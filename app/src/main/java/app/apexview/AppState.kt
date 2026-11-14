@@ -1331,6 +1331,13 @@ class AppState(
         val dropped = requested.size - picks.size
         task("Starting feeds") {
             val failures = mutableListOf<String>()
+            // The catalog already tells us whether this is live or a replay. Start timing
+            // immediately instead of waiting for every CONTENT/PLAY request and video prepare.
+            // For entries without a catalog classification, the timing job waits for the real
+            // Media3 timeline while feed creation proceeds in parallel.
+            if (timingContentId != contentId || (timing == null && liveFeed?.isActive != true)) {
+                loadTiming(contentId)
+            }
             val streams = picks.mapNotNull { channel ->
                 try {
                     channel to streamFor(contentId, channel, failures)
