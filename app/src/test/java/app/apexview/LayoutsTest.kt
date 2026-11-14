@@ -2,6 +2,7 @@ package app.apexview
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 class LayoutsTest {
@@ -37,4 +38,45 @@ class LayoutsTest {
             assertEquals(4, arrangement.slots.size)
         }
     }
+    @Test
+    fun timingTowerReservationLeavesASeparateRectangle() {
+        for (mode in listOf(LayoutMode.FEATURED, LayoutMode.GRID)) {
+            for ((width, height) in listOf(w to h, 1920f to 1080f, 1080f to 1920f, 1280f to 720f)) {
+                val towerWidth = minOf(380f, width - 32f)
+                val towerHeight = minOf(720f, height - 40f)
+                val arrangement = Layouts.withOverlays(
+                    mode, 4, width, height, towerWidth, towerHeight,
+                )
+                val tower = arrangement.tower
+                assertNotNull("$mode $width x $height: tower reservation missing", tower)
+                assertTrue(tower!!.x >= 0f && tower.y >= 0f)
+                assertTrue(tower.x + tower.w <= width + 0.5f)
+                assertTrue(tower.y + tower.h <= height + 0.5f)
+                assertTrue("Tower overlaps a feed: $tower", arrangement.slots.none { tower.overlaps(it) })
+            }
+        }
+    }
+
+    @Test
+    fun mapAndTowerReservationsDoNotOverlapFeedsOrEachOther() {
+        for (mode in listOf(LayoutMode.FEATURED, LayoutMode.GRID)) {
+            for ((width, height) in listOf(w to h, 1920f to 1080f, 1080f to 1920f, 1280f to 720f)) {
+                val towerWidth = minOf(380f, width - 32f)
+                val towerHeight = minOf(720f, height - 40f)
+                val minMapSide = minOf(width, height) * 0.22f
+                val arrangement = Layouts.withOverlays(
+                    mode, 4, width, height, towerWidth, towerHeight, minMapSide,
+                )
+                val tower = arrangement.tower
+                val map = arrangement.map
+                assertNotNull("$mode $width x $height: tower reservation missing", tower)
+                assertNotNull("$mode $width x $height: map reservation missing", map)
+                assertTrue("Tower overlaps a feed: $tower", arrangement.slots.none { tower!!.overlaps(it) })
+                assertTrue("Map overlaps a feed: $map", arrangement.slots.none { map!!.overlaps(it) })
+                assertTrue("Map overlaps timing tower: $map / $tower", !map!!.overlaps(tower!!))
+                assertTrue(map.w >= minMapSide && map.h >= minMapSide)
+            }
+        }
+    }
+
 }
