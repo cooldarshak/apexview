@@ -32,6 +32,14 @@ class MapRetryTest {
     }
 
     @Test
+    fun catalogReplayMetadataAvoidsWaitingForADeviceSpecificPlayerClock() {
+        assertEquals(false, catalogTimingSource(knownLive = false, knownArchive = true, completedLive = false))
+        assertEquals(false, catalogTimingSource(knownLive = false, knownArchive = false, completedLive = true))
+        assertEquals(true, catalogTimingSource(knownLive = true, knownArchive = false, completedLive = false))
+        assertEquals(null, catalogTimingSource(knownLive = false, knownArchive = false, completedLive = false))
+    }
+
+    @Test
     fun liveSessionMetadataWinsAndPlaceholderTimelineNeverLooksLikeReplay() {
         assertEquals(true, liveTimingSourceFor(knownLive = true, hasTimeline = false, placeholder = true, playerReportsLive = false))
         assertEquals(null, liveTimingSourceFor(knownLive = false, hasTimeline = false, placeholder = false, playerReportsLive = false))
