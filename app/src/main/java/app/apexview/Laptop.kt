@@ -124,9 +124,13 @@ fun SessionCountdown(app: AppState, timing: SessionTiming, style: TextStyle, mod
  */
 @Composable
 fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float, feedScale: Float) {
+    val density = LocalDensity.current
+    val maxTowerHeight = with(density) {
+        minOf(TOWER_HEIGHT, (height.toDp() - 40.dp).coerceAtLeast(AppState.TOWER_MIN_HEIGHT_DP.dp))
+    }
     FloatingPanel(
         app, app.towerSpot, "Timing", "Hide timing", app::toggleTower, width, height, feedScale,
-        maxWidth = TOWER_WIDTH, maxHeight = TOWER_HEIGHT,
+        maxWidth = TOWER_WIDTH, maxHeight = maxTowerHeight,
         opacity = app.towerOpacity,
         locked = app.towerLocked,
         onResizeFinished = app::finishTowerResize,
