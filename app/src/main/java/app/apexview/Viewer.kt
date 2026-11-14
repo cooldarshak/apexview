@@ -562,7 +562,23 @@ private fun TopChrome(app: AppState, cutout: Clearance) {
         )
         if (!app.isTv) Glyph(if (app.arranging) Icons.Rounded.LockOpen else Icons.Rounded.Lock, if (app.arranging) "Lock layout" else "Unlock to move and resize", modifier = Modifier.helpAnchor(app, "lock"), onClick = app::toggleArranging)
         Glyph(Icons.Rounded.Add, "Add a feed", modifier = Modifier.helpAnchor(app, "add")) { app.openPickerForPlaying() }
-        Glyph(Icons.Rounded.GridView, "Layout: ${app.layoutMode.label}", modifier = Modifier.helpAnchor(app, "layout")) { app.layoutSheetOpen = true; app.showChrome() }
+        if (app.isTv || LocalConfiguration.current.screenWidthDp > LocalConfiguration.current.screenHeightDp) {
+            Row(
+                Modifier
+                    .helpAnchor(app, "layout")
+                    .pressable { app.layoutSheetOpen = true; app.showChrome() }
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Ink.surfaceHigh.copy(alpha = 0.72f))
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(Icons.Rounded.GridView, contentDescription = "Layout", tint = Ink.primary, modifier = Modifier.size(20.dp))
+                Text("Layout", style = Type.subhead.copy(color = Ink.primary))
+            }
+        } else {
+            Glyph(Icons.Rounded.GridView, "Layout: ${app.layoutMode.label}", modifier = Modifier.helpAnchor(app, "layout")) { app.layoutSheetOpen = true; app.showChrome() }
+        }
         if (app.timing != null) Glyph(Icons.Rounded.Headset, if (app.radioOpen) "Hide team radio" else "Team radio", modifier = Modifier.helpAnchor(app, "radio-button"), onClick = app::toggleRadio)
         if (app.timing?.laps?.isNotEmpty() == true && !app.laptopActive) Glyph(Icons.Rounded.FormatListNumbered, if (app.towerOpen) "Hide timing" else "Timing", onClick = app::toggleTower)
         if (app.timing != null || app.mapStatus != null) Glyph(Icons.Rounded.Map, "Track map", modifier = Modifier.helpAnchor(app, "map")) { app.mapSheetOpen = true }
