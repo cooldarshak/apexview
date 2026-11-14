@@ -15,11 +15,74 @@ enum class LayoutMode(val label: String) {
     CUSTOM("My layout"),
 }
 
+/** How the reserved timing tower and map share the screen beside the video feeds. */
+enum class OverlayLayoutMode(val label: String) {
+    DOCKED("Stacked"),
+    FLOATING("Move and overlap"),
+}
+
+/** The feed area and the two overlay areas for the combined reservation layout. */
+data class CombinedOverlayPlan(
+    val slots: List<Slot>,
+    val feeds: Area,
+    val workspace: Area,
+    val tower: Area,
+    val map: Area,
+    val floating: Boolean,
+)
+
 /**
  * Fits n 16:9 tiles into the canvas. In [LayoutMode.FEATURED], slot 0 is the big one and the
  * rest share a strip beside or below it, whichever leaves more picture on screen.
  */
 object Layouts {
+    /**
+     * Gives the video feeds a dedicated main area and reserves the rest for the timing tower and
+     * map together. Portrait uses stacked horizontal bands; landscape uses a right-hand sidebar.
+     * In floating mode the two panels share one workspace and may overlap, but never cover video.
+     */
+    fun withCombinedOverlays(
+        mode: LayoutMode,
+        n: Int,
+        width: Float,
+        height: Float,
+        overlayMode: OverlayLayoutMode,
+    ): CombinedOverlayPlan {
+        val portrait = height >= width
+        val floating = overlayMode == OverlayLayoutMode.FLOATING
+        val feeds: Area
+        val workspace: Area
+        val tower: Area
+        val map: Area
+        if (portrait) {
+            val feedFraction = if (floating) 0.54f else 0.40f
+            feeds = Area(0f, 0f, width, height * feedFraction)
+            workspace = Area(0f, feeds.h, width, height - feeds.h)
+            if (floating) {
+                tower = workspace
+                map = workspace
+            } else {
+                val towerHeight = workspace.h * 0.62f
+                tower = Area(0f, workspace.y, width, towerHeight)
+                map = Area(0f, workspace.y + towerHeight, width, workspace.h - towerHeight)
+            }
+        } else {
+            val feedFraction = 0.66f
+            feeds = Area(0f, 0f, width * feedFraction, height)
+            workspace = Area(feeds.w, 0f, width - feeds.w, height)
+            if (floating) {
+                tower = workspace
+                map = workspace
+            } else {
+                val towerHeight = height * 0.5f
+                tower = Area(workspace.x, 0f, workspace.w, towerHeight)
+                map = Area(workspace.x, towerHeight, workspace.w, height - towerHeight)
+            }
+        }
+        val slots = place(mode, n, feeds.w, feeds.h).map { Slot(it.x + feeds.x, it.y + feeds.y, it.w) }
+        return CombinedOverlayPlan(slots, feeds, workspace, tower, map, floating)
+    }
+
     fun place(mode: LayoutMode, n: Int, width: Float, height: Float): List<Slot> = when {
         n == 0 -> emptyList()
         mode == LayoutMode.GRID || n == 1 -> grid(n, 0f, 0f, width, height, center = true)
