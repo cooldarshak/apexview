@@ -70,6 +70,16 @@ class DriverTimingTest {
     }
 
     @Test
+    fun readsLatestQualifyingPartGapsAndBestLap() {
+        val qualifying = """00:00:01.000{"Lines":{"16":{"Stats":{"0":{"TimeDiffToFastest":"+0.120","TimeDifftoPositionAhead":"+0.034"}},"BestLapTimes":{"0":{"Value":"1:34.567","PersonalFastest":true}}}}}"""
+        val state = DriverTimingParser.parse(qualifying, t0).getValue("16").at(t0 + 2_000)!!
+        assertEquals("+0.120", state.toLeader)
+        assertEquals("+0.034", state.ahead)
+        assertEquals("1:34.567", state.bestLap!!.time)
+        assertEquals(Pace.GREEN, state.bestLap!!.pace)
+    }
+
+    @Test
     fun readsRaceGapFromNestedGapToLeaderValue() {
         val race = """00:00:01.000{"Lines":{"1":{"Position":"1","GapToLeader":{"Value":"LEADER"},"IntervalToPositionAhead":{"Value":"0.000"}},"4":{"Position":"2","GapToLeader":{"Value":"+1.234"},"IntervalToPositionAhead":{"Value":"+1.234"}}}}"""
         val parsed = DriverTimingParser.parse(race, t0)
