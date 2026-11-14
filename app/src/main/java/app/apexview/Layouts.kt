@@ -56,7 +56,20 @@ object Layouts {
         val workspace: Area
         val tower: Area
         val map: Area
-        if (portrait) {
+        val tvLandscape = mode == LayoutMode.TV && !portrait && !floating
+        if (tvLandscape) {
+            // Match the TV broadcast composition: a slim title strip across the top, the
+            // main 16:9 picture below it on the left, timing at the top-right, map beneath it,
+            // and a small black margin at the bottom.
+            val titleBand = height * 0.09375f
+            val bottomMargin = height * 0.0625f
+            val feedWidth = width * 0.66f
+            val towerBottom = height * 0.65625f
+            feeds = Area(0f, titleBand, feedWidth, height - titleBand - bottomMargin)
+            workspace = Area(feedWidth, 0f, width - feedWidth, height)
+            tower = Area(workspace.x, 0f, workspace.w, towerBottom)
+            map = Area(workspace.x, towerBottom, workspace.w, height - bottomMargin - towerBottom)
+        } else if (portrait) {
             val feedFraction = if (floating) 0.50f else 0.34f
             feeds = Area(0f, 0f, width, height * feedFraction)
             workspace = Area(0f, feeds.h, width, height - feeds.h)
@@ -81,7 +94,13 @@ object Layouts {
                 map = Area(workspace.x, towerHeight, workspace.w, height - towerHeight)
             }
         }
-        val slots = place(mode, n, feeds.w, feeds.h).map { Slot(it.x + feeds.x, it.y + feeds.y, it.w) }
+        val slots = if (tvLandscape && n == 1) {
+            // The broadcast feed starts immediately below the top title band rather than
+            // vertically centering the image in the whole left column.
+            listOf(Slot(feeds.x, feeds.y, min(feeds.w, feeds.h * 16f / 9f)))
+        } else {
+            place(mode, n, feeds.w, feeds.h).map { Slot(it.x + feeds.x, it.y + feeds.y, it.w) }
+        }
         return CombinedOverlayPlan(slots, feeds, workspace, tower, map, floating)
     }
 
