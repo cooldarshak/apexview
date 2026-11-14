@@ -292,7 +292,7 @@ private fun VideoRow(app: AppState, v: CatalogItem) {
     Row(
         Modifier
             .fillMaxWidth()
-            .pressable(scaleTo = 0.99f) { app.openPicker(v.contentId, v.title, v.image) }
+            .pressable(scaleTo = 0.99f) { app.watch(v) }
             .padding(horizontal = 20.dp, vertical = 10.dp)
     ) {
         Column(Modifier.weight(1f)) {
