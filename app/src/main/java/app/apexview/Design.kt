@@ -41,6 +41,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onKeyEvent
 
 /**
  * The app's look, after Apple's TV app: black canvas, artwork carries the color, white type in a
@@ -195,7 +201,27 @@ fun AppleSlider(
     androidx.compose.material3.Slider(
         value = value,
         onValueChange = onValueChange,
-        modifier = modifier.tvFocusRing(),
+        modifier = modifier
+            .tvFocusRing()
+            .onKeyEvent { event ->
+                val step = (valueRange.endInclusive - valueRange.start) / 100f
+                when (event.key) {
+                    Key.DirectionLeft, Key.DirectionRight -> {
+                        if (event.type == KeyEventType.KeyDown) {
+                            val repeats = event.nativeKeyEvent.repeatCount
+                            val multiplier = if (repeats >= 8) 5f else 1f
+                            val direction = if (event.key == Key.DirectionLeft) -1f else 1f
+                            onValueChange((value + direction * step * multiplier).coerceIn(valueRange.start, valueRange.endInclusive))
+                        } else if (event.type == KeyEventType.KeyUp) {
+                            onValueChangeFinished?.invoke()
+                        }
+                        true
+                    }
+                    Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> true
+                    else -> false
+                }
+            }
+            .focusable(),
         valueRange = valueRange,
         onValueChangeFinished = onValueChangeFinished,
         thumb = {
