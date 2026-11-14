@@ -69,6 +69,15 @@ class DriverTimingTest {
     }
 
     @Test
+    fun readsRaceGapFromNestedGapToLeaderValue() {
+        val race = """00:00:01.000{"Lines":{"1":{"Position":"1","GapToLeader":{"Value":"LEADER"},"IntervalToPositionAhead":{"Value":"0.000"}},"4":{"Position":"2","GapToLeader":{"Value":"+1.234"},"IntervalToPositionAhead":{"Value":"+1.234"}}}}"""
+        val parsed = DriverTimingParser.parse(race, t0)
+        val second = parsed.getValue("4").at(t0 + 2_000)!!
+        assertEquals("+1.234", second.toLeader)
+        assertEquals("+1.234", second.ahead)
+    }
+
+    @Test
     fun aLateFinalSectorStillCountsForTheLapItFinished() {
         val late = listOf(
             "00:00:01.000{\"Lines\":{\"4\":{\"NumberOfLaps\":3}}}",
