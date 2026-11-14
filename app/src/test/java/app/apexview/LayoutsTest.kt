@@ -1,8 +1,8 @@
 package app.apexview
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LayoutsTest {
@@ -47,9 +47,10 @@ class LayoutsTest {
                 val arrangement = Layouts.withOverlays(
                     mode, 4, width, height, towerWidth, towerHeight,
                 )
-                val tower = arrangement.tower
-                assertNotNull("$mode $width x $height: tower reservation missing", tower)
-                assertTrue(tower!!.x >= 0f && tower.y >= 0f)
+                val reservedTower = arrangement.tower
+                assertNotNull("$mode $width x $height: tower reservation missing", reservedTower)
+                val tower = reservedTower ?: throw AssertionError("Tower reservation was null")
+                assertTrue(tower.x >= 0f && tower.y >= 0f)
                 assertTrue(tower.x + tower.w <= width + 0.5f)
                 assertTrue(tower.y + tower.h <= height + 0.5f)
                 assertTrue("Tower overlaps a feed: $tower", arrangement.slots.none { tower.overlaps(it) })
@@ -67,13 +68,15 @@ class LayoutsTest {
                 val arrangement = Layouts.withOverlays(
                     mode, 4, width, height, towerWidth, towerHeight, minMapSide,
                 )
-                val tower = arrangement.tower
-                val map = arrangement.map
-                assertNotNull("$mode $width x $height: tower reservation missing", tower)
-                assertNotNull("$mode $width x $height: map reservation missing", map)
-                assertTrue("Tower overlaps a feed: $tower", arrangement.slots.none { tower!!.overlaps(it) })
-                assertTrue("Map overlaps a feed: $map", arrangement.slots.none { map!!.overlaps(it) })
-                assertTrue("Map overlaps timing tower: $map / $tower", !map!!.overlaps(tower!!))
+                val reservedTower = arrangement.tower
+                val reservedMap = arrangement.map
+                assertNotNull("$mode $width x $height: tower reservation missing", reservedTower)
+                assertNotNull("$mode $width x $height: map reservation missing", reservedMap)
+                val tower = reservedTower ?: throw AssertionError("Tower reservation was null")
+                val map = reservedMap ?: throw AssertionError("Map reservation was null")
+                assertTrue("Tower overlaps a feed: $tower", arrangement.slots.none { tower.overlaps(it) })
+                assertTrue("Map overlaps a feed: $map", arrangement.slots.none { map.overlaps(it) })
+                assertTrue("Map overlaps timing tower: $map / $tower", !map.overlaps(tower))
                 assertTrue(map.w >= minMapSide && map.h >= minMapSide)
             }
         }
