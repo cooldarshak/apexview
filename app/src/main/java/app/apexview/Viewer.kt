@@ -1495,7 +1495,7 @@ private fun MapSheet(app: AppState) {
                     SwitchRow("Keep feeds clear of the timing tower", app.towerReserve, app::chooseTowerReserve)
                 }
                 Text(
-                    "When feeds are kept clear, the layout leaves a dedicated rectangular space for the tower instead of placing it over a video feed. The lock prevents dragging or resizing it by accident.",
+                    "Turn on Keep feeds clear of the map as well to reserve space for both overlays. The video feeds then stay in their own main area.",
                     style = Type.footnote,
                     modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
                 )
