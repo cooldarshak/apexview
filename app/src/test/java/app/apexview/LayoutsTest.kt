@@ -112,6 +112,79 @@ class LayoutsTest {
     }
 
     @Test
+    fun combinedPortraitDockedLayoutKeepsVideoTowerAndMapInThreeSeparateRegions() {
+        for ((width, height) in listOf(1080f to 2400f, 720f to 1600f)) {
+            for (feedCount in 1..4) {
+                val plan = Layouts.withCombinedOverlays(
+                    LayoutMode.FEATURED, feedCount, width, height, OverlayLayoutMode.DOCKED,
+                )
+                assertEquals(feedCount, plan.slots.size)
+                assertTrue(plan.feeds.y == 0f)
+                assertTrue(plan.workspace.y == plan.feeds.h)
+                assertTrue(plan.feeds.h < height)
+                assertTrue(plan.tower.y == plan.workspace.y)
+                assertTrue(plan.map.y == plan.tower.y + plan.tower.h)
+                assertTrue(plan.tower.h > plan.map.h)
+                assertTrue(plan.tower.y + plan.tower.h <= height + 0.5f)
+                assertTrue(plan.map.y + plan.map.h <= height + 0.5f)
+                assertTrue(plan.slots.all { slot ->
+                    slot.x >= plan.feeds.x - 0.5f && slot.y >= plan.feeds.y - 0.5f &&
+                        slot.x + slot.w <= plan.feeds.x + plan.feeds.w + 0.5f &&
+                        slot.y + slot.h <= plan.feeds.y + plan.feeds.h + 0.5f
+                })
+                assertTrue(plan.slots.none { plan.tower.overlaps(it) || plan.map.overlaps(it) })
+            }
+        }
+    }
+
+    @Test
+    fun combinedLandscapeDockedLayoutUsesLeftVideoAndRightStackedPanels() {
+        for ((width, height) in listOf(2400f to 1080f, 1600f to 720f)) {
+            for (feedCount in 1..4) {
+                val plan = Layouts.withCombinedOverlays(
+                    LayoutMode.FEATURED, feedCount, width, height, OverlayLayoutMode.DOCKED,
+                )
+                assertEquals(feedCount, plan.slots.size)
+                assertTrue(plan.feeds.x == 0f)
+                assertTrue(plan.workspace.x == plan.feeds.w)
+                assertTrue(plan.feeds.w > width * 0.6f)
+                assertTrue(plan.tower.y == 0f)
+                assertTrue(plan.map.y == plan.tower.h)
+                assertTrue(plan.tower.h > plan.map.h)
+                assertTrue(plan.workspace.x + plan.workspace.w <= width + 0.5f)
+                assertTrue(plan.map.y + plan.map.h <= height + 0.5f)
+                assertTrue(plan.slots.all { slot ->
+                    slot.x >= plan.feeds.x - 0.5f && slot.y >= plan.feeds.y - 0.5f &&
+                        slot.x + slot.w <= plan.feeds.x + plan.feeds.w + 0.5f &&
+                        slot.y + slot.h <= plan.feeds.y + plan.feeds.h + 0.5f
+                })
+                assertTrue(plan.slots.none { plan.tower.overlaps(it) || plan.map.overlaps(it) })
+            }
+        }
+    }
+
+    @Test
+    fun combinedFloatingLayoutLetsMapAndTowerShareWorkspaceWithoutCoveringVideo() {
+        for ((width, height) in listOf(1080f to 2400f, 2400f to 1080f, 1280f to 720f, 720f to 1280f)) {
+            for (feedCount in 1..4) {
+                val plan = Layouts.withCombinedOverlays(
+                    LayoutMode.FEATURED, feedCount, width, height, OverlayLayoutMode.FLOATING,
+                )
+                assertTrue(plan.floating)
+                assertEquals(feedCount, plan.slots.size)
+                assertEquals(plan.workspace, plan.tower)
+                assertEquals(plan.workspace, plan.map)
+                assertTrue(plan.slots.all { slot ->
+                    slot.x >= plan.feeds.x - 0.5f && slot.y >= plan.feeds.y - 0.5f &&
+                        slot.x + slot.w <= plan.feeds.x + plan.feeds.w + 0.5f &&
+                        slot.y + slot.h <= plan.feeds.y + plan.feeds.h + 0.5f
+                })
+                assertTrue(plan.slots.none { plan.workspace.overlaps(it) })
+            }
+        }
+    }
+
+    @Test
     fun timingTowerReservationLeavesASeparateRectangle() {
         for (mode in listOf(LayoutMode.FEATURED, LayoutMode.GRID)) {
             for ((width, height) in listOf(w to h, 1920f to 1080f, 1080f to 1920f, 1280f to 720f)) {
