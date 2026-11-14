@@ -839,16 +839,18 @@ private fun TileView(app: AppState, tile: Tile) {
             .helpAnchor(app, "tile:${tile.id}")
             .background(Color.Black)
     ) {
-        // A switched feed can use a different DRM level. Recreate PlayerView as well as the
-        // player binding so an L1 player is never attached to a TextureView (or vice versa).
-        key(tile.id, tile.feed.usesSoftwareDrm) {
+        // A single L3 feed uses SurfaceView so Android can compose video independently of
+        // the timing/map overlays. Multiple L3 feeds retain TextureView for correct tile overlap
+        // and z-order. L1 always uses SurfaceView for secure output.
+        val textureView = useTextureViewForFeed(tile.feed.usesSoftwareDrm, app.tiles.size)
+        key(tile.id, textureView) {
             AndroidView(
                 factory = { context ->
-                    val layout = if (tile.feed.usesSoftwareDrm) R.layout.player_texture else R.layout.player_surface
+                    val layout = if (textureView) R.layout.player_texture else R.layout.player_surface
                     (LayoutInflater.from(context).inflate(layout, null) as PlayerView).apply {
                         // Media3 1.5 made this workaround opt-in. Without it, PlayerView inside
                         // Compose AndroidView can stretch, crop or leak its SurfaceView surface.
-                        if (!tile.feed.usesSoftwareDrm) setEnableComposeSurfaceSyncWorkaround(true)
+                        if (!textureView) setEnableComposeSurfaceSyncWorkaround(true)
                     }
                 },
                 update = { it.player = tile.feed.player },
