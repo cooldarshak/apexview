@@ -247,7 +247,7 @@ internal fun shouldShowMapControls(
     arranging: Boolean,
     floating: Boolean,
     docked: Boolean,
-): Boolean = !docked && (isTv || arranging || floating)
+): Boolean = isTv || (!docked && (arranging || floating))
 
 /**
  * The track map in its own window. While arranging it's moved, resized and turned by its track
@@ -267,7 +267,7 @@ fun MapPanelView(app: AppState, timing: SessionTiming) {
             .requiredSize(with(density) { panel.w.toDp() }, with(density) { panel.h.toDp() })
     ) {
         TrackDrawing(app, timing, panel.w, panel.h, panel.rotation)
-        if (shouldShowMapControls(app.isTv, app.arranging, app.combinedOverlaysFloating, app.combinedOverlaysDocked)) {
+        if (shouldShowMapControls(app.isTv || app.layoutMode == LayoutMode.TV, app.arranging, app.combinedOverlaysFloating, app.combinedOverlaysDocked)) {
             MapControls(app, timing)
         }
     }
