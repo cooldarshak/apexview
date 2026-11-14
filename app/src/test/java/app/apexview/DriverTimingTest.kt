@@ -45,6 +45,7 @@ class DriverTimingTest {
         assertEquals(Pace.GREEN, s.lastLap!!.pace)
         assertEquals("+0.289", s.gap)
         assertEquals(2, s.position)
+        assertEquals(1, s.positionChange)
         assertEquals(500L, s.runningMs)
         // The finished lap's sectors move aside; the new lap starts empty.
         assertEquals(Pace.YELLOW, s.lapSectors[2]!!.pace)
