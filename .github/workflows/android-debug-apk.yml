@@ -39,19 +39,24 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Run unit tests
-        run: |
-          chmod +x ./gradlew
-          ./gradlew --no-daemon testDebugUnitTest
-
       - name: Install FFmpeg tools for synthetic HEVC fixtures
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y ffmpeg
           ffmpeg -hide_banner -encoders 2>&1 | grep -q libx265
+          ffmpeg -hide_banner -bsfs 2>&1 | grep -q trace_headers
 
       - name: Generate and validate synthetic HEVC feed pair
-        run: python3 tools/generate_hevc_fixtures.py
+        run: |
+          FIXTURE_DIR="$RUNNER_TEMP/apexview-hevc-fixtures"
+          mkdir -p "$FIXTURE_DIR"
+          python3 tools/generate_hevc_fixtures.py --output-dir "$FIXTURE_DIR"
+          echo "APEXVIEW_HEVC_FIXTURE_DIR=$FIXTURE_DIR" >> "$GITHUB_ENV"
+
+      - name: Run unit tests, including Kotlin analysis of real synthetic feeds
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon testDebugUnitTest
 
       # This repository must sign every distributable APK with the same private key. Do not
       # fall back to the ephemeral debug.keystore on a hosted runner: Android will reject updates.
