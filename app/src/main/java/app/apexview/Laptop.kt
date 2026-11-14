@@ -40,7 +40,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.delay
 
-private val ROW_HEIGHT = 39.dp
+private val ROW_HEIGHT = 34.dp
 private val TYRE_COLORS = mapOf(
     "SOFT" to Color(0xFFFF3B30),
     "MEDIUM" to Color(0xFFFFD60A),
@@ -489,4 +489,4 @@ private fun broadcastName(channel: Channel) = channel.title.split(" ").joinToStr
 
 /** The floating tower's size until it's resized: every column, and about ten drivers. */
 private val TOWER_WIDTH = 380.dp
-private val TOWER_HEIGHT = 520.dp
+private val TOWER_HEIGHT = 720.dp
