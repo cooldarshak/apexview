@@ -1152,7 +1152,14 @@ private fun SpeedSheet(app: AppState) {
         KeepSystemBarsHidden()
         val current = remember { FocusRequester() }
         LaunchedEffect(Unit) { runCatching { current.requestFocus() } }
-        Column(Modifier.navigationBarsPadding().padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp)
+        ) {
             Text("Playback speed", style = Type.title2)
             Row(Modifier.padding(top = 20.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(3.dp)) {
                 AppState.SPEEDS.forEach { speed ->
