@@ -28,6 +28,10 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
 
+/** TV hardware often cannot sustain several simultaneous secure decoder/surface sessions. */
+internal fun shouldUseSoftwareDrm(userPreference: Boolean, isTv: Boolean): Boolean =
+    userPreference || isTv
+
 /**
  * One feed: its own ExoPlayer and its own Widevine session, licensed by F1's license server
  * with the user's tokens. [status] is the diagnostics line shown on the tile.
@@ -51,6 +55,8 @@ class FeedPlayer(
         private set
 
     val player: ExoPlayer
+    /** Surface type must match the DRM level actually used by this player, not the current setting. */
+    val usesSoftwareDrm: Boolean = forceL3
 
     /** Distance from the leading tile in ms, set by the sync loop. Null for the leader. */
     var driftMs: Long? = null
@@ -311,7 +317,8 @@ class FeedPlayer(
                 dropsPerSecond == 0 -> "smooth"
                 else -> "$dropsPerSecond drops/s"
             },
-            if (licensed) null else drmLevel.ifEmpty { null }?.let { "DRM $it" },
+            decoder.ifEmpty { null }?.let { "codec $it" },
+            drmLevel.ifEmpty { null }?.let { "DRM $it" },
             driftMs?.let { "sync %+.1fs".format(it / 1000f) },
             if (wallClockMs() == null && state == "Playing") "no stream clock" else null,
         ).joinToString(" · ")
