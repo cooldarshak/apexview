@@ -1766,7 +1766,8 @@ class AppState(
 
         // When both reservations are on, give the feeds one main region and arrange the
         // tower and map together beside it. The orientation decides whether the workspace is
-        // below the video (portrait) or in a right-hand sidebar (landscape).
+        // below the video (portrait) or in a right-hand sidebar (landscape). In floating mode
+        // this is their starting workspace: the map can later be dragged over the video area.
         val keepMapClear = mapMode.inWindow && mapReserve && timing != null
         val keepTowerClear = towerOpen && towerReserve && timing != null && !laptopActive
         if (keepMapClear && keepTowerClear) {
@@ -1904,15 +1905,6 @@ class AppState(
         // video area. Keep it on screen, not trapped in the reserved sidebar/workspace.
         keepMapOnScreen()
         expandTowerWhenMapLeavesWorkspace(area)
-    }
-
-    /** Keeps the map inside the same floating workspace as the timing tower. */
-    private fun keepMapInArea(area: Area) {
-        val panel = mapPanel
-        panel.w = panel.w.coerceIn(minOf(MapPanel.MIN_SIZE, area.w), area.w)
-        panel.h = panel.h.coerceIn(minOf(MapPanel.MIN_SIZE, area.h), area.h)
-        panel.x = panel.x.coerceIn(area.x, (area.x + area.w - panel.w).coerceAtLeast(area.x))
-        panel.y = panel.y.coerceIn(area.y, (area.y + area.h - panel.h).coerceAtLeast(area.y))
     }
 
     /**
