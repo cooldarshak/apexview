@@ -79,6 +79,16 @@ class DriverTimingTest {
     }
 
     @Test
+    fun retiredStatusStaysLatchedWhenLaterDeltasClearTheFlag() {
+        val stream = listOf(
+            "00:00:01.000{\"Lines\":{\"4\":{\"Position\":\"12\",\"Retired\":true}}}",
+            "00:00:02.000{\"Lines\":{\"4\":{\"Retired\":false,\"Stopped\":false}}}",
+        ).joinToString("\n")
+        val state = DriverTimingParser.parse(stream, t0).getValue("4").at(t0 + 3_000)!!
+        assertTrue(state.retired)
+    }
+
+    @Test
     fun aLateFinalSectorStillCountsForTheLapItFinished() {
         val late = listOf(
             "00:00:01.000{\"Lines\":{\"4\":{\"NumberOfLaps\":3}}}",
