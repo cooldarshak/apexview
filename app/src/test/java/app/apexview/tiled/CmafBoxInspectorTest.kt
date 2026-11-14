@@ -72,7 +72,7 @@ class CmafBoxInspectorTest {
         } catch (_: IllegalArgumentException) { }
     }
 
-    private fun box(type: String, payload: ByteArray): ByteArray =
+    private fun box(type: String, vararg payloads: ByteArray): ByteArray {\n        val payload = payloads.fold(ByteArray(0)) { acc, part -> acc + part }\n        return
         int(payload.size + 8) + ascii(type) + payload
     private fun int(value: Int): ByteArray = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(value).array()
     private fun short(value: Int): ByteArray = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort(value.toShort()).array()
