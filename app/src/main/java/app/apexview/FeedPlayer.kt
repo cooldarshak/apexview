@@ -1,6 +1,9 @@
 package app.apexview
 
 import android.content.Context
+import android.media.MediaCodecInfo as PlatformMediaCodecInfo
+import android.media.MediaCodecList
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,6 +32,41 @@ import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
 
 /**
+ * Returns a conservative video-decoder budget for the device's AVC decoder pool.
+ *
+ * CodecCapabilities.maxSupportedInstances is only an upper bound. We reserve one instance for
+ * platform/other playback and clamp to this app's four-feed limit. Unknown capability data falls
+ * back to one video decoder on TV rather than risking a device-wide decoder exhaustion/reboot.
+ */
+internal fun reportedVideoDecoderBudget(reportedMaxInstances: Int?, isTv: Boolean): Int {
+    if (!isTv) return 4
+    val reported = reportedMaxInstances?.takeIf { it > 0 } ?: return 1
+    return (reported - 1).coerceIn(1, 4)
+}
+
+internal fun queryVideoDecoderBudget(context: Context, softwareDrm: Boolean, isTv: Boolean): Int {
+    if (!isTv) return 4
+    return runCatching {
+        val codecs = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
+            .filter { !it.isEncoder && it.supportedTypes.any { type -> type.equals(MimeTypes.VIDEO_H264, true) } }
+        val candidates = codecs.mapNotNull { codec ->
+            val caps = runCatching { codec.getCapabilitiesForType(MimeTypes.VIDEO_H264) }.getOrNull()
+                ?: return@mapNotNull null
+            val secure = caps.isFeatureSupported(PlatformMediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback) ||
+                caps.isFeatureRequired(PlatformMediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback)
+            if (!softwareDrm && !secure) return@mapNotNull null
+            codec to caps.maxSupportedInstances
+        }
+        val hardware = candidates.filter { it.first.isHardwareAccelerated }
+        val pool = hardware.ifEmpty { candidates }
+        reportedVideoDecoderBudget(pool.map { it.second }.filter { it > 0 }.maxOrNull(), isTv = true)
+    }.getOrElse {
+        Log.w("ApexviewVideoBudget", "Unable to query AVC decoder capacity; allowing one TV video decoder", it)
+        1
+    }
+}
+
+/**
  * One feed: its own ExoPlayer and its own Widevine session, licensed by F1's license server
  * with the user's tokens. [status] is the diagnostics line shown on the tile.
  */
@@ -44,6 +82,8 @@ class FeedPlayer(
     subtitles: Boolean,
     /** ISO 639 code, such as "en", for the commentary track. */
     commentary: String,
+    /** Whether to allocate a video decoder before prepare; audio can still run without it. */
+    startWithVideo: Boolean = true,
     /** Where a replay starts (ms), set before loading so nothing loads for the wrong spot. */
     startMs: Long = C.TIME_UNSET,
 ) {
@@ -51,6 +91,10 @@ class FeedPlayer(
         private set
 
     val player: ExoPlayer
+    /** Updated to the security level Widevine actually opened, not just the requested setting. */
+    var usesSoftwareDrm by mutableStateOf(forceL3)
+        private set
+    private var drmWarning: String? = null
 
     /** Distance from the leading tile in ms, set by the sync loop. Null for the leader. */
     var driftMs: Long? = null
@@ -93,13 +137,19 @@ class FeedPlayer(
             try {
                 FrameworkMediaDrm.newInstance(uuid).also { drm ->
                     if (forceL3) {
-                        try {
-                            drm.setPropertyString("securityLevel", "L3")
-                        } catch (e: Exception) {
-                            error = "Phone refused software DRM: ${e.message}"
-                        }
+                        // L3 is a preference, not a fatal requirement. Some TV firmware refuses
+                        // this property; continue at the device's actual security level instead.
+                        runCatching { drm.setPropertyString("securityLevel", "L3") }
+                            .onFailure { failure ->
+                                drmWarning = "L3 unavailable; using device DRM"
+                                Log.w("ApexviewDRM", "Device refused L3; retaining its security level", failure)
+                            }
                     }
                     drmLevel = runCatching { drm.getPropertyString("securityLevel") }.getOrDefault("?")
+                    usesSoftwareDrm = drmLevel.equals("L3", ignoreCase = true)
+                    if (forceL3 && !usesSoftwareDrm && drmWarning == null) {
+                        drmWarning = "Requested L3; device reports $drmLevel"
+                    }
                 }
             } catch (e: UnsupportedDrmException) {
                 error = "Widevine unavailable on this phone"
@@ -126,6 +176,7 @@ class FeedPlayer(
             .build()
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !subtitles)
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !startWithVideo)
             .setPreferredAudioLanguage(commentary)
             .setPreferredTextLanguage(commentary)
             .build()
@@ -220,7 +271,7 @@ class FeedPlayer(
     }
 
     private var startAtBeginning = false
-    private var videoOn = true
+    private var videoOn = startWithVideo
     private var started = false
     private var viewW = 0
     private var viewH = 0
@@ -311,7 +362,9 @@ class FeedPlayer(
                 dropsPerSecond == 0 -> "smooth"
                 else -> "$dropsPerSecond drops/s"
             },
-            if (licensed) null else drmLevel.ifEmpty { null }?.let { "DRM $it" },
+            decoder.ifEmpty { null }?.let { "codec $it" },
+            drmLevel.ifEmpty { null }?.let { "DRM $it" },
+            drmWarning,
             driftMs?.let { "sync %+.1fs".format(it / 1000f) },
             if (wallClockMs() == null && state == "Playing") "no stream clock" else null,
         ).joinToString(" · ")

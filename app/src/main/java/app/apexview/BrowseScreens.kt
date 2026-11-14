@@ -590,11 +590,11 @@ fun SignInScreen(app: AppState) {
                     textStyle = Type.body,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = Ink.secondary,
+                        focusedBorderColor = Color(0xFF168BFF),
                         unfocusedBorderColor = Ink.surfaceHigh,
                         cursorColor = Ink.primary,
                     ),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().tvFocusRing(),
                 )
                 SecondaryButton("Use token", Modifier.fillMaxWidth(), onClick = app::usePastedToken)
             } else {
@@ -706,7 +706,7 @@ fun HomeScreen(app: AppState) {
             item {
                 Shelf(app, "Live now", app.liveNow.toList()) { item, width ->
                     ArtCard(item.image, item.title, item.subtitle, width, live = true) {
-                        app.openPicker(item.contentId, listOfNotNull(item.subtitle, item.title).joinToString(" · "), item.image)
+                        app.watch(item)
                     }
                 }
                 Spacer(Modifier.height(28.dp))
@@ -726,7 +726,7 @@ fun HomeScreen(app: AppState) {
             item {
                 Shelf(app, latest.name, latestContent.sessions.reversed()) { item, width ->
                     ArtCard(item.image, item.title, sessionLine(item), width, live = item.live, upcoming = item.upcoming) {
-                        app.openPicker(item.contentId, "${latest.name} · ${item.title}", item.image)
+                        app.watch(item)
                     }
                 }
                 Spacer(Modifier.height(28.dp))
@@ -1000,14 +1000,14 @@ fun WeekendScreen(app: AppState, weekend: WeekendInfo, artKey: String?) {
                 val sessionsShelf: @Composable () -> Unit = {
                     Shelf(app, "Sessions", content.sessions) { item, width ->
                         ArtCard(item.image, item.title, sessionLine(item), width, live = item.live, upcoming = item.upcoming) {
-                            app.openPicker(item.contentId, "${weekend.name} · ${item.title}", item.image)
+                            app.watch(item)
                         }
                     }
                 }
                 val videosShelf: @Composable () -> Unit = {
                     Shelf(app, "Highlights and shows", content.videos) { item, width ->
                         ArtCard(item.image, item.title, sessionLine(item), width, live = item.live, upcoming = item.upcoming) {
-                            app.openPicker(item.contentId, item.title, item.image)
+                            app.watch(item)
                         }
                     }
                 }

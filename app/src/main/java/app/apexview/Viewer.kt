@@ -110,6 +110,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -118,6 +119,7 @@ import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
@@ -233,9 +235,11 @@ fun ViewerScreen(app: AppState) {
     // The controls step back a few seconds after the last touch, unless paused.
     // helpOpen is a key so opening the overlay cancels a hide already counting down; it used
     // to fire anyway and take the top bar away from under its labels.
-    LaunchedEffect(app.chromeTouch, app.chromeVisible, app.playing, app.helpOpen) {
-        // Stays up while arranging, so the lock is there to tap when done.
-        if (app.chromeVisible && app.playing && !app.arranging && !app.helpOpen) {
+    LaunchedEffect(app.chromeTouch, app.chromeVisible, app.playing, app.helpOpen, app.controlsFocused) {
+        // Stays up while arranging, or while a TV remote is operating an overlay control.
+        if (app.chromeVisible && app.playing && !app.arranging && !app.helpOpen &&
+            !(app.isTv && app.controlsFocused)
+        ) {
             delay(CHROME_HIDE_MS)
             app.chromeVisible = false
         }
@@ -260,7 +264,13 @@ fun ViewerScreen(app: AppState) {
     // feeds stay full size, so what you place is where it ends up.
     val motion = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
     // Laptop mode keeps the stream still: the controls lie over its top edge instead.
-    val lift by animateFloatAsState(if (app.chromeVisible && !app.arranging && !app.laptopActive) 1f else 0f, motion, label = "lift")
+    // SurfaceView is the recommended Android TV output, but scaling its parent while the
+    // controls animate can desynchronise its surface from Compose. TV chrome overlays in place.
+    val lift by animateFloatAsState(
+        if (!app.isTv && app.chromeVisible && !app.arranging && !app.laptopActive) 1f else 0f,
+        motion,
+        label = "lift",
+    )
 
     BoxWithConstraints(
         Modifier
@@ -305,17 +315,17 @@ fun ViewerScreen(app: AppState) {
             Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    val k = 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
+                    val k = if (app.isTv) 1f else 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
                     scaleX = k
                     scaleY = k
                     transformOrigin = TransformOrigin(0f, 0.5f)
                 }
                 .graphicsLayer {
-                    val s = if (app.inPip) 1f else 1f - lift * band / height
-                    scaleX = s
-                    scaleY = s
+                    val scale = if (app.inPip || app.isTv) 1f else 1f - lift * band / height
+                    scaleX = scale
+                    scaleY = scale
                     transformOrigin = TransformOrigin(0.5f, 1f)
-                    translationY = -sheetShift
+                    translationY = if (app.isTv) 0f else -sheetShift
                 }
                 .mapGestures(app, density)
         ) {
@@ -371,17 +381,57 @@ fun ViewerScreen(app: AppState) {
                     }
                 }
             }
+            // Keep the broadcast TV composition visible while the timing endpoint is connecting.
+            // A blank reserved sidebar looked like a broken layout and hid the actual failure state.
+            val tvPlan = app.combinedOverlayPlan
+            if (!laptop && app.layoutMode == LayoutMode.TV && tvPlan != null) {
+                val status = app.mapStatus ?: "Waiting for timing data…"
+                if (app.towerOpen && (app.timing == null || app.timing?.laps?.isEmpty() == true)) {
+                    TvOverlayPending("TIMING", tvPlan.tower, status)
+                }
+                if (app.mapMode == MapMode.TRACK &&
+                    (app.timing == null || (app.timing?.outline?.size ?: 0) < 8)
+                ) {
+                    TvOverlayPending("TRACK MAP", tvPlan.map, status)
+                }
+            }
         }
 
         if (app.inPip) return@BoxWithConstraints
 
         // Over the feeds and the map, under the controls; it doesn't shrink with the feeds.
         if (app.radioOpen) app.timing?.let { timing ->
-            Box(Modifier.zIndex(CHROME_Z - 1)) { RadioPanel(app, timing, width, height, feedScale = 1f - lift * band / height) }
+            Box(Modifier.zIndex(CHROME_Z - 1)) { RadioPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height) }
         }
         // Laptop mode has the tower below the hinge already.
         if (app.towerOpen && !app.laptopActive) app.timing?.takeIf { it.laps.isNotEmpty() }?.let { timing ->
-            Box(Modifier.zIndex(CHROME_Z - 1)) { TowerPanel(app, timing, width, height, feedScale = 1f - lift * band / height) }
+            if (app.combinedOverlayPlan != null) {
+                // The tower is outside mapGestures so dragging it cannot accidentally grab the
+                // circuit underneath. Apply the same transforms as the feed/map canvas instead.
+                Box(
+                    Modifier.fillMaxSize()
+                        .graphicsLayer {
+                            val k = 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
+                            scaleX = k
+                            scaleY = k
+                            transformOrigin = TransformOrigin(0f, 0.5f)
+                        }
+                        .graphicsLayer {
+                            val scale = if (app.inPip) 1f else 1f - lift * band / height
+                            scaleX = scale
+                            scaleY = scale
+                            transformOrigin = TransformOrigin(0.5f, 1f)
+                            translationY = -sheetShift
+                        }
+                        .zIndex(CHROME_Z - 1)
+                ) {
+                    TowerPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height)
+                }
+            } else {
+                Box(Modifier.zIndex(CHROME_Z - 1)) {
+                    TowerPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height)
+                }
+            }
         }
 
         // No feed on screen with F1's graphics: the time left goes up top, clear of the edge map
@@ -417,7 +467,7 @@ fun ViewerScreen(app: AppState) {
 
         // The explanation overlay, above everything. Shown once by itself, the first time.
         Box(Modifier.fillMaxSize().zIndex(CHROME_Z + 2)) {
-            HelpOverlay(app, width, height, feedScale = 1f - lift * band / height, compact = with(density) { minOf(width, height).toDp() } < 600.dp)
+            HelpOverlay(app, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height, compact = with(density) { minOf(width, height).toDp() } < 600.dp)
         }
         LaunchedEffect(Unit) {
             if (!app.helpSeen && !app.isTv) {
@@ -444,10 +494,12 @@ private fun Modifier.mapGestures(app: AppState, density: androidx.compose.ui.uni
     // The map's window: the regular one in Track or Pit style, or laptop mode's own.
     val circle = !app.laptopActive && app.mapMode == MapMode.PIT
     val window = app.laptopActive || app.mapMode.inWindow
-    if (!app.arranging || app.mapLocked || !window || timing == null) return this
+    // Floating overlay mode is independently movable; it must not depend on the feed layout's
+    // Snap/Free arranging toggle. Docked mode remains fixed.
+    if (!(app.arranging || app.combinedOverlaysFloating) || app.mapLocked || !window || timing == null || app.combinedOverlaysDocked) return this
     // Keyed on the circuit, not the timing: live timing is replaced every couple of seconds, and
     // restarting this mid-gesture used to leave the map "grabbed", so feeds wouldn't move again.
-    return pointerInput(timing.circuitKey, timing.outline.size, app.arranging, app.mapLocked, app.laptopActive, circle) {
+    return pointerInput(timing.circuitKey, timing.outline.size, app.arranging, app.combinedOverlaysFloating, app.mapLocked, app.laptopActive, circle) {
         val margin = mapMarginPx(density)
         val reach = with(density) { 22.dp.toPx() }
         awaitEachGesture {
@@ -535,7 +587,23 @@ private fun TopChrome(app: AppState, cutout: Clearance) {
         )
         if (!app.isTv) Glyph(if (app.arranging) Icons.Rounded.LockOpen else Icons.Rounded.Lock, if (app.arranging) "Lock layout" else "Unlock to move and resize", modifier = Modifier.helpAnchor(app, "lock"), onClick = app::toggleArranging)
         Glyph(Icons.Rounded.Add, "Add a feed", modifier = Modifier.helpAnchor(app, "add")) { app.openPickerForPlaying() }
-        Glyph(Icons.Rounded.GridView, "Layout: ${app.layoutMode.label}", modifier = Modifier.helpAnchor(app, "layout")) { app.layoutSheetOpen = true; app.showChrome() }
+        if (app.isTv || LocalConfiguration.current.screenWidthDp > LocalConfiguration.current.screenHeightDp) {
+            Row(
+                Modifier
+                    .helpAnchor(app, "layout")
+                    .pressable { app.layoutSheetOpen = true; app.showChrome() }
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Ink.surfaceHigh.copy(alpha = 0.72f))
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(Icons.Rounded.GridView, contentDescription = "Layout", tint = Ink.primary, modifier = Modifier.size(20.dp))
+                Text("Layout", style = Type.subhead.copy(color = Ink.primary))
+            }
+        } else {
+            Glyph(Icons.Rounded.GridView, "Layout: ${app.layoutMode.label}", modifier = Modifier.helpAnchor(app, "layout")) { app.layoutSheetOpen = true; app.showChrome() }
+        }
         if (app.timing != null) Glyph(Icons.Rounded.Headset, if (app.radioOpen) "Hide team radio" else "Team radio", modifier = Modifier.helpAnchor(app, "radio-button"), onClick = app::toggleRadio)
         if (app.timing?.laps?.isNotEmpty() == true && !app.laptopActive) Glyph(Icons.Rounded.FormatListNumbered, if (app.towerOpen) "Hide timing" else "Timing", onClick = app::toggleTower)
         if (app.timing != null || app.mapStatus != null) Glyph(Icons.Rounded.Map, "Track map", modifier = Modifier.helpAnchor(app, "map")) { app.mapSheetOpen = true }
@@ -685,6 +753,7 @@ internal fun Modifier.remoteScrub(
         }
     }
     .focusable(interactionSource = interaction)
+    .tvFocusRing()
 
 /**
  * Chequered marks on the scrubber's line at lights out (the session going green, outside races)
@@ -747,6 +816,7 @@ private val overlayShadow = androidx.compose.ui.graphics.Shadow(Color.Black, blu
  * arranging, one finger drags and two resize. With the controls up, the header shows the feed's
  * name (tap for its menu), a speaker that moves the audio here, and on the small feeds a close.
  */
+@OptIn(UnstableApi::class)
 @Composable
 private fun TileView(app: AppState, tile: Tile) {
     val density = LocalDensity.current
@@ -769,16 +839,23 @@ private fun TileView(app: AppState, tile: Tile) {
             .helpAnchor(app, "tile:${tile.id}")
             .background(Color.Black)
     ) {
-        AndroidView(
-            factory = { context ->
-                val layout = if (app.settings.softwareDrm) R.layout.player_texture else R.layout.player_surface
-                LayoutInflater.from(context).inflate(layout, null) as PlayerView
-            },
-            // Runs again when the tile's feed is switched.
-            update = { it.player = tile.feed.player },
-            onRelease = { it.player = null },
-            modifier = Modifier.fillMaxSize(),
-        )
+        // A switched feed can use a different DRM level. Recreate PlayerView as well as the
+        // player binding so an L1 player is never attached to a TextureView (or vice versa).
+        key(tile.id, tile.feed.usesSoftwareDrm) {
+            AndroidView(
+                factory = { context ->
+                    val layout = if (tile.feed.usesSoftwareDrm) R.layout.player_texture else R.layout.player_surface
+                    (LayoutInflater.from(context).inflate(layout, null) as PlayerView).apply {
+                        // Media3 1.5 made this workaround opt-in. Without it, PlayerView inside
+                        // Compose AndroidView can stretch, crop or leak its SurfaceView surface.
+                        if (!tile.feed.usesSoftwareDrm) setEnableComposeSurfaceSyncWorkaround(true)
+                    }
+                },
+                update = { it.player = tile.feed.player },
+                onRelease = { it.player = null },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
         if (app.inPip) return@Box
 
         Box(
@@ -858,6 +935,14 @@ private fun TileView(app: AppState, tile: Tile) {
             )
         }
 
+        if (tile.heldForDecoder) {
+            Text(
+                "TV decoder limit reached. Audio and sync continue; select fewer visible feeds or use a device with more video decoders.",
+                style = Type.subhead.copy(color = Ink.primary, shadow = overlayShadow, textAlign = androidx.compose.ui.text.style.TextAlign.Center),
+                modifier = Modifier.align(Alignment.Center).padding(horizontal = 24.dp).widthIn(max = 420.dp),
+            )
+        }
+
         if (tile.heldForSpeed) {
             Text(
                 "Picture paused while sped up. Back to 1× brings it back.",
@@ -866,7 +951,7 @@ private fun TileView(app: AppState, tile: Tile) {
             )
         }
 
-        if (tile.feed.problem == null && !tile.coolingOff && !tile.heldForSpeed) {
+        if (tile.feed.problem == null && !tile.coolingOff && !tile.heldForSpeed && !tile.heldForDecoder) {
             BufferingRing(tile.feed, Modifier.align(Alignment.Center))
         }
 
@@ -908,6 +993,28 @@ private fun TileView(app: AppState, tile: Tile) {
                     drawLine(Color.White, Offset(size.width, size.height / 2), Offset(size.width / 2, size.height), stroke)
                 }
             }
+        }
+    }
+}
+
+/** A visible TV placeholder while live/archive timing is being resolved. */
+@Composable
+private fun TvOverlayPending(title: String, area: Area, status: String) {
+    val density = LocalDensity.current
+    Box(
+        Modifier
+            .offset { IntOffset(area.x.roundToInt(), area.y.roundToInt()) }
+            .requiredSize(
+                with(density) { area.w.toDp() },
+                with(density) { area.h.toDp() },
+            )
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color(0xE6101010))
+            .padding(12.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(title, style = Type.subhead.copy(color = Ink.primary, fontWeight = FontWeight.Bold))
+            Text(status, style = Type.footnote.copy(color = Ink.secondary), maxLines = 3)
         }
     }
 }
@@ -1117,12 +1224,20 @@ internal fun KeepSystemBarsHidden(enabled: Boolean = true) {
 
 /** A row of choices, one picked, in the style of iOS's segmented control. */
 @Composable
-private fun <T> Segments(options: List<T>, chosen: T, label: (T) -> String, modifier: Modifier = Modifier, onPick: (T) -> Unit) {
+private fun <T> Segments(
+    options: List<T>,
+    chosen: T,
+    label: (T) -> String,
+    modifier: Modifier = Modifier,
+    focus: FocusRequester? = null,
+    onPick: (T) -> Unit,
+) {
     Row(modifier.clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(3.dp)) {
         options.forEach { option ->
             val on = option == chosen
             Box(
                 Modifier
+                    .then(if (on && focus != null) Modifier.focusRequester(focus) else Modifier)
                     .pressable { onPick(option) }
                     .clip(RoundedCornerShape(9.dp))
                     .background(if (on) Ink.surfaceHigh else Color.Transparent)
@@ -1202,15 +1317,29 @@ private fun LayoutSheet(app: AppState) {
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
     ) {
         KeepSystemBarsHidden()
-        Column(Modifier.navigationBarsPadding().padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
+        val selectedLayout = remember { FocusRequester() }
+        LaunchedEffect(Unit) { runCatching { selectedLayout.requestFocus() } }
+        Column(
+            Modifier.navigationBarsPadding().verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp).padding(bottom = 24.dp)
+        ) {
             Text("Layout", style = Type.title2)
             val n = app.tiles.size
             val hasSaved = app.savedLayout(n) != null
             val modes = LayoutMode.entries.filter { it != LayoutMode.CUSTOM || hasSaved }
-            Segments(modes, app.layoutMode, { it.label }, Modifier.padding(top = 20.dp)) { app.chooseLayout(it) }
+            Segments(
+                modes, app.layoutMode, { it.label },
+                Modifier.padding(top = 20.dp), selectedLayout,
+            ) { app.chooseLayout(it) }
             Text(
-                if (hasSaved) "My layout is the one you saved for $n feed${if (n == 1) "" else "s"} with the phone ${app.wayUp}."
-                else "Arrange the feeds the way you like, then save it. Upright and sideways each keep their own.",
+                when {
+                    app.layoutMode == LayoutMode.TV ->
+                        "Video fills the left two-thirds. The timing tower stays at the top-right, with the track map below. This is saved as the default for new sessions."
+                    hasSaved ->
+                        "My layout is the one you saved for $n feed${if (n == 1) "" else "s"} with the phone ${app.wayUp}."
+                    else ->
+                        "Arrange the feeds the way you like, then save it. Upright and sideways each keep their own."
+                },
                 style = Type.footnote,
                 modifier = Modifier.padding(top = 10.dp),
             )
@@ -1240,6 +1369,49 @@ private fun LayoutSheet(app: AppState) {
                 style = Type.footnote,
                 modifier = Modifier.padding(top = 10.dp),
             )
+
+            if (!app.laptopActive && app.mapMode.inWindow && app.mapReserve && app.towerOpen && app.towerReserve) {
+                val config = LocalConfiguration.current
+                val portrait = config.screenHeightDp >= config.screenWidthDp
+                Text("Map + timing tower", style = Type.headline, modifier = Modifier.padding(top = 24.dp))
+                Row(
+                    Modifier.padding(top = 10.dp).clip(RoundedCornerShape(12.dp))
+                        .background(Ink.background).padding(3.dp)
+                ) {
+                    OverlayLayoutMode.entries.forEach { mode ->
+                        val selected = app.overlayLayoutMode == mode
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .pressable { app.chooseOverlayLayoutMode(mode) }
+                                .clip(RoundedCornerShape(9.dp))
+                                .background(if (selected) Ink.surfaceHigh else Color.Transparent)
+                                .padding(horizontal = 8.dp, vertical = 12.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                mode.label,
+                                style = Type.subhead.copy(color = if (selected) Ink.primary else Ink.secondary),
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
+                }
+                Text(
+                    when {
+                        portrait && app.overlayLayoutMode == OverlayLayoutMode.DOCKED ->
+                            "Video on top, timing tower in the middle and track map at the bottom."
+                        portrait ->
+                            "Video stays in the top section. Move and overlap the tower and map freely anywhere on screen."
+                        app.overlayLayoutMode == OverlayLayoutMode.DOCKED ->
+                            "Video feeds use the left two-thirds. The right side holds the timing tower above the map."
+                        else ->
+                            "Video feeds use the left two-thirds. Move and overlap the tower and map freely anywhere on screen. When the map leaves the sidebar, the tower expands to fill it."
+                    },
+                    style = Type.footnote,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
         }
     }
 }
@@ -1255,25 +1427,32 @@ private fun MapSheet(app: AppState) {
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
     ) {
         KeepSystemBarsHidden()
-        Column(Modifier.navigationBarsPadding().padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
-            Text("Track map", style = Type.title2)
+        val density = LocalDensity.current
+        val config = LocalConfiguration.current
+        val selectedMapMode = remember { FocusRequester() }
+        LaunchedEffect(Unit) { runCatching { selectedMapMode.requestFocus() } }
+        val combinedWorkspace = app.combinedOverlayPlan?.takeIf { it.floating }?.workspace
+        val maxTowerWidthDp = combinedWorkspace?.let { with(density) { it.w.toDp().value } }
+            ?: (config.screenWidthDp - 32f).coerceAtLeast(AppState.TOWER_MIN_WIDTH_DP)
+        val maxTowerHeightDp = combinedWorkspace?.let { with(density) { it.h.toDp().value } }
+            ?: (config.screenHeightDp - 40f).coerceAtLeast(AppState.TOWER_MIN_HEIGHT_DP)
+        val minTowerWidthDp = minOf(AppState.TOWER_MIN_WIDTH_DP, maxTowerWidthDp)
+        val minTowerHeightDp = minOf(AppState.TOWER_MIN_HEIGHT_DP, maxTowerHeightDp)
+        val defaultTowerWidthDp = minOf(AppState.TOWER_DEFAULT_WIDTH_DP, maxTowerWidthDp)
+        val defaultTowerHeightDp = minOf(AppState.TOWER_DEFAULT_HEIGHT_DP, maxTowerHeightDp)
+        val towerWidthDp = with(density) {
+            (app.towerSpot.w.takeIf { it > 0f } ?: defaultTowerWidthDp.dp.toPx()).toDp().value
+        }.coerceIn(minTowerWidthDp, maxTowerWidthDp)
+        val towerHeightDp = with(density) {
+            (app.towerSpot.h.takeIf { it > 0f } ?: defaultTowerHeightDp.dp.toPx()).toDp().value
+        }.coerceIn(minTowerHeightDp, maxTowerHeightDp)
+        Column(
+            Modifier.navigationBarsPadding().verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp).padding(bottom = 24.dp)
+        ) {
+            Text("Live timing overlays", style = Type.title2)
+            Text("Track map", style = Type.headline, modifier = Modifier.padding(top = 18.dp))
             app.mapStatus?.let { Text(it, style = Type.footnote, modifier = Modifier.padding(top = 4.dp)) }
-
-            // The standalone timing tower uses the same live F1 timing session as the track map.
-            // It can be shown alongside the map without opening a separate F1 TV video feed.
-            Column(
-                Modifier.padding(top = 16.dp).clip(RoundedCornerShape(12.dp))
-                    .background(Ink.background).padding(horizontal = 16.dp, vertical = 10.dp)
-            ) {
-                SwitchRow("Show timing tower", app.towerOpen) { checked ->
-                    if (checked != app.towerOpen) app.toggleTower()
-                }
-                Text(
-                    "Add the live driver order, last laps, gaps, intervals and tyre information over the video feeds.",
-                    style = Type.footnote,
-                    modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 2.dp, bottom = 4.dp),
-                )
-            }
 
             Row(
                 Modifier.padding(top = 20.dp).clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(3.dp)
@@ -1282,6 +1461,7 @@ private fun MapSheet(app: AppState) {
                     val chosen = app.mapMode == mode
                     Box(
                         Modifier
+                            .then(if (chosen) Modifier.focusRequester(selectedMapMode) else Modifier)
                             .pressable { app.chooseMapMode(mode) }
                             .clip(RoundedCornerShape(9.dp))
                             .background(if (chosen) Ink.surfaceHigh else Color.Transparent)
@@ -1351,7 +1531,9 @@ private fun MapSheet(app: AppState) {
                 }
                 if (app.mapMode.inWindow) {
                     Column(Modifier.padding(top = 16.dp).clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(vertical = 4.dp)) {
-                        SwitchRow("Lock the map in place", app.mapLocked) { app.toggleMapLock() }
+                        if (!app.combinedOverlaysDocked) {
+                            SwitchRow("Lock the map in place", app.mapLocked) { app.toggleMapLock() }
+                        }
                         SwitchRow("Keep feeds clear of the map", app.mapReserve, app::chooseMapReserve)
                     }
                     Text(
@@ -1390,6 +1572,112 @@ private fun MapSheet(app: AppState) {
                         )
                     }
                 }
+            }
+
+            Text("Timing tower", style = Type.headline, modifier = Modifier.padding(top = 28.dp))
+            Column(
+                Modifier.padding(top = 10.dp).clip(RoundedCornerShape(12.dp))
+                    .background(Ink.background).padding(horizontal = 16.dp, vertical = 10.dp)
+            ) {
+                SwitchRow("Show timing tower", app.towerOpen) { checked ->
+                    if (checked != app.towerOpen) app.toggleTower()
+                }
+                Text(
+                    "Show the live driver order, lap times, gaps, sectors and tyre information over the video feeds.",
+                    style = Type.footnote,
+                    modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 2.dp, bottom = 4.dp),
+                )
+            }
+            if (app.towerOpen) {
+                Column(
+                    Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
+                        .background(Ink.background).padding(horizontal = 16.dp, vertical = 12.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Text size", style = Type.body, modifier = Modifier.weight(1f))
+                        Text("%d%%".format((app.towerFontScale * 100f).toInt()), style = Type.footnote)
+                    }
+                    AppleSlider(
+                        value = app.towerFontScale,
+                        onValueChange = app::updateTowerFontScale,
+                        valueRange = AppState.TOWER_MIN_FONT_SCALE..AppState.TOWER_MAX_FONT_SCALE,
+                        trackColor = Ink.surfaceHigh,
+                    )
+                    Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Opacity", style = Type.body, modifier = Modifier.weight(1f))
+                        Text("%d%%".format((app.towerOpacity * 100f).toInt()), style = Type.footnote)
+                    }
+                    AppleSlider(
+                        value = app.towerOpacity,
+                        onValueChange = app::updateTowerOpacity,
+                        valueRange = 0.2f..1f,
+                        trackColor = Ink.surfaceHigh,
+                    )
+                }
+                if (!app.combinedOverlaysDocked) {
+                    Column(
+                        Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
+                            .background(Ink.background).padding(horizontal = 16.dp, vertical = 12.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Width", style = Type.body, modifier = Modifier.weight(1f))
+                            Text("%.0f dp".format(towerWidthDp), style = Type.footnote)
+                        }
+                        AppleSlider(
+                            value = towerWidthDp,
+                            onValueChange = { value ->
+                                app.updateTowerSize(
+                                    with(density) { value.dp.toPx() },
+                                    with(density) { towerHeightDp.dp.toPx() },
+                                )
+                            },
+                            valueRange = minTowerWidthDp..maxTowerWidthDp,
+                            onValueChangeFinished = app::finishTowerResize,
+                            trackColor = Ink.surfaceHigh,
+                        )
+                        Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Height", style = Type.body, modifier = Modifier.weight(1f))
+                            Text("%.0f dp".format(towerHeightDp), style = Type.footnote)
+                        }
+                        AppleSlider(
+                            value = towerHeightDp,
+                            onValueChange = { value ->
+                                app.updateTowerSize(
+                                    with(density) { towerWidthDp.dp.toPx() },
+                                    with(density) { value.dp.toPx() },
+                                )
+                            },
+                            valueRange = minTowerHeightDp..maxTowerHeightDp,
+                            onValueChangeFinished = app::finishTowerResize,
+                            trackColor = Ink.surfaceHigh,
+                        )
+                        Text(
+                            "Minimum width is 300 dp where the available screen area allows it, keeping the sector and tyre columns visible. You can also drag the tower header to move it and its corner grip to resize it.",
+                            style = Type.footnote,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                } else {
+                    Text(
+                        "This layout fixes the tower and map in their own sections. Choose Move and overlap to resize and place them freely.",
+                        style = Type.footnote,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                Column(
+                    Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
+                        .background(Ink.background).padding(vertical = 4.dp)
+                ) {
+                    if (!app.combinedOverlaysDocked) {
+                        SwitchRow("Lock the timing tower in place", app.towerLocked) { app.toggleTowerLock() }
+                    }
+                    SwitchRow("Keep feeds clear of the timing tower", app.towerReserve, app::chooseTowerReserve)
+                }
+                Text(
+                    "Turn on Keep feeds clear of the map as well to reserve space for both overlays. The video feeds then stay in their own main area.",
+                    style = Type.footnote,
+                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
+                )
             }
         }
     }

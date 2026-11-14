@@ -27,7 +27,13 @@ data class SessionRef(
     val circuitKey: Int?,
     val meetingName: String,
     val title: String,
+    /** F1 catalog's scheduled session start, used when a TV stream exposes no program clock. */
+    val sessionStartUtcMs: Long? = null,
 )
+
+/** Prefer the video's exact clock, but never lose the catalog's session-start fallback. */
+internal fun archiveLookupTime(watchedUtc: Long?, sessionStartUtcMs: Long?): Long? =
+    watchedUtc ?: sessionStartUtcMs
 
 enum class LapState { UNKNOWN, PIT, OUT_LAP, PUSH, COOL_DOWN, KNOCKED_OUT }
 
@@ -910,6 +916,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
 
     /** Finds the session's archive path by F1's session key, else by meeting and session name. */
     private fun findSession(ref: SessionRef, watchedUtc: Long?): Pair<String, String> {
+        val lookupUtc = archiveLookupTime(watchedUtc, ref.sessionStartUtcMs)
         val meetings = JSONObject(fetch("${ref.year}/Index.json")).getJSONArray("Meetings")
         var byName: Pair<String, String>? = null
         var byNameLength = 0
@@ -946,15 +953,15 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         // F1 TV's live broadcasts (and their replays straight after) are titled with just the
         // event, with no session key: take the weekend's session that had started by the time
         // the video was broadcast, the latest such.
-        if (watchedUtc != null) {
-            fun recent(start: Long) = start <= watchedUtc + SESSION_SLACK_MS && watchedUtc - start < SESSION_SPAN_MS
+        if (lookupUtc != null) {
+            fun recent(start: Long) = start <= lookupUtc + SESSION_SLACK_MS && lookupUtc - start < SESSION_SPAN_MS
             meetingSessions.filter { recent(it.first) }.maxByOrNull { it.first }?.let { return it.second }
             // Just finished: the index can lag well behind. Sessions live in predictable
             // folders, so look for that day's under the weekend's folder.
             val folder = meetingFolder
             if (folder != null) {
                 val zone = parseOffset(meetingOffset ?: "00:00:00")
-                val day = java.time.Instant.ofEpochMilli(watchedUtc).atOffset(zone).toLocalDate()
+                val day = java.time.Instant.ofEpochMilli(lookupUtc).atOffset(zone).toLocalDate()
                 SESSION_FOLDERS.mapNotNull { name ->
                     val path = "$folder${day}_$name/"
                     runCatching { JSONObject(fetch(path + "SessionInfo.json")) }.getOrNull()?.let { info ->

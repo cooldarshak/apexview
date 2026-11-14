@@ -22,9 +22,11 @@ android {
         applicationId = "app.apexview_custom"
         minSdk = 29
         targetSdk = 35
-        // Bump both for every build that goes to the phone, so it's clear which one is installed.
-        versionCode = 108
-        versionName = "0.99.9"
+        // CI builds get a monotonically increasing version code so a same-signature APK installs
+        // over the previous one instead of being rejected as a downgrade.
+        val ciRun = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
+        versionCode = 100_000 + ciRun
+        versionName = "1.0.$ciRun"
         val builtAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("MMM d, HH:mm"))
         buildConfigField("String", "BUILT_AT", "\"$builtAt\"")
         // Where updates come from (owner/repo on GitHub). A fork points this at its own releases.
@@ -43,6 +45,13 @@ android {
     }
 
     buildTypes {
+        // CI debug APKs use the same persistent key as release builds when keystore.properties
+        // is supplied. This is essential: hosted runners' default debug keys change every run.
+        debug {
+            if (keystoreProps.isNotEmpty()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
         // The build to share: signed with its own key and shrunk by R8 (the icon set alone is ~40 MB
         // unshrunk), so it installs like a normal app instead of a debug build.
         release {

@@ -1,5 +1,6 @@
 package app.apexview
 
+
 import androidx.compose.foundation.Canvas
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.foundation.background
@@ -7,6 +8,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.rounded.OpenWith
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
@@ -33,6 +35,11 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
@@ -207,6 +214,8 @@ internal fun CarTargets(
                 .offset { IntOffset((p.x - half).roundToInt(), (p.y - half).roundToInt()) }
                 .size(target)
                 .combinedClickable(onLongClick = { onHold(number) }) { onTap(number) }
+                .focusable()
+                .tvFocusRing()
         )
     }
 }
@@ -229,6 +238,18 @@ fun mapLineTouched(app: AppState, timing: SessionTiming, x: Float, y: Float, mar
 fun mapMarginPx(density: androidx.compose.ui.unit.Density) = with(density) { MAP_MARGIN.toPx() }
 
 /**
+ * Whether the track map should expose its lock/move/resize controls. On touch devices they appear
+ * while arranging (or in a floating workspace). On TV they remain available in docked layouts too,
+ * because the remote is the way to move and resize the map.
+ */
+internal fun shouldShowMapControls(
+    isTv: Boolean,
+    arranging: Boolean,
+    floating: Boolean,
+    docked: Boolean,
+): Boolean = isTv || (!docked && (arranging || floating))
+
+/**
  * The track map in its own window. While arranging it's moved, resized and turned by its track
  * line (see [mapLineTouched]) or by the move grip; the corner handle resizes it and the lock keeps
  * it still while the feeds under it are arranged. The controls sit at the corners of the track
@@ -246,7 +267,9 @@ fun MapPanelView(app: AppState, timing: SessionTiming) {
             .requiredSize(with(density) { panel.w.toDp() }, with(density) { panel.h.toDp() })
     ) {
         TrackDrawing(app, timing, panel.w, panel.h, panel.rotation)
-        if (app.arranging) MapControls(app, timing)
+        if (shouldShowMapControls(app.isTv || app.layoutMode == LayoutMode.TV, app.arranging, app.combinedOverlaysFloating, app.combinedOverlaysDocked)) {
+            MapControls(app, timing)
+        }
     }
 }
 
@@ -277,7 +300,7 @@ private fun MapControls(app: AppState, timing: SessionTiming) {
         }
 
         // Top-right of the track: lock, and the move grip beside it.
-        MapControl(at(bounds.right, bounds.top).clickable(onClick = app::toggleMapLock)) {
+        MapControl(at(bounds.right, bounds.top).pressable(scaleTo = 1f, onClick = app::toggleMapLock).tvFocusRing()) {
             Icon(
                 if (app.mapLocked) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
                 if (app.mapLocked) "Unlock the map" else "Lock the map",
@@ -286,33 +309,68 @@ private fun MapControls(app: AppState, timing: SessionTiming) {
             )
         }
         if (!app.mapLocked) MapControl(
-            at(bounds.right - control, bounds.top).pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { app.mapGrabbed = true },
-                    onDragEnd = { app.mapGrabbed = false; app.storeMapPanel() },
-                    onDragCancel = { app.mapGrabbed = false },
-                ) { change, drag ->
-                    change.consume()
-                    app.arrangeMap(drag, 1f, 0f)
+            at(bounds.right - control, bounds.top)
+                .onKeyEvent { event ->
+                    when (event.key) {
+                        Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
+                            if (event.type == KeyEventType.KeyDown) {
+                                val step = with(density) { 18.dp.toPx() }
+                                val dx = when (event.key) { Key.DirectionLeft -> -step; Key.DirectionRight -> step; else -> 0f }
+                                val dy = when (event.key) { Key.DirectionUp -> -step; Key.DirectionDown -> step; else -> 0f }
+                                app.arrangeMap(Offset(dx, dy), 1f, 0f)
+                            } else if (event.type == KeyEventType.KeyUp) app.storeMapPanel()
+                            true
+                        }
+                        else -> false
+                    }
                 }
-            }
+                .focusable()
+                .tvFocusRing()
+                .pointerInput(Unit) {
+                    detectDragGestures(
+                        onDragStart = { app.mapGrabbed = true },
+                        onDragEnd = { app.mapGrabbed = false; app.storeMapPanel() },
+                        onDragCancel = { app.mapGrabbed = false },
+                    ) { change, drag ->
+                        change.consume()
+                        app.arrangeMap(drag, 1f, 0f)
+                    }
+                }
         ) {
             Icon(Icons.Rounded.OpenWith, "Move the map", tint = Color.White, modifier = Modifier.size(18.dp))
         }
         // Bottom-right of the track: resize, keeping the track's shape and centre.
         if (!app.mapLocked) MapControl(
-            at(bounds.right, bounds.bottom).pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { app.mapGrabbed = true },
-                    onDragEnd = { app.mapGrabbed = false; app.storeMapPanel() },
-                    onDragCancel = { app.mapGrabbed = false },
-                ) { change, drag ->
-                    change.consume()
-                    // Read live: the gesture outlives each size it passes through.
-                    val span = (panel.w + panel.h).coerceAtLeast(1f)
-                    app.arrangeMap(Offset.Zero, 1f + (drag.x + drag.y) / span, 0f)
+            at(bounds.right, bounds.bottom)
+                .onKeyEvent { event ->
+                    when (event.key) {
+                        Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
+                            if (event.type == KeyEventType.KeyDown) {
+                                val factor = when (event.key) {
+                                    Key.DirectionRight, Key.DirectionDown -> 1.035f
+                                    else -> 0.965f
+                                }
+                                app.arrangeMap(Offset.Zero, factor, 0f)
+                            } else if (event.type == KeyEventType.KeyUp) app.storeMapPanel()
+                            true
+                        }
+                        else -> false
+                    }
                 }
-            }
+                .focusable()
+                .tvFocusRing()
+                .pointerInput(Unit) {
+                    detectDragGestures(
+                        onDragStart = { app.mapGrabbed = true },
+                        onDragEnd = { app.mapGrabbed = false; app.storeMapPanel() },
+                        onDragCancel = { app.mapGrabbed = false },
+                    ) { change, drag ->
+                        change.consume()
+                        // Read live: the gesture outlives each size it passes through.
+                        val span = (panel.w + panel.h).coerceAtLeast(1f)
+                        app.arrangeMap(Offset.Zero, 1f + (drag.x + drag.y) / span, 0f)
+                    }
+                }
         ) {
             Canvas(Modifier.size(14.dp)) {
                 val stroke = 2.dp.toPx()

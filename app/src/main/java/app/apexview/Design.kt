@@ -15,6 +15,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -27,6 +28,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.platform.LocalInputModeManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
@@ -40,6 +42,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onKeyEvent
 
 /**
  * The app's look, after Apple's TV app: black canvas, artwork carries the color, white type in a
@@ -126,7 +134,9 @@ fun Modifier.pressable(enabled: Boolean = true, scaleTo: Float = 0.97f, onClick:
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     var focused by remember { mutableStateOf(false) }
-    val ringed = focused && LocalInputModeManager.current.inputMode == InputMode.Keyboard
+    val context = LocalContext.current
+    val isTv = remember(context) { context.packageManager.hasSystemFeature("android.software.leanback") }
+    val ringed = focused && (isTv || LocalInputModeManager.current.inputMode == InputMode.Keyboard)
     val scale by animateFloatAsState(
         if (pressed && enabled) scaleTo else if (ringed) FOCUS_SCALE else 1f,
         tween(Motion.PRESS_MS, easing = EaseOut),
@@ -140,7 +150,7 @@ fun Modifier.pressable(enabled: Boolean = true, scaleTo: Float = 0.97f, onClick:
             if (ringed) {
                 val out = 3.dp.toPx()
                 drawRoundRect(
-                    Color.White,
+                    Color(0xFF168BFF),
                     Offset(-out, -out),
                     Size(size.width + 2 * out, size.height + 2 * out),
                     CornerRadius(12.dp.toPx()),
@@ -149,6 +159,46 @@ fun Modifier.pressable(enabled: Boolean = true, scaleTo: Float = 0.97f, onClick:
             }
         }
         .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
+}
+
+/** A blue focus outline for native Compose controls such as sliders and map handles. */
+fun Modifier.tvFocusRing(): Modifier = composed {
+    val context = LocalContext.current
+    val isTv = remember(context) { context.packageManager.hasSystemFeature("android.software.leanback") }
+    var focused by remember { mutableStateOf(false) }
+    val keyboard = LocalInputModeManager.current.inputMode == InputMode.Keyboard
+    val ringed = focused && (isTv || keyboard)
+    this
+        .onFocusChanged { focused = it.isFocused }
+        .drawWithContent {
+            drawContent()
+            if (ringed) {
+                val out = 3.dp.toPx()
+                drawRoundRect(
+                    Color(0xFF168BFF),
+                    Offset(-out, -out),
+                    Size(size.width + 2 * out, size.height + 2 * out),
+                    CornerRadius(8.dp.toPx()),
+                    style = Stroke(2.5.dp.toPx()),
+                )
+            }
+        }
+}
+
+/**
+ * One hundred steps across the slider's range. A held remote key naturally sends repeated
+ * KeyDown events; accelerate after eight repeats without depending on Android's native event API.
+ */
+internal fun sliderDpadValue(
+    value: Float,
+    min: Float,
+    max: Float,
+    direction: Int,
+    repeatCount: Int,
+): Float {
+    val span = (max - min).coerceAtLeast(0f)
+    val multiplier = if (repeatCount >= 8) 5f else 1f
+    return (value + direction * span / 100f * multiplier).coerceIn(min, max)
 }
 
 /** iOS-style slider: a round white thumb on a thin track, instead of Material's bar thumb. */
@@ -165,10 +215,41 @@ fun AppleSlider(
     emphasised: Boolean = false,
 ) {
     val thumbScale by animateFloatAsState(if (emphasised) 1.5f else 1f, tween(Motion.PRESS_MS, easing = EaseOut), label = "thumb")
+    var dpadRepeats by remember { mutableIntStateOf(0) }
     androidx.compose.material3.Slider(
         value = value,
         onValueChange = onValueChange,
-        modifier = modifier,
+        modifier = modifier
+            .tvFocusRing()
+            .onFocusChanged { if (!it.isFocused) dpadRepeats = 0 }
+            .onKeyEvent { event ->
+                when (event.key) {
+                    Key.DirectionLeft, Key.DirectionRight -> when (event.type) {
+                        KeyEventType.KeyDown -> {
+                            dpadRepeats++
+                            val direction = if (event.key == Key.DirectionLeft) -1 else 1
+                            onValueChange(
+                                sliderDpadValue(
+                                    value,
+                                    valueRange.start,
+                                    valueRange.endInclusive,
+                                    direction,
+                                    dpadRepeats,
+                                )
+                            )
+                            true
+                        }
+                        KeyEventType.KeyUp -> {
+                            dpadRepeats = 0
+                            onValueChangeFinished?.invoke()
+                            true
+                        }
+                        else -> false
+                    }
+                    else -> false
+                }
+            }
+            .focusable(),
         valueRange = valueRange,
         onValueChangeFinished = onValueChangeFinished,
         thumb = {

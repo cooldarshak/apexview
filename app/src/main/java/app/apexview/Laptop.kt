@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.material.icons.rounded.ArrowBackIosNew
@@ -17,11 +18,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -34,6 +38,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -78,7 +84,7 @@ fun LaptopPanel(app: AppState, timing: SessionTiming?, modifier: Modifier) {
                 Spacer(Modifier.weight(1f))
                 timing?.let { SessionCountdown(app, it, Type.title2, Modifier.padding(top = 8.dp)) }
             }
-            if (timing != null && timing.laps.isNotEmpty()) TimingTower(app, timing)
+            if (timing != null && timing.laps.isNotEmpty()) TowerTextScale(app) { TimingTower(app, timing) }
             else Text(app.mapStatus ?: "No timing for this session.", style = Type.footnote, modifier = Modifier.padding(20.dp))
         }
         Spacer(Modifier.weight(1f - AppState.LAPTOP_TOWER_SHARE))
@@ -121,12 +127,41 @@ fun SessionCountdown(app: AppState, timing: SessionTiming, style: TextStyle, mod
  */
 @Composable
 fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float, feedScale: Float) {
-    FloatingPanel(
-        app, app.towerSpot, "Timing", "Hide timing", app::toggleTower, width, height, feedScale,
-        maxWidth = TOWER_WIDTH, maxHeight = TOWER_HEIGHT,
-    ) {
-        TimingTower(app, timing)
+    val density = LocalDensity.current
+    val plan = app.combinedOverlayPlan
+    val docked = plan?.floating == false
+    val bounds = plan?.let { if (it.floating) it.workspace else it.tower }
+    val maxTowerWidth = bounds?.let { with(density) { it.w.toDp() } } ?: TOWER_WIDTH
+    val maxTowerHeight = bounds?.let { with(density) { it.h.toDp() } } ?: with(density) {
+        minOf(TOWER_HEIGHT, (height.toDp() - 40.dp).coerceAtLeast(AppState.TOWER_MIN_HEIGHT_DP.dp))
     }
+    TowerTextScale(app) {
+        FloatingPanel(
+            app, app.towerSpot, "Timing", "Hide timing", app::toggleTower, width, height, feedScale,
+            maxWidth = maxTowerWidth, maxHeight = maxTowerHeight,
+            minWidth = minOf(AppState.TOWER_MIN_WIDTH_DP.dp, maxTowerWidth),
+            minHeight = minOf(AppState.TOWER_MIN_HEIGHT_DP.dp, maxTowerHeight),
+            bounds = bounds,
+            compactHeader = true,
+            compactHeaderHeight = if (app.layoutMode == LayoutMode.TV) {
+                with(density) { height.toDp() * 0.09375f }
+            } else null,
+            opacity = app.towerOpacity,
+            locked = app.towerLocked || docked,
+            onResizeFinished = app::finishTowerResize,
+        ) {
+            TimingTower(app, timing)
+        }
+    }
+}
+
+@Composable
+private fun TowerTextScale(app: AppState, content: @Composable () -> Unit) {
+    val baseDensity = LocalDensity.current
+    CompositionLocalProvider(
+        LocalDensity provides Density(baseDensity.density, baseDensity.fontScale * app.towerFontScale),
+        content = content,
+    )
 }
 
 /** Live running order. The screen follows the same delayed picture clock as the map. */
@@ -145,23 +180,68 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
         .sortedBy { it.second.position ?: 99 }
     val onTop = app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString()
 
-    Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
-        TowerSessionHeader(timing, now)
-        TowerHeader()
-        LazyColumn {
-            items(rows, key = { it.first }) { (number, state) ->
-                val kmh = timing.speeds[number]?.kmhAt(now)
-                val gear = timing.speeds[number]?.gearAt(now)
-                TowerRow(
-                    timing = timing,
-                    number = number,
-                    state = state,
-                    tyre = timing.tyres[number]?.at(now),
-                    kmh = kmh,
-                    gear = gear,
-                    speedUnit = app.settings.speedUnit,
-                    highlight = number == onTop,
-                ) { app.showOnboard(number) }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        // The table is 361dp wide, plus its 18dp side padding. Scale its layout with the panel
+        // so S1/S2/S3 and the tyre column remain inside the visible window when it is narrowed.
+        // Let the 1/3 landscape sidebar shrink the complete table rather than clip its last columns.
+        // The text-size setting remains available when the sidebar is especially narrow.
+        val baseDensity = LocalDensity.current
+        val contentScale = ((maxWidth.value - 18f) / 361f).coerceIn(0.60f, 1f)
+        CompositionLocalProvider(
+            LocalDensity provides Density(baseDensity.density * contentScale, baseDensity.fontScale)
+        ) {
+            val listState = rememberLazyListState()
+            val scrollHint by remember(listState, rows.size) {
+                derivedStateOf {
+                    val visible = listState.layoutInfo.visibleItemsInfo
+                    val first = visible.firstOrNull()?.index?.plus(1) ?: 0
+                    val last = visible.lastOrNull()?.index?.plus(1) ?: 0
+                    when {
+                        first == 0 -> "${rows.size} DRIVERS"
+                        first == 1 && last >= rows.size -> "${rows.size} DRIVERS"
+                        first > 1 && last < rows.size -> "↑↓ $first–$last / ${rows.size} · SCROLL"
+                        first > 1 -> "↑ $first–$last / ${rows.size} · SCROLL"
+                        last < rows.size -> "↓ $first–$last / ${rows.size} · SCROLL"
+                        else -> "${rows.size} DRIVERS"
+                    }
+                }
+            }
+            val minimumRowHeight = if (app.layoutMode == LayoutMode.TV) 16f else 20f
+            val rowHeight = if (rows.isEmpty()) ROW_HEIGHT else {
+                // The TV preset uses a compact broadcast tower so more of the field is visible.
+                // On other layouts preserve the existing minimum for touch readability.
+                ((maxHeight.value / contentScale - 73f) / rows.size)
+                    .coerceIn(minimumRowHeight / contentScale, ROW_HEIGHT.value).dp
+            }
+            Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
+                TowerSessionHeader(timing, now)
+                TowerHeader()
+                LazyColumn(Modifier.weight(1f), state = listState) {
+                    items(rows, key = { it.first }) { (number, state) ->
+                        val kmh = timing.speeds[number]?.kmhAt(now)
+                        val gear = timing.speeds[number]?.gearAt(now)
+                        TowerRow(
+                            timing = timing,
+                            number = number,
+                            state = state,
+                            tyre = timing.tyres[number]?.at(now),
+                            kmh = kmh,
+                            gear = gear,
+                            speedUnit = app.settings.speedUnit,
+                            highlight = number == onTop,
+                            rowHeight = rowHeight,
+                        ) { app.showOnboard(number) }
+                    }
+                }
+                if (rows.isNotEmpty()) {
+                    Text(
+                        scrollHint,
+                        style = cell.copy(fontSize = 6.sp, color = Ink.secondary),
+                        textAlign = TextAlign.End,
+                        maxLines = 1,
+                        modifier = Modifier.fillMaxWidth().padding(end = 6.dp, top = 2.dp, bottom = 2.dp),
+                    )
+                }
             }
         }
     }
@@ -274,6 +354,7 @@ fun TowerRow(
     gear: Int? = null,
     speedUnit: String = Settings.KMH,
     highlight: Boolean,
+    rowHeight: Dp = ROW_HEIGHT,
     onClick: () -> Unit,
 ) {
     val driver = timing.drivers[number]
@@ -282,7 +363,7 @@ fun TowerRow(
     val best = state.bestLap
     Row(
         Modifier
-            .height(ROW_HEIGHT)
+            .height(rowHeight)
             .fillMaxWidth()
             .clip(RoundedCornerShape(4.dp))
             .background(

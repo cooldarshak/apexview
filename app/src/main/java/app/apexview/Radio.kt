@@ -1,5 +1,6 @@
 package app.apexview
 
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -35,10 +36,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -210,25 +220,47 @@ internal fun FloatingPanel(
     /** Its size until it's resized by hand. */
     maxWidth: androidx.compose.ui.unit.Dp = PANEL_MAX_WIDTH,
     maxHeight: androidx.compose.ui.unit.Dp = PANEL_MAX_HEIGHT,
+    minWidth: androidx.compose.ui.unit.Dp = PANEL_MIN_WIDTH,
+    minHeight: androidx.compose.ui.unit.Dp = PANEL_MIN_HEIGHT,
+    /** Optional reserved area that contains the complete panel and its resize gestures. */
+    bounds: Area? = null,
+    /** Replaces the tall title bar with a slim move/resize strip, used by the timing tower. */
+    compactHeader: Boolean = false,
+    /** Optional compact-header height, scaled to the TV canvas in the broadcast layout. */
+    compactHeaderHeight: androidx.compose.ui.unit.Dp? = null,
+    /** Opacity of the complete panel, including its contents. */
+    opacity: Float = 1f,
+    /** When locked, its header and resize grip no longer change the panel's place or size. */
+    locked: Boolean = false,
+    /** Called after a user finishes resizing, so any reserved feed space can be recalculated. */
+    onResizeFinished: () -> Unit = {},
     content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
     val density = LocalDensity.current
-    val panelWidth = with(density) { minOf(maxWidth, (width.toDp() - 32.dp)) }
+    val panelWidth = with(density) {
+        minOf(maxWidth, bounds?.let { it.w.toDp() } ?: (width.toDp() - 32.dp))
+    }
+    val panelHeight = with(density) { minOf(maxHeight, bounds?.let { it.h.toDp() } ?: maxHeight) }
+    val effectiveMinWidth = minWidth.coerceAtMost(panelWidth)
+    val effectiveMinHeight = minHeight.coerceAtMost(panelHeight)
     if (spot.x < 0f) {
         with(density) {
             val w = panelWidth.toPx()
-            val h = maxHeight.toPx()
+            val h = panelHeight.toPx()
             val saved = spot.saved()
             if (saved != null && saved.size >= 4 && saved[2] > 0f && saved[3] > 0f) {
                 spot.w = saved[2] * width
                 spot.h = saved[3] * height
             }
-            // The biggest gap the feeds leave, if the panel fits in it; else above the controls.
-            val gap = Layouts.largestFree(app.tileSlots(), width, height)?.takeIf { it.h >= h }
+            val gap = if (bounds == null) Layouts.largestFree(app.tileSlots(), width, height)?.takeIf { it.h >= h } else null
             when {
                 saved != null -> {
                     spot.x = saved[0] * width
                     spot.y = saved[1] * height
+                }
+                bounds != null -> {
+                    spot.x = bounds.x + (bounds.w - w).coerceAtLeast(0f) / 2f
+                    spot.y = bounds.y + (bounds.h - h).coerceAtLeast(0f) / 2f
                 }
                 gap != null -> {
                     spot.x = gap.x + (gap.w - w).coerceAtLeast(0f) / 2
@@ -239,11 +271,29 @@ internal fun FloatingPanel(
                     spot.y = height - h - 120.dp.toPx()
                 }
             }
-            spot.x = spot.x.coerceIn(0f, (width - w).coerceAtLeast(0f))
-            spot.y = spot.y.coerceIn(0f, (height - h).coerceAtLeast(0f))
+            val minX = bounds?.x ?: 0f
+            val minY = bounds?.y ?: 0f
+            val maxX = bounds?.let { it.x + it.w - w } ?: (width - w)
+            val maxY = bounds?.let { it.y + it.h - h } ?: (height - h)
+            spot.x = spot.x.coerceIn(minX, maxX.coerceAtLeast(minX))
+            spot.y = spot.y.coerceIn(minY, maxY.coerceAtLeast(minY))
         }
     }
-    val shownWidth = if (spot.w > 0f) with(density) { spot.w.toDp() } else panelWidth
+    val shownWidth = if (spot.w > 0f) with(density) {
+        spot.w.toDp().coerceIn(effectiveMinWidth, panelWidth)
+    } else panelWidth
+    val shownHeight = if (spot.h > 0f) with(density) {
+        spot.h.toDp().coerceIn(effectiveMinHeight, panelHeight)
+    } else panelHeight
+    val shownWidthPx = with(density) { shownWidth.toPx() }
+    val shownHeightPx = with(density) { shownHeight.toPx() }
+    if (spot.w > 0f) spot.w = shownWidthPx
+    if (spot.h > 0f) spot.h = shownHeightPx
+    val minX = bounds?.x ?: 0f
+    val minY = bounds?.y ?: 0f
+    spot.x = spot.x.coerceIn(minX, (bounds?.let { it.x + it.w - shownWidthPx } ?: (width - shownWidthPx)).coerceAtLeast(minX))
+    spot.y = spot.y.coerceIn(minY, (bounds?.let { it.y + it.h - shownHeightPx } ?: (height - shownHeightPx)).coerceAtLeast(minY))
+    val minWidthPx = with(density) { effectiveMinWidth.toPx() }
     // Where the finger has taken the panel (or its corner) since the gesture began, before
     // snapping: snapping works from this, so an edge can be pulled back off a line.
     var rawX by remember { mutableFloatStateOf(0f) }
@@ -256,57 +306,134 @@ internal fun FloatingPanel(
         Modifier
             .offset { IntOffset(spot.x.roundToInt(), spot.y.roundToInt()) }
             .then(modifier)
+            .graphicsLayer { alpha = opacity.coerceIn(0f, 1f) }
             .onSizeChanged { boxW = it.width.toFloat(); boxH = it.height.toFloat() }
     ) {
         Column(
             Modifier
                 .width(shownWidth)
-                .then(if (spot.h > 0f) Modifier.height(with(density) { spot.h.toDp() }) else Modifier.heightIn(max = maxHeight))
+                .height(shownHeight)
                 .clip(RoundedCornerShape(16.dp))
                 .background(Color.Black.copy(alpha = 0.72f))
         ) {
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .pointerInput(Unit) {
-                        detectDragGestures(
-                            onDragStart = { rawX = spot.x; rawY = spot.y },
-                            onDragEnd = { spot.store(width, height) },
-                        ) { change, drag ->
-                            change.consume()
-                            rawX += drag.x
-                            rawY += drag.y
-                            var x = rawX
-                            var y = rawY
-                            if (app.snapMode) {
-                                val (xs, ys) = snapLines(app, width, height, feedScale)
-                                x += pull(listOf(x, x + boxW), xs, SNAP.toPx())
-                                y += pull(listOf(y, y + boxH), ys, SNAP.toPx())
+                    .then(
+                        if (locked) Modifier else Modifier.pointerInput(width, height, feedScale, bounds) {
+                            detectDragGestures(
+                                onDragStart = { rawX = spot.x; rawY = spot.y },
+                                onDragEnd = { spot.store(width, height) },
+                            ) { change, drag ->
+                                change.consume()
+                                rawX += drag.x
+                                rawY += drag.y
+                                var x = rawX
+                                var y = rawY
+                                if (app.snapMode) {
+                                    val (xs, ys) = snapLines(app, width, height, feedScale)
+                                    x += pull(listOf(x, x + boxW), xs, SNAP.toPx())
+                                    y += pull(listOf(y, y + boxH), ys, SNAP.toPx())
+                                }
+                                val minX = bounds?.x ?: 0f
+                                val minY = bounds?.y ?: 0f
+                                val maxX = bounds?.let { it.x + it.w - boxW } ?: (width - boxW)
+                                val maxY = bounds?.let { it.y + it.h - boxH } ?: (height - boxH)
+                                spot.x = x.coerceIn(minX, maxX.coerceAtLeast(minX))
+                                spot.y = y.coerceIn(minY, maxY.coerceAtLeast(minY))
                             }
-                            spot.x = x.coerceIn(0f, (width - boxW).coerceAtLeast(0f))
-                            spot.y = y.coerceIn(0f, (height - HEADER_HEIGHT.toPx()).coerceAtLeast(0f))
                         }
-                    }
-                    .height(HEADER_HEIGHT)
-                    .padding(start = 16.dp, end = 4.dp),
+                    )
+                    .height(if (compactHeader) compactHeaderHeight ?: 22.dp else HEADER_HEIGHT)
+                    .padding(start = if (compactHeader) 6.dp else 16.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(title, style = Type.headline, modifier = Modifier.weight(1f))
-                Box(Modifier.size(36.dp).pressable(onClick = onClose), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.Close, closeLabel, tint = Ink.secondary, modifier = Modifier.size(18.dp))
+                if (compactHeader) {
+                    if (!locked) {
+                        Text(
+                            "MOVE",
+                            style = Type.caption.copy(fontSize = 7.sp, color = Ink.secondary, fontWeight = FontWeight.Bold),
+                            modifier = Modifier
+                                .padding(horizontal = 7.dp, vertical = 1.dp)
+                                .onKeyEvent { event ->
+                                    when (event.key) {
+                                        Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
+                                            if (event.type == KeyEventType.KeyDown) {
+                                                val step = with(density) { 18.dp.toPx() }
+                                                val dx = when (event.key) { Key.DirectionLeft -> -step; Key.DirectionRight -> step; else -> 0f }
+                                                val dy = when (event.key) { Key.DirectionUp -> -step; Key.DirectionDown -> step; else -> 0f }
+                                                val minX = bounds?.x ?: 0f
+                                                val minY = bounds?.y ?: 0f
+                                                val maxX = bounds?.let { it.x + it.w - boxW } ?: (width - boxW)
+                                                val maxY = bounds?.let { it.y + it.h - boxH } ?: (height - boxH)
+                                                spot.x = (spot.x + dx).coerceIn(minX, maxX.coerceAtLeast(minX))
+                                                spot.y = (spot.y + dy).coerceIn(minY, maxY.coerceAtLeast(minY))
+                                            } else if (event.type == KeyEventType.KeyUp) spot.store(width, height)
+                                            true
+                                        }
+                                        else -> false
+                                    }
+                                }
+                                .pressable(scaleTo = 1f) {},
+                        )
+                        Text(
+                            "SIZE",
+                            style = Type.caption.copy(fontSize = 7.sp, color = Ink.secondary, fontWeight = FontWeight.Bold),
+                            modifier = Modifier
+                                .padding(horizontal = 7.dp, vertical = 1.dp)
+                                .onKeyEvent { event ->
+                                    when (event.key) {
+                                        Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
+                                            if (event.type == KeyEventType.KeyDown) {
+                                                val step = with(density) { 18.dp.toPx() }
+                                                val dx = when (event.key) { Key.DirectionLeft -> -step; Key.DirectionRight -> step; else -> 0f }
+                                                val dy = when (event.key) { Key.DirectionUp -> -step; Key.DirectionDown -> step; else -> 0f }
+                                                val minW = with(density) { effectiveMinWidth.toPx() }
+                                                val minH = with(density) { effectiveMinHeight.toPx() }
+                                                val maxW = bounds?.let { it.x + it.w - spot.x } ?: (width - spot.x)
+                                                val maxH = bounds?.let { it.y + it.h - spot.y } ?: (height - spot.y)
+                                                spot.w = (spot.w.takeIf { it > 0f } ?: boxW).let { (it + dx).coerceIn(minW, maxW.coerceAtLeast(minW)) }
+                                                spot.h = (spot.h.takeIf { it > 0f } ?: boxH).let { (it + dy).coerceIn(minH, maxH.coerceAtLeast(minH)) }
+                                            } else if (event.type == KeyEventType.KeyUp) {
+                                                spot.store(width, height)
+                                                onResizeFinished()
+                                            }
+                                            true
+                                        }
+                                        else -> false
+                                    }
+                                }
+                                .pressable(scaleTo = 1f) {},
+                        )
+                    }
+                    Text(
+                        title,
+                        style = Type.headline.copy(fontSize = if (app.layoutMode == LayoutMode.TV) 18.sp else 10.sp),
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f),
+                    )
+                } else {
+                    Text(title, style = Type.headline, modifier = Modifier.weight(1f))
+                }
+                Box(
+                    Modifier.size(if (compactHeader) 24.dp else 36.dp).pressable(onClick = onClose),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Rounded.Close, closeLabel, tint = Ink.secondary, modifier = Modifier.size(16.dp))
                 }
             }
             content()
         }
         // The corner grip: drag to resize, edges snapping like the feeds'.
-        Box(
+        if (!locked) Box(
             Modifier
                 .align(Alignment.BottomEnd)
                 .size(36.dp)
-                .pointerInput(Unit) {
+                .pointerInput(width, height, feedScale, bounds) {
                     detectDragGestures(
                         onDragStart = { rawW = boxW; rawH = boxH },
-                        onDragEnd = { spot.store(width, height) },
+                        onDragEnd = { spot.store(width, height); onResizeFinished() },
                     ) { change, drag ->
                         change.consume()
                         rawW += drag.x
@@ -318,8 +445,10 @@ internal fun FloatingPanel(
                             w += pull(listOf(spot.x + w), xs, SNAP.toPx())
                             h += pull(listOf(spot.y + h), ys, SNAP.toPx())
                         }
-                        spot.w = w.coerceIn(PANEL_MIN_WIDTH.toPx(), (width - spot.x).coerceAtLeast(PANEL_MIN_WIDTH.toPx()))
-                        spot.h = h.coerceIn(PANEL_MIN_HEIGHT.toPx(), (height - spot.y).coerceAtLeast(PANEL_MIN_HEIGHT.toPx()))
+                        val availableWidth = bounds?.let { it.x + it.w - spot.x } ?: (width - spot.x)
+                        val availableHeight = bounds?.let { it.y + it.h - spot.y } ?: (height - spot.y)
+                        spot.w = w.coerceIn(minWidthPx, availableWidth.coerceAtLeast(minWidthPx))
+                        spot.h = h.coerceIn(effectiveMinHeight.toPx(), availableHeight.coerceAtLeast(effectiveMinHeight.toPx()))
                     }
                 },
             contentAlignment = Alignment.Center,
