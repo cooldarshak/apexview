@@ -156,14 +156,14 @@ object Layouts {
         var bestScore = Double.NEGATIVE_INFINITY
         candidates.forEach { slots ->
             val free = freeAreas(slots, width, height)
-            free.filter { it.w >= panelW && it.h >= panelH }.forEach { gap ->
+            free.filter { it.w >= panelW && it.h >= panelH }.forEach gapLoop@ { gap ->
                 val tower = Area(gap.x, gap.y, panelW, panelH)
                 val map = if (minMapSide == null) null else free
                     .filter { area ->
                         area.w >= minMapSide && area.h >= minMapSide && !area.overlaps(tower)
                     }
                     .maxByOrNull { it.w.toDouble() * it.h }
-                if (minMapSide != null && map == null) return@forEach
+                if (minMapSide != null && map == null) return@gapLoop
                 val picture = slots.sumOf { (it.w * it.h).toDouble() }
                 val score = picture + panelW.toDouble() * panelH + (map?.let { it.w.toDouble() * it.h } ?: 0.0)
                 if (score > bestScore) {
