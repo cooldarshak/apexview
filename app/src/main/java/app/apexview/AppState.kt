@@ -427,13 +427,16 @@ class AppState(
 
     private fun videoDecoderBudget(): Int {
         if (!isTv) return 4
-        val softwareDrm = settings.softwareDrm
-        if (cachedDecoderDrmMode != softwareDrm) {
-            cachedDecoderDrmMode = softwareDrm
-            cachedDecoderBudget = queryVideoDecoderBudget(context, softwareDrm, isTv = true)
+        // Base the query on the DRM level actually active in this session. If the TV
+        // refuses L3, the players fall back to L1 and the budget must switch to secure codecs.
+        val softwareDrm = tiles.isNotEmpty() && tiles.all { it.feed.usesSoftwareDrm }
+        val effectiveMode = if (tiles.isEmpty()) settings.softwareDrm else softwareDrm
+        if (cachedDecoderDrmMode != effectiveMode) {
+            cachedDecoderDrmMode = effectiveMode
+            cachedDecoderBudget = queryVideoDecoderBudget(context, effectiveMode, isTv = true)
             android.util.Log.i(
                 "ApexviewVideoBudget",
-                "TV AVC decoder budget=$cachedDecoderBudget, softwareDrm=$softwareDrm",
+                "TV AVC decoder budget=$cachedDecoderBudget, actualSoftwareDrm=$effectiveMode",
             )
         }
         return cachedDecoderBudget
