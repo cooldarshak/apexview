@@ -1856,24 +1856,29 @@ class AppState(
         prefs.edit().putString(if (laptopActive) PREF_LAPTOP_MAP else PREF_MAP_PANEL, panel.toJson(canvasW, canvasH, mapOpacity)).apply()
     }
 
+    private fun requestOverlayLayout() {
+        if (canvasW <= 0f || laptopActive) return
+        handPlaced = false
+        layoutRequest++
+    }
+
     fun chooseMapMode(mode: MapMode) {
         mapGrabbed = false
         if (mode == mapMode) return
         mapMode = mode
         prefs.edit().putString(PREF_MAP_MODE, mode.name).apply()
-        // Only a map the feeds keep clear of changes their layout. Hand-placed feeds stay put.
-        if (mapReserve && !handPlaced && layoutMode != LayoutMode.CUSTOM) layoutRequest++
+        if ((mapReserve && mapMode.inWindow || towerOpen && towerReserve) && !handPlaced) {
+            requestOverlayLayout()
+        }
         if (canvasW > 0f) placeMapIfNeeded(canvasW, canvasH)
     }
 
     fun chooseMapReserve(on: Boolean) {
+        if (mapReserve == on) return
         mapReserve = on
         prefs.edit().putBoolean(PREF_MAP_RESERVE, on).apply()
-        if (on) {
-            mapPanel.placed = false
-            handPlaced = false
-            layoutRequest++
-        }
+        if (on) mapPanel.placed = false
+        if (on || towerOpen && towerReserve) requestOverlayLayout()
     }
 
     fun toggleMapLock() {
@@ -1990,10 +1995,7 @@ class AppState(
         if (towerReserve == on) return
         towerReserve = on
         prefs.edit().putBoolean(PREF_TOWER_RESERVE, on).apply()
-        if (on && towerOpen && canvasW > 0f && !laptopActive) {
-            handPlaced = false
-            layoutRequest++
-        }
+        if (towerOpen && (on || mapReserve)) requestOverlayLayout()
     }
 
     /** Width and height are in canvas pixels, like [FloatingSpot]. */
@@ -2016,6 +2018,11 @@ class AppState(
         panel.x = (centerX - panel.w / 2f).coerceIn(0f, (canvasW - panel.w).coerceAtLeast(0f))
         panel.y = (centerY - panel.h / 2f).coerceIn(0f, (canvasH - panel.h).coerceAtLeast(0f))
         storeTowerPanel()
+    }
+
+    /** Recalculates the feed layout after a tower resize when the feeds are kept clear. */
+    fun finishTowerResize() {
+        if (towerOpen && towerReserve) requestOverlayLayout()
     }
 
     fun storeTowerPanel() {
