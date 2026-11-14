@@ -94,7 +94,7 @@ class LayoutsTest {
                 assertEquals(plan.feeds.w, plan.workspace.x, 0.01f)
                 assertEquals(0f, plan.tower.y, 0.01f)
                 assertEquals(plan.workspace.x, plan.tower.x, 0.01f)
-                assertTrue(plan.map.y > plan.tower.y + plan.tower.h)
+                assertEquals(plan.tower.y + plan.tower.h, plan.map.y, 0.5f)
                 assertTrue(plan.map.y + plan.map.h <= height + 0.5f)
                 assertTrue(plan.slots.all { slot ->
                     slot.x >= plan.feeds.x - 0.5f && slot.y >= plan.feeds.y - 0.5f &&
