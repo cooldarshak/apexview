@@ -103,6 +103,18 @@ internal fun liveTimingSourceFor(
     else -> playerReportsLive
 }
 
+internal fun catalogTimingSource(
+    knownLive: Boolean,
+    knownArchive: Boolean,
+    completedLive: Boolean,
+): Boolean? = when {
+    completedLive || knownArchive -> false
+    knownLive -> true
+    else -> null
+}
+
+
+
 /**
  * Where a panel over the feeds sits, in canvas pixels: first in the biggest space the feeds
  * leave, and once dragged, kept (as fractions of the screen) for next time. Its size too, once
@@ -429,6 +441,8 @@ class AppState(
     private val catalogStartTimes = mutableMapOf<Long, Long>()
     /** Catalog-confirmed live sessions can use live timing before the video timeline is ready. */
     private val knownLiveContentIds = mutableSetOf<Long>()
+    /** Catalog-confirmed replays use the archive without waiting for a device-specific player clock. */
+    private val knownArchiveContentIds = mutableSetOf<Long>()
     /** Once F1 moves the live timing socket to the next session, the old session uses its archive. */
     private val completedLiveTimingContentIds = mutableSetOf<Long>()
     /** Session titles by content ID, for the viewer's header and its feed sheet. */
@@ -846,6 +860,15 @@ class AppState(
         item.startMs.takeIf { it > 0L }?.let { catalogStartTimes[item.contentId] = it }
         // Sessions are titled by their weekend in the viewer ("Mexico City Grand Prix · Race").
         val session = weekendContent.values.any { c -> c.sessions.any { it.contentId == item.contentId } }
+        if (item.live) {
+            knownArchiveContentIds -= item.contentId
+        } else if (session && !item.upcoming && item.startMs > 0L) {
+            // The catalog has already moved this session out of LIVE and supplies its event start.
+            // Don't make TV wait for a HLS/DASH program clock to learn what the catalog knows.
+            knownArchiveContentIds += item.contentId
+            knownLiveContentIds -= item.contentId
+            completedLiveTimingContentIds -= item.contentId
+        }
         // Live events carry their weekend's name as their subtitle.
         val meeting = item.meeting.ifEmpty { if (item.live) item.subtitle.orEmpty() else "" }
         openPicker(item.contentId, if ((session || item.live) && meeting.isNotEmpty()) "$meeting · ${item.title}" else item.title, item.image, start, item.live)
@@ -1061,6 +1084,7 @@ class AppState(
         val isKnownLive = live || liveNow.any { it.contentId == contentId }
         if (isKnownLive) {
             knownLiveContentIds += contentId
+            knownArchiveContentIds -= contentId
             completedLiveTimingContentIds -= contentId
         }
         val sheet = FeedPicker(contentId, title, isKnownLive)
@@ -1165,7 +1189,11 @@ class AppState(
             images[saved.contentId] = saved.image
             if (saved.live) {
                 knownLiveContentIds += saved.contentId
+                knownArchiveContentIds -= saved.contentId
                 completedLiveTimingContentIds -= saved.contentId
+            } else if (sessionRefs[saved.contentId] != null) {
+                knownArchiveContentIds += saved.contentId
+                knownLiveContentIds -= saved.contentId
             }
             val restoredLayout = runCatching { LayoutMode.valueOf(saved.layoutMode) }.getOrNull()
             if (restoredLayout != null) layoutMode = restoredLayout
@@ -1199,7 +1227,11 @@ class AppState(
     /** Opens the feed sheet for whatever is playing, to add another of its feeds. */
     fun openPickerForPlaying() {
         val leader = leaderTile() ?: return
-        openPicker(leader.contentId, titles[leader.contentId] ?: "Add a feed")
+        openPicker(
+            leader.contentId,
+            titles[leader.contentId] ?: "Add a feed",
+            live = leader.contentId in knownLiveContentIds || liveNow.any { it.contentId == leader.contentId },
+        )
     }
 
     fun closePicker() {
@@ -1397,11 +1429,11 @@ class AppState(
                 if (problem == null) {
                     // Prefer F1's catalog signal for a known-live session. Otherwise wait for a
                     // real, non-placeholder player window before choosing live timing or archive.
-                    val live = when {
-                        contentId in completedLiveTimingContentIds -> false
-                        contentId in knownLiveContentIds -> true
-                        else -> isLiveStream(contentId)
-                    }
+                    val live = catalogTimingSource(
+                        knownLive = contentId in knownLiveContentIds,
+                        knownArchive = contentId in knownArchiveContentIds,
+                        completedLive = contentId in completedLiveTimingContentIds,
+                    ) ?: isLiveStream(contentId)
                     if (live == null) {
                         mapStatus = "Waiting for the video stream to identify live timing or replay…"
                         android.util.Log.i("ApexviewTiming", "content=$contentId: player timeline not ready; keeping timing source undecided")
@@ -1419,7 +1451,11 @@ class AppState(
                     }
                     try {
                         // When the picture was broadcast: identifies the session if the title can't.
-                        val watched = leaderTile()?.feed?.wallClockMs()
+                        val watched = leaderTile()?.takeIf { it.contentId == contentId }?.feed?.wallClockMs()
+                        android.util.Log.i(
+                            "ApexviewTiming",
+                            "content=$contentId archive clock=${watched ?: "unavailable"} catalogStart=${ref!!.sessionStartUtcMs ?: "unavailable"}",
+                        )
                         val loaded = LiveTimingArchive(token!!, userAgent).load(ref!!, watched)
                         if (timingContentId != contentId) return@launch
                         rememberOutline(loaded)
