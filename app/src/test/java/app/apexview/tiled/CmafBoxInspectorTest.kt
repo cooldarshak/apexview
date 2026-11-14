@@ -16,7 +16,7 @@ class CmafBoxInspectorTest {
                     box("minf", box("stbl", box("stsd",
                         byteArrayOf(0,0,0,0) + int(1) +
                             int(86) + ascii("hvc1") + ByteArray(6) + short(1) +
-                            ByteArray(16) + short(1920) + short(1080) + ByteArray(42)
+                            ByteArray(16) + short(1920) + short(1080) + ByteArray(50)
                     )))
                 )
             )))
@@ -37,6 +37,24 @@ class CmafBoxInspectorTest {
     @Test fun detectsFragmentedMp4FromMoof() {
         val report = CmafBoxInspector.inspect(box("moof", box("mfhd", ByteArray(8))))
         assertTrue(report.fragmented)
+    }
+
+
+    @Test fun identifiesCbcsProtectionWithoutReadingProtectionPayload() {
+        val sinf = box("sinf", box("frma", ascii("hvc1")) +
+            box("schm", byteArrayOf(0,0,0,0) + ascii("cbcs") + int(0x00010000)))
+        val visualEntry = int(8 + 78 + sinf.size) + ascii("encv") +
+            ByteArray(6) + short(1) + ByteArray(16) + short(1280) + short(720) + ByteArray(50) + sinf
+        val track = box("trak", box("mdia",
+            box("hdlr", byteArrayOf(0,0,0,0) + int(0) + ascii("vide") + ByteArray(12)),
+            box("minf", box("stbl", box("stsd", byteArrayOf(0,0,0,0) + int(1) + visualEntry)))
+        ))
+        val report = CmafBoxInspector.inspect(box("moov", track))
+        val metadata = report.tracks.single()
+        assertEquals("encv", metadata.sampleEntry)
+        assertEquals("hvc1", metadata.originalFormat)
+        assertEquals("cbcs", metadata.protectionScheme)
+        assertTrue(metadata.encrypted)
     }
 
     @Test fun rejectsBoxWhoseDeclaredSizeExceedsInput() {
