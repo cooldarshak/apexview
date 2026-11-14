@@ -935,6 +935,14 @@ private fun TileView(app: AppState, tile: Tile) {
             )
         }
 
+        if (tile.heldForDecoder) {
+            Text(
+                "TV decoder limit reached. Audio and sync continue; select fewer visible feeds or use a device with more video decoders.",
+                style = Type.subhead.copy(color = Ink.primary, shadow = overlayShadow, textAlign = androidx.compose.ui.text.style.TextAlign.Center),
+                modifier = Modifier.align(Alignment.Center).padding(horizontal = 24.dp).widthIn(max = 420.dp),
+            )
+        }
+
         if (tile.heldForSpeed) {
             Text(
                 "Picture paused while sped up. Back to 1× brings it back.",
@@ -943,7 +951,7 @@ private fun TileView(app: AppState, tile: Tile) {
             )
         }
 
-        if (tile.feed.problem == null && !tile.coolingOff && !tile.heldForSpeed) {
+        if (tile.feed.problem == null && !tile.coolingOff && !tile.heldForSpeed && !tile.heldForDecoder) {
             BufferingRing(tile.feed, Modifier.align(Alignment.Center))
         }
 
