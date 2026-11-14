@@ -134,6 +134,7 @@ fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float
         FloatingPanel(
             app, app.towerSpot, "Timing", "Hide timing", app::toggleTower, width, height, feedScale,
             maxWidth = TOWER_WIDTH, maxHeight = maxTowerHeight,
+            minWidth = AppState.TOWER_MIN_WIDTH_DP.dp,
             opacity = app.towerOpacity,
             locked = app.towerLocked,
             onResizeFinished = app::finishTowerResize,
