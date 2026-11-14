@@ -150,7 +150,7 @@ class DriverLaps(
 }
 
 /**
- * Builds every driver's [DriverLaps] from F1's TimingData stream. Lines are "HH:MM:SS.mmm" +
+ * Builds every driver's [DriverLaps] from F1's TimingData and TimingDataF1 streams. Lines are "HH:MM:SS.mmm" +
  * JSON; the first is a full snapshot, the rest are partial updates under Lines.<number>. Sectors
  * come as a list in the snapshot and as an index-keyed object in updates; a sector's Value goes
  * empty when a new lap starts.
