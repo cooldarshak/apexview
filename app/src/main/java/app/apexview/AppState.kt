@@ -2106,8 +2106,6 @@ class AppState(
             return
         }
         val density = context.resources.displayMetrics.density
-        val minWidth = minOf(TOWER_MIN_WIDTH_DP * density, canvasW)
-        val minHeight = minOf(TOWER_MIN_HEIGHT_DP * density, canvasH)
         val workspace = combinedOverlayPlan?.takeIf { it.floating }?.workspace
         val minWidth = minOf(TOWER_MIN_WIDTH_DP * density, workspace?.w ?: canvasW)
         val minHeight = minOf(TOWER_MIN_HEIGHT_DP * density, workspace?.h ?: canvasH)
