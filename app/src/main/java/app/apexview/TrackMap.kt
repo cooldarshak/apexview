@@ -27,6 +27,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -158,12 +159,31 @@ private val PUSH_RING = Color(0xFFFFD400)
 
 internal class Car(val number: String, val x: Float, val y: Float, val state: LapState)
 
-/** The session time the map shows, updated every frame from the leading tile's clock. */
+/** Map refresh policy: keep full display cadence alone, reduce work beside the timing tower. */
+internal fun mapRefreshIntervalMs(towerVisible: Boolean): Long? =
+    if (towerVisible) MAP_REFRESH_INTERVAL_WITH_TOWER_MS else null
+
+internal const val MAP_REFRESH_INTERVAL_WITH_TOWER_MS = 50L
+
+/**
+ * The session time the map shows. At full display cadence the map stays smooth on its own;
+ * alongside the timing tower, cap map recomposition at 20 Hz. The map rebuilds car positions and
+ * touch targets from this clock, so redrawing at every display frame needlessly competes with the
+ * tower and the video surface on devices with a busy composition thread.
+ */
 @Composable
 internal fun rememberMapTime(app: AppState): Long {
     var now by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(Unit) {
-        while (true) withFrameMillis { now = app.mapTimeMs() ?: 0L }
+    LaunchedEffect(app.towerOpen) {
+        val intervalMs = mapRefreshIntervalMs(app.towerOpen)
+        if (intervalMs != null) {
+            while (true) {
+                now = app.mapTimeMs() ?: 0L
+                delay(intervalMs)
+            }
+        } else {
+            while (true) withFrameMillis { now = app.mapTimeMs() ?: 0L }
+        }
     }
     return now
 }
