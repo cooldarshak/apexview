@@ -42,8 +42,10 @@ class Tile(val id: Int, val contentId: Long, channel: Channel, feed: FeedPlayer)
     var pinned by mutableStateOf(false)
     /** Showing, but its picture paused while the phone is too hot (sound and place kept). */
     var coolingOff by mutableStateOf(false)
-    /** Showing, but its picture paused while sped up, on a phone that can't keep every feed smooth. */
+    /** Showing, but its picture paused while sped up, on a device that can't keep every feed smooth. */
     var heldForSpeed by mutableStateOf(false)
+    /** TV decoder budget: audio and sync continue, but this tile has no video decoder slot. */
+    var heldForDecoder by mutableStateOf(false)
     /** When this tile last took a car picked on the map (or was added). Oldest goes first. */
     var mapPickedAt = System.currentTimeMillis()
 
@@ -350,7 +352,7 @@ class AppState(
         // A speed this phone already struggled with, with this many feeds: straight to one picture.
         if (!speedHeld && playbackSpeed > 1f && tiles.size > 1 && (struggledAt[tiles.size] ?: Float.MAX_VALUE) <= playbackSpeed) {
             speedHeld = true
-            message = "Only the main feed's picture plays at ${speedLabel(playbackSpeed)} on this phone, to keep it smooth. Back to 1× brings the rest back."
+            message = "Only the main feed's picture plays at ${speedLabel(playbackSpeed)} on this device, to keep it smooth. Back to 1× brings the rest back."
         }
         val shown = if (inPip) pipTile() else null
         val main = tiles.firstOrNull { it.id == bigTileId } ?: tiles.firstOrNull { it.audible } ?: tiles.maxByOrNull { it.w }
@@ -359,28 +361,44 @@ class AppState(
             thermal >= android.os.PowerManager.THERMAL_STATUS_MODERATE -> 0.75f
             else -> 1f
         }
-        tiles.forEach { tile ->
-            val visible = when {
+        val visibleTiles = tiles.filter { tile ->
+            when {
                 browsing -> false
                 inPip -> tile === shown
                 laptopActive -> tile.id == bigTileId || tiles.size == 1
                 focusTileId != null -> tile.id == focusTileId
                 else -> onCanvas(tile) && tiles.none { it !== tile && it.z > tile.z && covers(it, tile) }
             }
-            // Laptop mode: the feed that was up top last keeps its picture going out of sight, so
-            // going back to it is instant rather than a fresh ~4 MB chunk. Not once the phone is warm.
+        }
+        // On TV, the codec's advertised instance count is an upper bound, not a guarantee. Keep
+        // one instance in reserve and allocate the remaining slots to the main/audible feeds first.
+        val decoderSlots = videoDecoderBudget()
+        val decoderEligible = if (isTv) {
+            visibleTiles.sortedWith(
+                compareBy<Tile> { if (it === main) 0 else if (it.audible) 1 else if (it.channel.isDefault) 2 else 3 }
+                    .thenByDescending { it.z }
+            ).take(decoderSlots).toSet()
+        } else visibleTiles.toSet()
+
+        tiles.forEach { tile ->
+            val visible = tile in visibleTiles
+            // Laptop mode: the feed that was up top before the one there now keeps its picture
+            // going out of sight, ready to return instantly. TV never takes this hidden slot.
             val warm = !visible && !browsing && !inPip && laptopActive && tile.id == previousTopId &&
                 thermal < android.os.PowerManager.THERMAL_STATUS_MODERATE && !speedHeld
             if (warm) {
                 tile.coolingOff = false
+                tile.heldForDecoder = false
                 tile.feed.keepVideo()
                 return@forEach
             }
+            val overDecoderBudget = isTv && visible && tile !in decoderEligible
             val hot = thermal >= android.os.PowerManager.THERMAL_STATUS_CRITICAL && tile !== main
             val held = speedHeld && !inPip && tile !== main
             tile.coolingOff = visible && hot
             tile.heldForSpeed = visible && held && !hot
-            val cooling = hot || held
+            tile.heldForDecoder = overDecoderBudget
+            val cooling = hot || held || overDecoderBudget
             // The pop-out stays on the rendition it has, ready for coming back.
             if (inPip && visible && !cooling) {
                 tile.feed.keepVideo()
@@ -389,7 +407,9 @@ class AppState(
             tile.feed.setVideo(visible && !cooling, (tile.w * scale).toInt(), (tile.h * scale).toInt())
         }
         val pictures = tiles.filter { it.feed.showingVideo }
-        pictures.zip(bandwidthShares(pictures.map { it.w * it.h })).forEach { (tile, share) -> tile.feed.setBandwidthShare(share) }
+        pictures.zip(bandwidthShares(pictures.map { it.w * it.h })).forEach { (tile, share) ->
+            tile.feed.setBandwidthShare(share)
+        }
     }
 
     /** In laptop mode, the feed that was up top before the one there now. */
@@ -402,6 +422,22 @@ class AppState(
         a.x <= b.x && a.y <= b.y && a.x + a.w >= b.x + b.w && a.y + a.h >= b.y + b.h
     val settings = Settings(context)
     val updater = Updater(context, scope)
+    private var cachedDecoderDrmMode: Boolean? = null
+    private var cachedDecoderBudget = 1
+
+    private fun videoDecoderBudget(): Int {
+        if (!isTv) return 4
+        val softwareDrm = settings.softwareDrm
+        if (cachedDecoderDrmMode != softwareDrm) {
+            cachedDecoderDrmMode = softwareDrm
+            cachedDecoderBudget = queryVideoDecoderBudget(context, softwareDrm, isTv = true)
+            android.util.Log.i(
+                "ApexviewVideoBudget",
+                "TV AVC decoder budget=$cachedDecoderBudget, softwareDrm=$softwareDrm",
+            )
+        }
+        return cachedDecoderBudget
+    }
 
     var auth by mutableStateOf(AuthState.CHECKING)
         private set
@@ -860,7 +896,8 @@ class AppState(
         item.startMs.takeIf { it > 0L }?.let { catalogStartTimes[item.contentId] = it }
         // Sessions are titled by their weekend in the viewer ("Mexico City Grand Prix · Race").
         val session = weekendContent.values.any { c -> c.sessions.any { it.contentId == item.contentId } }
-        val catalogReplay = item.kind.equals("REPLAY", ignoreCase = true)
+        val catalogReplay = item.kind.equals("REPLAY", ignoreCase = true) ||
+            (session && !item.live && !item.upcoming && item.startMs > 0L)
         if (item.live) {
             knownArchiveContentIds -= item.contentId
         } else if (catalogReplay && !item.upcoming) {
@@ -1137,7 +1174,7 @@ class AppState(
     fun saveWatch() {
         val leader = leaderTile() ?: return
         val player = leader.feed.player
-        val live = player.isCurrentMediaItemLive
+        val live = leader.contentId in knownLiveContentIds || player.isCurrentMediaItemLive
         val duration = player.duration.takeIf { it > 0 } ?: 0L
         val position = player.currentPosition
         noteSeen(leader.contentId, position, duration, live)
@@ -1192,6 +1229,10 @@ class AppState(
                 knownLiveContentIds += saved.contentId
                 knownArchiveContentIds -= saved.contentId
                 completedLiveTimingContentIds -= saved.contentId
+            } else if (saved.contentId !in notSessions) {
+                // This is a saved replay of a session. Do not wait for the TV's player clock.
+                knownArchiveContentIds += saved.contentId
+                knownLiveContentIds -= saved.contentId
             }
             val restoredLayout = runCatching { LayoutMode.valueOf(saved.layoutMode) }.getOrNull()
             if (restoredLayout != null) layoutMode = restoredLayout
@@ -1356,20 +1397,32 @@ class AppState(
             showChrome()
             if (dropped > 0) failures += "Left out $dropped feed(s): 4 is the most this phone plays smoothly"
             message = if (failures.isEmpty()) null else "Some feeds had problems:\n" + failures.joinToString("\n")
-            if (timingContentId != leaderTile()?.contentId) loadTiming(leaderTile()!!.contentId)
+            leaderTile()?.let { leader ->
+                // A prior timing job can finish while retaining the same content ID. Restart it
+                // instead of leaving the TV's map sheet permanently at its initial Loading text.
+                if (timingContentId != leader.contentId || (timing == null && liveFeed?.isActive != true)) {
+                    loadTiming(leader.contentId)
+                }
+                applyVideoBudget()
+            }
         }
     }
 
-    private fun newFeed(stream: PlayInfo, startMs: Long = C.TIME_UNSET) = makeFeed(stream, startMs).also { it.setBaseSpeed(playbackSpeed) }
+    private fun newFeed(
+        stream: PlayInfo,
+        startMs: Long = C.TIME_UNSET,
+        startWithVideo: Boolean = !isTv,
+    ) = makeFeed(stream, startMs, startWithVideo).also { it.setBaseSpeed(playbackSpeed) }
 
-    private fun makeFeed(stream: PlayInfo, startMs: Long) = FeedPlayer(
+    private fun makeFeed(stream: PlayInfo, startMs: Long, startWithVideo: Boolean) = FeedPlayer(
         context, stream,
         ascendon = api.ascendon.orEmpty(),
         entitlement = api.entitlement.orEmpty(),
         userAgent = userAgent,
-        forceL3 = shouldUseSoftwareDrm(settings.softwareDrm, isTv),
+        forceL3 = settings.softwareDrm,
         subtitles = settings.subtitles,
         commentary = settings.commentary,
+        startWithVideo = startWithVideo,
         startMs = startMs,
     )
 
