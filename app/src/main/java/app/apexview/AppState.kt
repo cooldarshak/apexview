@@ -543,6 +543,12 @@ class AppState(
     val activeMapPanel get() = if (laptopActive) laptopMapPanel else mapPanel
     var mapOpacity by mutableFloatStateOf(0.9f)
         private set
+    /** Driver marker radius in dp; smaller defaults keep a crowded circuit readable. */
+    var mapDotSizeDp by mutableFloatStateOf(prefs.getFloat(PREF_MAP_DOT_SIZE, 5f))
+        private set
+    /** Three-letter driver abbreviation size in sp. */
+    var mapLabelSizeSp by mutableFloatStateOf(prefs.getFloat(PREF_MAP_LABEL_SIZE, 8f))
+        private set
     /** Keeps the map still while the feeds under it are arranged. */
     var mapLocked by mutableStateOf(prefs.getBoolean(PREF_MAP_LOCKED, false))
         private set
@@ -1866,6 +1872,16 @@ class AppState(
         mapOpacity = value
     }
 
+    fun updateMapDotSize(value: Float) {
+        mapDotSizeDp = value.coerceIn(MIN_MAP_DOT_SIZE, MAX_MAP_DOT_SIZE)
+        prefs.edit().putFloat(PREF_MAP_DOT_SIZE, mapDotSizeDp).apply()
+    }
+
+    fun updateMapLabelSize(value: Float) {
+        mapLabelSizeSp = value.coerceIn(MIN_MAP_LABEL_SIZE, MAX_MAP_LABEL_SIZE)
+        prefs.edit().putFloat(PREF_MAP_LABEL_SIZE, mapLabelSizeSp).apply()
+    }
+
     // Moving and resizing tiles by hand.
 
     // The explanation overlay.
@@ -2845,6 +2861,12 @@ class AppState(
         const val LAPTOP_TOWER_SHARE = 0.52f
         private const val PREF_MAP_LOCKED = "mapLocked"
         private const val PREF_MAP_RESERVE = "mapReserve"
+        private const val PREF_MAP_DOT_SIZE = "mapDotSizeDp"
+        private const val PREF_MAP_LABEL_SIZE = "mapLabelSizeSp"
+        private const val MIN_MAP_DOT_SIZE = 3f
+        private const val MAX_MAP_DOT_SIZE = 8f
+        private const val MIN_MAP_LABEL_SIZE = 7f
+        private const val MAX_MAP_LABEL_SIZE = 12f
         private const val PREF_START_LINE = "startLine"
         private const val PREF_PIT_LOSS = "pitLoss"
         // Snap mode: edges pull together inside 12dp; a push past 56dp goes through.
