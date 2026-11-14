@@ -1229,7 +1229,7 @@ class AppState(
                 knownLiveContentIds += saved.contentId
                 knownArchiveContentIds -= saved.contentId
                 completedLiveTimingContentIds -= saved.contentId
-            } else if (saved.contentId !in notSessions) {
+            } else if (sessionRefs.containsKey(saved.contentId)) {
                 // This is a saved replay of a session. Do not wait for the TV's player clock.
                 knownArchiveContentIds += saved.contentId
                 knownLiveContentIds -= saved.contentId
@@ -1493,13 +1493,21 @@ class AppState(
                     }
                     android.util.Log.i("ApexviewTiming", "content=$contentId: using ${if (live) "live timing" else "timing archive"}")
                     if (live) {
+                        // Show the transport stage immediately. A TV with no program clock used to
+                        // sit on the generic "Loading" label while the socket was still starting.
+                        mapStatus = "Connecting to F1 live timing…"
+                        android.util.Log.i(
+                            "ApexviewTiming",
+                            "content=$contentId live source; meeting=${ref!!.meetingKey}, session=${ref.sessionKey}, circuit=${ref.circuitKey}",
+                        )
                         // Runs until the viewer moves on, reconnecting itself; back here only
                         // if it failed outright or F1 ends this live timing session.
-                        followLive(contentId, ref!!, token!!)
+                        followLive(contentId, ref, token!!)
                         if (timingContentId != contentId) return@launch
                         kotlinx.coroutines.delay(mapRetryDelayMs(attempt++))
                         continue
                     }
+                    mapStatus = "Loading F1 timing archive…"
                     try {
                         // When the picture was broadcast: identifies the session if the title can't.
                         val watched = leaderTile()?.takeIf { it.contentId == contentId }?.feed?.wallClockMs()
@@ -1613,7 +1621,11 @@ class AppState(
                         if (!kept && key != null) feed.newOutline?.let { writeOutline(key, it); kept = true }
                     }
                 },
-                onStatus = { if (timingContentId == contentId) mapStatus = it },
+                onStatus = { status ->
+                    if (timingContentId == contentId) {
+                        mapStatus = status
+                    }
+                },
             )
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
