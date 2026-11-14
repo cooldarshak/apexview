@@ -860,11 +860,12 @@ class AppState(
         item.startMs.takeIf { it > 0L }?.let { catalogStartTimes[item.contentId] = it }
         // Sessions are titled by their weekend in the viewer ("Mexico City Grand Prix · Race").
         val session = weekendContent.values.any { c -> c.sessions.any { it.contentId == item.contentId } }
+        val catalogReplay = session || item.kind.equals("REPLAY", ignoreCase = true)
         if (item.live) {
             knownArchiveContentIds -= item.contentId
-        } else if (session && !item.upcoming && item.startMs > 0L) {
-            // The catalog has already moved this session out of LIVE and supplies its event start.
-            // Don't make TV wait for a HLS/DASH program clock to learn what the catalog knows.
+        } else if (catalogReplay && !item.upcoming) {
+            // The catalog has already moved this session out of LIVE. Don't make TV wait for a
+            // HLS/DASH program clock to learn whether this is a replay.
             knownArchiveContentIds += item.contentId
             knownLiveContentIds -= item.contentId
             completedLiveTimingContentIds -= item.contentId
