@@ -44,6 +44,12 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --no-daemon testDebugUnitTest
 
+      - name: Install FFmpeg tools for synthetic HEVC fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg
+          ffmpeg -hide_banner -encoders 2>&1 | grep -q libx265
+
       - name: Generate and validate synthetic HEVC feed pair
         run: python3 tools/generate_hevc_fixtures.py
 
