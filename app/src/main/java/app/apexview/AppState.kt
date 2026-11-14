@@ -1751,14 +1751,20 @@ class AppState(
             custom != null -> custom.slots(width, height)
             keepTowerClear -> {
                 val density = context.resources.displayMetrics.density
-                val requestedWidth = towerSpot.w.takeIf { it > 0f }
-                    ?: minOf(TOWER_DEFAULT_WIDTH_DP * density, (width - 32f * density).coerceAtLeast(1f))
-                val requestedHeight = towerSpot.h.takeIf { it > 0f }
-                    ?: minOf(TOWER_DEFAULT_HEIGHT_DP * density, (height - 32f * density).coerceAtLeast(1f))
+                val minTowerWidth = minOf(TOWER_MIN_WIDTH_DP * density, width)
+                val minTowerHeight = minOf(TOWER_MIN_HEIGHT_DP * density, height)
+                val maxTowerWidth = (width - 32f * density).coerceAtLeast(minTowerWidth).coerceAtMost(width)
+                val maxTowerHeight = (height - 40f * density).coerceAtLeast(minTowerHeight).coerceAtMost(height)
+                val requestedWidth = (towerSpot.w.takeIf { it > 0f }
+                    ?: minOf(TOWER_DEFAULT_WIDTH_DP * density, maxTowerWidth))
+                    .coerceIn(minTowerWidth, maxTowerWidth)
+                val requestedHeight = (towerSpot.h.takeIf { it > 0f }
+                    ?: minOf(TOWER_DEFAULT_HEIGHT_DP * density, maxTowerHeight))
+                    .coerceIn(minTowerHeight, maxTowerHeight)
                 val mapMinSide = if (keepMapClear) minOf(width, height) * 0.22f else null
                 val arrangement = Layouts.withOverlays(
                     layoutMode, ordered.size, width, height,
-                    requestedWidth.coerceAtMost(width), requestedHeight.coerceAtMost(height), mapMinSide,
+                    requestedWidth, requestedHeight, mapMinSide,
                 )
                 arrangement.tower?.let { gap ->
                     towerSpot.x = gap.x
@@ -2011,12 +2017,14 @@ class AppState(
         val density = context.resources.displayMetrics.density
         val minWidth = minOf(TOWER_MIN_WIDTH_DP * density, canvasW)
         val minHeight = minOf(TOWER_MIN_HEIGHT_DP * density, canvasH)
-        val oldWidth = panel.w.takeIf { it > 0f } ?: widthPx
-        val oldHeight = panel.h.takeIf { it > 0f } ?: heightPx
+        val maxWidth = (canvasW - 32f * density).coerceAtLeast(minWidth).coerceAtMost(canvasW)
+        val maxHeight = (canvasH - 40f * density).coerceAtLeast(minHeight).coerceAtMost(canvasH)
+        val oldWidth = panel.w.takeIf { it > 0f } ?: minOf(TOWER_DEFAULT_WIDTH_DP * density, maxWidth)
+        val oldHeight = panel.h.takeIf { it > 0f } ?: minOf(TOWER_DEFAULT_HEIGHT_DP * density, maxHeight)
         val centerX = if (panel.x >= 0f) panel.x + oldWidth / 2f else canvasW / 2f
         val centerY = if (panel.y >= 0f) panel.y + oldHeight / 2f else canvasH / 2f
-        panel.w = widthPx.coerceIn(minWidth, canvasW)
-        panel.h = heightPx.coerceIn(minHeight, canvasH)
+        panel.w = widthPx.coerceIn(minWidth, maxWidth)
+        panel.h = heightPx.coerceIn(minHeight, maxHeight)
         panel.x = (centerX - panel.w / 2f).coerceIn(0f, (canvasW - panel.w).coerceAtLeast(0f))
         panel.y = (centerY - panel.h / 2f).coerceIn(0f, (canvasH - panel.h).coerceAtLeast(0f))
         storeTowerPanel()
