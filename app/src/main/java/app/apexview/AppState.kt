@@ -1766,6 +1766,8 @@ class AppState(
                     towerSpot.w = gap.w
                     towerSpot.h = gap.h
                     storeTowerPanel()
+                } ?: run {
+                    message = "There isn't enough room to keep the timing tower clear of the feeds. Reduce its width or height, then try again."
                 }
                 arrangement.map?.let { gap ->
                     mapPanel.place(gap)
@@ -1867,7 +1869,7 @@ class AppState(
         if (mode == mapMode) return
         mapMode = mode
         prefs.edit().putString(PREF_MAP_MODE, mode.name).apply()
-        if ((mapReserve && mapMode.inWindow || towerOpen && towerReserve) && !handPlaced) {
+        if ((mapReserve || towerOpen && towerReserve) && !handPlaced) {
             requestOverlayLayout()
         }
         if (canvasW > 0f) placeMapIfNeeded(canvasW, canvasH)
@@ -1995,7 +1997,7 @@ class AppState(
         if (towerReserve == on) return
         towerReserve = on
         prefs.edit().putBoolean(PREF_TOWER_RESERVE, on).apply()
-        if (towerOpen && (on || mapReserve)) requestOverlayLayout()
+        if (towerOpen || mapReserve) requestOverlayLayout()
     }
 
     /** Width and height are in canvas pixels, like [FloatingSpot]. */
