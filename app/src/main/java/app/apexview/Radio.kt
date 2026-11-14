@@ -212,6 +212,7 @@ internal fun FloatingPanel(
     maxWidth: androidx.compose.ui.unit.Dp = PANEL_MAX_WIDTH,
     maxHeight: androidx.compose.ui.unit.Dp = PANEL_MAX_HEIGHT,
     minWidth: androidx.compose.ui.unit.Dp = PANEL_MIN_WIDTH,
+    minHeight: androidx.compose.ui.unit.Dp = PANEL_MIN_HEIGHT,
     /** Optional reserved area that contains the complete panel and its resize gestures. */
     bounds: Area? = null,
     /** Opacity of the complete panel, including its contents. */
@@ -228,7 +229,7 @@ internal fun FloatingPanel(
     }
     val panelHeight = with(density) { minOf(maxHeight, bounds?.let { it.h.toDp() } ?: maxHeight) }
     val effectiveMinWidth = minWidth.coerceAtMost(panelWidth)
-    val effectiveMinHeight = PANEL_MIN_HEIGHT.coerceAtMost(panelHeight)
+    val effectiveMinHeight = minHeight.coerceAtMost(panelHeight)
     if (spot.x < 0f) {
         with(density) {
             val w = panelWidth.toPx()
