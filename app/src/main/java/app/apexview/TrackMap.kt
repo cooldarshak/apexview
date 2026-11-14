@@ -162,12 +162,37 @@ private val PUSH_RING = Color(0xFFFFD400)
 
 internal class Car(val number: String, val x: Float, val y: Float, val state: LapState)
 
-/** The session time the map shows, updated every frame from the leading tile's clock. */
+/** Shared wall-clock map/card time for components that need display-frame precision. */
 @Composable
 internal fun rememberMapTime(app: AppState): Long {
     var now by remember { mutableLongStateOf(0L) }
     LaunchedEffect(Unit) {
         while (true) withFrameMillis { now = app.mapTimeMs() ?: 0L }
+    }
+    return now
+}
+
+/**
+ * Map geometry and marker hit positions do not need to trigger a full Compose pass at 60/120 Hz.
+ * Publish map state at 30 Hz, while the video continues on its own playback/surface clock.
+ */
+internal const val MAP_RENDER_INTERVAL_MS = 33L
+
+@Composable
+internal fun rememberMapRenderTime(app: AppState): Long {
+    var now by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(app) {
+        var lastPublishedFrameMs = Long.MIN_VALUE
+        while (true) {
+            withFrameMillis { frameMs ->
+                if (lastPublishedFrameMs == Long.MIN_VALUE ||
+                    frameMs - lastPublishedFrameMs >= MAP_RENDER_INTERVAL_MS
+                ) {
+                    now = app.mapTimeMs() ?: 0L
+                    lastPublishedFrameMs = frameMs
+                }
+            }
+        }
     }
     return now
 }
@@ -509,15 +534,14 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
     fun lapPoint(f: Float) = timing.geometry.pointAt(f).let { g -> fit.map(g[0], g[1]) }
     val sectors = remember(fit) { sectorPaths(timing, ::lapPoint) }
     val scLabel = remember { measurer.label("SC", 8.sp) }
-    val pulse by rememberPulse()
-
-    val now = rememberMapTime(app)
+    val now = rememberMapRenderTime(app)
     val cars = carsAt(timing, now).map { it to fit.map(it.x, it.y) }
     val stop = pitStopNow(rememberPitBasis(app, timing, now), app.pitDriver, cars.map { (car, _) -> car.number to timing.geometry.progress(car.x, car.y) })
     val pitLabel = remember { measurer.label("PIT", 8.sp) }
     val stopLine = stop?.let { pitStopLine(timing, it) } ?: noPositionsLine(timing, now)
     val stopText = remember(stopLine) { stopLine?.let { measurer.label(it, 13.sp) } }
     val flags = timing.flags.at(now)
+    val pulse = rememberPulse(flags.track.ending)
     val caption = rememberCaption(measurer, flags, now)
     val safetyCar = if (!flags.track.safetyCar) null else leaderAt(timing, now)
         ?.let { leader -> cars.firstOrNull { it.first.number == leader }?.first }
@@ -689,14 +713,18 @@ private fun rememberCaption(measurer: TextMeasurer, flags: FlagPicture, now: Lon
 
 /** 0.3 to 1 and back, gently, for flags about to go green. */
 @Composable
-private fun rememberPulse() = androidx.compose.animation.core.rememberInfiniteTransition(label = "flags").animateFloat(
-    0.3f, 1f,
-    androidx.compose.animation.core.infiniteRepeatable(
-        androidx.compose.animation.core.tween(1100, easing = EaseOut),
-        androidx.compose.animation.core.RepeatMode.Reverse,
-    ),
-    label = "pulse",
-)
+private fun rememberPulse(active: Boolean): Float {
+    if (!active) return 1f
+    val pulse by androidx.compose.animation.core.rememberInfiniteTransition(label = "flags").animateFloat(
+        0.3f, 1f,
+        androidx.compose.animation.core.infiniteRepeatable(
+            androidx.compose.animation.core.tween(1100, easing = EaseOut),
+            androidx.compose.animation.core.RepeatMode.Reverse,
+        ),
+        label = "pulse",
+    )
+    return pulse
+}
 
 private fun outward(p: Offset, center: Offset): Offset {
     val d = p - center
@@ -785,13 +813,12 @@ fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, i
     val startLabel = remember { measurer.label("START", 8.sp) }
     val sectors = remember(ribbon, timing) { sectorPaths(timing, ribbon::point) }
     val scLabel = remember { measurer.label("SC", 7.sp) }
-    val pulse by rememberPulse()
-
-    val now = rememberMapTime(app)
+    val now = rememberMapRenderTime(app)
     val cars = carsAt(timing, now)
         .map { car -> car to timing.geometry.progress(car.x, car.y) }
         .sortedBy { it.second }
     val flags = timing.flags.at(now)
+    val pulse = rememberPulse(flags.track.ending)
     val caption = rememberCaption(measurer, flags, now)
     val safetyCar = if (!flags.track.safetyCar) null else leaderAt(timing, now)
         ?.let { leader -> cars.firstOrNull { it.first.number == leader }?.second }
