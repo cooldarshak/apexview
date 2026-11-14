@@ -860,7 +860,7 @@ class AppState(
         item.startMs.takeIf { it > 0L }?.let { catalogStartTimes[item.contentId] = it }
         // Sessions are titled by their weekend in the viewer ("Mexico City Grand Prix · Race").
         val session = weekendContent.values.any { c -> c.sessions.any { it.contentId == item.contentId } }
-        val catalogReplay = session || item.kind.equals("REPLAY", ignoreCase = true)
+        val catalogReplay = item.kind.equals("REPLAY", ignoreCase = true)
         if (item.live) {
             knownArchiveContentIds -= item.contentId
         } else if (catalogReplay && !item.upcoming) {
@@ -1192,9 +1192,6 @@ class AppState(
                 knownLiveContentIds += saved.contentId
                 knownArchiveContentIds -= saved.contentId
                 completedLiveTimingContentIds -= saved.contentId
-            } else if (sessionRefs[saved.contentId] != null) {
-                knownArchiveContentIds += saved.contentId
-                knownLiveContentIds -= saved.contentId
             }
             val restoredLayout = runCatching { LayoutMode.valueOf(saved.layoutMode) }.getOrNull()
             if (restoredLayout != null) layoutMode = restoredLayout
