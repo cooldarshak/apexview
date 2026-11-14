@@ -7,6 +7,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.rounded.OpenWith
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
@@ -33,6 +34,9 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
@@ -207,6 +211,8 @@ internal fun CarTargets(
                 .offset { IntOffset((p.x - half).roundToInt(), (p.y - half).roundToInt()) }
                 .size(target)
                 .combinedClickable(onLongClick = { onHold(number) }) { onTap(number) }
+                .focusable()
+                .tvFocusRing()
         )
     }
 }
@@ -277,7 +283,7 @@ private fun MapControls(app: AppState, timing: SessionTiming) {
         }
 
         // Top-right of the track: lock, and the move grip beside it.
-        MapControl(at(bounds.right, bounds.top).clickable(onClick = app::toggleMapLock)) {
+        MapControl(at(bounds.right, bounds.top).pressable(scaleTo = 1f, onClick = app::toggleMapLock).tvFocusRing()) {
             Icon(
                 if (app.mapLocked) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
                 if (app.mapLocked) "Unlock the map" else "Lock the map",
@@ -286,33 +292,69 @@ private fun MapControls(app: AppState, timing: SessionTiming) {
             )
         }
         if (!app.mapLocked) MapControl(
-            at(bounds.right - control, bounds.top).pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { app.mapGrabbed = true },
-                    onDragEnd = { app.mapGrabbed = false; app.storeMapPanel() },
-                    onDragCancel = { app.mapGrabbed = false },
-                ) { change, drag ->
-                    change.consume()
-                    app.arrangeMap(drag, 1f, 0f)
+            at(bounds.right - control, bounds.top)
+                .onKeyEvent { event ->
+                    when (event.key) {
+                        Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
+                            if (event.type == KeyEventType.KeyDown) {
+                                val step = with(density) { 18.dp.toPx() }
+                                val dx = when (event.key) { Key.DirectionLeft -> -step; Key.DirectionRight -> step; else -> 0f }
+                                val dy = when (event.key) { Key.DirectionUp -> -step; Key.DirectionDown -> step; else -> 0f }
+                                panel.x = (panel.x + dx).coerceIn(0f, (screenW - panel.w).coerceAtLeast(0f))
+                                panel.y = (panel.y + dy).coerceIn(0f, (screenH - panel.h).coerceAtLeast(0f))
+                            } else if (event.type == KeyEventType.KeyUp) app.storeMapPanel()
+                            true
+                        }
+                        else -> false
+                    }
                 }
-            }
+                .focusable()
+                .tvFocusRing()
+                .pointerInput(Unit) {
+                    detectDragGestures(
+                        onDragStart = { app.mapGrabbed = true },
+                        onDragEnd = { app.mapGrabbed = false; app.storeMapPanel() },
+                        onDragCancel = { app.mapGrabbed = false },
+                    ) { change, drag ->
+                        change.consume()
+                        app.arrangeMap(drag, 1f, 0f)
+                    }
+                }
         ) {
             Icon(Icons.Rounded.OpenWith, "Move the map", tint = Color.White, modifier = Modifier.size(18.dp))
         }
         // Bottom-right of the track: resize, keeping the track's shape and centre.
         if (!app.mapLocked) MapControl(
-            at(bounds.right, bounds.bottom).pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { app.mapGrabbed = true },
-                    onDragEnd = { app.mapGrabbed = false; app.storeMapPanel() },
-                    onDragCancel = { app.mapGrabbed = false },
-                ) { change, drag ->
-                    change.consume()
-                    // Read live: the gesture outlives each size it passes through.
-                    val span = (panel.w + panel.h).coerceAtLeast(1f)
-                    app.arrangeMap(Offset.Zero, 1f + (drag.x + drag.y) / span, 0f)
+            at(bounds.right, bounds.bottom)
+                .onKeyEvent { event ->
+                    when (event.key) {
+                        Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
+                            if (event.type == KeyEventType.KeyDown) {
+                                val factor = when (event.key) {
+                                    Key.DirectionRight, Key.DirectionDown -> 1.035f
+                                    else -> 0.965f
+                                }
+                                app.arrangeMap(Offset.Zero, factor, 0f)
+                            } else if (event.type == KeyEventType.KeyUp) app.storeMapPanel()
+                            true
+                        }
+                        else -> false
+                    }
                 }
-            }
+                .focusable()
+                .tvFocusRing()
+                .pointerInput(Unit) {
+                    detectDragGestures(
+                        onDragStart = { app.mapGrabbed = true },
+                        onDragEnd = { app.mapGrabbed = false; app.storeMapPanel() },
+                        onDragCancel = { app.mapGrabbed = false },
+                    ) { change, drag ->
+                        change.consume()
+                        // Read live: the gesture outlives each size it passes through.
+                        val span = (panel.w + panel.h).coerceAtLeast(1f)
+                        app.arrangeMap(Offset.Zero, 1f + (drag.x + drag.y) / span, 0f)
+                    }
+                }
         ) {
             Canvas(Modifier.size(14.dp)) {
                 val stroke = 2.dp.toPx()
