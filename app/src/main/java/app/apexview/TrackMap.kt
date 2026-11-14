@@ -1,6 +1,5 @@
 package app.apexview
 
-import android.view.KeyEvent as AndroidKeyEvent
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.animation.core.animateFloat
@@ -36,7 +35,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.key.nativeKeyEvent
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -295,14 +295,14 @@ private fun MapControls(app: AppState, timing: SessionTiming) {
         if (!app.mapLocked) MapControl(
             at(bounds.right - control, bounds.top)
                 .onKeyEvent { event ->
-                    when (event.nativeKeyEvent.keyCode) {
-                        AndroidKeyEvent.KEYCODE_DPAD_LEFT, AndroidKeyEvent.KEYCODE_DPAD_RIGHT, AndroidKeyEvent.KEYCODE_DPAD_UP, AndroidKeyEvent.KEYCODE_DPAD_DOWN -> {
-                            if (event.nativeKeyEvent.action == AndroidKeyEvent.ACTION_DOWN) {
+                    when (event.key) {
+                        Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
+                            if (event.type == KeyEventType.KeyDown) {
                                 val step = with(density) { 18.dp.toPx() }
                                 val dx = when (event.key) { Key.DirectionLeft -> -step; Key.DirectionRight -> step; else -> 0f }
                                 val dy = when (event.key) { Key.DirectionUp -> -step; Key.DirectionDown -> step; else -> 0f }
                                 app.arrangeMap(Offset(dx, dy), 1f, 0f)
-                            } else if (event.nativeKeyEvent.action == AndroidKeyEvent.ACTION_UP) app.storeMapPanel()
+                            } else if (event.type == KeyEventType.KeyUp) app.storeMapPanel()
                             true
                         }
                         else -> false
