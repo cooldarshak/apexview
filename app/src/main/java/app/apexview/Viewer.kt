@@ -1084,7 +1084,7 @@ private fun TileMenuSheet(app: AppState, tile: Tile) {
             }
             if (timing != null && ranked.isNotEmpty()) {
                 Spacer(Modifier.height(10.dp))
-                TowerHeader(timing)
+                TowerHeader()
                 ranked.forEach { (channel, number, state) ->
                     TowerRow(timing, number, state, timing.tyres[number]?.at(now), highlight = channel == tile.channel) {
                         app.chooseFeed(tile, channel)
