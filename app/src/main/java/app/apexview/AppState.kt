@@ -1390,9 +1390,15 @@ class AppState(
      * a live session then looked for its map in the archive, where it isn't yet.
      */
     private suspend fun isLiveStream(): Boolean {
+        // On Android TV the feed's Player can be attached later than the tile itself. Treating a
+        // temporarily missing Player as "not live" sends a live session down the archive path,
+        // where its timing data does not exist yet. Keep waiting for the player to be attached.
         repeat(LIVE_CHECK_TRIES) {
-            val player = leaderTile()?.feed?.player ?: return false
-            if (!player.currentTimeline.isEmpty || player.playbackState == Player.STATE_READY) return player.isCurrentMediaItemLive
+            val feed = leaderTile()?.feed ?: return false
+            val player = feed.player
+            if (player != null && (!player.currentTimeline.isEmpty || player.playbackState == Player.STATE_READY)) {
+                return player.isCurrentMediaItemLive
+            }
             kotlinx.coroutines.delay(250)
         }
         return false
