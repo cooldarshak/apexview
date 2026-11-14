@@ -471,7 +471,7 @@ private fun Modifier.mapGestures(app: AppState, density: androidx.compose.ui.uni
     // The map's window: the regular one in Track or Pit style, or laptop mode's own.
     val circle = !app.laptopActive && app.mapMode == MapMode.PIT
     val window = app.laptopActive || app.mapMode.inWindow
-    if (!app.arranging || app.mapLocked || !window || timing == null) return this
+    if (!app.arranging || app.mapLocked || !window || timing == null || app.combinedOverlaysDocked) return this
     // Keyed on the circuit, not the timing: live timing is replaced every couple of seconds, and
     // restarting this mid-gesture used to leave the map "grabbed", so feeds wouldn't move again.
     return pointerInput(timing.circuitKey, timing.outline.size, app.arranging, app.mapLocked, app.laptopActive, circle) {
@@ -1383,7 +1383,9 @@ private fun MapSheet(app: AppState) {
                 }
                 if (app.mapMode.inWindow) {
                     Column(Modifier.padding(top = 16.dp).clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(vertical = 4.dp)) {
-                        SwitchRow("Lock the map in place", app.mapLocked) { app.toggleMapLock() }
+                        if (!app.combinedOverlaysDocked) {
+                            SwitchRow("Lock the map in place", app.mapLocked) { app.toggleMapLock() }
+                        }
                         SwitchRow("Keep feeds clear of the map", app.mapReserve, app::chooseMapReserve)
                     }
                     Text(
@@ -1518,7 +1520,9 @@ private fun MapSheet(app: AppState) {
                     Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
                         .background(Ink.background).padding(vertical = 4.dp)
                 ) {
-                    SwitchRow("Lock the timing tower in place", app.towerLocked) { app.toggleTowerLock() }
+                    if (!app.combinedOverlaysDocked) {
+                        SwitchRow("Lock the timing tower in place", app.towerLocked) { app.toggleTowerLock() }
+                    }
                     SwitchRow("Keep feeds clear of the timing tower", app.towerReserve, app::chooseTowerReserve)
                 }
                 Text(
