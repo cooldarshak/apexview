@@ -20,6 +20,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
@@ -84,6 +85,22 @@ internal fun pickNextLive(live: List<CatalogItem>, watching: Long, atStart: Set<
         item.contentId > 0 && item.contentId !in playing && item.contentId !in declined &&
             (ended || item.contentId !in atStart)
     }
+}
+
+/**
+ * Live timing is a different source from the replay archive. Don't classify an empty or placeholder
+ * Media3 timeline as a replay: slower TV devices can publish the real window later than phones.
+ * Catalog metadata can positively identify a live session before the player timeline is ready.
+ */
+internal fun liveTimingSourceFor(
+    knownLive: Boolean,
+    hasTimeline: Boolean,
+    placeholder: Boolean,
+    playerReportsLive: Boolean,
+): Boolean? = when {
+    knownLive -> true
+    !hasTimeline || placeholder -> null
+    else -> playerReportsLive
 }
 
 /**
@@ -408,6 +425,10 @@ class AppState(
     /** Every content's channel list, for switching a tile's feed later. */
     private val channelsByContent = mutableMapOf<Long, List<Channel>>()
     private val sessionRefs = mutableMapOf<Long, SessionRef>()
+    /** Catalog-confirmed live sessions can use live timing before the video timeline is ready. */
+    private val knownLiveContentIds = mutableSetOf<Long>()
+    /** Once F1 moves the live timing socket to the next session, the old session uses its archive. */
+    private val completedLiveTimingContentIds = mutableSetOf<Long>()
     /** Session titles by content ID, for the viewer's header and its feed sheet. */
     private val titles = mutableMapOf<Long, String>()
     /** Session artwork by content ID, for the Continue watching card. */
@@ -1031,7 +1052,12 @@ class AppState(
             message = "Sign in to watch."
             return
         }
-        val sheet = FeedPicker(contentId, title, live || liveNow.any { it.contentId == contentId })
+        val isKnownLive = live || liveNow.any { it.contentId == contentId }
+        if (isKnownLive) {
+            knownLiveContentIds += contentId
+            completedLiveTimingContentIds -= contentId
+        }
+        val sheet = FeedPicker(contentId, title, isKnownLive)
         titles[contentId] = title
         if (image != null) images[contentId] = image
         picker = sheet
@@ -1126,6 +1152,10 @@ class AppState(
             if (feeds.isEmpty()) throw IOException("those feeds aren't available any more")
             titles[saved.contentId] = saved.title
             images[saved.contentId] = saved.image
+            if (saved.live) {
+                knownLiveContentIds += saved.contentId
+                completedLiveTimingContentIds -= saved.contentId
+            }
             runCatching { layoutMode = LayoutMode.valueOf(saved.layoutMode) }
             runCatching { mapMode = MapMode.valueOf(saved.mapMode) }
             // Feeds come back where they were, if the screen is the same shape.
@@ -1329,10 +1359,23 @@ class AppState(
                     else -> null
                 }
                 if (problem == null) {
-                    // Live or replay is only known once the player has the stream.
-                    if (isLiveStream()) {
+                    // Prefer F1's catalog signal for a known-live session. Otherwise wait for a
+                    // real, non-placeholder player window before choosing live timing or archive.
+                    val live = when {
+                        contentId in completedLiveTimingContentIds -> false
+                        contentId in knownLiveContentIds -> true
+                        else -> isLiveStream(contentId)
+                    }
+                    if (live == null) {
+                        mapStatus = "Waiting for the video stream to identify live timing or replay…"
+                        android.util.Log.i("ApexviewTiming", "content=$contentId: player timeline not ready; keeping timing source undecided")
+                        kotlinx.coroutines.delay(1_000)
+                        continue
+                    }
+                    android.util.Log.i("ApexviewTiming", "content=$contentId: using ${if (live) "live timing" else "timing archive"}")
+                    if (live) {
                         // Runs until the viewer moves on, reconnecting itself; back here only
-                        // if it failed outright.
+                        // if it failed outright or F1 ends this live timing session.
                         followLive(contentId, ref!!, token!!)
                         if (timingContentId != contentId) return@launch
                         kotlinx.coroutines.delay(mapRetryDelayMs(attempt++))
@@ -1389,19 +1432,45 @@ class AppState(
      * well before it's ready to play; a slow start used to be taken for a replay after 15 s, and
      * a live session then looked for its map in the archive, where it isn't yet.
      */
-    private suspend fun isLiveStream(): Boolean {
-        // On Android TV the feed's Player can be attached later than the tile itself. Treating a
-        // temporarily missing Player as "not live" sends a live session down the archive path,
-        // where its timing data does not exist yet. Keep waiting for the player to be attached.
-        repeat(LIVE_CHECK_TRIES) {
-            val feed = leaderTile()?.feed ?: return false
-            val player = feed.player
-            if (player != null && (!player.currentTimeline.isEmpty || player.playbackState == Player.STATE_READY)) {
-                return player.isCurrentMediaItemLive
+    private suspend fun isLiveStream(contentId: Long): Boolean? {
+        // FeedPlayer creates its ExoPlayer immediately; the asynchronous part is receiving a usable
+        // timeline. A placeholder window is not evidence of a replay and must never trigger an
+        // archive lookup for a live session.
+        repeat(LIVE_CHECK_TRIES) { attempt ->
+            if (timingContentId != contentId) return null
+            val player = leaderTile()
+                ?.takeIf { it.contentId == contentId }
+                ?.feed
+                ?.player
+            if (player != null) {
+                val timeline = player.currentTimeline
+                if (!timeline.isEmpty) {
+                    val index = player.currentMediaItemIndex.takeIf { it in 0 until timeline.windowCount } ?: 0
+                    val window = runCatching { timeline.getWindow(index, Timeline.Window()) }.getOrNull()
+                    if (window != null) {
+                        val source = liveTimingSourceFor(
+                            knownLive = false,
+                            hasTimeline = true,
+                            placeholder = window.isPlaceholder,
+                            playerReportsLive = player.isCurrentMediaItemLive,
+                        )
+                        if (source != null) {
+                            android.util.Log.i(
+                                "ApexviewTiming",
+                                "content=$contentId: window live=${player.isCurrentMediaItemLive}, placeholder=${window.isPlaceholder}, state=${player.playbackState}",
+                            )
+                            return source
+                        }
+                    }
+                }
+            }
+            if (attempt == 20 && timingContentId == contentId) {
+                mapStatus = "Waiting for the TV stream's video timeline…"
             }
             kotlinx.coroutines.delay(250)
         }
-        return false
+        android.util.Log.w("ApexviewTiming", "content=$contentId: no usable video timeline after waiting; will retry without assuming replay")
+        return null
     }
 
     /** Follows a live session through F1's live timing until the viewer closes or moves on. */
@@ -1426,7 +1495,17 @@ class AppState(
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (timingContentId == contentId) mapStatus = "Live map unavailable: ${e.message}. Trying again…"
+            if (timingContentId == contentId) {
+                if (e.message?.contains("live timing moved on to another session") == true) {
+                    knownLiveContentIds -= contentId
+                    completedLiveTimingContentIds += contentId
+                    mapStatus = "Live session ended. Loading its timing archive…"
+                    android.util.Log.i("ApexviewTiming", "content=$contentId: live timing moved on; switching to archive")
+                } else {
+                    mapStatus = "Live map unavailable: ${e.message}. Trying again…"
+                    android.util.Log.w("ApexviewTiming", "content=$contentId: live timing failed", e)
+                }
+            }
         }
     }
 
@@ -2847,7 +2926,10 @@ class AppState(
     }
 
     /** On a TV there's no touch: no dragging feeds around, and Back steps the controls away first. */
-    val isTv = context.getSystemService(android.app.UiModeManager::class.java).currentModeType ==
+    // Match the same Leanback detection used by the focus-ring and remote controls. Some TV
+    // launchers report NORMAL from UiModeManager even though the device exposes the TV feature.
+    val isTv = context.packageManager.hasSystemFeature("android.software.leanback") ||
+        context.getSystemService(android.app.UiModeManager::class.java)?.currentModeType ==
         android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
     /** Whether something in the viewer has the remote's focus; arrows then move between controls. */
     var controlsFocused by mutableStateOf(false)
