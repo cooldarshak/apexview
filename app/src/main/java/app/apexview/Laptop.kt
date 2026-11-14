@@ -195,8 +195,8 @@ private fun TowerSessionHeader(timing: SessionTiming, now: Long) {
     val wind = weather?.windSpeedMps?.let { "W ${"%.1f".format(it * 3.6)} ${windDirection}" } ?: "W –"
     val trackTemp = weather?.trackTempC?.let { "T ${"%.1f".format(it)}°" } ?: "T –"
     val airTemp = weather?.airTempC?.let { "A ${"%.1f".format(it)}°" } ?: "A –"
-    val humidity = weather?.humidityPct?.let { "H ${"%.0f".format(it)}%" } ?: "H –"
-    val pressure = weather?.pressureHpa?.let { "P ${"%.0f".format(it)}" } ?: "P –"
+    val humidity = weather?.humidityPct?.let { "H ${"%.1f".format(it)}%" } ?: "H –"
+    val pressure = weather?.pressureHpa?.let { "P ${"%.1f".format(it)}" } ?: "P –"
     val rain = when (weather?.raining) {
         true -> "RAIN"
         false -> "DRY"
