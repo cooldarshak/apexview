@@ -226,10 +226,15 @@ internal object HevcParameterSets {
     internal fun parseShortTermRefPicSet(
         bits: HevcBitReader,
         index: Int,
+        totalSets: Int,
         previous: List<ShortTermRefPicSet>,
     ): ShortTermRefPicSet {
+        require(index in 0..totalSets) { "Short-term RPS index is out of range" }
         if (index > 0) {
             val predicted = bits.readBit() != 0
+            if (predicted && index == totalSets) {
+                readUe(bits, 64, "delta_idx_minus1")
+            }
             require(!predicted) {
                 "Predicted short-term RPS is not supported by this analysis pass"
             }
