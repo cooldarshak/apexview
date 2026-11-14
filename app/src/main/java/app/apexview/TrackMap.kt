@@ -382,7 +382,9 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
         }
     }
     val measurer = rememberTextMeasurer()
-    val names = remember(timing) { timing.drivers.mapValues { measurer.label(it.value.tla, 11.sp) } }
+    val names = remember(timing, app.mapLabelSizeSp) {
+        timing.drivers.mapValues { measurer.label(it.value.tla, app.mapLabelSizeSp.sp) }
+    }
     val turns = remember(timing) { timing.corners.associate { it.number to measurer.label("${it.number}", 9.sp, bold = false) } }
     val marks = remember(timing, timing.startLine) { LineMarks(timing) }
     val finishLabel = remember(marks) { measurer.label(marks.finishLabel, 8.sp) }
@@ -441,7 +443,7 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
 
         stop?.let { drawPitStop(it, Color(timing.drivers[it.number]?.color ?: android.graphics.Color.WHITE), pitLabel) { f -> lapPoint(f) } }
         cars.forEach { (car, p) ->
-            val r = 7.dp.toPx()
+            val r = app.mapDotSizeDp.dp.toPx()
             val alpha = drawCar(timing, car, p, r)
             if (car.number == stop?.number) drawCircle(Color.White, r + 4.dp.toPx(), p, style = Stroke(2.dp.toPx()))
             names[car.number]?.let { drawText(it, topLeft = Offset(p.x + r + 3.dp.toPx(), p.y - it.size.height / 2f), alpha = alpha) }
