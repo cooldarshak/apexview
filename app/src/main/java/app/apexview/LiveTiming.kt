@@ -260,7 +260,7 @@ class StateLog(private val t: LongArray, private val s: Array<LapState>) {
     }
 }
 
-/** A car's speed through a session, as F1's car data gives it (km/h, a few times a second). */
+/** A car's speed and gear through a session, from F1 CarData (speed in km/h). */
 class SpeedLog(
     private val t: LongArray,
     private val v: ShortArray,
@@ -1021,7 +1021,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         cars.mapValues { it.value.build() }
     }
 
-    /** One decoded CarData message (archive line or live update): channel 2 is the speed. */
+    /** One decoded CarData message: channel 2 is speed (km/h), channel 3 is gear. */
     internal fun addCarData(json: JSONObject, cars: MutableMap<String, SpeedBuilder>) {
         val entries = json.optJSONArray("Entries") ?: return
         for (i in 0 until entries.length()) {
