@@ -1420,8 +1420,9 @@ class AppState(
         if (!first) return
         // The map lies over the feeds; they only move for it when asked to keep it clear (and
         // nobody has arranged them by hand).
-        if (mapMode.inWindow && mapReserve && !handPlaced) layoutRequest++
-        else if (canvasW > 0f) placeMapIfNeeded(canvasW, canvasH)
+        if (((mapMode.inWindow && mapReserve) || (towerOpen && towerReserve && !laptopActive)) && !handPlaced) {
+            layoutRequest++
+        } else if (canvasW > 0f) placeMapIfNeeded(canvasW, canvasH)
     }
 
     // Circuits traced from replays, kept per circuit so a live session there has its map at once.
@@ -1739,10 +1740,43 @@ class AppState(
             }
         }
 
-        val custom = if (layoutMode == LayoutMode.CUSTOM) savedLayout(ordered.size)?.takeIf { it.fits(width, height) } else null
+        // Panels the feeds have been asked to keep clear of. A custom layout still gives way
+        // when either reservation is enabled.
+        val keepMapClear = mapMode.inWindow && mapReserve && timing != null
+        val keepTowerClear = towerOpen && towerReserve && timing != null && !laptopActive
+        val custom = if (layoutMode == LayoutMode.CUSTOM && !keepMapClear && !keepTowerClear) {
+            savedLayout(ordered.size)?.takeIf { it.fits(width, height) }
+        } else null
         val slots = when {
             custom != null -> custom.slots(width, height)
-            mapMode.inWindow && mapReserve && timing != null -> {
+            keepTowerClear -> {
+                val density = context.resources.displayMetrics.density
+                val requestedWidth = towerSpot.w.takeIf { it > 0f }
+                    ?: minOf(TOWER_DEFAULT_WIDTH_DP * density, (width - 32f * density).coerceAtLeast(1f))
+                val requestedHeight = towerSpot.h.takeIf { it > 0f }
+                    ?: minOf(TOWER_DEFAULT_HEIGHT_DP * density, (height - 32f * density).coerceAtLeast(1f))
+                val mapMinSide = if (keepMapClear) min(width, height) * 0.22f else null
+                val arrangement = Layouts.withOverlays(
+                    layoutMode, ordered.size, width, height,
+                    requestedWidth.coerceAtMost(width), requestedHeight.coerceAtMost(height), mapMinSide,
+                )
+                arrangement.tower?.let { gap ->
+                    towerSpot.x = gap.x
+                    towerSpot.y = gap.y
+                    towerSpot.w = gap.w
+                    towerSpot.h = gap.h
+                    storeTowerPanel()
+                }
+                arrangement.map?.let { gap ->
+                    mapPanel.place(gap)
+                    mapPanel.placed = true
+                }
+                if (keepMapClear && arrangement.map == null) {
+                    message = "There isn't enough room to keep both the map and timing tower clear. Try making the tower smaller."
+                }
+                arrangement.slots
+            }
+            keepMapClear -> {
                 val arrangement = Layouts.withMap(layoutMode, ordered.size, width, height)
                 val gap = arrangement.map
                 if (gap != null && minOf(gap.w, gap.h) >= minOf(width, height) * 0.22f) {
@@ -1919,10 +1953,73 @@ class AppState(
     var towerOpen by mutableStateOf(prefs.getBoolean(PREF_TOWER, false))
         private set
     val towerSpot = FloatingSpot(prefs, PREF_TOWER_SPOT)
+    var towerOpacity by mutableFloatStateOf(prefs.getFloat(PREF_TOWER_OPACITY, 0.9f))
+        private set
+    var towerFontScale by mutableFloatStateOf(prefs.getFloat(PREF_TOWER_FONT_SCALE, 1f))
+        private set
+    var towerLocked by mutableStateOf(prefs.getBoolean(PREF_TOWER_LOCKED, false))
+        private set
+    var towerReserve by mutableStateOf(prefs.getBoolean(PREF_TOWER_RESERVE, false))
+        private set
 
     fun toggleTower() {
         towerOpen = !towerOpen
         prefs.edit().putBoolean(PREF_TOWER, towerOpen).apply()
+        if (towerReserve && canvasW > 0f && !laptopActive) {
+            handPlaced = false
+            layoutRequest++
+        }
+    }
+
+    fun updateTowerFontScale(value: Float) {
+        towerFontScale = value.coerceIn(TOWER_MIN_FONT_SCALE, TOWER_MAX_FONT_SCALE)
+        prefs.edit().putFloat(PREF_TOWER_FONT_SCALE, towerFontScale).apply()
+    }
+
+    fun updateTowerOpacity(value: Float) {
+        towerOpacity = value.coerceIn(0.2f, 1f)
+        prefs.edit().putFloat(PREF_TOWER_OPACITY, towerOpacity).apply()
+    }
+
+    fun toggleTowerLock() {
+        towerLocked = !towerLocked
+        prefs.edit().putBoolean(PREF_TOWER_LOCKED, towerLocked).apply()
+    }
+
+    fun chooseTowerReserve(on: Boolean) {
+        if (towerReserve == on) return
+        towerReserve = on
+        prefs.edit().putBoolean(PREF_TOWER_RESERVE, on).apply()
+        if (on && towerOpen && canvasW > 0f && !laptopActive) {
+            handPlaced = false
+            layoutRequest++
+        }
+    }
+
+    /** Width and height are in canvas pixels, like [FloatingSpot]. */
+    fun updateTowerSize(widthPx: Float, heightPx: Float) {
+        val panel = towerSpot
+        if (canvasW <= 0f || canvasH <= 0f) {
+            panel.w = widthPx
+            panel.h = heightPx
+            return
+        }
+        val density = context.resources.displayMetrics.density
+        val minWidth = minOf(TOWER_MIN_WIDTH_DP * density, canvasW)
+        val minHeight = minOf(TOWER_MIN_HEIGHT_DP * density, canvasH)
+        val oldWidth = panel.w.takeIf { it > 0f } ?: widthPx
+        val oldHeight = panel.h.takeIf { it > 0f } ?: heightPx
+        val centerX = if (panel.x >= 0f) panel.x + oldWidth / 2f else canvasW / 2f
+        val centerY = if (panel.y >= 0f) panel.y + oldHeight / 2f else canvasH / 2f
+        panel.w = widthPx.coerceIn(minWidth, canvasW)
+        panel.h = heightPx.coerceIn(minHeight, canvasH)
+        panel.x = (centerX - panel.w / 2f).coerceIn(0f, (canvasW - panel.w).coerceAtLeast(0f))
+        panel.y = (centerY - panel.h / 2f).coerceIn(0f, (canvasH - panel.h).coerceAtLeast(0f))
+        storeTowerPanel()
+    }
+
+    fun storeTowerPanel() {
+        if (canvasW > 0f && canvasH > 0f && towerSpot.x >= 0f) towerSpot.store(canvasW, canvasH)
     }
 
     /** Feed rectangles, for finding open space. */
@@ -2824,6 +2921,16 @@ class AppState(
         private const val PREF_RADIO_SPOT = "radioSpot"
         private const val PREF_TOWER = "towerOpen"
         private const val PREF_TOWER_SPOT = "towerSpot"
+        private const val PREF_TOWER_OPACITY = "towerOpacity"
+        private const val PREF_TOWER_FONT_SCALE = "towerFontScale"
+        private const val PREF_TOWER_LOCKED = "towerLocked"
+        private const val PREF_TOWER_RESERVE = "towerReserve"
+        const val TOWER_DEFAULT_WIDTH_DP = 380f
+        const val TOWER_DEFAULT_HEIGHT_DP = 720f
+        const val TOWER_MIN_WIDTH_DP = 220f
+        const val TOWER_MIN_HEIGHT_DP = 260f
+        const val TOWER_MIN_FONT_SCALE = 0.7f
+        const val TOWER_MAX_FONT_SCALE = 1.5f
         private const val PREF_SPEED = "playbackSpeed"
         /** The playback speeds on offer. */
         val SPEEDS = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
