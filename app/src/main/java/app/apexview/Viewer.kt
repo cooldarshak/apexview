@@ -1344,6 +1344,8 @@ private fun MapSheet(app: AppState) {
         KeepSystemBarsHidden()
         val density = LocalDensity.current
         val config = LocalConfiguration.current
+        val selectedMapMode = remember { FocusRequester() }
+        LaunchedEffect(Unit) { runCatching { selectedMapMode.requestFocus() } }
         val combinedWorkspace = app.combinedOverlayPlan?.takeIf { it.floating }?.workspace
         val maxTowerWidthDp = combinedWorkspace?.let { with(density) { it.w.toDp().value } }
             ?: (config.screenWidthDp - 32f).coerceAtLeast(AppState.TOWER_MIN_WIDTH_DP)
@@ -1374,6 +1376,7 @@ private fun MapSheet(app: AppState) {
                     val chosen = app.mapMode == mode
                     Box(
                         Modifier
+                            .then(if (chosen) Modifier.focusRequester(selectedMapMode) else Modifier)
                             .pressable { app.chooseMapMode(mode) }
                             .clip(RoundedCornerShape(9.dp))
                             .background(if (chosen) Ink.surfaceHigh else Color.Transparent)
