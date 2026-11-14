@@ -307,11 +307,10 @@ fun SettingsScreen(app: AppState) {
             Group(
                 "Advanced",
                 footer = if (app.isTv) {
-                    "Android TV uses software DRM for every feed. This avoids relying on multiple secure hardware decoder/surface sessions, which vary by TV chipset. " +
-                        "The switch is retained for phones; TV playback stays on the compatible path."
+                    "Software DRM requests Widevine L3. With it off, F1 uses the TV's Widevine hardware security level. " +
+                        "The app keeps each feed on the matching video surface and limits active TV video decoders to the device's reported capacity."
                 } else {
-                    "Software DRM is what desktop browsers use, and it's what lets four feeds play at once. " +
-                        "Change the stream type only if feeds won't play."
+                    "Software DRM requests Widevine L3. It can allow more simultaneous feeds on some devices; switch it off to use hardware-secure playback."
                 },
             ) {
                 SwitchRow("Software DRM", s.softwareDrm, s::updateSoftwareDrm)
