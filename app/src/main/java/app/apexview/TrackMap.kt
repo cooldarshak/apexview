@@ -11,6 +11,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
@@ -25,6 +26,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
@@ -42,6 +44,8 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
@@ -195,10 +199,11 @@ internal fun DrawScope.drawCar(timing: SessionTiming, car: Car, at: Offset, base
 }
 
 /**
- * Invisible 44dp tap targets that follow the dots. A tap shows that car's onboard, unless told
- * otherwise; holding one shows where a stop now would put it, and holding it again hides that.
+ * Invisible 44dp hit targets that follow the dots. Android TV keeps one focusable target per
+ * driver for D-pad navigation. Touch devices use one pointer node and hit-test the same 44dp
+ * squares, avoiding a full set of clickable Compose layouts being recomposed on every map frame.
+ * Tap still opens the onboard; long-press still toggles the pit-stop marker.
  */
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 internal fun CarTargets(
     app: AppState,
@@ -208,6 +213,42 @@ internal fun CarTargets(
 ) {
     val target = 44.dp
     val half = with(LocalDensity.current) { target.toPx() / 2 }
+    if (app.isTv) {
+        DriverFocusTargets(positions, half, onTap, onHold)
+    } else {
+        val latestPositions = rememberUpdatedState(positions)
+        val latestOnTap = rememberUpdatedState(onTap)
+        val latestOnHold = rememberUpdatedState(onHold)
+        Box(
+            Modifier
+                .fillMaxSize()
+                .semantics {
+                    contentDescription =
+                        "Driver tracker. Tap a driver marker to open that onboard. Long-press a marker to show its pit-stop position."
+                }
+                .pointerInput(half) {
+                    detectTapGestures(
+                        onTap = { point ->
+                            carTargetAt(latestPositions.value, point, half)?.let { latestOnTap.value(it) }
+                        },
+                        onLongPress = { point ->
+                            carTargetAt(latestPositions.value, point, half)?.let { latestOnHold.value(it) }
+                        },
+                    )
+                }
+        )
+    }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun DriverFocusTargets(
+    positions: List<Pair<String, Offset>>,
+    half: Float,
+    onTap: (String) -> Unit,
+    onHold: (String) -> Unit,
+) {
+    val target = with(LocalDensity.current) { (half * 2).toDp() }
     positions.forEach { (number, p) ->
         Box(
             Modifier
@@ -218,6 +259,24 @@ internal fun CarTargets(
                 .tvFocusRing()
         )
     }
+}
+
+/** Matches the old square 44dp target and chooses the nearest marker if targets overlap. */
+internal fun carTargetAt(
+    positions: List<Pair<String, Offset>>,
+    point: Offset,
+    halfSizePx: Float,
+): String? {
+    if (halfSizePx <= 0f) return null
+    return positions.asSequence()
+        .map { (number, at) ->
+            val dx = point.x - at.x
+            val dy = point.y - at.y
+            Triple(number, dx, dy)
+        }
+        .filter { (_, dx, dy) -> kotlin.math.abs(dx) <= halfSizePx && kotlin.math.abs(dy) <= halfSizePx }
+        .minByOrNull { (_, dx, dy) -> dx * dx + dy * dy }
+        ?.first
 }
 
 private val MAP_MARGIN = 22.dp
