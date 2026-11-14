@@ -215,6 +215,8 @@ internal fun FloatingPanel(
     opacity: Float = 1f,
     /** When locked, its header and resize grip no longer change the panel's place or size. */
     locked: Boolean = false,
+    /** Called after a user finishes resizing, so any reserved feed space can be recalculated. */
+    onResizeFinished: () -> Unit = {},
     content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
     val density = LocalDensity.current
@@ -314,7 +316,7 @@ internal fun FloatingPanel(
                 .pointerInput(width, height, feedScale) {
                     detectDragGestures(
                         onDragStart = { rawW = boxW; rawH = boxH },
-                        onDragEnd = { spot.store(width, height) },
+                        onDragEnd = { spot.store(width, height); onResizeFinished() },
                     ) { change, drag ->
                         change.consume()
                         rawW += drag.x
