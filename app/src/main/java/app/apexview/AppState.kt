@@ -488,11 +488,11 @@ class AppState(
         private set
     /** True once feeds have been moved by hand (or put back from a saved session). */
     private var handPlaced = false
-    /** The TV preset starts the map in its right-hand slot once, then preserves D-pad moves. */
-    private var tvLayoutMapNeedsDefault = false
     /** What a fresh stream starts in; Save layout makes it the custom one. */
     private var defaultLayoutMode =
         prefs.getString(PREF_DEFAULT_LAYOUT, null)?.let { runCatching { LayoutMode.valueOf(it) }.getOrNull() } ?: LayoutMode.FEATURED
+    /** The TV preset starts the map in its right-hand slot once, then preserves D-pad moves. */
+    private var tvLayoutMapNeedsDefault = defaultLayoutMode == LayoutMode.TV
     /** A resumed session's feed boxes by channel, applied at its first layout. */
     private var resumeLayout: Pair<Map<Int, FloatArray>, SavedLayout>? = null
     /** Every feed silenced at once; the audio choice is kept for when it's turned back on. */
@@ -1158,8 +1158,20 @@ class AppState(
                 knownLiveContentIds += saved.contentId
                 completedLiveTimingContentIds -= saved.contentId
             }
-            runCatching { layoutMode = LayoutMode.valueOf(saved.layoutMode) }
+            val restoredLayout = runCatching { LayoutMode.valueOf(saved.layoutMode) }.getOrNull()
+            if (restoredLayout != null) layoutMode = restoredLayout
             runCatching { mapMode = MapMode.valueOf(saved.mapMode) }
+            if (restoredLayout == LayoutMode.TV) {
+                mapMode = MapMode.TRACK
+                towerOpen = true
+                overlayLayoutMode = OverlayLayoutMode.DOCKED
+                tvLayoutMapNeedsDefault = !mapPanel.placed
+                prefs.edit()
+                    .putString(PREF_MAP_MODE, MapMode.TRACK.name)
+                    .putBoolean(PREF_TOWER, true)
+                    .putString(PREF_OVERLAY_LAYOUT, OverlayLayoutMode.DOCKED.name)
+                    .apply()
+            }
             // Feeds come back where they were, if the screen is the same shape.
             resumeLayout = saved.layout?.let { layout -> saved.channels.zip(layout.boxes).toMap() to layout }
             pendingResume = saved
@@ -1276,7 +1288,20 @@ class AppState(
                 added(tile)
             }
             // A fresh start uses the layout picked as default (Save layout makes it the custom one).
-            if (first && pendingResume?.contentId != contentId) layoutMode = defaultLayoutMode
+            if (first && pendingResume?.contentId != contentId) {
+                layoutMode = defaultLayoutMode
+                if (layoutMode == LayoutMode.TV) {
+                    mapMode = MapMode.TRACK
+                    towerOpen = true
+                    overlayLayoutMode = OverlayLayoutMode.DOCKED
+                    tvLayoutMapNeedsDefault = true
+                    prefs.edit()
+                        .putString(PREF_MAP_MODE, MapMode.TRACK.name)
+                        .putBoolean(PREF_TOWER, true)
+                        .putString(PREF_OVERLAY_LAYOUT, OverlayLayoutMode.DOCKED.name)
+                        .apply()
+                }
+            }
             // Keep the audio where it was; new feeds start muted. The default feed gets it first.
             setAudio(tiles.firstOrNull { it.audible } ?: tiles.firstOrNull { it.channel.isDefault } ?: tiles.first())
             pendingResume?.takeIf { it.contentId == contentId }?.let { saved ->
@@ -1518,9 +1543,10 @@ class AppState(
         if (!first) return
         // A tower reservation is a direct layout constraint, even if the user previously
         // arranged feeds by hand. A map-only reservation retains its existing hand-layout rule.
+        val reserveTvLayout = layoutMode == LayoutMode.TV && !laptopActive
         val reserveTower = towerOpen && towerReserve && !laptopActive
         val reserveMap = mapMode.inWindow && mapReserve
-        if (reserveTower || reserveMap && !handPlaced) {
+        if (reserveTvLayout || reserveTower || reserveMap && !handPlaced) {
             handPlaced = false
             layoutRequest++
         } else if (canvasW > 0f) placeMapIfNeeded(canvasW, canvasH)
@@ -3002,8 +3028,10 @@ class AppState(
             android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> {
                 if (helpOpen) {
                     if (first) closeHelp()
-                } else if (controlsFocused && chromeVisible) {
-                    if (down) showChrome()
+                } else if (controlsFocused) {
+                    // The focused slider/map handle owns its D-pad keys even after the chrome
+                    // timeout. Never reinterpret its left/right presses as media seeking.
+                    if (down && !chromeVisible) showChrome()
                     return false
                 } else when (event.keyCode) {
                     android.view.KeyEvent.KEYCODE_DPAD_LEFT -> if (down) remoteSkip(event, -10_000)
