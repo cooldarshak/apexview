@@ -555,6 +555,17 @@ class AppState(
     /** Feeds make room for the track map instead of lying under it. */
     var mapReserve by mutableStateOf(prefs.getBoolean(PREF_MAP_RESERVE, false))
         private set
+    /** How the reserved map and timing tower share the space beside the video. */
+    var overlayLayoutMode by mutableStateOf(
+        prefs.getString(PREF_OVERLAY_LAYOUT, null)?.let { runCatching { OverlayLayoutMode.valueOf(it) }.getOrNull() }
+            ?: OverlayLayoutMode.DOCKED
+    )
+        private set
+    /** The screen regions currently assigned to the combined video/map/tower layout. */
+    var combinedOverlayPlan by mutableStateOf<CombinedOverlayPlan?>(null)
+        private set
+    val combinedOverlaysDocked get() = combinedOverlayPlan?.floating == false
+    val combinedOverlaysFloating get() = combinedOverlayPlan?.floating == true
     /**
      * Correction between the picture and the map, in ms. F1 stamps video a few seconds later
      * than timing (about -7 s on the 2026 Japanese GP replay). The last value set is remembered.
@@ -1743,10 +1754,31 @@ class AppState(
             }
         }
 
-        // Panels the feeds have been asked to keep clear of. A custom layout still gives way
-        // when either reservation is enabled.
+        // When both reservations are on, give the feeds one main region and arrange the
+        // tower and map together beside it. The orientation decides whether the workspace is
+        // below the video (portrait) or in a right-hand sidebar (landscape).
         val keepMapClear = mapMode.inWindow && mapReserve && timing != null
         val keepTowerClear = towerOpen && towerReserve && timing != null && !laptopActive
+        if (keepMapClear && keepTowerClear) {
+            val plan = Layouts.withCombinedOverlays(layoutMode, ordered.size, width, height, overlayLayoutMode)
+            combinedOverlayPlan = plan
+            if (plan.floating) {
+                keepTowerInArea(plan.workspace, width, height)
+                if (!mapPanel.placed) placeMapIfNeeded(width, height)
+                keepMapInArea(plan.workspace)
+            } else {
+                towerSpot.x = plan.tower.x
+                towerSpot.y = plan.tower.y
+                towerSpot.w = plan.tower.w
+                towerSpot.h = plan.tower.h
+                mapPanel.place(plan.map)
+                mapPanel.placed = true
+            }
+            plan.slots.zip(ordered).forEach { (slot, tile) -> settle(tile, slot) }
+            return
+        } else {
+            combinedOverlayPlan = null
+        }
         val custom = if (layoutMode == LayoutMode.CUSTOM && !keepMapClear && !keepTowerClear) {
             savedLayout(ordered.size)?.takeIf { it.fits(width, height) }
         } else null
@@ -1809,6 +1841,41 @@ class AppState(
         }
         slots.zip(ordered).forEach { (slot, tile) -> settle(tile, slot) }
         placeMapIfNeeded(width, height)
+    }
+
+    /** Restores and clamps the tower to the workspace shared with the map. */
+    private fun keepTowerInArea(area: Area, width: Float, height: Float) {
+        val density = context.resources.displayMetrics.density
+        val saved = towerSpot.saved()
+        if (towerSpot.x < 0f && saved != null) {
+            towerSpot.x = saved[0] * width
+            towerSpot.y = saved[1] * height
+            if (saved.size >= 4) {
+                if (saved[2] > 0f) towerSpot.w = saved[2] * width
+                if (saved[3] > 0f) towerSpot.h = saved[3] * height
+            }
+        }
+        val minWidth = minOf(TOWER_MIN_WIDTH_DP * density, area.w)
+        val minHeight = minOf(TOWER_MIN_HEIGHT_DP * density, area.h)
+        val defaultWidth = minOf(TOWER_DEFAULT_WIDTH_DP * density, area.w)
+        val defaultHeight = minOf(TOWER_DEFAULT_HEIGHT_DP * density, area.h)
+        towerSpot.w = (towerSpot.w.takeIf { it > 0f } ?: defaultWidth).coerceIn(minWidth, area.w)
+        towerSpot.h = (towerSpot.h.takeIf { it > 0f } ?: defaultHeight).coerceIn(minHeight, area.h)
+        if (towerSpot.x < 0f || towerSpot.y < 0f) {
+            towerSpot.x = area.x + (area.w - towerSpot.w) / 2f
+            towerSpot.y = area.y + (area.h - towerSpot.h) / 2f
+        }
+        towerSpot.x = towerSpot.x.coerceIn(area.x, (area.x + area.w - towerSpot.w).coerceAtLeast(area.x))
+        towerSpot.y = towerSpot.y.coerceIn(area.y, (area.y + area.h - towerSpot.h).coerceAtLeast(area.y))
+    }
+
+    /** Keeps the map inside the same floating workspace as the timing tower. */
+    private fun keepMapInArea(area: Area) {
+        val panel = mapPanel
+        panel.w = panel.w.coerceIn(minOf(MapPanel.MIN_SIZE, area.w), area.w)
+        panel.h = panel.h.coerceIn(minOf(MapPanel.MIN_SIZE, area.h), area.h)
+        panel.x = panel.x.coerceIn(area.x, (area.x + area.w - panel.w).coerceAtLeast(area.x))
+        panel.y = panel.y.coerceIn(area.y, (area.y + area.h - panel.h).coerceAtLeast(area.y))
     }
 
     /**
@@ -1922,6 +1989,7 @@ class AppState(
         panel.y += pan.y
         if (zoom != 1f) panel.scale(zoom)
         if (rotation != 0f) panel.rotation = (panel.rotation + rotation).mod(360f)
+        if (combinedOverlaysFloating) combinedOverlayPlan?.workspace?.let { keepMapInArea(it) }
         showChrome()
     }
 
@@ -2016,6 +2084,19 @@ class AppState(
         if (towerOpen || mapReserve) requestOverlayLayout()
     }
 
+    fun chooseOverlayLayoutMode(mode: OverlayLayoutMode) {
+        if (overlayLayoutMode == mode) return
+        overlayLayoutMode = mode
+        prefs.edit().putString(PREF_OVERLAY_LAYOUT, mode.name).apply()
+        // Re-open the saved floating positions when leaving the fixed, docked arrangement.
+        towerSpot.x = -1f
+        towerSpot.y = -1f
+        towerSpot.w = -1f
+        towerSpot.h = -1f
+        mapPanel.placed = false
+        if (mapReserve && towerOpen && towerReserve) requestOverlayLayout()
+    }
+
     /** Width and height are in canvas pixels, like [FloatingSpot]. */
     fun updateTowerSize(widthPx: Float, heightPx: Float) {
         val panel = towerSpot
@@ -2027,16 +2108,19 @@ class AppState(
         val density = context.resources.displayMetrics.density
         val minWidth = minOf(TOWER_MIN_WIDTH_DP * density, canvasW)
         val minHeight = minOf(TOWER_MIN_HEIGHT_DP * density, canvasH)
-        val maxWidth = (canvasW - 32f * density).coerceAtLeast(minWidth).coerceAtMost(canvasW)
-        val maxHeight = (canvasH - 40f * density).coerceAtLeast(minHeight).coerceAtMost(canvasH)
+        val workspace = combinedOverlayPlan?.takeIf { it.floating }?.workspace
+        val minWidth = minOf(TOWER_MIN_WIDTH_DP * density, workspace?.w ?: canvasW)
+        val minHeight = minOf(TOWER_MIN_HEIGHT_DP * density, workspace?.h ?: canvasH)
+        val maxWidth = workspace?.w ?: (canvasW - 32f * density).coerceAtLeast(minWidth).coerceAtMost(canvasW)
+        val maxHeight = workspace?.h ?: (canvasH - 40f * density).coerceAtLeast(minHeight).coerceAtMost(canvasH)
         val oldWidth = panel.w.takeIf { it > 0f } ?: minOf(TOWER_DEFAULT_WIDTH_DP * density, maxWidth)
         val oldHeight = panel.h.takeIf { it > 0f } ?: minOf(TOWER_DEFAULT_HEIGHT_DP * density, maxHeight)
         val centerX = if (panel.x >= 0f) panel.x + oldWidth / 2f else canvasW / 2f
         val centerY = if (panel.y >= 0f) panel.y + oldHeight / 2f else canvasH / 2f
         panel.w = widthPx.coerceIn(minWidth, maxWidth)
         panel.h = heightPx.coerceIn(minHeight, maxHeight)
-        panel.x = (centerX - panel.w / 2f).coerceIn(0f, (canvasW - panel.w).coerceAtLeast(0f))
-        panel.y = (centerY - panel.h / 2f).coerceIn(0f, (canvasH - panel.h).coerceAtLeast(0f))
+        panel.x = (centerX - panel.w / 2f).coerceIn(workspace?.x ?: 0f, ((workspace?.x ?: 0f) + maxWidth - panel.w).coerceAtLeast(workspace?.x ?: 0f))
+        panel.y = (centerY - panel.h / 2f).coerceIn(workspace?.y ?: 0f, ((workspace?.y ?: 0f) + maxHeight - panel.h).coerceAtLeast(workspace?.y ?: 0f))
         storeTowerPanel()
     }
 
@@ -2995,6 +3079,7 @@ class AppState(
         const val LAPTOP_TOWER_SHARE = 0.52f
         private const val PREF_MAP_LOCKED = "mapLocked"
         private const val PREF_MAP_RESERVE = "mapReserve"
+        private const val PREF_OVERLAY_LAYOUT = "overlayLayoutMode"
         private const val PREF_MAP_DOT_SIZE = "mapDotSizeDp"
         private const val PREF_MAP_LABEL_SIZE = "mapLabelSizeSp"
         private const val MIN_MAP_DOT_SIZE = 3f
