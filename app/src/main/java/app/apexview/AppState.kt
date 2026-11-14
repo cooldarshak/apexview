@@ -1764,8 +1764,7 @@ class AppState(
             combinedOverlayPlan = plan
             if (plan.floating) {
                 keepTowerInArea(plan.workspace, width, height)
-                if (!mapPanel.placed) placeMapIfNeeded(width, height)
-                keepMapInArea(plan.workspace)
+                placeMapInAreaIfNeeded(plan.workspace, width, height)
             } else {
                 towerSpot.x = plan.tower.x
                 towerSpot.y = plan.tower.y
@@ -1857,8 +1856,8 @@ class AppState(
         }
         val minWidth = minOf(TOWER_MIN_WIDTH_DP * density, area.w)
         val minHeight = minOf(TOWER_MIN_HEIGHT_DP * density, area.h)
-        val defaultWidth = minOf(TOWER_DEFAULT_WIDTH_DP * density, area.w)
-        val defaultHeight = minOf(TOWER_DEFAULT_HEIGHT_DP * density, area.h)
+        val defaultWidth = minOf(TOWER_DEFAULT_WIDTH_DP * density, area.w * 0.92f)
+        val defaultHeight = minOf(TOWER_DEFAULT_HEIGHT_DP * density, area.h * 0.72f)
         towerSpot.w = (towerSpot.w.takeIf { it > 0f } ?: defaultWidth).coerceIn(minWidth, area.w)
         towerSpot.h = (towerSpot.h.takeIf { it > 0f } ?: defaultHeight).coerceIn(minHeight, area.h)
         if (towerSpot.x < 0f || towerSpot.y < 0f) {
@@ -1867,6 +1866,27 @@ class AppState(
         }
         towerSpot.x = towerSpot.x.coerceIn(area.x, (area.x + area.w - towerSpot.w).coerceAtLeast(area.x))
         towerSpot.y = towerSpot.y.coerceIn(area.y, (area.y + area.h - towerSpot.h).coerceAtLeast(area.y))
+    }
+
+    /** Restores or initially places the map inside the shared floating workspace. */
+    private fun placeMapInAreaIfNeeded(area: Area, width: Float, height: Float) {
+        if (!mapPanel.placed) {
+            mapPanel.restore(prefs.getString(PREF_MAP_PANEL, null), width, height)?.let { mapOpacity = it }
+            if (!mapPanel.placed) {
+                val panelWidth = area.w * 0.84f
+                val panelHeight = area.h * 0.78f
+                mapPanel.place(
+                    Area(
+                        area.x + (area.w - panelWidth) * 0.16f,
+                        area.y + (area.h - panelHeight) * 0.18f,
+                        panelWidth,
+                        panelHeight,
+                    )
+                )
+                mapPanel.placed = true
+            }
+        }
+        keepMapInArea(area)
     }
 
     /** Keeps the map inside the same floating workspace as the timing tower. */
