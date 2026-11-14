@@ -200,7 +200,7 @@ object DriverTimingParser {
      */
     fun parse(stream: String, streamStart: Long, timingF1: String = ""): Map<String, DriverLaps> {
         val drivers = mutableMapOf<String, Live>()
-        val events = sequenceOf(stream, timingF1).flatMapIndexed { source, text ->
+        val events = sequenceOf(0 to stream, 1 to timingF1).flatMap { (source, text) ->
             text.lineSequence().mapNotNull { line ->
                 val prefix = streamPrefixLength(line)
                 if (line.length <= prefix) null
