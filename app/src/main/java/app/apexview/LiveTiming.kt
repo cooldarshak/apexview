@@ -261,17 +261,30 @@ class StateLog(private val t: LongArray, private val s: Array<LapState>) {
 }
 
 /** A car's speed through a session, as F1's car data gives it (km/h, a few times a second). */
-class SpeedLog(private val t: LongArray, private val v: ShortArray, private val n: Int) {
-    /** The latest reading at [utcMs]. Null before the first, and once they've stopped coming. */
-    fun kmhAt(utcMs: Long): Int? {
-        if (n == 0 || utcMs < t[0]) return null
+class SpeedLog(
+    private val t: LongArray,
+    private val v: ShortArray,
+    private val n: Int,
+    private val gears: ShortArray = ShortArray(0),
+) {
+    private fun indexAt(utcMs: Long): Int {
+        if (n == 0 || utcMs < t[0]) return -1
         var lo = 0
         var hi = n
         while (hi - lo > 1) {
             val mid = (lo + hi) ushr 1
             if (t[mid] <= utcMs) lo = mid else hi = mid
         }
-        return if (utcMs - t[lo] > STALE_MS) null else v[lo].toInt()
+        return if (utcMs - t[lo] > STALE_MS) -1 else lo
+    }
+
+    /** The latest speed at [utcMs], null before the first reading or when it goes stale. */
+    fun kmhAt(utcMs: Long): Int? = indexAt(utcMs).takeIf { it >= 0 }?.let { v[it].toInt() }
+
+    /** F1 car-data channel 3: 0 is neutral, 1–8 are gears. */
+    fun gearAt(utcMs: Long): Int? {
+        val index = indexAt(utcMs)
+        return if (index < 0 || index >= gears.size || gears[index].toInt() < 0) null else gears[index].toInt()
     }
 
     private companion object {
@@ -282,20 +295,23 @@ class SpeedLog(private val t: LongArray, private val v: ShortArray, private val 
 class SpeedBuilder {
     private var t = LongArray(4096)
     private var v = ShortArray(4096)
+    private var gears = ShortArray(4096) { (-1).toShort() }
     private var size = 0
 
-    fun add(time: Long, kmh: Int) {
+    fun add(time: Long, kmh: Int, gear: Int? = null) {
         if (size > 0 && time <= t[size - 1]) return
         if (size == t.size) {
             t = t.copyOf(size * 2)
             v = v.copyOf(size * 2)
+            gears = gears.copyOf(size * 2)
         }
         t[size] = time
         v[size] = kmh.toShort()
+        gears[size] = (gear ?: if (size > 0) gears[size - 1].toInt() else -1).toShort()
         size++
     }
 
-    fun build() = SpeedLog(t, v, size)
+    fun build() = SpeedLog(t, v, size, gears)
 }
 
 /** A speed in the unit chosen in Settings. */
@@ -947,8 +963,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             val time = runCatching { Instant.parse(entry.getString("Utc")).toEpochMilli() }.getOrNull() ?: continue
             val list = entry.optJSONObject("Cars") ?: continue
             list.keys().forEach { number ->
-                val kmh = list.optJSONObject(number)?.optJSONObject("Channels")?.optInt("2", -1) ?: -1
-                if (kmh >= 0) cars.getOrPut(number) { SpeedBuilder() }.add(time, kmh)
+                val channels = list.optJSONObject(number)?.optJSONObject("Channels") ?: continue
+                val kmh = channels.optInt("2", -1)
+                val gear = channels.optInt("3", -1).takeIf { it in 0..8 }
+                if (kmh >= 0) cars.getOrPut(number) { SpeedBuilder() }.add(time, kmh, gear)
             }
         }
     }
