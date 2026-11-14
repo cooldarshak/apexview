@@ -352,7 +352,7 @@ object LiveConnection {
     private const val HEADER = "#session\t"
     private val TOPICS = listOf(
         "Heartbeat", "Position.z", "CarData.z", "TimingData", "TimingDataF1", "DriverList", "SessionInfo", "SessionStatus", "RaceControlMessages",
-        "TeamRadio", "TimingAppData", "TrackStatus", "LapCount", "ExtrapolatedClock",
+        "TeamRadio", "TimingAppData", "WeatherData", "TrackStatus", "LapCount", "ExtrapolatedClock",
     )
     private const val RECONNECT_MS = 5_000L
     private const val FLUSH_MS = 2_000L
