@@ -232,7 +232,9 @@ object DriverTimingParser {
             if (o.has("Value")) l.gap = o.optString("Value").ifEmpty { null }
         }
         // For the tower: both gaps, under whichever names this session uses.
-        if (d.has("GapToLeader")) l.toLeader = d.optString("GapToLeader").ifEmpty { null }
+        d.optJSONObject("GapToLeader")?.let { o ->
+            if (o.has("Value")) l.toLeader = o.optString("Value").ifEmpty { null }
+        }
         if (d.has("TimeDiffToFastest")) l.toLeader = d.optString("TimeDiffToFastest").ifEmpty { null }
         d.optJSONObject("IntervalToPositionAhead")?.let { o -> if (o.has("Value")) l.ahead = o.optString("Value").ifEmpty { null } }
         if (d.has("TimeDiffToPositionAhead")) l.ahead = d.optString("TimeDiffToPositionAhead").ifEmpty { null }
