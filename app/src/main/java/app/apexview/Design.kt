@@ -27,6 +27,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.platform.LocalInputModeManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
@@ -126,7 +127,9 @@ fun Modifier.pressable(enabled: Boolean = true, scaleTo: Float = 0.97f, onClick:
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     var focused by remember { mutableStateOf(false) }
-    val ringed = focused && LocalInputModeManager.current.inputMode == InputMode.Keyboard
+    val context = LocalContext.current
+    val isTv = remember(context) { context.packageManager.hasSystemFeature("android.software.leanback") }
+    val ringed = focused && (isTv || LocalInputModeManager.current.inputMode == InputMode.Keyboard)
     val scale by animateFloatAsState(
         if (pressed && enabled) scaleTo else if (ringed) FOCUS_SCALE else 1f,
         tween(Motion.PRESS_MS, easing = EaseOut),
@@ -140,7 +143,7 @@ fun Modifier.pressable(enabled: Boolean = true, scaleTo: Float = 0.97f, onClick:
             if (ringed) {
                 val out = 3.dp.toPx()
                 drawRoundRect(
-                    Color.White,
+                    Color(0xFF168BFF),
                     Offset(-out, -out),
                     Size(size.width + 2 * out, size.height + 2 * out),
                     CornerRadius(12.dp.toPx()),
@@ -149,6 +152,30 @@ fun Modifier.pressable(enabled: Boolean = true, scaleTo: Float = 0.97f, onClick:
             }
         }
         .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
+}
+
+/** A blue focus outline for native Compose controls such as sliders and map handles. */
+fun Modifier.tvFocusRing(): Modifier = composed {
+    val context = LocalContext.current
+    val isTv = remember(context) { context.packageManager.hasSystemFeature("android.software.leanback") }
+    var focused by remember { mutableStateOf(false) }
+    val keyboard = LocalInputModeManager.current.inputMode == InputMode.Keyboard
+    val ringed = focused && (isTv || keyboard)
+    this
+        .onFocusChanged { focused = it.isFocused }
+        .drawWithContent {
+            drawContent()
+            if (ringed) {
+                val out = 3.dp.toPx()
+                drawRoundRect(
+                    Color(0xFF168BFF),
+                    Offset(-out, -out),
+                    Size(size.width + 2 * out, size.height + 2 * out),
+                    CornerRadius(8.dp.toPx()),
+                    style = Stroke(2.5.dp.toPx()),
+                )
+            }
+        }
 }
 
 /** iOS-style slider: a round white thumb on a thin track, instead of Material's bar thumb. */
@@ -168,7 +195,7 @@ fun AppleSlider(
     androidx.compose.material3.Slider(
         value = value,
         onValueChange = onValueChange,
-        modifier = modifier,
+        modifier = modifier.tvFocusRing(),
         valueRange = valueRange,
         onValueChangeFinished = onValueChangeFinished,
         thumb = {
