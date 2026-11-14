@@ -1715,6 +1715,9 @@ class AppState(
     }
 
     private fun layOut(width: Float, height: Float) {
+        // Clear a previous screen orientation's reservation before any early-return layout.
+        // The combined plan is rebuilt below only when its two feed-clearance switches apply.
+        combinedOverlayPlan = null
         val ordered = bigFirst()
         bigTileId = ordered.firstOrNull()?.id
 
@@ -1731,8 +1734,11 @@ class AppState(
         }
 
         // One feed filling the screen: it gets the whole canvas, the rest wait off screen.
-        // Unfolding to the big screen ends it.
-        tiles.firstOrNull { it.id == focusTileId }?.takeIf { compactCanvas }?.let { focus ->
+        // Unfolding to the big screen ends it. When both overlays reserve space, keep the
+        // selected main feed in the dedicated feed region instead of bypassing that layout.
+        val combinedReservationsActive =
+            mapMode.inWindow && mapReserve && towerOpen && towerReserve && timing != null && !laptopActive
+        tiles.firstOrNull { it.id == focusTileId }?.takeIf { compactCanvas && !combinedReservationsActive }?.let { focus ->
             focus.place(Layouts.place(LayoutMode.GRID, 1, width, height).first())
             raise(focus)
             tiles.filter { it !== focus }.forEach { it.place(Slot(width * 2, 0f, it.w)) }
