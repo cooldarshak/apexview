@@ -183,7 +183,7 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
                 // On a tall tower, fit the complete field where possible. On a short tower,
                 // keep rows legible and let the list scroll instead of squeezing text away.
                 ((maxHeight.value / contentScale - 73f) / rows.size)
-                    .coerceIn(24f, ROW_HEIGHT.value).dp
+                    .coerceIn(24f / contentScale, ROW_HEIGHT.value).dp
             }
             Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
                 TowerSessionHeader(timing, now)
