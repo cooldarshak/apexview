@@ -84,8 +84,13 @@ class DriverTimingTest {
             "00:01:00.000{\"Lines\":{\"4\":{\"NumberOfLaps\":4,\"LastLapTime\":{\"Value\":\"1:33.100\"}}}}",
             "00:01:01.000{\"Lines\":{\"4\":{\"Sectors\":{\"2\":{\"Value\":\"30.100\",\"OverallFastest\":true}}}}}",
         ).joinToString("\n")
-        val s = DriverTimingParser.parse(late, t0).getValue("4").at(t0 + 62_000)!!
+        val withMicro = late.replace(
+            "\"Value\":\"30.100\",\"OverallFastest\":true",
+            "\"Value\":\"30.100\",\"OverallFastest\":true,\"Segments\":[{\"Status\":2051},{\"Status\":2049}]",
+        )
+        val s = DriverTimingParser.parse(withMicro, t0).getValue("4").at(t0 + 62_000)!!
         assertEquals(Pace.PURPLE, s.lapSectors[2]!!.pace)
+        assertEquals(listOf(2051, 2049), s.lapSectors[2]!!.segments)
         assertNull(s.sectors[2])
     }
 
