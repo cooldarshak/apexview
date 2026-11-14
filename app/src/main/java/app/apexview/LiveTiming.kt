@@ -356,6 +356,8 @@ class SessionTiming(
     val clock: SessionClock = SessionClock.NONE,
     /** Live: the feed brings the cars' speeds. A replay's come from the archive when first wanted. */
     val live: Boolean = false,
+    /** Session weather sampled from F1's WeatherData topic/archive. */
+    val weather: WeatherLog = WeatherLog.NONE,
 ) {
     val geometry = TrackGeometry(outline)
 
@@ -385,6 +387,67 @@ class SessionTiming(
 
     /** Flying-lap highlights only mean something in qualifying. */
     val showsPushLaps get() = type.contains("Qualifying", ignoreCase = true)
+}
+
+/** Weather published by F1's WeatherData topic, sampled against the session clock. */
+class WeatherReading(
+    val windSpeedMps: Double?,
+    val windDirectionDegrees: Double?,
+    val trackTempC: Double?,
+    val airTempC: Double?,
+    val humidityPct: Double?,
+    val pressureHpa: Double?,
+    val raining: Boolean?,
+)
+
+class WeatherLog(private val times: LongArray, private val readings: List<WeatherReading>) {
+    fun at(utcMs: Long): WeatherReading? {
+        if (readings.isEmpty()) return null
+        val index = times.indexOfLast { it <= utcMs }
+        return readings[if (index < 0) 0 else index]
+    }
+
+    companion object {
+        val NONE = WeatherLog(LongArray(0), emptyList())
+    }
+}
+
+/** Parses F1's timestamped WeatherData snapshots, including the archived jsonStream format. */
+object WeatherParser {
+    fun parse(stream: String, streamStart: Long): WeatherLog {
+        val times = mutableListOf<Long>()
+        val readings = mutableListOf<WeatherReading>()
+        stream.lineSequence().forEach { line ->
+            val prefix = streamPrefixLength(line)
+            if (line.length <= prefix) return@forEach
+            val json = runCatching { JSONObject(line.substring(prefix)) }.getOrNull() ?: return@forEach
+            val rain = json.optString("Rainfall").let {
+                when (it.trim().lowercase()) {
+                    "1", "true", "yes" -> true
+                    "0", "false", "no" -> false
+                    else -> null
+                }
+            }
+            val reading = WeatherReading(
+                windSpeedMps = json.optString("WindSpeed").toDoubleOrNull(),
+                windDirectionDegrees = json.optString("WindDirection").toDoubleOrNull(),
+                trackTempC = json.optString("TrackTemp").toDoubleOrNull(),
+                airTempC = json.optString("AirTemp").toDoubleOrNull(),
+                humidityPct = json.optString("Humidity").toDoubleOrNull(),
+                pressureHpa = json.optString("Pressure").toDoubleOrNull(),
+                raining = rain,
+            )
+            val utc = runCatching { streamStart + streamOffsetMs(line) }.getOrNull() ?: return@forEach
+            if (times.isNotEmpty() && utc < times.last()) return@forEach
+            if (times.isNotEmpty() && utc == times.last()) {
+                readings[readings.lastIndex] = reading
+            } else {
+                times += utc
+                readings += reading
+            }
+        }
+        return WeatherLog(times.toLongArray(), readings)
+    }
 }
 
 /** The countdown at one moment: what's left, whether it's running, and the part of qualifying. */
@@ -477,9 +540,11 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         // own timestamps disagree with it by more than a minute, they're the ones to trust.
         val streamStart = streamStart(fetch(path + "Heartbeat.jsonStream"), positions)
         val timingStream = runCatching { fetch(path + "TimingData.jsonStream") }.getOrNull()
+        val timingF1Stream = runCatching { fetch(path + "TimingDataF1.jsonStream") }.getOrNull().orEmpty()
+        val weather = runCatching { WeatherParser.parse(fetch(path + "WeatherData.jsonStream"), streamStart) }.getOrDefault(WeatherLog.NONE)
         val parsed = timingStream?.let { runCatching { parseStates(it, streamStart) }.getOrNull() }
             ?: StateParse(emptyMap(), emptyList())
-        val laps = timingStream?.let { runCatching { DriverTimingParser.parse(it, streamStart) }.getOrNull() }.orEmpty()
+        val laps = timingStream?.let { runCatching { DriverTimingParser.parse(it, streamStart, timingF1Stream) }.getOrNull() }.orEmpty()
 
         val built = tracks.mapValues { it.value.build() }
         val traced = traceOutline(tracks.values.toList())
@@ -532,6 +597,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             clock = runCatching {
                 SessionClock(parseClock(fetch(path + "ExtrapolatedClock.jsonStream"), streamStart), parseParts(timingStream.orEmpty(), streamStart))
             }.getOrDefault(SessionClock.NONE),
+            weather = weather,
         ).also { it.startLine = grid?.startLine }
     }
 
