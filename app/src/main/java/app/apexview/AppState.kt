@@ -2034,13 +2034,17 @@ class AppState(
         val centerY = mapPanel.y + mapPanel.h / 2f
         val mapIsInOverlayColumn = centerX in workspace.x..(workspace.x + workspace.w) &&
             centerY in workspace.y..(workspace.y + workspace.h)
-        if (!mapIsInOverlayColumn && !towerExpandedForMapMove) {
-            towerHeightBeforeMapMove = towerSpot.h.takeIf { it > 0f }
-            towerYBeforeMapMove = towerSpot.y.takeIf { it >= 0f }
+        if (!mapIsInOverlayColumn) {
+            if (!towerExpandedForMapMove) {
+                towerHeightBeforeMapMove = towerSpot.h.takeIf { it > 0f && it < workspace.h }
+                towerYBeforeMapMove = towerSpot.y.takeIf { it >= workspace.y && it < workspace.y + workspace.h }
+            }
+            // Reapply after any screen-size/orientation relayout too. The map may have remained
+            // over the video while the app rebuilt its combined overlay plan.
             towerSpot.y = workspace.y
             towerSpot.h = workspace.h
             towerExpandedForMapMove = true
-        } else if (mapIsInOverlayColumn && towerExpandedForMapMove) {
+        } else if (towerExpandedForMapMove) {
             towerSpot.h = (towerHeightBeforeMapMove ?: minOf(TOWER_DEFAULT_HEIGHT_DP *
                 context.resources.displayMetrics.density, workspace.h)).coerceIn(
                 minOf(TOWER_MIN_HEIGHT_DP * context.resources.displayMetrics.density, workspace.h),
