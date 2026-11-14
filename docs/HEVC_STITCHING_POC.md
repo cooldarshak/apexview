@@ -60,6 +60,10 @@ The first prototype must not modify FeedPlayer or the production playback graph.
 - Existing multi-player playback and its tests remain unchanged.
 - Any F1-specific limitation is documented with evidence from the actual authorised stream metadata.
 
+## Current synthetic fixture boundary
+
+The fixture generator uses FFmpeg/libx265 to create two disposable, time-aligned HEVC test streams. It checks codec, dimensions, frame rate and frame count. It does not split a single encoded picture into independent tile streams, rewrite slice headers, combine streams, or prove decoder interoperability. The next engineering gate is bitstream-level SPS/PPS, POC, tile geometry and slice-header analysis before any stitcher is attempted.
+
 ## Current known risk
 
 The F1 Tizen project describes an F1-specific HEVC packaging profile and CBCS handling. Android Media3/MediaCodec DRM integration may not expose the protected compressed samples in a form that permits stitching. That is a gating technical question. A clear synthetic single-decoder demonstration is necessary but not sufficient to prove protected F1 playback.
