@@ -55,14 +55,14 @@ object Layouts {
         val tower: Area
         val map: Area
         if (portrait) {
-            val feedFraction = if (floating) 0.54f else 0.40f
+            val feedFraction = if (floating) 0.50f else 0.34f
             feeds = Area(0f, 0f, width, height * feedFraction)
             workspace = Area(0f, feeds.h, width, height - feeds.h)
             if (floating) {
                 tower = workspace
                 map = workspace
             } else {
-                val towerHeight = workspace.h * 0.62f
+                val towerHeight = workspace.h * 0.58f
                 tower = Area(0f, workspace.y, width, towerHeight)
                 map = Area(0f, workspace.y + towerHeight, width, workspace.h - towerHeight)
             }
