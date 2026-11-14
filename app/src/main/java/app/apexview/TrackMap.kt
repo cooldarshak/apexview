@@ -238,6 +238,18 @@ fun mapLineTouched(app: AppState, timing: SessionTiming, x: Float, y: Float, mar
 fun mapMarginPx(density: androidx.compose.ui.unit.Density) = with(density) { MAP_MARGIN.toPx() }
 
 /**
+ * Whether the track map should expose its lock/move/resize controls. On touch devices they appear
+ * while arranging (or in a floating workspace). A TV has no touch arrangement mode, so keep the
+ * same controls available for the remote whenever the map is not in a fixed docked workspace.
+ */
+internal fun shouldShowMapControls(
+    isTv: Boolean,
+    arranging: Boolean,
+    floating: Boolean,
+    docked: Boolean,
+): Boolean = !docked && (isTv || arranging || floating)
+
+/**
  * The track map in its own window. While arranging it's moved, resized and turned by its track
  * line (see [mapLineTouched]) or by the move grip; the corner handle resizes it and the lock keeps
  * it still while the feeds under it are arranged. The controls sit at the corners of the track
@@ -255,7 +267,9 @@ fun MapPanelView(app: AppState, timing: SessionTiming) {
             .requiredSize(with(density) { panel.w.toDp() }, with(density) { panel.h.toDp() })
     ) {
         TrackDrawing(app, timing, panel.w, panel.h, panel.rotation)
-        if ((app.arranging || app.combinedOverlaysFloating) && !app.combinedOverlaysDocked) MapControls(app, timing)
+        if (shouldShowMapControls(app.isTv, app.arranging, app.combinedOverlaysFloating, app.combinedOverlaysDocked)) {
+            MapControls(app, timing)
+        }
     }
 }
 
