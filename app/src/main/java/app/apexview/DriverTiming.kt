@@ -285,7 +285,16 @@ object DriverTimingParser {
             val value = o.optString("Value")
             if (value.isNotEmpty()) {
                 val flags = booleanArrayOf(o.optBoolean("PersonalFastest"), o.optBoolean("OverallFastest"))
-                l.lapSectors[2] = SectorCell(value, pace(flags))
+                val segments = mutableListOf<Int>()
+                when (val rawSegments = o.opt("Segments")) {
+                    is JSONArray -> for (n in 0 until rawSegments.length()) {
+                        rawSegments.optJSONObject(n)?.optInt("Status", -1)?.takeIf { it >= 0 }?.let { segments += it }
+                    }
+                    is JSONObject -> rawSegments.keys().forEach { key ->
+                        rawSegments.optJSONObject(key)?.optInt("Status", -1)?.takeIf { it >= 0 }?.let { segments += it }
+                    }
+                }
+                l.lapSectors[2] = SectorCell(value, pace(flags), segments, o.optString("PreviousValue"))
             }
             return
         }
