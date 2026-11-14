@@ -128,16 +128,21 @@ fun SessionCountdown(app: AppState, timing: SessionTiming, style: TextStyle, mod
 @Composable
 fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float, feedScale: Float) {
     val density = LocalDensity.current
-    val maxTowerHeight = with(density) {
+    val plan = app.combinedOverlayPlan
+    val docked = plan?.floating == false
+    val bounds = plan?.let { if (it.floating) it.workspace else it.tower }
+    val maxTowerWidth = bounds?.let { with(density) { it.w.toDp() } } ?: TOWER_WIDTH
+    val maxTowerHeight = bounds?.let { with(density) { it.h.toDp() } } ?: with(density) {
         minOf(TOWER_HEIGHT, (height.toDp() - 40.dp).coerceAtLeast(AppState.TOWER_MIN_HEIGHT_DP.dp))
     }
     TowerTextScale(app) {
         FloatingPanel(
             app, app.towerSpot, "Timing", "Hide timing", app::toggleTower, width, height, feedScale,
-            maxWidth = TOWER_WIDTH, maxHeight = maxTowerHeight,
-            minWidth = AppState.TOWER_MIN_WIDTH_DP.dp,
+            maxWidth = maxTowerWidth, maxHeight = maxTowerHeight,
+            minWidth = minOf(AppState.TOWER_MIN_WIDTH_DP.dp, maxTowerWidth),
+            bounds = bounds,
             opacity = app.towerOpacity,
-            locked = app.towerLocked,
+            locked = app.towerLocked || docked,
             onResizeFinished = app::finishTowerResize,
         ) {
             TimingTower(app, timing)
