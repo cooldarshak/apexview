@@ -167,26 +167,26 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
     val onTop = app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString()
 
     Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
-            TowerSessionHeader(timing, now)
-            TowerHeader()
-            LazyColumn {
-                items(rows, key = { it.first }) { (number, state) ->
-                    val kmh = timing.speeds[number]?.kmhAt(now)
-                    val gear = timing.speeds[number]?.gearAt(now)
-                    TowerRow(
-                        timing = timing,
-                        number = number,
-                        state = state,
-                        tyre = timing.tyres[number]?.at(now),
-                        kmh = kmh,
-                        gear = gear,
-                        speedUnit = app.settings.speedUnit,
-                        highlight = number == onTop,
-                    ) { app.showOnboard(number) }
-                }
+        TowerSessionHeader(timing, now)
+        TowerHeader()
+        LazyColumn {
+            items(rows, key = { it.first }) { (number, state) ->
+                val kmh = timing.speeds[number]?.kmhAt(now)
+                val gear = timing.speeds[number]?.gearAt(now)
+                TowerRow(
+                    timing = timing,
+                    number = number,
+                    state = state,
+                    tyre = timing.tyres[number]?.at(now),
+                    kmh = kmh,
+                    gear = gear,
+                    speedUnit = app.settings.speedUnit,
+                    highlight = number == onTop,
+                ) { app.showOnboard(number) }
             }
         }
     }
+}
 
 /** Compact session/track strip, like the header on the F1 timing screen. */
 @Composable
