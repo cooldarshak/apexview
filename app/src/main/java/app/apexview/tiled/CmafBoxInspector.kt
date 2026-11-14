@@ -54,7 +54,23 @@ internal object CmafBoxInspector {
     }
 
     private fun track(data: ByteArray, trak: Box): TrackMetadata {
-        val all = flatten(trak)
+        val all = flatten(trak).toMutableList()
+        val stsdBox = all.firstOrNull { it.type == "stsd" }
+        if (stsdBox != null) {
+            val p = payload(data, stsdBox)
+            if (p.remaining() >= 16) {
+                val entryStart = stsdBox.start + stsdBox.headerSize + 8
+                val entrySize = uint32(data, entryStart)
+                val entryType = String(data, entryStart + 4, 4, Charsets.ISO_8859_1)
+                val fixedHeader = if (entryType == "encv" || handlerFor(trak, data) == "vide") 78 else 28
+                val childStart = entryStart + 8 + fixedHeader
+                val entryEnd = entryStart + entrySize.toInt()
+                if (entrySize >= 8L + fixedHeader && entryEnd <= stsdBox.start + stsdBox.size && childStart <= entryEnd) {
+                    val entryChildren = parseBoxes(data, childStart, entryEnd, 1, intArrayOf(0), mutableListOf())
+                    all += entryChildren.flatMap { flatten(it) }
+                }
+            }
+        }
         val mdhd = all.firstOrNull { it.type == "mdhd" }?.let { payload(data, it) }
         val timescale = mdhd?.let { readTimescale(it) }
         val handler = all.firstOrNull { it.type == "hdlr" }?.let { payload(data, it) }?.let { p ->
@@ -80,6 +96,11 @@ internal object CmafBoxInspector {
         return TrackMetadata(handler, timescale, entry, original, scheme,
             entry == "encv" || entry == "enca" || scheme != null, width, height)
     }
+
+    private fun handlerFor(trak: Box, data: ByteArray): String? =
+        flatten(trak).firstOrNull { it.type == "hdlr" }?.let { payload(data, it) }?.let { p ->
+            if (p.remaining() >= 12) { p.position(p.position() + 8); readFourCc(p) } else null
+        }
 
     private fun readTimescale(p: ByteBuffer): Long? {
         if (p.remaining() < 4) return null
