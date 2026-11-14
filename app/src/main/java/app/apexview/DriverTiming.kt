@@ -227,8 +227,8 @@ object DriverTimingParser {
         d.optString("Position").toIntOrNull()?.let { l.position = it }
         if (d.has("InPit")) l.inPit = d.optBoolean("InPit")
         if (d.optBoolean("PitOut")) l.inPit = false
-        if (d.has("Retired")) l.retired = d.optBoolean("Retired")
-        if (d.optBoolean("Stopped")) l.retired = true
+        // F1 can clear these transient fields in later deltas; once a driver is out, keep it latched.
+        if (d.optBoolean("Retired") || d.optBoolean("Stopped")) l.retired = true
         // Qualifying gives the gap to the fastest; races the interval to the car ahead.
         d.optString("TimeDiffToFastest").takeIf { d.has("TimeDiffToFastest") }?.let { l.gap = it.ifEmpty { null } }
         d.optJSONObject("IntervalToPositionAhead")?.let { o ->
