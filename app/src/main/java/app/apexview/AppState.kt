@@ -3115,9 +3115,7 @@ class AppState(
     /** On a TV there's no touch: no dragging feeds around, and Back steps the controls away first. */
     // Match the same Leanback detection used by the focus-ring and remote controls. Some TV
     // launchers report NORMAL from UiModeManager even though the device exposes the TV feature.
-    val isTv = context.packageManager.hasSystemFeature("android.software.leanback") ||
-        context.getSystemService(android.app.UiModeManager::class.java)?.currentModeType ==
-        android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+    val isTv = isTvDevice(context)
     /** Whether something in the viewer has the remote's focus; arrows then move between controls. */
     var controlsFocused by mutableStateOf(false)
     /** Asks the viewer to put the remote's focus on play/pause. */
