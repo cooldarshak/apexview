@@ -5,6 +5,7 @@ on:
     branches:
       - feature/playback-speed-tv-controls
       - feature/timing-tower-map-menu
+      - fix/tv-timing-map-and-dpad-sliders
   workflow_dispatch:
 
 permissions:
