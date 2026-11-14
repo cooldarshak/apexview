@@ -22,6 +22,13 @@ class WeatherTest {
     }
 
     @Test
+    fun doesNotShowFutureWeatherBeforeTheFirstSample() {
+        val start = 1_000_000L
+        val stream = "00:00:05.000{\"WindSpeed\":\"1.5\"}"
+        assertEquals(null, WeatherParser.parse(stream, start).at(start + 4_000))
+    }
+
+    @Test
     fun reportsRainWhenF1RainfallFlagIsSet() {
         val reading = WeatherParser.parse(
             "00:00:05.000{\"Rainfall\":\"1\"}",
