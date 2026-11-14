@@ -172,7 +172,7 @@ private fun TowerSessionHeader(timing: SessionTiming, now: Long) {
     val trackLabel = flag.caption(now) ?: "Track clear"
     val trackColor = when {
         flag.track == TrackCondition.RED -> Color(0xFFFF453A)
-        flag.track.safetyCar || flag.track == TrackCondition.VSC -> Color(0xFFFFD60A)
+        flag.track.safetyCar || flag.track == TrackCondition.VSC || flag.track == TrackCondition.VSC_ENDING -> Color(0xFFFFD60A)
         else -> Color(0xFF30D158)
     }
     val counter = if (timing.isRace && timing.currentLap != null) {
@@ -293,12 +293,25 @@ private fun TowerRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(Modifier.width(64.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                state.position?.toString() ?: "–",
-                style = cell.copy(fontSize = 12.sp, fontWeight = FontWeight.Bold),
-                textAlign = TextAlign.End,
-                modifier = Modifier.width(18.dp),
-            )
+            Column(
+                Modifier.width(18.dp),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text(
+                    state.position?.toString() ?: "–",
+                    style = cell.copy(fontSize = 12.sp, fontWeight = FontWeight.Bold),
+                    textAlign = TextAlign.End,
+                )
+                state.positionChange?.takeIf { it != 0 }?.let { change ->
+                    val gained = change > 0
+                    Text(
+                        "${if (gained) "▲" else "▼"}${if (gained) change else -change}",
+                        style = cell.copy(fontSize = 6.sp, color = if (gained) Color(0xFF30D158) else Color(0xFFFF453A)),
+                        maxLines = 1,
+                    )
+                }
+            }
             Spacer(Modifier.width(4.dp))
             Box(
                 Modifier.width(42.dp).height(23.dp).clip(RoundedCornerShape(3.dp)).background(teamColor),
@@ -338,7 +351,7 @@ private fun TowerRow(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("LAST", style = cell.copy(fontSize = 6.sp, color = Ink.secondary), modifier = Modifier.width(19.dp))
                 Text(
-                    if (state.inPit) "IN PIT" else last?.time?.ifBlank { "–" } ?: "–",
+                    when { state.retired -> "OUT"; state.inPit -> "PIT"; else -> last?.time?.ifBlank { "–" } ?: "–" },
                     style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold, color = if (state.inPit) Color(0xFFFF453A) else lapColor(last?.pace)),
                     maxLines = 1,
                 )
