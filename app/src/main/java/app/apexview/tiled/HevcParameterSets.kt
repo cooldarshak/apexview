@@ -16,6 +16,17 @@ internal object HevcParameterSets {
         val temporalIdNesting: Boolean
     )
 
+    data class ReferenceDelta(val deltaPoc: Int, val usedByCurrent: Boolean)
+
+    data class LongTermReference(val pocLsb: Int, val usedByCurrent: Boolean)
+
+    data class ShortTermRefPicSet(
+        val negative: List<ReferenceDelta>,
+        val positive: List<ReferenceDelta>
+    ) {
+        val all: List<ReferenceDelta> get() = negative + positive
+    }
+
     data class SpsMetadata(
         val vpsId: Int,
         val spsId: Int,
@@ -29,7 +40,12 @@ internal object HevcParameterSets {
         val log2CtbSize: Int,
         val ctbSize: Int,
         val picWidthInCtbs: Int,
-        val picHeightInCtbs: Int
+        val picHeightInCtbs: Int,
+        val sampleAdaptiveOffsetEnabled: Boolean,
+        val temporalMvpEnabled: Boolean,
+        val longTermRefPicsPresent: Boolean,
+        val longTermRefPics: List<LongTermReference>,
+        val shortTermRefPicSets: List<ShortTermRefPicSet>
     )
 
     data class PpsMetadata(
@@ -101,9 +117,45 @@ internal object HevcParameterSets {
         val widthInCtbs = (width + ctbSize - 1) / ctbSize
         val heightInCtbs = (height + ctbSize - 1) / ctbSize
 
-        return SpsMetadata(vpsId, spsId, maxSubLayersMinus1 + 1, temporalNesting,
+        // Continue through the sequence fields needed to interpret slice headers.
+        readUe(bits, 3, "log2_min_luma_transform_block_size_minus2")
+        readUe(bits, 3, "log2_diff_max_min_luma_transform_block_size")
+        readUe(bits, 4, "max_transform_hierarchy_depth_inter")
+        readUe(bits, 4, "max_transform_hierarchy_depth_intra")
+        val scalingListEnabled = bits.readBit() != 0
+        if (scalingListEnabled && bits.readBit() != 0) skipScalingListData(bits)
+        bits.readBit() // amp_enabled_flag
+        val saoEnabled = bits.readBit() != 0
+        if (bits.readBit() != 0) {
+            bits.skipBits(8) // PCM sample bit depths
+            readUe(bits, 3, "log2_min_pcm_luma_coding_block_size_minus3")
+            readUe(bits, 3, "log2_diff_max_min_pcm_luma_coding_block_size")
+            bits.readBit() // pcm_loop_filter_disabled_flag
+        }
+
+        val numShortTermSets = readUe(bits, 64, "num_short_term_ref_pic_sets")
+        val shortTermSets = mutableListOf<ShortTermRefPicSet>()
+        repeat(numShortTermSets) { index ->
+            shortTermSets += parseShortTermRefPicSet(bits, index, numShortTermSets, shortTermSets)
+        }
+
+        val longTermPresent = bits.readBit() != 0
+        val longTermRefs = mutableListOf<LongTermReference>()
+        if (longTermPresent) {
+            val count = readUe(bits, 32, "num_long_term_ref_pics_sps")
+            repeat(count) {
+                longTermRefs += LongTermReference(bits.readBits(log2Poc), bits.readBit() != 0)
+            }
+        }
+        val temporalMvp = bits.readBit() != 0
+        bits.readBit() // strong_intra_smoothing_enabled_flag
+
+        return SpsMetadata(
+            vpsId, spsId, maxSubLayersMinus1 + 1, temporalNesting,
             chromaFormat, separateColourPlane, width, height, log2Poc, log2Ctb,
-            ctbSize, widthInCtbs, heightInCtbs)
+            ctbSize, widthInCtbs, heightInCtbs, saoEnabled, temporalMvp,
+            longTermPresent, longTermRefs, shortTermSets
+        )
     }
 
     fun parsePps(nal: ByteArray, sps: SpsMetadata? = null): PpsMetadata {
@@ -165,6 +217,57 @@ internal object HevcParameterSets {
         return PpsMetadata(ppsId, spsId, dependentSlices, outputFlag, extraHeaderBits,
             true, entropySync, uniform, numColumns, numRows, explicitColumns, explicitRows,
             columnWidths, rowHeights, loopFilter)
+    }
+
+    /**
+     * Parses a non-predicted short-term RPS. Predicted RPS chains are rejected for now rather
+     * than guessed, so downstream frame-alignment results remain fail-closed.
+     */
+    internal fun parseShortTermRefPicSet(
+        bits: HevcBitReader,
+        index: Int,
+        previous: List<ShortTermRefPicSet>,
+    ): ShortTermRefPicSet {
+        if (index > 0) {
+            val predicted = bits.readBit() != 0
+            require(!predicted) {
+                "Predicted short-term RPS is not supported by this analysis pass"
+            }
+        }
+        val negativeCount = readUe(bits, 16, "num_negative_pics")
+        val positiveCount = readUe(bits, 16, "num_positive_pics")
+        require(negativeCount + positiveCount <= 32) { "Short-term RPS exceeds supported reference count" }
+
+        val negative = mutableListOf<ReferenceDelta>()
+        var negativePoc = 0
+        repeat(negativeCount) {
+            negativePoc -= readUe(bits, 32767, "delta_poc_s0_minus1") + 1
+            negative += ReferenceDelta(negativePoc, bits.readBit() != 0)
+        }
+        val positive = mutableListOf<ReferenceDelta>()
+        var positivePoc = 0
+        repeat(positiveCount) {
+            positivePoc += readUe(bits, 32767, "delta_poc_s1_minus1") + 1
+            positive += ReferenceDelta(positivePoc, bits.readBit() != 0)
+        }
+        return ShortTermRefPicSet(negative, positive)
+    }
+
+    private fun skipScalingListData(bits: HevcBitReader) {
+        for (sizeId in 0..3) {
+            val matrixStep = if (sizeId == 3) 3 else 1
+            var matrixId = 0
+            while (matrixId < 6) {
+                if (bits.readBit() == 0) {
+                    readUe(bits, 63, "scaling_list_pred_matrix_id_delta")
+                } else {
+                    val coefficientCount = minOf(64, 1 shl (4 + (sizeId shl 1)))
+                    if (sizeId > 1) bits.readSignedExpGolomb()
+                    repeat(coefficientCount) { bits.readSignedExpGolomb() }
+                }
+                matrixId += matrixStep
+            }
+        }
     }
 
     private fun readerFor(nal: ByteArray, expectedType: Int): HevcBitReader {
