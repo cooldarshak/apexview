@@ -5,7 +5,9 @@ import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.setValue
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import androidx.compose.foundation.layout.Box
