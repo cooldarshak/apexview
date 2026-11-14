@@ -53,6 +53,22 @@ class DriverTimingTest {
     }
 
     @Test
+    fun bestLapPreviousSectorAndMicroSegmentsAreMergedFromTimingF1() {
+        val base = listOf(
+            "00:00:01.000{\"Lines\":{\"16\":{\"Position\":\"1\",\"Sectors\":[{\"Value\":\"\"},{\"Value\":\"\"},{\"Value\":\"\"}]}}}",
+            "00:01:00.000{\"Lines\":{\"16\":{\"Sectors\":{\"0\":{\"Value\":\"27.506\",\"PersonalFastest\":true}}}}}",
+        ).joinToString("\n")
+        val micro = listOf(
+            "00:01:01.000{\"Lines\":{\"16\":{\"BestLapTime\":{\"Value\":\"1:33.047\",\"OverallFastest\":true},\"Sectors\":{\"0\":{\"PreviousValue\":\"27.600\",\"Segments\":[{\"Status\":2051},{\"Status\":2049},{\"Status\":2048},{\"Status\":2064}]}}}}}",
+        ).joinToString("\n")
+        val state = DriverTimingParser.parse(base, t0, micro).getValue("16").at(t0 + 61_000)!!
+        assertEquals("1:33.047", state.bestLap!!.time)
+        assertEquals(Pace.PURPLE, state.bestLap!!.pace)
+        assertEquals("27.600", state.sectors[0]!!.previousTime)
+        assertEquals(listOf(2051, 2049, 2048, 2064), state.sectors[0]!!.segments)
+    }
+
+    @Test
     fun aLateFinalSectorStillCountsForTheLapItFinished() {
         val late = listOf(
             "00:00:01.000{\"Lines\":{\"4\":{\"NumberOfLaps\":3}}}",
