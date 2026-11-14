@@ -179,9 +179,10 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         // The table is 361dp wide, plus its 18dp side padding. Scale its layout with the panel
         // so S1/S2/S3 and the tyre column remain inside the visible window when it is narrowed.
-        // The panel's 300dp minimum keeps that compression readable.
+        // Let the 1/3 landscape sidebar shrink the complete table rather than clip its last columns.
+        // The text-size setting remains available when the sidebar is especially narrow.
         val baseDensity = LocalDensity.current
-        val contentScale = ((maxWidth.value - 18f) / 361f).coerceIn(0.78f, 1f)
+        val contentScale = ((maxWidth.value - 18f) / 361f).coerceIn(0.60f, 1f)
         CompositionLocalProvider(
             LocalDensity provides Density(baseDensity.density * contentScale, baseDensity.fontScale)
         ) {
