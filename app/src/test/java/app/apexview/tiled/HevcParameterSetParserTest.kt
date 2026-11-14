@@ -89,6 +89,17 @@ class HevcParameterSetParserTest {
         writeUe(4); writeUe(2); writeUe(0)
         writeUe(0) // log2_min_luma_coding_block_size_minus3
         writeUe(3) // log2_diff_max_min_luma_coding_block_size -> 64x64 CTB
+        writeUe(0); writeUe(0) // transform block size limits
+        writeUe(0); writeUe(0) // transform hierarchy depths
+        write(0, 1) // scaling_list_enabled_flag
+        write(0, 1) // amp_enabled_flag
+        write(1, 1) // sample_adaptive_offset_enabled_flag
+        write(0, 1) // pcm_enabled_flag
+        writeUe(0) // no SPS short-term reference sets
+        write(0, 1) // long_term_ref_pics_present_flag
+        write(1, 1) // sps_temporal_mvp_enabled_flag
+        write(1, 1) // strong_intra_smoothing_enabled_flag
+        write(0, 1) // vui_parameters_present_flag
     }.finish()
 
     private fun ppsBits(uniform: Boolean, spsId: Int = 0): ByteArray = BitWriter().apply {
