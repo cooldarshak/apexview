@@ -2013,6 +2013,7 @@ class AppState(
 
     /** Two fingers on the track line while arranging: move, resize and turn the map. */
     fun arrangeMap(pan: androidx.compose.ui.geometry.Offset, zoom: Float, rotation: Float) {
+        if (combinedOverlaysDocked) return
         val panel = activeMapPanel
         panel.x += pan.x
         panel.y += pan.y
