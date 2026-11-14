@@ -65,6 +65,7 @@ class LayoutsTest {
     fun mapAndTowerReservationsDoNotOverlapFeedsOrEachOther() {
         for (mode in listOf(LayoutMode.FEATURED, LayoutMode.GRID)) {
             for ((width, height) in listOf(w to h, 1920f to 1080f, 1080f to 1920f, 1280f to 720f)) {
+                for (feedCount in 1..4) {
                 val towerWidth = minOf(380f, width - 32f)
                 val towerHeight = minOf(720f, height - 40f)
                 val minMapSide = minOf(width, height) * 0.22f
