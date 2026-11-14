@@ -402,9 +402,9 @@ class WeatherReading(
 
 class WeatherLog(private val times: LongArray, private val readings: List<WeatherReading>) {
     fun at(utcMs: Long): WeatherReading? {
-        if (readings.isEmpty()) return null
+        if (readings.isEmpty() || utcMs < times.first()) return null
         val index = times.indexOfLast { it <= utcMs }
-        return readings[if (index < 0) 0 else index]
+        return index.takeIf { it >= 0 }?.let(readings::get)
     }
 
     companion object {
