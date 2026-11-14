@@ -372,6 +372,15 @@ fun ViewerScreen(app: AppState) {
                     }
                 }
             }
+            // In combined mode the tower belongs to the same transformed canvas as the
+            // video feeds and map, so all three stay aligned when the playback controls appear.
+            if (app.combinedOverlayPlan != null && app.towerOpen && !laptop) {
+                app.timing?.takeIf { it.laps.isNotEmpty() }?.let { timing ->
+                    Box(Modifier.fillMaxSize().zIndex(1.6e9f)) {
+                        TowerPanel(app, timing, width, height, feedScale = 1f - lift * band / height)
+                    }
+                }
+            }
         }
 
         if (app.inPip) return@BoxWithConstraints
@@ -381,8 +390,12 @@ fun ViewerScreen(app: AppState) {
             Box(Modifier.zIndex(CHROME_Z - 1)) { RadioPanel(app, timing, width, height, feedScale = 1f - lift * band / height) }
         }
         // Laptop mode has the tower below the hinge already.
-        if (app.towerOpen && !app.laptopActive) app.timing?.takeIf { it.laps.isNotEmpty() }?.let { timing ->
-            Box(Modifier.zIndex(CHROME_Z - 1)) { TowerPanel(app, timing, width, height, feedScale = 1f - lift * band / height) }
+        if (app.towerOpen && !app.laptopActive && app.combinedOverlayPlan == null) {
+            app.timing?.takeIf { it.laps.isNotEmpty() }?.let { timing ->
+                Box(Modifier.zIndex(CHROME_Z - 1)) {
+                    TowerPanel(app, timing, width, height, feedScale = 1f - lift * band / height)
+                }
+            }
         }
 
         // No feed on screen with F1's graphics: the time left goes up top, clear of the edge map
