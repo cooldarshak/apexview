@@ -31,6 +31,14 @@ class SpeedTest {
     }
 
     @Test
+    fun readsGearFromChannelThreeAndKeepsLastKnownGear() {
+        val car = speeds().getValue("1")
+        assertEquals(8, car.gearAt(ms("2026-11-01T20:00:00.200Z")))
+        assertEquals(8, car.gearAt(ms("2026-11-01T20:00:00.500Z")))
+        assertNull(speeds().getValue("44").gearAt(ms("2026-11-01T20:00:00.200Z")))
+    }
+
+    @Test
     fun aCarMissingTheChannelKeepsItsLastReading() {
         assertEquals(120, speeds().getValue("44").kmhAt(ms("2026-11-01T20:00:00.500Z")))
     }
