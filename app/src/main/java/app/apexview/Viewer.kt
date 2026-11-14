@@ -1229,7 +1229,10 @@ private fun LayoutSheet(app: AppState) {
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
     ) {
         KeepSystemBarsHidden()
-        Column(Modifier.navigationBarsPadding().padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
+        Column(
+            Modifier.navigationBarsPadding().verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp).padding(bottom = 24.dp)
+        ) {
             Text("Layout", style = Type.title2)
             val n = app.tiles.size
             val hasSaved = app.savedLayout(n) != null
@@ -1267,6 +1270,49 @@ private fun LayoutSheet(app: AppState) {
                 style = Type.footnote,
                 modifier = Modifier.padding(top = 10.dp),
             )
+
+            if (!app.laptopActive && app.mapMode.inWindow && app.mapReserve && app.towerOpen && app.towerReserve) {
+                val config = LocalConfiguration.current
+                val portrait = config.screenHeightDp >= config.screenWidthDp
+                Text("Map + timing tower", style = Type.headline, modifier = Modifier.padding(top = 24.dp))
+                Row(
+                    Modifier.padding(top = 10.dp).clip(RoundedCornerShape(12.dp))
+                        .background(Ink.background).padding(3.dp)
+                ) {
+                    OverlayLayoutMode.entries.forEach { mode ->
+                        val selected = app.overlayLayoutMode == mode
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .pressable { app.chooseOverlayLayoutMode(mode) }
+                                .clip(RoundedCornerShape(9.dp))
+                                .background(if (selected) Ink.surfaceHigh else Color.Transparent)
+                                .padding(horizontal = 8.dp, vertical = 12.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                mode.label,
+                                style = Type.subhead.copy(color = if (selected) Ink.primary else Ink.secondary),
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
+                }
+                Text(
+                    when {
+                        portrait && app.overlayLayoutMode == OverlayLayoutMode.DOCKED ->
+                            "Video on top, timing tower in the middle and track map at the bottom."
+                        portrait ->
+                            "Video stays in the top section. Move and overlap the tower and map freely anywhere on screen."
+                        app.overlayLayoutMode == OverlayLayoutMode.DOCKED ->
+                            "Video feeds use the left two-thirds. The right side holds the timing tower above the map."
+                        else ->
+                            "Video feeds use the left two-thirds. Move and overlap the tower and map freely anywhere on screen. When the map leaves the sidebar, the tower expands to fill it."
+                    },
+                    style = Type.footnote,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
         }
     }
 }
@@ -1530,47 +1576,6 @@ private fun MapSheet(app: AppState) {
                     style = Type.footnote,
                     modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
                 )
-                if (!app.laptopActive && app.mapMode.inWindow && app.mapReserve && app.towerReserve) {
-                    val portrait = config.screenHeightDp >= config.screenWidthDp
-                    Text("Map + tower layout", style = Type.body, modifier = Modifier.padding(top = 14.dp))
-                    Row(
-                        Modifier.padding(top = 8.dp).clip(RoundedCornerShape(12.dp))
-                            .background(Ink.background).padding(3.dp)
-                    ) {
-                        OverlayLayoutMode.entries.forEach { mode ->
-                            val selected = app.overlayLayoutMode == mode
-                            Box(
-                                Modifier
-                                    .weight(1f)
-                                    .pressable { app.chooseOverlayLayoutMode(mode) }
-                                    .clip(RoundedCornerShape(9.dp))
-                                    .background(if (selected) Ink.surfaceHigh else Color.Transparent)
-                                    .padding(horizontal = 8.dp, vertical = 10.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Text(
-                                    mode.label,
-                                    style = Type.subhead.copy(color = if (selected) Ink.primary else Ink.secondary),
-                                    textAlign = TextAlign.Center,
-                                )
-                            }
-                        }
-                    }
-                    Text(
-                        when {
-                            portrait && app.overlayLayoutMode == OverlayLayoutMode.DOCKED ->
-                                "Video on top, timing tower in the middle and track map at the bottom."
-                            portrait ->
-                                "Video stays in the top section. The tower and map can be moved and overlapped in the lower section."
-                            app.overlayLayoutMode == OverlayLayoutMode.DOCKED ->
-                                "Video feeds use the left two-thirds. The right side holds the timing tower above the map."
-                            else ->
-                                "Video feeds use the left two-thirds. Move and overlap the tower and map freely within the right-side area."
-                        },
-                        style = Type.footnote,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                }
             }
         }
     }
