@@ -35,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
@@ -210,6 +211,10 @@ internal fun FloatingPanel(
     /** Its size until it's resized by hand. */
     maxWidth: androidx.compose.ui.unit.Dp = PANEL_MAX_WIDTH,
     maxHeight: androidx.compose.ui.unit.Dp = PANEL_MAX_HEIGHT,
+    /** Opacity of the complete panel, including its contents. */
+    opacity: Float = 1f,
+    /** When locked, its header and resize grip no longer change the panel's place or size. */
+    locked: Boolean = false,
     content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
     val density = LocalDensity.current
@@ -256,6 +261,7 @@ internal fun FloatingPanel(
         Modifier
             .offset { IntOffset(spot.x.roundToInt(), spot.y.roundToInt()) }
             .then(modifier)
+            .graphicsLayer { alpha = opacity.coerceIn(0f, 1f) }
             .onSizeChanged { boxW = it.width.toFloat(); boxH = it.height.toFloat() }
     ) {
         Column(
@@ -268,25 +274,27 @@ internal fun FloatingPanel(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .pointerInput(Unit) {
-                        detectDragGestures(
-                            onDragStart = { rawX = spot.x; rawY = spot.y },
-                            onDragEnd = { spot.store(width, height) },
-                        ) { change, drag ->
-                            change.consume()
-                            rawX += drag.x
-                            rawY += drag.y
-                            var x = rawX
-                            var y = rawY
-                            if (app.snapMode) {
-                                val (xs, ys) = snapLines(app, width, height, feedScale)
-                                x += pull(listOf(x, x + boxW), xs, SNAP.toPx())
-                                y += pull(listOf(y, y + boxH), ys, SNAP.toPx())
+                    .then(
+                        if (locked) Modifier else Modifier.pointerInput(width, height, feedScale) {
+                            detectDragGestures(
+                                onDragStart = { rawX = spot.x; rawY = spot.y },
+                                onDragEnd = { spot.store(width, height) },
+                            ) { change, drag ->
+                                change.consume()
+                                rawX += drag.x
+                                rawY += drag.y
+                                var x = rawX
+                                var y = rawY
+                                if (app.snapMode) {
+                                    val (xs, ys) = snapLines(app, width, height, feedScale)
+                                    x += pull(listOf(x, x + boxW), xs, SNAP.toPx())
+                                    y += pull(listOf(y, y + boxH), ys, SNAP.toPx())
+                                }
+                                spot.x = x.coerceIn(0f, (width - boxW).coerceAtLeast(0f))
+                                spot.y = y.coerceIn(0f, (height - HEADER_HEIGHT.toPx()).coerceAtLeast(0f))
                             }
-                            spot.x = x.coerceIn(0f, (width - boxW).coerceAtLeast(0f))
-                            spot.y = y.coerceIn(0f, (height - HEADER_HEIGHT.toPx()).coerceAtLeast(0f))
                         }
-                    }
+                    )
                     .height(HEADER_HEIGHT)
                     .padding(start = 16.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -299,11 +307,11 @@ internal fun FloatingPanel(
             content()
         }
         // The corner grip: drag to resize, edges snapping like the feeds'.
-        Box(
+        if (!locked) Box(
             Modifier
                 .align(Alignment.BottomEnd)
                 .size(36.dp)
-                .pointerInput(Unit) {
+                .pointerInput(width, height, feedScale) {
                     detectDragGestures(
                         onDragStart = { rawW = boxW; rawH = boxH },
                         onDragEnd = { spot.store(width, height) },
