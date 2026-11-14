@@ -1418,9 +1418,12 @@ class AppState(
         val first = timing == null
         timing = loaded
         if (!first) return
-        // The map lies over the feeds; they only move for it when asked to keep it clear (and
-        // nobody has arranged them by hand).
-        if (((mapMode.inWindow && mapReserve) || (towerOpen && towerReserve && !laptopActive)) && !handPlaced) {
+        // A tower reservation is a direct layout constraint, even if the user previously
+        // arranged feeds by hand. A map-only reservation retains its existing hand-layout rule.
+        val reserveTower = towerOpen && towerReserve && !laptopActive
+        val reserveMap = mapMode.inWindow && mapReserve
+        if (reserveTower || reserveMap && !handPlaced) {
+            handPlaced = false
             layoutRequest++
         } else if (canvasW > 0f) placeMapIfNeeded(canvasW, canvasH)
     }
