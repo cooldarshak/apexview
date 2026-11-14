@@ -42,10 +42,11 @@ class LayoutsTest {
     fun timingTowerReservationLeavesASeparateRectangle() {
         for (mode in listOf(LayoutMode.FEATURED, LayoutMode.GRID)) {
             for ((width, height) in listOf(w to h, 1920f to 1080f, 1080f to 1920f, 1280f to 720f)) {
+                for (feedCount in 1..4) {
                 val towerWidth = minOf(380f, width - 32f)
                 val towerHeight = minOf(720f, height - 40f)
                 val arrangement = Layouts.withOverlays(
-                    mode, 4, width, height, towerWidth, towerHeight,
+                    mode, feedCount, width, height, towerWidth, towerHeight,
                 )
                 val reservedTower = arrangement.tower
                 assertNotNull("$mode $width x $height: tower reservation missing", reservedTower)
@@ -53,7 +54,9 @@ class LayoutsTest {
                 assertTrue(tower.x >= 0f && tower.y >= 0f)
                 assertTrue(tower.x + tower.w <= width + 0.5f)
                 assertTrue(tower.y + tower.h <= height + 0.5f)
+                assertEquals(feedCount, arrangement.slots.size)
                 assertTrue("Tower overlaps a feed: $tower", arrangement.slots.none { tower.overlaps(it) })
+                }
             }
         }
     }
@@ -66,7 +69,7 @@ class LayoutsTest {
                 val towerHeight = minOf(720f, height - 40f)
                 val minMapSide = minOf(width, height) * 0.22f
                 val arrangement = Layouts.withOverlays(
-                    mode, 4, width, height, towerWidth, towerHeight, minMapSide,
+                    mode, feedCount, width, height, towerWidth, towerHeight, minMapSide,
                 )
                 val reservedTower = arrangement.tower
                 val reservedMap = arrangement.map
@@ -77,7 +80,9 @@ class LayoutsTest {
                 assertTrue("Tower overlaps a feed: $tower", arrangement.slots.none { tower.overlaps(it) })
                 assertTrue("Map overlaps a feed: $map", arrangement.slots.none { map.overlaps(it) })
                 assertTrue("Map overlaps timing tower: $map / $tower", !map.overlaps(tower))
+                assertEquals(feedCount, arrangement.slots.size)
                 assertTrue(map.w >= minMapSide && map.h >= minMapSide)
+                }
             }
         }
     }
