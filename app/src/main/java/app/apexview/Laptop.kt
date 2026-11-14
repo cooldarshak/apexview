@@ -247,7 +247,7 @@ private fun TowerSessionHeader(timing: SessionTiming, now: Long) {
 
 /** Narrow headings aligned to the broadcast-style row columns. */
 @Composable
-private fun TowerHeader() {
+fun TowerHeader() {
     Row(
         Modifier.fillMaxWidth().height(19.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -265,14 +265,14 @@ private fun TowerHeader() {
 
 /** One dense live row: order, gear/speed, lap times, gaps, three sector strips and tyre age. */
 @Composable
-private fun TowerRow(
+fun TowerRow(
     timing: SessionTiming,
     number: String,
     state: CardState,
     tyre: Tyre?,
-    kmh: Int?,
-    gear: Int?,
-    speedUnit: String,
+    kmh: Int? = null,
+    gear: Int? = null,
+    speedUnit: String = Settings.KMH,
     highlight: Boolean,
     onClick: () -> Unit,
 ) {
