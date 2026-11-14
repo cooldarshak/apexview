@@ -492,7 +492,8 @@ class AppState(
     private var defaultLayoutMode =
         prefs.getString(PREF_DEFAULT_LAYOUT, null)?.let { runCatching { LayoutMode.valueOf(it) }.getOrNull() } ?: LayoutMode.FEATURED
     /** The TV preset starts the map in its right-hand slot once, then preserves D-pad moves. */
-    private var tvLayoutMapNeedsDefault = defaultLayoutMode == LayoutMode.TV
+    private var tvLayoutMapNeedsDefault =
+        defaultLayoutMode == LayoutMode.TV && prefs.getString(PREF_MAP_PANEL, null).isNullOrBlank()
     /** A resumed session's feed boxes by channel, applied at its first layout. */
     private var resumeLayout: Pair<Map<Int, FloatArray>, SavedLayout>? = null
     /** Every feed silenced at once; the audio choice is kept for when it's turned back on. */
@@ -1165,7 +1166,7 @@ class AppState(
                 mapMode = MapMode.TRACK
                 towerOpen = true
                 overlayLayoutMode = OverlayLayoutMode.DOCKED
-                tvLayoutMapNeedsDefault = !mapPanel.placed
+                tvLayoutMapNeedsDefault = !mapPanel.placed && prefs.getString(PREF_MAP_PANEL, null).isNullOrBlank()
                 prefs.edit()
                     .putString(PREF_MAP_MODE, MapMode.TRACK.name)
                     .putBoolean(PREF_TOWER, true)
@@ -1294,7 +1295,7 @@ class AppState(
                     mapMode = MapMode.TRACK
                     towerOpen = true
                     overlayLayoutMode = OverlayLayoutMode.DOCKED
-                    tvLayoutMapNeedsDefault = true
+                    tvLayoutMapNeedsDefault = !mapPanel.placed && prefs.getString(PREF_MAP_PANEL, null).isNullOrBlank()
                     prefs.edit()
                         .putString(PREF_MAP_MODE, MapMode.TRACK.name)
                         .putBoolean(PREF_TOWER, true)
