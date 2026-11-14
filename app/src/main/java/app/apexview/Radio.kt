@@ -1,5 +1,7 @@
 package app.apexview
 
+import android.view.KeyEvent as AndroidKeyEvent
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -37,13 +39,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.nativeKeyEvent
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -349,9 +351,9 @@ internal fun FloatingPanel(
                             modifier = Modifier
                                 .padding(horizontal = 7.dp, vertical = 1.dp)
                                 .onKeyEvent { event ->
-                                    when (event.key) {
-                                        Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
-                                            if (event.type == KeyEventType.KeyDown) {
+                                    when (event.nativeKeyEvent.keyCode) {
+                                        AndroidKeyEvent.KEYCODE_DPAD_LEFT, AndroidKeyEvent.KEYCODE_DPAD_RIGHT, AndroidKeyEvent.KEYCODE_DPAD_UP, AndroidKeyEvent.KEYCODE_DPAD_DOWN -> {
+                                            if (event.nativeKeyEvent.action == AndroidKeyEvent.ACTION_DOWN) {
                                                 val step = with(density) { 18.dp.toPx() }
                                                 val dx = when (event.key) { Key.DirectionLeft -> -step; Key.DirectionRight -> step; else -> 0f }
                                                 val dy = when (event.key) { Key.DirectionUp -> -step; Key.DirectionDown -> step; else -> 0f }
@@ -361,7 +363,7 @@ internal fun FloatingPanel(
                                                 val maxY = bounds?.let { it.y + it.h - boxH } ?: (height - boxH)
                                                 spot.x = (spot.x + dx).coerceIn(minX, maxX.coerceAtLeast(minX))
                                                 spot.y = (spot.y + dy).coerceIn(minY, maxY.coerceAtLeast(minY))
-                                            } else if (event.type == KeyEventType.KeyUp) spot.store(width, height)
+                                            } else if (event.nativeKeyEvent.action == AndroidKeyEvent.ACTION_UP) spot.store(width, height)
                                             true
                                         }
                                         else -> false
