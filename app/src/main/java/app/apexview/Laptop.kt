@@ -132,6 +132,8 @@ fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float
 /** Live running order. The screen follows the same delayed picture clock as the map. */
 @Composable
 private fun TimingTower(app: AppState, timing: SessionTiming) {
+    // Replays load their car telemetry lazily; live sessions already carry it on SessionTiming.
+    LaunchedEffect(timing) { app.loadSpeeds(timing) }
     var now by remember { mutableLongStateOf(0L) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -175,8 +177,9 @@ private fun TowerSessionHeader(timing: SessionTiming, now: Long) {
         flag.track.safetyCar || flag.track == TrackCondition.VSC || flag.track == TrackCondition.VSC_ENDING -> Color(0xFFFFD60A)
         else -> Color(0xFF30D158)
     }
-    val counter = if (timing.isRace && timing.currentLap != null) {
-        "L${timing.currentLap}/${timing.totalLaps ?: "–"}"
+    val currentLap = timing.currentLap ?: timing.laps.values.mapNotNull { it.lapAt(now) }.maxOrNull()
+    val counter = if (timing.isRace && currentLap != null) {
+        "L${currentLap}/${timing.totalLaps ?: "–"}"
     } else {
         timing.clock.at(now)?.let { reading ->
             val seconds = (reading.remainingMs + 999) / 1000
