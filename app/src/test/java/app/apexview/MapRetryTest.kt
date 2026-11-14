@@ -18,6 +18,20 @@ class MapRetryTest {
     }
 
     @Test
+    fun archiveUsesCatalogSessionStartWhenTvHasNoProgramClock() {
+        assertEquals(1_000L, archiveLookupTime(watchedUtc = 1_000L, sessionStartUtcMs = 2_000L))
+        assertEquals(2_000L, archiveLookupTime(watchedUtc = null, sessionStartUtcMs = 2_000L))
+        assertEquals(null, archiveLookupTime(watchedUtc = null, sessionStartUtcMs = null))
+    }
+
+    @Test
+    fun tvAlwaysUsesCompatibleSoftwareDrmEvenWhenPhonePreferenceIsOff() {
+        assertEquals(true, shouldUseSoftwareDrm(userPreference = false, isTv = true))
+        assertEquals(true, shouldUseSoftwareDrm(userPreference = true, isTv = false))
+        assertEquals(false, shouldUseSoftwareDrm(userPreference = false, isTv = false))
+    }
+
+    @Test
     fun liveSessionMetadataWinsAndPlaceholderTimelineNeverLooksLikeReplay() {
         assertEquals(true, liveTimingSourceFor(knownLive = true, hasTimeline = false, placeholder = true, playerReportsLive = false))
         assertEquals(null, liveTimingSourceFor(knownLive = false, hasTimeline = false, placeholder = false, playerReportsLive = false))
