@@ -81,7 +81,7 @@ fun LaptopPanel(app: AppState, timing: SessionTiming?, modifier: Modifier) {
                 Spacer(Modifier.weight(1f))
                 timing?.let { SessionCountdown(app, it, Type.title2, Modifier.padding(top = 8.dp)) }
             }
-            if (timing != null && timing.laps.isNotEmpty()) TimingTower(app, timing)
+            if (timing != null && timing.laps.isNotEmpty()) TowerTextScale(app) { TimingTower(app, timing) }
             else Text(app.mapStatus ?: "No timing for this session.", style = Type.footnote, modifier = Modifier.padding(20.dp))
         }
         Spacer(Modifier.weight(1f - AppState.LAPTOP_TOWER_SHARE))
@@ -128,15 +128,26 @@ fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float
     val maxTowerHeight = with(density) {
         minOf(TOWER_HEIGHT, (height.toDp() - 40.dp).coerceAtLeast(AppState.TOWER_MIN_HEIGHT_DP.dp))
     }
-    FloatingPanel(
-        app, app.towerSpot, "Timing", "Hide timing", app::toggleTower, width, height, feedScale,
-        maxWidth = TOWER_WIDTH, maxHeight = maxTowerHeight,
-        opacity = app.towerOpacity,
-        locked = app.towerLocked,
-        onResizeFinished = app::finishTowerResize,
-    ) {
-        TimingTower(app, timing)
+    TowerTextScale(app) {
+        FloatingPanel(
+            app, app.towerSpot, "Timing", "Hide timing", app::toggleTower, width, height, feedScale,
+            maxWidth = TOWER_WIDTH, maxHeight = maxTowerHeight,
+            opacity = app.towerOpacity,
+            locked = app.towerLocked,
+            onResizeFinished = app::finishTowerResize,
+        ) {
+            TimingTower(app, timing)
+        }
     }
+}
+
+@Composable
+private fun TowerTextScale(app: AppState, content: @Composable () -> Unit) {
+    val baseDensity = LocalDensity.current
+    CompositionLocalProvider(
+        LocalDensity provides Density(baseDensity.density, baseDensity.fontScale * app.towerFontScale),
+        content = content,
+    )
 }
 
 /** Live running order. The screen follows the same delayed picture clock as the map. */
@@ -155,11 +166,7 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
         .sortedBy { it.second.position ?: 99 }
     val onTop = app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString()
 
-    val baseDensity = LocalDensity.current
-    CompositionLocalProvider(
-        LocalDensity provides Density(baseDensity.density, baseDensity.fontScale * app.towerFontScale)
-    ) {
-        Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
+    Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
             TowerSessionHeader(timing, now)
             TowerHeader()
             LazyColumn {
@@ -180,7 +187,6 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
             }
         }
     }
-}
 
 /** Compact session/track strip, like the header on the F1 timing screen. */
 @Composable
