@@ -1861,12 +1861,12 @@ class AppState(
         val minWidth = minOf(TOWER_MIN_WIDTH_DP * density, area.w)
         val minHeight = minOf(TOWER_MIN_HEIGHT_DP * density, area.h)
         val defaultWidth = minOf(TOWER_DEFAULT_WIDTH_DP * density, area.w * 0.92f)
-        val defaultHeight = minOf(TOWER_DEFAULT_HEIGHT_DP * density, area.h * 0.72f)
+        val defaultHeight = minOf(TOWER_DEFAULT_HEIGHT_DP * density, area.h * 0.58f)
         towerSpot.w = (towerSpot.w.takeIf { it > 0f } ?: defaultWidth).coerceIn(minWidth, area.w)
         towerSpot.h = (towerSpot.h.takeIf { it > 0f } ?: defaultHeight).coerceIn(minHeight, area.h)
         if (towerSpot.x < 0f || towerSpot.y < 0f) {
             towerSpot.x = area.x + (area.w - towerSpot.w) / 2f
-            towerSpot.y = area.y + (area.h - towerSpot.h) / 2f
+            towerSpot.y = area.y + (area.h - towerSpot.h) * 0.04f
         }
         towerSpot.x = towerSpot.x.coerceIn(area.x, (area.x + area.w - towerSpot.w).coerceAtLeast(area.x))
         towerSpot.y = towerSpot.y.coerceIn(area.y, (area.y + area.h - towerSpot.h).coerceAtLeast(area.y))
@@ -1877,12 +1877,12 @@ class AppState(
         if (!mapPanel.placed) {
             mapPanel.restore(prefs.getString(PREF_MAP_PANEL, null), width, height)?.let { mapOpacity = it }
             if (!mapPanel.placed) {
-                val panelWidth = area.w * 0.84f
-                val panelHeight = area.h * 0.78f
+                val panelWidth = area.w * 0.90f
+                val panelHeight = area.h * 0.58f
                 mapPanel.place(
                     Area(
-                        area.x + (area.w - panelWidth) * 0.16f,
-                        area.y + (area.h - panelHeight) * 0.18f,
+                        area.x + (area.w - panelWidth) / 2f,
+                        area.y + area.h - panelHeight - (area.h - panelHeight) * 0.04f,
                         panelWidth,
                         panelHeight,
                     )
