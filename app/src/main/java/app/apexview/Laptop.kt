@@ -337,6 +337,7 @@ fun TowerRow(
     gear: Int? = null,
     speedUnit: String = Settings.KMH,
     highlight: Boolean,
+    rowHeight: Dp = ROW_HEIGHT,
     onClick: () -> Unit,
 ) {
     val driver = timing.drivers[number]
@@ -345,7 +346,7 @@ fun TowerRow(
     val best = state.bestLap
     Row(
         Modifier
-            .height(ROW_HEIGHT)
+            .height(rowHeight)
             .fillMaxWidth()
             .clip(RoundedCornerShape(4.dp))
             .background(
