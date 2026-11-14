@@ -212,6 +212,8 @@ internal fun FloatingPanel(
     maxWidth: androidx.compose.ui.unit.Dp = PANEL_MAX_WIDTH,
     maxHeight: androidx.compose.ui.unit.Dp = PANEL_MAX_HEIGHT,
     minWidth: androidx.compose.ui.unit.Dp = PANEL_MIN_WIDTH,
+    /** Optional reserved area that contains the complete panel and its resize gestures. */
+    bounds: Area? = null,
     /** Opacity of the complete panel, including its contents. */
     opacity: Float = 1f,
     /** When locked, its header and resize grip no longer change the panel's place or size. */
@@ -221,23 +223,30 @@ internal fun FloatingPanel(
     content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
     val density = LocalDensity.current
-    val panelWidth = with(density) { minOf(maxWidth, (width.toDp() - 32.dp)) }
+    val panelWidth = with(density) {
+        minOf(maxWidth, bounds?.let { it.w.toDp() } ?: (width.toDp() - 32.dp))
+    }
+    val panelHeight = with(density) { minOf(maxHeight, bounds?.let { it.h.toDp() } ?: maxHeight) }
     val effectiveMinWidth = minWidth.coerceAtMost(panelWidth)
+    val effectiveMinHeight = PANEL_MIN_HEIGHT.coerceAtMost(panelHeight)
     if (spot.x < 0f) {
         with(density) {
             val w = panelWidth.toPx()
-            val h = maxHeight.toPx()
+            val h = panelHeight.toPx()
             val saved = spot.saved()
             if (saved != null && saved.size >= 4 && saved[2] > 0f && saved[3] > 0f) {
                 spot.w = saved[2] * width
                 spot.h = saved[3] * height
             }
-            // The biggest gap the feeds leave, if the panel fits in it; else above the controls.
-            val gap = Layouts.largestFree(app.tileSlots(), width, height)?.takeIf { it.h >= h }
+            val gap = if (bounds == null) Layouts.largestFree(app.tileSlots(), width, height)?.takeIf { it.h >= h } else null
             when {
                 saved != null -> {
                     spot.x = saved[0] * width
                     spot.y = saved[1] * height
+                }
+                bounds != null -> {
+                    spot.x = bounds.x + (bounds.w - w).coerceAtLeast(0f) / 2f
+                    spot.y = bounds.y + (bounds.h - h).coerceAtLeast(0f) / 2f
                 }
                 gap != null -> {
                     spot.x = gap.x + (gap.w - w).coerceAtLeast(0f) / 2
@@ -248,16 +257,28 @@ internal fun FloatingPanel(
                     spot.y = height - h - 120.dp.toPx()
                 }
             }
-            spot.x = spot.x.coerceIn(0f, (width - w).coerceAtLeast(0f))
-            spot.y = spot.y.coerceIn(0f, (height - h).coerceAtLeast(0f))
+            val minX = bounds?.x ?: 0f
+            val minY = bounds?.y ?: 0f
+            val maxX = bounds?.let { it.x + it.w - w } ?: (width - w)
+            val maxY = bounds?.let { it.y + it.h - h } ?: (height - h)
+            spot.x = spot.x.coerceIn(minX, maxX.coerceAtLeast(minX))
+            spot.y = spot.y.coerceIn(minY, maxY.coerceAtLeast(minY))
         }
     }
     val shownWidth = if (spot.w > 0f) with(density) {
         spot.w.toDp().coerceIn(effectiveMinWidth, panelWidth)
     } else panelWidth
+    val shownHeight = if (spot.h > 0f) with(density) {
+        spot.h.toDp().coerceIn(effectiveMinHeight, panelHeight)
+    } else panelHeight
     val shownWidthPx = with(density) { shownWidth.toPx() }
+    val shownHeightPx = with(density) { shownHeight.toPx() }
     if (spot.w > 0f) spot.w = shownWidthPx
-    spot.x = spot.x.coerceIn(0f, (width - shownWidthPx).coerceAtLeast(0f))
+    if (spot.h > 0f) spot.h = shownHeightPx
+    val minX = bounds?.x ?: 0f
+    val minY = bounds?.y ?: 0f
+    spot.x = spot.x.coerceIn(minX, (bounds?.let { it.x + it.w - shownWidthPx } ?: (width - shownWidthPx)).coerceAtLeast(minX))
+    spot.y = spot.y.coerceIn(minY, (bounds?.let { it.y + it.h - shownHeightPx } ?: (height - shownHeightPx)).coerceAtLeast(minY))
     val minWidthPx = with(density) { effectiveMinWidth.toPx() }
     // Where the finger has taken the panel (or its corner) since the gesture began, before
     // snapping: snapping works from this, so an edge can be pulled back off a line.
@@ -277,7 +298,7 @@ internal fun FloatingPanel(
         Column(
             Modifier
                 .width(shownWidth)
-                .then(if (spot.h > 0f) Modifier.height(with(density) { spot.h.toDp() }) else Modifier.heightIn(max = maxHeight))
+                .height(shownHeight)
                 .clip(RoundedCornerShape(16.dp))
                 .background(Color.Black.copy(alpha = 0.72f))
         ) {
@@ -300,8 +321,12 @@ internal fun FloatingPanel(
                                     x += pull(listOf(x, x + boxW), xs, SNAP.toPx())
                                     y += pull(listOf(y, y + boxH), ys, SNAP.toPx())
                                 }
-                                spot.x = x.coerceIn(0f, (width - boxW).coerceAtLeast(0f))
-                                spot.y = y.coerceIn(0f, (height - HEADER_HEIGHT.toPx()).coerceAtLeast(0f))
+                                val minX = bounds?.x ?: 0f
+                                val minY = bounds?.y ?: 0f
+                                val maxX = bounds?.let { it.x + it.w - boxW } ?: (width - boxW)
+                                val maxY = bounds?.let { it.y + it.h - boxH } ?: (height - HEADER_HEIGHT.toPx())
+                                spot.x = x.coerceIn(minX, maxX.coerceAtLeast(minX))
+                                spot.y = y.coerceIn(minY, maxY.coerceAtLeast(minY))
                             }
                         }
                     )
@@ -336,8 +361,10 @@ internal fun FloatingPanel(
                             w += pull(listOf(spot.x + w), xs, SNAP.toPx())
                             h += pull(listOf(spot.y + h), ys, SNAP.toPx())
                         }
-                        spot.w = w.coerceIn(minWidthPx, (width - spot.x).coerceAtLeast(minWidthPx))
-                        spot.h = h.coerceIn(PANEL_MIN_HEIGHT.toPx(), (height - spot.y).coerceAtLeast(PANEL_MIN_HEIGHT.toPx()))
+                        val availableWidth = bounds?.let { it.x + it.w - spot.x } ?: (width - spot.x)
+                        val availableHeight = bounds?.let { it.y + it.h - spot.y } ?: (height - spot.y)
+                        spot.w = w.coerceIn(minWidthPx, availableWidth.coerceAtLeast(minWidthPx))
+                        spot.h = h.coerceIn(effectiveMinHeight.toPx(), availableHeight.coerceAtLeast(effectiveMinHeight.toPx()))
                     }
                 },
             contentAlignment = Alignment.Center,
