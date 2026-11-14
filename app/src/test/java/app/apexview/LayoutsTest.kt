@@ -82,6 +82,31 @@ class LayoutsTest {
     }
 
     @Test
+    fun tvLandscapeLayoutKeepsVideoLeftTowerTopRightAndMapBelow() {
+        for ((width, height) in listOf(1920f to 1080f, 1280f to 720f, 3840f to 2160f)) {
+            for (feedCount in 1..4) {
+                val plan = Layouts.withCombinedOverlays(
+                    LayoutMode.TV, feedCount, width, height, OverlayLayoutMode.DOCKED,
+                )
+                assertEquals(feedCount, plan.slots.size)
+                assertEquals(0f, plan.feeds.x, 0.01f)
+                assertTrue(plan.feeds.y > 0f)
+                assertEquals(plan.feeds.w, plan.workspace.x, 0.01f)
+                assertEquals(0f, plan.tower.y, 0.01f)
+                assertEquals(plan.workspace.x, plan.tower.x, 0.01f)
+                assertTrue(plan.map.y > plan.tower.y + plan.tower.h)
+                assertTrue(plan.map.y + plan.map.h <= height + 0.5f)
+                assertTrue(plan.slots.all { slot ->
+                    slot.x >= plan.feeds.x - 0.5f && slot.y >= plan.feeds.y - 0.5f &&
+                        slot.x + slot.w <= plan.feeds.x + plan.feeds.w + 0.5f &&
+                        slot.y + slot.h <= plan.feeds.y + plan.feeds.h + 0.5f
+                })
+                assertTrue(plan.slots.none { plan.workspace.overlaps(it) })
+            }
+        }
+    }
+
+    @Test
     fun combinedFloatingLayoutsReserveAWorkspaceForBothPanels() {
         val screens = listOf(
             1080f to 2400f,
