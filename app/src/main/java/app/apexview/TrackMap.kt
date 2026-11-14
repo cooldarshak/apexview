@@ -300,8 +300,7 @@ private fun MapControls(app: AppState, timing: SessionTiming) {
                                 val step = with(density) { 18.dp.toPx() }
                                 val dx = when (event.key) { Key.DirectionLeft -> -step; Key.DirectionRight -> step; else -> 0f }
                                 val dy = when (event.key) { Key.DirectionUp -> -step; Key.DirectionDown -> step; else -> 0f }
-                                panel.x = (panel.x + dx).coerceIn(0f, (screenW - panel.w).coerceAtLeast(0f))
-                                panel.y = (panel.y + dy).coerceIn(0f, (screenH - panel.h).coerceAtLeast(0f))
+                                app.arrangeMap(Offset(dx, dy), 1f, 0f)
                             } else if (event.type == KeyEventType.KeyUp) app.storeMapPanel()
                             true
                         }
