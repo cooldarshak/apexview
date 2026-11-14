@@ -255,7 +255,9 @@ internal fun FloatingPanel(
     val shownWidth = if (spot.w > 0f) with(density) {
         spot.w.toDp().coerceIn(effectiveMinWidth, panelWidth)
     } else panelWidth
-    if (spot.w > 0f) spot.w = with(density) { shownWidth.toPx() }
+    val shownWidthPx = with(density) { shownWidth.toPx() }
+    if (spot.w > 0f) spot.w = shownWidthPx
+    spot.x = spot.x.coerceIn(0f, (width - shownWidthPx).coerceAtLeast(0f))
     val minWidthPx = with(density) { effectiveMinWidth.toPx() }
     // Where the finger has taken the panel (or its corner) since the gesture began, before
     // snapping: snapping works from this, so an edge can be pulled back off a line.
