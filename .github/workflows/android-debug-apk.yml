@@ -40,9 +40,19 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Install FFmpeg tools for synthetic HEVC fixtures
+        timeout-minutes: 6
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ffmpeg
+          set -euo pipefail
+          # Avoid downloading translation indexes and bound mirror/network stalls.
+          sudo apt-get -o Acquire::Languages=none \\
+            -o Acquire::Retries=2 \\
+            -o Acquire::http::Timeout=30 \\
+            -o Acquire::https::Timeout=30 \\
+            update
+          sudo apt-get -o Acquire::Retries=2 \\
+            -o Acquire::http::Timeout=30 \\
+            -o Acquire::https::Timeout=30 \\
+            install --no-install-recommends -y ffmpeg
           ffmpeg -hide_banner -encoders 2>&1 | grep -q libx265
           ffmpeg -hide_banner -bsfs 2>&1 | grep -q trace_headers
 
