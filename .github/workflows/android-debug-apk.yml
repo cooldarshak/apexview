@@ -44,6 +44,9 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --no-daemon testDebugUnitTest
 
+      - name: Generate and validate synthetic HEVC feed pair
+        run: python3 tools/generate_hevc_fixtures.py
+
       # This repository must sign every distributable APK with the same private key. Do not
       # fall back to the ephemeral debug.keystore on a hosted runner: Android will reject updates.
       - name: Configure persistent APK signing
