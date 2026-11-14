@@ -11,6 +11,8 @@ data class Slot(val x: Float, val y: Float, val w: Float) {
 enum class LayoutMode(val label: String) {
     FEATURED("Main + strip"),
     GRID("Grid"),
+    /** Broadcast-style TV view: video left, timing tower top-right, track map below. */
+    TV("TV"),
     /** The arrangement saved with Save layout; falls back to main + strip where there's none. */
     CUSTOM("My layout"),
 }
