@@ -2954,7 +2954,7 @@ class AppState(
         private const val PREF_TOWER_RESERVE = "towerReserve"
         const val TOWER_DEFAULT_WIDTH_DP = 380f
         const val TOWER_DEFAULT_HEIGHT_DP = 720f
-        const val TOWER_MIN_WIDTH_DP = 220f
+        const val TOWER_MIN_WIDTH_DP = 300f
         const val TOWER_MIN_HEIGHT_DP = 260f
         const val TOWER_MIN_FONT_SCALE = 0.7f
         const val TOWER_MAX_FONT_SCALE = 1.5f
