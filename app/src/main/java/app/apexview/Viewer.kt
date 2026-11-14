@@ -1449,6 +1449,7 @@ private fun MapSheet(app: AppState) {
                             )
                         },
                         valueRange = AppState.TOWER_MIN_WIDTH_DP..maxTowerWidthDp,
+                        onValueChangeFinished = app::finishTowerResize,
                         trackColor = Ink.surfaceHigh,
                     )
                     Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1464,6 +1465,7 @@ private fun MapSheet(app: AppState) {
                             )
                         },
                         valueRange = AppState.TOWER_MIN_HEIGHT_DP..maxTowerHeightDp,
+                        onValueChangeFinished = app::finishTowerResize,
                         trackColor = Ink.surfaceHigh,
                     )
                     Text(
