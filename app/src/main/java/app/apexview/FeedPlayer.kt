@@ -102,10 +102,15 @@ class FeedPlayer(
                         try {
                             drm.setPropertyString("securityLevel", "L3")
                         } catch (e: Exception) {
-                            error = "Phone refused software DRM: ${e.message}"
+                            error = "Device refused Widevine L3: ${e.message}"
+                            throw IllegalStateException(error, e)
                         }
                     }
                     drmLevel = runCatching { drm.getPropertyString("securityLevel") }.getOrDefault("?")
+                    if (forceL3 && !drmLevel.equals("L3", ignoreCase = true)) {
+                        error = "Multiview requires Widevine L3; this device reports $drmLevel"
+                        throw IllegalStateException(error)
+                    }
                 }
             } catch (e: UnsupportedDrmException) {
                 error = "Widevine unavailable on this phone"
