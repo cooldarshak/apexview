@@ -46,6 +46,72 @@ class LayoutsTest {
     }
 
     @Test
+    fun combinedDockedLayoutsKeepVideoTowerAndMapInSeparateRegions() {
+        val screens = listOf(
+            1080f to 2400f,
+            720f to 1600f,
+            1920f to 1080f,
+            2560f to 1440f,
+            1280f to 720f,
+        )
+        for (mode in LayoutMode.entries) {
+            for ((width, height) in screens) {
+                for (feedCount in 1..4) {
+                    val plan = Layouts.withCombinedOverlays(
+                        mode, feedCount, width, height, OverlayLayoutMode.DOCKED,
+                    )
+                    assertEquals(feedCount, plan.slots.size)
+                    assertTrue(plan.feeds.x >= 0f && plan.feeds.y >= 0f)
+                    assertTrue(plan.feeds.x + plan.feeds.w <= width + 0.5f)
+                    assertTrue(plan.feeds.y + plan.feeds.h <= height + 0.5f)
+                    assertTrue(plan.workspace.x >= 0f && plan.workspace.y >= 0f)
+                    assertTrue(plan.workspace.x + plan.workspace.w <= width + 0.5f)
+                    assertTrue(plan.workspace.y + plan.workspace.h <= height + 0.5f)
+                    assertTrue("Tower outside workspace: ${plan.tower}", plan.tower.x >= plan.workspace.x && plan.tower.y >= plan.workspace.y)
+                    assertTrue("Map outside workspace: ${plan.map}", plan.map.x >= plan.workspace.x && plan.map.y >= plan.workspace.y)
+                    assertTrue(!plan.tower.overlaps(plan.map))
+                    assertTrue(plan.slots.none { plan.workspace.overlaps(it) })
+                    plan.slots.forEach { slot ->
+                        assertTrue(slot.x >= plan.feeds.x - 0.5f && slot.y >= plan.feeds.y - 0.5f)
+                        assertTrue(slot.x + slot.w <= plan.feeds.x + plan.feeds.w + 0.5f)
+                        assertTrue(slot.y + slot.h <= plan.feeds.y + plan.feeds.h + 0.5f)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun combinedFloatingLayoutsReserveAWorkspaceForBothPanels() {
+        val screens = listOf(
+            1080f to 2400f,
+            720f to 1600f,
+            1920f to 1080f,
+            2560f to 1440f,
+            1280f to 720f,
+        )
+        for (mode in LayoutMode.entries) {
+            for ((width, height) in screens) {
+                for (feedCount in 1..4) {
+                    val plan = Layouts.withCombinedOverlays(
+                        mode, feedCount, width, height, OverlayLayoutMode.FLOATING,
+                    )
+                    assertTrue(plan.floating)
+                    assertEquals(feedCount, plan.slots.size)
+                    assertTrue(plan.tower == plan.workspace)
+                    assertTrue(plan.map == plan.workspace)
+                    assertTrue(plan.slots.none { plan.workspace.overlaps(it) })
+                    plan.slots.forEach { slot ->
+                        assertTrue(slot.x >= plan.feeds.x - 0.5f && slot.y >= plan.feeds.y - 0.5f)
+                        assertTrue(slot.x + slot.w <= plan.feeds.x + plan.feeds.w + 0.5f)
+                        assertTrue(slot.y + slot.h <= plan.feeds.y + plan.feeds.h + 0.5f)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     fun timingTowerReservationLeavesASeparateRectangle() {
         for (mode in listOf(LayoutMode.FEATURED, LayoutMode.GRID)) {
             for ((width, height) in listOf(w to h, 1920f to 1080f, 1080f to 1920f, 1280f to 720f)) {
