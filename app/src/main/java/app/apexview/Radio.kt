@@ -37,6 +37,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -403,7 +404,13 @@ internal fun FloatingPanel(
                                 .pressable(scaleTo = 1f) {},
                         )
                     }
-                    Spacer(Modifier.weight(1f))
+                    Text(
+                        title,
+                        style = Type.headline.copy(fontSize = 10.sp),
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f),
+                    )
                 } else {
                     Text(title, style = Type.headline, modifier = Modifier.weight(1f))
                 }
