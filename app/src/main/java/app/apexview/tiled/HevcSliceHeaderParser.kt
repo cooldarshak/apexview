@@ -87,7 +87,9 @@ internal object HevcSliceHeaderParser {
         }
 
         val pocLsb = bits.readBits(sps.log2MaxPicOrderCntLsb)
-        val fromSps = bits.readBit() != 0
+        // short_term_ref_pic_set_sps_flag is present only when the SPS defines at least
+        // one short-term RPS. With zero SPS sets, the slice carries an inline RPS directly.
+        val fromSps = if (sps.shortTermRefPicSets.isNotEmpty()) bits.readBit() != 0 else false
         val shortTermIndex: Int?
         val shortTermSet: HevcParameterSets.ShortTermRefPicSet
         if (fromSps) {
