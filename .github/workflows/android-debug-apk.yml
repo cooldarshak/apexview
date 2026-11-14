@@ -5,6 +5,7 @@ on:
     branches:
       - feature/playback-speed-tv-controls
       - feature/timing-tower-map-menu
+      - fix/tv-timing-map-and-dpad-sliders
   workflow_dispatch:
 
 permissions:
@@ -44,6 +45,7 @@ jobs:
       # This repository must sign every distributable APK with the same private key. Do not
       # fall back to the ephemeral debug.keystore on a hosted runner: Android will reject updates.
       - name: Configure persistent APK signing
+        id: apk_signing
         env:
           APK_SIGNING_KEYSTORE_BASE64: ${{ secrets.APK_SIGNING_KEYSTORE_BASE64 }}
           APK_SIGNING_STORE_PASSWORD: ${{ secrets.APK_SIGNING_STORE_PASSWORD }}
@@ -53,9 +55,10 @@ jobs:
           set -euo pipefail
           for name in APK_SIGNING_KEYSTORE_BASE64 APK_SIGNING_STORE_PASSWORD APK_SIGNING_KEY_ALIAS APK_SIGNING_KEY_PASSWORD; do
             if [ -z "${!name:-}" ]; then
-              echo "::error::Missing repository Actions secret: $name"
-              echo "Add the four APK_SIGNING_* repository secrets before dispatching this workflow." >> "$GITHUB_STEP_SUMMARY"
-              exit 1
+              echo "APK_SIGNING_READY=false" >> "$GITHUB_ENV"
+              echo "::warning::Missing repository Actions secret: $name. Tests and compilation will run, but no distributable APK will be uploaded."
+              echo "Add the four APK_SIGNING_* repository secrets, then dispatch this workflow to create an updateable APK." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
             fi
           done
           KEYSTORE_PATH="$RUNNER_TEMP/apexview-update-key.p12"
@@ -67,6 +70,7 @@ jobs:
           keyAlias=$APK_SIGNING_KEY_ALIAS
           keyPassword=$APK_SIGNING_KEY_PASSWORD
           EOF
+          echo "APK_SIGNING_READY=true" >> "$GITHUB_ENV"
           echo "Persistent APK signing key configured." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Assemble debug APK
@@ -74,7 +78,7 @@ jobs:
         run: ./gradlew --no-daemon assembleDebug
 
       - name: Upload debug APK
-        if: always() && !cancelled()
+        if: success() && env.APK_SIGNING_READY == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: apexview-custom-debug-apk
