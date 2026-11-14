@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/playback-speed-tv-controls
+      - feature/timing-tower-map-menu
   workflow_dispatch:
 
 permissions:
