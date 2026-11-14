@@ -74,7 +74,7 @@ object Layouts {
                 tower = workspace
                 map = workspace
             } else {
-                val towerHeight = height * 0.64f
+                val towerHeight = height * 0.78f
                 tower = Area(workspace.x, 0f, workspace.w, towerHeight)
                 map = Area(workspace.x, towerHeight, workspace.w, height - towerHeight)
             }
