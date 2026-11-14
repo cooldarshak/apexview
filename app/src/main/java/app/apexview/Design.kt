@@ -47,6 +47,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.nativeKeyEvent
 
 /**
  * The app's look, after Apple's TV app: black canvas, artwork carries the color, white type in a
