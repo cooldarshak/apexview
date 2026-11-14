@@ -84,7 +84,7 @@ internal object CmafBoxInspector {
             stsd.position(stsd.position() + 8) // full box header + entry count
             entry = readFourCc(stsd)
             if (stsd.remaining() >= 28 && (handler == "vide")) {
-                stsd.position(stsd.position() + 16)
+                stsd.position(stsd.position() + 24)
                 width = stsd.short.toInt() and 0xffff
                 height = stsd.short.toInt() and 0xffff
             }
