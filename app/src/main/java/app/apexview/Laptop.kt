@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -34,6 +35,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -124,6 +127,8 @@ fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float
     FloatingPanel(
         app, app.towerSpot, "Timing", "Hide timing", app::toggleTower, width, height, feedScale,
         maxWidth = TOWER_WIDTH, maxHeight = TOWER_HEIGHT,
+        opacity = app.towerOpacity,
+        locked = app.towerLocked,
     ) {
         TimingTower(app, timing)
     }
@@ -145,23 +150,28 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
         .sortedBy { it.second.position ?: 99 }
     val onTop = app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString()
 
-    Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
-        TowerSessionHeader(timing, now)
-        TowerHeader()
-        LazyColumn {
-            items(rows, key = { it.first }) { (number, state) ->
-                val kmh = timing.speeds[number]?.kmhAt(now)
-                val gear = timing.speeds[number]?.gearAt(now)
-                TowerRow(
-                    timing = timing,
-                    number = number,
-                    state = state,
-                    tyre = timing.tyres[number]?.at(now),
-                    kmh = kmh,
-                    gear = gear,
-                    speedUnit = app.settings.speedUnit,
-                    highlight = number == onTop,
-                ) { app.showOnboard(number) }
+    val baseDensity = LocalDensity.current
+    CompositionLocalProvider(
+        LocalDensity provides Density(baseDensity.density, baseDensity.fontScale * app.towerFontScale)
+    ) {
+        Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
+            TowerSessionHeader(timing, now)
+            TowerHeader()
+            LazyColumn {
+                items(rows, key = { it.first }) { (number, state) ->
+                    val kmh = timing.speeds[number]?.kmhAt(now)
+                    val gear = timing.speeds[number]?.gearAt(now)
+                    TowerRow(
+                        timing = timing,
+                        number = number,
+                        state = state,
+                        tyre = timing.tyres[number]?.at(now),
+                        kmh = kmh,
+                        gear = gear,
+                        speedUnit = app.settings.speedUnit,
+                        highlight = number == onTop,
+                    ) { app.showOnboard(number) }
+                }
             }
         }
     }
