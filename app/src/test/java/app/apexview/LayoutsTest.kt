@@ -185,6 +185,29 @@ class LayoutsTest {
     }
 
     @Test
+    fun tvLayoutMatchesBroadcastStyleLeftVideoAndRightTimingSidebar() {
+        val width = 1536f
+        val height = 768f
+        val plan = Layouts.withCombinedOverlays(
+            LayoutMode.TV, 1, width, height, OverlayLayoutMode.DOCKED,
+        )
+        assertEquals(width * 0.66f, plan.feeds.w, 1f)
+        assertEquals(0f, plan.feeds.x, 0.1f)
+        assertEquals(plan.feeds.w, plan.workspace.x, 0.1f)
+        assertEquals(width - plan.feeds.w, plan.workspace.w, 1f)
+        assertEquals(0f, plan.tower.y, 0.1f)
+        assertEquals(height * 0.78f, plan.tower.h, 1f)
+        assertEquals(plan.tower.y + plan.tower.h, plan.map.y, 0.1f)
+        assertEquals(height * 0.22f, plan.map.h, 1f)
+        assertTrue(!plan.tower.overlaps(plan.map))
+        assertEquals(1, plan.slots.size)
+        val video = plan.slots.single()
+        assertEquals(0f, video.x, 0.1f)
+        assertEquals((height - video.h) / 2f, video.y, 1f)
+        assertTrue(video.x + video.w <= plan.feeds.x + plan.feeds.w + 1f)
+    }
+
+    @Test
     fun timingTowerReservationLeavesASeparateRectangle() {
         for (mode in listOf(LayoutMode.FEATURED, LayoutMode.GRID)) {
             for ((width, height) in listOf(w to h, 1920f to 1080f, 1080f to 1920f, 1280f to 720f)) {
