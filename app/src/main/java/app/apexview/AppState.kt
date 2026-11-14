@@ -2025,8 +2025,41 @@ class AppState(
         panel.y += pan.y
         if (zoom != 1f) panel.scale(zoom)
         if (rotation != 0f) panel.rotation = (panel.rotation + rotation).mod(360f)
-        if (combinedOverlaysFloating) combinedOverlayPlan?.workspace?.let { keepMapInArea(it) }
+        if (combinedOverlaysFloating) {
+            // In Move and overlap mode the map can sit anywhere on screen, including over the
+            // broadcast logo. Only the original feed layout remains reserved.
+            keepMapOnScreen()
+            combinedOverlayPlan?.workspace?.let(::expandTowerWhenMapLeavesWorkspace)
+        }
         showChrome()
+    }
+
+    private fun expandTowerWhenMapLeavesWorkspace(workspace: Area) {
+        val centerX = mapPanel.x + mapPanel.w / 2f
+        val centerY = mapPanel.y + mapPanel.h / 2f
+        val mapIsInOverlayColumn = centerX in workspace.x..(workspace.x + workspace.w) &&
+            centerY in workspace.y..(workspace.y + workspace.h)
+        if (!mapIsInOverlayColumn && !towerExpandedForMapMove) {
+            towerHeightBeforeMapMove = towerSpot.h.takeIf { it > 0f }
+            towerYBeforeMapMove = towerSpot.y.takeIf { it >= 0f }
+            towerSpot.y = workspace.y
+            towerSpot.h = workspace.h
+            towerExpandedForMapMove = true
+            storeTowerPanel()
+        } else if (mapIsInOverlayColumn && towerExpandedForMapMove) {
+            towerSpot.h = (towerHeightBeforeMapMove ?: minOf(TOWER_DEFAULT_HEIGHT_DP *
+                context.resources.displayMetrics.density, workspace.h)).coerceIn(
+                minOf(TOWER_MIN_HEIGHT_DP * context.resources.displayMetrics.density, workspace.h),
+                workspace.h,
+            )
+            towerSpot.y = (towerYBeforeMapMove ?: workspace.y).coerceIn(
+                workspace.y, (workspace.y + workspace.h - towerSpot.h).coerceAtLeast(workspace.y),
+            )
+            towerHeightBeforeMapMove = null
+            towerYBeforeMapMove = null
+            towerExpandedForMapMove = false
+            storeTowerPanel()
+        }
     }
 
     fun updateMapOpacity(value: Float) {
@@ -2088,6 +2121,10 @@ class AppState(
         private set
     var towerReserve by mutableStateOf(prefs.getBoolean(PREF_TOWER_RESERVE, false))
         private set
+    /** The tower's preferred height before the floating map moves over the video area. */
+    private var towerHeightBeforeMapMove: Float? = null
+    private var towerYBeforeMapMove: Float? = null
+    private var towerExpandedForMapMove = false
 
     fun toggleTower() {
         towerOpen = !towerOpen
@@ -2129,6 +2166,9 @@ class AppState(
         towerSpot.y = -1f
         towerSpot.w = -1f
         towerSpot.h = -1f
+        towerHeightBeforeMapMove = null
+        towerYBeforeMapMove = null
+        towerExpandedForMapMove = false
         mapPanel.placed = false
         if (mapReserve && towerOpen && towerReserve) requestOverlayLayout()
     }
