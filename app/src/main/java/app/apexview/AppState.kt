@@ -1780,6 +1780,7 @@ class AppState(
                 mapPanel.place(plan.map)
                 mapPanel.placed = true
             }
+            handPlaced = false
             plan.slots.zip(ordered).forEach { (slot, tile) -> settle(tile, slot) }
             return
         } else {
@@ -1979,7 +1980,8 @@ class AppState(
         if (mode == mapMode) return
         mapMode = mode
         prefs.edit().putString(PREF_MAP_MODE, mode.name).apply()
-        if ((mapReserve || towerOpen && towerReserve) && !handPlaced) {
+        if (mapReserve || towerOpen && towerReserve) {
+            // Overlay reservations take priority over any hand-placed feed layout.
             requestOverlayLayout()
         }
         if (canvasW > 0f) placeMapIfNeeded(canvasW, canvasH)
