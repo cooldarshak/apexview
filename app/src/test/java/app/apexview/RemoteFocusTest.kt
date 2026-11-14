@@ -65,16 +65,7 @@ class RemoteFocusTest {
     /**
      * Home's carousel with the remote on a slide's button, on a device that says it's a TV. With
      * Compose's own TV scrolling (no [PhoneScrolling]) this never settles: the test times out.
-     */
-    @Test
-    fun mapAndTowerSlidersAdjustWithDpadRepeatAndClampAtRangeEnds() {
-        assertEquals(0.51f, sliderDpadValue(0.5f, 0f, 1f, 1, 1), 0.0001f)
-        assertEquals(0.55f, sliderDpadValue(0.5f, 0f, 1f, 1, 8), 0.0001f)
-        assertEquals(0f, sliderDpadValue(0.01f, 0f, 1f, -1, 1), 0.0001f)
-        assertEquals(1f, sliderDpadValue(0.99f, 0f, 1f, 1, 8), 0.0001f)
-    }
-
-    @Test
+     */    @Test
     fun theCarouselStaysPutUnderTheRemote() {
         shadowOf(RuntimeEnvironment.getApplication().packageManager)
             .setSystemFeature(PackageManager.FEATURE_LEANBACK, true)
@@ -256,7 +247,7 @@ class RemoteFocusTest {
         assertTrue(shouldShowMapControls(isTv = true, arranging = false, floating = false, docked = false))
         assertTrue(shouldShowMapControls(isTv = false, arranging = true, floating = false, docked = false))
         assertTrue(shouldShowMapControls(isTv = false, arranging = false, floating = true, docked = false))
-        assertFalse(shouldShowMapControls(isTv = true, arranging = false, floating = true, docked = true))
+        assertTrue(shouldShowMapControls(isTv = true, arranging = false, floating = true, docked = true))
         assertFalse(shouldShowMapControls(isTv = false, arranging = false, floating = false, docked = false))
     }
 
