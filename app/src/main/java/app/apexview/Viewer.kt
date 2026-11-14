@@ -1255,25 +1255,25 @@ private fun MapSheet(app: AppState) {
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
     ) {
         KeepSystemBarsHidden()
-        Column(Modifier.navigationBarsPadding().padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
-            Text("Track map", style = Type.title2)
+        val density = LocalDensity.current
+        val config = LocalConfiguration.current
+        val maxTowerWidthDp = (config.screenWidthDp - 32f).coerceAtLeast(AppState.TOWER_MIN_WIDTH_DP)
+        val maxTowerHeightDp = (config.screenHeightDp - 40f).coerceAtLeast(AppState.TOWER_MIN_HEIGHT_DP)
+        val defaultTowerWidthDp = minOf(AppState.TOWER_DEFAULT_WIDTH_DP, maxTowerWidthDp)
+        val defaultTowerHeightDp = minOf(AppState.TOWER_DEFAULT_HEIGHT_DP, maxTowerHeightDp)
+        val towerWidthDp = with(density) {
+            (app.towerSpot.w.takeIf { it > 0f } ?: defaultTowerWidthDp.dp.toPx()).toDp().value
+        }.coerceIn(AppState.TOWER_MIN_WIDTH_DP, maxTowerWidthDp)
+        val towerHeightDp = with(density) {
+            (app.towerSpot.h.takeIf { it > 0f } ?: defaultTowerHeightDp.dp.toPx()).toDp().value
+        }.coerceIn(AppState.TOWER_MIN_HEIGHT_DP, maxTowerHeightDp)
+        Column(
+            Modifier.navigationBarsPadding().verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp).padding(bottom = 24.dp)
+        ) {
+            Text("Live timing overlays", style = Type.title2)
+            Text("Track map", style = Type.headline, modifier = Modifier.padding(top = 18.dp))
             app.mapStatus?.let { Text(it, style = Type.footnote, modifier = Modifier.padding(top = 4.dp)) }
-
-            // The standalone timing tower uses the same live F1 timing session as the track map.
-            // It can be shown alongside the map without opening a separate F1 TV video feed.
-            Column(
-                Modifier.padding(top = 16.dp).clip(RoundedCornerShape(12.dp))
-                    .background(Ink.background).padding(horizontal = 16.dp, vertical = 10.dp)
-            ) {
-                SwitchRow("Show timing tower", app.towerOpen) { checked ->
-                    if (checked != app.towerOpen) app.toggleTower()
-                }
-                Text(
-                    "Add the live driver order, last laps, gaps, intervals and tyre information over the video feeds.",
-                    style = Type.footnote,
-                    modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 2.dp, bottom = 4.dp),
-                )
-            }
 
             Row(
                 Modifier.padding(top = 20.dp).clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(3.dp)
@@ -1390,6 +1390,100 @@ private fun MapSheet(app: AppState) {
                         )
                     }
                 }
+            }
+
+            Text("Timing tower", style = Type.headline, modifier = Modifier.padding(top = 28.dp))
+            Column(
+                Modifier.padding(top = 10.dp).clip(RoundedCornerShape(12.dp))
+                    .background(Ink.background).padding(horizontal = 16.dp, vertical = 10.dp)
+            ) {
+                SwitchRow("Show timing tower", app.towerOpen) { checked ->
+                    if (checked != app.towerOpen) app.toggleTower()
+                }
+                Text(
+                    "Show the live driver order, lap times, gaps, sectors and tyre information over the video feeds.",
+                    style = Type.footnote,
+                    modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 2.dp, bottom = 4.dp),
+                )
+            }
+            if (app.towerOpen) {
+                Column(
+                    Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
+                        .background(Ink.background).padding(horizontal = 16.dp, vertical = 12.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Text size", style = Type.body, modifier = Modifier.weight(1f))
+                        Text("%d%%".format((app.towerFontScale * 100f).toInt()), style = Type.footnote)
+                    }
+                    AppleSlider(
+                        value = app.towerFontScale,
+                        onValueChange = app::updateTowerFontScale,
+                        valueRange = AppState.TOWER_MIN_FONT_SCALE..AppState.TOWER_MAX_FONT_SCALE,
+                        trackColor = Ink.surfaceHigh,
+                    )
+                    Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Opacity", style = Type.body, modifier = Modifier.weight(1f))
+                        Text("%d%%".format((app.towerOpacity * 100f).toInt()), style = Type.footnote)
+                    }
+                    AppleSlider(
+                        value = app.towerOpacity,
+                        onValueChange = app::updateTowerOpacity,
+                        valueRange = 0.2f..1f,
+                        trackColor = Ink.surfaceHigh,
+                    )
+                }
+                Column(
+                    Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
+                        .background(Ink.background).padding(horizontal = 16.dp, vertical = 12.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Width", style = Type.body, modifier = Modifier.weight(1f))
+                        Text("%.0f dp".format(towerWidthDp), style = Type.footnote)
+                    }
+                    AppleSlider(
+                        value = towerWidthDp,
+                        onValueChange = { value ->
+                            app.updateTowerSize(
+                                with(density) { value.dp.toPx() },
+                                with(density) { towerHeightDp.dp.toPx() },
+                            )
+                        },
+                        valueRange = AppState.TOWER_MIN_WIDTH_DP..maxTowerWidthDp,
+                        trackColor = Ink.surfaceHigh,
+                    )
+                    Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Height", style = Type.body, modifier = Modifier.weight(1f))
+                        Text("%.0f dp".format(towerHeightDp), style = Type.footnote)
+                    }
+                    AppleSlider(
+                        value = towerHeightDp,
+                        onValueChange = { value ->
+                            app.updateTowerSize(
+                                with(density) { towerWidthDp.dp.toPx() },
+                                with(density) { value.dp.toPx() },
+                            )
+                        },
+                        valueRange = AppState.TOWER_MIN_HEIGHT_DP..maxTowerHeightDp,
+                        trackColor = Ink.surfaceHigh,
+                    )
+                    Text(
+                        "You can also drag the tower header to move it and its corner grip to resize it.",
+                        style = Type.footnote,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                Column(
+                    Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
+                        .background(Ink.background).padding(vertical = 4.dp)
+                ) {
+                    SwitchRow("Lock the timing tower in place", app.towerLocked) { app.toggleTowerLock() }
+                    SwitchRow("Keep feeds clear of the timing tower", app.towerReserve, app::chooseTowerReserve)
+                }
+                Text(
+                    "When feeds are kept clear, the layout leaves a dedicated rectangular space for the tower instead of placing it over a video feed. The lock prevents dragging or resizing it by accident.",
+                    style = Type.footnote,
+                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
+                )
             }
         }
     }
