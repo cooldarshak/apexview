@@ -34,7 +34,7 @@ def trace_frame_signatures(path):
         "-c:v", "copy", "-bsf:v", "trace_headers", "-f", "null", "-",
     ])
     field = re.compile(
-        r"\\[trace_headers @ [^]]+\\]\\s+\\d+\\s+([A-Za-z0-9_\\[\\]]+)\\s+\\S+\\s+=\\s+(-?\\d+)"
+        r"\[trace_headers @ [^]]+\]\s+\d+\s+([A-Za-z0-9_\[\]]+)\s+\S+\s+=\s+(-?\d+)"
     )
     blocks = []
     current = None
