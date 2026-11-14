@@ -1740,6 +1740,10 @@ class AppState(
         }
         focusTileId = null
 
+        // The combined map/tower reservation takes precedence over a saved feed-only layout.
+        if (mapMode.inWindow && mapReserve && towerOpen && towerReserve && timing != null && !laptopActive) {
+            resumeLayout = null
+        }
         // Coming back to a session puts its feeds back where they were.
         resumeLayout?.let { (boxes, layout) ->
             resumeLayout = null
