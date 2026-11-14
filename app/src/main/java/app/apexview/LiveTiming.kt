@@ -1029,10 +1029,12 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             val time = runCatching { Instant.parse(entry.getString("Utc")).toEpochMilli() }.getOrNull() ?: continue
             val list = entry.optJSONObject("Cars") ?: continue
             list.keys().forEach { number ->
-                val channels = list.optJSONObject(number)?.optJSONObject("Channels") ?: continue
-                val kmh = channels.optInt("2", -1)
-                val gear = channels.optInt("3", -1).takeIf { it in 0..8 }
-                if (kmh >= 0) cars.getOrPut(number) { SpeedBuilder() }.add(time, kmh, gear)
+                val channels = list.optJSONObject(number)?.optJSONObject("Channels")
+                if (channels != null) {
+                    val kmh = channels.optInt("2", -1)
+                    val gear = channels.optInt("3", -1).takeIf { it in 0..8 }
+                    if (kmh >= 0) cars.getOrPut(number) { SpeedBuilder() }.add(time, kmh, gear)
+                }
             }
         }
     }
