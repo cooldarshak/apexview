@@ -102,7 +102,7 @@ internal object HevcSliceHeaderParser {
         } else {
             shortTermIndex = null
             shortTermSet = HevcParameterSets.parseShortTermRefPicSet(
-                bits, sps.shortTermRefPicSets.size, sps.shortTermRefPicSets
+                bits, sps.shortTermRefPicSets.size, sps.shortTermRefPicSets.size, sps.shortTermRefPicSets
             )
         }
 
