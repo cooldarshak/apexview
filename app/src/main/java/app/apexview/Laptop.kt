@@ -203,11 +203,12 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
                     }
                 }
             }
+            val minimumRowHeight = if (app.layoutMode == LayoutMode.TV) 16f else 20f
             val rowHeight = if (rows.isEmpty()) ROW_HEIGHT else {
-                // On a tall tower, fit the complete field where possible. On a short tower,
-                // keep rows legible and let the list scroll instead of squeezing text away.
+                // The TV preset uses a compact broadcast tower so more of the field is visible.
+                // On other layouts preserve the existing minimum for touch readability.
                 ((maxHeight.value / contentScale - 73f) / rows.size)
-                    .coerceIn(20f / contentScale, ROW_HEIGHT.value).dp
+                    .coerceIn(minimumRowHeight / contentScale, ROW_HEIGHT.value).dp
             }
             Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
                 TowerSessionHeader(timing, now)
