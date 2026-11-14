@@ -1755,7 +1755,7 @@ class AppState(
                     ?: minOf(TOWER_DEFAULT_WIDTH_DP * density, (width - 32f * density).coerceAtLeast(1f))
                 val requestedHeight = towerSpot.h.takeIf { it > 0f }
                     ?: minOf(TOWER_DEFAULT_HEIGHT_DP * density, (height - 32f * density).coerceAtLeast(1f))
-                val mapMinSide = if (keepMapClear) min(width, height) * 0.22f else null
+                val mapMinSide = if (keepMapClear) minOf(width, height) * 0.22f else null
                 val arrangement = Layouts.withOverlays(
                     layoutMode, ordered.size, width, height,
                     requestedWidth.coerceAtMost(width), requestedHeight.coerceAtMost(height), mapMinSide,
