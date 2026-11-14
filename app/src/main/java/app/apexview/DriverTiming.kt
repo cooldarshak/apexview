@@ -6,7 +6,13 @@ import org.json.JSONObject
 /** How a sector or lap compares: the broadcast's yellow, green and purple. */
 enum class Pace { NONE, YELLOW, GREEN, PURPLE }
 
-class SectorCell(val time: String, val pace: Pace)
+/** A sector time plus the F1 micro-sector status strip and its previous value. */
+class SectorCell(
+    val time: String,
+    val pace: Pace,
+    val segments: List<Int> = emptyList(),
+    val previousTime: String = "",
+)
 
 /** What a driver's timing card shows at one moment. */
 class CardState(
@@ -25,6 +31,8 @@ class CardState(
     val toLeader: String? = null,
     /** Gap to the car ahead, for the timing tower. */
     val ahead: String? = null,
+    val bestLap: SectorCell? = null,
+    val retired: Boolean = false,
 )
 
 /**
@@ -51,6 +59,7 @@ class DriverLaps(
         val ahead: String?,
         /** Out of the race: retired, or stopped on track. */
         val retired: Boolean = false,
+        val bestLap: SectorCell? = null,
     )
 
     /**
@@ -125,6 +134,8 @@ class DriverLaps(
             inPit = s.inPit,
             toLeader = s.toLeader,
             ahead = s.ahead,
+            bestLap = s.bestLap,
+            retired = s.retired,
         )
     }
 
@@ -154,6 +165,11 @@ object DriverTimingParser {
         var lastLap: SectorCell? = null
         var lastLapValue = ""
         val lastLapFlags = BooleanArray(2)
+        var bestLap: SectorCell? = null
+        var bestLapValue = ""
+        val bestLapFlags = BooleanArray(2)
+        val sectorSegments = Array(3) { sortedMapOf<Int, Int>() }
+        val sectorPrevious = Array(3) { "" }
         var gap: String? = null
         var toLeader: String? = null
         var ahead: String? = null
@@ -167,7 +183,7 @@ object DriverTimingParser {
         val lapCounts = ArrayList<Int>()
 
         fun snap(t: Long) {
-            val copy = DriverLaps.Snapshot(position, sector.toList(), lapSectors.toList(), lastLap, gap, inPit, toLeader, ahead, retired)
+            val copy = DriverLaps.Snapshot(position, sector.toList(), lapSectors.toList(), lastLap, gap, inPit, toLeader, ahead, retired, bestLap)
             if (times.isNotEmpty() && times.last() == t) {
                 snaps[snaps.lastIndex] = copy
             } else {
@@ -177,12 +193,23 @@ object DriverTimingParser {
         }
     }
 
-    fun parse(stream: String, streamStart: Long): Map<String, DriverLaps> {
+    /**
+     * Parses the normal TimingData stream and the optional TimingDataF1 supplement together.
+     * F1 publishes micro-sector segment status on the latter. Events are ordered by UTC so a
+     * delayed snapshot from one topic cannot roll back a newer update from the other.
+     */
+    fun parse(stream: String, streamStart: Long, timingF1: String = ""): Map<String, DriverLaps> {
         val drivers = mutableMapOf<String, Live>()
-        stream.lineSequence().forEach { line ->
-            if (line.length <= streamPrefixLength(line)) return@forEach
-            val lines = runCatching { JSONObject(line.substring(streamPrefixLength(line))).optJSONObject("Lines") }.getOrNull() ?: return@forEach
-            val t = streamStart + offsetMs(line)
+        val events = sequenceOf(stream, timingF1).flatMapIndexed { source, text ->
+            text.lineSequence().mapNotNull { line ->
+                val prefix = streamPrefixLength(line)
+                if (line.length <= prefix) null
+                else runCatching { Triple(streamStart + offsetMs(line), source, line) }.getOrNull()
+            }
+        }.sortedWith(compareBy<Triple<Long, Int, String>> { it.first }.thenBy { it.second })
+        events.forEach { (t, _, line) ->
+            val prefix = streamPrefixLength(line)
+            val lines = runCatching { JSONObject(line.substring(prefix)).optJSONObject("Lines") }.getOrNull() ?: return@forEach
             lines.keys().forEach { number ->
                 val d = lines.optJSONObject(number) ?: return@forEach
                 val live = drivers.getOrPut(number) { Live() }
@@ -223,6 +250,12 @@ object DriverTimingParser {
             if (o.has("OverallFastest")) l.lastLapFlags[1] = o.optBoolean("OverallFastest")
             l.lastLap = l.lastLapValue.takeIf { it.isNotEmpty() }?.let { SectorCell(it, pace(l.lastLapFlags)) }
         }
+        d.optJSONObject("BestLapTime")?.let { o ->
+            if (o.has("Value")) l.bestLapValue = o.optString("Value")
+            if (o.has("PersonalFastest")) l.bestLapFlags[0] = o.optBoolean("PersonalFastest")
+            if (o.has("OverallFastest")) l.bestLapFlags[1] = o.optBoolean("OverallFastest")
+            l.bestLap = l.bestLapValue.takeIf { it.isNotEmpty() }?.let { SectorCell(it, pace(l.bestLapFlags)) }
+        }
         // After the sectors, so a final sector sent with the crossing still counts for the lap
         // it finished. F1 leaves the old sectors up well into the next lap; the card doesn't.
         if (d.has("NumberOfLaps")) {
@@ -233,6 +266,8 @@ object DriverTimingParser {
                 l.sector.copyInto(l.lapSectors)
                 l.sector.fill(null)
                 l.sectorValue.fill("")
+                l.sectorPrevious.fill("")
+                l.sectorSegments.forEach { it.clear() }
                 l.sectorFlags.forEach { it.fill(false) }
             }
             l.laps = n
@@ -256,13 +291,32 @@ object DriverTimingParser {
         }
         if (o.has("Value")) {
             val value = o.optString("Value")
-            // A sector emptied means a new lap: its flags no longer apply.
-            if (value.isEmpty()) l.sectorFlags[i].fill(false)
+            // A sector emptied means a new lap: its flags and micro-segments no longer apply.
+            if (value.isEmpty()) {
+                l.sectorFlags[i].fill(false)
+                l.sectorSegments[i].clear()
+                l.sectorPrevious[i] = ""
+            }
             l.sectorValue[i] = value
         }
+        if (o.has("PreviousValue")) l.sectorPrevious[i] = o.optString("PreviousValue")
         if (o.has("PersonalFastest")) l.sectorFlags[i][0] = o.optBoolean("PersonalFastest")
         if (o.has("OverallFastest")) l.sectorFlags[i][1] = o.optBoolean("OverallFastest")
-        l.sector[i] = l.sectorValue[i].takeIf { it.isNotEmpty() }?.let { SectorCell(it, pace(l.sectorFlags[i])) }
+        when (val rawSegments = o.opt("Segments")) {
+            is JSONArray -> for (n in 0 until rawSegments.length()) {
+                val status = rawSegments.optJSONObject(n)?.optInt("Status", -1) ?: -1
+                if (status >= 0) l.sectorSegments[i][n] = status
+            }
+            is JSONObject -> rawSegments.keys().forEach { key ->
+                val index = key.toIntOrNull() ?: return@forEach
+                val status = rawSegments.optJSONObject(key)?.optInt("Status", -1) ?: -1
+                if (index >= 0 && status >= 0) l.sectorSegments[i][index] = status
+            }
+        }
+        val segmentValues = l.sectorSegments[i].toSortedMap().values.toList()
+        l.sector[i] = if (l.sectorValue[i].isNotEmpty() || segmentValues.isNotEmpty()) {
+            SectorCell(l.sectorValue[i], if (l.sectorValue[i].isEmpty()) Pace.NONE else pace(l.sectorFlags[i]), segmentValues, l.sectorPrevious[i])
+        } else null
     }
 
     private fun pace(flags: BooleanArray) = when {
