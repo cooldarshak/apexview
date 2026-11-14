@@ -120,6 +120,78 @@ object Layouts {
     }
 
     /**
+     * Finds an arrangement that leaves a real rectangle for the timing tower and, when requested,
+     * a separate rectangle for the track map. The tower keeps its requested dimensions; the map
+     * gets the largest remaining free rectangle. This is the rectangular counterpart of [withMap].
+     */
+    fun withOverlays(
+        mode: LayoutMode,
+        n: Int,
+        width: Float,
+        height: Float,
+        towerWidth: Float,
+        towerHeight: Float,
+        mapMinSide: Float? = null,
+    ): OverlayArrangement {
+        val panelW = towerWidth.coerceIn(1f, width)
+        val panelH = towerHeight.coerceIn(1f, height)
+        val minMapSide = mapMinSide?.coerceAtMost(min(width, height))
+        val candidates = mutableListOf<List<Slot>>()
+        candidates += place(mode, n, width, height)
+        // Exact bands give the tower predictable room at the right or bottom edge.
+        candidates += place(mode, n, (width - panelW).coerceAtLeast(1f), height)
+        candidates += place(mode, n, width, (height - panelH).coerceAtLeast(1f))
+        if (minMapSide != null) {
+            // Leave a second, non-overlapping band for the map as well.
+            candidates += place(mode, n, (width - panelW).coerceAtLeast(1f), (height - minMapSide).coerceAtLeast(1f))
+            candidates += place(mode, n, (width - minMapSide).coerceAtLeast(1f), (height - panelH).coerceAtLeast(1f))
+            candidates += place(mode, n, (width - panelW).coerceAtLeast(1f), (height - panelH).coerceAtLeast(1f))
+        }
+        for (fraction in listOf(0.25f, 0.3f, 0.35f, 0.4f, 0.45f, 0.5f, 0.55f, 0.6f, 0.65f, 0.7f)) {
+            candidates += place(mode, n, width, height * (1f - fraction))
+            candidates += place(mode, n, width * (1f - fraction), height)
+        }
+
+        var best: OverlayArrangement? = null
+        var bestScore = Double.NEGATIVE_INFINITY
+        candidates.forEach { slots ->
+            val free = freeAreas(slots, width, height)
+            free.filter { it.w >= panelW && it.h >= panelH }.forEach { gap ->
+                val tower = Area(gap.x, gap.y, panelW, panelH)
+                val map = if (minMapSide == null) null else free
+                    .filter { area ->
+                        area.w >= minMapSide && area.h >= minMapSide && !area.overlaps(tower)
+                    }
+                    .maxByOrNull { it.w.toDouble() * it.h }
+                if (minMapSide != null && map == null) return@forEach
+                val picture = slots.sumOf { (it.w * it.h).toDouble() }
+                val score = picture + panelW.toDouble() * panelH + (map?.let { it.w.toDouble() * it.h } ?: 0.0)
+                if (score > bestScore) {
+                    bestScore = score
+                    best = OverlayArrangement(slots, tower, map)
+                }
+            }
+        }
+        return best ?: OverlayArrangement(place(mode, n, width, height), null, null)
+    }
+
+    /** Every empty axis-aligned rectangle formed by tile edges, largest first. */
+    private fun freeAreas(slots: List<Slot>, width: Float, height: Float): List<Area> {
+        val xs = (listOf(0f, width) + slots.flatMap { listOf(it.x, it.x + it.w) })
+            .map { it.coerceIn(0f, width) }.distinct().sorted()
+        val ys = (listOf(0f, height) + slots.flatMap { listOf(it.y, it.y + it.h) })
+            .map { it.coerceIn(0f, height) }.distinct().sorted()
+        val result = mutableListOf<Area>()
+        for (i in xs.indices) for (j in i + 1 until xs.size) for (k in ys.indices) for (l in k + 1 until ys.size) {
+            val area = Area(xs[i], ys[k], xs[j] - xs[i], ys[l] - ys[k])
+            if (area.w <= 0f || area.h <= 0f) continue
+            if (slots.none { area.overlaps(it) }) result += area
+        }
+        return result.distinctBy { listOf(it.x, it.y, it.w, it.h) }
+            .sortedByDescending { it.w.toDouble() * it.h }
+    }
+
+    /**
      * The biggest empty rectangle left between the tiles, for the map. Candidate edges are the
      * area's edges and every tile edge; with at most four tiles that's a small search.
      */
@@ -138,6 +210,10 @@ object Layouts {
     }
 }
 
+data class OverlayArrangement(val slots: List<Slot>, val tower: Area?, val map: Area?)
+
 data class Area(val x: Float, val y: Float, val w: Float, val h: Float) {
     fun overlaps(s: Slot) = x < s.x + s.w - 1 && s.x < x + w - 1 && y < s.y + s.h - 1 && s.y < y + h - 1
+    fun overlaps(other: Area) = x < other.x + other.w - 1 && other.x < x + w - 1 &&
+        y < other.y + other.h - 1 && other.y < y + h - 1
 }
