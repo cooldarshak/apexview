@@ -306,8 +306,13 @@ fun SettingsScreen(app: AppState) {
         item {
             Group(
                 "Advanced",
-                footer = "Software DRM is what desktop browsers use, and it's what lets four feeds play at once. " +
-                    "Change the stream type only if feeds won't play.",
+                footer = if (app.isTv) {
+                    "Android TV uses software DRM for every feed. This avoids relying on multiple secure hardware decoder/surface sessions, which vary by TV chipset. " +
+                        "The switch is retained for phones; TV playback stays on the compatible path."
+                } else {
+                    "Software DRM is what desktop browsers use, and it's what lets four feeds play at once. " +
+                        "Change the stream type only if feeds won't play."
+                },
             ) {
                 SwitchRow("Software DRM", s.softwareDrm, s::updateSoftwareDrm)
                 Text("Stream type", style = Type.footnote, modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 2.dp))
