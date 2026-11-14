@@ -10,6 +10,14 @@ class MapRetryTest {
     }
  
     @Test
+    fun tvMapControlsRemainAvailableInDockedLayout() {
+        assertEquals(true, shouldShowMapControls(isTv = true, arranging = false, floating = false, docked = true))
+        assertEquals(false, shouldShowMapControls(isTv = false, arranging = false, floating = false, docked = true))
+        assertEquals(true, shouldShowMapControls(isTv = false, arranging = false, floating = true, docked = false))
+        assertEquals(true, shouldShowMapControls(isTv = false, arranging = true, floating = false, docked = false))
+    }
+
+    @Test
     fun liveSessionMetadataWinsAndPlaceholderTimelineNeverLooksLikeReplay() {
         assertEquals(true, liveTimingSourceFor(knownLive = true, hasTimeline = false, placeholder = true, playerReportsLive = false))
         assertEquals(null, liveTimingSourceFor(knownLive = false, hasTimeline = false, placeholder = false, playerReportsLive = false))
