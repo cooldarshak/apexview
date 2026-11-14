@@ -1774,6 +1774,9 @@ class AppState(
                 towerSpot.y = plan.tower.y
                 towerSpot.w = plan.tower.w
                 towerSpot.h = plan.tower.h
+                if (!mapPanel.placed) {
+                    mapPanel.restore(prefs.getString(PREF_MAP_PANEL, null), width, height)?.let { mapOpacity = it }
+                }
                 mapPanel.place(plan.map)
                 mapPanel.placed = true
             }
