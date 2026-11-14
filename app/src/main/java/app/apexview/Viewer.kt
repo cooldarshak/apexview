@@ -1145,12 +1145,20 @@ internal fun KeepSystemBarsHidden(enabled: Boolean = true) {
 
 /** A row of choices, one picked, in the style of iOS's segmented control. */
 @Composable
-private fun <T> Segments(options: List<T>, chosen: T, label: (T) -> String, modifier: Modifier = Modifier, onPick: (T) -> Unit) {
+private fun <T> Segments(
+    options: List<T>,
+    chosen: T,
+    label: (T) -> String,
+    modifier: Modifier = Modifier,
+    focus: FocusRequester? = null,
+    onPick: (T) -> Unit,
+) {
     Row(modifier.clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(3.dp)) {
         options.forEach { option ->
             val on = option == chosen
             Box(
                 Modifier
+                    .then(if (on && focus != null) Modifier.focusRequester(focus) else Modifier)
                     .pressable { onPick(option) }
                     .clip(RoundedCornerShape(9.dp))
                     .background(if (on) Ink.surfaceHigh else Color.Transparent)
@@ -1230,6 +1238,8 @@ private fun LayoutSheet(app: AppState) {
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
     ) {
         KeepSystemBarsHidden()
+        val selectedLayout = remember { FocusRequester() }
+        LaunchedEffect(Unit) { runCatching { selectedLayout.requestFocus() } }
         Column(
             Modifier.navigationBarsPadding().verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp).padding(bottom = 24.dp)
@@ -1238,7 +1248,10 @@ private fun LayoutSheet(app: AppState) {
             val n = app.tiles.size
             val hasSaved = app.savedLayout(n) != null
             val modes = LayoutMode.entries.filter { it != LayoutMode.CUSTOM || hasSaved }
-            Segments(modes, app.layoutMode, { it.label }, Modifier.padding(top = 20.dp)) { app.chooseLayout(it) }
+            Segments(
+                modes, app.layoutMode, { it.label },
+                Modifier.padding(top = 20.dp), selectedLayout,
+            ) { app.chooseLayout(it) }
             Text(
                 if (hasSaved) "My layout is the one you saved for $n feed${if (n == 1) "" else "s"} with the phone ${app.wayUp}."
                 else "Arrange the feeds the way you like, then save it. Upright and sideways each keep their own.",
