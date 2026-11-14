@@ -246,7 +246,7 @@ fun MapPanelView(app: AppState, timing: SessionTiming) {
             .requiredSize(with(density) { panel.w.toDp() }, with(density) { panel.h.toDp() })
     ) {
         TrackDrawing(app, timing, panel.w, panel.h, panel.rotation)
-        if (app.arranging) MapControls(app, timing)
+        if (app.arranging && !app.combinedOverlaysDocked) MapControls(app, timing)
     }
 }
 
