@@ -129,6 +129,7 @@ fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float
         maxWidth = TOWER_WIDTH, maxHeight = TOWER_HEIGHT,
         opacity = app.towerOpacity,
         locked = app.towerLocked,
+        onResizeFinished = app::finishTowerResize,
     ) {
         TimingTower(app, timing)
     }
