@@ -15,6 +15,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -41,6 +42,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onKeyEvent
 
 /**
  * The app's look, after Apple's TV app: black canvas, artwork carries the color, white type in a
@@ -178,6 +185,22 @@ fun Modifier.tvFocusRing(): Modifier = composed {
         }
 }
 
+/**
+ * One hundred steps across the slider's range. A held remote key naturally sends repeated
+ * KeyDown events; accelerate after eight repeats without depending on Android's native event API.
+ */
+internal fun sliderDpadValue(
+    value: Float,
+    min: Float,
+    max: Float,
+    direction: Int,
+    repeatCount: Int,
+): Float {
+    val span = (max - min).coerceAtLeast(0f)
+    val multiplier = if (repeatCount >= 8) 5f else 1f
+    return (value + direction * span / 100f * multiplier).coerceIn(min, max)
+}
+
 /** iOS-style slider: a round white thumb on a thin track, instead of Material's bar thumb. */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -192,10 +215,41 @@ fun AppleSlider(
     emphasised: Boolean = false,
 ) {
     val thumbScale by animateFloatAsState(if (emphasised) 1.5f else 1f, tween(Motion.PRESS_MS, easing = EaseOut), label = "thumb")
+    var dpadRepeats by remember { mutableIntStateOf(0) }
     androidx.compose.material3.Slider(
         value = value,
         onValueChange = onValueChange,
-        modifier = modifier.tvFocusRing(),
+        modifier = modifier
+            .tvFocusRing()
+            .onFocusChanged { if (!it.isFocused) dpadRepeats = 0 }
+            .onKeyEvent { event ->
+                when (event.key) {
+                    Key.DirectionLeft, Key.DirectionRight -> when (event.type) {
+                        KeyEventType.KeyDown -> {
+                            dpadRepeats++
+                            val direction = if (event.key == Key.DirectionLeft) -1 else 1
+                            onValueChange(
+                                sliderDpadValue(
+                                    value,
+                                    valueRange.start,
+                                    valueRange.endInclusive,
+                                    direction,
+                                    dpadRepeats,
+                                )
+                            )
+                            true
+                        }
+                        KeyEventType.KeyUp -> {
+                            dpadRepeats = 0
+                            onValueChangeFinished?.invoke()
+                            true
+                        }
+                        else -> false
+                    }
+                    else -> false
+                }
+            }
+            .focusable(),
         valueRange = valueRange,
         onValueChangeFinished = onValueChangeFinished,
         thumb = {

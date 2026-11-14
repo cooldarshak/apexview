@@ -5,6 +5,9 @@ import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.setValue
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import androidx.compose.foundation.layout.Box
@@ -39,6 +42,8 @@ import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -62,8 +67,7 @@ class RemoteFocusTest {
     /**
      * Home's carousel with the remote on a slide's button, on a device that says it's a TV. With
      * Compose's own TV scrolling (no [PhoneScrolling]) this never settles: the test times out.
-     */
-    @Test
+     */    @Test
     fun theCarouselStaysPutUnderTheRemote() {
         shadowOf(RuntimeEnvironment.getApplication().packageManager)
             .setSystemFeature(PackageManager.FEATURE_LEANBACK, true)
@@ -201,5 +205,52 @@ class RemoteFocusTest {
         assertFocus("play")
         press(Key.DirectionUp)
         assertFocus("calendar")
+    } 
+    @Test
+    fun appleSliderCanBeAdjustedAndCommittedWithTheRemote() {
+        val focus = FocusRequester()
+        var value by mutableFloatStateOf(0.5f)
+        var finished = 0
+        rule.setContent {
+            val input = LocalInputModeManager.current
+            LaunchedEffect(Unit) { input.requestInputMode(InputMode.Keyboard) }
+            Box(Modifier.fillMaxSize()) {
+                AppleSlider(
+                    value = value,
+                    onValueChange = { value = it },
+                    modifier = Modifier.testTag("apple-slider").focusRequester(focus),
+                    valueRange = 0f..1f,
+                    onValueChangeFinished = { finished++ },
+                )
+            }
+        }
+        rule.waitForIdle()
+        rule.runOnIdle { focus.requestFocus() }
+        rule.waitForIdle()
+        assertFocus("apple-slider")
+
+        press(Key.DirectionRight)
+        rule.runOnIdle { assertEquals(0.51f, value, 0.001f) }
+        press(Key.DirectionLeft)
+        rule.runOnIdle { assertEquals(0.5f, value, 0.001f) }
+        rule.runOnIdle { assertTrue(finished >= 2) }
     }
+
+    @Test
+    fun sliderDpadAccelerationUsesComposeKeyRepeatsNotNativeEvents() {
+        assertEquals(0.51f, sliderDpadValue(0.5f, 0f, 1f, 1, 1), 0.0001f)
+        assertEquals(0.55f, sliderDpadValue(0.5f, 0f, 1f, 1, 8), 0.0001f)
+        assertEquals(0.45f, sliderDpadValue(0.5f, 0f, 1f, -1, 8), 0.0001f)
+        assertEquals(0f, sliderDpadValue(0.01f, 0f, 1f, -1, 8), 0.0001f)
+    }
+
+    @Test
+    fun tvCanReachMapMoveAndResizeControlsWithoutTouchArrangementMode() {
+        assertTrue(shouldShowMapControls(isTv = true, arranging = false, floating = false, docked = false))
+        assertTrue(shouldShowMapControls(isTv = false, arranging = true, floating = false, docked = false))
+        assertTrue(shouldShowMapControls(isTv = false, arranging = false, floating = true, docked = false))
+        assertTrue(shouldShowMapControls(isTv = true, arranging = false, floating = true, docked = true))
+        assertFalse(shouldShowMapControls(isTv = false, arranging = false, floating = false, docked = false))
+    }
+
 }

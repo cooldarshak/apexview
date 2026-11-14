@@ -20,6 +20,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
@@ -41,8 +42,10 @@ class Tile(val id: Int, val contentId: Long, channel: Channel, feed: FeedPlayer)
     var pinned by mutableStateOf(false)
     /** Showing, but its picture paused while the phone is too hot (sound and place kept). */
     var coolingOff by mutableStateOf(false)
-    /** Showing, but its picture paused while sped up, on a phone that can't keep every feed smooth. */
+    /** Showing, but its picture paused while sped up, on a device that can't keep every feed smooth. */
     var heldForSpeed by mutableStateOf(false)
+    /** TV decoder budget: audio and sync continue, but this tile has no video decoder slot. */
+    var heldForDecoder by mutableStateOf(false)
     /** When this tile last took a car picked on the map (or was added). Oldest goes first. */
     var mapPickedAt = System.currentTimeMillis()
 
@@ -85,6 +88,34 @@ internal fun pickNextLive(live: List<CatalogItem>, watching: Long, atStart: Set<
             (ended || item.contentId !in atStart)
     }
 }
+
+/**
+ * Live timing is a different source from the replay archive. Don't classify an empty or placeholder
+ * Media3 timeline as a replay: slower TV devices can publish the real window later than phones.
+ * Catalog metadata can positively identify a live session before the player timeline is ready.
+ */
+internal fun liveTimingSourceFor(
+    knownLive: Boolean,
+    hasTimeline: Boolean,
+    placeholder: Boolean,
+    playerReportsLive: Boolean,
+): Boolean? = when {
+    knownLive -> true
+    !hasTimeline || placeholder -> null
+    else -> playerReportsLive
+}
+
+internal fun catalogTimingSource(
+    knownLive: Boolean,
+    knownArchive: Boolean,
+    completedLive: Boolean,
+): Boolean? = when {
+    completedLive || knownArchive -> false
+    knownLive -> true
+    else -> null
+}
+
+
 
 /**
  * Where a panel over the feeds sits, in canvas pixels: first in the biggest space the feeds
@@ -321,7 +352,7 @@ class AppState(
         // A speed this phone already struggled with, with this many feeds: straight to one picture.
         if (!speedHeld && playbackSpeed > 1f && tiles.size > 1 && (struggledAt[tiles.size] ?: Float.MAX_VALUE) <= playbackSpeed) {
             speedHeld = true
-            message = "Only the main feed's picture plays at ${speedLabel(playbackSpeed)} on this phone, to keep it smooth. Back to 1× brings the rest back."
+            message = "Only the main feed's picture plays at ${speedLabel(playbackSpeed)} on this device, to keep it smooth. Back to 1× brings the rest back."
         }
         val shown = if (inPip) pipTile() else null
         val main = tiles.firstOrNull { it.id == bigTileId } ?: tiles.firstOrNull { it.audible } ?: tiles.maxByOrNull { it.w }
@@ -330,28 +361,44 @@ class AppState(
             thermal >= android.os.PowerManager.THERMAL_STATUS_MODERATE -> 0.75f
             else -> 1f
         }
-        tiles.forEach { tile ->
-            val visible = when {
+        val visibleTiles = tiles.filter { tile ->
+            when {
                 browsing -> false
                 inPip -> tile === shown
                 laptopActive -> tile.id == bigTileId || tiles.size == 1
                 focusTileId != null -> tile.id == focusTileId
                 else -> onCanvas(tile) && tiles.none { it !== tile && it.z > tile.z && covers(it, tile) }
             }
-            // Laptop mode: the feed that was up top last keeps its picture going out of sight, so
-            // going back to it is instant rather than a fresh ~4 MB chunk. Not once the phone is warm.
+        }
+        // On TV, the codec's advertised instance count is an upper bound, not a guarantee. Keep
+        // one instance in reserve and allocate the remaining slots to the main/audible feeds first.
+        val decoderSlots = videoDecoderBudget()
+        val decoderEligible = if (isTv) {
+            visibleTiles.sortedWith(
+                compareBy<Tile> { if (it === main) 0 else if (it.audible) 1 else if (it.channel.isDefault) 2 else 3 }
+                    .thenByDescending { it.z }
+            ).take(decoderSlots).toSet()
+        } else visibleTiles.toSet()
+
+        tiles.forEach { tile ->
+            val visible = tile in visibleTiles
+            // Laptop mode: the feed that was up top before the one there now keeps its picture
+            // going out of sight, ready to return instantly. TV never takes this hidden slot.
             val warm = !visible && !browsing && !inPip && laptopActive && tile.id == previousTopId &&
                 thermal < android.os.PowerManager.THERMAL_STATUS_MODERATE && !speedHeld
             if (warm) {
                 tile.coolingOff = false
+                tile.heldForDecoder = false
                 tile.feed.keepVideo()
                 return@forEach
             }
+            val overDecoderBudget = isTv && visible && tile !in decoderEligible
             val hot = thermal >= android.os.PowerManager.THERMAL_STATUS_CRITICAL && tile !== main
             val held = speedHeld && !inPip && tile !== main
             tile.coolingOff = visible && hot
             tile.heldForSpeed = visible && held && !hot
-            val cooling = hot || held
+            tile.heldForDecoder = overDecoderBudget
+            val cooling = hot || held || overDecoderBudget
             // The pop-out stays on the rendition it has, ready for coming back.
             if (inPip && visible && !cooling) {
                 tile.feed.keepVideo()
@@ -360,7 +407,9 @@ class AppState(
             tile.feed.setVideo(visible && !cooling, (tile.w * scale).toInt(), (tile.h * scale).toInt())
         }
         val pictures = tiles.filter { it.feed.showingVideo }
-        pictures.zip(bandwidthShares(pictures.map { it.w * it.h })).forEach { (tile, share) -> tile.feed.setBandwidthShare(share) }
+        pictures.zip(bandwidthShares(pictures.map { it.w * it.h })).forEach { (tile, share) ->
+            tile.feed.setBandwidthShare(share)
+        }
     }
 
     /** In laptop mode, the feed that was up top before the one there now. */
@@ -373,6 +422,25 @@ class AppState(
         a.x <= b.x && a.y <= b.y && a.x + a.w >= b.x + b.w && a.y + a.h >= b.y + b.h
     val settings = Settings(context)
     val updater = Updater(context, scope)
+    private var cachedDecoderDrmMode: Boolean? = null
+    private var cachedDecoderBudget = 1
+
+    private fun videoDecoderBudget(): Int {
+        if (!isTv) return 4
+        // Base the query on the DRM level actually active in this session. If the TV
+        // refuses L3, the players fall back to L1 and the budget must switch to secure codecs.
+        val softwareDrm = tiles.isNotEmpty() && tiles.all { it.feed.usesSoftwareDrm }
+        val effectiveMode = if (tiles.isEmpty()) settings.softwareDrm else softwareDrm
+        if (cachedDecoderDrmMode != effectiveMode) {
+            cachedDecoderDrmMode = effectiveMode
+            cachedDecoderBudget = queryVideoDecoderBudget(context, effectiveMode, isTv = true)
+            android.util.Log.i(
+                "ApexviewVideoBudget",
+                "TV AVC decoder budget=$cachedDecoderBudget, actualSoftwareDrm=$effectiveMode",
+            )
+        }
+        return cachedDecoderBudget
+    }
 
     var auth by mutableStateOf(AuthState.CHECKING)
         private set
@@ -408,6 +476,14 @@ class AppState(
     /** Every content's channel list, for switching a tile's feed later. */
     private val channelsByContent = mutableMapOf<Long, List<Channel>>()
     private val sessionRefs = mutableMapOf<Long, SessionRef>()
+    /** Catalog session starts are retained when Media3 on a TV exposes no HLS/DASH program clock. */
+    private val catalogStartTimes = mutableMapOf<Long, Long>()
+    /** Catalog-confirmed live sessions can use live timing before the video timeline is ready. */
+    private val knownLiveContentIds = mutableSetOf<Long>()
+    /** Catalog-confirmed replays use the archive without waiting for a device-specific player clock. */
+    private val knownArchiveContentIds = mutableSetOf<Long>()
+    /** Once F1 moves the live timing socket to the next session, the old session uses its archive. */
+    private val completedLiveTimingContentIds = mutableSetOf<Long>()
     /** Session titles by content ID, for the viewer's header and its feed sheet. */
     private val titles = mutableMapOf<Long, String>()
     /** Session artwork by content ID, for the Continue watching card. */
@@ -470,6 +546,9 @@ class AppState(
     /** What a fresh stream starts in; Save layout makes it the custom one. */
     private var defaultLayoutMode =
         prefs.getString(PREF_DEFAULT_LAYOUT, null)?.let { runCatching { LayoutMode.valueOf(it) }.getOrNull() } ?: LayoutMode.FEATURED
+    /** The TV preset starts the map in its right-hand slot once, then preserves D-pad moves. */
+    private var tvLayoutMapNeedsDefault =
+        defaultLayoutMode == LayoutMode.TV && prefs.getString(PREF_MAP_PANEL, null).isNullOrBlank()
     /** A resumed session's feed boxes by channel, applied at its first layout. */
     private var resumeLayout: Pair<Map<Int, FloatArray>, SavedLayout>? = null
     /** Every feed silenced at once; the audio choice is kept for when it's turned back on. */
@@ -817,8 +896,20 @@ class AppState(
     /** Plays a catalog item; a show or documentary series opens its page of episodes instead. */
     fun watch(item: CatalogItem, start: Boolean = false) {
         item.pageId?.let { open(Screen.Collection(it, item.title)); return }
+        item.startMs.takeIf { it > 0L }?.let { catalogStartTimes[item.contentId] = it }
         // Sessions are titled by their weekend in the viewer ("Mexico City Grand Prix · Race").
         val session = weekendContent.values.any { c -> c.sessions.any { it.contentId == item.contentId } }
+        val catalogReplay = item.kind.equals("REPLAY", ignoreCase = true) ||
+            (session && !item.live && !item.upcoming && item.startMs > 0L)
+        if (item.live) {
+            knownArchiveContentIds -= item.contentId
+        } else if (catalogReplay && !item.upcoming) {
+            // The catalog has already moved this session out of LIVE. Don't make TV wait for a
+            // HLS/DASH program clock to learn whether this is a replay.
+            knownArchiveContentIds += item.contentId
+            knownLiveContentIds -= item.contentId
+            completedLiveTimingContentIds -= item.contentId
+        }
         // Live events carry their weekend's name as their subtitle.
         val meeting = item.meeting.ifEmpty { if (item.live) item.subtitle.orEmpty() else "" }
         openPicker(item.contentId, if ((session || item.live) && meeting.isNotEmpty()) "$meeting · ${item.title}" else item.title, item.image, start, item.live)
@@ -1031,7 +1122,13 @@ class AppState(
             message = "Sign in to watch."
             return
         }
-        val sheet = FeedPicker(contentId, title, live || liveNow.any { it.contentId == contentId })
+        val isKnownLive = live || liveNow.any { it.contentId == contentId }
+        if (isKnownLive) {
+            knownLiveContentIds += contentId
+            knownArchiveContentIds -= contentId
+            completedLiveTimingContentIds -= contentId
+        }
+        val sheet = FeedPicker(contentId, title, isKnownLive)
         titles[contentId] = title
         if (image != null) images[contentId] = image
         picker = sheet
@@ -1059,7 +1156,12 @@ class AppState(
     /** A session's feeds, fetched once. */
     private suspend fun channelsOf(contentId: Long): List<Channel> = channelsByContent[contentId] ?: run {
         val video = api.contentVideo(contentId)
-        video.session?.let { sessionRefs[contentId] = it }
+        video.session?.let { ref ->
+            val catalogStart = catalogStartTimes[contentId]
+            sessionRefs[contentId] = if (ref.sessionStartUtcMs == null && catalogStart != null) {
+                ref.copy(sessionStartUtcMs = catalogStart)
+            } else ref
+        }
         if (!video.isSession) notSessions += contentId
         video.channels.ifEmpty { listOf(Channel("Main feed", null, isDefault = true)) }
             .also { channelsByContent[contentId] = it }
@@ -1075,7 +1177,7 @@ class AppState(
     fun saveWatch() {
         val leader = leaderTile() ?: return
         val player = leader.feed.player
-        val live = player.isCurrentMediaItemLive
+        val live = leader.contentId in knownLiveContentIds || player.isCurrentMediaItemLive
         val duration = player.duration.takeIf { it > 0 } ?: 0L
         val position = player.currentPosition
         noteSeen(leader.contentId, position, duration, live)
@@ -1126,8 +1228,29 @@ class AppState(
             if (feeds.isEmpty()) throw IOException("those feeds aren't available any more")
             titles[saved.contentId] = saved.title
             images[saved.contentId] = saved.image
-            runCatching { layoutMode = LayoutMode.valueOf(saved.layoutMode) }
+            if (saved.live) {
+                knownLiveContentIds += saved.contentId
+                knownArchiveContentIds -= saved.contentId
+                completedLiveTimingContentIds -= saved.contentId
+            } else if (sessionRefs.containsKey(saved.contentId)) {
+                // This is a saved replay of a session. Do not wait for the TV's player clock.
+                knownArchiveContentIds += saved.contentId
+                knownLiveContentIds -= saved.contentId
+            }
+            val restoredLayout = runCatching { LayoutMode.valueOf(saved.layoutMode) }.getOrNull()
+            if (restoredLayout != null) layoutMode = restoredLayout
             runCatching { mapMode = MapMode.valueOf(saved.mapMode) }
+            if (restoredLayout == LayoutMode.TV) {
+                mapMode = MapMode.TRACK
+                towerOpen = true
+                overlayLayoutMode = OverlayLayoutMode.DOCKED
+                tvLayoutMapNeedsDefault = !mapPanel.placed && prefs.getString(PREF_MAP_PANEL, null).isNullOrBlank()
+                prefs.edit()
+                    .putString(PREF_MAP_MODE, MapMode.TRACK.name)
+                    .putBoolean(PREF_TOWER, true)
+                    .putString(PREF_OVERLAY_LAYOUT, OverlayLayoutMode.DOCKED.name)
+                    .apply()
+            }
             // Feeds come back where they were, if the screen is the same shape.
             resumeLayout = saved.layout?.let { layout -> saved.channels.zip(layout.boxes).toMap() to layout }
             pendingResume = saved
@@ -1146,7 +1269,11 @@ class AppState(
     /** Opens the feed sheet for whatever is playing, to add another of its feeds. */
     fun openPickerForPlaying() {
         val leader = leaderTile() ?: return
-        openPicker(leader.contentId, titles[leader.contentId] ?: "Add a feed")
+        openPicker(
+            leader.contentId,
+            titles[leader.contentId] ?: "Add a feed",
+            live = leader.contentId in knownLiveContentIds || liveNow.any { it.contentId == leader.contentId },
+        )
     }
 
     fun closePicker() {
@@ -1207,6 +1334,13 @@ class AppState(
         val dropped = requested.size - picks.size
         task("Starting feeds") {
             val failures = mutableListOf<String>()
+            // The catalog already tells us whether this is live or a replay. Start timing
+            // immediately instead of waiting for every CONTENT/PLAY request and video prepare.
+            // For entries without a catalog classification, the timing job waits for the real
+            // Media3 timeline while feed creation proceeds in parallel.
+            if (timingContentId != contentId || (timing == null && liveFeed?.isActive != true)) {
+                loadTiming(contentId)
+            }
             val streams = picks.mapNotNull { channel ->
                 try {
                     channel to streamFor(contentId, channel, failures)
@@ -1244,7 +1378,20 @@ class AppState(
                 added(tile)
             }
             // A fresh start uses the layout picked as default (Save layout makes it the custom one).
-            if (first && pendingResume?.contentId != contentId) layoutMode = defaultLayoutMode
+            if (first && pendingResume?.contentId != contentId) {
+                layoutMode = defaultLayoutMode
+                if (layoutMode == LayoutMode.TV) {
+                    mapMode = MapMode.TRACK
+                    towerOpen = true
+                    overlayLayoutMode = OverlayLayoutMode.DOCKED
+                    tvLayoutMapNeedsDefault = !mapPanel.placed && prefs.getString(PREF_MAP_PANEL, null).isNullOrBlank()
+                    prefs.edit()
+                        .putString(PREF_MAP_MODE, MapMode.TRACK.name)
+                        .putBoolean(PREF_TOWER, true)
+                        .putString(PREF_OVERLAY_LAYOUT, OverlayLayoutMode.DOCKED.name)
+                        .apply()
+                }
+            }
             // Keep the audio where it was; new feeds start muted. The default feed gets it first.
             setAudio(tiles.firstOrNull { it.audible } ?: tiles.firstOrNull { it.channel.isDefault } ?: tiles.first())
             pendingResume?.takeIf { it.contentId == contentId }?.let { saved ->
@@ -1260,13 +1407,24 @@ class AppState(
             showChrome()
             if (dropped > 0) failures += "Left out $dropped feed(s): 4 is the most this phone plays smoothly"
             message = if (failures.isEmpty()) null else "Some feeds had problems:\n" + failures.joinToString("\n")
-            if (timingContentId != leaderTile()?.contentId) loadTiming(leaderTile()!!.contentId)
+            leaderTile()?.let { leader ->
+                // A prior timing job can finish while retaining the same content ID. Restart it
+                // instead of leaving the TV's map sheet permanently at its initial Loading text.
+                if (timingContentId != leader.contentId || (timing == null && liveFeed?.isActive != true)) {
+                    loadTiming(leader.contentId)
+                }
+                applyVideoBudget()
+            }
         }
     }
 
-    private fun newFeed(stream: PlayInfo, startMs: Long = C.TIME_UNSET) = makeFeed(stream, startMs).also { it.setBaseSpeed(playbackSpeed) }
+    private fun newFeed(
+        stream: PlayInfo,
+        startMs: Long = C.TIME_UNSET,
+        startWithVideo: Boolean = !isTv,
+    ) = makeFeed(stream, startMs, startWithVideo).also { it.setBaseSpeed(playbackSpeed) }
 
-    private fun makeFeed(stream: PlayInfo, startMs: Long) = FeedPlayer(
+    private fun makeFeed(stream: PlayInfo, startMs: Long, startWithVideo: Boolean) = FeedPlayer(
         context, stream,
         ascendon = api.ascendon.orEmpty(),
         entitlement = api.entitlement.orEmpty(),
@@ -1274,6 +1432,7 @@ class AppState(
         forceL3 = settings.softwareDrm,
         subtitles = settings.subtitles,
         commentary = settings.commentary,
+        startWithVideo = startWithVideo,
         startMs = startMs,
     )
 
@@ -1329,18 +1488,43 @@ class AppState(
                     else -> null
                 }
                 if (problem == null) {
-                    // Live or replay is only known once the player has the stream.
-                    if (isLiveStream()) {
+                    // Prefer F1's catalog signal for a known-live session. Otherwise wait for a
+                    // real, non-placeholder player window before choosing live timing or archive.
+                    val live = catalogTimingSource(
+                        knownLive = contentId in knownLiveContentIds,
+                        knownArchive = contentId in knownArchiveContentIds,
+                        completedLive = contentId in completedLiveTimingContentIds,
+                    ) ?: isLiveStream(contentId)
+                    if (live == null) {
+                        mapStatus = "Waiting for the video stream to identify live timing or replay…"
+                        android.util.Log.i("ApexviewTiming", "content=$contentId: player timeline not ready; keeping timing source undecided")
+                        kotlinx.coroutines.delay(1_000)
+                        continue
+                    }
+                    android.util.Log.i("ApexviewTiming", "content=$contentId: using ${if (live) "live timing" else "timing archive"}")
+                    if (live) {
+                        // Show the transport stage immediately. A TV with no program clock used to
+                        // sit on the generic "Loading" label while the socket was still starting.
+                        mapStatus = "Connecting to F1 live timing…"
+                        android.util.Log.i(
+                            "ApexviewTiming",
+                            "content=$contentId live source; meeting=${ref!!.meetingKey}, session=${ref.sessionKey}, circuit=${ref.circuitKey}",
+                        )
                         // Runs until the viewer moves on, reconnecting itself; back here only
-                        // if it failed outright.
-                        followLive(contentId, ref!!, token!!)
+                        // if it failed outright or F1 ends this live timing session.
+                        followLive(contentId, ref, token!!)
                         if (timingContentId != contentId) return@launch
                         kotlinx.coroutines.delay(mapRetryDelayMs(attempt++))
                         continue
                     }
+                    mapStatus = "Loading F1 timing archive…"
                     try {
                         // When the picture was broadcast: identifies the session if the title can't.
-                        val watched = leaderTile()?.feed?.wallClockMs()
+                        val watched = leaderTile()?.takeIf { it.contentId == contentId }?.feed?.wallClockMs()
+                        android.util.Log.i(
+                            "ApexviewTiming",
+                            "content=$contentId archive clock=${watched ?: "unavailable"} catalogStart=${ref!!.sessionStartUtcMs ?: "unavailable"}",
+                        )
                         val loaded = LiveTimingArchive(token!!, userAgent).load(ref!!, watched)
                         if (timingContentId != contentId) return@launch
                         rememberOutline(loaded)
@@ -1389,13 +1573,45 @@ class AppState(
      * well before it's ready to play; a slow start used to be taken for a replay after 15 s, and
      * a live session then looked for its map in the archive, where it isn't yet.
      */
-    private suspend fun isLiveStream(): Boolean {
-        repeat(LIVE_CHECK_TRIES) {
-            val player = leaderTile()?.feed?.player ?: return false
-            if (!player.currentTimeline.isEmpty || player.playbackState == Player.STATE_READY) return player.isCurrentMediaItemLive
+    private suspend fun isLiveStream(contentId: Long): Boolean? {
+        // FeedPlayer creates its ExoPlayer immediately; the asynchronous part is receiving a usable
+        // timeline. A placeholder window is not evidence of a replay and must never trigger an
+        // archive lookup for a live session.
+        repeat(LIVE_CHECK_TRIES) { attempt ->
+            if (timingContentId != contentId) return null
+            val player = leaderTile()
+                ?.takeIf { it.contentId == contentId }
+                ?.feed
+                ?.player
+            if (player != null) {
+                val timeline = player.currentTimeline
+                if (!timeline.isEmpty) {
+                    val index = player.currentMediaItemIndex.takeIf { it in 0 until timeline.windowCount } ?: 0
+                    val window = runCatching { timeline.getWindow(index, Timeline.Window()) }.getOrNull()
+                    if (window != null) {
+                        val source = liveTimingSourceFor(
+                            knownLive = false,
+                            hasTimeline = true,
+                            placeholder = window.isPlaceholder,
+                            playerReportsLive = player.isCurrentMediaItemLive,
+                        )
+                        if (source != null) {
+                            android.util.Log.i(
+                                "ApexviewTiming",
+                                "content=$contentId: window live=${player.isCurrentMediaItemLive}, placeholder=${window.isPlaceholder}, state=${player.playbackState}",
+                            )
+                            return source
+                        }
+                    }
+                }
+            }
+            if (attempt == 20 && timingContentId == contentId) {
+                mapStatus = "Waiting for the TV stream's video timeline…"
+            }
             kotlinx.coroutines.delay(250)
         }
-        return false
+        android.util.Log.w("ApexviewTiming", "content=$contentId: no usable video timeline after waiting; will retry without assuming replay")
+        return null
     }
 
     /** Follows a live session through F1's live timing until the viewer closes or moves on. */
@@ -1415,12 +1631,26 @@ class AppState(
                         if (!kept && key != null) feed.newOutline?.let { writeOutline(key, it); kept = true }
                     }
                 },
-                onStatus = { if (timingContentId == contentId) mapStatus = it },
+                onStatus = { status ->
+                    if (timingContentId == contentId) {
+                        mapStatus = status
+                    }
+                },
             )
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (timingContentId == contentId) mapStatus = "Live map unavailable: ${e.message}. Trying again…"
+            if (timingContentId == contentId) {
+                if (e.message?.contains("live timing moved on to another session") == true) {
+                    knownLiveContentIds -= contentId
+                    completedLiveTimingContentIds += contentId
+                    mapStatus = "Live session ended. Loading its timing archive…"
+                    android.util.Log.i("ApexviewTiming", "content=$contentId: live timing moved on; switching to archive")
+                } else {
+                    mapStatus = "Live map unavailable: ${e.message}. Trying again…"
+                    android.util.Log.w("ApexviewTiming", "content=$contentId: live timing failed", e)
+                }
+            }
         }
     }
 
@@ -1431,9 +1661,10 @@ class AppState(
         if (!first) return
         // A tower reservation is a direct layout constraint, even if the user previously
         // arranged feeds by hand. A map-only reservation retains its existing hand-layout rule.
+        val reserveTvLayout = layoutMode == LayoutMode.TV && !laptopActive
         val reserveTower = towerOpen && towerReserve && !laptopActive
         val reserveMap = mapMode.inWindow && mapReserve
-        if (reserveTower || reserveMap && !handPlaced) {
+        if (reserveTvLayout || reserveTower || reserveMap && !handPlaced) {
             handPlaced = false
             layoutRequest++
         } else if (canvasW > 0f) placeMapIfNeeded(canvasW, canvasH)
@@ -1654,7 +1885,23 @@ class AppState(
     /** Lays the feeds out afresh in [mode]. */
     fun chooseLayout(mode: LayoutMode) {
         mapGrabbed = false
+        val enteringTvLayout = mode == LayoutMode.TV && layoutMode != LayoutMode.TV
         layoutMode = mode
+        if (mode == LayoutMode.TV) {
+            // TV is a complete preset, not a feed-only arrangement: turn on the track map and
+            // tower, put them in the fixed right sidebar, and remember TV as the next session's default.
+            defaultLayoutMode = LayoutMode.TV
+            mapMode = MapMode.TRACK
+            towerOpen = true
+            overlayLayoutMode = OverlayLayoutMode.DOCKED
+            tvLayoutMapNeedsDefault = enteringTvLayout
+            prefs.edit()
+                .putString(PREF_DEFAULT_LAYOUT, LayoutMode.TV.name)
+                .putString(PREF_MAP_MODE, MapMode.TRACK.name)
+                .putBoolean(PREF_TOWER, true)
+                .putString(PREF_OVERLAY_LAYOUT, OverlayLayoutMode.DOCKED.name)
+                .apply()
+        }
         handPlaced = false
         layoutRequest++
         showChrome()
@@ -1736,8 +1983,9 @@ class AppState(
         // One feed filling the screen: it gets the whole canvas, the rest wait off screen.
         // Unfolding to the big screen ends it. When both overlays reserve space, keep the
         // selected main feed in the dedicated feed region instead of bypassing that layout.
+        val tvLayoutActive = layoutMode == LayoutMode.TV && !laptopActive
         val combinedReservationsActive =
-            mapMode.inWindow && mapReserve && towerOpen && towerReserve && timing != null && !laptopActive
+            tvLayoutActive || (mapMode.inWindow && mapReserve && towerOpen && towerReserve && timing != null && !laptopActive)
         tiles.firstOrNull { it.id == focusTileId }?.takeIf { compactCanvas && !combinedReservationsActive }?.let { focus ->
             focus.place(Layouts.place(LayoutMode.GRID, 1, width, height).first())
             raise(focus)
@@ -1747,7 +1995,7 @@ class AppState(
         focusTileId = null
 
         // The combined map/tower reservation takes precedence over a saved feed-only layout.
-        if (mapMode.inWindow && mapReserve && towerOpen && towerReserve && timing != null && !laptopActive) {
+        if (tvLayoutActive || (mapMode.inWindow && mapReserve && towerOpen && towerReserve && timing != null && !laptopActive)) {
             resumeLayout = null
         }
         // Coming back to a session puts its feeds back where they were.
@@ -1768,10 +2016,14 @@ class AppState(
         // tower and map together beside it. The orientation decides whether the workspace is
         // below the video (portrait) or in a right-hand sidebar (landscape). In floating mode
         // this is their starting workspace: the map can later be dragged over the video area.
-        val keepMapClear = mapMode.inWindow && mapReserve && timing != null
-        val keepTowerClear = towerOpen && towerReserve && timing != null && !laptopActive
+        // TV owns its video/timing/map regions even while F1 timing is still connecting. This
+        // prevents startup latency from collapsing the TV layout back into a feed-only grid.
+        val keepMapClear = tvLayoutActive || (mapMode.inWindow && mapReserve && timing != null)
+        val keepTowerClear = towerOpen && (tvLayoutActive || towerReserve && timing != null) && !laptopActive
         if (keepMapClear && keepTowerClear) {
-            val plan = Layouts.withCombinedOverlays(layoutMode, ordered.size, width, height, overlayLayoutMode)
+            val panelLayoutMode = if (tvLayoutActive) LayoutMode.TV else layoutMode
+            val panelOverlayMode = if (tvLayoutActive) OverlayLayoutMode.DOCKED else overlayLayoutMode
+            val plan = Layouts.withCombinedOverlays(panelLayoutMode, ordered.size, width, height, panelOverlayMode)
             combinedOverlayPlan = plan
             if (plan.floating) {
                 keepTowerInArea(plan.workspace, width, height)
@@ -1781,11 +2033,25 @@ class AppState(
                 towerSpot.y = plan.tower.y
                 towerSpot.w = plan.tower.w
                 towerSpot.h = plan.tower.h
-                if (!mapPanel.placed) {
-                    mapPanel.restore(prefs.getString(PREF_MAP_PANEL, null), width, height)?.let { mapOpacity = it }
+                if (tvLayoutActive) {
+                    if (tvLayoutMapNeedsDefault) {
+                        mapPanel.place(plan.map)
+                        mapPanel.placed = true
+                        tvLayoutMapNeedsDefault = false
+                        storeMapPanel()
+                    } else if (!mapPanel.placed) {
+                        mapPanel.restore(prefs.getString(PREF_MAP_PANEL, null), width, height)?.let { mapOpacity = it }
+                        if (!mapPanel.placed) mapPanel.place(plan.map)
+                        mapPanel.placed = true
+                    }
+                    keepMapOnScreen()
+                } else {
+                    if (!mapPanel.placed) {
+                        mapPanel.restore(prefs.getString(PREF_MAP_PANEL, null), width, height)?.let { mapOpacity = it }
+                    }
+                    mapPanel.place(plan.map)
+                    mapPanel.placed = true
                 }
-                mapPanel.place(plan.map)
-                mapPanel.placed = true
             }
             handPlaced = false
             plan.slots.zip(ordered).forEach { (slot, tile) -> settle(tile, slot) }
@@ -1978,6 +2244,10 @@ class AppState(
 
     fun chooseMapMode(mode: MapMode) {
         mapGrabbed = false
+        if (layoutMode == LayoutMode.TV && mode != MapMode.TRACK) {
+            message = "TV layout uses the Track map. Choose another layout to use Edge or Pit."
+            return
+        }
         if (mode == mapMode) return
         mapMode = mode
         prefs.edit().putString(PREF_MAP_MODE, mode.name).apply()
@@ -2014,17 +2284,19 @@ class AppState(
 
     /** Two fingers on the track line while arranging: move, resize and turn the map. */
     fun arrangeMap(pan: androidx.compose.ui.geometry.Offset, zoom: Float, rotation: Float) {
-        if (combinedOverlaysDocked) return
+        // Docked overlays stay fixed in the normal layout, but the TV preset exposes D-pad
+        // move/resize handles and must let its map be adjusted without unlocking video tiles.
+        if (combinedOverlaysDocked && layoutMode != LayoutMode.TV) return
         val panel = activeMapPanel
         panel.x += pan.x
         panel.y += pan.y
         if (zoom != 1f) panel.scale(zoom)
         if (rotation != 0f) panel.rotation = (panel.rotation + rotation).mod(360f)
-        if (combinedOverlaysFloating) {
-            // In Move and overlap mode the map can sit anywhere on screen, including over the
-            // broadcast logo. Only the original feed layout remains reserved.
+        if (combinedOverlaysFloating || layoutMode == LayoutMode.TV) {
+            // TV map controls may move the map within the screen even though the tower remains
+            // docked. Floating mode also expands the tower when the map leaves its workspace.
             keepMapOnScreen()
-            combinedOverlayPlan?.workspace?.let(::expandTowerWhenMapLeavesWorkspace)
+            if (combinedOverlaysFloating) combinedOverlayPlan?.workspace?.let(::expandTowerWhenMapLeavesWorkspace)
         }
         showChrome()
     }
@@ -2126,7 +2398,7 @@ class AppState(
     fun toggleTower() {
         towerOpen = !towerOpen
         prefs.edit().putBoolean(PREF_TOWER, towerOpen).apply()
-        if (towerReserve && canvasW > 0f && !laptopActive) {
+        if ((towerReserve || layoutMode == LayoutMode.TV) && canvasW > 0f && !laptopActive) {
             handPlaced = false
             layoutRequest++
         }
@@ -2841,8 +3113,9 @@ class AppState(
     }
 
     /** On a TV there's no touch: no dragging feeds around, and Back steps the controls away first. */
-    val isTv = context.getSystemService(android.app.UiModeManager::class.java).currentModeType ==
-        android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+    // Match the same Leanback detection used by the focus-ring and remote controls. Some TV
+    // launchers report NORMAL from UiModeManager even though the device exposes the TV feature.
+    val isTv = isTvDevice(context)
     /** Whether something in the viewer has the remote's focus; arrows then move between controls. */
     var controlsFocused by mutableStateOf(false)
     /** Asks the viewer to put the remote's focus on play/pause. */
@@ -2870,8 +3143,10 @@ class AppState(
             android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> {
                 if (helpOpen) {
                     if (first) closeHelp()
-                } else if (controlsFocused && chromeVisible) {
-                    if (down) showChrome()
+                } else if (controlsFocused) {
+                    // The focused slider/map handle owns its D-pad keys even after the chrome
+                    // timeout. Never reinterpret its left/right presses as media seeking.
+                    if (down && !chromeVisible) showChrome()
                     return false
                 } else when (event.keyCode) {
                     android.view.KeyEvent.KEYCODE_DPAD_LEFT -> if (down) remoteSkip(event, -10_000)

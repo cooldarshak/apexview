@@ -37,6 +37,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -225,6 +226,8 @@ internal fun FloatingPanel(
     bounds: Area? = null,
     /** Replaces the tall title bar with a slim move/resize strip, used by the timing tower. */
     compactHeader: Boolean = false,
+    /** Optional compact-header height, scaled to the TV canvas in the broadcast layout. */
+    compactHeaderHeight: androidx.compose.ui.unit.Dp? = null,
     /** Opacity of the complete panel, including its contents. */
     opacity: Float = 1f,
     /** When locked, its header and resize grip no longer change the panel's place or size. */
@@ -341,7 +344,7 @@ internal fun FloatingPanel(
                             }
                         }
                     )
-                    .height(if (compactHeader) 22.dp else HEADER_HEIGHT)
+                    .height(if (compactHeader) compactHeaderHeight ?: 22.dp else HEADER_HEIGHT)
                     .padding(start = if (compactHeader) 6.dp else 16.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -403,7 +406,13 @@ internal fun FloatingPanel(
                                 .pressable(scaleTo = 1f) {},
                         )
                     }
-                    Spacer(Modifier.weight(1f))
+                    Text(
+                        title,
+                        style = Type.headline.copy(fontSize = if (app.layoutMode == LayoutMode.TV) 18.sp else 10.sp),
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f),
+                    )
                 } else {
                     Text(title, style = Type.headline, modifier = Modifier.weight(1f))
                 }

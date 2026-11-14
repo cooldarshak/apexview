@@ -306,8 +306,12 @@ fun SettingsScreen(app: AppState) {
         item {
             Group(
                 "Advanced",
-                footer = "Software DRM is what desktop browsers use, and it's what lets four feeds play at once. " +
-                    "Change the stream type only if feeds won't play.",
+                footer = if (app.isTv) {
+                    "Software DRM requests Widevine L3. With it off, F1 uses the TV's Widevine hardware security level. " +
+                        "The app keeps each feed on the matching video surface and limits active TV video decoders to the device's reported capacity."
+                } else {
+                    "Software DRM requests Widevine L3. It can allow more simultaneous feeds on some devices; switch it off to use hardware-secure playback."
+                },
             ) {
                 SwitchRow("Software DRM", s.softwareDrm, s::updateSoftwareDrm)
                 Text("Stream type", style = Type.footnote, modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 2.dp))

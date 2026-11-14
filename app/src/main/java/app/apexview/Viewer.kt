@@ -119,6 +119,7 @@ import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
@@ -234,9 +235,11 @@ fun ViewerScreen(app: AppState) {
     // The controls step back a few seconds after the last touch, unless paused.
     // helpOpen is a key so opening the overlay cancels a hide already counting down; it used
     // to fire anyway and take the top bar away from under its labels.
-    LaunchedEffect(app.chromeTouch, app.chromeVisible, app.playing, app.helpOpen) {
-        // Stays up while arranging, so the lock is there to tap when done.
-        if (app.chromeVisible && app.playing && !app.arranging && !app.helpOpen) {
+    LaunchedEffect(app.chromeTouch, app.chromeVisible, app.playing, app.helpOpen, app.controlsFocused) {
+        // Stays up while arranging, or while a TV remote is operating an overlay control.
+        if (app.chromeVisible && app.playing && !app.arranging && !app.helpOpen &&
+            !(app.isTv && app.controlsFocused)
+        ) {
             delay(CHROME_HIDE_MS)
             app.chromeVisible = false
         }
@@ -261,7 +264,13 @@ fun ViewerScreen(app: AppState) {
     // feeds stay full size, so what you place is where it ends up.
     val motion = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
     // Laptop mode keeps the stream still: the controls lie over its top edge instead.
-    val lift by animateFloatAsState(if (app.chromeVisible && !app.arranging && !app.laptopActive) 1f else 0f, motion, label = "lift")
+    // SurfaceView is the recommended Android TV output, but scaling its parent while the
+    // controls animate can desynchronise its surface from Compose. TV chrome overlays in place.
+    val lift by animateFloatAsState(
+        if (!app.isTv && app.chromeVisible && !app.arranging && !app.laptopActive) 1f else 0f,
+        motion,
+        label = "lift",
+    )
 
     BoxWithConstraints(
         Modifier
@@ -306,17 +315,17 @@ fun ViewerScreen(app: AppState) {
             Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    val k = 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
+                    val k = if (app.isTv) 1f else 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
                     scaleX = k
                     scaleY = k
                     transformOrigin = TransformOrigin(0f, 0.5f)
                 }
                 .graphicsLayer {
-                    val s = if (app.inPip) 1f else 1f - lift * band / height
-                    scaleX = s
-                    scaleY = s
+                    val scale = if (app.inPip || app.isTv) 1f else 1f - lift * band / height
+                    scaleX = scale
+                    scaleY = scale
                     transformOrigin = TransformOrigin(0.5f, 1f)
-                    translationY = -sheetShift
+                    translationY = if (app.isTv) 0f else -sheetShift
                 }
                 .mapGestures(app, density)
         ) {
@@ -372,13 +381,27 @@ fun ViewerScreen(app: AppState) {
                     }
                 }
             }
+            // Keep the broadcast TV composition visible while the timing endpoint is connecting.
+            // A blank reserved sidebar looked like a broken layout and hid the actual failure state.
+            val tvPlan = app.combinedOverlayPlan
+            if (!laptop && app.layoutMode == LayoutMode.TV && tvPlan != null) {
+                val status = app.mapStatus ?: "Waiting for timing data…"
+                if (app.towerOpen && (app.timing == null || app.timing?.laps?.isEmpty() == true)) {
+                    TvOverlayPending("TIMING", tvPlan.tower, status)
+                }
+                if (app.mapMode == MapMode.TRACK &&
+                    (app.timing == null || (app.timing?.outline?.size ?: 0) < 8)
+                ) {
+                    TvOverlayPending("TRACK MAP", tvPlan.map, status)
+                }
+            }
         }
 
         if (app.inPip) return@BoxWithConstraints
 
         // Over the feeds and the map, under the controls; it doesn't shrink with the feeds.
         if (app.radioOpen) app.timing?.let { timing ->
-            Box(Modifier.zIndex(CHROME_Z - 1)) { RadioPanel(app, timing, width, height, feedScale = 1f - lift * band / height) }
+            Box(Modifier.zIndex(CHROME_Z - 1)) { RadioPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height) }
         }
         // Laptop mode has the tower below the hinge already.
         if (app.towerOpen && !app.laptopActive) app.timing?.takeIf { it.laps.isNotEmpty() }?.let { timing ->
@@ -402,11 +425,11 @@ fun ViewerScreen(app: AppState) {
                         }
                         .zIndex(CHROME_Z - 1)
                 ) {
-                    TowerPanel(app, timing, width, height, feedScale = 1f - lift * band / height)
+                    TowerPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height)
                 }
             } else {
                 Box(Modifier.zIndex(CHROME_Z - 1)) {
-                    TowerPanel(app, timing, width, height, feedScale = 1f - lift * band / height)
+                    TowerPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height)
                 }
             }
         }
@@ -444,7 +467,7 @@ fun ViewerScreen(app: AppState) {
 
         // The explanation overlay, above everything. Shown once by itself, the first time.
         Box(Modifier.fillMaxSize().zIndex(CHROME_Z + 2)) {
-            HelpOverlay(app, width, height, feedScale = 1f - lift * band / height, compact = with(density) { minOf(width, height).toDp() } < 600.dp)
+            HelpOverlay(app, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height, compact = with(density) { minOf(width, height).toDp() } < 600.dp)
         }
         LaunchedEffect(Unit) {
             if (!app.helpSeen && !app.isTv) {
@@ -793,6 +816,7 @@ private val overlayShadow = androidx.compose.ui.graphics.Shadow(Color.Black, blu
  * arranging, one finger drags and two resize. With the controls up, the header shows the feed's
  * name (tap for its menu), a speaker that moves the audio here, and on the small feeds a close.
  */
+@OptIn(UnstableApi::class)
 @Composable
 private fun TileView(app: AppState, tile: Tile) {
     val density = LocalDensity.current
@@ -815,16 +839,23 @@ private fun TileView(app: AppState, tile: Tile) {
             .helpAnchor(app, "tile:${tile.id}")
             .background(Color.Black)
     ) {
-        AndroidView(
-            factory = { context ->
-                val layout = if (app.settings.softwareDrm) R.layout.player_texture else R.layout.player_surface
-                LayoutInflater.from(context).inflate(layout, null) as PlayerView
-            },
-            // Runs again when the tile's feed is switched.
-            update = { it.player = tile.feed.player },
-            onRelease = { it.player = null },
-            modifier = Modifier.fillMaxSize(),
-        )
+        // A switched feed can use a different DRM level. Recreate PlayerView as well as the
+        // player binding so an L1 player is never attached to a TextureView (or vice versa).
+        key(tile.id, tile.feed.usesSoftwareDrm) {
+            AndroidView(
+                factory = { context ->
+                    val layout = if (tile.feed.usesSoftwareDrm) R.layout.player_texture else R.layout.player_surface
+                    (LayoutInflater.from(context).inflate(layout, null) as PlayerView).apply {
+                        // Media3 1.5 made this workaround opt-in. Without it, PlayerView inside
+                        // Compose AndroidView can stretch, crop or leak its SurfaceView surface.
+                        if (!tile.feed.usesSoftwareDrm) setEnableComposeSurfaceSyncWorkaround(true)
+                    }
+                },
+                update = { it.player = tile.feed.player },
+                onRelease = { it.player = null },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
         if (app.inPip) return@Box
 
         Box(
@@ -904,6 +935,14 @@ private fun TileView(app: AppState, tile: Tile) {
             )
         }
 
+        if (tile.heldForDecoder) {
+            Text(
+                "TV decoder limit reached. Audio and sync continue; select fewer visible feeds or use a device with more video decoders.",
+                style = Type.subhead.copy(color = Ink.primary, shadow = overlayShadow, textAlign = androidx.compose.ui.text.style.TextAlign.Center),
+                modifier = Modifier.align(Alignment.Center).padding(horizontal = 24.dp).widthIn(max = 420.dp),
+            )
+        }
+
         if (tile.heldForSpeed) {
             Text(
                 "Picture paused while sped up. Back to 1× brings it back.",
@@ -912,7 +951,7 @@ private fun TileView(app: AppState, tile: Tile) {
             )
         }
 
-        if (tile.feed.problem == null && !tile.coolingOff && !tile.heldForSpeed) {
+        if (tile.feed.problem == null && !tile.coolingOff && !tile.heldForSpeed && !tile.heldForDecoder) {
             BufferingRing(tile.feed, Modifier.align(Alignment.Center))
         }
 
@@ -954,6 +993,28 @@ private fun TileView(app: AppState, tile: Tile) {
                     drawLine(Color.White, Offset(size.width, size.height / 2), Offset(size.width / 2, size.height), stroke)
                 }
             }
+        }
+    }
+}
+
+/** A visible TV placeholder while live/archive timing is being resolved. */
+@Composable
+private fun TvOverlayPending(title: String, area: Area, status: String) {
+    val density = LocalDensity.current
+    Box(
+        Modifier
+            .offset { IntOffset(area.x.roundToInt(), area.y.roundToInt()) }
+            .requiredSize(
+                with(density) { area.w.toDp() },
+                with(density) { area.h.toDp() },
+            )
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color(0xE6101010))
+            .padding(12.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(title, style = Type.subhead.copy(color = Ink.primary, fontWeight = FontWeight.Bold))
+            Text(status, style = Type.footnote.copy(color = Ink.secondary), maxLines = 3)
         }
     }
 }
@@ -1271,8 +1332,14 @@ private fun LayoutSheet(app: AppState) {
                 Modifier.padding(top = 20.dp), selectedLayout,
             ) { app.chooseLayout(it) }
             Text(
-                if (hasSaved) "My layout is the one you saved for $n feed${if (n == 1) "" else "s"} with the phone ${app.wayUp}."
-                else "Arrange the feeds the way you like, then save it. Upright and sideways each keep their own.",
+                when {
+                    app.layoutMode == LayoutMode.TV ->
+                        "Video fills the left two-thirds. The timing tower stays at the top-right, with the track map below. This is saved as the default for new sessions."
+                    hasSaved ->
+                        "My layout is the one you saved for $n feed${if (n == 1) "" else "s"} with the phone ${app.wayUp}."
+                    else ->
+                        "Arrange the feeds the way you like, then save it. Upright and sideways each keep their own."
+                },
                 style = Type.footnote,
                 modifier = Modifier.padding(top = 10.dp),
             )

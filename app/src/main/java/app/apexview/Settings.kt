@@ -5,6 +5,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
+/** Uses the same Leanback/UiMode checks as the viewer and remote-control path. */
+internal fun isTvDevice(context: Context): Boolean =
+    context.packageManager.hasSystemFeature("android.software.leanback") ||
+        context.getSystemService(android.app.UiModeManager::class.java)?.currentModeType ==
+        android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+
 /** Choices that live one level down, in Settings, and survive restarts. */
 class Settings(context: Context) {
     private val prefs = context.getSharedPreferences("f1mv", Context.MODE_PRIVATE)
