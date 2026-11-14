@@ -590,11 +590,11 @@ fun SignInScreen(app: AppState) {
                     textStyle = Type.body,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = Ink.secondary,
+                        focusedBorderColor = Color(0xFF168BFF),
                         unfocusedBorderColor = Ink.surfaceHigh,
                         cursorColor = Ink.primary,
                     ),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().tvFocusRing(),
                 )
                 SecondaryButton("Use token", Modifier.fillMaxWidth(), onClick = app::usePastedToken)
             } else {
