@@ -398,8 +398,6 @@ internal fun FloatingPanel(
                                 }
                                 .pressable(scaleTo = 1f) {},
                         )
-                    } else {
-                        Text("TIMING", style = Type.caption.copy(fontSize = 7.sp, color = Ink.secondary, fontWeight = FontWeight.Bold))
                     }
                     Spacer(Modifier.weight(1f))
                 } else {
