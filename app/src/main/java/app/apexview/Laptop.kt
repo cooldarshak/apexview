@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.material.icons.rounded.ArrowBackIosNew
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -166,23 +168,62 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
         .sortedBy { it.second.position ?: 99 }
     val onTop = app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString()
 
-    Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
-        TowerSessionHeader(timing, now)
-        TowerHeader()
-        LazyColumn {
-            items(rows, key = { it.first }) { (number, state) ->
-                val kmh = timing.speeds[number]?.kmhAt(now)
-                val gear = timing.speeds[number]?.gearAt(now)
-                TowerRow(
-                    timing = timing,
-                    number = number,
-                    state = state,
-                    tyre = timing.tyres[number]?.at(now),
-                    kmh = kmh,
-                    gear = gear,
-                    speedUnit = app.settings.speedUnit,
-                    highlight = number == onTop,
-                ) { app.showOnboard(number) }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        // The table is 361dp wide, plus its 18dp side padding. Scale its layout with the panel
+        // so S1/S2/S3 and the tyre column remain inside the visible window when it is narrowed.
+        // The panel's 300dp minimum keeps that compression readable.
+        val baseDensity = LocalDensity.current
+        val contentScale = ((maxWidth.value - 18f) / 361f).coerceIn(0.78f, 1f)
+        CompositionLocalProvider(
+            LocalDensity provides Density(baseDensity.density * contentScale, baseDensity.fontScale)
+        ) {
+            val listState = rememberLazyListState()
+            val rowHeight = if (rows.isEmpty()) ROW_HEIGHT else {
+                // On a tall tower, fit the complete field where possible. On a short tower,
+                // keep rows legible and let the list scroll instead of squeezing text away.
+                ((maxHeight.value / contentScale - 73f) / rows.size)
+                    .coerceIn(24f, ROW_HEIGHT.value).dp
+            }
+            Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
+                TowerSessionHeader(timing, now)
+                TowerHeader()
+                LazyColumn(Modifier.weight(1f), state = listState) {
+                    items(rows, key = { it.first }) { (number, state) ->
+                        val kmh = timing.speeds[number]?.kmhAt(now)
+                        val gear = timing.speeds[number]?.gearAt(now)
+                        TowerRow(
+                            timing = timing,
+                            number = number,
+                            state = state,
+                            tyre = timing.tyres[number]?.at(now),
+                            kmh = kmh,
+                            gear = gear,
+                            speedUnit = app.settings.speedUnit,
+                            highlight = number == onTop,
+                            rowHeight = rowHeight,
+                        ) { app.showOnboard(number) }
+                    }
+                }
+                if (rows.isNotEmpty()) {
+                    val visible = listState.layoutInfo.visibleItemsInfo
+                    val first = visible.firstOrNull()?.index?.plus(1) ?: 0
+                    val last = visible.lastOrNull()?.index?.plus(1) ?: 0
+                    val scrollHint = when {
+                        first == 0 -> "${rows.size} DRIVERS"
+                        first == 1 && last >= rows.size -> "${rows.size} DRIVERS"
+                        first > 1 && last < rows.size -> "↑↓ $first–$last / ${rows.size} · SCROLL"
+                        first > 1 -> "↑ $first–$last / ${rows.size} · SCROLL"
+                        last < rows.size -> "↓ $first–$last / ${rows.size} · SCROLL"
+                        else -> "${rows.size} DRIVERS"
+                    }
+                    Text(
+                        scrollHint,
+                        style = cell.copy(fontSize = 6.sp, color = Ink.secondary),
+                        textAlign = TextAlign.End,
+                        maxLines = 1,
+                        modifier = Modifier.fillMaxWidth().padding(end = 6.dp, top = 2.dp, bottom = 2.dp),
+                    )
+                }
             }
         }
     }
