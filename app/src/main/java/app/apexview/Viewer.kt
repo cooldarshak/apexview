@@ -1084,7 +1084,7 @@ private fun TileMenuSheet(app: AppState, tile: Tile) {
             }
             if (timing != null && ranked.isNotEmpty()) {
                 Spacer(Modifier.height(10.dp))
-                TowerHeader(timing)
+                TowerHeader()
                 ranked.forEach { (channel, number, state) ->
                     TowerRow(timing, number, state, timing.tyres[number]?.at(now), highlight = channel == tile.channel) {
                         app.chooseFeed(tile, channel)
@@ -1258,6 +1258,22 @@ private fun MapSheet(app: AppState) {
         Column(Modifier.navigationBarsPadding().padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
             Text("Track map", style = Type.title2)
             app.mapStatus?.let { Text(it, style = Type.footnote, modifier = Modifier.padding(top = 4.dp)) }
+
+            // The standalone timing tower uses the same live F1 timing session as the track map.
+            // It can be shown alongside the map without opening a separate F1 TV video feed.
+            Column(
+                Modifier.padding(top = 16.dp).clip(RoundedCornerShape(12.dp))
+                    .background(Ink.background).padding(horizontal = 16.dp, vertical = 10.dp)
+            ) {
+                SwitchRow("Show timing tower", app.towerOpen) { checked ->
+                    if (checked != app.towerOpen) app.toggleTower()
+                }
+                Text(
+                    "Add the live driver order, last laps, gaps, intervals and tyre information over the video feeds.",
+                    style = Type.footnote,
+                    modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 2.dp, bottom = 4.dp),
+                )
+            }
 
             Row(
                 Modifier.padding(top = 20.dp).clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(3.dp)

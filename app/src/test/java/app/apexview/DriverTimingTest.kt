@@ -45,11 +45,57 @@ class DriverTimingTest {
         assertEquals(Pace.GREEN, s.lastLap!!.pace)
         assertEquals("+0.289", s.gap)
         assertEquals(2, s.position)
+        assertEquals(1, s.positionChange)
         assertEquals(500L, s.runningMs)
         // The finished lap's sectors move aside; the new lap starts empty.
         assertEquals(Pace.YELLOW, s.lapSectors[2]!!.pace)
         assertEquals(Pace.PURPLE, s.lapSectors[1]!!.pace)
         assertTrue(s.sectors.all { it == null })
+    }
+
+    @Test
+    fun bestLapPreviousSectorAndMicroSegmentsAreMergedFromTimingF1() {
+        val base = listOf(
+            "00:00:01.000{\"Lines\":{\"16\":{\"Position\":\"1\",\"Sectors\":[{\"Value\":\"\"},{\"Value\":\"\"},{\"Value\":\"\"}]}}}",
+            "00:01:00.000{\"Lines\":{\"16\":{\"Sectors\":{\"0\":{\"Value\":\"27.506\",\"PersonalFastest\":true}}}}}",
+        ).joinToString("\n")
+        val micro = listOf(
+            "00:01:01.000{\"Lines\":{\"16\":{\"BestLapTime\":{\"Value\":\"1:33.047\",\"OverallFastest\":true},\"Sectors\":{\"0\":{\"PreviousValue\":\"27.600\",\"Segments\":[{\"Status\":2051},{\"Status\":2049},{\"Status\":2048},{\"Status\":2064}]}}}}}",
+        ).joinToString("\n")
+        val state = DriverTimingParser.parse(base, t0, micro).getValue("16").at(t0 + 61_000)!!
+        assertEquals("1:33.047", state.bestLap!!.time)
+        assertEquals(Pace.PURPLE, state.bestLap!!.pace)
+        assertEquals("27.600", state.sectors[0]!!.previousTime)
+        assertEquals(listOf(2051, 2049, 2048, 2064), state.sectors[0]!!.segments)
+    }
+
+    @Test
+    fun readsLatestQualifyingPartGapsAndBestLap() {
+        val qualifying = """00:00:01.000{"Lines":{"16":{"Stats":{"0":{"TimeDiffToFastest":"+0.120","TimeDifftoPositionAhead":"+0.034"}},"BestLapTimes":{"0":{"Value":"1:34.567","PersonalFastest":true}}}}}"""
+        val state = DriverTimingParser.parse(qualifying, t0).getValue("16").at(t0 + 2_000)!!
+        assertEquals("+0.120", state.toLeader)
+        assertEquals("+0.034", state.ahead)
+        assertEquals("1:34.567", state.bestLap!!.time)
+        assertEquals(Pace.GREEN, state.bestLap!!.pace)
+    }
+
+    @Test
+    fun readsRaceGapFromNestedGapToLeaderValue() {
+        val race = """00:00:01.000{"Lines":{"1":{"Position":"1","GapToLeader":{"Value":"LEADER"},"IntervalToPositionAhead":{"Value":"0.000"}},"4":{"Position":"2","GapToLeader":{"Value":"+1.234"},"IntervalToPositionAhead":{"Value":"+1.234"}}}}"""
+        val parsed = DriverTimingParser.parse(race, t0)
+        val second = parsed.getValue("4").at(t0 + 2_000)!!
+        assertEquals("+1.234", second.toLeader)
+        assertEquals("+1.234", second.ahead)
+    }
+
+    @Test
+    fun retiredStatusStaysLatchedWhenLaterDeltasClearTheFlag() {
+        val stream = listOf(
+            "00:00:01.000{\"Lines\":{\"4\":{\"Position\":\"12\",\"Retired\":true}}}",
+            "00:00:02.000{\"Lines\":{\"4\":{\"Retired\":false,\"Stopped\":false}}}",
+        ).joinToString("\n")
+        val state = DriverTimingParser.parse(stream, t0).getValue("4").at(t0 + 3_000)!!
+        assertTrue(state.retired)
     }
 
     @Test
@@ -59,8 +105,13 @@ class DriverTimingTest {
             "00:01:00.000{\"Lines\":{\"4\":{\"NumberOfLaps\":4,\"LastLapTime\":{\"Value\":\"1:33.100\"}}}}",
             "00:01:01.000{\"Lines\":{\"4\":{\"Sectors\":{\"2\":{\"Value\":\"30.100\",\"OverallFastest\":true}}}}}",
         ).joinToString("\n")
-        val s = DriverTimingParser.parse(late, t0).getValue("4").at(t0 + 62_000)!!
+        val withMicro = late.replace(
+            "\"Value\":\"30.100\",\"OverallFastest\":true",
+            "\"Value\":\"30.100\",\"OverallFastest\":true,\"Segments\":[{\"Status\":2051},{\"Status\":2049}]",
+        )
+        val s = DriverTimingParser.parse(withMicro, t0).getValue("4").at(t0 + 62_000)!!
         assertEquals(Pace.PURPLE, s.lapSectors[2]!!.pace)
+        assertEquals(listOf(2051, 2049), s.lapSectors[2]!!.segments)
         assertNull(s.sectors[2])
     }
 

@@ -40,7 +40,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.delay
 
-private val ROW_HEIGHT = 28.dp
+private val ROW_HEIGHT = 34.dp
 private val TYRE_COLORS = mapOf(
     "SOFT" to Color(0xFFFF3B30),
     "MEDIUM" to Color(0xFFFFD60A),
@@ -129,10 +129,11 @@ fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float
     }
 }
 
-/** Every driver in running order: last lap, gap to the leader, interval, tyre. Tap a row for their onboard. */
+/** Live running order. The screen follows the same delayed picture clock as the map. */
 @Composable
 private fun TimingTower(app: AppState, timing: SessionTiming) {
-    // Twice a second is plenty for a table.
+    // Replays load their car telemetry lazily; live sessions already carry it on SessionTiming.
+    LaunchedEffect(timing) { app.loadSpeeds(timing) }
     var now by remember { mutableLongStateOf(0L) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -144,69 +145,305 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
         .sortedBy { it.second.position ?: 99 }
     val onTop = app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString()
 
-    Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 8.dp)) {
-        TowerHeader(timing)
+    Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
+        TowerSessionHeader(timing, now)
+        TowerHeader()
         LazyColumn {
             items(rows, key = { it.first }) { (number, state) ->
-                TowerRow(timing, number, state, timing.tyres[number]?.at(now), highlight = number == onTop) { app.showOnboard(number) }
+                val kmh = timing.speeds[number]?.kmhAt(now)
+                val gear = timing.speeds[number]?.gearAt(now)
+                TowerRow(
+                    timing = timing,
+                    number = number,
+                    state = state,
+                    tyre = timing.tyres[number]?.at(now),
+                    kmh = kmh,
+                    gear = gear,
+                    speedUnit = app.settings.speedUnit,
+                    highlight = number == onTop,
+                ) { app.showOnboard(number) }
             }
         }
     }
 }
 
-/** The tower's column titles. */
+/** Compact session/track strip, like the header on the F1 timing screen. */
 @Composable
-fun TowerHeader(timing: SessionTiming) {
-    Row(Modifier.height(22.dp), verticalAlignment = Alignment.CenterVertically) {
-        Header("", 26.dp)
-        Header("Driver", 58.dp, TextAlign.Start)
-        Header("Last lap", 74.dp)
-        Header(if (timing.isRace) "Leader" else "Fastest", 66.dp)
-        Header("Interval", 66.dp)
-        Header("Tyre", 52.dp)
+private fun TowerSessionHeader(timing: SessionTiming, now: Long) {
+    val flag = timing.flags.at(now)
+    val trackLabel = flag.caption(now) ?: "Track clear"
+    val trackColor = when {
+        flag.track == TrackCondition.RED -> Color(0xFFFF453A)
+        flag.track.safetyCar || flag.track == TrackCondition.VSC || flag.track == TrackCondition.VSC_ENDING -> Color(0xFFFFD60A)
+        else -> Color(0xFF30D158)
+    }
+    val currentLap = timing.currentLap ?: timing.laps.values.mapNotNull { it.lapAt(now) }.maxOrNull()
+    val counter = if (timing.isRace && currentLap != null) {
+        "L${currentLap}/${timing.totalLaps ?: "–"}"
+    } else {
+        timing.clock.at(now)?.let { reading ->
+            val seconds = (reading.remainingMs + 999) / 1000
+            val clock = "%02d:%02d".format(seconds / 60, seconds % 60)
+            val part = reading.part?.takeIf { timing.showsPushLaps }
+                ?.let { (if (timing.name.contains("Sprint", ignoreCase = true)) "SQ" else "Q") + it + " " }
+                .orEmpty()
+            part + clock
+        }.orEmpty()
+    }
+    val weather = timing.weather.at(now)
+    val directions = arrayOf("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW")
+    val windDirection = weather?.windDirectionDegrees?.let {
+        directions[((it / 22.5 + 0.5).toInt()).mod(16)]
+    }.orEmpty()
+    val wind = weather?.windSpeedMps?.let { "W ${"%.1f".format(it * 3.6)} ${windDirection}" } ?: "W –"
+    val trackTemp = weather?.trackTempC?.let { "T ${"%.1f".format(it)}°" } ?: "T –"
+    val airTemp = weather?.airTempC?.let { "A ${"%.1f".format(it)}°" } ?: "A –"
+    val humidity = weather?.humidityPct?.let { "H ${"%.1f".format(it)}%" } ?: "H –"
+    val pressure = weather?.pressureHpa?.let { "P ${"%.1f".format(it)}" } ?: "P –"
+    val rain = when (weather?.raining) {
+        true -> "RAIN"
+        false -> "DRY"
+        null -> "RAIN –"
+    }
+    Column(Modifier.fillMaxWidth().height(36.dp)) {
+        Row(
+            Modifier.fillMaxWidth().height(18.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                timing.name.uppercase(),
+                style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Ink.secondary),
+                maxLines = 1,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                trackLabel.uppercase(),
+                style = cell.copy(fontSize = 8.sp, fontWeight = FontWeight.Bold, color = trackColor),
+                maxLines = 1,
+                modifier = Modifier.padding(horizontal = 5.dp),
+            )
+            Text(
+                counter,
+                style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
+                textAlign = TextAlign.End,
+                maxLines = 1,
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().height(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            listOf(wind, trackTemp, airTemp, humidity, pressure, rain).forEach { value ->
+                Text(
+                    value,
+                    style = cell.copy(fontSize = 7.sp, color = Ink.secondary),
+                    maxLines = 1,
+                )
+            }
+        }
     }
 }
 
-/** One driver in the tower: position, team colour, code, last lap, gaps and tyre. */
+/** Narrow headings aligned to the broadcast-style row columns. */
 @Composable
-fun TowerRow(timing: SessionTiming, number: String, state: CardState, tyre: Tyre?, highlight: Boolean, onClick: () -> Unit) {
+fun TowerHeader() {
+    Row(
+        Modifier.fillMaxWidth().height(19.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Header("POS / DRV", 64.dp, TextAlign.Start)
+        Header("GEAR", 30.dp)
+        Header("LAST / BEST", 62.dp)
+        Header("INT / LDR", 46.dp)
+        Header("S1", 43.dp)
+        Header("S2", 43.dp)
+        Header("S3", 43.dp)
+        Header("TYR", 30.dp)
+    }
+}
+
+/** One dense live row: order, gear/speed, lap times, gaps, three sector strips and tyre age. */
+@Composable
+fun TowerRow(
+    timing: SessionTiming,
+    number: String,
+    state: CardState,
+    tyre: Tyre?,
+    kmh: Int? = null,
+    gear: Int? = null,
+    speedUnit: String = Settings.KMH,
+    highlight: Boolean,
+    onClick: () -> Unit,
+) {
     val driver = timing.drivers[number]
-    val lap = state.lastLap
+    val teamColor = driver?.color?.let { Color(it) } ?: Color.White
+    val last = state.lastLap
+    val best = state.bestLap
     Row(
         Modifier
             .height(ROW_HEIGHT)
             .fillMaxWidth()
-            .clip(RoundedCornerShape(6.dp))
-            .background(if (highlight) Color.White.copy(alpha = 0.1f) else Color.Transparent)
+            .clip(RoundedCornerShape(4.dp))
+            .background(
+                when {
+                    highlight -> Color.White.copy(alpha = 0.12f)
+                    state.retired -> Color.White.copy(alpha = 0.025f)
+                    else -> Color.Transparent
+                }
+            )
             .pressable(scaleTo = 0.99f, onClick = onClick),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("${state.position ?: ""}", style = cell.copy(color = Ink.secondary), textAlign = TextAlign.End, modifier = Modifier.width(20.dp))
-        Spacer(Modifier.width(6.dp))
-        Box(Modifier.width(3.dp).height(16.dp).clip(RoundedCornerShape(2.dp)).background(driver?.color?.let { Color(it) } ?: Color.White))
-        Spacer(Modifier.width(6.dp))
-        Text(driver?.tla ?: number, style = cell.copy(fontWeight = FontWeight.SemiBold), modifier = Modifier.width(49.dp))
-        Text(
-            if (state.inPit) "PIT" else lap?.time.orEmpty(),
-            style = cell.copy(color = lapColor(lap?.pace)),
-            textAlign = TextAlign.End,
-            modifier = Modifier.width(74.dp),
-        )
-        Text(state.toLeader.orEmpty(), style = cell.copy(color = Ink.secondary), textAlign = TextAlign.End, modifier = Modifier.width(66.dp))
-        Text(state.ahead.orEmpty(), style = cell.copy(color = Ink.secondary), textAlign = TextAlign.End, modifier = Modifier.width(66.dp))
-        Row(Modifier.width(52.dp), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-            tyre?.let {
-                Text("${it.laps}", style = cell.copy(color = Ink.secondary, fontSize = 12.sp))
-                Spacer(Modifier.width(5.dp))
-                TyreMark(it.compound)
+        Row(Modifier.width(64.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(
+                Modifier.width(18.dp),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text(
+                    state.position?.toString() ?: "–",
+                    style = cell.copy(fontSize = 12.sp, fontWeight = FontWeight.Bold),
+                    textAlign = TextAlign.End,
+                )
+                state.positionChange?.takeIf { it != 0 }?.let { change ->
+                    val gained = change > 0
+                    Text(
+                        "${if (gained) "▲" else "▼"}${if (gained) change else -change}",
+                        style = cell.copy(fontSize = 6.sp, color = if (gained) Color(0xFF30D158) else Color(0xFFFF453A)),
+                        maxLines = 1,
+                    )
+                }
+            }
+            Spacer(Modifier.width(4.dp))
+            Box(
+                Modifier.width(42.dp).height(23.dp).clip(RoundedCornerShape(3.dp)).background(teamColor),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    driver?.tla ?: number,
+                    style = cell.copy(color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Black),
+                    maxLines = 1,
+                )
+            }
+        }
+        Column(
+            Modifier.width(30.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Box(
+                Modifier.size(19.dp).border(1.5.dp, Color(0xFF28A8F8), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    gear?.let { if (it == 0) "N" else it.toString() } ?: "–",
+                    style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
+                )
+            }
+            Text(
+                kmh?.let { speedIn(it, speedUnit) }?.toString() ?: "–",
+                style = cell.copy(fontSize = 8.sp, color = Ink.secondary),
+                maxLines = 1,
+            )
+        }
+        Column(
+            Modifier.width(62.dp).padding(start = 2.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("LAST", style = cell.copy(fontSize = 6.sp, color = Ink.secondary), modifier = Modifier.width(19.dp))
+                Text(
+                    when { state.retired -> "OUT"; state.inPit -> "PIT"; else -> last?.time?.ifBlank { "–" } ?: "–" },
+                    style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold, color = if (state.inPit) Color(0xFFFF453A) else lapColor(last?.pace)),
+                    maxLines = 1,
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("BEST", style = cell.copy(fontSize = 6.sp, color = Ink.secondary), modifier = Modifier.width(19.dp))
+                Text(
+                    best?.time?.ifBlank { "–" } ?: "–",
+                    style = cell.copy(fontSize = 9.sp, color = lapColor(best?.pace)),
+                    maxLines = 1,
+                )
+            }
+        }
+        Column(
+            Modifier.width(46.dp).padding(start = 2.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("INT", style = cell.copy(fontSize = 6.sp, color = Ink.secondary), modifier = Modifier.width(14.dp))
+                Text(state.ahead ?: "–", style = cell.copy(fontSize = 8.sp), maxLines = 1)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("LDR", style = cell.copy(fontSize = 6.sp, color = Ink.secondary), modifier = Modifier.width(14.dp))
+                Text(state.toLeader ?: "–", style = cell.copy(fontSize = 8.sp, color = Ink.secondary), maxLines = 1)
+            }
+        }
+        repeat(3) { index ->
+            val sector = state.sectors.getOrNull(index) ?: state.lapSectors.getOrNull(index)
+            TowerSector(sector)
+        }
+        Column(
+            Modifier.width(30.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            if (tyre != null) {
+                TyreMark(tyre.compound)
+                Text(tyre.laps.toString(), style = cell.copy(fontSize = 7.sp, color = Ink.secondary), maxLines = 1)
+            } else {
+                Text("–", style = cell.copy(fontSize = 9.sp, color = Ink.tertiary))
             }
         }
     }
 }
 
+/** A sector value with its official purple/green/yellow comparison and live micro-sector strip. */
 @Composable
-private fun Header(text: String, width: Dp, align: TextAlign = TextAlign.End) {
-    Text(text, style = Type.caption, textAlign = align, maxLines = 1, modifier = Modifier.width(width))
+private fun TowerSector(sector: SectorCell?) {
+    Column(
+        Modifier.width(43.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Row(
+            Modifier.fillMaxWidth().height(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(1.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            val segments = sector?.segments.orEmpty()
+            if (segments.isEmpty()) {
+                repeat(5) {
+                    Box(
+                        Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(1.dp))
+                            .background(Color.White.copy(alpha = 0.10f))
+                    )
+                }
+            } else {
+                segments.forEach { status ->
+                    Box(
+                        Modifier.weight(1f).height(8.dp).clip(RoundedCornerShape(1.dp))
+                            .background(segmentColor(status))
+                    )
+                }
+            }
+        }
+        Text(
+            sector?.time?.ifBlank { "–" } ?: "–",
+            style = cell.copy(fontSize = 8.sp, color = lapColor(sector?.pace)),
+            maxLines = 1,
+        )
+    }
+}
+
+private fun segmentColor(status: Int) = when (status) {
+    2048 -> Color(0xFFFFD60A) // Yellow
+    2049 -> Color(0xFF30D158) // Personal best
+    2051 -> Color(0xFFBF5AF2) // Session best
+    2064 -> Color(0xFFFF453A) // Stopped
+    else -> Color.White.copy(alpha = 0.10f)
 }
 
 /** The tyre as on the broadcast: a ring in the compound's colour with its letter. */
@@ -214,11 +451,16 @@ private fun Header(text: String, width: Dp, align: TextAlign = TextAlign.End) {
 private fun TyreMark(compound: String) {
     val color = TYRE_COLORS[compound] ?: Ink.secondary
     Box(
-        Modifier.size(18.dp).border(2.dp, color, CircleShape),
+        Modifier.size(16.dp).border(1.5.dp, color, CircleShape),
         contentAlignment = Alignment.Center,
     ) {
-        Text(compound.take(1), style = cell.copy(color = color, fontSize = 9.sp, fontWeight = FontWeight.Bold))
+        Text(compound.take(1), style = cell.copy(color = color, fontSize = 8.sp, fontWeight = FontWeight.Bold))
     }
+}
+
+@Composable
+private fun Header(text: String, width: Dp, align: TextAlign = TextAlign.End) {
+    Text(text, style = Type.caption.copy(fontSize = 7.sp), textAlign = align, maxLines = 1, modifier = Modifier.width(width))
 }
 
 private fun lapColor(pace: Pace?) = when (pace) {
@@ -263,4 +505,4 @@ private fun broadcastName(channel: Channel) = channel.title.split(" ").joinToStr
 
 /** The floating tower's size until it's resized: every column, and about ten drivers. */
 private val TOWER_WIDTH = 380.dp
-private val TOWER_HEIGHT = 340.dp
+private val TOWER_HEIGHT = 720.dp

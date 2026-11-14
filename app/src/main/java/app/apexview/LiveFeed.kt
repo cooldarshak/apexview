@@ -61,7 +61,9 @@ class LiveTimingFeed(
     private val speeds = mutableMapOf<String, SpeedBuilder>()
     private val driverList = JSONObject()
     private val timingLines = StreamText()
+    private val timingF1Lines = StreamText()
     private val tyreLines = StreamText()
+    private val weatherLines = StreamText()
     private val statusLines = StreamText()
     private val controlLines = StreamText()
     /** The cars before connecting, from the archive: live timing only sends what happens from then on. */
@@ -80,6 +82,7 @@ class LiveTimingFeed(
     private var states = StateParse(emptyMap(), emptyList())
     private var laps: Map<String, DriverLaps> = emptyMap()
     private var tyres: Map<String, TyreLog> = emptyMap()
+    private var weather: WeatherLog = WeatherLog.NONE
     private var traced: SavedOutline? = saved
     private var tracedAt = 0L
     private var corners: List<Corner>? = null
@@ -177,7 +180,9 @@ class LiveTimingFeed(
                 if (count.has("TotalLaps")) totalLaps = count.optInt("TotalLaps")
             }
             "TimingData" -> append(timingLines, start, utc, data, opening)
+            "TimingDataF1" -> append(timingF1Lines, start, utc, data, opening)
             "TimingAppData" -> append(tyreLines, start, utc, data, opening)
+            "WeatherData" -> append(weatherLines, start, utc, data, opening)
             "SessionStatus" -> append(statusLines, start, utc, data, opening)
             "RaceControlMessages" -> append(controlLines, start, utc, data, opening)
             "TrackStatus" -> append(trackStatusLines, start, utc, data, opening)
@@ -224,7 +229,9 @@ class LiveTimingFeed(
                 fun past(file: String) = runCatching { rebaseStream(archive.fetchStream(path + file), archiveStart, joined - HEAD_START_MS, joined) }
                     .onFailure { Log.w(TAG, "archive $file: ${it.message}") }.getOrNull()
                 val timing = past("TimingData.jsonStream")
+                val timingF1 = past("TimingDataF1.jsonStream")
                 val tyre = past("TimingAppData.jsonStream")
+                val weather = past("WeatherData.jsonStream")
                 val status = past("SessionStatus.jsonStream")
                 val control = past("RaceControlMessages.jsonStream")
                 val trackStatus = past("TrackStatus.jsonStream")
@@ -233,7 +240,9 @@ class LiveTimingFeed(
                 synchronized(this) {
                     pastTracks = cars
                     timingLines.past = timing
+                    timingF1Lines.past = timingF1
                     tyreLines.past = tyre
+                    weatherLines.past = weather
                     statusLines.past = status
                     controlLines.past = control
                     trackStatusLines.past = trackStatus
@@ -270,8 +279,9 @@ class LiveTimingFeed(
             parsedAt = now
             val text = timingLines.toString()
             states = runCatching { archive.parseStates(text, start) }.getOrDefault(states)
-            laps = runCatching { DriverTimingParser.parse(text, start) }.getOrDefault(laps)
+            laps = runCatching { DriverTimingParser.parse(text, start, timingF1Lines.toString()) }.getOrDefault(laps)
             tyres = runCatching { TyreParser.parse(tyreLines.toString(), start) }.getOrDefault(tyres)
+            weather = runCatching { WeatherParser.parse(weatherLines.toString(), start) }.getOrDefault(weather)
             parts = runCatching { archive.parseParts(text, start) }.getOrDefault(parts)
         }
         val built = (tracks.keys + pastTracks.keys).associateWith { number ->
@@ -324,6 +334,7 @@ class LiveTimingFeed(
             totalLaps = totalLaps,
             clock = runCatching { SessionClock(archive.parseClock(clockLines.toString(), start), parts) }.getOrDefault(SessionClock.NONE),
             live = true,
+            weather = weather,
         ).also { timing ->
             timing.speeds = speeds.mapValues { it.value.build() }
             timing.positionsFromUtc = built.values.filter { it.endMs > 0 }.minOfOrNull { it.startMs }

@@ -260,18 +260,31 @@ class StateLog(private val t: LongArray, private val s: Array<LapState>) {
     }
 }
 
-/** A car's speed through a session, as F1's car data gives it (km/h, a few times a second). */
-class SpeedLog(private val t: LongArray, private val v: ShortArray, private val n: Int) {
-    /** The latest reading at [utcMs]. Null before the first, and once they've stopped coming. */
-    fun kmhAt(utcMs: Long): Int? {
-        if (n == 0 || utcMs < t[0]) return null
+/** A car's speed and gear through a session, from F1 CarData (speed in km/h). */
+class SpeedLog(
+    private val t: LongArray,
+    private val v: ShortArray,
+    private val n: Int,
+    private val gears: ShortArray = ShortArray(0),
+) {
+    private fun indexAt(utcMs: Long): Int {
+        if (n == 0 || utcMs < t[0]) return -1
         var lo = 0
         var hi = n
         while (hi - lo > 1) {
             val mid = (lo + hi) ushr 1
             if (t[mid] <= utcMs) lo = mid else hi = mid
         }
-        return if (utcMs - t[lo] > STALE_MS) null else v[lo].toInt()
+        return if (utcMs - t[lo] > STALE_MS) -1 else lo
+    }
+
+    /** The latest speed at [utcMs], null before the first reading or when it goes stale. */
+    fun kmhAt(utcMs: Long): Int? = indexAt(utcMs).takeIf { it >= 0 }?.let { v[it].toInt() }
+
+    /** F1 car-data channel 3: 0 is neutral, 1–8 are gears. */
+    fun gearAt(utcMs: Long): Int? {
+        val index = indexAt(utcMs)
+        return if (index < 0 || index >= gears.size || gears[index].toInt() < 0) null else gears[index].toInt()
     }
 
     private companion object {
@@ -282,20 +295,23 @@ class SpeedLog(private val t: LongArray, private val v: ShortArray, private val 
 class SpeedBuilder {
     private var t = LongArray(4096)
     private var v = ShortArray(4096)
+    private var gears = ShortArray(4096) { (-1).toShort() }
     private var size = 0
 
-    fun add(time: Long, kmh: Int) {
+    fun add(time: Long, kmh: Int, gear: Int? = null) {
         if (size > 0 && time <= t[size - 1]) return
         if (size == t.size) {
             t = t.copyOf(size * 2)
             v = v.copyOf(size * 2)
+            gears = gears.copyOf(size * 2)
         }
         t[size] = time
         v[size] = kmh.toShort()
+        gears[size] = (gear ?: if (size > 0) gears[size - 1].toInt() else -1).toShort()
         size++
     }
 
-    fun build() = SpeedLog(t, v, size)
+    fun build() = SpeedLog(t, v, size, gears)
 }
 
 /** A speed in the unit chosen in Settings. */
@@ -340,6 +356,8 @@ class SessionTiming(
     val clock: SessionClock = SessionClock.NONE,
     /** Live: the feed brings the cars' speeds. A replay's come from the archive when first wanted. */
     val live: Boolean = false,
+    /** Session weather sampled from F1's WeatherData topic/archive. */
+    val weather: WeatherLog = WeatherLog.NONE,
 ) {
     val geometry = TrackGeometry(outline)
 
@@ -369,6 +387,67 @@ class SessionTiming(
 
     /** Flying-lap highlights only mean something in qualifying. */
     val showsPushLaps get() = type.contains("Qualifying", ignoreCase = true)
+}
+
+/** Weather published by F1's WeatherData topic, sampled against the session clock. */
+class WeatherReading(
+    val windSpeedMps: Double?,
+    val windDirectionDegrees: Double?,
+    val trackTempC: Double?,
+    val airTempC: Double?,
+    val humidityPct: Double?,
+    val pressureHpa: Double?,
+    val raining: Boolean?,
+)
+
+class WeatherLog(private val times: LongArray, private val readings: List<WeatherReading>) {
+    fun at(utcMs: Long): WeatherReading? {
+        if (readings.isEmpty() || utcMs < times.first()) return null
+        val index = times.indexOfLast { it <= utcMs }
+        return index.takeIf { it >= 0 }?.let(readings::get)
+    }
+
+    companion object {
+        val NONE = WeatherLog(LongArray(0), emptyList())
+    }
+}
+
+/** Parses F1's timestamped WeatherData snapshots, including the archived jsonStream format. */
+object WeatherParser {
+    fun parse(stream: String, streamStart: Long): WeatherLog {
+        val times = mutableListOf<Long>()
+        val readings = mutableListOf<WeatherReading>()
+        stream.lineSequence().forEach { line ->
+            val prefix = streamPrefixLength(line)
+            if (line.length <= prefix) return@forEach
+            val json = runCatching { JSONObject(line.substring(prefix)) }.getOrNull() ?: return@forEach
+            val rain = json.optString("Rainfall").let {
+                when (it.trim().lowercase()) {
+                    "1", "true", "yes" -> true
+                    "0", "false", "no" -> false
+                    else -> null
+                }
+            }
+            val reading = WeatherReading(
+                windSpeedMps = json.optString("WindSpeed").toDoubleOrNull(),
+                windDirectionDegrees = json.optString("WindDirection").toDoubleOrNull(),
+                trackTempC = json.optString("TrackTemp").toDoubleOrNull(),
+                airTempC = json.optString("AirTemp").toDoubleOrNull(),
+                humidityPct = json.optString("Humidity").toDoubleOrNull(),
+                pressureHpa = json.optString("Pressure").toDoubleOrNull(),
+                raining = rain,
+            )
+            val utc = runCatching { streamStart + streamOffsetMs(line) }.getOrNull() ?: return@forEach
+            if (times.isNotEmpty() && utc < times.last()) return@forEach
+            if (times.isNotEmpty() && utc == times.last()) {
+                readings[readings.lastIndex] = reading
+            } else {
+                times += utc
+                readings += reading
+            }
+        }
+        return WeatherLog(times.toLongArray(), readings)
+    }
 }
 
 /** The countdown at one moment: what's left, whether it's running, and the part of qualifying. */
@@ -461,9 +540,11 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         // own timestamps disagree with it by more than a minute, they're the ones to trust.
         val streamStart = streamStart(fetch(path + "Heartbeat.jsonStream"), positions)
         val timingStream = runCatching { fetch(path + "TimingData.jsonStream") }.getOrNull()
+        val timingF1Stream = runCatching { fetch(path + "TimingDataF1.jsonStream") }.getOrNull().orEmpty()
+        val weather = runCatching { WeatherParser.parse(fetch(path + "WeatherData.jsonStream"), streamStart) }.getOrDefault(WeatherLog.NONE)
         val parsed = timingStream?.let { runCatching { parseStates(it, streamStart) }.getOrNull() }
             ?: StateParse(emptyMap(), emptyList())
-        val laps = timingStream?.let { runCatching { DriverTimingParser.parse(it, streamStart) }.getOrNull() }.orEmpty()
+        val laps = timingStream?.let { runCatching { DriverTimingParser.parse(it, streamStart, timingF1Stream) }.getOrNull() }.orEmpty()
 
         val built = tracks.mapValues { it.value.build() }
         val traced = traceOutline(tracks.values.toList())
@@ -516,6 +597,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             clock = runCatching {
                 SessionClock(parseClock(fetch(path + "ExtrapolatedClock.jsonStream"), streamStart), parseParts(timingStream.orEmpty(), streamStart))
             }.getOrDefault(SessionClock.NONE),
+            weather = weather,
         ).also { it.startLine = grid?.startLine }
     }
 
@@ -939,7 +1021,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         cars.mapValues { it.value.build() }
     }
 
-    /** One decoded CarData message (archive line or live update): channel 2 is the speed. */
+    /** One decoded CarData message: channel 2 is speed (km/h), channel 3 is gear. */
     internal fun addCarData(json: JSONObject, cars: MutableMap<String, SpeedBuilder>) {
         val entries = json.optJSONArray("Entries") ?: return
         for (i in 0 until entries.length()) {
@@ -947,8 +1029,12 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             val time = runCatching { Instant.parse(entry.getString("Utc")).toEpochMilli() }.getOrNull() ?: continue
             val list = entry.optJSONObject("Cars") ?: continue
             list.keys().forEach { number ->
-                val kmh = list.optJSONObject(number)?.optJSONObject("Channels")?.optInt("2", -1) ?: -1
-                if (kmh >= 0) cars.getOrPut(number) { SpeedBuilder() }.add(time, kmh)
+                val channels = list.optJSONObject(number)?.optJSONObject("Channels")
+                if (channels != null) {
+                    val kmh = channels.optInt("2", -1)
+                    val gear = channels.optInt("3", -1).takeIf { it in 0..8 }
+                    if (kmh >= 0) cars.getOrPut(number) { SpeedBuilder() }.add(time, kmh, gear)
+                }
             }
         }
     }
