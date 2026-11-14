@@ -55,52 +55,53 @@ internal object CmafBoxInspector {
 
     private fun track(data: ByteArray, trak: Box): TrackMetadata {
         val all = flatten(trak).toMutableList()
+        val handler = all.firstOrNull { it.type == "hdlr" }?.let { payload(data, it) }?.let { p ->
+            if (p.remaining() >= 12) { p.position(p.position() + 8); readFourCc(p) } else null
+        }
         val stsdBox = all.firstOrNull { it.type == "stsd" }
+        var sampleEntry: String? = null
+        var width: Int? = null
+        var height: Int? = null
         if (stsdBox != null) {
-            val p = payload(data, stsdBox)
-            if (p.remaining() >= 16) {
+            val stsd = payload(data, stsdBox)
+            // FullBox header (4) + entry_count (4) + sample_entry size (4).
+            if (stsd.remaining() >= 16) {
+                stsd.position(stsd.position() + 8)
+                val entrySize = stsd.int.toLong() and 0xffffffffL
+                sampleEntry = readFourCc(stsd)
+                if (handler == "vide" && sampleEntry in setOf("avc1", "avc3", "hvc1", "hev1", "encv", "dvhe", "dvh1")) {
+                    // The visual sample-entry fields begin after the 8-byte box header.
+                    // Skip reserved[6], data_reference_index[2], pre_defined[2],
+                    // reserved[2], and pre_defined[3][4] before width/height.
+                    if (stsd.remaining() >= 28 && entrySize >= 8L + 28L) {
+                        stsd.position(stsd.position() + 24)
+                        width = stsd.short.toInt() and 0xffff
+                        height = stsd.short.toInt() and 0xffff
+                    }
+                }
                 val entryStart = stsdBox.start + stsdBox.headerSize + 8
-                val entrySize = uint32(data, entryStart)
-                val entryType = String(data, entryStart + 4, 4, Charsets.ISO_8859_1)
-                val fixedHeader = if (entryType == "encv" || handlerFor(trak, data) == "vide") 78 else 28
-                val childStart = entryStart + 8 + fixedHeader
-                val entryEnd = entryStart + entrySize.toInt()
-                if (entrySize >= 8L + fixedHeader && entryEnd <= stsdBox.start + stsdBox.size && childStart <= entryEnd) {
-                    val entryChildren = parseBoxes(data, childStart, entryEnd, 1, intArrayOf(0), mutableListOf())
-                    all += entryChildren.flatMap { flatten(it) }
+                val entryEndLong = entryStart.toLong() + entrySize
+                val boxEnd = stsdBox.start.toLong() + stsdBox.size
+                if (entrySize >= 8 && entryEndLong <= boxEnd && entryEndLong <= data.size.toLong()) {
+                    val entryEnd = entryEndLong.toInt()
+                    val childStart = entryStart + 8 + if (handler == "vide" ||
+                        sampleEntry in setOf("avc1", "avc3", "hvc1", "hev1", "encv", "dvhe", "dvh1")) 78 else 28
+                    if (childStart <= entryEnd) {
+                        val entryChildren = parseBoxes(data, childStart, entryEnd, 1, intArrayOf(0), mutableListOf())
+                        all += entryChildren.flatMap { flatten(it) }
+                    }
                 }
             }
         }
         val mdhd = all.firstOrNull { it.type == "mdhd" }?.let { payload(data, it) }
         val timescale = mdhd?.let { readTimescale(it) }
-        val handler = all.firstOrNull { it.type == "hdlr" }?.let { payload(data, it) }?.let { p ->
-            if (p.remaining() >= 12) { p.position(p.position() + 8); readFourCc(p) } else null
-        }
-        val stsd = all.firstOrNull { it.type == "stsd" }?.let { payload(data, it) }
-        var entry: String? = null
-        var width: Int? = null
-        var height: Int? = null
-        if (stsd != null && stsd.remaining() >= 16) {
-            stsd.position(stsd.position() + 8) // full box header + entry count
-            entry = readFourCc(stsd)
-            if (stsd.remaining() >= 28 && (handler == "vide")) {
-                stsd.position(stsd.position() + 24)
-                width = stsd.short.toInt() and 0xffff
-                height = stsd.short.toInt() and 0xffff
-            }
-        }
         val original = all.firstOrNull { it.type == "frma" }?.let { payload(data, it) }?.takeIf { it.remaining() >= 4 }?.let { readFourCc(it) }
         val scheme = all.firstOrNull { it.type == "schm" }?.let { payload(data, it) }?.takeIf { it.remaining() >= 8 }?.let { p ->
             p.position(p.position() + 4); readFourCc(p)
         }
-        return TrackMetadata(handler, timescale, entry, original, scheme,
-            entry == "encv" || entry == "enca" || scheme != null, width, height)
+        return TrackMetadata(handler, timescale, sampleEntry, original, scheme,
+            sampleEntry == "encv" || sampleEntry == "enca" || scheme != null, width, height)
     }
-
-    private fun handlerFor(trak: Box, data: ByteArray): String? =
-        flatten(trak).firstOrNull { it.type == "hdlr" }?.let { payload(data, it) }?.let { p ->
-            if (p.remaining() >= 12) { p.position(p.position() + 8); readFourCc(p) } else null
-        }
 
     private fun readTimescale(p: ByteBuffer): Long? {
         if (p.remaining() < 4) return null
