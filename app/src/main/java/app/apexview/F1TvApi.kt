@@ -534,6 +534,7 @@ class F1TvApi(private val userAgent: String, private val chromeMajor: String) {
             circuitKey = text(emf, "CircuitKey").toIntOrNull(),
             meetingName = text(emf, "Meeting_Name"),
             title = title,
+            sessionStartUtcMs = text(emf, "sessionStartDate").toLongOrNull()?.takeIf { it > 0L },
         )
     }
 
