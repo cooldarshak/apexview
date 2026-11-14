@@ -307,7 +307,7 @@ internal fun FloatingPanel(
                 Modifier
                     .fillMaxWidth()
                     .then(
-                        if (locked) Modifier else Modifier.pointerInput(width, height, feedScale) {
+                        if (locked) Modifier else Modifier.pointerInput(width, height, feedScale, bounds) {
                             detectDragGestures(
                                 onDragStart = { rawX = spot.x; rawY = spot.y },
                                 onDragEnd = { spot.store(width, height) },
@@ -347,7 +347,7 @@ internal fun FloatingPanel(
             Modifier
                 .align(Alignment.BottomEnd)
                 .size(36.dp)
-                .pointerInput(width, height, feedScale) {
+                .pointerInput(width, height, feedScale, bounds) {
                     detectDragGestures(
                         onDragStart = { rawW = boxW; rawH = boxH },
                         onDragEnd = { spot.store(width, height); onResizeFinished() },
