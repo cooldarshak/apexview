@@ -1269,7 +1269,7 @@ private fun MapSheet(app: AppState) {
                     if (checked != app.towerOpen) app.toggleTower()
                 }
                 Text(
-                    "Add the live driver order, lap times, gaps, sector colours and tyre information over the video feeds.",
+                    "Add the live driver order, last laps, gaps, intervals and tyre information over the video feeds.",
                     style = Type.footnote,
                     modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 2.dp, bottom = 4.dp),
                 )
