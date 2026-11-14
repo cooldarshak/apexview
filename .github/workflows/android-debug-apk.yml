@@ -6,6 +6,7 @@ on:
       - feature/playback-speed-tv-controls
       - feature/timing-tower-map-menu
       - fix/tv-timing-map-and-dpad-sliders
+      - customtiledview
   workflow_dispatch:
 
 permissions:
