@@ -61,6 +61,7 @@ class LiveTimingFeed(
     private val speeds = mutableMapOf<String, SpeedBuilder>()
     private val driverList = JSONObject()
     private val timingLines = StreamText()
+    private val timingF1Lines = StreamText()
     private val tyreLines = StreamText()
     private val statusLines = StreamText()
     private val controlLines = StreamText()
@@ -177,6 +178,7 @@ class LiveTimingFeed(
                 if (count.has("TotalLaps")) totalLaps = count.optInt("TotalLaps")
             }
             "TimingData" -> append(timingLines, start, utc, data, opening)
+            "TimingDataF1" -> append(timingF1Lines, start, utc, data, opening)
             "TimingAppData" -> append(tyreLines, start, utc, data, opening)
             "SessionStatus" -> append(statusLines, start, utc, data, opening)
             "RaceControlMessages" -> append(controlLines, start, utc, data, opening)
@@ -224,6 +226,7 @@ class LiveTimingFeed(
                 fun past(file: String) = runCatching { rebaseStream(archive.fetchStream(path + file), archiveStart, joined - HEAD_START_MS, joined) }
                     .onFailure { Log.w(TAG, "archive $file: ${it.message}") }.getOrNull()
                 val timing = past("TimingData.jsonStream")
+                val timingF1 = past("TimingDataF1.jsonStream")
                 val tyre = past("TimingAppData.jsonStream")
                 val status = past("SessionStatus.jsonStream")
                 val control = past("RaceControlMessages.jsonStream")
@@ -233,6 +236,7 @@ class LiveTimingFeed(
                 synchronized(this) {
                     pastTracks = cars
                     timingLines.past = timing
+                    timingF1Lines.past = timingF1
                     tyreLines.past = tyre
                     statusLines.past = status
                     controlLines.past = control
@@ -270,7 +274,7 @@ class LiveTimingFeed(
             parsedAt = now
             val text = timingLines.toString()
             states = runCatching { archive.parseStates(text, start) }.getOrDefault(states)
-            laps = runCatching { DriverTimingParser.parse(text, start) }.getOrDefault(laps)
+            laps = runCatching { DriverTimingParser.parse(text, start, timingF1Lines.toString()) }.getOrDefault(laps)
             tyres = runCatching { TyreParser.parse(tyreLines.toString(), start) }.getOrDefault(tyres)
             parts = runCatching { archive.parseParts(text, start) }.getOrDefault(parts)
         }
