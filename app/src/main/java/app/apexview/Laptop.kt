@@ -143,6 +143,9 @@ fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float
             minHeight = minOf(AppState.TOWER_MIN_HEIGHT_DP.dp, maxTowerHeight),
             bounds = bounds,
             compactHeader = true,
+            compactHeaderHeight = if (app.layoutMode == LayoutMode.TV) {
+                with(density) { height.toDp() * 0.09375f }
+            } else null,
             opacity = app.towerOpacity,
             locked = app.towerLocked || docked,
             onResizeFinished = app::finishTowerResize,
