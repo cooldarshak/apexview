@@ -712,6 +712,7 @@ internal fun Modifier.remoteScrub(
         }
     }
     .focusable(interactionSource = interaction)
+    .tvFocusRing()
 
 /**
  * Chequered marks on the scrubber's line at lights out (the session going green, outside races)
