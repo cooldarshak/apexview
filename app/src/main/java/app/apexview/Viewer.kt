@@ -374,6 +374,20 @@ fun ViewerScreen(app: AppState) {
                     }
                 }
             }
+            // Keep the broadcast TV composition visible while the timing endpoint is connecting.
+            // A blank reserved sidebar looked like a broken layout and hid the actual failure state.
+            val tvPlan = app.combinedOverlayPlan
+            if (!laptop && app.layoutMode == LayoutMode.TV && tvPlan != null) {
+                val status = app.mapStatus ?: "Waiting for timing data…"
+                if (app.towerOpen && (app.timing == null || app.timing?.laps?.isEmpty() == true)) {
+                    TvOverlayPending("TIMING", tvPlan.tower, status)
+                }
+                if (app.mapMode == MapMode.TRACK &&
+                    (app.timing == null || (app.timing?.outline?.size ?: 0) < 8)
+                ) {
+                    TvOverlayPending("TRACK MAP", tvPlan.map, status)
+                }
+            }
         }
 
         if (app.inPip) return@BoxWithConstraints
@@ -959,6 +973,28 @@ private fun TileView(app: AppState, tile: Tile) {
                     drawLine(Color.White, Offset(size.width, size.height / 2), Offset(size.width / 2, size.height), stroke)
                 }
             }
+        }
+    }
+}
+
+/** A visible TV placeholder while live/archive timing is being resolved. */
+@Composable
+private fun TvOverlayPending(title: String, area: Area, status: String) {
+    val density = LocalDensity.current
+    Box(
+        Modifier
+            .offset { IntOffset(area.x.roundToInt(), area.y.roundToInt()) }
+            .requiredSize(
+                with(density) { area.w.toDp() },
+                with(density) { area.h.toDp() },
+            )
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color(0xE6101010))
+            .padding(12.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(title, style = Type.subhead.copy(color = Ink.primary, fontWeight = FontWeight.Bold))
+            Text(status, style = Type.footnote.copy(color = Ink.secondary), maxLines = 3)
         }
     }
 }
