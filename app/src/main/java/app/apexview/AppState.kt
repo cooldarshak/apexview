@@ -425,6 +425,8 @@ class AppState(
     /** Every content's channel list, for switching a tile's feed later. */
     private val channelsByContent = mutableMapOf<Long, List<Channel>>()
     private val sessionRefs = mutableMapOf<Long, SessionRef>()
+    /** Catalog session starts are retained when Media3 on a TV exposes no HLS/DASH program clock. */
+    private val catalogStartTimes = mutableMapOf<Long, Long>()
     /** Catalog-confirmed live sessions can use live timing before the video timeline is ready. */
     private val knownLiveContentIds = mutableSetOf<Long>()
     /** Once F1 moves the live timing socket to the next session, the old session uses its archive. */
@@ -841,6 +843,7 @@ class AppState(
     /** Plays a catalog item; a show or documentary series opens its page of episodes instead. */
     fun watch(item: CatalogItem, start: Boolean = false) {
         item.pageId?.let { open(Screen.Collection(it, item.title)); return }
+        item.startMs.takeIf { it > 0L }?.let { catalogStartTimes[item.contentId] = it }
         // Sessions are titled by their weekend in the viewer ("Mexico City Grand Prix · Race").
         val session = weekendContent.values.any { c -> c.sessions.any { it.contentId == item.contentId } }
         // Live events carry their weekend's name as their subtitle.
@@ -1088,7 +1091,12 @@ class AppState(
     /** A session's feeds, fetched once. */
     private suspend fun channelsOf(contentId: Long): List<Channel> = channelsByContent[contentId] ?: run {
         val video = api.contentVideo(contentId)
-        video.session?.let { sessionRefs[contentId] = it }
+        video.session?.let { ref ->
+            val catalogStart = catalogStartTimes[contentId]
+            sessionRefs[contentId] = if (ref.sessionStartUtcMs == null && catalogStart != null) {
+                ref.copy(sessionStartUtcMs = catalogStart)
+            } else ref
+        }
         if (!video.isSession) notSessions += contentId
         video.channels.ifEmpty { listOf(Channel("Main feed", null, isDefault = true)) }
             .also { channelsByContent[contentId] = it }
@@ -1329,7 +1337,7 @@ class AppState(
         ascendon = api.ascendon.orEmpty(),
         entitlement = api.entitlement.orEmpty(),
         userAgent = userAgent,
-        forceL3 = settings.softwareDrm,
+        forceL3 = shouldUseSoftwareDrm(settings.softwareDrm, isTv),
         subtitles = settings.subtitles,
         commentary = settings.commentary,
         startMs = startMs,
@@ -1868,8 +1876,7 @@ class AppState(
         // selected main feed in the dedicated feed region instead of bypassing that layout.
         val tvLayoutActive = layoutMode == LayoutMode.TV && !laptopActive
         val combinedReservationsActive =
-            (tvLayoutActive || mapMode.inWindow && mapReserve && towerOpen && towerReserve) &&
-                timing != null && !laptopActive
+            tvLayoutActive || (mapMode.inWindow && mapReserve && towerOpen && towerReserve && timing != null && !laptopActive)
         tiles.firstOrNull { it.id == focusTileId }?.takeIf { compactCanvas && !combinedReservationsActive }?.let { focus ->
             focus.place(Layouts.place(LayoutMode.GRID, 1, width, height).first())
             raise(focus)
@@ -1879,9 +1886,7 @@ class AppState(
         focusTileId = null
 
         // The combined map/tower reservation takes precedence over a saved feed-only layout.
-        if ((tvLayoutActive || mapMode.inWindow && mapReserve && towerOpen && towerReserve) &&
-            timing != null && !laptopActive
-        ) {
+        if (tvLayoutActive || (mapMode.inWindow && mapReserve && towerOpen && towerReserve && timing != null && !laptopActive)) {
             resumeLayout = null
         }
         // Coming back to a session puts its feeds back where they were.
@@ -1902,8 +1907,10 @@ class AppState(
         // tower and map together beside it. The orientation decides whether the workspace is
         // below the video (portrait) or in a right-hand sidebar (landscape). In floating mode
         // this is their starting workspace: the map can later be dragged over the video area.
-        val keepMapClear = (tvLayoutActive || mapMode.inWindow && mapReserve) && timing != null
-        val keepTowerClear = towerOpen && (tvLayoutActive || towerReserve) && timing != null && !laptopActive
+        // TV owns its video/timing/map regions even while F1 timing is still connecting. This
+        // prevents startup latency from collapsing the TV layout back into a feed-only grid.
+        val keepMapClear = tvLayoutActive || (mapMode.inWindow && mapReserve && timing != null)
+        val keepTowerClear = towerOpen && (tvLayoutActive || towerReserve && timing != null) && !laptopActive
         if (keepMapClear && keepTowerClear) {
             val panelLayoutMode = if (tvLayoutActive) LayoutMode.TV else layoutMode
             val panelOverlayMode = if (tvLayoutActive) OverlayLayoutMode.DOCKED else overlayLayoutMode
