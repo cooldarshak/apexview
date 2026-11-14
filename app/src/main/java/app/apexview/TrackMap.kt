@@ -239,8 +239,8 @@ fun mapMarginPx(density: androidx.compose.ui.unit.Density) = with(density) { MAP
 
 /**
  * Whether the track map should expose its lock/move/resize controls. On touch devices they appear
- * while arranging (or in a floating workspace). A TV has no touch arrangement mode, so keep the
- * same controls available for the remote whenever the map is not in a fixed docked workspace.
+ * while arranging (or in a floating workspace). On TV they remain available in docked layouts too,
+ * because the remote is the way to move and resize the map.
  */
 internal fun shouldShowMapControls(
     isTv: Boolean,
