@@ -25,10 +25,15 @@ class MapRetryTest {
     }
 
     @Test
-    fun tvAlwaysUsesCompatibleSoftwareDrmEvenWhenPhonePreferenceIsOff() {
-        assertEquals(true, shouldUseSoftwareDrm(userPreference = false, isTv = true))
-        assertEquals(true, shouldUseSoftwareDrm(userPreference = true, isTv = false))
-        assertEquals(false, shouldUseSoftwareDrm(userPreference = false, isTv = false))
+    fun tvDecoderBudgetReservesOneCodecAndHandlesUnknownCapabilitiesSafely() {
+        assertEquals(1, reportedVideoDecoderBudget(null, isTv = true))
+        assertEquals(1, reportedVideoDecoderBudget(-1, isTv = true))
+        assertEquals(1, reportedVideoDecoderBudget(1, isTv = true))
+        assertEquals(1, reportedVideoDecoderBudget(2, isTv = true))
+        assertEquals(2, reportedVideoDecoderBudget(3, isTv = true))
+        assertEquals(3, reportedVideoDecoderBudget(4, isTv = true))
+        assertEquals(4, reportedVideoDecoderBudget(16, isTv = true))
+        assertEquals(4, reportedVideoDecoderBudget(1, isTv = false))
     }
 
     @Test
