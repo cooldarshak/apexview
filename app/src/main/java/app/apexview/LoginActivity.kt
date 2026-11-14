@@ -33,10 +33,39 @@ class LoginActivity : ComponentActivity() {
         web.settings.domStorageEnabled = true
         // Look like plain Chrome; some sign-in pages reject the WebView marker.
         web.settings.userAgentString = web.settings.userAgentString.replace("; wv", "")
-        web.webViewClient = WebViewClient()
+        web.isFocusable = true
+        web.isFocusableInTouchMode = true
+        web.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                // Keep F1's own sign-in page, but make the active WebView control obvious on TV.
+                // The WebView retains its native DPAD navigation and form-entry behaviour.
+                view?.evaluateJavascript(
+                    """
+                    (() => {
+                      const id = 'apexview-tv-focus-style';
+                      let style = document.getElementById(id);
+                      if (!style) {
+                        style = document.createElement('style');
+                        style.id = id;
+                        (document.head || document.documentElement).appendChild(style);
+                      }
+                      style.textContent = 'button:focus, input:focus, select:focus, textarea:focus, a:focus, [tabindex]:focus { outline: 3px solid #168BFF !important; outline-offset: 2px !important; box-shadow: 0 0 0 2px rgba(22,139,255,.28) !important; }';
+                      const active = document.activeElement;
+                      if (!active || active === document.body || active === document.documentElement) {
+                        const first = document.querySelector('input:not([type=hidden]), button, a[href], select, textarea, [tabindex="0"]');
+                        if (first) first.focus();
+                      }
+                    })();
+                    """.trimIndent(),
+                    null,
+                )
+            }
+        }
         setContentView(web)
 
         web.loadUrl(LoginCookie.LOGIN_URL)
+        web.requestFocus()
         handler.post(poll)
     }
 
