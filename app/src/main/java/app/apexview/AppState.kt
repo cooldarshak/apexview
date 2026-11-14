@@ -1758,6 +1758,13 @@ class AppState(
                 val minTowerHeight = minOf(TOWER_MIN_HEIGHT_DP * density, height)
                 val maxTowerWidth = (width - 32f * density).coerceAtLeast(minTowerWidth).coerceAtMost(width)
                 val maxTowerHeight = (height - 40f * density).coerceAtLeast(minTowerHeight).coerceAtMost(height)
+                // FloatingPanel normally restores these dimensions when it first appears.
+                // A reserved tower is positioned by the layout solver first, so restore the
+                // saved dimensions here before asking it to find the matching free rectangle.
+                towerSpot.saved()?.takeIf { it.size >= 4 }?.let { saved ->
+                    if (towerSpot.w <= 0f && saved[2] > 0f) towerSpot.w = saved[2] * width
+                    if (towerSpot.h <= 0f && saved[3] > 0f) towerSpot.h = saved[3] * height
+                }
                 val requestedWidth = (towerSpot.w.takeIf { it > 0f }
                     ?: minOf(TOWER_DEFAULT_WIDTH_DP * density, maxTowerWidth))
                     .coerceIn(minTowerWidth, maxTowerWidth)
