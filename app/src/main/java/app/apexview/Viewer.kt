@@ -119,6 +119,7 @@ import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
@@ -263,7 +264,13 @@ fun ViewerScreen(app: AppState) {
     // feeds stay full size, so what you place is where it ends up.
     val motion = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
     // Laptop mode keeps the stream still: the controls lie over its top edge instead.
-    val lift by animateFloatAsState(if (app.chromeVisible && !app.arranging && !app.laptopActive) 1f else 0f, motion, label = "lift")
+    // SurfaceView is the recommended Android TV output, but scaling its parent while the
+    // controls animate can desynchronise its surface from Compose. TV chrome overlays in place.
+    val lift by animateFloatAsState(
+        if (!app.isTv && app.chromeVisible && !app.arranging && !app.laptopActive) 1f else 0f,
+        motion,
+        label = "lift",
+    )
 
     BoxWithConstraints(
         Modifier
@@ -308,17 +315,17 @@ fun ViewerScreen(app: AppState) {
             Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    val k = 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
+                    val k = if (app.isTv) 1f else 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
                     scaleX = k
                     scaleY = k
                     transformOrigin = TransformOrigin(0f, 0.5f)
                 }
                 .graphicsLayer {
-                    val s = if (app.inPip) 1f else 1f - lift * band / height
-                    scaleX = s
-                    scaleY = s
+                    val scale = if (app.inPip || app.isTv) 1f else 1f - lift * band / height
+                    scaleX = scale
+                    scaleY = scale
                     transformOrigin = TransformOrigin(0.5f, 1f)
-                    translationY = -sheetShift
+                    translationY = if (app.isTv) 0f else -sheetShift
                 }
                 .mapGestures(app, density)
         ) {
@@ -394,7 +401,7 @@ fun ViewerScreen(app: AppState) {
 
         // Over the feeds and the map, under the controls; it doesn't shrink with the feeds.
         if (app.radioOpen) app.timing?.let { timing ->
-            Box(Modifier.zIndex(CHROME_Z - 1)) { RadioPanel(app, timing, width, height, feedScale = 1f - lift * band / height) }
+            Box(Modifier.zIndex(CHROME_Z - 1)) { RadioPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height) }
         }
         // Laptop mode has the tower below the hinge already.
         if (app.towerOpen && !app.laptopActive) app.timing?.takeIf { it.laps.isNotEmpty() }?.let { timing ->
@@ -418,11 +425,11 @@ fun ViewerScreen(app: AppState) {
                         }
                         .zIndex(CHROME_Z - 1)
                 ) {
-                    TowerPanel(app, timing, width, height, feedScale = 1f - lift * band / height)
+                    TowerPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height)
                 }
             } else {
                 Box(Modifier.zIndex(CHROME_Z - 1)) {
-                    TowerPanel(app, timing, width, height, feedScale = 1f - lift * band / height)
+                    TowerPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height)
                 }
             }
         }
@@ -460,7 +467,7 @@ fun ViewerScreen(app: AppState) {
 
         // The explanation overlay, above everything. Shown once by itself, the first time.
         Box(Modifier.fillMaxSize().zIndex(CHROME_Z + 2)) {
-            HelpOverlay(app, width, height, feedScale = 1f - lift * band / height, compact = with(density) { minOf(width, height).toDp() } < 600.dp)
+            HelpOverlay(app, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height, compact = with(density) { minOf(width, height).toDp() } < 600.dp)
         }
         LaunchedEffect(Unit) {
             if (!app.helpSeen && !app.isTv) {
@@ -809,6 +816,7 @@ private val overlayShadow = androidx.compose.ui.graphics.Shadow(Color.Black, blu
  * arranging, one finger drags and two resize. With the controls up, the header shows the feed's
  * name (tap for its menu), a speaker that moves the audio here, and on the small feeds a close.
  */
+@OptIn(UnstableApi::class)
 @Composable
 private fun TileView(app: AppState, tile: Tile) {
     val density = LocalDensity.current
@@ -837,7 +845,11 @@ private fun TileView(app: AppState, tile: Tile) {
             AndroidView(
                 factory = { context ->
                     val layout = if (tile.feed.usesSoftwareDrm) R.layout.player_texture else R.layout.player_surface
-                    LayoutInflater.from(context).inflate(layout, null) as PlayerView
+                    (LayoutInflater.from(context).inflate(layout, null) as PlayerView).apply {
+                        // Media3 1.5 made this workaround opt-in. Without it, PlayerView inside
+                        // Compose AndroidView can stretch, crop or leak its SurfaceView surface.
+                        if (!tile.feed.usesSoftwareDrm) setEnableComposeSurfaceSyncWorkaround(true)
+                    }
                 },
                 update = { it.player = tile.feed.player },
                 onRelease = { it.player = null },
