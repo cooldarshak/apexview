@@ -1900,7 +1900,10 @@ class AppState(
                 mapPanel.placed = true
             }
         }
-        keepMapInArea(area)
+        // In floating mode the saved map is intentionally allowed to sit over the main
+        // video area. Keep it on screen, not trapped in the reserved sidebar/workspace.
+        keepMapOnScreen()
+        expandTowerWhenMapLeavesWorkspace(area)
     }
 
     /** Keeps the map inside the same floating workspace as the timing tower. */
@@ -2045,7 +2048,6 @@ class AppState(
             towerSpot.y = workspace.y
             towerSpot.h = workspace.h
             towerExpandedForMapMove = true
-            storeTowerPanel()
         } else if (mapIsInOverlayColumn && towerExpandedForMapMove) {
             towerSpot.h = (towerHeightBeforeMapMove ?: minOf(TOWER_DEFAULT_HEIGHT_DP *
                 context.resources.displayMetrics.density, workspace.h)).coerceIn(
@@ -2058,7 +2060,6 @@ class AppState(
             towerHeightBeforeMapMove = null
             towerYBeforeMapMove = null
             towerExpandedForMapMove = false
-            storeTowerPanel()
         }
     }
 
