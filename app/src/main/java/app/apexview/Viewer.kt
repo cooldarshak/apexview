@@ -471,10 +471,12 @@ private fun Modifier.mapGestures(app: AppState, density: androidx.compose.ui.uni
     // The map's window: the regular one in Track or Pit style, or laptop mode's own.
     val circle = !app.laptopActive && app.mapMode == MapMode.PIT
     val window = app.laptopActive || app.mapMode.inWindow
-    if (!app.arranging || app.mapLocked || !window || timing == null || app.combinedOverlaysDocked) return this
+    // Floating overlay mode is independently movable; it must not depend on the feed layout's
+    // Snap/Free arranging toggle. Docked mode remains fixed.
+    if (!(app.arranging || app.combinedOverlaysFloating) || app.mapLocked || !window || timing == null || app.combinedOverlaysDocked) return this
     // Keyed on the circuit, not the timing: live timing is replaced every couple of seconds, and
     // restarting this mid-gesture used to leave the map "grabbed", so feeds wouldn't move again.
-    return pointerInput(timing.circuitKey, timing.outline.size, app.arranging, app.mapLocked, app.laptopActive, circle) {
+    return pointerInput(timing.circuitKey, timing.outline.size, app.arranging, app.combinedOverlaysFloating, app.mapLocked, app.laptopActive, circle) {
         val margin = mapMarginPx(density)
         val reach = with(density) { 22.dp.toPx() }
         awaitEachGesture {
