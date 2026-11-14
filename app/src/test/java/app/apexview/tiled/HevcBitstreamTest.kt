@@ -20,7 +20,7 @@ class HevcBitstreamTest {
 
     @Test fun parsesLayerAndTemporalId() {
         // nal_unit_type=19, nuh_layer_id=3, nuh_temporal_id_plus1=2
-        val nal = byteArrayOf(0x27, 0x1a, 0x00)
+        val nal = byteArrayOf(0x26, 0x1a, 0x00)
         val parsed = HevcBitstream.parseNalHeader(nal)
         assertEquals(19, parsed.type)
         assertEquals(3, parsed.layerId)
@@ -35,9 +35,9 @@ class HevcBitstreamTest {
     @Test fun readsBitsAndUnsignedExpGolomb() {
         val reader = HevcBitReader(byteArrayOf(0b1010_0110.toByte()))
         assertEquals(1, reader.readBit())
-        assertEquals(2, reader.readBits(2))
-        // Remaining bits 0110: ue(v) = 2
-        assertEquals(2L, reader.readUnsignedExpGolomb())
+        assertEquals(1, reader.readBits(2))
+        // Remaining bits 00110: ue(v) = 5
+        assertEquals(5L, reader.readUnsignedExpGolomb())
     }
 
     @Test fun rejectsMissingStartCode() {
