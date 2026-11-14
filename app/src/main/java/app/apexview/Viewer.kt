@@ -1469,7 +1469,7 @@ private fun MapSheet(app: AppState) {
                         trackColor = Ink.surfaceHigh,
                     )
                     Text(
-                        "You can also drag the tower header to move it and its corner grip to resize it.",
+                        "Minimum width is 300 dp so the sector and tyre columns remain visible. You can also drag the tower header to move it and its corner grip to resize it.",
                         style = Type.footnote,
                         modifier = Modifier.padding(top = 8.dp),
                     )
