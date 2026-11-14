@@ -224,6 +224,7 @@ internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> U
         Switch(
             checked = checked,
             onCheckedChange = onChange,
+            modifier = Modifier.tvFocusRing(),
             colors = SwitchDefaults.colors(
                 checkedTrackColor = Color(0xFF30D158),
                 checkedThumbColor = Color.White,
