@@ -36,6 +36,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
@@ -215,6 +218,8 @@ internal fun FloatingPanel(
     minHeight: androidx.compose.ui.unit.Dp = PANEL_MIN_HEIGHT,
     /** Optional reserved area that contains the complete panel and its resize gestures. */
     bounds: Area? = null,
+    /** Replaces the tall title bar with a slim move/resize strip, used by the timing tower. */
+    compactHeader: Boolean = false,
     /** Opacity of the complete panel, including its contents. */
     opacity: Float = 1f,
     /** When locked, its header and resize grip no longer change the panel's place or size. */
@@ -325,19 +330,85 @@ internal fun FloatingPanel(
                                 val minX = bounds?.x ?: 0f
                                 val minY = bounds?.y ?: 0f
                                 val maxX = bounds?.let { it.x + it.w - boxW } ?: (width - boxW)
-                                val maxY = bounds?.let { it.y + it.h - boxH } ?: (height - HEADER_HEIGHT.toPx())
+                                val maxY = bounds?.let { it.y + it.h - boxH } ?: (height - boxH)
                                 spot.x = x.coerceIn(minX, maxX.coerceAtLeast(minX))
                                 spot.y = y.coerceIn(minY, maxY.coerceAtLeast(minY))
                             }
                         }
                     )
-                    .height(HEADER_HEIGHT)
-                    .padding(start = 16.dp, end = 4.dp),
+                    .height(if (compactHeader) 22.dp else HEADER_HEIGHT)
+                    .padding(start = if (compactHeader) 6.dp else 16.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(title, style = Type.headline, modifier = Modifier.weight(1f))
-                Box(Modifier.size(36.dp).pressable(onClick = onClose), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.Close, closeLabel, tint = Ink.secondary, modifier = Modifier.size(18.dp))
+                if (compactHeader) {
+                    if (!locked) {
+                        Text(
+                            "MOVE",
+                            style = Type.caption.copy(fontSize = 7.sp, color = Ink.secondary, fontWeight = FontWeight.Bold),
+                            modifier = Modifier
+                                .padding(horizontal = 7.dp, vertical = 1.dp)
+                                .onKeyEvent { event ->
+                                    when (event.key) {
+                                        Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
+                                            if (event.type == KeyEventType.KeyDown) {
+                                                val step = with(density) { 18.dp.toPx() }
+                                                val dx = when (event.key) { Key.DirectionLeft -> -step; Key.DirectionRight -> step; else -> 0f }
+                                                val dy = when (event.key) { Key.DirectionUp -> -step; Key.DirectionDown -> step; else -> 0f }
+                                                val minX = bounds?.x ?: 0f
+                                                val minY = bounds?.y ?: 0f
+                                                val maxX = bounds?.let { it.x + it.w - boxW } ?: (width - boxW)
+                                                val maxY = bounds?.let { it.y + it.h - boxH } ?: (height - boxH)
+                                                spot.x = (spot.x + dx).coerceIn(minX, maxX.coerceAtLeast(minX))
+                                                spot.y = (spot.y + dy).coerceIn(minY, maxY.coerceAtLeast(minY))
+                                            } else if (event.type == KeyEventType.KeyUp) spot.store(width, height)
+                                            true
+                                        }
+                                        else -> false
+                                    }
+                                }
+                                .pressable(scaleTo = 1f) {},
+                        )
+                        Text(
+                            "SIZE",
+                            style = Type.caption.copy(fontSize = 7.sp, color = Ink.secondary, fontWeight = FontWeight.Bold),
+                            modifier = Modifier
+                                .padding(horizontal = 7.dp, vertical = 1.dp)
+                                .onKeyEvent { event ->
+                                    when (event.key) {
+                                        Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
+                                            if (event.type == KeyEventType.KeyDown) {
+                                                val step = with(density) { 18.dp.toPx() }
+                                                val dx = when (event.key) { Key.DirectionLeft -> -step; Key.DirectionRight -> step; else -> 0f }
+                                                val dy = when (event.key) { Key.DirectionUp -> -step; Key.DirectionDown -> step; else -> 0f }
+                                                val minW = with(density) { effectiveMinWidth.toPx() }
+                                                val minH = with(density) { effectiveMinHeight.toPx() }
+                                                val maxW = bounds?.let { it.x + it.w - spot.x } ?: (width - spot.x)
+                                                val maxH = bounds?.let { it.y + it.h - spot.y } ?: (height - spot.y)
+                                                spot.w = (spot.w.takeIf { it > 0f } ?: boxW).let { (it + dx).coerceIn(minW, maxW.coerceAtLeast(minW)) }
+                                                spot.h = (spot.h.takeIf { it > 0f } ?: boxH).let { (it + dy).coerceIn(minH, maxH.coerceAtLeast(minH)) }
+                                            } else if (event.type == KeyEventType.KeyUp) {
+                                                spot.store(width, height)
+                                                onResizeFinished()
+                                            }
+                                            true
+                                        }
+                                        else -> false
+                                    }
+                                }
+                                .pressable(scaleTo = 1f) {},
+                        )
+                    } else {
+                        Text("TIMING", style = Type.caption.copy(fontSize = 7.sp, color = Ink.secondary, fontWeight = FontWeight.Bold))
+                    }
+                    Spacer(Modifier.weight(1f))
+                } else {
+                    Text(title, style = Type.headline, modifier = Modifier.weight(1f))
+                }
+                Box(
+                    Modifier.size(if (compactHeader) 24.dp else 36.dp).pressable(onClick = onClose),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Rounded.Close, closeLabel, tint = Ink.secondary, modifier = Modifier.size(16.dp))
                 }
             }
             content()
