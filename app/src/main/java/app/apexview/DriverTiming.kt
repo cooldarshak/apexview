@@ -33,6 +33,8 @@ class CardState(
     val ahead: String? = null,
     val bestLap: SectorCell? = null,
     val retired: Boolean = false,
+    /** Positive means gained places since the first position observed by this timing stream. */
+    val positionChange: Int? = null,
 )
 
 /**
@@ -136,6 +138,7 @@ class DriverLaps(
             ahead = s.ahead,
             bestLap = s.bestLap,
             retired = s.retired,
+            positionChange = states.firstOrNull()?.position?.let { first -> s.position?.let { first - it } },
         )
     }
 
