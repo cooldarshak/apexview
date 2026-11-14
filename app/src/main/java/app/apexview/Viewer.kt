@@ -1526,7 +1526,7 @@ private fun MapSheet(app: AppState) {
                     style = Type.footnote,
                     modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
                 )
-                if (app.mapMode.inWindow && app.mapReserve && app.towerReserve) {
+                if (!app.laptopActive && app.mapMode.inWindow && app.mapReserve && app.towerReserve) {
                     val portrait = config.screenHeightDp >= config.screenWidthDp
                     Text("Map + tower layout", style = Type.body, modifier = Modifier.padding(top = 14.dp))
                     Row(
