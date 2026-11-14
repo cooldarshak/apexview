@@ -1262,14 +1262,16 @@ private fun MapSheet(app: AppState) {
             ?: (config.screenWidthDp - 32f).coerceAtLeast(AppState.TOWER_MIN_WIDTH_DP)
         val maxTowerHeightDp = combinedWorkspace?.let { with(density) { it.h.toDp().value } }
             ?: (config.screenHeightDp - 40f).coerceAtLeast(AppState.TOWER_MIN_HEIGHT_DP)
+        val minTowerWidthDp = minOf(AppState.TOWER_MIN_WIDTH_DP, maxTowerWidthDp)
+        val minTowerHeightDp = minOf(AppState.TOWER_MIN_HEIGHT_DP, maxTowerHeightDp)
         val defaultTowerWidthDp = minOf(AppState.TOWER_DEFAULT_WIDTH_DP, maxTowerWidthDp)
         val defaultTowerHeightDp = minOf(AppState.TOWER_DEFAULT_HEIGHT_DP, maxTowerHeightDp)
         val towerWidthDp = with(density) {
             (app.towerSpot.w.takeIf { it > 0f } ?: defaultTowerWidthDp.dp.toPx()).toDp().value
-        }.coerceIn(AppState.TOWER_MIN_WIDTH_DP, maxTowerWidthDp)
+        }.coerceIn(minTowerWidthDp, maxTowerWidthDp)
         val towerHeightDp = with(density) {
             (app.towerSpot.h.takeIf { it > 0f } ?: defaultTowerHeightDp.dp.toPx()).toDp().value
-        }.coerceIn(AppState.TOWER_MIN_HEIGHT_DP, maxTowerHeightDp)
+        }.coerceIn(minTowerHeightDp, maxTowerHeightDp)
         Column(
             Modifier.navigationBarsPadding().verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp).padding(bottom = 24.dp)
@@ -1452,7 +1454,7 @@ private fun MapSheet(app: AppState) {
                                     with(density) { towerHeightDp.dp.toPx() },
                                 )
                             },
-                            valueRange = AppState.TOWER_MIN_WIDTH_DP..maxTowerWidthDp,
+                            valueRange = minTowerWidthDp..maxTowerWidthDp,
                             onValueChangeFinished = app::finishTowerResize,
                             trackColor = Ink.surfaceHigh,
                         )
@@ -1468,12 +1470,12 @@ private fun MapSheet(app: AppState) {
                                     with(density) { value.dp.toPx() },
                                 )
                             },
-                            valueRange = AppState.TOWER_MIN_HEIGHT_DP..maxTowerHeightDp,
+                            valueRange = minTowerHeightDp..maxTowerHeightDp,
                             onValueChangeFinished = app::finishTowerResize,
                             trackColor = Ink.surfaceHigh,
                         )
                         Text(
-                            "Minimum width is 300 dp so the sector and tyre columns remain visible. You can also drag the tower header to move it and its corner grip to resize it.",
+                            "Minimum width is 300 dp where the available screen area allows it, keeping the sector and tyre columns visible. You can also drag the tower header to move it and its corner grip to resize it.",
                             style = Type.footnote,
                             modifier = Modifier.padding(top = 8.dp),
                         )
