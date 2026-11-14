@@ -234,9 +234,11 @@ fun ViewerScreen(app: AppState) {
     // The controls step back a few seconds after the last touch, unless paused.
     // helpOpen is a key so opening the overlay cancels a hide already counting down; it used
     // to fire anyway and take the top bar away from under its labels.
-    LaunchedEffect(app.chromeTouch, app.chromeVisible, app.playing, app.helpOpen) {
-        // Stays up while arranging, so the lock is there to tap when done.
-        if (app.chromeVisible && app.playing && !app.arranging && !app.helpOpen) {
+    LaunchedEffect(app.chromeTouch, app.chromeVisible, app.playing, app.helpOpen, app.controlsFocused) {
+        // Stays up while arranging, or while a TV remote is operating an overlay control.
+        if (app.chromeVisible && app.playing && !app.arranging && !app.helpOpen &&
+            !(app.isTv && app.controlsFocused)
+        ) {
             delay(CHROME_HIDE_MS)
             app.chromeVisible = false
         }
@@ -1271,8 +1273,14 @@ private fun LayoutSheet(app: AppState) {
                 Modifier.padding(top = 20.dp), selectedLayout,
             ) { app.chooseLayout(it) }
             Text(
-                if (hasSaved) "My layout is the one you saved for $n feed${if (n == 1) "" else "s"} with the phone ${app.wayUp}."
-                else "Arrange the feeds the way you like, then save it. Upright and sideways each keep their own.",
+                when {
+                    app.layoutMode == LayoutMode.TV ->
+                        "Video fills the left two-thirds. The timing tower stays at the top-right, with the track map below. This is saved as the default for new sessions."
+                    hasSaved ->
+                        "My layout is the one you saved for $n feed${if (n == 1) "" else "s"} with the phone ${app.wayUp}."
+                    else ->
+                        "Arrange the feeds the way you like, then save it. Upright and sideways each keep their own."
+                },
                 style = Type.footnote,
                 modifier = Modifier.padding(top = 10.dp),
             )
