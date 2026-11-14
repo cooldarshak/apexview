@@ -211,6 +211,7 @@ internal fun FloatingPanel(
     /** Its size until it's resized by hand. */
     maxWidth: androidx.compose.ui.unit.Dp = PANEL_MAX_WIDTH,
     maxHeight: androidx.compose.ui.unit.Dp = PANEL_MAX_HEIGHT,
+    minWidth: androidx.compose.ui.unit.Dp = PANEL_MIN_WIDTH,
     /** Opacity of the complete panel, including its contents. */
     opacity: Float = 1f,
     /** When locked, its header and resize grip no longer change the panel's place or size. */
@@ -221,6 +222,7 @@ internal fun FloatingPanel(
 ) {
     val density = LocalDensity.current
     val panelWidth = with(density) { minOf(maxWidth, (width.toDp() - 32.dp)) }
+    val effectiveMinWidth = minWidth.coerceAtMost(panelWidth)
     if (spot.x < 0f) {
         with(density) {
             val w = panelWidth.toPx()
@@ -250,7 +252,11 @@ internal fun FloatingPanel(
             spot.y = spot.y.coerceIn(0f, (height - h).coerceAtLeast(0f))
         }
     }
-    val shownWidth = if (spot.w > 0f) with(density) { spot.w.toDp() } else panelWidth
+    val shownWidth = if (spot.w > 0f) with(density) {
+        spot.w.toDp().coerceIn(effectiveMinWidth, panelWidth)
+    } else panelWidth
+    if (spot.w > 0f) spot.w = with(density) { shownWidth.toPx() }
+    val minWidthPx = with(density) { effectiveMinWidth.toPx() }
     // Where the finger has taken the panel (or its corner) since the gesture began, before
     // snapping: snapping works from this, so an edge can be pulled back off a line.
     var rawX by remember { mutableFloatStateOf(0f) }
@@ -328,7 +334,7 @@ internal fun FloatingPanel(
                             w += pull(listOf(spot.x + w), xs, SNAP.toPx())
                             h += pull(listOf(spot.y + h), ys, SNAP.toPx())
                         }
-                        spot.w = w.coerceIn(PANEL_MIN_WIDTH.toPx(), (width - spot.x).coerceAtLeast(PANEL_MIN_WIDTH.toPx()))
+                        spot.w = w.coerceIn(minWidthPx, (width - spot.x).coerceAtLeast(minWidthPx))
                         spot.h = h.coerceIn(PANEL_MIN_HEIGHT.toPx(), (height - spot.y).coerceAtLeast(PANEL_MIN_HEIGHT.toPx()))
                     }
                 },
