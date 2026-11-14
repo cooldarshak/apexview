@@ -817,16 +817,19 @@ private fun TileView(app: AppState, tile: Tile) {
             .helpAnchor(app, "tile:${tile.id}")
             .background(Color.Black)
     ) {
-        AndroidView(
-            factory = { context ->
-                val layout = if (app.settings.softwareDrm) R.layout.player_texture else R.layout.player_surface
-                LayoutInflater.from(context).inflate(layout, null) as PlayerView
-            },
-            // Runs again when the tile's feed is switched.
-            update = { it.player = tile.feed.player },
-            onRelease = { it.player = null },
-            modifier = Modifier.fillMaxSize(),
-        )
+        // A switched feed can use a different DRM level. Recreate PlayerView as well as the
+        // player binding so an L1 player is never attached to a TextureView (or vice versa).
+        key(tile.id, tile.feed.usesSoftwareDrm) {
+            AndroidView(
+                factory = { context ->
+                    val layout = if (tile.feed.usesSoftwareDrm) R.layout.player_texture else R.layout.player_surface
+                    LayoutInflater.from(context).inflate(layout, null) as PlayerView
+                },
+                update = { it.player = tile.feed.player },
+                onRelease = { it.player = null },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
         if (app.inPip) return@Box
 
         Box(
