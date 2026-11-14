@@ -249,6 +249,17 @@ object DriverTimingParser {
                 if (i in 0..2) sectors.optJSONObject(k)?.let { applySector(l, i, it, t) }
             }
         }
+        latestObject(d.opt("Stats"))?.let { stats ->
+            if (stats.has("TimeDiffToFastest")) l.toLeader = stats.optString("TimeDiffToFastest").ifEmpty { null }
+            // F1's field name has a lowercase "t" in "to".
+            if (stats.has("TimeDifftoPositionAhead")) l.ahead = stats.optString("TimeDifftoPositionAhead").ifEmpty { null }
+        }
+        latestObject(d.opt("BestLapTimes"))?.let { o ->
+            if (o.has("Value")) l.bestLapValue = o.optString("Value")
+            if (o.has("PersonalFastest")) l.bestLapFlags[0] = o.optBoolean("PersonalFastest")
+            if (o.has("OverallFastest")) l.bestLapFlags[1] = o.optBoolean("OverallFastest")
+            l.bestLap = l.bestLapValue.takeIf { it.isNotEmpty() }?.let { SectorCell(it, pace(l.bestLapFlags)) }
+        }
         d.optJSONObject("LastLapTime")?.let { o ->
             if (o.has("Value")) l.lastLapValue = o.optString("Value")
             if (o.has("PersonalFastest")) l.lastLapFlags[0] = o.optBoolean("PersonalFastest")
@@ -331,6 +342,16 @@ object DriverTimingParser {
         l.sector[i] = if (l.sectorValue[i].isNotEmpty() || segmentValues.isNotEmpty()) {
             SectorCell(l.sectorValue[i], if (l.sectorValue[i].isEmpty()) Pace.NONE else pace(l.sectorFlags[i]), segmentValues, l.sectorPrevious[i])
         } else null
+    }
+
+    /** Latest qualifying-part entry in F1's keyed-object or array delta shapes. */
+    private fun latestObject(value: Any?): JSONObject? = when (value) {
+        is JSONArray -> (value.length() - 1 downTo 0).firstNotNullOfOrNull { value.optJSONObject(it) }
+        is JSONObject -> value.keys().asSequence()
+            .mapNotNull { key -> key.toIntOrNull()?.let { it to value.optJSONObject(key) } }
+            .filter { it.second != null }
+            .maxByOrNull { it.first }?.second
+        else -> null
     }
 
     private fun pace(flags: BooleanArray) = when {
