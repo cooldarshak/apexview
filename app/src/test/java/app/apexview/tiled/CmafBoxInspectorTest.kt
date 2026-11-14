@@ -1,0 +1,62 @@
+package app.apexview.tiled
+
+import org.junit.Assert.*
+import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
+class CmafBoxInspectorTest {
+    @Test fun readsBrandsTrackTimescaleAndVideoDimensions() {
+        val data = box("ftyp", ascii("iso6") + int(0) + ascii("iso6cmfc"))
+            .plus(box("moov", box("trak",
+                box("mdia",
+                    box("mdhd", byteArrayOf(0,0,0,0) + int(0) + int(0) + int(90000) + int(0) + short(0) + short(0)),
+                    box("hdlr", byteArrayOf(0,0,0,0) + int(0) + ascii("vide") + ByteArray(12)),
+                    box("minf", box("stbl", box("stsd",
+                        byteArrayOf(0,0,0,0) + int(1) +
+                            int(86) + ascii("hvc1") + ByteArray(6) + short(1) +
+                            ByteArray(16) + short(1920) + short(1080) + ByteArray(42)
+                    )))
+                )
+            )))
+        val report = CmafBoxInspector.inspect(data)
+        assertEquals("iso6", report.majorBrand)
+        assertTrue(report.compatibleBrands.contains("cmfc"))
+        assertEquals(1, report.tracks.size)
+        val track = report.tracks.single()
+        assertEquals("vide", track.handler)
+        assertEquals(90000L, track.timescale)
+        assertEquals("hvc1", track.sampleEntry)
+        assertEquals(1920, track.width)
+        assertEquals(1080, track.height)
+        assertFalse(track.encrypted)
+        assertFalse(report.fragmented)
+    }
+
+    @Test fun detectsFragmentedMp4FromMoof() {
+        val report = CmafBoxInspector.inspect(box("moof", box("mfhd", ByteArray(8))))
+        assertTrue(report.fragmented)
+    }
+
+    @Test fun rejectsBoxWhoseDeclaredSizeExceedsInput() {
+        val malformed = int(100) + ascii("free") + ByteArray(4)
+        try {
+            CmafBoxInspector.inspect(malformed)
+            fail("Expected malformed box to be rejected")
+        } catch (_: IllegalArgumentException) { }
+    }
+
+    @Test fun rejectsInputShorterThanHeader() {
+        try {
+            CmafBoxInspector.inspect(ByteArray(7))
+            fail("Expected short input to be rejected")
+        } catch (_: IllegalArgumentException) { }
+    }
+
+    private fun box(type: String, payload: ByteArray): ByteArray =
+        int(payload.size + 8) + ascii(type) + payload
+    private fun int(value: Int): ByteArray = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(value).array()
+    private fun short(value: Int): ByteArray = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort(value.toShort()).array()
+    private fun ascii(value: String): ByteArray = value.toByteArray(Charsets.ISO_8859_1)
+}
