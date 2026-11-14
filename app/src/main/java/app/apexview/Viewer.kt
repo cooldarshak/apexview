@@ -1338,6 +1338,35 @@ private fun MapSheet(app: AppState) {
                         modifier = Modifier.padding(top = 8.dp),
                     )
                 }
+                Column(
+                    Modifier.padding(top = 16.dp).clip(RoundedCornerShape(12.dp))
+                        .background(Ink.background).padding(horizontal = 16.dp, vertical = 10.dp)
+                ) {
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Driver dot size", style = Type.body, modifier = Modifier.weight(1f))
+                            Text("%.0f dp".format(app.mapDotSizeDp), style = Type.footnote)
+                        }
+                        AppleSlider(
+                            value = app.mapDotSizeDp,
+                            onValueChange = app::updateMapDotSize,
+                            valueRange = 3f..8f,
+                            trackColor = Ink.surfaceHigh,
+                        )
+                    }
+                    Column(Modifier.padding(top = 8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Driver abbreviation size", style = Type.body, modifier = Modifier.weight(1f))
+                            Text("%.0f sp".format(app.mapLabelSizeSp), style = Type.footnote)
+                        }
+                        AppleSlider(
+                            value = app.mapLabelSizeSp,
+                            onValueChange = app::updateMapLabelSize,
+                            valueRange = 7f..12f,
+                            trackColor = Ink.surfaceHigh,
+                        )
+                    }
+                }
             }
         }
     }
