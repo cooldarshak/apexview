@@ -187,28 +187,58 @@ private fun TowerSessionHeader(timing: SessionTiming, now: Long) {
             part + clock
         }.orEmpty()
     }
-    Row(
-        Modifier.fillMaxWidth().height(23.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            timing.name.uppercase(),
-            style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Ink.secondary),
-            maxLines = 1,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            trackLabel.uppercase(),
-            style = cell.copy(fontSize = 8.sp, fontWeight = FontWeight.Bold, color = trackColor),
-            maxLines = 1,
-            modifier = Modifier.padding(horizontal = 5.dp),
-        )
-        Text(
-            counter,
-            style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
-            textAlign = TextAlign.End,
-            maxLines = 1,
-        )
+    val weather = timing.weather.at(now)
+    val directions = arrayOf("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW")
+    val windDirection = weather?.windDirectionDegrees?.let {
+        directions[((it / 22.5 + 0.5).toInt()).mod(16)]
+    }.orEmpty()
+    val wind = weather?.windSpeedMps?.let { "W ${"%.1f".format(it * 3.6)} ${windDirection}" } ?: "W –"
+    val trackTemp = weather?.trackTempC?.let { "T ${"%.1f".format(it)}°" } ?: "T –"
+    val airTemp = weather?.airTempC?.let { "A ${"%.1f".format(it)}°" } ?: "A –"
+    val humidity = weather?.humidityPct?.let { "H ${"%.0f".format(it)}%" } ?: "H –"
+    val pressure = weather?.pressureHpa?.let { "P ${"%.0f".format(it)}" } ?: "P –"
+    val rain = when (weather?.raining) {
+        true -> "RAIN"
+        false -> "DRY"
+        null -> "RAIN –"
+    }
+    Column(Modifier.fillMaxWidth().height(36.dp)) {
+        Row(
+            Modifier.fillMaxWidth().height(18.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                timing.name.uppercase(),
+                style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Ink.secondary),
+                maxLines = 1,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                trackLabel.uppercase(),
+                style = cell.copy(fontSize = 8.sp, fontWeight = FontWeight.Bold, color = trackColor),
+                maxLines = 1,
+                modifier = Modifier.padding(horizontal = 5.dp),
+            )
+            Text(
+                counter,
+                style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
+                textAlign = TextAlign.End,
+                maxLines = 1,
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().height(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            listOf(wind, trackTemp, airTemp, humidity, pressure, rain).forEach { value ->
+                Text(
+                    value,
+                    style = cell.copy(fontSize = 7.sp, color = Ink.secondary),
+                    maxLines = 1,
+                )
+            }
+        }
     }
 }
 
