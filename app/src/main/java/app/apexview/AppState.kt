@@ -488,6 +488,8 @@ class AppState(
         private set
     /** True once feeds have been moved by hand (or put back from a saved session). */
     private var handPlaced = false
+    /** The TV preset starts the map in its right-hand slot once, then preserves D-pad moves. */
+    private var tvLayoutMapNeedsDefault = false
     /** What a fresh stream starts in; Save layout makes it the custom one. */
     private var defaultLayoutMode =
         prefs.getString(PREF_DEFAULT_LAYOUT, null)?.let { runCatching { LayoutMode.valueOf(it) }.getOrNull() } ?: LayoutMode.FEATURED
@@ -1739,7 +1741,23 @@ class AppState(
     /** Lays the feeds out afresh in [mode]. */
     fun chooseLayout(mode: LayoutMode) {
         mapGrabbed = false
+        val enteringTvLayout = mode == LayoutMode.TV && layoutMode != LayoutMode.TV
         layoutMode = mode
+        if (mode == LayoutMode.TV) {
+            // TV is a complete preset, not a feed-only arrangement: turn on the track map and
+            // tower, put them in the fixed right sidebar, and remember TV as the next session's default.
+            defaultLayoutMode = LayoutMode.TV
+            mapMode = MapMode.TRACK
+            towerOpen = true
+            overlayLayoutMode = OverlayLayoutMode.DOCKED
+            tvLayoutMapNeedsDefault = enteringTvLayout
+            prefs.edit()
+                .putString(PREF_DEFAULT_LAYOUT, LayoutMode.TV.name)
+                .putString(PREF_MAP_MODE, MapMode.TRACK.name)
+                .putBoolean(PREF_TOWER, true)
+                .putString(PREF_OVERLAY_LAYOUT, OverlayLayoutMode.DOCKED.name)
+                .apply()
+        }
         handPlaced = false
         layoutRequest++
         showChrome()
@@ -1821,8 +1839,10 @@ class AppState(
         // One feed filling the screen: it gets the whole canvas, the rest wait off screen.
         // Unfolding to the big screen ends it. When both overlays reserve space, keep the
         // selected main feed in the dedicated feed region instead of bypassing that layout.
+        val tvLayoutActive = layoutMode == LayoutMode.TV && !laptopActive
         val combinedReservationsActive =
-            mapMode.inWindow && mapReserve && towerOpen && towerReserve && timing != null && !laptopActive
+            (tvLayoutActive || mapMode.inWindow && mapReserve && towerOpen && towerReserve) &&
+                timing != null && !laptopActive
         tiles.firstOrNull { it.id == focusTileId }?.takeIf { compactCanvas && !combinedReservationsActive }?.let { focus ->
             focus.place(Layouts.place(LayoutMode.GRID, 1, width, height).first())
             raise(focus)
@@ -1832,7 +1852,9 @@ class AppState(
         focusTileId = null
 
         // The combined map/tower reservation takes precedence over a saved feed-only layout.
-        if (mapMode.inWindow && mapReserve && towerOpen && towerReserve && timing != null && !laptopActive) {
+        if ((tvLayoutActive || mapMode.inWindow && mapReserve && towerOpen && towerReserve) &&
+            timing != null && !laptopActive
+        ) {
             resumeLayout = null
         }
         // Coming back to a session puts its feeds back where they were.
@@ -1853,10 +1875,12 @@ class AppState(
         // tower and map together beside it. The orientation decides whether the workspace is
         // below the video (portrait) or in a right-hand sidebar (landscape). In floating mode
         // this is their starting workspace: the map can later be dragged over the video area.
-        val keepMapClear = mapMode.inWindow && mapReserve && timing != null
-        val keepTowerClear = towerOpen && towerReserve && timing != null && !laptopActive
+        val keepMapClear = (tvLayoutActive || mapMode.inWindow && mapReserve) && timing != null
+        val keepTowerClear = towerOpen && (tvLayoutActive || towerReserve) && timing != null && !laptopActive
         if (keepMapClear && keepTowerClear) {
-            val plan = Layouts.withCombinedOverlays(layoutMode, ordered.size, width, height, overlayLayoutMode)
+            val panelLayoutMode = if (tvLayoutActive) LayoutMode.TV else layoutMode
+            val panelOverlayMode = if (tvLayoutActive) OverlayLayoutMode.DOCKED else overlayLayoutMode
+            val plan = Layouts.withCombinedOverlays(panelLayoutMode, ordered.size, width, height, panelOverlayMode)
             combinedOverlayPlan = plan
             if (plan.floating) {
                 keepTowerInArea(plan.workspace, width, height)
@@ -1866,11 +1890,25 @@ class AppState(
                 towerSpot.y = plan.tower.y
                 towerSpot.w = plan.tower.w
                 towerSpot.h = plan.tower.h
-                if (!mapPanel.placed) {
-                    mapPanel.restore(prefs.getString(PREF_MAP_PANEL, null), width, height)?.let { mapOpacity = it }
+                if (tvLayoutActive) {
+                    if (tvLayoutMapNeedsDefault) {
+                        mapPanel.place(plan.map)
+                        mapPanel.placed = true
+                        tvLayoutMapNeedsDefault = false
+                        storeMapPanel()
+                    } else if (!mapPanel.placed) {
+                        mapPanel.restore(prefs.getString(PREF_MAP_PANEL, null), width, height)?.let { mapOpacity = it }
+                        if (!mapPanel.placed) mapPanel.place(plan.map)
+                        mapPanel.placed = true
+                    }
+                    keepMapOnScreen()
+                } else {
+                    if (!mapPanel.placed) {
+                        mapPanel.restore(prefs.getString(PREF_MAP_PANEL, null), width, height)?.let { mapOpacity = it }
+                    }
+                    mapPanel.place(plan.map)
+                    mapPanel.placed = true
                 }
-                mapPanel.place(plan.map)
-                mapPanel.placed = true
             }
             handPlaced = false
             plan.slots.zip(ordered).forEach { (slot, tile) -> settle(tile, slot) }
@@ -2063,6 +2101,10 @@ class AppState(
 
     fun chooseMapMode(mode: MapMode) {
         mapGrabbed = false
+        if (layoutMode == LayoutMode.TV && mode != MapMode.TRACK) {
+            message = "TV layout uses the Track map. Choose another layout to use Edge or Pit."
+            return
+        }
         if (mode == mapMode) return
         mapMode = mode
         prefs.edit().putString(PREF_MAP_MODE, mode.name).apply()
@@ -2099,17 +2141,19 @@ class AppState(
 
     /** Two fingers on the track line while arranging: move, resize and turn the map. */
     fun arrangeMap(pan: androidx.compose.ui.geometry.Offset, zoom: Float, rotation: Float) {
-        if (combinedOverlaysDocked) return
+        // Docked overlays stay fixed in the normal layout, but the TV preset exposes D-pad
+        // move/resize handles and must let its map be adjusted without unlocking video tiles.
+        if (combinedOverlaysDocked && layoutMode != LayoutMode.TV) return
         val panel = activeMapPanel
         panel.x += pan.x
         panel.y += pan.y
         if (zoom != 1f) panel.scale(zoom)
         if (rotation != 0f) panel.rotation = (panel.rotation + rotation).mod(360f)
-        if (combinedOverlaysFloating) {
-            // In Move and overlap mode the map can sit anywhere on screen, including over the
-            // broadcast logo. Only the original feed layout remains reserved.
+        if (combinedOverlaysFloating || layoutMode == LayoutMode.TV) {
+            // TV map controls may move the map within the screen even though the tower remains
+            // docked. Floating mode also expands the tower when the map leaves its workspace.
             keepMapOnScreen()
-            combinedOverlayPlan?.workspace?.let(::expandTowerWhenMapLeavesWorkspace)
+            if (combinedOverlaysFloating) combinedOverlayPlan?.workspace?.let(::expandTowerWhenMapLeavesWorkspace)
         }
         showChrome()
     }
@@ -2211,7 +2255,7 @@ class AppState(
     fun toggleTower() {
         towerOpen = !towerOpen
         prefs.edit().putBoolean(PREF_TOWER, towerOpen).apply()
-        if (towerReserve && canvasW > 0f && !laptopActive) {
+        if ((towerReserve || layoutMode == LayoutMode.TV) && canvasW > 0f && !laptopActive) {
             handPlaced = false
             layoutRequest++
         }
