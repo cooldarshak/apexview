@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -179,6 +180,21 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
             LocalDensity provides Density(baseDensity.density * contentScale, baseDensity.fontScale)
         ) {
             val listState = rememberLazyListState()
+            val scrollHint by remember(listState, rows.size) {
+                derivedStateOf {
+                    val visible = listState.layoutInfo.visibleItemsInfo
+                    val first = visible.firstOrNull()?.index?.plus(1) ?: 0
+                    val last = visible.lastOrNull()?.index?.plus(1) ?: 0
+                    when {
+                        first == 0 -> "${rows.size} DRIVERS"
+                        first == 1 && last >= rows.size -> "${rows.size} DRIVERS"
+                        first > 1 && last < rows.size -> "↑↓ $first–$last / ${rows.size} · SCROLL"
+                        first > 1 -> "↑ $first–$last / ${rows.size} · SCROLL"
+                        last < rows.size -> "↓ $first–$last / ${rows.size} · SCROLL"
+                        else -> "${rows.size} DRIVERS"
+                    }
+                }
+            }
             val rowHeight = if (rows.isEmpty()) ROW_HEIGHT else {
                 // On a tall tower, fit the complete field where possible. On a short tower,
                 // keep rows legible and let the list scroll instead of squeezing text away.
@@ -206,17 +222,6 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
                     }
                 }
                 if (rows.isNotEmpty()) {
-                    val visible = listState.layoutInfo.visibleItemsInfo
-                    val first = visible.firstOrNull()?.index?.plus(1) ?: 0
-                    val last = visible.lastOrNull()?.index?.plus(1) ?: 0
-                    val scrollHint = when {
-                        first == 0 -> "${rows.size} DRIVERS"
-                        first == 1 && last >= rows.size -> "${rows.size} DRIVERS"
-                        first > 1 && last < rows.size -> "↑↓ $first–$last / ${rows.size} · SCROLL"
-                        first > 1 -> "↑ $first–$last / ${rows.size} · SCROLL"
-                        last < rows.size -> "↓ $first–$last / ${rows.size} · SCROLL"
-                        else -> "${rows.size} DRIVERS"
-                    }
                     Text(
                         scrollHint,
                         style = cell.copy(fontSize = 6.sp, color = Ink.secondary),
