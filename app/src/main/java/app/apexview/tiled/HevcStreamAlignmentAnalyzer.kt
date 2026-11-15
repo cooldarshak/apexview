@@ -7,7 +7,9 @@ internal data class HevcFrameSignature(
     val pocLsb: Int,
     val sliceType: Int,
     val references: List<HevcSliceHeaderParser.ReferencePicture>,
-    val sliceSegmentAddresses: List<Int>
+    val sliceSegmentAddresses: List<Int>,
+    /** Full parsed first-slice header, used to prevent false alignment on picture-header differences. */
+    val firstSliceHeader: HevcSliceHeaderParser.SliceHeader
 )
 
 internal data class HevcFrameMismatch(
@@ -17,7 +19,8 @@ internal data class HevcFrameMismatch(
     val pocAligned: Boolean,
     val sliceTypeAligned: Boolean,
     val referencesAligned: Boolean,
-    val segmentLayoutAligned: Boolean
+    val segmentLayoutAligned: Boolean,
+    val sliceHeaderAligned: Boolean
 )
 
 internal data class HevcFrameAlignmentReport(
@@ -26,12 +29,15 @@ internal data class HevcFrameAlignmentReport(
     val comparedFrameCount: Int,
     val pocAlignedFrameCount: Int,
     val referenceAlignedFrameCount: Int,
+    val sliceHeaderAlignedFrameCount: Int,
     val fullyAlignedFrameCount: Int,
     val mismatches: List<HevcFrameMismatch>
 ) {
     val hasSameFrameCount: Boolean get() = firstFrameCount == secondFrameCount
     val pocAligned: Boolean get() = hasSameFrameCount && pocAlignedFrameCount == comparedFrameCount
     val referencesAligned: Boolean get() = hasSameFrameCount && referenceAlignedFrameCount == comparedFrameCount
+    val sliceHeadersAligned: Boolean get() =
+        hasSameFrameCount && sliceHeaderAlignedFrameCount == comparedFrameCount
     val fullyAligned: Boolean get() =
         hasSameFrameCount && fullyAlignedFrameCount == comparedFrameCount
 }
@@ -96,7 +102,8 @@ internal object HevcStreamAlignmentAnalyzer {
                             shortTermRpsIndex = slice.shortTermRpsIndex,
                             temporalMvpEnabled = slice.temporalMvpEnabled,
                             references = slice.references,
-                            sliceSegmentAddresses = mutableListOf(slice.sliceSegmentAddress)
+                            sliceSegmentAddresses = mutableListOf(slice.sliceSegmentAddress),
+                            firstSliceHeader = slice
                         )
                         sawCodedPicture = true
                         afterEndOfSequence = false
@@ -146,6 +153,7 @@ internal object HevcStreamAlignmentAnalyzer {
         val count = minOf(first.size, second.size)
         var pocMatches = 0
         var refMatches = 0
+        var headerMatches = 0
         var fullMatches = 0
         val mismatches = mutableListOf<HevcFrameMismatch>()
         for (index in 0 until count) {
@@ -155,17 +163,20 @@ internal object HevcStreamAlignmentAnalyzer {
             val typeSame = a.sliceType == b.sliceType
             val refsSame = a.references == b.references
             val segmentsSame = a.sliceSegmentAddresses == b.sliceSegmentAddresses
+            val headerSame = a.firstSliceHeader == b.firstSliceHeader
             if (pocSame) pocMatches++
             if (refsSame) refMatches++
-            if (pocSame && typeSame && refsSame && segmentsSame) fullMatches++
-            if (!pocSame || !typeSame || !refsSame || !segmentsSame) {
+            if (headerSame) headerMatches++
+            if (pocSame && typeSame && refsSame && segmentsSame && headerSame) fullMatches++
+            if (!pocSame || !typeSame || !refsSame || !segmentsSame || !headerSame) {
                 mismatches += HevcFrameMismatch(
-                    index, a.poc, b.poc, pocSame, typeSame, refsSame, segmentsSame
+                    index, a.poc, b.poc, pocSame, typeSame, refsSame, segmentsSame, headerSame
                 )
             }
         }
         return HevcFrameAlignmentReport(
-            first.size, second.size, count, pocMatches, refMatches, fullMatches, mismatches
+            first.size, second.size, count, pocMatches, refMatches, headerMatches,
+            fullMatches, mismatches
         )
     }
 
@@ -192,10 +203,11 @@ internal object HevcStreamAlignmentAnalyzer {
         val shortTermRpsIndex: Int?,
         val temporalMvpEnabled: Boolean?,
         val references: List<HevcSliceHeaderParser.ReferencePicture>,
-        val sliceSegmentAddresses: MutableList<Int>
+        val sliceSegmentAddresses: MutableList<Int>,
+        val firstSliceHeader: HevcSliceHeaderParser.SliceHeader
     ) {
         fun toSignature() = HevcFrameSignature(
-            decodeIndex, poc, pocLsb, sliceType, references, sliceSegmentAddresses.toList()
+            decodeIndex, poc, pocLsb, sliceType, references, sliceSegmentAddresses.toList(), firstSliceHeader
         )
     }
 }

@@ -22,6 +22,25 @@ class HevcStreamAlignmentAnalyzerTest {
     }
 
     @Test
+    fun rejectsSamePocAndReferencesWhenOtherFirstSliceHeaderFieldsDiffer() {
+        val feedA = stream(pSlice(1, referenceCount = 1), pSlice(2, referenceCount = 2))
+        val feedB = stream(
+            pSlice(1, referenceCount = 1, temporalMvpEnabled = false),
+            pSlice(2, referenceCount = 2)
+        )
+        val report = HevcStreamAlignmentAnalyzer.compare(
+            HevcStreamAlignmentAnalyzer.analyze(feedA),
+            HevcStreamAlignmentAnalyzer.analyze(feedB)
+        )
+
+        assertTrue(report.pocAligned)
+        assertTrue(report.referencesAligned)
+        assertTrue(!report.sliceHeadersAligned)
+        assertTrue(!report.fullyAligned)
+        assertTrue(report.mismatches.any { !it.sliceHeaderAligned })
+    }
+
+    @Test
     fun reportsPocAndReferenceMismatchesRatherThanTreatingFeedsAsAligned() {
         val feedA = stream(pSlice(1, referenceCount = 1), pSlice(2, referenceCount = 2))
         val feedB = stream(pSlice(1, referenceCount = 1), pSlice(3, referenceCount = 1))
@@ -78,13 +97,17 @@ class HevcStreamAlignmentAnalyzerTest {
         writeUe(0) // num_entry_point_offsets
     }.finish()
 
-    private fun pSlice(poc: Int, referenceCount: Int): ByteArray = BitWriter().apply {
+    private fun pSlice(
+        poc: Int,
+        referenceCount: Int,
+        temporalMvpEnabled: Boolean = true
+    ): ByteArray = BitWriter().apply {
         write(1, 1); writeUe(0); write(0, 2); writeUe(1)
         write(poc, 8)
         write(0, 1) // short_term_ref_pic_set_sps_flag is always present for non-IDR pictures
         writeUe(referenceCount); writeUe(0)
         repeat(referenceCount) { writeUe(0); write(1, 1) }
-        write(1, 1) // temporal MVP
+        write(if (temporalMvpEnabled) 1 else 0, 1) // temporal MVP
         write(1, 1); write(1, 1) // SAO luma/chroma
         write(0, 1) // num_ref_idx_active_override_flag
         writeUe(0) // five_minus_max_num_merge_cand
