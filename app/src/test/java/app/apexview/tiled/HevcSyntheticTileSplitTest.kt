@@ -87,6 +87,38 @@ class HevcSyntheticTileSplitTest {
         }
     }
 
+
+    @Test fun assemblerRejectsSpsReferencingDifferentVps() {
+        val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+        assumeTrue("Kvazaar tile fixture directory is not configured", !fixturePath.isNullOrBlank())
+        val directory = File(fixturePath!!)
+        val left = File(directory, "feed_left.hevc")
+        val right = File(directory, "feed_right.hevc")
+        assumeTrue("Synthetic complementary tile files are missing", left.isFile && right.isFile)
+
+        val corrupted = ByteArrayOutputStream()
+        HevcBitstream.splitAnnexB(left.readBytes()).forEach { nal ->
+            val changed = nal.bytes.copyOf()
+            if (nal.type == 32) {
+                // vps_video_parameter_set_id is the first four RBSP bits after the NAL header.
+                val current = (changed[2].toInt() ushr 4) and 0x0f
+                val mismatch = (current + 1) and 0x0f
+                changed[2] = ((changed[2].toInt() and 0x0f) or (mismatch shl 4)).toByte()
+            }
+            appendNal(corrupted, changed)
+        }
+
+        var rejected = false
+        try {
+            HevcTileStreamAssembler.assembleTwoTileStreams(
+                corrupted.toByteArray(), right.readBytes()
+            )
+        } catch (error: IllegalArgumentException) {
+            rejected = error.message?.contains("references VPS") == true
+        }
+        assertTrue("Assembler must reject an SPS/VPS identity mismatch", rejected)
+    }
+
     @Test fun assemblerRejectsMissingPictureFromOneTileFeed() {
         val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
         assumeTrue("Kvazaar tile fixture directory is not configured", !fixturePath.isNullOrBlank())

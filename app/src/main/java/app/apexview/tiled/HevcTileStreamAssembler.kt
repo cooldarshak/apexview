@@ -154,10 +154,21 @@ internal object HevcTileStreamAssembler {
             "$label feed parameter sets must precede all coded pictures"
         }
 
+        val vpsNal = parameterSets.single { it.type == 32 }
         val spsNal = parameterSets.single { it.type == 33 }
         val ppsNal = parameterSets.single { it.type == 34 }
+        val vps = HevcParameterSets.parseVps(vpsNal.bytes)
         val sps = HevcParameterSets.parseSps(spsNal.bytes)
+        require(sps.vpsId == vps.vpsId) {
+            "$label SPS references VPS ${sps.vpsId}, but supplied VPS is ${vps.vpsId}"
+        }
+        require(sps.maxSubLayers <= vps.maxSubLayers) {
+            "$label SPS sub-layer count exceeds its VPS limit"
+        }
         val pps = HevcParameterSets.parsePps(ppsNal.bytes, sps)
+        require(pps.spsId == sps.spsId) {
+            "$label PPS references SPS ${pps.spsId}, but supplied SPS is ${sps.spsId}"
+        }
         return ParsedFeed(parameterSets, vcl, sps, pps)
     }
 
