@@ -78,6 +78,11 @@ internal object CmafBoxInspector {
         val skipByteBlock: Int,
         val constantIvSize: Int?
     )
+    data class SampleGroupDescriptionMetadata(
+        val version: Int,
+        val defaultSampleDescriptionIndex: Long,
+        val entries: List<SeigProtectionEntry>
+    )
     data class SampleGroupRun(
         val sampleCount: Long,
         val groupDescriptionIndex: Long
@@ -130,7 +135,9 @@ internal object CmafBoxInspector {
         val sampleAuxiliarySizesPresent: Boolean,
         val sampleAuxiliaryOffsetsPresent: Boolean,
         val sampleGroupDescriptionPresent: Boolean,
-        val sampleToGroupPresent: Boolean
+        val sampleToGroupPresent: Boolean,
+        val seigSampleGroupDescription: SampleGroupDescriptionMetadata? = null,
+        val seigSampleGroupDescriptionStructureComplete: Boolean = true
     )
     data class Report(
         val majorBrand: String?,
@@ -170,12 +177,15 @@ internal object CmafBoxInspector {
             val encryption = item.trackEncryption
             if (id != null && encryption != null) id to encryption else null
         }.toMap()
+        val trackMetadataById = tracks.mapNotNull { item ->
+            item.trackId?.let { it to item }
+        }.toMap()
         val trexDefaults = moov?.let { parseTrexDefaults(data, it, errors) }.orEmpty()
         val fragments = boxes.filter { it.type == "moof" }.flatMap { moof ->
             moof.children.filter { it.type == "traf" }.mapNotNull { traf ->
                 try {
                     parseFragmentTrack(data, traf, trexDefaults, trackTimescales,
-                        trackEncryptionDefaults, errors)
+                        trackEncryptionDefaults, trackMetadataById, errors)
                 } catch (e: Exception) {
                     errors += "Fragment timing metadata could not be parsed: ${e.message ?: e.javaClass.simpleName}"
                     null
@@ -250,12 +260,27 @@ internal object CmafBoxInspector {
                 null
             }
         }
+        val trackSeigDescriptions = mutableListOf<SampleGroupDescriptionMetadata>()
+        var trackSeigStructureComplete = true
+        all.filter { it.type == "sgpd" }.forEach { box ->
+            try {
+                parseSeigSgpd(payload(data, box))?.let(trackSeigDescriptions::add)
+            } catch (e: Exception) {
+                trackSeigStructureComplete = false
+                errors += "Track-level seig sample-group descriptions could not be parsed"
+            }
+        }
+        if (trackSeigDescriptions.size > 1) {
+            trackSeigStructureComplete = false
+            errors += "Multiple track-level seig sample-group descriptions are not supported"
+        }
         return TrackMetadata(
             trackId, handler, timescale, sampleEntry, original, scheme,
             sampleEntry == "encv" || sampleEntry == "enca" || scheme != null, width, height,
             hevcConfiguration, trackEncryption,
             all.any { it.type == "senc" }, all.any { it.type == "saiz" }, all.any { it.type == "saio" },
-            all.any { it.type == "sgpd" }, all.any { it.type == "sbgp" }
+            all.any { it.type == "sgpd" }, all.any { it.type == "sbgp" },
+            trackSeigDescriptions.singleOrNull(), trackSeigStructureComplete
         )
     }
 
@@ -319,6 +344,7 @@ internal object CmafBoxInspector {
         trexDefaults: Map<Long, TrexDefaults>,
         timescales: Map<Long, Long>,
         trackEncryptionDefaults: Map<Long, TrackEncryptionMetadata>,
+        trackMetadataById: Map<Long, TrackMetadata>,
         errors: MutableList<String>
     ): FragmentMetadata {
         val tfhdBox = traf.children.firstOrNull { it.type == "tfhd" }
@@ -405,7 +431,9 @@ internal object CmafBoxInspector {
             )
         } else null
         val sampleGroupEncryption = try {
-            parseSampleGroupEncryption(data, traf, samples.size, errors)
+            parseSampleGroupEncryption(
+                data, traf, samples.size, trackMetadataById[tfhd.trackId], errors
+            )
         } catch (e: Exception) {
             errors += "Sample-group encryption metadata could not be parsed: ${e.message ?: e.javaClass.simpleName}"
             SampleGroupParseResult(present = true, complete = false, metadata = null)
@@ -595,6 +623,7 @@ internal object CmafBoxInspector {
         data: ByteArray,
         traf: Box,
         sampleCount: Int,
+        trackMetadata: TrackMetadata?,
         errors: MutableList<String>
     ): SampleGroupParseResult {
         val sgpdBoxes = traf.children.filter { it.type == "sgpd" }
@@ -626,16 +655,40 @@ internal object CmafBoxInspector {
 
         val description = descriptions.singleOrNull()
         val mapping = mappings.singleOrNull()
-        val entries = description?.entries.orEmpty()
-        val defaultIndex = description?.defaultSampleDescriptionIndex ?: 0L
-        if (defaultIndex > entries.size.toLong()) {
+        val localEntries = description?.entries.orEmpty()
+        val trackDescription = trackMetadata?.seigSampleGroupDescription
+        val trackDescriptionComplete = trackMetadata?.seigSampleGroupDescriptionStructureComplete ?: true
+        val trackEntries = trackDescription?.entries.orEmpty()
+        val localDefaultIndex = description?.defaultSampleDescriptionIndex ?: 0L
+        val trackDefaultIndex = trackDescription?.defaultSampleDescriptionIndex ?: 0L
+        if (!trackDescriptionComplete) {
+            errors += "Track-level seig sample-group descriptions are incomplete"
+            return SampleGroupParseResult(true, false, null)
+        }
+        if (localDefaultIndex > localEntries.size.toLong() ||
+            trackDefaultIndex > trackEntries.size.toLong()) {
             errors += "seig default sample-description index is out of range"
             return SampleGroupParseResult(true, false, null)
         }
 
+        // sgpd in traf is fragment-local; its sbgp indices occupy the 0x10001+ range.
+        // Lower 1-based indices refer to sgpd entries in the track's stbl.
+        val combinedEntries = buildList {
+            trackEntries.forEachIndexed { index, entry ->
+                add(entry.copy(entryIndex = index + 1))
+            }
+            localEntries.forEachIndexed { index, entry ->
+                add(entry.copy(entryIndex = 0x10001 + index))
+            }
+        }
         val runs = mapping?.runs?.toMutableList() ?: mutableListOf()
-        if (mapping == null && defaultIndex > 0 && sampleCount > 0) {
-            runs += SampleGroupRun(sampleCount.toLong(), defaultIndex)
+        if (mapping == null && sampleCount > 0) {
+            val defaultReference = when {
+                localDefaultIndex > 0 -> 0x10000L + localDefaultIndex
+                trackDefaultIndex > 0 -> trackDefaultIndex
+                else -> 0L
+            }
+            if (defaultReference > 0) runs += SampleGroupRun(sampleCount.toLong(), defaultReference)
         }
         if (mapping != null && runs.isEmpty() && sampleCount > 0) {
             errors += "seig sample-to-group mapping is empty"
@@ -650,11 +703,23 @@ internal object CmafBoxInspector {
             require(mappedSamples <= MAX_FRAGMENT_SAMPLES.toLong()) {
                 "seig sample-to-group sample count exceeds limit"
             }
-            val effectiveIndex = if (run.groupDescriptionIndex == 0L) defaultIndex else run.groupDescriptionIndex
-            require(effectiveIndex <= entries.size.toLong()) {
-                "seig mapping references a missing local or unsupported track-level description"
+            val index = run.groupDescriptionIndex
+            if (index == 0L) {
+                resolvedRuns += run
+            } else if (index in 1L..0xffffL) {
+                require(index <= trackEntries.size.toLong()) {
+                    "seig mapping references a missing track-level description"
+                }
+                resolvedRuns += run
+            } else if (index in 0x10001L..0x1ffffL) {
+                val localIndex = index - 0x10000L
+                require(localIndex <= localEntries.size.toLong()) {
+                    "seig mapping references a missing fragment-local description"
+                }
+                resolvedRuns += run
+            } else {
+                throw IllegalArgumentException("Unsupported seig group-description index scope")
             }
-            resolvedRuns += run.copy(groupDescriptionIndex = effectiveIndex)
         }
         if (mapping != null && mappedSamples != sampleCount.toLong()) {
             errors += "seig sample-to-group mapping count does not match fragment samples"
@@ -662,8 +727,11 @@ internal object CmafBoxInspector {
         }
         val metadata = SampleGroupEncryptionMetadata(
             descriptionVersion = description?.version,
-            defaultSampleDescriptionIndex = defaultIndex,
-            entries = entries,
+            defaultSampleDescriptionIndex = when {
+                localDefaultIndex > 0 -> 0x10000L + localDefaultIndex
+                else -> trackDefaultIndex
+            },
+            entries = combinedEntries,
             runs = resolvedRuns
         )
         return SampleGroupParseResult(true, true, metadata)
