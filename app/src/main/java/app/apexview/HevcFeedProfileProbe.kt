@@ -9,6 +9,9 @@ import androidx.media3.common.MimeTypes
 import app.apexview.tiled.HevcBitstream
 import app.apexview.tiled.HevcParameterSets
 import app.apexview.tiled.HevcParameterSetCompatibility
+import app.apexview.tiled.CmafBoxInspector
+import app.apexview.tiled.HevcFeedCompatibility
+import app.apexview.tiled.HevcFragmentCompatibility
 
 /**
  * Sanitised read-only summary of the codec configuration Media3 already parsed for a video track.
@@ -159,6 +162,15 @@ internal object HevcFeedProfileCapture {
 
     private val profiles = linkedMapOf<String, HevcFeedProfileProbe.Snapshot>()
     private val feedProgress = linkedMapOf<String, FeedProgress>()
+    private data class CmafFeedProgress(
+        val videoTracks: MutableMap<Long, CmafBoxInspector.TrackMetadata> = linkedMapOf(),
+        val latestFragments: MutableMap<Long, CmafBoxInspector.FragmentMetadata> = linkedMapOf(),
+        var initSegmentsObserved: Int = 0,
+        var mediaFragmentsObserved: Int = 0,
+        var parseFailures: Int = 0,
+        var overLimitSegments: Int = 0
+    )
+    private val cmafProgress = linkedMapOf<String, CmafFeedProgress>()
     private var activeGroup: String? = null
     private var tileTestLabels: List<String> = emptyList()
     var diagnostic by mutableStateOf("HEVC_PROFILE_WAITING_FOR_FEED_A_AND_FEED_B")
@@ -168,6 +180,7 @@ internal object HevcFeedProfileCapture {
         if (activeGroup != group) {
             profiles.clear()
             feedProgress.clear()
+            cmafProgress.clear()
             tileTestLabels = emptyList()
             activeGroup = group
         }
@@ -185,6 +198,61 @@ internal object HevcFeedProfileCapture {
         selectGroup(group)
         tileTestLabels = labels.distinct().take(2)
         tileTestLabels.forEach { feedProgress.getOrPut(it) { FeedProgress() } }
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun clearTileTestSelection() {
+        tileTestLabels = emptyList()
+        cmafProgress.clear()
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun shouldCaptureCmaf(group: String, label: String): Boolean =
+        activeGroup == group && tileTestLabels.size == 2 && label in tileTestLabels
+
+    @Synchronized
+    fun recordCmafParseFailure(group: String, label: String) {
+        if (!shouldCaptureCmaf(group, label)) return
+        cmafProgress.getOrPut(label) { CmafFeedProgress() }.parseFailures++
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun recordCmafCaptureSkipped(group: String, label: String) {
+        if (!shouldCaptureCmaf(group, label)) return
+        cmafProgress.getOrPut(label) { CmafFeedProgress() }.overLimitSegments++
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun recordCmafReport(group: String, label: String, report: CmafBoxInspector.Report) {
+        if (!shouldCaptureCmaf(group, label)) return
+        val progress = cmafProgress.getOrPut(label) { CmafFeedProgress() }
+        val videoTracks = report.tracks.filter { track ->
+            track.handler == "vide" && (track.hevcConfiguration != null ||
+                track.sampleEntry in setOf("hvc1", "hev1", "encv", "dvhe", "dvh1"))
+        }
+        if (videoTracks.isNotEmpty()) {
+            progress.initSegmentsObserved++
+            videoTracks.forEach { track ->
+                track.trackId?.let { progress.videoTracks[it] = track }
+            }
+        }
+        val fragments = report.fragments.filter { fragment ->
+            fragment.trackId in progress.videoTracks
+        }
+        if (fragments.isNotEmpty()) {
+            progress.mediaFragmentsObserved += fragments.size
+            fragments.forEach { progress.latestFragments[it.trackId] = it }
+        }
+        if (report.errors.isNotEmpty()) {
+            progress.parseFailures += report.errors.size.coerceAtMost(8)
+        }
+        while (progress.latestFragments.size > 4) {
+            progress.latestFragments.remove(progress.latestFragments.keys.first())
+        }
         diagnostic = buildDiagnostic()
     }
 
@@ -372,6 +440,12 @@ internal object HevcFeedProfileCapture {
     }
 
     private fun buildDiagnostic(): String {
+        val profile = buildHevcProfileDiagnostic()
+        val cmaf = buildCmafDiagnostic()
+        return if (cmaf.isBlank()) profile else "$profile\\n\\n$cmaf"
+    }
+
+    private fun buildHevcProfileDiagnostic(): String {
         val captured = if (tileTestLabels.size == 2) {
             val selected = tileTestLabels.mapNotNull(profiles::get)
             if (selected.size < 2) {
@@ -462,4 +536,83 @@ internal object HevcFeedProfileCapture {
             )
         }.joinToString("\n")
     }
+    /**
+     * Runtime CMAF observations are metadata-only. Sample payloads are not parsed; for Widevine
+     * content the KID and IV values are never read or displayed, and no protected bytes are saved.
+     */
+    private fun buildCmafDiagnostic(): String {
+        if (tileTestLabels.size != 2) return ""
+        val states = tileTestLabels.map { label -> label to cmafProgress[label] }
+        val lines = mutableListOf(
+            "F1_CMAF_READ_ONLY_INSPECTOR=ACTIVE",
+            "CMAF_CAPTURE_SCOPE=two selected feeds; bounded in-memory ISO-BMFF metadata only"
+        )
+        states.forEach { (label, state) ->
+            val track = state?.videoTracks?.values?.firstOrNull()
+            val fragment = track?.trackId?.let { state.latestFragments[it] }
+            if (track == null) {
+                lines += "$label: CMAF_INIT=WAITING; initSegments=${state?.initSegmentsObserved ?: 0}; mediaFragments=${state?.mediaFragmentsObserved ?: 0}; parseFailures=${state?.parseFailures ?: 0}; overLimit=${state?.overLimitSegments ?: 0}"
+            } else {
+                val config = track.hevcConfiguration
+                val pps = config?.pps?.singleOrNull()
+                val protection = track.trackEncryption
+                lines += "$label: trackId=${track.trackId}; codec=${track.originalFormat ?: track.sampleEntry ?: "unknown"}; ${track.width ?: 0}x${track.height ?: 0}; timescale=${track.timescale ?: "unknown"}; scheme=${track.protectionScheme ?: "none"}; encrypted=${track.encrypted}"
+                lines += "$label: hvcC VPS/SPS/PPS=${config?.vps?.size ?: 0}/${config?.sps?.size ?: 0}/${config?.pps?.size ?: 0}; tileGrid=${pps?.numTileColumns ?: "unknown"}x${pps?.numTileRows ?: "unknown"}; tileColumnsCTB=${pps?.tileColumnWidthsInCtbs ?: "unknown"}"
+                lines += "$label: tencPresent=${protection != null}; protected=${protection?.defaultIsProtected ?: "unknown"}; perSampleIvSize=${protection?.perSampleIvSize ?: "unknown"}; pattern=${protection?.cryptByteBlock ?: 0}/${protection?.skipByteBlock ?: 0}; initSegments=${state?.initSegmentsObserved ?: 0}; mediaFragments=${state?.mediaFragmentsObserved ?: 0}"
+                if (fragment != null) {
+                    val firstSample = fragment.sampleTimings.firstOrNull()
+                    lines += "$label: fragmentSamples=${fragment.sampleCount}; baseDecodeTicks=${fragment.baseDecodeTimeTicks ?: "unknown"}; firstDts=${firstSample?.decodeTimeTicks ?: "unknown"}; firstPts=${firstSample?.presentationTimeTicks ?: "unknown"}; firstDurationTicks=${firstSample?.durationTicks ?: "unknown"}; timingComplete=${fragment.timingComplete}"
+                    lines += "$label: senc=${fragment.sampleEncryptionBoxPresent}; subsample=${fragment.subsampleEncryptionSignalled ?: "unknown"}; encryptionStructureComplete=${fragment.sampleEncryptionStructureComplete}; rangesCoverSamples=${fragment.sampleEncryptionRangesCoverSamples}; saizSaioComplete=${fragment.sampleAuxiliaryInfoStructureComplete}; auxiliaryRecordsComplete=${fragment.sampleAuxiliaryPayloadStructureComplete}; seigComplete=${fragment.sampleGroupEncryptionStructureComplete}"
+                } else {
+                    lines += "$label: CMAF_MEDIA_FRAGMENT=WAITING"
+                }
+                if ((state?.parseFailures ?: 0) > 0 || (state?.overLimitSegments ?: 0) > 0) {
+                    lines += "$label: parseFailures=${state?.parseFailures ?: 0}; overLimit=${state?.overLimitSegments ?: 0}"
+                }
+            }
+        }
+
+        val firstTrack = states.firstOrNull()?.second?.videoTracks?.values?.firstOrNull()
+        val secondTrack = states.getOrNull(1)?.second?.videoTracks?.values?.firstOrNull()
+        val firstFragment = firstTrack?.trackId?.let { states.firstOrNull()?.second?.latestFragments?.get(it) }
+        val secondFragment = secondTrack?.trackId?.let { states.getOrNull(1)?.second?.latestFragments?.get(it) }
+        if (firstTrack != null && secondTrack != null) {
+            val firstTiming = firstFragment?.sampleTimings?.mapNotNull { it.durationTicks }?.distinct()?.singleOrNull()
+            val secondTiming = secondFragment?.sampleTimings?.mapNotNull { it.durationTicks }?.distinct()?.singleOrNull()
+            val trackGate = HevcFeedCompatibility.compare(
+                HevcFeedCompatibility.Profile(
+                    firstTrack.originalFormat ?: firstTrack.sampleEntry,
+                    firstTrack.width, firstTrack.height, firstTrack.timescale, firstTiming,
+                    firstTrack.protectionScheme
+                ),
+                HevcFeedCompatibility.Profile(
+                    secondTrack.originalFormat ?: secondTrack.sampleEntry,
+                    secondTrack.width, secondTrack.height, secondTrack.timescale, secondTiming,
+                    secondTrack.protectionScheme
+                )
+            )
+            lines += "CMAF_TRACK_PROFILE_GATE=${if (trackGate.compatible) "MATCH" else "NOT_COMPATIBLE"}; reasons=${trackGate.reasons.ifEmpty { listOf("none") }.joinToString("|")}"
+
+            val firstConfig = firstTrack.hevcConfiguration
+            val secondConfig = secondTrack.hevcConfiguration
+            val tileGate = HevcParameterSetCompatibility.compare(
+                firstConfig?.vps?.singleOrNull(), firstConfig?.sps?.singleOrNull(), firstConfig?.pps?.singleOrNull(),
+                secondConfig?.vps?.singleOrNull(), secondConfig?.sps?.singleOrNull(), secondConfig?.pps?.singleOrNull()
+            )
+            lines += "CMAF_HEVC_TILE_CONFIG_GATE=${if (tileGate.compatible) "MATCH" else "NOT_COMPATIBLE"}; reasons=${tileGate.reasons.ifEmpty { listOf("none") }.joinToString("|")}"
+        } else {
+            lines += "CMAF_TRACK_COMPARISON=WAITING_FOR_BOTH_VIDEO_INIT_SEGMENTS"
+        }
+
+        if (firstTrack != null && secondTrack != null && firstFragment != null && secondFragment != null) {
+            val fragmentGate = HevcFragmentCompatibility.compare(firstTrack, firstFragment, secondTrack, secondFragment)
+            lines += "CMAF_FRAGMENT_TIMING_ENCRYPTION_GATE=${if (fragmentGate.compatible) "MATCH" else "NOT_COMPATIBLE"}; reasons=${fragmentGate.reasons.ifEmpty { listOf("none") }.joinToString("|")}"
+        } else {
+            lines += "CMAF_FRAGMENT_COMPARISON=WAITING_FOR_BOTH_VIDEO_MEDIA_FRAGMENTS"
+        }
+        lines += "HEVC_SLICE_HEADER_ANALYSIS=NOT_READ; protected media sample bytes are not inspected"
+        lines += "DRM_SAFETY=KID values and IV values are never read or displayed; no decryption is attempted"
+        return lines.joinToString("\\n")
+    }
+
 }

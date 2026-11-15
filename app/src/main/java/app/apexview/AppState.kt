@@ -2003,6 +2003,7 @@ class AppState(
             return
         }
         val enteringTvLayout = mode == LayoutMode.TV && layoutMode != LayoutMode.TV
+        HevcFeedProfileCapture.clearTileTestSelection()
         layoutMode = mode
         if (mode == LayoutMode.TV) {
             // TV is a complete preset, not a feed-only arrangement: turn on the track map and

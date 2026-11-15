@@ -17,6 +17,7 @@ import androidx.media3.common.Timeline
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -31,6 +32,8 @@ import androidx.media3.exoplayer.drm.UnsupportedDrmException
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
+import app.apexview.tiled.CmafBoxInspector
+import app.apexview.tiled.CmafMetadataInspectingDataSource
 
 /**
  * F1's current video renditions use HEVC. Querying AVC here under-counts the secure decoder pool
@@ -196,7 +199,33 @@ class FeedPlayer(
             .setUuidAndExoMediaDrmProvider(C.WIDEVINE_UUID, drmProvider)
             .build(licenseCallback)
 
-        val sources = DefaultMediaSourceFactory(http).setDrmSessionManagerProvider { drmManager }
+        // The tile-test observer taps only the two feeds explicitly selected by the user. It
+        // inspects bounded CMAF container metadata in memory; the byte stream passed to Media3,
+        // Widevine and the decoder is unchanged.
+        val mediaDataSourceFactory: DataSource.Factory = if (stream.allowHevcProfileProbe) {
+            DataSource.Factory {
+                CmafMetadataInspectingDataSource(
+                    upstream = http.createDataSource(),
+                    shouldCapture = {
+                        HevcFeedProfileCapture.shouldCaptureCmaf(stream.profileGroup, stream.profileLabel)
+                    },
+                    onCmafResponse = { bytes ->
+                        val report = runCatching { CmafBoxInspector.inspect(bytes) }.getOrNull()
+                        if (report == null) {
+                            HevcFeedProfileCapture.recordCmafParseFailure(stream.profileGroup, stream.profileLabel)
+                        } else {
+                            HevcFeedProfileCapture.recordCmafReport(stream.profileGroup, stream.profileLabel, report)
+                        }
+                    },
+                    onCaptureSkipped = {
+                        HevcFeedProfileCapture.recordCmafCaptureSkipped(stream.profileGroup, stream.profileLabel)
+                    }
+                )
+            }
+        } else {
+            http
+        }
+        val sources = DefaultMediaSourceFactory(mediaDataSourceFactory).setDrmSessionManagerProvider { drmManager }
 
         // Starts once a second of picture is in rather than the default 2.5 (2 rather than 5 after
         // a stall): F1's chunks are almost 6 s each, so a feed starting mid-chunk otherwise waits
