@@ -51,6 +51,15 @@ internal object CmafBoxInspector {
         val durationTicks: Long?,
         val compositionOffsetTicks: Long?
     )
+    /** Byte-range shape only. No encrypted bytes, IV bytes or key identifiers are retained. */
+    data class SubsampleEncryptionRange(
+        val clearBytes: Int,
+        val encryptedBytes: Long
+    )
+    data class SampleEncryptionMetadata(
+        val ivSize: Int,
+        val subsampleRanges: List<SubsampleEncryptionRange>?
+    )
     data class FragmentMetadata(
         val trackId: Long,
         val timescale: Long?,
@@ -66,7 +75,10 @@ internal object CmafBoxInspector {
         val sampleAuxiliaryOffsetsPresent: Boolean,
         val sampleGroupDescriptionPresent: Boolean,
         val sampleToGroupPresent: Boolean,
-        val durationIsEmpty: Boolean = false
+        val durationIsEmpty: Boolean = false,
+        val sampleEncryptionStructureComplete: Boolean = false,
+        val sampleEncryptionMetadata: List<SampleEncryptionMetadata> = emptyList(),
+        val sencOverrideIvSize: Int? = null
     )
     data class TrackMetadata(
         val trackId: Long?,
@@ -119,11 +131,17 @@ internal object CmafBoxInspector {
             val scale = item.timescale
             if (id != null && scale != null) id to scale else null
         }.toMap()
+        val trackEncryptionDefaults = tracks.mapNotNull { item ->
+            val id = item.trackId
+            val encryption = item.trackEncryption
+            if (id != null && encryption != null) id to encryption else null
+        }.toMap()
         val trexDefaults = moov?.let { parseTrexDefaults(data, it, errors) }.orEmpty()
         val fragments = boxes.filter { it.type == "moof" }.flatMap { moof ->
             moof.children.filter { it.type == "traf" }.mapNotNull { traf ->
                 try {
-                    parseFragmentTrack(data, traf, trexDefaults, trackTimescales)
+                    parseFragmentTrack(data, traf, trexDefaults, trackTimescales,
+                        trackEncryptionDefaults, errors)
                 } catch (e: Exception) {
                     errors += "Fragment timing metadata could not be parsed: ${e.message ?: e.javaClass.simpleName}"
                     null
@@ -252,7 +270,9 @@ internal object CmafBoxInspector {
         data: ByteArray,
         traf: Box,
         trexDefaults: Map<Long, Long>,
-        timescales: Map<Long, Long>
+        timescales: Map<Long, Long>,
+        trackEncryptionDefaults: Map<Long, TrackEncryptionMetadata>,
+        errors: MutableList<String>
     ): FragmentMetadata {
         val tfhdBox = traf.children.firstOrNull { it.type == "tfhd" }
             ?: throw IllegalArgumentException("traf is missing tfhd")
@@ -279,8 +299,15 @@ internal object CmafBoxInspector {
         val totalDuration = if (samples.isNotEmpty() && samples.all { it.durationTicks != null }) {
             samples.fold(0L) { total, item -> Math.addExact(total, item.durationTicks!!) }
         } else null
-        val senc = traf.children.firstOrNull { it.type == "senc" }
-            ?.let { parseSencSummary(payload(data, it)) }
+        val sencBox = traf.children.firstOrNull { it.type == "senc" }
+        val senc = sencBox?.let { box ->
+            try {
+                parseSencSummary(payload(data, box), trackEncryptionDefaults[tfhd.trackId])
+            } catch (e: Exception) {
+                errors += "Sample encryption structure could not be parsed: ${e.message ?: e.javaClass.simpleName}"
+                null
+            }
+        }
         return FragmentMetadata(
             trackId = tfhd.trackId,
             timescale = timescales[tfhd.trackId],
@@ -290,14 +317,17 @@ internal object CmafBoxInspector {
             sampleTimings = samples,
             timingComplete = !tfhd.durationIsEmpty && baseDecodeTime != null && samples.isNotEmpty() &&
                 samples.all { it.decodeTimeTicks != null && it.durationTicks != null },
-            sampleEncryptionBoxPresent = senc != null,
+            sampleEncryptionBoxPresent = sencBox != null,
             subsampleEncryptionSignalled = senc?.subsampleEncryption,
             sampleEncryptionCount = senc?.sampleCount,
             sampleAuxiliarySizesPresent = traf.children.any { it.type == "saiz" },
             sampleAuxiliaryOffsetsPresent = traf.children.any { it.type == "saio" },
             sampleGroupDescriptionPresent = traf.children.any { it.type == "sgpd" },
             sampleToGroupPresent = traf.children.any { it.type == "sbgp" },
-            durationIsEmpty = tfhd.durationIsEmpty
+            durationIsEmpty = tfhd.durationIsEmpty,
+            sampleEncryptionStructureComplete = senc?.structureComplete == true,
+            sampleEncryptionMetadata = senc?.samples.orEmpty(),
+            sencOverrideIvSize = senc?.overrideIvSize
         )
     }
 
@@ -369,23 +399,68 @@ internal object CmafBoxInspector {
         return cursor
     }
 
-    private data class SencSummary(val sampleCount: Long, val subsampleEncryption: Boolean)
+    private data class SencSummary(
+        val sampleCount: Long,
+        val subsampleEncryption: Boolean,
+        val structureComplete: Boolean,
+        val samples: List<SampleEncryptionMetadata>,
+        val overrideIvSize: Int?
+    )
 
-    private fun parseSencSummary(p: ByteBuffer): SencSummary {
+    private fun parseSencSummary(
+        p: ByteBuffer,
+        trackEncryption: TrackEncryptionMetadata?
+    ): SencSummary {
         require(p.remaining() >= 8) { "Truncated senc box" }
         val version = u8(p)
         require(version == 0) { "Unsupported senc version $version" }
         val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
         require((flags and 0xfffffc) == 0) { "Unsupported senc flags" }
-        // Flag 0 carries algorithm_id, per-sample IV size and a 16-byte KID override.
-        // Skip that metadata without retaining the KID.
-        if ((flags and 0x000001) != 0) skip(p, 20)
+        var overrideIvSize: Int? = null
+        if ((flags and 0x000001) != 0) {
+            skip(p, 3) // algorithm_id: not needed for structural analysis
+            overrideIvSize = u8(p)
+            require(overrideIvSize == 0 || overrideIvSize == 8 || overrideIvSize == 16) {
+                "Unsupported senc override IV size"
+            }
+            skip(p, 16) // Skip the KID. Never copy, compare, retain, or log its bytes.
+        }
         val sampleCount = u32(p)
         require(sampleCount <= MAX_FRAGMENT_SAMPLES.toLong()) {
             "senc sample count exceeds limit"
         }
-        // The per-sample IV and optional subsample maps remain deliberately unread.
-        return SencSummary(sampleCount, (flags and 0x000002) != 0)
+        val subsampleEncryption = (flags and 0x000002) != 0
+
+        // Without tenc defaults or an explicit senc override, the IV byte count cannot be
+        // established safely. Preserve only the declared count and fail the crypto check closed.
+        val defaultIvSize = trackEncryption?.let {
+            if (it.defaultIsProtected) it.perSampleIvSize else 0
+        }
+        val effectiveIvSize = overrideIvSize ?: defaultIvSize
+            ?: return SencSummary(sampleCount, subsampleEncryption, false, emptyList(), null)
+
+        val samples = ArrayList<SampleEncryptionMetadata>(sampleCount.toInt())
+        var totalSubsampleEntries = 0L
+        repeat(sampleCount.toInt()) {
+            if (effectiveIvSize > 0) skip(p, effectiveIvSize) // Skip IV bytes without retaining them.
+            val ranges = if (subsampleEncryption) {
+                val count = u16(p)
+                totalSubsampleEntries = Math.addExact(totalSubsampleEntries, count.toLong())
+                require(totalSubsampleEntries <= MAX_TOTAL_SUBSAMPLE_ENTRIES) {
+                    "senc subsample entry count exceeds limit"
+                }
+                buildList(count) {
+                    repeat(count) {
+                        val clearBytes = u16(p)
+                        val encryptedBytes = u32(p)
+                        add(SubsampleEncryptionRange(clearBytes, encryptedBytes))
+                    }
+                }
+            } else null
+            samples += SampleEncryptionMetadata(effectiveIvSize, ranges)
+        }
+        require(!p.hasRemaining()) { "Unexpected trailing bytes in senc box" }
+        return SencSummary(sampleCount, subsampleEncryption, true, samples, overrideIvSize)
     }
 
     private fun skip(p: ByteBuffer, count: Int) {
@@ -406,6 +481,7 @@ internal object CmafBoxInspector {
     }
 
     private const val MAX_FRAGMENT_SAMPLES = 100_000
+    private const val MAX_TOTAL_SUBSAMPLE_ENTRIES = 1_000_000L
 
     private fun parseHevcConfiguration(p: ByteBuffer): HevcConfiguration {
         require(p.remaining() >= 23) { "Truncated hvcC record" }
