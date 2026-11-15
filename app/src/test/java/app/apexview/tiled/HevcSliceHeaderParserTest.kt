@@ -256,6 +256,43 @@ class HevcSliceHeaderParserTest {
     }
 
     @Test
+    fun excludesAllSlnrRadlAndRaslNalTypesFromPrevTid0Anchor() {
+        val excludedTypes = listOf(0, 2, 4, 6, 7, 8, 9, 10, 12, 14)
+        excludedTypes.forEach { excludedType ->
+            val tracker = HevcPocTracker()
+            assertEquals(8L, tracker.derive(1, 1, 8, 4))
+            tracker.derive(excludedType, 1, 1, 4)
+            assertEquals(
+                "NAL type $excludedType must not replace prevTid0Pic",
+                16L,
+                tracker.derive(1, 1, 0, 4)
+            )
+        }
+    }
+
+    @Test
+    fun reservedReferenceVclTypesCanUpdatePrevTid0Anchor() {
+        listOf(11, 13, 15).forEach { referenceType ->
+            val tracker = HevcPocTracker()
+            assertEquals(8L, tracker.derive(1, 1, 8, 4))
+            tracker.derive(referenceType, 1, 1, 4)
+            assertEquals(
+                "Reference NAL type $referenceType should become prevTid0Pic",
+                0L,
+                tracker.derive(1, 1, 0, 4)
+            )
+        }
+    }
+
+    @Test
+    fun nonZeroTemporalLayerDoesNotReplacePrevTid0Anchor() {
+        val tracker = HevcPocTracker()
+        assertEquals(8L, tracker.derive(1, 1, 8, 4))
+        tracker.derive(1, 2, 1, 4)
+        assertEquals(16L, tracker.derive(1, 1, 0, 4))
+    }
+
+    @Test
     fun appliesCraNoRaslOutputFlagOnlyWhenSequenceContextRequiresIt() {
         val atRandomAccessPoint = HevcPocTracker()
         assertEquals(240L, atRandomAccessPoint.derive(21, 1, 240, 8, noRaslOutputFlag = true))
