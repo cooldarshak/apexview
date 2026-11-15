@@ -612,7 +612,8 @@ class AppState(
         get() = if (!isTv) "Decoder diagnostics: phone" else {
             val visible = tiles.count { it.feed.showingVideo }
             val held = tiles.count { it.heldForDecoder }
-            "HEVC decoder budget $cachedDecoderBudget · video $visible/${tiles.size} · held $held"
+            "HEVC decoder budget $cachedDecoderBudget · video $visible/${tiles.size} · held $held · " +
+                lastVideoDecoderDiagnostic.take(150)
         }
     /** Edge by default; the last style picked is remembered. */
     var mapMode by mutableStateOf(savedMapMode())
