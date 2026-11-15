@@ -199,9 +199,9 @@ class FeedPlayer(
             .setUuidAndExoMediaDrmProvider(C.WIDEVINE_UUID, drmProvider)
             .build(licenseCallback)
 
-        // The tile-test observer taps only the two feeds explicitly selected by the user. It
-        // inspects bounded CMAF container metadata in memory; the byte stream passed to Media3,
-        // Widevine and the decoder is unchanged.
+        // Observe bounded init metadata for registered F1 feeds so an already-playing feed can
+        // be compared later. Capture media-fragment metadata only for the two user-selected feeds.
+        // The byte stream passed to Media3, Widevine and the decoder is unchanged.
         val mediaDataSourceFactory: DataSource.Factory = if (stream.allowHevcProfileProbe) {
             DataSource.Factory {
                 CmafMetadataInspectingDataSource(
