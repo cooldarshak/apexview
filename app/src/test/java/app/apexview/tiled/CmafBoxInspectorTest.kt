@@ -188,16 +188,20 @@ class CmafBoxInspectorTest {
 
     @Test fun doesNotResolveExternalAuxiliaryOffsetsWithoutAnUnambiguousTfhdBase() {
         val init = fragmentedInitSegment(trackId = 72, timescale = 90000, includeEncryption = true)
+        // The first traf has no media samples and ends without a calculable data end. The
+        // following traf therefore inherits a base that this bounded inspector cannot prove.
+        val firstTraf = box("traf", box("tfhd", byteArrayOf(0,1,0,0) + int(99)))
         val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(72))
         val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
         val trun = box("trun", byteArrayOf(0,0,3,0) + int(1) + int(3000) + int(64))
         val saiz = box("saiz", byteArrayOf(0,0,0,0, 0) + int(1) + byteArrayOf(16))
         val saio = box("saio", byteArrayOf(0,0,0,0) + int(1) + int(0))
+        val secondTraf = box("traf", tfhd + tfdt + trun + saiz + saio)
         val report = CmafBoxInspector.inspect(
-            init + box("moof", box("mfhd", ByteArray(8)) +
-                box("traf", tfhd + tfdt + trun + saiz + saio) + box("mdat", ByteArray(16)))
+            init + box("moof", box("mfhd", ByteArray(8)) + firstTraf + secondTraf) +
+                box("mdat", ByteArray(80))
         )
-        val fragment = report.fragments.single()
+        val fragment = report.fragments.first { it.trackId == 72L }
         assertTrue(fragment.sampleAuxiliaryInfoStructureComplete)
         assertFalse(fragment.sampleAuxiliaryPayloadStructureComplete)
         assertTrue(report.errors.any { it.contains("base is ambiguous") })
