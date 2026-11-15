@@ -200,7 +200,26 @@ internal object HevcFragmentCompatibility {
         }
         if (firstFragment.sampleAuxiliarySizesPresent || secondFragment.sampleAuxiliarySizesPresent ||
             firstFragment.sampleAuxiliaryOffsetsPresent || secondFragment.sampleAuxiliaryOffsetsPresent) {
-            reasons += "External sample-encryption auxiliary data is not yet parsed"
+            if (!firstFragment.sampleAuxiliaryInfoStructureComplete ||
+                !secondFragment.sampleAuxiliaryInfoStructureComplete) {
+                reasons += "Sample auxiliary size/offset signalling is incomplete"
+            }
+            if (!firstFragment.sampleAuxiliaryPayloadStructureComplete ||
+                !secondFragment.sampleAuxiliaryPayloadStructureComplete) {
+                reasons += "Sample auxiliary payload records are incomplete or could not be safely resolved"
+            } else {
+                if (firstFragment.sampleAuxiliaryPayloadSampleCount != firstFragment.sampleCount ||
+                    secondFragment.sampleAuxiliaryPayloadSampleCount != secondFragment.sampleCount) {
+                    reasons += "Sample auxiliary payload record count does not match the fragment sample count"
+                }
+                if (firstFragment.sampleEncryptionMetadata != secondFragment.sampleEncryptionMetadata) {
+                    reasons += "Per-sample auxiliary IV-size/subsample-map structure differs"
+                }
+                if (!firstFragment.sampleEncryptionRangesCoverSamples ||
+                    !secondFragment.sampleEncryptionRangesCoverSamples) {
+                    reasons += "Sample auxiliary subsample ranges do not cover the declared sample sizes"
+                }
+            }
         }
         if (firstFragment.sampleGroupEncryptionPresent != secondFragment.sampleGroupEncryptionPresent) {
             reasons += "seig sample-group encryption override presence differs"
