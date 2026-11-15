@@ -32,11 +32,19 @@ import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
 
 /**
- * Returns a conservative video-decoder budget for the device's AVC decoder pool.
+ * F1's current video renditions use HEVC. Querying AVC here under-counts the secure decoder pool
+ * on TVs that expose a separate HEVC decoder (for example, Amlogic's secure HEVC decoder).
+ */
+internal const val F1_VIDEO_MIME_TYPE = "video/hevc"
+
+internal fun supportsF1VideoMimeType(supportedTypes: Array<String>): Boolean =
+    supportedTypes.any { it.equals(F1_VIDEO_MIME_TYPE, ignoreCase = true) }
+
+/**
+ * Returns a conservative budget for the codec that actually decodes F1's HEVC feeds.
  *
- * CodecCapabilities.maxSupportedInstances is only an upper bound. We reserve one instance for
- * platform/other playback and clamp to this app's four-feed limit. Unknown capability data falls
- * back to one video decoder on TV rather than risking a device-wide decoder exhaustion/reboot.
+ * maxSupportedInstances is only an upper bound. Reserve one instance for platform/other playback
+ * and clamp to this app's four-feed limit. Unknown capability data remains fail-closed at one.
  */
 internal fun reportedVideoDecoderBudget(reportedMaxInstances: Int?, isTv: Boolean): Int {
     if (!isTv) return 4
@@ -48,9 +56,9 @@ internal fun queryVideoDecoderBudget(context: Context, softwareDrm: Boolean, isT
     if (!isTv) return 4
     return runCatching {
         val codecs = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
-            .filter { !it.isEncoder && it.supportedTypes.any { type -> type.equals(MimeTypes.VIDEO_H264, true) } }
+            .filter { !it.isEncoder && supportsF1VideoMimeType(it.supportedTypes) }
         val candidates = codecs.mapNotNull { codec ->
-            val caps = runCatching { codec.getCapabilitiesForType(MimeTypes.VIDEO_H264) }.getOrNull()
+            val caps = runCatching { codec.getCapabilitiesForType(F1_VIDEO_MIME_TYPE) }.getOrNull()
                 ?: return@mapNotNull null
             val secure = caps.isFeatureSupported(PlatformMediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback) ||
                 caps.isFeatureRequired(PlatformMediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback)
@@ -61,7 +69,7 @@ internal fun queryVideoDecoderBudget(context: Context, softwareDrm: Boolean, isT
         val pool = hardware.ifEmpty { candidates }
         reportedVideoDecoderBudget(pool.map { it.second }.filter { it > 0 }.maxOrNull(), isTv = true)
     }.getOrElse {
-        Log.w("ApexviewVideoBudget", "Unable to query AVC decoder capacity; allowing one TV video decoder", it)
+        Log.w("ApexviewVideoBudget", "Unable to query HEVC decoder capacity; allowing one TV video decoder", it)
         1
     }
 }
