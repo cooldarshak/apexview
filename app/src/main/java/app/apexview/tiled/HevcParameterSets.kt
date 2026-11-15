@@ -3,9 +3,9 @@ package app.apexview.tiled
 /**
  * Bounded prefix parser for HEVC VPS/SPS/PPS parameter sets.
  *
- * It extracts only fields needed to compare candidate tiled feeds: parameter-set IDs,
- * picture dimensions, POC LSB width, CTB dimensions and PPS tile geometry. It deliberately
- * stops before reference-picture-set/VUI parsing and never attempts to rewrite a slice header.
+ * It extracts bounded decoder and tile metadata from clear VPS/SPS/PPS NALs. VUI payloads
+ * and parameter-set extensions are identified but not interpreted; callers must fail closed
+ * when those unparsed features are present. This parser never rewrites a slice header.
  * Input must be clear NAL bytes, including the two-byte HEVC NAL header.
  */
 internal object HevcParameterSets {
@@ -14,6 +14,15 @@ internal object HevcParameterSets {
         val maxLayers: Int,
         val maxSubLayers: Int,
         val temporalIdNesting: Boolean
+    )
+
+    data class ProfileTierLevel(
+        val profileSpace: Int,
+        val tierFlag: Boolean,
+        val profileIdc: Int,
+        val compatibilityFlags: Long,
+        val constraintIndicatorFlags: Long,
+        val levelIdc: Int
     )
 
     data class ReferenceDelta(val deltaPoc: Int, val usedByCurrent: Boolean)
@@ -45,7 +54,26 @@ internal object HevcParameterSets {
         val temporalMvpEnabled: Boolean,
         val longTermRefPicsPresent: Boolean,
         val longTermRefPics: List<LongTermReference>,
-        val shortTermRefPicSets: List<ShortTermRefPicSet>
+        val shortTermRefPicSets: List<ShortTermRefPicSet>,
+        val profileTierLevel: ProfileTierLevel,
+        val bitDepthLuma: Int,
+        val bitDepthChroma: Int,
+        val conformanceWindowLeft: Int,
+        val conformanceWindowRight: Int,
+        val conformanceWindowTop: Int,
+        val conformanceWindowBottom: Int,
+        val displayWidth: Int,
+        val displayHeight: Int,
+        val maxDecPicBuffering: List<Int>,
+        val maxNumReorderPics: List<Int>,
+        val maxLatencyIncrease: List<Int>,
+        val scalingListEnabled: Boolean,
+        val scalingListDataPresent: Boolean,
+        val ampEnabled: Boolean,
+        val pcmEnabled: Boolean,
+        val strongIntraSmoothingEnabled: Boolean,
+        val vuiParametersPresent: Boolean,
+        val spsExtensionPresent: Boolean?
     )
 
     data class PpsMetadata(
@@ -63,7 +91,22 @@ internal object HevcParameterSets {
         val explicitRowHeightsMinus1: List<Int>,
         val tileColumnWidthsInCtbs: List<Int>?,
         val tileRowHeightsInCtbs: List<Int>?,
-        val loopFilterAcrossTiles: Boolean?
+        val loopFilterAcrossTiles: Boolean?,
+        val weightedPredictionEnabled: Boolean,
+        val weightedBipredictionEnabled: Boolean,
+        val transquantBypassEnabled: Boolean,
+        val loopFilterAcrossSlicesEnabled: Boolean,
+        val deblockingFilterControlPresent: Boolean,
+        val deblockingFilterOverrideEnabled: Boolean?,
+        val deblockingFilterDisabled: Boolean?,
+        val betaOffsetDiv2: Int?,
+        val tcOffsetDiv2: Int?,
+        val scalingListDataPresent: Boolean,
+        val listsModificationPresent: Boolean,
+        val log2ParallelMergeLevelMinus2: Int,
+        val sliceSegmentHeaderExtensionPresent: Boolean,
+        val extensionPresent: Boolean,
+        val extensionFlags: Int?
     )
 
     fun parseVps(nal: ByteArray): VpsMetadata {
@@ -85,7 +128,7 @@ internal object HevcParameterSets {
         val maxSubLayersMinus1 = bits.readBits(3)
         require(maxSubLayersMinus1 in 0..6) { "Invalid SPS sub-layer count" }
         val temporalNesting = bits.readBit() != 0
-        skipProfileTierLevel(bits, maxSubLayersMinus1)
+        val profileTierLevel = parseProfileTierLevel(bits, maxSubLayersMinus1)
 
         val spsId = readUe(bits, 15, "sps_seq_parameter_set_id")
         val chromaFormat = readUe(bits, 3, "chroma_format_idc")
@@ -93,20 +136,37 @@ internal object HevcParameterSets {
         val width = readUe(bits, 32768, "pic_width_in_luma_samples")
         val height = readUe(bits, 32768, "pic_height_in_luma_samples")
         require(width > 0 && height > 0) { "SPS picture dimensions must be non-zero" }
-        if (bits.readBit() != 0) {
-            repeat(4) { readUe(bits, 32768, "conformance_window_offset") }
-        }
-        readUe(bits, 8, "bit_depth_luma_minus8")
-        readUe(bits, 8, "bit_depth_chroma_minus8")
+        val hasConformanceWindow = bits.readBit() != 0
+        val conformanceLeft = if (hasConformanceWindow) readUe(bits, 32768, "conf_win_left_offset") else 0
+        val conformanceRight = if (hasConformanceWindow) readUe(bits, 32768, "conf_win_right_offset") else 0
+        val conformanceTop = if (hasConformanceWindow) readUe(bits, 32768, "conf_win_top_offset") else 0
+        val conformanceBottom = if (hasConformanceWindow) readUe(bits, 32768, "conf_win_bottom_offset") else 0
+        val cropUnitWidth = if (separateColourPlane) 1 else if (chromaFormat == 1 || chromaFormat == 2) 2 else 1
+        val cropUnitHeight = if (separateColourPlane) 1 else if (chromaFormat == 1) 2 else 1
+        val displayWidth = width - cropUnitWidth * (conformanceLeft + conformanceRight)
+        val displayHeight = height - cropUnitHeight * (conformanceTop + conformanceBottom)
+        require(displayWidth > 0 && displayHeight > 0) { "SPS conformance window removes the full picture" }
+        val bitDepthLuma = readUe(bits, 8, "bit_depth_luma_minus8") + 8
+        val bitDepthChroma = readUe(bits, 8, "bit_depth_chroma_minus8") + 8
         val pocMinus4 = readUe(bits, 12, "log2_max_pic_order_cnt_lsb_minus4")
         val log2Poc = pocMinus4 + 4
 
         val orderingInfoPresent = bits.readBit() != 0
+        val maxDecPicBuffering = MutableList(maxSubLayersMinus1 + 1) { 0 }
+        val maxNumReorderPics = MutableList(maxSubLayersMinus1 + 1) { 0 }
+        val maxLatencyIncrease = MutableList(maxSubLayersMinus1 + 1) { 0 }
         val firstLayer = if (orderingInfoPresent) 0 else maxSubLayersMinus1
         for (layer in firstLayer..maxSubLayersMinus1) {
-            readUe(bits, 32, "sps_max_dec_pic_buffering_minus1")
-            readUe(bits, 32, "sps_max_num_reorder_pics")
-            readUe(bits, 1024, "sps_max_latency_increase_plus1")
+            maxDecPicBuffering[layer] = readUe(bits, 32, "sps_max_dec_pic_buffering_minus1") + 1
+            maxNumReorderPics[layer] = readUe(bits, 32, "sps_max_num_reorder_pics")
+            maxLatencyIncrease[layer] = readUe(bits, 1024, "sps_max_latency_increase_plus1")
+        }
+        if (!orderingInfoPresent) {
+            for (layer in 0 until maxSubLayersMinus1) {
+                maxDecPicBuffering[layer] = maxDecPicBuffering[maxSubLayersMinus1]
+                maxNumReorderPics[layer] = maxNumReorderPics[maxSubLayersMinus1]
+                maxLatencyIncrease[layer] = maxLatencyIncrease[maxSubLayersMinus1]
+            }
         }
 
         val log2MinCbMinus3 = readUe(bits, 3, "log2_min_luma_coding_block_size_minus3")
@@ -123,10 +183,12 @@ internal object HevcParameterSets {
         readUe(bits, 4, "max_transform_hierarchy_depth_inter")
         readUe(bits, 4, "max_transform_hierarchy_depth_intra")
         val scalingListEnabled = bits.readBit() != 0
-        if (scalingListEnabled && bits.readBit() != 0) skipScalingListData(bits)
-        bits.readBit() // amp_enabled_flag
+        val scalingListDataPresent = scalingListEnabled && bits.readBit() != 0
+        if (scalingListDataPresent) skipScalingListData(bits)
+        val ampEnabled = bits.readBit() != 0
         val saoEnabled = bits.readBit() != 0
-        if (bits.readBit() != 0) {
+        val pcmEnabled = bits.readBit() != 0
+        if (pcmEnabled) {
             bits.skipBits(8) // PCM sample bit depths
             readUe(bits, 3, "log2_min_pcm_luma_coding_block_size_minus3")
             readUe(bits, 3, "log2_diff_max_min_pcm_luma_coding_block_size")
@@ -148,13 +210,22 @@ internal object HevcParameterSets {
             }
         }
         val temporalMvp = bits.readBit() != 0
-        bits.readBit() // strong_intra_smoothing_enabled_flag
+        val strongIntraSmoothing = bits.readBit() != 0
+        val vuiPresent = bits.readBit() != 0
+        // VUI is deliberately not parsed yet. Its presence is exposed so a stitcher can
+        // reject streams whose colour/timing/display semantics are not fully compared.
+        val spsExtensionPresent = if (vuiPresent || bits.bitsRemaining == 0) null else bits.readBit() != 0
 
         return SpsMetadata(
             vpsId, spsId, maxSubLayersMinus1 + 1, temporalNesting,
             chromaFormat, separateColourPlane, width, height, log2Poc, log2Ctb,
             ctbSize, widthInCtbs, heightInCtbs, saoEnabled, temporalMvp,
-            longTermPresent, longTermRefs, shortTermSets
+            longTermPresent, longTermRefs, shortTermSets,
+            profileTierLevel, bitDepthLuma, bitDepthChroma,
+            conformanceLeft, conformanceRight, conformanceTop, conformanceBottom,
+            displayWidth, displayHeight, maxDecPicBuffering, maxNumReorderPics,
+            maxLatencyIncrease, scalingListEnabled, scalingListDataPresent,
+            ampEnabled, pcmEnabled, strongIntraSmoothing, vuiPresent, spsExtensionPresent
         )
     }
 
@@ -178,45 +249,67 @@ internal object HevcParameterSets {
         bits.readSignedExpGolomb() // pps_cb_qp_offset
         bits.readSignedExpGolomb() // pps_cr_qp_offset
         bits.readBit() // pps_slice_chroma_qp_offsets_present_flag
-        bits.readBit() // weighted_pred_flag
-        bits.readBit() // weighted_bipred_flag
-        bits.readBit() // transquant_bypass_enabled_flag
+        val weightedPred = bits.readBit() != 0
+        val weightedBipred = bits.readBit() != 0
+        val transquantBypass = bits.readBit() != 0
 
         val tilesEnabled = bits.readBit() != 0
         val entropySync = bits.readBit() != 0
-        if (!tilesEnabled) {
-            val columns = sps?.let { listOf(it.picWidthInCtbs) }
-            val rows = sps?.let { listOf(it.picHeightInCtbs) }
-            return PpsMetadata(ppsId, spsId, dependentSlices, outputFlag, extraHeaderBits,
-                false, entropySync, null, 1, 1, emptyList(), emptyList(), columns, rows, null)
-        }
 
-        val numColumns = readUe(bits, 1023, "num_tile_columns_minus1") + 1
-        val numRows = readUe(bits, 1023, "num_tile_rows_minus1") + 1
+        val numColumns = if (tilesEnabled) readUe(bits, 1023, "num_tile_columns_minus1") + 1 else 1
+        val numRows = if (tilesEnabled) readUe(bits, 1023, "num_tile_rows_minus1") + 1 else 1
         if (sps != null) {
             require(numColumns <= sps.picWidthInCtbs) { "Tile columns exceed picture CTB width" }
             require(numRows <= sps.picHeightInCtbs) { "Tile rows exceed picture CTB height" }
         }
-        val uniform = bits.readBit() != 0
+        val uniform = if (tilesEnabled) bits.readBit() != 0 else null
         val explicitColumns = mutableListOf<Int>()
         val explicitRows = mutableListOf<Int>()
-        if (!uniform) {
+        if (tilesEnabled && uniform == false) {
             repeat(numColumns - 1) { explicitColumns += readUe(bits, 32767, "column_width_minus1") }
             repeat(numRows - 1) { explicitRows += readUe(bits, 32767, "row_height_minus1") }
         }
-        val loopFilter = bits.readBit() != 0
-
+        val loopFilter = if (tilesEnabled) bits.readBit() != 0 else null
         val columnWidths = sps?.let {
-            if (uniform) uniformPartition(it.picWidthInCtbs, numColumns)
+            if (!tilesEnabled) listOf(it.picWidthInCtbs)
+            else if (uniform == true) uniformPartition(it.picWidthInCtbs, numColumns)
             else explicitPartition(it.picWidthInCtbs, explicitColumns, numColumns, "column")
         }
         val rowHeights = sps?.let {
-            if (uniform) uniformPartition(it.picHeightInCtbs, numRows)
+            if (!tilesEnabled) listOf(it.picHeightInCtbs)
+            else if (uniform == true) uniformPartition(it.picHeightInCtbs, numRows)
             else explicitPartition(it.picHeightInCtbs, explicitRows, numRows, "row")
         }
+
+        val loopFilterAcrossSlices = bits.readBit() != 0
+        val deblockingControlPresent = bits.readBit() != 0
+        var deblockingOverride: Boolean? = null
+        var deblockingDisabled: Boolean? = null
+        var betaOffset: Int? = null
+        var tcOffset: Int? = null
+        if (deblockingControlPresent) {
+            deblockingOverride = bits.readBit() != 0
+            deblockingDisabled = bits.readBit() != 0
+            if (deblockingDisabled == false) {
+                betaOffset = bits.readSignedExpGolomb().toInt()
+                tcOffset = bits.readSignedExpGolomb().toInt()
+                require(betaOffset in -6..6 && tcOffset in -6..6) { "PPS deblocking offsets exceed HEVC range" }
+            }
+        }
+        val scalingListDataPresent = bits.readBit() != 0
+        if (scalingListDataPresent) skipScalingListData(bits)
+        val listsModificationPresent = bits.readBit() != 0
+        val log2ParallelMerge = readUe(bits, 6, "log2_parallel_merge_level_minus2")
+        val sliceHeaderExtension = bits.readBit() != 0
+        val extensionPresent = bits.readBit() != 0
+        val extensionFlags = if (extensionPresent) bits.readBits(8) else null
+
         return PpsMetadata(ppsId, spsId, dependentSlices, outputFlag, extraHeaderBits,
-            true, entropySync, uniform, numColumns, numRows, explicitColumns, explicitRows,
-            columnWidths, rowHeights, loopFilter)
+            tilesEnabled, entropySync, uniform, numColumns, numRows, explicitColumns, explicitRows,
+            columnWidths, rowHeights, loopFilter, weightedPred, weightedBipred, transquantBypass,
+            loopFilterAcrossSlices, deblockingControlPresent, deblockingOverride, deblockingDisabled,
+            betaOffset, tcOffset, scalingListDataPresent, listsModificationPresent,
+            log2ParallelMerge, sliceHeaderExtension, extensionPresent, extensionFlags)
     }
 
     /**
@@ -363,9 +456,13 @@ internal object HevcParameterSets {
         return HevcBitReader(HevcBitstream.ebspToRbsp(nal.copyOfRange(2, nal.size)))
     }
 
-    private fun skipProfileTierLevel(bits: HevcBitReader, maxSubLayersMinus1: Int) {
-        // general_profile_* and general_level_idc
-        bits.skipBits(8 + 32 + 4 + 44 + 8)
+    private fun parseProfileTierLevel(bits: HevcBitReader, maxSubLayersMinus1: Int): ProfileTierLevel {
+        val profileSpace = bits.readBits(2)
+        val tierFlag = bits.readBit() != 0
+        val profileIdc = bits.readBits(5)
+        val compatibility = bits.readBits(32).toLong() and 0xffffffffL
+        val constraints = (bits.readBits(32).toLong() shl 16) or bits.readBits(16).toLong()
+        val levelIdc = bits.readBits(8)
         val profilePresent = BooleanArray(maxSubLayersMinus1)
         val levelPresent = BooleanArray(maxSubLayersMinus1)
         for (i in 0 until maxSubLayersMinus1) {
@@ -376,9 +473,10 @@ internal object HevcParameterSets {
             for (i in maxSubLayersMinus1 until 8) bits.skipBits(2)
         }
         for (i in 0 until maxSubLayersMinus1) {
-            if (profilePresent[i]) bits.skipBits(8 + 32 + 4 + 44)
+            if (profilePresent[i]) bits.skipBits(8 + 32 + 48)
             if (levelPresent[i]) bits.skipBits(8)
         }
+        return ProfileTierLevel(profileSpace, tierFlag, profileIdc, compatibility, constraints, levelIdc)
     }
 
     private fun readUe(bits: HevcBitReader, max: Int, field: String): Int {
