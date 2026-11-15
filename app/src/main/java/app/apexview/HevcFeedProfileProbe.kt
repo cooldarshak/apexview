@@ -30,6 +30,9 @@ internal object HevcFeedProfileProbe {
         val frameRate: Float,
         val parameterSetFingerprint: String?,
         val parsedParameterCounts: String,
+        val parsedVps: List<HevcParameterSets.VpsMetadata>,
+        val parsedSps: List<HevcParameterSets.SpsMetadata>,
+        val parsedPps: List<HevcParameterSets.PpsMetadata>,
         val drmSecurityLevel: String?,
         val widevineKeysLoaded: Boolean
     )
@@ -124,6 +127,9 @@ internal object HevcFeedProfileProbe {
             frameRate = format.frameRate,
             parameterSetFingerprint = fingerprint,
             parsedParameterCounts = parsedCounts,
+            parsedVps = vps,
+            parsedSps = sps,
+            parsedPps = pps,
             drmSecurityLevel = null,
             widevineKeysLoaded = false
         )
@@ -176,6 +182,54 @@ internal object HevcFeedProfileCapture {
         diagnostic = buildDiagnostic()
     }
 
+    private fun compareParsedParameterSets(
+        first: HevcFeedProfileProbe.Snapshot,
+        second: HevcFeedProfileProbe.Snapshot
+    ): String {
+        if (first.parsedVps.isEmpty() || first.parsedSps.isEmpty() || first.parsedPps.isEmpty() ||
+            second.parsedVps.isEmpty() || second.parsedSps.isEmpty() || second.parsedPps.isEmpty()) {
+            return "INCOMPLETE: one or more VPS/SPS/PPS sets could not be parsed"
+        }
+        val reasons = mutableListOf<String>()
+        val firstVps = first.parsedVps.associateBy { it.vpsId }
+        val secondVps = second.parsedVps.associateBy { it.vpsId }
+        val firstSps = first.parsedSps.associateBy { it.spsId }
+        val secondSps = second.parsedSps.associateBy { it.spsId }
+        val firstPps = first.parsedPps.associateBy { it.ppsId }
+        val secondPps = second.parsedPps.associateBy { it.ppsId }
+
+        if (firstVps.size != first.parsedVps.size || secondVps.size != second.parsedVps.size ||
+            firstSps.size != first.parsedSps.size || secondSps.size != second.parsedSps.size ||
+            firstPps.size != first.parsedPps.size || secondPps.size != second.parsedPps.size) {
+            reasons += "duplicate parameter-set IDs are present"
+        }
+        if (firstVps != secondVps) reasons += "VPS IDs or metadata differ"
+        if (firstSps != secondSps) reasons += "SPS IDs or metadata differ"
+        if (firstPps != secondPps) reasons += "PPS IDs or metadata differ"
+
+        firstPps.forEach { (ppsId, firstPpsMetadata) ->
+            val secondPpsMetadata = secondPps[ppsId] ?: return@forEach
+            val firstSpsMetadata = firstSps[firstPpsMetadata.spsId]
+            val secondSpsMetadata = secondSps[secondPpsMetadata.spsId]
+            if (firstSpsMetadata == null || secondSpsMetadata == null) {
+                reasons += "PPS $ppsId references a missing SPS"
+                return@forEach
+            }
+            val firstVpsMetadata = firstVps[firstSpsMetadata.vpsId]
+            val secondVpsMetadata = secondVps[secondSpsMetadata.vpsId]
+            if (firstVpsMetadata == null || secondVpsMetadata == null) {
+                reasons += "SPS ${firstSpsMetadata.spsId} references a missing VPS"
+                return@forEach
+            }
+            val gate = HevcParameterSetCompatibility.compare(
+                firstVpsMetadata, firstSpsMetadata, firstPpsMetadata,
+                secondVpsMetadata, secondSpsMetadata, secondPpsMetadata
+            )
+            if (!gate.compatible) reasons += gate.reasons.map { "PPS $ppsId: $it" }
+        }
+        return if (reasons.isEmpty()) "PASS" else "REJECT: ${reasons.distinct().joinToString("; ")}"
+    }
+
     private fun buildDiagnostic(): String {
         if (profiles.isEmpty()) return "HEVC_PROFILE_WAITING_FOR_FEED_A"
         val captured = profiles.values.toList()
@@ -220,9 +274,10 @@ internal object HevcFeedProfileCapture {
         val result = if (reasons.isEmpty()) "CODEC_PROFILE_MATCH" else "CODEC_PROFILE_MISMATCH"
         fun drm(profile: HevcFeedProfileProbe.Snapshot) =
             "DRM=${profile.drmSecurityLevel ?: "not-observed"},keysLoaded=${profile.widevineKeysLoaded}"
+        val parameterGate = compareParsedParameterSets(first, second)
         return "$result ${first.label} vs ${second.label}: " +
             (reasons.ifEmpty { listOf("MIME, codec, dimensions and VPS/SPS/PPS fingerprint match") }.joinToString("; ")) +
-            ". CMAF timing, encryption layout and secure-surface feasibility are not established. " +
+            ". HEVC_PARAMETER_SET_GATE=$parameterGate. CMAF timing, encryption layout and secure-surface feasibility are not established. " +
             "${first.label}[${first.deliveryType},${first.width}x${first.height}@${first.frameRate}fps,${first.codecs ?: "?"}," +
             "chunksMs=${first.observedMediaChunkDurationsMs},${drm(first)}]; " +
             "${second.label}[${second.deliveryType},${second.width}x${second.height}@${second.frameRate}fps,${second.codecs ?: "?"}," +
