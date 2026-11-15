@@ -162,12 +162,18 @@ class HevcSyntheticTileSplitTest {
         val right = File(directory, "feed_right.hevc")
         assumeTrue("Synthetic complementary tile files are missing", left.isFile && right.isFile)
 
+        val leftTemporalIds = HevcBitstream.splitAnnexB(left.readBytes())
+            .filter { it.type in 0..21 }
+            .map { it.temporalIdPlus1 }
         val changedRight = ByteArrayOutputStream()
+        var vclIndex = 0
         HevcBitstream.splitAnnexB(right.readBytes()).forEach { nal ->
             val changed = nal.bytes.copyOf()
             if (nal.type in 0..21) {
+                val leftTemporalId = leftTemporalIds[vclIndex++]
+                val oppositeTemporalId = if (leftTemporalId == 1) 2 else 1
                 val oldHeader = changed[1].toInt() and 0xff
-                changed[1] = ((oldHeader and 0xf8) or 0x02).toByte()
+                changed[1] = ((oldHeader and 0xf8) or oppositeTemporalId).toByte()
             }
             appendNal(changedRight, changed)
         }
