@@ -12,6 +12,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
@@ -25,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -43,6 +45,8 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.awaitFirstDown
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -62,6 +66,7 @@ import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlinx.coroutines.delay
 
 /**
  * Maps archive coordinates onto a box. The track is turned to whichever angle lets it fill the
@@ -333,6 +338,16 @@ internal fun shouldShowMapControls(
     docked: Boolean,
 ): Boolean = isTv || (!docked && (arranging || floating))
 
+/** The locked-map control fades away after inactivity on touch devices. */
+internal const val MAP_LOCK_CONTROL_AUTO_HIDE_MS = 5_000L
+
+/** Keep the lock button visible while unlocked, temporarily revealed, or used with a TV remote. */
+internal fun shouldShowMapLockControl(
+    mapLocked: Boolean,
+    isTv: Boolean,
+    temporarilyVisible: Boolean,
+): Boolean = !mapLocked || isTv || temporarilyVisible
+
 /**
  * The track map in its own window. While arranging it's moved, resized and turned by its track
  * line (see [mapLineTouched]) or by the move grip; the corner handle resizes it and the lock keeps
@@ -343,15 +358,52 @@ internal fun shouldShowMapControls(
 fun MapPanelView(app: AppState, timing: SessionTiming) {
     val panel = app.activeMapPanel
     val density = LocalDensity.current
+    val tvControls = app.isTv || app.layoutMode == LayoutMode.TV
+    var mapInteractionGeneration by remember(app) { mutableLongStateOf(0L) }
+    var lockControlTemporarilyVisible by remember(app) { mutableStateOf(true) }
+
+    // Lock the map, then leave the unobtrusive lock affordance visible briefly. Any subsequent
+    // touch anywhere in the map panel restarts the five-second window. TV keeps it available for
+    // D-pad navigation because there is no touch gesture to reveal a hidden control.
+    LaunchedEffect(app.mapLocked, mapInteractionGeneration, tvControls) {
+        lockControlTemporarilyVisible = true
+        if (app.mapLocked && !tvControls) {
+            delay(MAP_LOCK_CONTROL_AUTO_HIDE_MS)
+            lockControlTemporarilyVisible = false
+        }
+    }
+
     Box(
         Modifier
             .offset { IntOffset(panel.x.roundToInt(), panel.y.roundToInt()) }
             // requiredSize, not size: size() is capped at the screen width, while the track is
             // fitted to the full panel, so a panel wider than the screen lost its right side.
             .requiredSize(with(density) { panel.w.toDp() }, with(density) { panel.h.toDp() })
+            .pointerInput(app.mapLocked, tvControls) {
+                if (app.mapLocked && !tvControls) {
+                    awaitEachGesture {
+                        awaitFirstDown(
+                            requireUnconsumed = false,
+                            pass = PointerEventPass.Initial,
+                        )
+                        mapInteractionGeneration++
+                    }
+                }
+            }
     ) {
         TrackDrawing(app, timing, panel.w, panel.h, panel.rotation)
-        if (shouldShowMapControls(app.isTv || app.layoutMode == LayoutMode.TV, app.arranging, app.combinedOverlaysFloating, app.combinedOverlaysDocked)) {
+        val showControls = shouldShowMapControls(
+            tvControls,
+            app.arranging,
+            app.combinedOverlaysFloating,
+            app.combinedOverlaysDocked,
+        )
+        val showLockControl = shouldShowMapLockControl(
+            app.mapLocked,
+            tvControls,
+            lockControlTemporarilyVisible,
+        )
+        if (showControls && showLockControl) {
             MapControls(app, timing)
         }
     }
