@@ -592,19 +592,13 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         val laps = timingStream?.let {
             runCatching { DriverTimingParser.parse(it, streamStart, timingF1Stream) }.getOrNull()
         }.orEmpty()
-        val weather = runCatching { WeatherParser.parse(fetch(path + "WeatherData.jsonStream"), streamStart) }.getOrDefault(WeatherLog.NONE)
 
         val built = tracks.mapValues { it.value.build() }
         val traced = traceOutline(tracks.values.toList())
         val line = findStartFinish(traced, parsed.crossings, built)
         var outline = if (line != null) startAt(traced, line) else traced
-        // Turn numbers and marshal sectors are a nice extra from a third party; the map works without them.
-        val circuit = ref.circuitKey?.let { runCatching { fetchCircuit(it, ref.year) }.getOrNull() }
-        val corners = circuit?.corners.orEmpty()
-        if (outline.size < 8 && (circuit?.outline?.size ?: 0) >= 8) outline = circuit!!.outline
-
-        // Publish the map as soon as its required track samples are ready. Weather, radio, tyres,
-        // race control and session extras are deliberately loaded afterwards and cannot block it.
+        // Publish the traced map immediately. Optional external circuit lookup may provide a
+        // better outline/corner labels, but it must not hold up a usable map or timing tower.
         publish(
             SessionTiming(
                 type = type,
@@ -613,7 +607,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 states = parsed.states,
                 outline = outline,
                 hasStartFinish = line != null,
-                corners = corners,
+                corners = emptyList(),
                 startUtcMs = streamStart,
                 circuitKey = ref.circuitKey,
                 laps = laps,
@@ -621,7 +615,30 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             )
         )
 
+        progress("Loading circuit details…")
+        val circuit = ref.circuitKey?.let { runCatching { fetchCircuit(it, ref.year) }.getOrNull() }
+        val corners = circuit?.corners.orEmpty()
+        if (outline.size < 8 && (circuit?.outline?.size ?: 0) >= 8) outline = circuit!!.outline
+        if (circuit != null) {
+            publish(
+                SessionTiming(
+                    type = type,
+                    drivers = drivers,
+                    tracks = built,
+                    states = parsed.states,
+                    outline = outline,
+                    hasStartFinish = line != null,
+                    corners = corners,
+                    startUtcMs = streamStart,
+                    circuitKey = ref.circuitKey,
+                    laps = laps,
+                    radioBase = BASE + path,
+                )
+            )
+        }
+
         progress("Loading remaining race details…")
+        val weather = runCatching { WeatherParser.parse(fetch(path + "WeatherData.jsonStream"), streamStart) }.getOrDefault(WeatherLog.NONE)
         val started = runCatching { parseSessionStarted(fetch(path + "SessionStatus.jsonStream"), streamStart) }.getOrNull()
         val control = runCatching { fetch(path + "RaceControlMessages.jsonStream") }.getOrNull()
         val chequered = control?.let { runCatching { parseChequered(it, streamStart) }.getOrNull() }
