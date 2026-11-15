@@ -591,11 +591,11 @@ internal object CmafBoxInspector {
             require(start >= 0 && end <= data.size.toLong()) {
                 "saio sample auxiliary record lies outside the supplied media segment"
             }
-            start until end
+            start to end
         }
         val sortedRanges = ranges.sortedBy { it.first }
         for (index in 1 until sortedRanges.size) {
-            require(sortedRanges[index - 1].last < sortedRanges[index].first) {
+            require(sortedRanges[index - 1].second <= sortedRanges[index].first) {
                 "saio sample auxiliary records overlap"
             }
         }
