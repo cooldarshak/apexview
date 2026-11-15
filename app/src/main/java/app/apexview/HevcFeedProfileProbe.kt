@@ -20,6 +20,8 @@ internal object HevcFeedProfileProbe {
     data class Snapshot(
         val label: String,
         val group: String,
+        val deliveryType: String,
+        val observedMediaChunkDurationsMs: List<Long>,
         val summary: String,
         val mime: String?,
         val codecs: String?,
@@ -108,6 +110,8 @@ internal object HevcFeedProfileProbe {
         return Snapshot(
             label = label,
             group = group,
+            deliveryType = "UNKNOWN",
+            observedMediaChunkDurationsMs = emptyList(),
             summary = summary,
             mime = format.sampleMimeType,
             codecs = format.codecs,
@@ -145,6 +149,18 @@ internal object HevcFeedProfileCapture {
     }
 
     @Synchronized
+    fun updateMediaChunkDuration(group: String, label: String, deliveryType: String, durationMs: Long) {
+        if (activeGroup != group || durationMs !in 1_000L..12_000L) return
+        val current = profiles[label] ?: return
+        val durations = (current.observedMediaChunkDurationsMs + durationMs).takeLast(8)
+        profiles[label] = current.copy(
+            deliveryType = deliveryType,
+            observedMediaChunkDurationsMs = durations
+        )
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
     fun updateDrm(group: String, label: String, securityLevel: String, keysLoaded: Boolean) {
         if (activeGroup != group) return
         val current = profiles[label] ?: return
@@ -161,8 +177,8 @@ internal object HevcFeedProfileCapture {
         if (captured.size == 1) {
             val first = captured.single()
             return "HEVC_PROFILE_CAPTURED ${first.label}: ${first.mime ?: "?"} ${first.codecs ?: "?"} " +
-                "${first.width}x${first.height}; parsed VPS/SPS/PPS=${first.parsedParameterCounts}; " +
-                "fingerprint=${first.parameterSetFingerprint ?: "unavailable"}"
+                "${first.width}x${first.height}; delivery=${first.deliveryType}; chunks(ms)=${first.observedMediaChunkDurationsMs}; " +
+                "parsed VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}"
         }
         val first = captured[0]
         val second = captured[1]
@@ -177,13 +193,16 @@ internal object HevcFeedProfileCapture {
             }
             if (first.parsedParameterCounts != second.parsedParameterCounts) add("parsed parameter counts differ")
         }
+        if (first.deliveryType != second.deliveryType) reasons += "delivery type differs"
         val result = if (reasons.isEmpty()) "CODEC_PROFILE_MATCH" else "CODEC_PROFILE_MISMATCH"
         fun drm(profile: HevcFeedProfileProbe.Snapshot) =
             "DRM=${profile.drmSecurityLevel ?: "not-observed"},keysLoaded=${profile.widevineKeysLoaded}"
         return "$result ${first.label} vs ${second.label}: " +
             (reasons.ifEmpty { listOf("MIME, codec, dimensions and VPS/SPS/PPS fingerprint match") }.joinToString("; ")) +
             ". CMAF timing, encryption layout and secure-surface feasibility are not established. " +
-            "${first.label}[${first.width}x${first.height},${first.codecs ?: "?"},${drm(first)}]; " +
-            "${second.label}[${second.width}x${second.height},${second.codecs ?: "?"},${drm(second)}]"
+            "${first.label}[${first.deliveryType},${first.width}x${first.height},${first.codecs ?: "?"}," +
+            "chunksMs=${first.observedMediaChunkDurationsMs},${drm(first)}]; " +
+            "${second.label}[${second.deliveryType},${second.width}x${second.height},${second.codecs ?: "?"}," +
+            "chunksMs=${second.observedMediaChunkDurationsMs},${drm(second)}]"
     }
 }
