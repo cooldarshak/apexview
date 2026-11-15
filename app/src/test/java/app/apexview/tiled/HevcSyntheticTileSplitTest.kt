@@ -176,7 +176,7 @@ class HevcSyntheticTileSplitTest {
         try {
             HevcTileStreamAssembler.assembleTwoTileStreams(left.readBytes(), changedRight.toByteArray())
         } catch (error: IllegalArgumentException) {
-            rejected = error.message?.contains("NAL header mismatch") == true
+            rejected = error.message?.contains("temporal_id_plus1") == true
         }
         assertTrue("Assembler must reject mismatched nuh_temporal_id_plus1", rejected)
     }
