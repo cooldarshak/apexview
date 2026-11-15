@@ -27,6 +27,7 @@ android {
         val ciRun = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
         versionCode = 100_000 + ciRun
         versionName = "1.0.$ciRun"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         val builtAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("MMM d, HH:mm"))
         buildConfigField("String", "BUILT_AT", "\"$builtAt\"")
         // Where updates come from (owner/repo on GitHub). A fork points this at its own releases.
@@ -83,6 +84,13 @@ android {
         unitTests.isIncludeAndroidResources = true
     }
 
+    // CI generates this disposable MP4 from the complementary synthetic tile slices.
+    // It is included only in the instrumentation APK and never shipped in the app.
+    val hevcTileFixtureDirectory = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+    if (!hevcTileFixtureDirectory.isNullOrBlank()) {
+        sourceSets.getByName("androidTest").assets.srcDir(hevcTileFixtureDirectory)
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true
@@ -112,6 +120,9 @@ dependencies {
     implementation("androidx.window:window:1.3.0")
     // Chrome sheet for the Driver of the Day vote, so the race stays on screen.
     implementation("androidx.browser:browser:1.8.0")
+
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 
     testImplementation("junit:junit:4.13.2")
     // Real org.json for JVM tests; android.jar only has stubs.
