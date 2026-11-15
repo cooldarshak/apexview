@@ -197,16 +197,25 @@ internal object HevcFeedProfileCapture {
     fun selectTileTestFeeds(group: String, labels: List<String>) {
         selectGroup(group)
         tileTestLabels = labels.distinct().take(2)
-        tileTestLabels.forEach { feedProgress.getOrPut(it) { FeedProgress() } }
+        tileTestLabels.forEach { label ->
+            feedProgress.getOrPut(label) { FeedProgress() }
+            cmafProgress[label]?.let {
+                it.latestFragments.clear()
+                it.mediaFragmentsObserved = 0
+            }
+        }
         diagnostic = buildDiagnostic()
     }
 
     @Synchronized
     fun clearTileTestSelection() {
         tileTestLabels = emptyList()
-        cmafProgress.clear()
         diagnostic = buildDiagnostic()
     }
+
+    @Synchronized
+    fun shouldCaptureCmafInit(group: String, label: String): Boolean =
+        activeGroup == group && label in feedProgress
 
     @Synchronized
     fun shouldCaptureCmaf(group: String, label: String): Boolean =
@@ -214,21 +223,21 @@ internal object HevcFeedProfileCapture {
 
     @Synchronized
     fun recordCmafParseFailure(group: String, label: String) {
-        if (!shouldCaptureCmaf(group, label)) return
+        if (!shouldCaptureCmafInit(group, label)) return
         cmafProgress.getOrPut(label) { CmafFeedProgress() }.parseFailures++
         diagnostic = buildDiagnostic()
     }
 
     @Synchronized
     fun recordCmafCaptureSkipped(group: String, label: String) {
-        if (!shouldCaptureCmaf(group, label)) return
+        if (!shouldCaptureCmafInit(group, label)) return
         cmafProgress.getOrPut(label) { CmafFeedProgress() }.overLimitSegments++
         diagnostic = buildDiagnostic()
     }
 
     @Synchronized
     fun recordCmafReport(group: String, label: String, report: CmafBoxInspector.Report) {
-        if (!shouldCaptureCmaf(group, label)) return
+        if (!shouldCaptureCmafInit(group, label)) return
         val progress = cmafProgress.getOrPut(label) { CmafFeedProgress() }
         val videoTracks = report.tracks.filter { track ->
             track.handler == "vide" && (track.hevcConfiguration != null ||
@@ -240,9 +249,10 @@ internal object HevcFeedProfileCapture {
                 track.trackId?.let { progress.videoTracks[it] = track }
             }
         }
-        val fragments = report.fragments.filter { fragment ->
+        val selectedForTileTest = shouldCaptureCmaf(group, label)
+        val fragments = if (selectedForTileTest) report.fragments.filter { fragment ->
             fragment.trackId in progress.videoTracks
-        }
+        } else emptyList()
         if (fragments.isNotEmpty()) {
             progress.mediaFragmentsObserved += fragments.size
             fragments.forEach { progress.latestFragments[it.trackId] = it }
