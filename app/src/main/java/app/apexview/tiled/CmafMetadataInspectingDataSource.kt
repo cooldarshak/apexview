@@ -111,12 +111,16 @@ internal class CmafMetadataInspectingDataSource(
     private fun finishCapture() {
         if (captureFinished) return
         captureFinished = true
-        if (!captureAccepted || captureDisabled || !safeShouldContinue()) {
+        if (!captureAccepted || captureDisabled) {
             wipeBuffer()
             return
         }
         if (captureOverflowed) {
             runCatching { onCaptureSkipped() }
+            wipeBuffer()
+            return
+        }
+        if (!safeShouldContinue()) {
             wipeBuffer()
             return
         }
