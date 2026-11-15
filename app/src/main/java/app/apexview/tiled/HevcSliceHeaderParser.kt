@@ -54,6 +54,7 @@ internal object HevcSliceHeaderParser {
         val numRefIdxL1Active: Int? = null,
         val list0Modification: List<Int> = emptyList(),
         val list1Modification: List<Int> = emptyList(),
+        val mvdL1Zero: Boolean? = null,
         val cabacInitEnabled: Boolean? = null,
         val collocatedFromL0: Boolean? = null,
         val collocatedReferenceIndex: Int? = null,
@@ -85,6 +86,12 @@ internal object HevcSliceHeaderParser {
         }
         require(nal.size > 2) { "Truncated HEVC slice NAL" }
         require(pps.spsId == sps.spsId) { "PPS references a different SPS" }
+        require(!sps.spsExtensionPresent) {
+            "SPS extensions are not parsed by the bounded slice-header parser"
+        }
+        require(!pps.extensionPresent) {
+            "PPS extensions are not parsed by the bounded slice-header parser"
+        }
 
         val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal.copyOfRange(2, nal.size)))
         val initialBits = bits.bitsRemaining
@@ -121,6 +128,7 @@ internal object HevcSliceHeaderParser {
         var numL1: Int? = null
         var list0Modification = emptyList<Int>()
         var list1Modification = emptyList<Int>()
+        var mvdL1Zero: Boolean? = null
         var cabacInit: Boolean? = null
         var collocatedFromL0: Boolean? = null
         var collocatedIndex: Int? = null
@@ -199,7 +207,7 @@ internal object HevcSliceHeaderParser {
             }
 
             numPicTotalCurrent = references.count { it.usedByCurrent }
-            temporalMvp = if (sps.temporalMvpEnabled) bits.readBit() != 0 else false
+            temporalMvp = if (sps.temporalMvpEnabled && !isIdr) bits.readBit() != 0 else false
             if (sps.sampleAdaptiveOffsetEnabled) {
                 saoLuma = bits.readBit() != 0
                 saoChroma = if (sps.chromaFormatIdc != 0 && !sps.separateColourPlane) {
@@ -242,6 +250,7 @@ internal object HevcSliceHeaderParser {
                     }
                 }
 
+                mvdL1Zero = if (sliceType == 0) bits.readBit() != 0 else null
                 cabacInit = if (pps.cabacInitPresent) bits.readBit() != 0 else false
                 if (temporalMvp == true) {
                     collocatedFromL0 = if (sliceType == 0) bits.readBit() != 0 else true
@@ -262,7 +271,14 @@ internal object HevcSliceHeaderParser {
                 fiveMinusMaxMerge = readUe(bits, 4, "five_minus_max_num_merge_cand")
             }
 
-            sliceQpDelta = readSe(bits, -87, 77, "slice_qp_delta")
+            val qpBdOffsetY = 6 * (sps.bitDepthLuma - 8)
+            val initialSliceQp = 26 + pps.initQpMinus26
+            sliceQpDelta = readSe(
+                bits,
+                -qpBdOffsetY - initialSliceQp,
+                51 - initialSliceQp,
+                "slice_qp_delta"
+            )
             if (pps.sliceChromaQpOffsetsPresent) {
                 val cb = readSe(bits, -12, 12, "slice_cb_qp_offset")
                 val cr = readSe(bits, -12, 12, "slice_cr_qp_offset")
@@ -336,6 +352,7 @@ internal object HevcSliceHeaderParser {
             numRefIdxL1Active = numL1,
             list0Modification = list0Modification,
             list1Modification = list1Modification,
+            mvdL1Zero = mvdL1Zero,
             cabacInitEnabled = cabacInit,
             collocatedFromL0 = collocatedFromL0,
             collocatedReferenceIndex = collocatedIndex,
