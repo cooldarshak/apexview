@@ -442,7 +442,7 @@ internal object HevcFeedProfileCapture {
     private fun buildDiagnostic(): String {
         val profile = buildHevcProfileDiagnostic()
         val cmaf = buildCmafDiagnostic()
-        return if (cmaf.isBlank()) profile else "$profile\\n\\n$cmaf"
+        return if (cmaf.isBlank()) profile else "$profile\n\n$cmaf"
     }
 
     private fun buildHevcProfileDiagnostic(): String {
@@ -612,7 +612,7 @@ internal object HevcFeedProfileCapture {
         }
         lines += "HEVC_SLICE_HEADER_ANALYSIS=NOT_READ; protected media sample bytes are not inspected"
         lines += "DRM_SAFETY=KID values and IV values are never read or displayed; no decryption is attempted"
-        return lines.joinToString("\\n")
+        return lines.joinToString("\n")
     }
 
 }
