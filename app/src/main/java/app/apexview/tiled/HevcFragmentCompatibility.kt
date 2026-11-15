@@ -23,6 +23,17 @@ internal object HevcFragmentCompatibility {
         if (firstTrack.handler != "vide" || secondTrack.handler != "vide") {
             reasons += "Both tracks must be video"
         }
+        if (firstTrack.trackId != null && firstTrack.trackId != firstFragment.trackId ||
+            secondTrack.trackId != null && secondTrack.trackId != secondFragment.trackId) {
+            reasons += "Fragment track ID does not match its init-segment track"
+        }
+        if (firstTrack.sampleEntry != secondTrack.sampleEntry ||
+            firstTrack.originalFormat != secondTrack.originalFormat) {
+            reasons += "Track sample-entry formats differ"
+        }
+        if (firstTrack.width != secondTrack.width || firstTrack.height != secondTrack.height) {
+            reasons += "Track display dimensions differ"
+        }
         val firstScale = firstFragment.timescale ?: firstTrack.timescale
         val secondScale = secondFragment.timescale ?: secondTrack.timescale
         if (firstScale == null || secondScale == null || firstScale <= 0 || secondScale <= 0) {
@@ -79,9 +90,13 @@ internal object HevcFragmentCompatibility {
                 firstConfig.compatibilityFlags == secondConfig.compatibilityFlags &&
                 firstConfig.constraintIndicatorFlags == secondConfig.constraintIndicatorFlags &&
                 firstConfig.levelIdc == secondConfig.levelIdc &&
+                firstConfig.minSpatialSegmentationIdc == secondConfig.minSpatialSegmentationIdc &&
+                firstConfig.parallelismType == secondConfig.parallelismType &&
                 firstConfig.chromaFormat == secondConfig.chromaFormat &&
                 firstConfig.bitDepthLuma == secondConfig.bitDepthLuma &&
                 firstConfig.bitDepthChroma == secondConfig.bitDepthChroma &&
+                firstConfig.averageFrameRate == secondConfig.averageFrameRate &&
+                firstConfig.constantFrameRate == secondConfig.constantFrameRate &&
                 firstConfig.temporalLayers == secondConfig.temporalLayers &&
                 firstConfig.temporalIdNested == secondConfig.temporalIdNested &&
                 firstConfig.nalLengthSize == secondConfig.nalLengthSize
@@ -106,7 +121,9 @@ internal object HevcFragmentCompatibility {
             if (firstTrack.protectionScheme != secondTrack.protectionScheme) {
                 reasons += "Track protection schemes differ"
             }
-            if (firstTrack.trackEncryption != secondTrack.trackEncryption) {
+            if (firstTrack.trackEncryption == null || secondTrack.trackEncryption == null) {
+                reasons += "Track encryption defaults are unavailable"
+            } else if (firstTrack.trackEncryption != secondTrack.trackEncryption) {
                 reasons += "Track encryption defaults differ"
             }
             reasons += "Default KID identity has not been compared"
