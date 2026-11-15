@@ -103,7 +103,7 @@ class CmafBoxInspectorTest {
         val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(22))
         val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
         val trun = box("trun", byteArrayOf(0,0,1,0) + int(1) + int(3000))
-        val sencOverride = byteArrayOf(0,0,1,0) + byteArrayOf(1,2,3,8) +
+        val sencOverride = byteArrayOf(0,0,0,1) + byteArrayOf(1,2,3,8) +
             ByteArray(16) + int(1) + ByteArray(8)
         val senc = box("senc", sencOverride)
         val report = CmafBoxInspector.inspect(

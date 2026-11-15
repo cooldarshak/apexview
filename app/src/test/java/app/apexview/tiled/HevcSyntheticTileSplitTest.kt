@@ -52,9 +52,15 @@ class HevcSyntheticTileSplitTest {
         )
         assertEquals(listOf(sps.picHeightInCtbs), pps.tileRowHeightsInCtbs)
 
-        val result = HevcTileStreamAssembler.assembleTwoTileStreams(
-            leftFile.readBytes(), rightFile.readBytes()
-        )
+        val result = try {
+            HevcTileStreamAssembler.assembleTwoTileStreams(
+                leftFile.readBytes(), rightFile.readBytes()
+            )
+        } catch (failure: IllegalArgumentException) {
+            System.err.println("HEVC_TILE_ASSEMBLY_FAILURE: ${failure.message}")
+            failure.printStackTrace(System.err)
+            throw failure
+        }
         assertEquals(50, result.pictureCount)
         assertEquals(2, result.tileSlicesPerPicture)
         assertTrue(result.sliceSegmentAddresses.all { it.first == 0 && it.second > 0 })
