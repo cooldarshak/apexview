@@ -179,6 +179,46 @@ class HevcSliceHeaderParserTest {
     }
 
     @Test
+    fun parsesBsliceL1PredictionListMvdFlagAndCollocatedL1Selection() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(
+            nal(34, ppsBits(
+                weightedBipred = true,
+                defaultL0Minus1 = 1,
+                defaultL1Minus1 = 1,
+                listsModification = true
+            )), sps
+        )
+        val slice = HevcSliceHeaderParser.parse(nal(1, weightedBSliceBits()), sps, pps)
+
+        assertEquals(0, slice.sliceType)
+        assertEquals(2, slice.numPicTotalCurrent)
+        assertEquals(2, slice.numRefIdxL0Active)
+        assertEquals(2, slice.numRefIdxL1Active)
+        assertEquals(listOf(1, 0), slice.list0Modification)
+        assertEquals(listOf(0, 1), slice.list1Modification)
+        assertTrue(slice.mvdL1Zero!!)
+        assertFalse(slice.collocatedFromL0!!)
+        assertEquals(1, slice.collocatedReferenceIndex)
+
+        val table = slice.predictionWeightTable!!
+        assertEquals(2, table.list0.size)
+        assertEquals(2, table.list1.size)
+        assertNull(table.list0[0].luma)
+        assertEquals(
+            HevcSliceHeaderParser.PredictionWeightComponent(1, 2),
+            table.list1[0].luma
+        )
+        assertEquals(
+            listOf(
+                HevcSliceHeaderParser.PredictionWeightComponent(0, 0),
+                HevcSliceHeaderParser.PredictionWeightComponent(0, 0)
+            ),
+            table.list1[0].chroma
+        )
+    }
+
+    @Test
     fun parsesPerSliceDeblockingOverridesEntryPointsAndHeaderExtensionLength() {
         val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
         val pps = HevcParameterSets.parsePps(
@@ -261,7 +301,9 @@ class HevcSliceHeaderParserTest {
 
     private fun ppsBits(
         weightedPred: Boolean = false,
+        weightedBipred: Boolean = false,
         defaultL0Minus1: Int = 0,
+        defaultL1Minus1: Int = 0,
         listsModification: Boolean = false,
         deblockingOverride: Boolean = false,
         sliceHeaderExtension: Boolean = false
@@ -269,13 +311,14 @@ class HevcSliceHeaderParserTest {
         writeUe(0); writeUe(0)
         write(1, 1); write(0, 1); write(2, 3)
         write(0, 1); write(0, 1)
-        writeUe(defaultL0Minus1); writeUe(0)
+        writeUe(defaultL0Minus1); writeUe(defaultL1Minus1)
         writeSe(0)
         write(0, 1); write(0, 1); write(0, 1)
         writeSe(0); writeSe(0)
         write(0, 1) // slice chroma QP offsets absent
         write(if (weightedPred) 1 else 0, 1)
-        write(0, 1); write(0, 1)
+        write(if (weightedBipred) 1 else 0, 1)
+        write(0, 1)
         write(1, 1); write(0, 1)
         writeUe(1); writeUe(1); write(1, 1)
         write(1, 1) // loop filter across tiles
@@ -341,6 +384,38 @@ class HevcSliceHeaderParserTest {
         write(1, 1) // ref_pic_list_modification_flag_l0
         write(1, 1); write(0, 1) // list_entry_l0[0..1]
         writeUe(1) // collocated_ref_idx
+        writeUe(0) // five_minus_max_num_merge_cand
+        writeSe(0) // slice_qp_delta
+        write(1, 1) // loop filter across slices
+        writeUe(0) // no tile entry points
+    }.finish()
+
+    private fun weightedBSliceBits(): ByteArray = BitWriter().apply {
+        write(1, 1); writeUe(0); write(0, 2); writeUe(0) // first B slice, PPS, extra bits, B slice type
+        write(42, 8)
+        write(0, 1) // inline short-term RPS
+        writeUe(1); writeUe(1) // one negative and one positive reference
+        writeUe(0); write(1, 1) // -1, used by current
+        writeUe(0); write(1, 1) // +1, used by current
+        write(1, 1) // temporal MVP
+        write(1, 1); write(1, 1) // SAO luma/chroma
+        write(1, 1) // active reference override
+        writeUe(1); writeUe(1) // two L0 and two L1 entries
+        write(1, 1) // ref_pic_list_modification_flag_l0
+        write(1, 1); write(0, 1) // L0 entries [1, 0]
+        write(1, 1) // ref_pic_list_modification_flag_l1
+        write(0, 1); write(1, 1) // L1 entries [0, 1]
+        write(1, 1) // mvd_l1_zero_flag
+        write(0, 1) // collocated_from_l0_flag = false, select L1
+        writeUe(1) // collocated_ref_idx
+        writeUe(0) // luma_log2_weight_denom
+        writeSe(0) // delta_chroma_log2_weight_denom
+        write(0, 1); write(0, 1) // L0 luma flags
+        write(0, 1); write(0, 1) // L0 chroma flags
+        write(1, 1); write(0, 1) // L1 luma flags
+        write(1, 1); write(0, 1) // L1 chroma flags
+        writeSe(1); writeSe(2) // L1 ref0 luma delta weight/offset
+        writeSe(0); writeSe(0); writeSe(0); writeSe(0) // L1 ref0 Cb/Cr components
         writeUe(0) // five_minus_max_num_merge_cand
         writeSe(0) // slice_qp_delta
         write(1, 1) // loop filter across slices
