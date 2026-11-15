@@ -40,7 +40,7 @@ class HevcSliceHeaderParserTest {
         assertFalse(slice.shortTermRpsFromSps!!)
         assertEquals(listOf(-1, -4), slice.references.map { it.deltaPoc })
         assertEquals(listOf(true, false), slice.references.map { it.usedByCurrent })
-        assertTrue(slice.temporalMvpEnabled!!)
+        assertFalse(slice.temporalMvpEnabled!!)
         assertTrue(slice.sampleAdaptiveOffsetLuma!!)
         assertTrue(slice.sampleAdaptiveOffsetChroma!!)
         assertTrue(slice.bitsConsumed > 0)
@@ -83,8 +83,7 @@ class HevcSliceHeaderParserTest {
             writeUe(0) // PPS id
             write(0, 2) // reserved header bits
             writeUe(2) // I slice
-            write(1, 1) // temporal MVP is still present for IDR
-            write(1, 1); write(1, 1) // SAO luma/chroma are still present for IDR
+            write(1, 1); write(1, 1) // SAO luma/chroma are present for IDR
             writeSe(0) // slice_qp_delta
             write(1, 1) // slice_loop_filter_across_slices_enabled_flag
             writeUe(0) // num_entry_point_offsets
