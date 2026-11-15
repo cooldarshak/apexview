@@ -43,7 +43,10 @@ class HevcFeedCompatibilityTest {
         )
         val pps = HevcParameterSets.PpsMetadata(
             ppsId=0, spsId=0, dependentSliceSegmentsEnabled=true, outputFlagPresent=false,
-            extraSliceHeaderBits=0, tilesEnabled=true, entropyCodingSyncEnabled=false,
+            extraSliceHeaderBits=0, cabacInitPresent=false,
+            numRefIdxL0DefaultActiveMinus1=0, numRefIdxL1DefaultActiveMinus1=0,
+            initQpMinus26=0, sliceChromaQpOffsetsPresent=false,
+            tilesEnabled=true, entropyCodingSyncEnabled=false,
             uniformTileSpacing=true, numTileColumns=2, numTileRows=1,
             explicitColumnWidthsMinus1=emptyList(), explicitRowHeightsMinus1=emptyList(),
             tileColumnWidthsInCtbs=listOf(5,5), tileRowHeightsInCtbs=listOf(6),
