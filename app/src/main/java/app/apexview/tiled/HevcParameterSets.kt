@@ -223,6 +223,10 @@ internal object HevcParameterSets {
      * Parses a non-predicted short-term RPS. Predicted RPS chains are rejected for now rather
      * than guessed, so downstream frame-alignment results remain fail-closed.
      */
+    /**
+     * Parses an explicit or inter-predicted short-term RPS and expands it to absolute POC deltas.
+     * The same derived representation is used for SPS sets and the inline slice-header set.
+     */
     internal fun parseShortTermRefPicSet(
         bits: HevcBitReader,
         index: Int,
@@ -230,15 +234,33 @@ internal object HevcParameterSets {
         previous: List<ShortTermRefPicSet>,
     ): ShortTermRefPicSet {
         require(index in 0..totalSets) { "Short-term RPS index is out of range" }
-        if (index > 0) {
-            val predicted = bits.readBit() != 0
-            if (predicted && index == totalSets) {
-                readUe(bits, 64, "delta_idx_minus1")
+        val predicted = if (index > 0) bits.readBit() != 0 else false
+        if (predicted) {
+            val deltaIndexMinus1 = if (index == totalSets) {
+                readUe(bits, index - 1, "delta_idx_minus1")
+            } else {
+                0
             }
-            require(!predicted) {
-                "Predicted short-term RPS is not supported by this analysis pass"
+            require(deltaIndexMinus1 < index) { "Predicted RPS source index is out of range" }
+            val referenceIndex = index - (deltaIndexMinus1 + 1)
+            val reference = previous.getOrNull(referenceIndex)
+                ?: throw IllegalArgumentException("Predicted RPS source set is unavailable")
+            val numDeltaPocs = reference.negative.size + reference.positive.size
+            require(numDeltaPocs <= 32) { "Predicted RPS source exceeds supported reference count" }
+
+            val deltaRpsSign = bits.readBit() != 0
+            val absDeltaRps = readUe(bits, 32767, "abs_delta_rps_minus1") + 1
+            val deltaRps = if (deltaRpsSign) -absDeltaRps else absDeltaRps
+
+            val usedByCurrent = BooleanArray(numDeltaPocs + 1)
+            val useDelta = BooleanArray(numDeltaPocs + 1)
+            for (i in 0..numDeltaPocs) {
+                usedByCurrent[i] = bits.readBit() != 0
+                useDelta[i] = if (usedByCurrent[i]) true else bits.readBit() != 0
             }
+            return derivePredictedShortTermRefPicSet(reference, deltaRps, usedByCurrent, useDelta)
         }
+
         val negativeCount = readUe(bits, 16, "num_negative_pics")
         val positiveCount = readUe(bits, 16, "num_positive_pics")
         require(negativeCount + positiveCount <= 32) { "Short-term RPS exceeds supported reference count" }
@@ -255,6 +277,65 @@ internal object HevcParameterSets {
             positivePoc += readUe(bits, 32767, "delta_poc_s1_minus1") + 1
             positive += ReferenceDelta(positivePoc, bits.readBit() != 0)
         }
+        return ShortTermRefPicSet(negative, positive)
+    }
+
+    /**
+     * Implements the HEVC 7.4.8 inter-RPS derivation order. The order matters: negative
+     * deltas are retained nearest-to-farthest from the current picture, followed by the
+     * positive list in ascending order. Entries with use_delta_flag == 0 are discarded.
+     */
+    private fun derivePredictedShortTermRefPicSet(
+        reference: ShortTermRefPicSet,
+        deltaRps: Int,
+        usedByCurrent: BooleanArray,
+        useDelta: BooleanArray,
+    ): ShortTermRefPicSet {
+        val negative = mutableListOf<ReferenceDelta>()
+        val positive = mutableListOf<ReferenceDelta>()
+        val numNegative = reference.negative.size
+        val numPositive = reference.positive.size
+        val numDeltaPocs = numNegative + numPositive
+        require(usedByCurrent.size == numDeltaPocs + 1 && useDelta.size == numDeltaPocs + 1) {
+            "Predicted RPS flags do not match source reference count"
+        }
+
+        // Source positive deltas, shifted below zero, are first in the derived negative set.
+        for (j in numPositive - 1 downTo 0) {
+            val index = numNegative + j
+            val deltaPoc = reference.positive[j].deltaPoc + deltaRps
+            if (deltaPoc < 0 && useDelta[index]) {
+                negative += ReferenceDelta(deltaPoc, usedByCurrent[index])
+            }
+        }
+        if (deltaRps < 0 && useDelta[numDeltaPocs]) {
+            negative += ReferenceDelta(deltaRps, usedByCurrent[numDeltaPocs])
+        }
+        for (j in 0 until numNegative) {
+            val deltaPoc = reference.negative[j].deltaPoc + deltaRps
+            if (deltaPoc < 0 && useDelta[j]) {
+                negative += ReferenceDelta(deltaPoc, usedByCurrent[j])
+            }
+        }
+
+        // Source negative deltas, shifted above zero, are first in the derived positive set.
+        for (j in numNegative - 1 downTo 0) {
+            val deltaPoc = reference.negative[j].deltaPoc + deltaRps
+            if (deltaPoc > 0 && useDelta[j]) {
+                positive += ReferenceDelta(deltaPoc, usedByCurrent[j])
+            }
+        }
+        if (deltaRps > 0 && useDelta[numDeltaPocs]) {
+            positive += ReferenceDelta(deltaRps, usedByCurrent[numDeltaPocs])
+        }
+        for (j in 0 until numPositive) {
+            val index = numNegative + j
+            val deltaPoc = reference.positive[j].deltaPoc + deltaRps
+            if (deltaPoc > 0 && useDelta[index]) {
+                positive += ReferenceDelta(deltaPoc, usedByCurrent[index])
+            }
+        }
+
         return ShortTermRefPicSet(negative, positive)
     }
 
