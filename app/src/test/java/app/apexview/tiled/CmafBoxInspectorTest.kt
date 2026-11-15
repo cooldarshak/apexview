@@ -81,7 +81,7 @@ class CmafBoxInspectorTest {
     }
 
     @Test fun marksFragmentTimingIncompleteRatherThanGuessingMissingDuration() {
-        val init = fragmentedInitSegment(trackId = 3, timescale = 1000)
+        val init = fragmentedInitSegment(trackId = 3, timescale = 1000, includeTrex = false)
         val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(3))
         val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(500))
         val trun = box("trun", byteArrayOf(0,0,0,0) + int(2))
@@ -215,16 +215,20 @@ class CmafBoxInspectorTest {
         } catch (_: IllegalArgumentException) { }
     }
 
-    private fun fragmentedInitSegment(trackId: Int, timescale: Int): ByteArray {
+    private fun fragmentedInitSegment(
+        trackId: Int,
+        timescale: Int,
+        includeTrex: Boolean = true
+    ): ByteArray {
         val tkhd = box("tkhd", byteArrayOf(0,0,0,7) +
             int(0) + int(0) + int(trackId) + int(0) + ByteArray(60))
         val mdhd = box("mdhd", byteArrayOf(0,0,0,0) +
             int(0) + int(0) + int(timescale) + int(0) + short(0) + short(0))
         val hdlr = box("hdlr", byteArrayOf(0,0,0,0) + int(0) + ascii("vide") + ByteArray(12))
         val trak = box("trak", tkhd + box("mdia", mdhd + hdlr))
-        val mvex = box("mvex", box("trex",
+        val mvex = if (includeTrex) box("mvex", box("trex",
             byteArrayOf(0,0,0,0) + int(trackId) + int(1) + int(0) + int(0) + int(0)
-        ))
+        )) else ByteArray(0)
         return box("moov", trak + mvex)
     }
 
