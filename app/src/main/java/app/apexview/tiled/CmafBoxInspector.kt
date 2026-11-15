@@ -660,22 +660,30 @@ internal object CmafBoxInspector {
                 null
             }
         }
-        val present = descriptions.isNotEmpty() || mappings.isNotEmpty()
+        val description = descriptions.singleOrNull()
+        val mapping = mappings.singleOrNull()
+        val trackDescription = trackMetadata?.seigSampleGroupDescription
+        val trackDescriptionComplete = trackMetadata?.seigSampleGroupDescriptionStructureComplete ?: true
+        val trackEntries = trackDescription?.entries.orEmpty()
+        val localEntries = description?.entries.orEmpty()
+        val localDefaultIndex = description?.defaultSampleDescriptionIndex ?: 0L
+        val trackDefaultIndex = trackDescription?.defaultSampleDescriptionIndex ?: 0L
+
+        // A v2 fragment sgpd supplies the default for this fragment, including an explicit
+        // zero ("no group"). If the fragment has no v2 default, fall back to the track sgpd.
+        val effectiveDefaultIndex = if (description?.version?.let { it >= 2 } == true) {
+            if (localDefaultIndex > 0) 0x10000L + localDefaultIndex else 0L
+        } else {
+            trackDefaultIndex
+        }
+        val present = descriptions.isNotEmpty() || mappings.isNotEmpty() ||
+            !trackDescriptionComplete || trackDefaultIndex > 0
         if (parseFailed) return SampleGroupParseResult(true, false, null)
         if (!present) return SampleGroupParseResult(false, true, null)
         if (descriptions.size > 1 || mappings.size > 1) {
             errors += "Multiple seig sample-group boxes are not supported"
             return SampleGroupParseResult(true, false, null)
         }
-
-        val description = descriptions.singleOrNull()
-        val mapping = mappings.singleOrNull()
-        val localEntries = description?.entries.orEmpty()
-        val trackDescription = trackMetadata?.seigSampleGroupDescription
-        val trackDescriptionComplete = trackMetadata?.seigSampleGroupDescriptionStructureComplete ?: true
-        val trackEntries = trackDescription?.entries.orEmpty()
-        val localDefaultIndex = description?.defaultSampleDescriptionIndex ?: 0L
-        val trackDefaultIndex = trackDescription?.defaultSampleDescriptionIndex ?: 0L
         if (!trackDescriptionComplete) {
             errors += "Track-level seig sample-group descriptions are incomplete"
             return SampleGroupParseResult(true, false, null)
@@ -696,28 +704,29 @@ internal object CmafBoxInspector {
                 add(entry.copy(entryIndex = 0x10001 + index))
             }
         }
+
         val runs = mapping?.runs?.toMutableList() ?: mutableListOf()
-        if (mapping == null && sampleCount > 0) {
-            val defaultReference = when {
-                localDefaultIndex > 0 -> 0x10000L + localDefaultIndex
-                trackDefaultIndex > 0 -> trackDefaultIndex
-                else -> 0L
-            }
-            if (defaultReference > 0) runs += SampleGroupRun(sampleCount.toLong(), defaultReference)
-        }
         if (mapping != null && runs.isEmpty() && sampleCount > 0) {
             errors += "seig sample-to-group mapping is empty"
             return SampleGroupParseResult(true, false, null)
         }
 
         var mappedSamples = 0L
-        val resolvedRuns = mutableListOf<SampleGroupRun>()
         for (run in runs) {
             require(run.sampleCount > 0) { "seig sample-to-group run has zero samples" }
             mappedSamples = Math.addExact(mappedSamples, run.sampleCount)
-            require(mappedSamples <= MAX_FRAGMENT_SAMPLES.toLong()) {
-                "seig sample-to-group sample count exceeds limit"
+            require(mappedSamples <= sampleCount.toLong()) {
+                "seig sample-to-group sample count exceeds fragment samples"
             }
+        }
+        if (mappedSamples < sampleCount.toLong()) {
+            // ISO/IEC 14496-12 Amd.3: unmapped samples use the applicable sgpd default,
+            // or no group when that default index is zero.
+            runs += SampleGroupRun(sampleCount.toLong() - mappedSamples, effectiveDefaultIndex)
+        }
+
+        val resolvedRuns = mutableListOf<SampleGroupRun>()
+        for (run in runs) {
             val index = run.groupDescriptionIndex
             if (index == 0L) {
                 resolvedRuns += run
@@ -736,16 +745,10 @@ internal object CmafBoxInspector {
                 throw IllegalArgumentException("Unsupported seig group-description index scope")
             }
         }
-        if (mapping != null && mappedSamples != sampleCount.toLong()) {
-            errors += "seig sample-to-group mapping count does not match fragment samples"
-            return SampleGroupParseResult(true, false, null)
-        }
+
         val metadata = SampleGroupEncryptionMetadata(
             descriptionVersion = description?.version,
-            defaultSampleDescriptionIndex = when {
-                localDefaultIndex > 0 -> 0x10000L + localDefaultIndex
-                else -> trackDefaultIndex
-            },
+            defaultSampleDescriptionIndex = effectiveDefaultIndex,
             entries = combinedEntries,
             runs = resolvedRuns
         )

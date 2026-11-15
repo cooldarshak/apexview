@@ -231,6 +231,89 @@ class CmafBoxInspectorTest {
         assertEquals(listOf(CmafBoxInspector.SampleGroupRun(2, 0x10001)), group.runs)
     }
 
+    @Test fun appliesTrackLevelV2SeigDefaultWhenFragmentHasNoSbgp() {
+        val entry = byteArrayOf(0, 0x19, 1, 8) + ByteArray(16)
+        val trackSgpd = box(
+            "sgpd",
+            byteArrayOf(2,0,0,0) + ascii("seig") + int(0) + int(1) + int(1) +
+                int(entry.size) + entry
+        )
+        val init = fragmentedInitSegment(
+            trackId = 66, timescale = 90000, includeEncryption = true, trackSeig = trackSgpd
+        )
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(66))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(2) + int(3000) + int(3000))
+        val senc = box("senc", byteArrayOf(0,0,0,0) + int(2))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + senc))
+        )
+        val fragment = report.fragments.single()
+        assertTrue(report.errors.toString(), report.errors.isEmpty())
+        assertTrue(fragment.sampleGroupEncryptionPresent)
+        assertTrue(fragment.sampleGroupEncryptionStructureComplete)
+        assertEquals(1L, fragment.sampleGroupEncryptionMetadata!!.defaultSampleDescriptionIndex)
+        assertEquals(listOf(CmafBoxInspector.SampleGroupRun(2, 1)),
+            fragment.sampleGroupEncryptionMetadata.runs)
+        assertFalse(fragment.sampleEncryptionStructureComplete)
+    }
+
+    @Test fun fragmentV2SeigDefaultOverridesTrackDefaultForUnmappedSamples() {
+        val trackEntry = byteArrayOf(0, 0x19, 1, 8) + ByteArray(16)
+        val localEntry = byteArrayOf(0, 0x29, 1, 16) + ByteArray(16)
+        val trackSgpd = box(
+            "sgpd",
+            byteArrayOf(2,0,0,0) + ascii("seig") + int(0) + int(1) + int(1) +
+                int(trackEntry.size) + trackEntry
+        )
+        val localSgpd = box(
+            "sgpd",
+            byteArrayOf(2,0,0,0) + ascii("seig") + int(0) + int(1) + int(1) +
+                int(localEntry.size) + localEntry
+        )
+        val init = fragmentedInitSegment(
+            trackId = 67, timescale = 90000, includeEncryption = true, trackSeig = trackSgpd
+        )
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(67))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(2) + int(3000) + int(3000))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + localSgpd))
+        )
+        val fragment = report.fragments.single()
+        assertTrue(report.errors.toString(), report.errors.isEmpty())
+        assertEquals(0x10001L, fragment.sampleGroupEncryptionMetadata!!.defaultSampleDescriptionIndex)
+        assertEquals(listOf(CmafBoxInspector.SampleGroupRun(2, 0x10001)),
+            fragment.sampleGroupEncryptionMetadata.runs)
+        assertEquals(listOf(1, 0x10001),
+            fragment.sampleGroupEncryptionMetadata.entries.map { it.entryIndex })
+    }
+
+    @Test fun unmappedSbgpTailUsesEffectiveSeigDefaultInsteadOfSilentlyDroppingSamples() {
+        val entry = byteArrayOf(0, 0x19, 1, 8) + ByteArray(16)
+        val trackSgpd = box(
+            "sgpd",
+            byteArrayOf(2,0,0,0) + ascii("seig") + int(0) + int(1) + int(1) +
+                int(entry.size) + entry
+        )
+        val init = fragmentedInitSegment(
+            trackId = 68, timescale = 90000, includeEncryption = true, trackSeig = trackSgpd
+        )
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(68))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(3) + int(3000) + int(3000) + int(3000))
+        val sbgp = box("sbgp", byteArrayOf(0,0,0,0) + ascii("seig") + int(1) + int(2) + int(1))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + sbgp))
+        )
+        val fragment = report.fragments.single()
+        assertTrue(report.errors.toString(), report.errors.isEmpty())
+        assertEquals(
+            listOf(CmafBoxInspector.SampleGroupRun(2, 1), CmafBoxInspector.SampleGroupRun(1, 1)),
+            fragment.sampleGroupEncryptionMetadata!!.runs
+        )
+    }
+
     @Test fun resolvesTrackLevelSeigDescriptionFromFragmentSbgpIndex() {
         val entry = byteArrayOf(0, 0x19, 1, 8) + ByteArray(16)
         val trackSgpd = box(
