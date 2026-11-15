@@ -94,13 +94,14 @@ internal object HevcSliceHeaderParser {
                 require(sps.shortTermRefPicSets.isNotEmpty()) {
                     "Slice selects an SPS short-term RPS but the SPS contains none"
                 }
-                shortTermIndex = if (sps.shortTermRefPicSets.size > 1) {
+                val selectedIndex = if (sps.shortTermRefPicSets.size > 1) {
                     bits.readBits(ceilLog2(sps.shortTermRefPicSets.size))
                 } else 0
-                require(shortTermIndex in sps.shortTermRefPicSets.indices) {
+                require(selectedIndex in sps.shortTermRefPicSets.indices) {
                     "SPS short-term RPS index is out of range"
                 }
-                sps.shortTermRefPicSets[shortTermIndex!!]
+                shortTermIndex = selectedIndex
+                sps.shortTermRefPicSets[selectedIndex]
             } else {
                 HevcParameterSets.parseShortTermRefPicSet(
                     bits, sps.shortTermRefPicSets.size, sps.shortTermRefPicSets.size,
