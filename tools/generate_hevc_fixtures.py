@@ -140,7 +140,7 @@ def main():
             "-f", "lavfi", "-i", source, "-t", "2", "-an",
             "-c:v", "libx265", "-preset", "ultrafast",
             "-x265-params",
-            "log-level=error:bframes=0:repeat-headers=1:keyint=25:min-keyint=25:scenecut=0",
+            "log-level=error:bframes=0:wpp=0:repeat-headers=1:keyint=25:min-keyint=25:scenecut=0",
             "-f", "hevc", str(destination),
         ])
         metadata[filename] = probe(destination)

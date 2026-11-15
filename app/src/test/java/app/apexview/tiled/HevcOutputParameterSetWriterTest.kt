@@ -17,6 +17,7 @@ class HevcOutputParameterSetWriterTest {
         val sps = HevcParameterSets.parseSps(source.second)
         val pps = HevcParameterSets.parsePps(source.third, sps)
         assertFalse("Input feed PPS is deliberately non-tiled", pps.tilesEnabled)
+        assertFalse("Input feed PPS must not use unsupported WPP coding", pps.entropyCodingSyncEnabled)
 
         val ctbWidth = sps.picWidthInCtbs
         val ctbHeight = sps.picHeightInCtbs
