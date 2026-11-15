@@ -11,6 +11,40 @@ import java.nio.ByteOrder
  */
 internal object CmafBoxInspector {
     data class Box(val type: String, val start: Int, val size: Int, val headerSize: Int, val children: List<Box>)
+    data class HevcConfiguration(
+        val configurationVersion: Int,
+        val profileSpace: Int,
+        val tierFlag: Boolean,
+        val profileIdc: Int,
+        val compatibilityFlags: Long,
+        val constraintIndicatorFlags: Long,
+        val levelIdc: Int,
+        val minSpatialSegmentationIdc: Int,
+        val parallelismType: Int,
+        val chromaFormat: Int,
+        val bitDepthLuma: Int,
+        val bitDepthChroma: Int,
+        val averageFrameRate: Int,
+        val constantFrameRate: Int,
+        val temporalLayers: Int,
+        val temporalIdNested: Boolean,
+        val nalLengthSize: Int,
+        val vpsCount: Int,
+        val spsCount: Int,
+        val ppsCount: Int,
+        val vps: List<HevcParameterSets.VpsMetadata>,
+        val sps: List<HevcParameterSets.SpsMetadata>,
+        val pps: List<HevcParameterSets.PpsMetadata>,
+        val parameterSetErrors: List<String>
+    )
+    data class TrackEncryptionMetadata(
+        val version: Int,
+        val defaultIsProtected: Boolean,
+        val perSampleIvSize: Int,
+        val cryptByteBlock: Int,
+        val skipByteBlock: Int,
+        val constantIvSize: Int?
+    )
     data class TrackMetadata(
         val handler: String?,
         val timescale: Long?,
@@ -19,7 +53,14 @@ internal object CmafBoxInspector {
         val protectionScheme: String?,
         val encrypted: Boolean,
         val width: Int?,
-        val height: Int?
+        val height: Int?,
+        val hevcConfiguration: HevcConfiguration?,
+        val trackEncryption: TrackEncryptionMetadata?,
+        val sampleEncryptionBoxPresent: Boolean,
+        val sampleAuxiliarySizesPresent: Boolean,
+        val sampleAuxiliaryOffsetsPresent: Boolean,
+        val sampleGroupDescriptionPresent: Boolean,
+        val sampleToGroupPresent: Boolean
     )
     data class Report(
         val majorBrand: String?,
@@ -47,13 +88,13 @@ internal object CmafBoxInspector {
             while (ftyp.remaining() >= 4) brands += readFourCc(ftyp)
         }
         val tracks = boxes.firstOrNull { it.type == "moov" }?.children
-            ?.filter { it.type == "trak" }?.map { track(data, it) }.orEmpty()
+            ?.filter { it.type == "trak" }?.map { track(data, it, errors) }.orEmpty()
         return Report(major, brands, boxes.map { it.type }, tracks,
             boxes.any { it.type == "moof" } || boxes.any { it.type == "moov" && it.children.any { c -> c.type == "mvex" } },
             errors)
     }
 
-    private fun track(data: ByteArray, trak: Box): TrackMetadata {
+    private fun track(data: ByteArray, trak: Box, errors: MutableList<String>): TrackMetadata {
         val all = flatten(trak).toMutableList()
         val handler = all.firstOrNull { it.type == "hdlr" }?.let { payload(data, it) }?.let { p ->
             if (p.remaining() >= 12) { p.position(p.position() + 8); readFourCc(p) } else null
@@ -87,7 +128,7 @@ internal object CmafBoxInspector {
                     val childStart = entryStart + 8 + if (handler == "vide" ||
                         sampleEntry in setOf("avc1", "avc3", "hvc1", "hev1", "encv", "dvhe", "dvh1")) 78 else 28
                     if (childStart <= entryEnd) {
-                        val entryChildren = parseBoxes(data, childStart, entryEnd, 1, intArrayOf(0), mutableListOf())
+                        val entryChildren = parseBoxes(data, childStart, entryEnd, 1, intArrayOf(0), errors)
                         all += entryChildren.flatMap { flatten(it) }
                     }
                 }
@@ -99,8 +140,163 @@ internal object CmafBoxInspector {
         val scheme = all.firstOrNull { it.type == "schm" }?.let { payload(data, it) }?.takeIf { it.remaining() >= 8 }?.let { p ->
             p.position(p.position() + 4); readFourCc(p)
         }
-        return TrackMetadata(handler, timescale, sampleEntry, original, scheme,
-            sampleEntry == "encv" || sampleEntry == "enca" || scheme != null, width, height)
+        val hevcBox = all.firstOrNull { it.type == "hvcC" }
+        val hevcConfiguration = hevcBox?.let {
+            try { parseHevcConfiguration(payload(data, it)) }
+            catch (e: Exception) {
+                errors += "HEVC decoder configuration could not be parsed: ${e.message ?: e.javaClass.simpleName}"
+                null
+            }
+        }
+        val tencBox = all.firstOrNull { it.type == "tenc" }
+        val trackEncryption = tencBox?.let {
+            try { parseTrackEncryption(payload(data, it)) }
+            catch (e: Exception) {
+                errors += "Track encryption metadata could not be parsed: ${e.message ?: e.javaClass.simpleName}"
+                null
+            }
+        }
+        return TrackMetadata(
+            handler, timescale, sampleEntry, original, scheme,
+            sampleEntry == "encv" || sampleEntry == "enca" || scheme != null, width, height,
+            hevcConfiguration, trackEncryption,
+            all.any { it.type == "senc" }, all.any { it.type == "saiz" }, all.any { it.type == "saio" },
+            all.any { it.type == "sgpd" }, all.any { it.type == "sbgp" }
+        )
+    }
+
+    private fun parseHevcConfiguration(p: ByteBuffer): HevcConfiguration {
+        require(p.remaining() >= 23) { "Truncated hvcC record" }
+        val version = u8(p)
+        require(version == 1) { "Unsupported hvcC configuration version $version" }
+        val profileByte = u8(p)
+        val profileSpace = profileByte ushr 6
+        val tierFlag = ((profileByte ushr 5) and 1) != 0
+        val profileIdc = profileByte and 0x1f
+        val compatibility = u32(p)
+        val constraints = (u32(p) shl 16) or u16(p).toLong()
+        val level = u8(p)
+        val segmentationField = u16(p)
+        require((segmentationField and 0xf000) == 0xf000) { "Invalid hvcC spatial segmentation reserved bits" }
+        val parallelismField = u8(p)
+        require((parallelismField and 0xfc) == 0xfc) { "Invalid hvcC parallelism reserved bits" }
+        val chromaField = u8(p)
+        require((chromaField and 0xfc) == 0xfc) { "Invalid hvcC chroma reserved bits" }
+        val lumaDepthField = u8(p)
+        require((lumaDepthField and 0xf8) == 0xf8) { "Invalid hvcC luma bit-depth reserved bits" }
+        val chromaDepthField = u8(p)
+        require((chromaDepthField and 0xf8) == 0xf8) { "Invalid hvcC chroma bit-depth reserved bits" }
+        val averageFrameRate = u16(p)
+        val packed = u8(p)
+        val constantFrameRate = packed ushr 6
+        val temporalLayers = (packed ushr 3) and 0x07
+        val temporalIdNested = ((packed ushr 2) and 1) != 0
+        val nalLengthSize = (packed and 0x03) + 1
+        val arrayCount = u8(p)
+        require(arrayCount <= 64) { "hvcC contains too many NAL arrays" }
+
+        val vpsNals = mutableListOf<ByteArray>()
+        val spsNals = mutableListOf<ByteArray>()
+        val ppsNals = mutableListOf<ByteArray>()
+        repeat(arrayCount) {
+            require(p.remaining() >= 3) { "Truncated hvcC NAL array header" }
+            val arrayHeader = u8(p)
+            val declaredType = arrayHeader and 0x3f
+            val nalCount = u16(p)
+            require(nalCount <= 1024) { "hvcC NAL array contains too many entries" }
+            repeat(nalCount) {
+                require(p.remaining() >= 2) { "Truncated hvcC NAL length" }
+                val nalLength = u16(p)
+                require(nalLength >= 2 && nalLength <= p.remaining()) { "Invalid hvcC NAL length" }
+                val nal = ByteArray(nalLength)
+                p.get(nal)
+                val header = HevcBitstream.parseNalHeader(nal)
+                require(header.type == declaredType) { "hvcC array type does not match its NAL header" }
+                when (declaredType) {
+                    32 -> vpsNals += nal
+                    33 -> spsNals += nal
+                    34 -> ppsNals += nal
+                }
+            }
+        }
+        require(!p.hasRemaining()) { "Unexpected trailing bytes in hvcC record" }
+
+        val parameterErrors = mutableListOf<String>()
+        val vps = vpsNals.mapNotNull { nal ->
+            try { HevcParameterSets.parseVps(nal) }
+            catch (e: Exception) { parameterErrors += "VPS parse failed: ${e.message ?: e.javaClass.simpleName}"; null }
+        }
+        val sps = spsNals.mapNotNull { nal ->
+            try { HevcParameterSets.parseSps(nal) }
+            catch (e: Exception) { parameterErrors += "SPS parse failed: ${e.message ?: e.javaClass.simpleName}"; null }
+        }
+        val pps = ppsNals.mapNotNull { nal ->
+            try {
+                val preliminary = HevcParameterSets.parsePps(nal)
+                val matchingSps = sps.firstOrNull { it.spsId == preliminary.spsId }
+                if (matchingSps == null) {
+                    parameterErrors += "PPS ${preliminary.ppsId} has no matching parsed SPS"
+                    preliminary
+                } else HevcParameterSets.parsePps(nal, matchingSps)
+            } catch (e: Exception) {
+                parameterErrors += "PPS parse failed: ${e.message ?: e.javaClass.simpleName}"
+                null
+            }
+        }
+        return HevcConfiguration(
+            version, profileSpace, tierFlag, profileIdc, compatibility, constraints, level,
+            segmentationField and 0x0fff, parallelismField and 0x03, chromaField and 0x03,
+            (lumaDepthField and 0x07) + 8, (chromaDepthField and 0x07) + 8,
+            averageFrameRate, constantFrameRate, temporalLayers, temporalIdNested, nalLengthSize,
+            vpsNals.size, spsNals.size, ppsNals.size, vps, sps, pps, parameterErrors
+        )
+    }
+
+    /**
+     * Reads only the track-level encryption shape. KIDs, constant IV bytes and all actual
+     * sample-encryption payloads are skipped and never returned or logged.
+     */
+    private fun parseTrackEncryption(p: ByteBuffer): TrackEncryptionMetadata {
+        require(p.remaining() >= 4 + 2 + 2 + 16) { "Truncated tenc box" }
+        val version = u8(p)
+        p.get(); p.get(); p.get() // FullBox flags
+        require(version in 0..1) { "Unsupported tenc version $version" }
+        val reserved = u8(p)
+        require(reserved == 0) { "Invalid tenc reserved byte" }
+        val pattern = u8(p)
+        val cryptBlocks = if (version == 1) pattern ushr 4 else 0
+        val skipBlocks = if (version == 1) pattern and 0x0f else 0
+        if (version == 0) require(pattern == 0) { "Invalid version 0 tenc reserved byte" }
+        val isProtected = u8(p)
+        val ivSize = u8(p)
+        require(isProtected in 0..1) { "Invalid tenc default_isProtected value" }
+        require(ivSize == 0 || ivSize == 8 || ivSize == 16) { "Unsupported tenc per-sample IV size" }
+        p.position(p.position() + 16) // Skip default_KID without retaining it.
+        var constantIvSize: Int? = null
+        if (isProtected == 1 && ivSize == 0) {
+            require(p.hasRemaining()) { "Missing tenc constant IV size" }
+            constantIvSize = u8(p)
+            require(constantIvSize == 8 || constantIvSize == 16) { "Unsupported tenc constant IV size" }
+            require(p.remaining() >= constantIvSize) { "Truncated tenc constant IV" }
+            p.position(p.position() + constantIvSize) // Skip constant IV bytes.
+        }
+        require(!p.hasRemaining()) { "Unexpected trailing bytes in tenc box" }
+        return TrackEncryptionMetadata(version, isProtected == 1, ivSize, cryptBlocks, skipBlocks, constantIvSize)
+    }
+
+    private fun u8(p: ByteBuffer): Int {
+        require(p.hasRemaining()) { "Unexpected end of ISO-BMFF field" }
+        return p.get().toInt() and 0xff
+    }
+
+    private fun u16(p: ByteBuffer): Int {
+        require(p.remaining() >= 2) { "Unexpected end of ISO-BMFF 16-bit field" }
+        return p.short.toInt() and 0xffff
+    }
+
+    private fun u32(p: ByteBuffer): Long {
+        require(p.remaining() >= 4) { "Unexpected end of ISO-BMFF 32-bit field" }
+        return p.int.toLong() and 0xffffffffL
     }
 
     private fun readTimescale(p: ByteBuffer): Long? {
