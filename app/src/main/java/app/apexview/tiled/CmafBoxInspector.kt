@@ -61,6 +61,15 @@ internal object CmafBoxInspector {
         val ivSize: Int,
         val subsampleRanges: List<SubsampleEncryptionRange>?
     )
+    /** Structural auxiliary-info shape only; encrypted bytes and IV/KID values are never retained. */
+    data class SampleAuxiliaryMetadata(
+        val auxiliaryInfoType: String?,
+        val auxiliaryInfoParameter: Long?,
+        val saizSampleCount: Long,
+        val defaultSampleInfoSize: Int,
+        val sampleInfoSizes: List<Int>,
+        val saioOffsets: List<Long>
+    )
     data class FragmentMetadata(
         val trackId: Long,
         val timescale: Long?,
@@ -80,7 +89,9 @@ internal object CmafBoxInspector {
         val sampleEncryptionStructureComplete: Boolean = false,
         val sampleEncryptionMetadata: List<SampleEncryptionMetadata> = emptyList(),
         val sencOverrideIvSize: Int? = null,
-        val sampleEncryptionRangesCoverSamples: Boolean = false
+        val sampleEncryptionRangesCoverSamples: Boolean = false,
+        val sampleAuxiliaryInfoStructureComplete: Boolean = false,
+        val sampleAuxiliaryMetadata: SampleAuxiliaryMetadata? = null
     )
     data class TrackMetadata(
         val trackId: Long?,
@@ -326,6 +337,41 @@ internal object CmafBoxInspector {
                 null
             }
         }
+        val saizBox = traf.children.firstOrNull { it.type == "saiz" }
+        val saioBox = traf.children.firstOrNull { it.type == "saio" }
+        val saiz = saizBox?.let { box ->
+            try { parseSaiz(payload(data, box)) }
+            catch (e: Exception) {
+                errors += "Sample auxiliary size metadata could not be parsed: ${e.message ?: e.javaClass.simpleName}"
+                null
+            }
+        }
+        val saio = saioBox?.let { box ->
+            try { parseSaio(payload(data, box)) }
+            catch (e: Exception) {
+                errors += "Sample auxiliary offset metadata could not be parsed: ${e.message ?: e.javaClass.simpleName}"
+                null
+            }
+        }
+        val sampleAuxiliaryInfoStructureComplete =
+            saiz != null && saio != null &&
+                saiz.sampleCount == samples.size.toLong() &&
+                (saio.offsets.size == 1 || saio.offsets.size == samples.size) &&
+                saiz.auxiliaryInfoType == saio.auxiliaryInfoType &&
+                saiz.auxiliaryInfoParameter == saio.auxiliaryInfoParameter
+        if ((saizBox != null || saioBox != null) && !sampleAuxiliaryInfoStructureComplete) {
+            errors += "saiz/saio structure is incomplete or inconsistent with the fragment sample count"
+        }
+        val sampleAuxiliaryMetadata = if (saiz != null && saio != null) {
+            SampleAuxiliaryMetadata(
+                saiz.auxiliaryInfoType,
+                saiz.auxiliaryInfoParameter,
+                saiz.sampleCount,
+                saiz.defaultSampleInfoSize,
+                saiz.sampleInfoSizes,
+                saio.offsets
+            )
+        } else null
         val sampleEncryptionRangesCoverSamples = senc?.let { summary ->
             if (!summary.structureComplete || summary.sampleCount != samples.size.toLong()) {
                 false
@@ -362,7 +408,9 @@ internal object CmafBoxInspector {
             sampleEncryptionStructureComplete = senc?.structureComplete == true,
             sampleEncryptionMetadata = senc?.samples.orEmpty(),
             sencOverrideIvSize = senc?.overrideIvSize,
-            sampleEncryptionRangesCoverSamples = sampleEncryptionRangesCoverSamples
+            sampleEncryptionRangesCoverSamples = sampleEncryptionRangesCoverSamples,
+            sampleAuxiliaryInfoStructureComplete = sampleAuxiliaryInfoStructureComplete,
+            sampleAuxiliaryMetadata = sampleAuxiliaryMetadata
         )
     }
 
@@ -433,6 +481,57 @@ internal object CmafBoxInspector {
         }
         require(!p.hasRemaining()) { "Unexpected trailing bytes in trun box" }
         return cursor
+    }
+
+    private data class SaizMetadata(
+        val auxiliaryInfoType: String?,
+        val auxiliaryInfoParameter: Long?,
+        val defaultSampleInfoSize: Int,
+        val sampleCount: Long,
+        val sampleInfoSizes: List<Int>
+    )
+
+    private data class SaioMetadata(
+        val auxiliaryInfoType: String?,
+        val auxiliaryInfoParameter: Long?,
+        val offsets: List<Long>
+    )
+
+    private fun parseSaiz(p: ByteBuffer): SaizMetadata {
+        require(p.remaining() >= 9) { "Truncated saiz box" }
+        val version = u8(p)
+        require(version == 0) { "Unsupported saiz version $version" }
+        val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
+        require((flags and 0xfffffe) == 0) { "Unsupported saiz flags" }
+        val auxiliaryInfoType = if ((flags and 1) != 0) readFourCc(p) else null
+        val auxiliaryInfoParameter = if ((flags and 1) != 0) u32(p) else null
+        val defaultSize = u8(p)
+        val count = u32(p)
+        require(count <= MAX_FRAGMENT_SAMPLES.toLong()) { "saiz sample count exceeds limit" }
+        val sizes = if (defaultSize == 0) {
+            List(count.toInt()) { u8(p) }
+        } else {
+            List(count.toInt()) { defaultSize }
+        }
+        require(!p.hasRemaining()) { "Unexpected trailing bytes in saiz box" }
+        return SaizMetadata(auxiliaryInfoType, auxiliaryInfoParameter, defaultSize, count, sizes)
+    }
+
+    private fun parseSaio(p: ByteBuffer): SaioMetadata {
+        require(p.remaining() >= 8) { "Truncated saio box" }
+        val version = u8(p)
+        require(version in 0..1) { "Unsupported saio version $version" }
+        val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
+        require((flags and 0xfffffe) == 0) { "Unsupported saio flags" }
+        val auxiliaryInfoType = if ((flags and 1) != 0) readFourCc(p) else null
+        val auxiliaryInfoParameter = if ((flags and 1) != 0) u32(p) else null
+        val count = u32(p)
+        require(count <= MAX_FRAGMENT_SAMPLES.toLong()) { "saio entry count exceeds limit" }
+        val offsets = List(count.toInt()) {
+            if (version == 0) u32(p) else readUnsignedLong(p)
+        }
+        require(!p.hasRemaining()) { "Unexpected trailing bytes in saio box" }
+        return SaioMetadata(auxiliaryInfoType, auxiliaryInfoParameter, offsets)
     }
 
     private data class SencSummary(

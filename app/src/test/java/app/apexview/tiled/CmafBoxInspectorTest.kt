@@ -94,6 +94,11 @@ class CmafBoxInspectorTest {
         )
         assertTrue(timing.sampleAuxiliarySizesPresent)
         assertTrue(timing.sampleAuxiliaryOffsetsPresent)
+        assertTrue(timing.sampleAuxiliaryInfoStructureComplete)
+        assertEquals(2L, timing.sampleAuxiliaryMetadata!!.saizSampleCount)
+        assertEquals(16, timing.sampleAuxiliaryMetadata.defaultSampleInfoSize)
+        assertEquals(listOf(16, 16), timing.sampleAuxiliaryMetadata.sampleInfoSizes)
+        assertEquals(listOf(100L), timing.sampleAuxiliaryMetadata.saioOffsets)
         assertTrue(timing.sampleGroupDescriptionPresent)
         assertTrue(timing.sampleToGroupPresent)
     }
@@ -151,6 +156,21 @@ class CmafBoxInspectorTest {
         val fragment = report.fragments.single()
         assertTrue(fragment.sampleEncryptionStructureComplete)
         assertFalse(fragment.sampleEncryptionRangesCoverSamples)
+    }
+
+    @Test fun rejectsSaizMetadataWhenDeclaredSampleCountDoesNotMatchTrun() {
+        val init = fragmentedInitSegment(trackId = 41, timescale = 90000)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(41))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(2) + int(3000) + int(3000))
+        val saiz = box("saiz", byteArrayOf(0,0,0,0) + byteArrayOf(16) + int(1))
+        val saio = box("saio", byteArrayOf(0,0,0,0) + int(1) + int(128))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + saiz + saio))
+        )
+        val fragment = report.fragments.single()
+        assertFalse(fragment.sampleAuxiliaryInfoStructureComplete)
+        assertTrue(report.errors.any { it.contains("saiz/saio structure") })
     }
 
     @Test fun acceptsDefaultBaseIsMoofTfhdFlagAndReadsFragmentTiming() {
