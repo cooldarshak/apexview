@@ -27,6 +27,7 @@ internal object HevcFeedProfileProbe {
         val codecs: String?,
         val width: Int,
         val height: Int,
+        val frameRate: Float,
         val parameterSetFingerprint: String?,
         val parsedParameterCounts: String,
         val drmSecurityLevel: String?,
@@ -88,16 +89,19 @@ internal object HevcFeedProfileProbe {
         }.ifEmpty { "unavailable" }
 
         val parsedCounts = "${vps.size}/${sps.size}/${pps.size}"
-        val parameterNals = nals.sortedWith(compareBy({ it.type }, { it.bytes.size }))
-        val fingerprint = parameterNals.takeIf { it.isNotEmpty() }?.let { units ->
+        // Hash individual parameter NALs, then hash their sorted fingerprints. The result is
+        // independent of CSD array/NAL ordering while preserving duplicate counts.
+        val unitFingerprints = nals.map { nal ->
             val digest = MessageDigest.getInstance("SHA-256")
-            units.forEach { nal ->
-                digest.update(nal.type.toByte())
-                digest.update((nal.bytes.size ushr 24).toByte())
-                digest.update((nal.bytes.size ushr 16).toByte())
-                digest.update((nal.bytes.size ushr 8).toByte())
-                digest.update(nal.bytes.size.toByte())
-                digest.update(nal.bytes)
+            digest.update(nal.type.toByte())
+            digest.update(nal.bytes)
+            digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+        }.sorted()
+        val fingerprint = unitFingerprints.takeIf { it.isNotEmpty() }?.let { units ->
+            val digest = MessageDigest.getInstance("SHA-256")
+            units.forEach { unit ->
+                digest.update(unit.toByteArray(Charsets.US_ASCII))
+                digest.update(0.toByte())
             }
             digest.digest().joinToString("") { byte -> "%02x".format(byte) }
         }
@@ -117,6 +121,7 @@ internal object HevcFeedProfileProbe {
             codecs = format.codecs,
             width = format.width,
             height = format.height,
+            frameRate = format.frameRate,
             parameterSetFingerprint = fingerprint,
             parsedParameterCounts = parsedCounts,
             drmSecurityLevel = null,
@@ -177,7 +182,7 @@ internal object HevcFeedProfileCapture {
         if (captured.size == 1) {
             val first = captured.single()
             return "HEVC_PROFILE_CAPTURED ${first.label}: ${first.mime ?: "?"} ${first.codecs ?: "?"} " +
-                "${first.width}x${first.height}; delivery=${first.deliveryType}; chunks(ms)=${first.observedMediaChunkDurationsMs}; " +
+                "${first.width}x${first.height}@${first.frameRate}fps; delivery=${first.deliveryType}; chunks(ms)=${first.observedMediaChunkDurationsMs}; " +
                 "parsed VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}"
         }
         val first = captured[0]
@@ -185,13 +190,31 @@ internal object HevcFeedProfileCapture {
         val reasons = buildList {
             if (first.mime != second.mime) add("MIME differs")
             if (first.codecs != second.codecs) add("codec string differs")
-            if (first.width != second.width || first.height != second.height) add("dimensions differ")
+            if (first.width <= 0 || first.height <= 0 || second.width <= 0 || second.height <= 0) {
+                add("video dimensions unavailable")
+            } else if (first.width != second.width || first.height != second.height) {
+                add("dimensions differ")
+            }
+            if (first.mime?.equals("video/hevc", ignoreCase = true) != true ||
+                second.mime?.equals("video/hevc", ignoreCase = true) != true) {
+                add("one or both tracks are not identified as HEVC")
+            }
+            if (first.codecs.isNullOrBlank() || second.codecs.isNullOrBlank()) add("codec string unavailable")
+            val firstCounts = first.parsedParameterCounts.split('/').mapNotNull { it.toIntOrNull() }
+            val secondCounts = second.parsedParameterCounts.split('/').mapNotNull { it.toIntOrNull() }
+            if (firstCounts.size != 3 || secondCounts.size != 3 ||
+                firstCounts.any { it <= 0 } || secondCounts.any { it <= 0 }) {
+                add("VPS/SPS/PPS parsing is incomplete")
+            }
             if (first.parameterSetFingerprint == null || second.parameterSetFingerprint == null) {
                 add("parameter-set fingerprint unavailable")
             } else if (first.parameterSetFingerprint != second.parameterSetFingerprint) {
                 add("VPS/SPS/PPS fingerprint differs")
             }
             if (first.parsedParameterCounts != second.parsedParameterCounts) add("parsed parameter counts differ")
+            if (first.frameRate > 0f && second.frameRate > 0f && first.frameRate != second.frameRate) {
+                add("reported frame rates differ")
+            }
         }
         if (first.deliveryType != second.deliveryType) reasons += "delivery type differs"
         val result = if (reasons.isEmpty()) "CODEC_PROFILE_MATCH" else "CODEC_PROFILE_MISMATCH"
@@ -200,9 +223,9 @@ internal object HevcFeedProfileCapture {
         return "$result ${first.label} vs ${second.label}: " +
             (reasons.ifEmpty { listOf("MIME, codec, dimensions and VPS/SPS/PPS fingerprint match") }.joinToString("; ")) +
             ". CMAF timing, encryption layout and secure-surface feasibility are not established. " +
-            "${first.label}[${first.deliveryType},${first.width}x${first.height},${first.codecs ?: "?"}," +
+            "${first.label}[${first.deliveryType},${first.width}x${first.height}@${first.frameRate}fps,${first.codecs ?: "?"}," +
             "chunksMs=${first.observedMediaChunkDurationsMs},${drm(first)}]; " +
-            "${second.label}[${second.deliveryType},${second.width}x${second.height},${second.codecs ?: "?"}," +
+            "${second.label}[${second.deliveryType},${second.width}x${second.height}@${second.frameRate}fps,${second.codecs ?: "?"}," +
             "chunksMs=${second.observedMediaChunkDurationsMs},${drm(second)}]"
     }
 }
