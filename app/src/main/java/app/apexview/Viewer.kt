@@ -369,6 +369,25 @@ fun ViewerScreen(app: AppState) {
             Box(Modifier.fillMaxSize().zIndex(1.5e9f)) {
                 app.tiles.forEach { tile -> key(tile.id) { TileHeader(app, tile) } }
             }
+            // Tile-test diagnostics belong to the whole test surface, not the first feed.
+            // This keeps both selected feed reports readable in side-by-side layouts.
+            if (app.layoutMode == LayoutMode.TILE_TEST) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .heightIn(max = 220.dp)
+                        .zIndex(1.6e9f)
+                        .background(Color.Black.copy(alpha = 0.78f))
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        HevcFeedProfileCapture.diagnostic,
+                        style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow)
+                    )
+                }
+            }
             // Above every tile (their z grows by one per touch), below the controls.
             app.timing?.let { timing ->
                 AnimatedVisibility(!laptop, Modifier.fillMaxSize().zIndex(1e9f), enter = fadeIn(swap), exit = fadeOut(swap)) {
@@ -983,13 +1002,6 @@ private fun TileView(app: AppState, tile: Tile) {
                         profile,
                         style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow),
                         maxLines = 2
-                    )
-                }
-                if (app.tiles.firstOrNull()?.id == tile.id) {
-                    Text(
-                        HevcFeedProfileCapture.diagnostic,
-                        style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow),
-                        modifier = Modifier.heightIn(max = 220.dp).verticalScroll(rememberScrollState())
                     )
                 }
             }
