@@ -164,6 +164,34 @@ class HevcFragmentCompatibilityTest {
         assertTrue(result.reasons.any { it.contains("Per-sample IV/subsample encryption structure is incomplete") })
     }
 
+    @Test fun rejectsSampleSyncAndRandomAccessDependencyFlagMismatch() {
+        val first = fragment(90000, 0, listOf(
+            CmafBoxInspector.SampleTiming(0, 0, 3000, 0, sampleFlags = 0x02000000L)
+        ))
+        val second = fragment(90000, 0, listOf(
+            CmafBoxInspector.SampleTiming(0, 0, 3000, 0, sampleFlags = 0x02010000L)
+        ))
+        val result = HevcFragmentCompatibility.compare(
+            track(90000), first, track(90000), second
+        )
+        assertTrue(result.reasons.any { it.contains("sync/random-access dependency flags differ") })
+    }
+
+    @Test fun rejectsMissingSampleSyncFlagsInsteadOfAssumingRandomAccess() {
+        val first = fragment(90000, 0, listOf(
+            CmafBoxInspector.SampleTiming(0, 0, 3000, 0)
+        )).copy(sampleTimings = listOf(
+            CmafBoxInspector.SampleTiming(0, 0, 3000, 0, sampleFlags = null)
+        ))
+        val second = fragment(90000, 0, listOf(
+            CmafBoxInspector.SampleTiming(0, 0, 3000, 0, sampleFlags = 0x02000000L)
+        ))
+        val result = HevcFragmentCompatibility.compare(
+            track(90000), first, track(90000), second
+        )
+        assertTrue(result.reasons.any { it.contains("sync/random-access flags are unavailable") })
+    }
+
     private fun config(parameterSetFingerprints: List<String>) =
         CmafBoxInspector.HevcConfiguration(
             configurationVersion = 1,
@@ -226,7 +254,9 @@ class HevcFragmentCompatibilityTest {
         sampleCount = samples.size,
         totalDurationTicks = samples.mapNotNull { it.durationTicks }.takeIf { it.size == samples.size }
             ?.sum(),
-        sampleTimings = samples,
+        sampleTimings = samples.map { sample ->
+            if (sample.sampleFlags == null) sample.copy(sampleFlags = 0x02000000L) else sample
+        },
         timingComplete = complete,
         sampleEncryptionBoxPresent = encrypted,
         subsampleEncryptionSignalled = if (encrypted) true else null,

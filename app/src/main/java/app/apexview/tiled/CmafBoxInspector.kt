@@ -53,7 +53,8 @@ internal object CmafBoxInspector {
         val presentationTimeTicks: Long?,
         val durationTicks: Long?,
         val compositionOffsetTicks: Long?,
-        val sampleSizeBytes: Long? = null
+        val sampleSizeBytes: Long? = null,
+        val sampleFlags: Long? = null
     )
     /** Byte-range shape only. No encrypted bytes, IV bytes or key identifiers are retained. */
     data class SubsampleEncryptionRange(
@@ -153,7 +154,8 @@ internal object CmafBoxInspector {
         val trackId: Long,
         val defaultSampleDescriptionIndex: Long,
         val defaultSampleDuration: Long?,
-        val defaultSampleSize: Long?
+        val defaultSampleSize: Long?,
+        val defaultSampleFlags: Long? = null
     )
     data class Report(
         val majorBrand: String?,
@@ -209,7 +211,8 @@ internal object CmafBoxInspector {
         } else {
             priorInitialization?.fragmentDefaults.orEmpty().associate { item ->
                 item.trackId to TrexDefaults(
-                    item.defaultSampleDescriptionIndex, item.defaultSampleDuration, item.defaultSampleSize
+                    item.defaultSampleDescriptionIndex, item.defaultSampleDuration, item.defaultSampleSize,
+                    item.defaultSampleFlags
                 )
             }
         }
@@ -234,7 +237,7 @@ internal object CmafBoxInspector {
             fragmentDefaults = trexDefaults.map { (trackId, defaults) ->
                 TrackFragmentDefaults(
                     trackId, defaults.defaultSampleDescriptionIndex,
-                    defaults.defaultSampleDuration, defaults.defaultSampleSize
+                    defaults.defaultSampleDuration, defaults.defaultSampleSize, defaults.defaultSampleFlags
                 )
             },
             initializationSegmentPresent = parsedTracks.isNotEmpty()
@@ -351,13 +354,15 @@ internal object CmafBoxInspector {
         val sampleDescriptionIndex: Long?,
         val defaultSampleDuration: Long?,
         val defaultSampleSize: Long?,
+        val defaultSampleFlags: Long?,
         val durationIsEmpty: Boolean
     )
 
     private data class TrexDefaults(
         val defaultSampleDescriptionIndex: Long,
         val defaultSampleDuration: Long?,
-        val defaultSampleSize: Long?
+        val defaultSampleSize: Long?,
+        val defaultSampleFlags: Long?
     )
 
     private fun readTrackId(p: ByteBuffer): Long? {
@@ -393,9 +398,9 @@ internal object CmafBoxInspector {
                 require(defaultSampleDescriptionIndex > 0) { "Invalid trex default sample-description index" }
                 val defaultDuration = u32(p).takeIf { it > 0 }
                 val defaultSize = u32(p).takeIf { it > 0 }
-                skip(p, 4) // default_sample_flags
+                val defaultFlags = u32(p)
                 require(!p.hasRemaining()) { "Unexpected trailing bytes in trex box" }
-                defaults[trackId] = TrexDefaults(defaultSampleDescriptionIndex, defaultDuration, defaultSize)
+                defaults[trackId] = TrexDefaults(defaultSampleDescriptionIndex, defaultDuration, defaultSize, defaultFlags)
             } catch (e: Exception) {
                 errors += "Track defaults could not be parsed: ${e.message ?: e.javaClass.simpleName}"
             }
@@ -422,6 +427,7 @@ internal object CmafBoxInspector {
         val trex = trexDefaults[tfhd.trackId]
         val defaultDuration = tfhd.defaultSampleDuration ?: trex?.defaultSampleDuration
         val defaultSampleSize = tfhd.defaultSampleSize ?: trex?.defaultSampleSize
+        val defaultSampleFlags = tfhd.defaultSampleFlags ?: trex?.defaultSampleFlags
         val sampleDescriptionIndex = tfhd.sampleDescriptionIndex ?: trex?.defaultSampleDescriptionIndex
         val selectedDescriptionCount = trackMetadataById[tfhd.trackId]?.sampleDescriptionCount ?: 0
         if (sampleDescriptionIndex == null) {
@@ -447,6 +453,7 @@ internal object CmafBoxInspector {
                 payload(data, trun),
                 defaultDuration,
                 defaultSampleSize,
+                defaultSampleFlags,
                 decodeCursor,
                 samples
             )
@@ -732,11 +739,11 @@ internal object CmafBoxInspector {
         } else null
         val defaultDuration = if ((flags and 0x000008) != 0) u32(p).takeIf { it > 0 } else null
         val defaultSampleSize = if ((flags and 0x000010) != 0) u32(p).takeIf { it > 0 } else null
-        if ((flags and 0x000020) != 0) skip(p, 4) // default_sample_flags
+        val defaultSampleFlags = if ((flags and 0x000020) != 0) u32(p) else null
         require(!p.hasRemaining()) { "Unexpected trailing bytes in tfhd box" }
         return TfhdDefaults(
             trackId, baseDataOffset, defaultBaseIsMoof, sampleDescriptionIndex,
-            defaultDuration, defaultSampleSize, (flags and 0x010000) != 0
+            defaultDuration, defaultSampleSize, defaultSampleFlags, (flags and 0x010000) != 0
         )
     }
 
@@ -758,6 +765,7 @@ internal object CmafBoxInspector {
         p: ByteBuffer,
         defaultDuration: Long?,
         defaultSampleSize: Long?,
+        defaultSampleFlags: Long?,
         initialDecodeTime: Long?,
         output: MutableList<SampleTiming>
     ): Long? {
@@ -773,17 +781,24 @@ internal object CmafBoxInspector {
         }
         val count = countLong.toInt()
         if ((flags and 0x000001) != 0) skip(p, 4) // data_offset
-        if ((flags and 0x000004) != 0) skip(p, 4) // first_sample_flags
+        require(!((flags and 0x000004) != 0 && (flags and 0x000400) != 0)) {
+            "trun cannot signal both first_sample_flags and per-sample sample_flags"
+        }
+        val firstSampleFlags = if ((flags and 0x000004) != 0) u32(p) else null
         var cursor = initialDecodeTime
         repeat(count) {
             val duration = if ((flags and 0x000100) != 0) u32(p) else defaultDuration
             val sampleSize = if ((flags and 0x000200) != 0) u32(p) else defaultSampleSize
-            if ((flags and 0x000400) != 0) skip(p, 4) // sample_flags
+            val sampleFlags = when {
+                (flags and 0x000400) != 0 -> u32(p)
+                it == 0 && firstSampleFlags != null -> firstSampleFlags
+                else -> defaultSampleFlags
+            }
             val compositionOffset = if ((flags and 0x000800) != 0) {
                 if (version == 1) readSignedInt(p) else u32(p)
             } else 0L
             val presentationTime = cursor?.let { Math.addExact(it, compositionOffset) }
-            output += SampleTiming(cursor, presentationTime, duration, compositionOffset, sampleSize)
+            output += SampleTiming(cursor, presentationTime, duration, compositionOffset, sampleSize, sampleFlags)
             cursor = if (cursor != null && duration != null) Math.addExact(cursor, duration) else null
         }
         require(!p.hasRemaining()) { "Unexpected trailing bytes in trun box" }

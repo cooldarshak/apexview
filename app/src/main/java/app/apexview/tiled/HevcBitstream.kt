@@ -96,6 +96,7 @@ internal class HevcBitReader(private val data: ByteArray) {
     private var bitOffset = 0
 
     val bitsRemaining: Int get() = data.size * 8 - bitOffset
+    val positionBits: Int get() = bitOffset
 
     fun readBit(): Int = readBits(1)
 

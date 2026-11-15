@@ -33,6 +33,7 @@ internal object HevcSliceHeaderParser {
 
     data class SliceHeader(
         val nalUnitType: Int,
+        val temporalIdPlus1: Int,
         val firstSliceSegmentInPicture: Boolean,
         val noOutputOfPriorPictures: Boolean?,
         val ppsId: Int,
@@ -68,13 +69,18 @@ internal object HevcSliceHeaderParser {
         val tcOffsetDiv2: Int? = null,
         val loopFilterAcrossSlices: Boolean? = null,
         val entryPointOffsets: List<Long> = emptyList(),
-        val sliceHeaderExtensionLength: Int = 0
+        val sliceHeaderExtensionLength: Int = 0,
+        val sourceAddressEndBit: Int,
+        val entryPointFieldStartBit: Int,
+        val entryPointFieldEndBit: Int,
+        val alignmentStartBit: Int
     )
 
     fun parse(
         nal: ByteArray,
         sps: HevcParameterSets.SpsMetadata,
-        pps: HevcParameterSets.PpsMetadata
+        pps: HevcParameterSets.PpsMetadata,
+        clearNalBytes: Int = nal.size
     ): SliceHeader {
         val header = HevcBitstream.parseNalHeader(nal)
         require(header.type in 0..21) {
@@ -85,6 +91,7 @@ internal object HevcSliceHeaderParser {
             "HEVC temporal_id_plus1 exceeds the SPS sub-layer limit"
         }
         require(nal.size > 2) { "Truncated HEVC slice NAL" }
+        require(clearNalBytes in 3..nal.size) { "Clear HEVC slice prefix is outside the NAL unit" }
         require(pps.spsId == sps.spsId) { "PPS references a different SPS" }
         require(!sps.spsExtensionPresent) {
             "SPS extensions are not parsed by the bounded slice-header parser"
@@ -97,7 +104,7 @@ internal object HevcSliceHeaderParser {
             "PPS init_qp_minus26 exceeds the range for the SPS luma bit depth"
         }
 
-        val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal.copyOfRange(2, nal.size)))
+        val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal.copyOfRange(2, clearNalBytes)))
         val initialBits = bits.bitsRemaining
         fun consumed() = initialBits - bits.bitsRemaining
 
@@ -116,6 +123,7 @@ internal object HevcSliceHeaderParser {
             address = if (addressBits == 0) 0 else bits.readBits(addressBits)
             require(address < pictureCtbs) { "Slice segment address exceeds picture CTB count" }
         }
+        val sourceAddressEndBit = bits.positionBits
 
         var sliceType: Int? = null
         var outputFlag: Boolean? = null
@@ -146,6 +154,8 @@ internal object HevcSliceHeaderParser {
         var tcOffset: Int? = null
         var loopFilterAcrossSlices: Boolean? = null
         var entryPointOffsets = emptyList<Long>()
+        var entryPointFieldStartBit = bits.positionBits
+        var entryPointFieldEndBit = bits.positionBits
 
         if (!dependent) {
             repeat(pps.extraSliceHeaderBits) { bits.readBit() }
@@ -311,6 +321,7 @@ internal object HevcSliceHeaderParser {
                 loopFilterAcrossSlices = bits.readBit() != 0
             }
 
+            entryPointFieldStartBit = bits.positionBits
             if (pps.tilesEnabled || pps.entropyCodingSyncEnabled) {
                 val count = readUe(bits, 65_535, "num_entry_point_offsets")
                 if (count > 0) {
@@ -321,6 +332,7 @@ internal object HevcSliceHeaderParser {
                     }
                 }
             }
+            entryPointFieldEndBit = bits.positionBits
         }
 
         val extensionLength = if (pps.sliceSegmentHeaderExtensionPresent) {
@@ -331,10 +343,12 @@ internal object HevcSliceHeaderParser {
             repeat(length) { bits.readBits(8) }
             length
         } else 0
+        val alignmentStartBit = bits.positionBits
         readByteAlignment(bits, ::consumed)
 
         return SliceHeader(
             nalUnitType = header.type,
+            temporalIdPlus1 = header.temporalIdPlus1,
             firstSliceSegmentInPicture = firstSlice,
             noOutputOfPriorPictures = noOutput,
             ppsId = ppsId,
@@ -370,7 +384,11 @@ internal object HevcSliceHeaderParser {
             tcOffsetDiv2 = tcOffset,
             loopFilterAcrossSlices = loopFilterAcrossSlices,
             entryPointOffsets = entryPointOffsets,
-            sliceHeaderExtensionLength = extensionLength
+            sliceHeaderExtensionLength = extensionLength,
+            sourceAddressEndBit = sourceAddressEndBit,
+            entryPointFieldStartBit = entryPointFieldStartBit,
+            entryPointFieldEndBit = entryPointFieldEndBit,
+            alignmentStartBit = alignmentStartBit
         )
     }
 

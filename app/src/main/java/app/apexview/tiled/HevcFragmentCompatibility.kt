@@ -101,6 +101,17 @@ internal object HevcFragmentCompatibility {
                         pair.second.durationTicks, firstScale, secondScale, reasons)
                     compareTime("sample $index composition offset", pair.first.compositionOffsetTicks,
                         pair.second.compositionOffsetTicks, firstScale, secondScale, reasons)
+
+                    val firstFlags = pair.first.sampleFlags
+                    val secondFlags = pair.second.sampleFlags
+                    if (firstFlags == null || secondFlags == null) {
+                        reasons += "sample $index sync/random-access flags are unavailable"
+                    } else {
+                        val randomAccessMask = 0x0ff10000L
+                        if (((firstFlags xor secondFlags) and randomAccessMask) != 0L) {
+                            reasons += "sample $index sync/random-access dependency flags differ"
+                        }
+                    }
                 }
             }
         }

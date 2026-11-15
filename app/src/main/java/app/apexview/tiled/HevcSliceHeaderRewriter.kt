@@ -1,0 +1,290 @@
+package app.apexview.tiled
+
+/**
+ * Rewrites a clear HEVC slice header for one cell of a newly constructed output picture.
+ *
+ * CABAC is not decoded. The rewritten header and two clear CABAC bytes are escaped again to
+ * establish a valid emulation-prevention boundary. The remaining source EBSP bytes are copied
+ * unchanged. The caller must supply a verified clear prefix length from its CMAF subsample map.
+ */
+internal object HevcSliceHeaderRewriter {
+    data class Result(
+        val nal: ByteArray,
+        val destinationAddress: Int,
+        val sourceHeaderBytes: Int,
+        val outputHeaderBytes: Int,
+        val sourceTailOffset: Int,
+        val copiedTailBytes: Int,
+        val reencodedClearPayloadBytes: Int
+    )
+
+    private data class ClearRbsp(
+        val bytes: ByteArray,
+        val sourceOffsets: IntArray
+    )
+
+    fun rewrite(
+        nal: ByteArray,
+        sourceSps: HevcParameterSets.SpsMetadata,
+        sourcePps: HevcParameterSets.PpsMetadata,
+        outputSps: HevcParameterSets.SpsMetadata,
+        outputPps: HevcParameterSets.PpsMetadata,
+        destinationAddress: Int,
+        clearNalBytes: Int = nal.size
+    ): Result {
+        val nalHeader = HevcBitstream.parseNalHeader(nal)
+        require(nalHeader.type in 0..21) { "Unsupported VCL NAL type" }
+        require(nalHeader.layerId == 0) { "Non-zero HEVC layers are not supported" }
+        require(sourcePps.spsId == sourceSps.spsId) { "Source PPS/SPS identity mismatch" }
+        require(outputPps.spsId == outputSps.spsId) { "Output PPS/SPS identity mismatch" }
+        require(clearNalBytes in 3..nal.size) { "Invalid clear NAL prefix length" }
+        requireCompatibleSps(sourceSps, outputSps)
+        requireCompatiblePps(sourcePps, outputPps)
+        require(!sourcePps.entropyCodingSyncEnabled && !outputPps.entropyCodingSyncEnabled) {
+            "WPP/entropy-coding-sync slices are not supported"
+        }
+        require(!sourcePps.sliceSegmentHeaderExtensionPresent &&
+            !outputPps.sliceSegmentHeaderExtensionPresent) {
+            "Slice-header extensions are not supported"
+        }
+
+        val parsed = HevcSliceHeaderParser.parse(nal, sourceSps, sourcePps, clearNalBytes)
+        require(!parsed.dependentSliceSegment) { "Dependent slice segments are not supported" }
+        require(parsed.entryPointOffsets.isEmpty()) {
+            "Non-zero tile/WPP entry-point offsets are not supported"
+        }
+        require(destinationAddress >= 0) { "Destination CTB address must not be negative" }
+        val outputPictureCtbs = Math.multiplyExact(outputSps.picWidthInCtbs, outputSps.picHeightInCtbs)
+        require(destinationAddress < outputPictureCtbs) {
+            "Destination CTB address exceeds the output picture"
+        }
+
+        val clearRbsp = decodeClearPrefix(nal, clearNalBytes)
+        val rbsp = clearRbsp.bytes
+        require(parsed.bitsConsumed % 8 == 0) { "Source slice header is not byte aligned" }
+        val sourceHeaderBytes = parsed.bitsConsumed / 8
+        require(sourceHeaderBytes + 2 < rbsp.size) {
+            "At least three clear CABAC bytes are required after the slice header"
+        }
+        require(parsed.sourceAddressEndBit <= parsed.entryPointFieldStartBit &&
+            parsed.entryPointFieldStartBit <= parsed.entryPointFieldEndBit &&
+            parsed.entryPointFieldEndBit <= parsed.alignmentStartBit) {
+            "Slice-header syntax offsets are inconsistent"
+        }
+
+        val sourceBits = HevcBitReader(rbsp)
+        val sourceFirst = sourceBits.readBit() != 0
+        if (nalHeader.type in 16..21) sourceBits.readBit()
+        sourceBits.readUnsignedExpGolomb()
+        if (!sourceFirst) {
+            if (sourcePps.dependentSliceSegmentsEnabled) {
+                require(sourceBits.readBit() == 0) { "Dependent slice segments are not supported" }
+            }
+            val sourcePictureCtbs = Math.multiplyExact(sourceSps.picWidthInCtbs, sourceSps.picHeightInCtbs)
+            val sourceAddressBits = ceilLog2(sourcePictureCtbs)
+            if (sourceAddressBits > 0) sourceBits.readBits(sourceAddressBits)
+        }
+        require(sourceBits.positionBits == parsed.sourceAddressEndBit) {
+            "Source address boundary does not match the parsed header"
+        }
+
+        val outputAddressBits = ceilLog2(outputPictureCtbs)
+        val writer = BitWriter()
+        writer.writeBit(if (destinationAddress == 0) 1 else 0)
+        if (nalHeader.type in 16..21) {
+            writer.writeBit(if (parsed.noOutputOfPriorPictures == true) 1 else 0)
+        }
+        writer.writeUnsignedExpGolomb(outputPps.ppsId)
+        if (destinationAddress != 0) {
+            if (outputPps.dependentSliceSegmentsEnabled) writer.writeBit(0)
+            if (outputAddressBits > 0) writer.writeBits(destinationAddress, outputAddressBits)
+        }
+
+        // Preserve every parsed coding field after the address, including POC/RPS, prediction,
+        // deblocking override and loop-filter syntax.
+        writer.copyBits(rbsp, parsed.sourceAddressEndBit, parsed.entryPointFieldStartBit)
+
+        // The output grid has one independently coded slice per cell, hence no entry-point
+        // substreams inside a cell. Source entry-point syntax is replaced, not carried over.
+        if (outputPps.tilesEnabled || outputPps.entropyCodingSyncEnabled) {
+            writer.writeUnsignedExpGolomb(0)
+        }
+        writer.copyBits(rbsp, parsed.entryPointFieldEndBit, parsed.alignmentStartBit)
+        writer.writeBit(1)
+        while (writer.bitCount % 8 != 0) writer.writeBit(0)
+        val outputHeaderRbsp = writer.toByteArray()
+
+        val firstTwoCabacBytes = rbsp.copyOfRange(sourceHeaderBytes, sourceHeaderBytes + 2)
+        val thirdCabacByte = rbsp[sourceHeaderBytes + 2].toInt() and 0xff
+        val escapedHeaderAndPayloadPrefix = escapeRbsp(
+            outputHeaderRbsp + firstTwoCabacBytes,
+            thirdCabacByte
+        )
+        val sourceTailOffset = clearRbsp.sourceOffsets[sourceHeaderBytes + 2]
+        require(sourceTailOffset in 2 until nal.size) { "CABAC tail is outside the source NAL" }
+        val outputNal = nal.copyOfRange(0, 2) +
+            escapedHeaderAndPayloadPrefix +
+            nal.copyOfRange(sourceTailOffset, nal.size)
+
+        return Result(
+            nal = outputNal,
+            destinationAddress = destinationAddress,
+            sourceHeaderBytes = sourceHeaderBytes,
+            outputHeaderBytes = outputHeaderRbsp.size,
+            sourceTailOffset = sourceTailOffset,
+            copiedTailBytes = nal.size - sourceTailOffset,
+            reencodedClearPayloadBytes = 2
+        )
+    }
+
+    private fun requireCompatibleSps(
+        source: HevcParameterSets.SpsMetadata,
+        output: HevcParameterSets.SpsMetadata
+    ) {
+        val sourceProfile = source.profileTierLevel.copy(levelIdc = 0)
+        val outputProfile = output.profileTierLevel.copy(levelIdc = 0)
+        require(
+            source.maxSubLayers == output.maxSubLayers &&
+                source.temporalIdNesting == output.temporalIdNesting &&
+                source.chromaFormatIdc == output.chromaFormatIdc &&
+                source.separateColourPlane == output.separateColourPlane &&
+                source.log2MaxPicOrderCntLsb == output.log2MaxPicOrderCntLsb &&
+                source.log2CtbSize == output.log2CtbSize &&
+                source.ctbSize == output.ctbSize &&
+                source.sampleAdaptiveOffsetEnabled == output.sampleAdaptiveOffsetEnabled &&
+                source.temporalMvpEnabled == output.temporalMvpEnabled &&
+                source.longTermRefPicsPresent == output.longTermRefPicsPresent &&
+                source.longTermRefPics == output.longTermRefPics &&
+                source.shortTermRefPicSets == output.shortTermRefPicSets &&
+                source.bitDepthLuma == output.bitDepthLuma &&
+                source.bitDepthChroma == output.bitDepthChroma &&
+                source.scalingListEnabled == output.scalingListEnabled &&
+                source.scalingListDataPresent == output.scalingListDataPresent &&
+                source.ampEnabled == output.ampEnabled &&
+                source.pcmEnabled == output.pcmEnabled &&
+                source.strongIntraSmoothingEnabled == output.strongIntraSmoothingEnabled &&
+                source.maxDecPicBuffering == output.maxDecPicBuffering &&
+                source.maxNumReorderPics == output.maxNumReorderPics &&
+                source.maxLatencyIncrease == output.maxLatencyIncrease &&
+                sourceProfile == outputProfile
+        ) { "Output SPS changes source slice-coding semantics" }
+    }
+
+    private fun requireCompatiblePps(
+        source: HevcParameterSets.PpsMetadata,
+        output: HevcParameterSets.PpsMetadata
+    ) {
+        require(
+            source.dependentSliceSegmentsEnabled == output.dependentSliceSegmentsEnabled &&
+                source.outputFlagPresent == output.outputFlagPresent &&
+                source.extraSliceHeaderBits == output.extraSliceHeaderBits &&
+                source.cabacInitPresent == output.cabacInitPresent &&
+                source.numRefIdxL0DefaultActiveMinus1 == output.numRefIdxL0DefaultActiveMinus1 &&
+                source.numRefIdxL1DefaultActiveMinus1 == output.numRefIdxL1DefaultActiveMinus1 &&
+                source.initQpMinus26 == output.initQpMinus26 &&
+                source.sliceChromaQpOffsetsPresent == output.sliceChromaQpOffsetsPresent &&
+                source.weightedPredictionEnabled == output.weightedPredictionEnabled &&
+                source.weightedBipredictionEnabled == output.weightedBipredictionEnabled &&
+                source.transquantBypassEnabled == output.transquantBypassEnabled &&
+                source.loopFilterAcrossSlicesEnabled == output.loopFilterAcrossSlicesEnabled &&
+                source.deblockingFilterControlPresent == output.deblockingFilterControlPresent &&
+                source.deblockingFilterOverrideEnabled == output.deblockingFilterOverrideEnabled &&
+                source.deblockingFilterDisabled == output.deblockingFilterDisabled &&
+                source.betaOffsetDiv2 == output.betaOffsetDiv2 &&
+                source.tcOffsetDiv2 == output.tcOffsetDiv2 &&
+                source.scalingListDataPresent == output.scalingListDataPresent &&
+                source.listsModificationPresent == output.listsModificationPresent &&
+                source.log2ParallelMergeLevelMinus2 == output.log2ParallelMergeLevelMinus2 &&
+                source.sliceSegmentHeaderExtensionPresent == output.sliceSegmentHeaderExtensionPresent
+        ) { "Output PPS changes source slice-header semantics" }
+    }
+
+    private fun decodeClearPrefix(nal: ByteArray, clearNalBytes: Int): ClearRbsp {
+        val decoded = ArrayList<Byte>(clearNalBytes - 2)
+        val offsets = ArrayList<Int>(clearNalBytes - 2)
+        var zeroCount = 0
+        var index = 2
+        while (index < clearNalBytes) {
+            val value = nal[index].toInt() and 0xff
+            if (zeroCount >= 2 && value == 3) {
+                require(index + 1 < clearNalBytes) {
+                    "Emulation-prevention byte is truncated at the clear/encrypted boundary"
+                }
+                val next = nal[index + 1].toInt() and 0xff
+                require(next <= 3) { "Invalid emulation-prevention sequence in clear slice header" }
+                zeroCount = 0
+                index++
+                continue
+            }
+            decoded += nal[index]
+            offsets += index
+            zeroCount = if (value == 0) zeroCount + 1 else 0
+            index++
+        }
+        return ClearRbsp(decoded.toByteArray(), offsets.toIntArray())
+    }
+
+    private fun escapeRbsp(rbsp: ByteArray, nextRbspByte: Int): ByteArray {
+        val out = ArrayList<Byte>(rbsp.size + 8)
+        var zeroCount = 0
+        rbsp.forEach { byte ->
+            val value = byte.toInt() and 0xff
+            if (zeroCount >= 2 && value <= 3) {
+                out += 3.toByte()
+                zeroCount = 0
+            }
+            out += byte
+            zeroCount = if (value == 0) zeroCount + 1 else 0
+        }
+        if (zeroCount >= 2 && nextRbspByte in 0..3) out += 3.toByte()
+        return out.toByteArray()
+    }
+
+    private fun ceilLog2(value: Int): Int {
+        require(value > 0)
+        return if (value <= 1) 0 else 32 - Integer.numberOfLeadingZeros(value - 1)
+    }
+
+    private class BitWriter {
+        private val bits = ArrayList<Int>()
+        val bitCount: Int get() = bits.size
+
+        fun writeBit(value: Int) {
+            require(value == 0 || value == 1)
+            bits += value
+        }
+
+        fun writeBits(value: Int, count: Int) {
+            require(count in 0..32)
+            require(count == 32 || value ushr count == 0) { "Value does not fit output field" }
+            for (index in count - 1 downTo 0) writeBit((value ushr index) and 1)
+        }
+
+        fun writeUnsignedExpGolomb(value: Int) {
+            require(value >= 0)
+            val codeNum = value.toLong() + 1L
+            val width = 64 - java.lang.Long.numberOfLeadingZeros(codeNum)
+            repeat(width - 1) { writeBit(0) }
+            for (index in width - 1 downTo 0) {
+                writeBit(((codeNum ushr index) and 1L).toInt())
+            }
+        }
+
+        fun copyBits(source: ByteArray, from: Int, to: Int) {
+            require(from in 0..to && to <= source.size * 8) { "Invalid bit copy range" }
+            for (position in from until to) {
+                val value = (source[position / 8].toInt() ushr (7 - position % 8)) and 1
+                writeBit(value)
+            }
+        }
+
+        fun toByteArray(): ByteArray {
+            require(bitCount % 8 == 0) { "Output slice header must be byte aligned" }
+            return ByteArray(bitCount / 8) { byteIndex ->
+                var value = 0
+                for (bit in 0 until 8) value = (value shl 1) or bits[byteIndex * 8 + bit]
+                value.toByte()
+            }
+        }
+    }
+}
