@@ -476,3 +476,31 @@ internal class HevcPocTracker {
         val isIrap = nalUnitType in 16..23
         val resetPocMsb = isIrap && (nalUnitType in 16..18 || noRaslOutputFlag)
         val current = pocLsb.toLong()
+
+        val pocMsb = if (resetPocMsb) {
+            // For IRAP with NoRaslOutputFlag=1 the standard sets PicOrderCntMsb to zero.
+            // Do not run the wrap comparison against an artificial zero anchor.
+            0L
+        } else {
+            when {
+                current < previousTid0PocLsb &&
+                    previousTid0PocLsb - current >= maxPocLsb / 2L ->
+                    previousTid0PocMsb + maxPocLsb
+                current > previousTid0PocLsb &&
+                    current - previousTid0PocLsb > maxPocLsb / 2L ->
+                    previousTid0PocMsb - maxPocLsb
+                else -> previousTid0PocMsb
+            }
+        }
+        val poc = pocMsb + current
+
+        // prevTid0Pic excludes all RADL/RASL pictures plus every SLNR picture.
+        // RADL_R/RASL_R are reference pictures, but are still excluded from the POC anchor.
+        val excludedFromTid0Anchor = nalUnitType in setOf(0, 2, 4, 6, 7, 8, 9, 10, 12, 14)
+        if (temporalIdPlus1 == 1 && !excludedFromTid0Anchor) {
+            previousTid0PocMsb = pocMsb
+            previousTid0PocLsb = current
+        }
+        return poc
+    }
+}
