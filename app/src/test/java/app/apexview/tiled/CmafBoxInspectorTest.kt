@@ -70,6 +70,31 @@ class CmafBoxInspectorTest {
         assertEquals(0, config.ppsCount)
     }
 
+    @Test fun parsesVpsParameterSetArrayFromHvcC() {
+        val vpsNal = byteArrayOf(0x40, 0x01) + BitWriter().apply {
+            write(5, 4); write(1, 1); write(1, 1); write(0, 6)
+            write(1, 3); write(1, 1); write(0xffff, 16)
+        }.finish()
+        val header = byteArrayOf(
+            1, 0xa1.toByte(),
+            0x12, 0x34, 0x56, 0x78,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+            120, 0xf1.toByte(), 0x23, 0xfd.toByte(), 0xfd.toByte(),
+            0xfa.toByte(), 0xf9.toByte(), 0x01, 0x2c, 0x9f.toByte()
+        )
+        val array = byteArrayOf(0xa0.toByte()) + short(1) + short(vpsNal.size) + vpsNal
+        val record = header + byteArrayOf(1) + array
+        val config = inspectVisualEntry(
+            visualSampleEntry("hvc1", 1280, 720, box("hvcC", record))
+        ).tracks.single().hevcConfiguration!!
+
+        assertEquals(1, config.vpsCount)
+        assertEquals(0, config.spsCount)
+        assertEquals(0, config.ppsCount)
+        assertEquals(5, config.vps.single().vpsId)
+        assertTrue(config.parameterSetErrors.isEmpty())
+    }
+
     @Test fun readsCbcsTrackEncryptionShapeWithoutReturningKidOrIv() {
         val tenc = byteArrayOf(1, 0, 0, 0, 0, 0x19, 1, 16) + ByteArray(16)
         val sinf = box("sinf",
@@ -152,6 +177,22 @@ class CmafBoxInspectorTest {
             short(width) + short(height) + ByteArray(50)
         val payload = ascii(type) + visualFields + childBoxes.fold(ByteArray(0)) { acc, value -> acc + value }
         return int(payload.size + 4) + payload
+    }
+
+    private class BitWriter {
+        private val bits = mutableListOf<Int>()
+        fun write(value: Int, count: Int) {
+            for (i in count - 1 downTo 0) bits += (value ushr i) and 1
+        }
+        fun finish(): ByteArray {
+            bits += 1
+            while (bits.size % 8 != 0) bits += 0
+            return ByteArray(bits.size / 8) { index ->
+                var value = 0
+                for (bit in 0 until 8) value = (value shl 1) or bits[index * 8 + bit]
+                value.toByte()
+            }
+        }
     }
 
     private fun box(type: String, vararg payloads: ByteArray): ByteArray {
