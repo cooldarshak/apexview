@@ -153,9 +153,9 @@ class HevcSliceHeaderParserTest {
         val table = slice.predictionWeightTable!!
         assertEquals(1, table.lumaLog2WeightDenom)
         assertEquals(1, table.chromaLog2WeightDenom)
-        assertEquals(PredictionWeightComponent(2, -1), table.list0.single().luma)
+        assertEquals(HevcSliceHeaderParser.PredictionWeightComponent(2, -1), table.list0.single().luma)
         assertEquals(
-            listOf(PredictionWeightComponent(1, -2), PredictionWeightComponent(-1, 3)),
+            listOf(HevcSliceHeaderParser.PredictionWeightComponent(1, -2), HevcSliceHeaderParser.PredictionWeightComponent(-1, 3)),
             table.list0.single().chroma
         )
         assertTrue(table.list1.isEmpty())
