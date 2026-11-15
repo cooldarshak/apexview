@@ -57,7 +57,7 @@ class HevcOutputParameterSetWriterTest {
 
     @Test
     fun roundTripsRealKvazaarTwoByOneOutputHeadersForIndependentFfmpegDecode() {
-        val directory = fixtureDirectory()
+        val directory = tileFixtureDirectory()
         assumeTrue("Synthetic HEVC tile fixture directory is not configured", directory != null)
         val sourceFile = File(directory!!, "reassembled.hevc")
         assumeTrue("Kvazaar reassembled tile fixture is not present", sourceFile.isFile)
@@ -152,6 +152,11 @@ class HevcOutputParameterSetWriterTest {
 
     private fun fixtureDirectory(): File? {
         val path = System.getenv("APEXVIEW_HEVC_FIXTURE_DIR")
+        return if (path.isNullOrBlank()) null else File(path)
+    }
+
+    private fun tileFixtureDirectory(): File? {
+        val path = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
         return if (path.isNullOrBlank()) null else File(path)
     }
 
