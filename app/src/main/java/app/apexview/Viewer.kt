@@ -1024,11 +1024,11 @@ private fun TvOverlayPending(
             Text(title, style = Type.subhead.copy(color = Ink.primary, fontWeight = FontWeight.Bold))
             Text(status, style = Type.footnote.copy(color = Ink.secondary), maxLines = 2)
             Text(decoderDiagnostic, style = Type.caption.copy(color = Ink.secondary), maxLines = 2)
-            diagnostics.takeLast(5).forEach { line ->
+            diagnostics.takeLast(4).forEach { line ->
                 Text(
                     line,
                     style = Type.caption.copy(color = Ink.secondary),
-                    maxLines = 2,
+                    maxLines = 1,
                 )
             }
         }
