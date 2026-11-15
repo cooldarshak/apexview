@@ -4,8 +4,9 @@ package app.apexview.tiled
  * Reads the picture-identity and reference-picture portion of HEVC slice_segment_header().
  *
  * The parser stops after temporal-MVP and SAO flags. It does not parse weighted prediction,
- * deblocking, entry-point offsets, extensions or CABAC data, and it never rewrites slice headers.
- * Unsupported predicted short-term RPS and non-zero layer IDs are rejected.
+ * per-slice deblocking overrides, entry-point offsets, slice-header extensions or CABAC data,
+ * and it never rewrites slice headers. Predicted short-term RPS is expanded; non-zero layer IDs
+ * and unsupported syntax are rejected.
  */
 internal object HevcSliceHeaderParser {
     data class ReferencePicture(
