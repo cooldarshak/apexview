@@ -214,7 +214,7 @@ class CmafBoxInspectorTest {
         val entry = byteArrayOf(0, 0x19, 1, 8) + ByteArray(16)
         val sgpd = box("sgpd", byteArrayOf(1,0,0,0) + ascii("seig") + int(0) + int(1) +
             int(entry.size) + entry)
-        val sbgp = box("sbgp", byteArrayOf(0,0,0,0) + ascii("seig") + int(1) + int(2) + int(1))
+        val sbgp = box("sbgp", byteArrayOf(0,0,0,0) + ascii("seig") + int(1) + int(2) + int(0x10001))
         val report = CmafBoxInspector.inspect(
             init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + sgpd + sbgp))
         )
@@ -229,6 +229,33 @@ class CmafBoxInspectorTest {
         assertEquals(1, group.entries.single().cryptByteBlock)
         assertEquals(9, group.entries.single().skipByteBlock)
         assertEquals(listOf(CmafBoxInspector.SampleGroupRun(2, 1)), group.runs)
+    }
+
+    @Test fun resolvesTrackLevelSeigDescriptionFromFragmentSbgpIndex() {
+        val entry = byteArrayOf(0, 0x19, 1, 8) + ByteArray(16)
+        val trackSgpd = box(
+            "sgpd",
+            byteArrayOf(1,0,0,0) + ascii("seig") + int(0) + int(1) + int(entry.size) + entry
+        )
+        val init = fragmentedInitSegment(
+            trackId = 64, timescale = 90000, includeEncryption = true, trackSeig = trackSgpd
+        )
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(64))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(2) + int(3000) + int(3000))
+        val sbgp = box("sbgp", byteArrayOf(0,0,0,0) + ascii("seig") + int(1) + int(2) + int(1))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + sbgp))
+        )
+        val track = report.tracks.single()
+        val fragment = report.fragments.single()
+        assertTrue(report.errors.toString(), report.errors.isEmpty())
+        assertTrue(track.seigSampleGroupDescriptionStructureComplete)
+        assertEquals(1, track.seigSampleGroupDescription!!.entries.size)
+        assertTrue(fragment.sampleGroupEncryptionStructureComplete)
+        assertEquals(1, fragment.sampleGroupEncryptionMetadata!!.entries.single().entryIndex)
+        assertEquals(listOf(CmafBoxInspector.SampleGroupRun(2, 1)),
+            fragment.sampleGroupEncryptionMetadata.runs)
     }
 
     @Test fun parsesSeigConstantIvSizeWithoutRetainingConstantIvBytes() {
@@ -448,7 +475,8 @@ class CmafBoxInspectorTest {
         trackId: Int,
         timescale: Int,
         includeTrex: Boolean = true,
-        includeEncryption: Boolean = false
+        includeEncryption: Boolean = false,
+        trackSeig: ByteArray = ByteArray(0)
     ): ByteArray {
         val tkhd = box("tkhd", byteArrayOf(0,0,0,7) +
             int(0) + int(0) + int(trackId) + int(0) + ByteArray(60))
@@ -467,7 +495,7 @@ class CmafBoxInspectorTest {
             visualSampleEntry("hvc1", 1920, 1080)
         }
         val stsd = box("stsd", byteArrayOf(0,0,0,0) + int(1) + sampleEntry)
-        val minf = box("minf", box("stbl", stsd))
+        val minf = box("minf", box("stbl", stsd + trackSeig))
         val trak = box("trak", tkhd + box("mdia", mdhd + hdlr + minf))
         val mvex = if (includeTrex) box("mvex", box("trex",
             byteArrayOf(0,0,0,0) + int(trackId) + int(1) + int(0) + int(0) + int(0)
