@@ -1,6 +1,8 @@
 package app.apexview
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.os.Build
 import android.view.LayoutInflater
 import android.view.RoundedCorner
@@ -372,6 +374,8 @@ fun ViewerScreen(app: AppState) {
             // Tile-test diagnostics belong to the whole test surface, not the first feed.
             // This keeps both selected feed reports readable in side-by-side layouts.
             if (app.layoutMode == LayoutMode.TILE_TEST) {
+                val context = LocalContext.current
+                val inspectorText = HevcFeedProfileCapture.diagnostic
                 Box(
                     Modifier
                         .align(Alignment.BottomStart)
@@ -380,12 +384,31 @@ fun ViewerScreen(app: AppState) {
                         .zIndex(1.6e9f)
                         .background(Color.Black.copy(alpha = 0.78f))
                         .padding(horizontal = 12.dp, vertical = 8.dp)
-                        .verticalScroll(rememberScrollState())
                 ) {
-                    Text(
-                        HevcFeedProfileCapture.diagnostic,
-                        style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow)
-                    )
+                    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "F1 STREAM INSPECTOR",
+                                style = Type.caption.copy(color = Ink.secondary, fontWeight = FontWeight.Bold)
+                            )
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                "COPY REPORT",
+                                style = Type.caption.copy(color = Ink.primary, fontWeight = FontWeight.Bold),
+                                modifier = Modifier
+                                    .pressable {
+                                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                        clipboard.setPrimaryClip(ClipData.newPlainText("ApexView HEVC stream diagnostics", inspectorText))
+                                        android.widget.Toast.makeText(context, "Inspector report copied", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                            )
+                        }
+                        Text(
+                            inspectorText,
+                            style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow)
+                        )
+                    }
                 }
             }
             // Above every tile (their z grows by one per touch), below the controls.
