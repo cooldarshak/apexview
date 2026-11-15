@@ -82,15 +82,16 @@ class HevcFragmentCompatibilityTest {
         assertFalse(result.compatible)
     }
 
-    @Test fun rejectsDifferentRawParameterSetNalsEvenWhenParsedMetadataIsUnavailable() {
+    @Test fun doesNotRequireIndependentSourceParameterSetBytesToBeIdentical() {
         val firstConfig = config(listOf("vps:aa", "sps:bb", "pps:cc"))
-        val secondConfig = config(listOf("vps:aa", "sps:bb", "pps:dd"))
+        val secondConfig = config(listOf("vps:11", "sps:22", "pps:33"))
         val firstTrack = track(90000).copy(hevcConfiguration = firstConfig)
         val secondTrack = track(90000).copy(hevcConfiguration = secondConfig)
         val timed = fragment(90000, 0,
             listOf(CmafBoxInspector.SampleTiming(0, 0, 3000, 0)))
         val result = HevcFragmentCompatibility.compare(firstTrack, timed, secondTrack, timed)
-        assertTrue(result.reasons.any { it.contains("Raw VPS/SPS/PPS NAL bytes differ") })
+        assertFalse(result.reasons.any { it.contains("Raw VPS/SPS/PPS NAL bytes differ") })
+        assertTrue(result.reasons.any { it.contains("Exactly one parsed VPS, SPS and PPS") })
         assertFalse(result.compatible)
     }
 

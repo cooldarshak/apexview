@@ -1,68 +1,158 @@
 package app.apexview.tiled
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HevcParameterSetCompatibilityTest {
-    @Test fun acceptsIdenticalFullyRepresentedTiledParameterSets() {
-        val first = fixture()
-        val second = fixture()
-        val result = HevcParameterSetCompatibility.compare(
-            first.vps, first.sps, first.pps, second.vps, second.sps, second.pps
+    @Test fun acceptsIndependentNonTiledSourcePicturesAsCellsInANewOutputGrid() {
+        val first = fixture(tilesEnabled = false)
+        val second = fixture(tilesEnabled = false).withDifferentParameterSetIds()
+
+        val parameterResult = compare(first, second)
+        assertTrue(parameterResult.reasons.toString(), parameterResult.compatible)
+
+        val cellA = fullCell(first, "channel-1004")
+        val cellB = fullCell(second, "channel-1009")
+        val sourceResult = HevcSourceCellCompatibility.compare(cellA, cellB)
+        assertTrue(sourceResult.reasons.toString(), sourceResult.compatible)
+
+        val output = HevcOutputGridValidator.validate(
+            HevcOutputGridDimensions(columns = 2, rows = 1),
+            listOf(
+                HevcOutputCellPlacement(cellA, column = 0, row = 0),
+                HevcOutputCellPlacement(cellB, column = 1, row = 0)
+            )
         )
-        assertTrue(result.reasons.toString(), result.compatible)
+        assertTrue(output.reasons.toString(), output.compatible)
+        assertNotNull(output.geometry)
+        assertEquals(2560, output.geometry!!.codedWidth)
+        assertEquals(720, output.geometry.codedHeight)
+        assertEquals(40, output.geometry.pictureWidthInCtbs)
+        assertEquals(12, output.geometry.pictureHeightInCtbs)
+        assertEquals(listOf(20, 20), output.geometry.tileColumnWidthsInCtbs)
+        assertEquals(listOf(12), output.geometry.tileRowHeightsInCtbs)
     }
 
-    @Test fun rejectsAnySpsProfileOrPpsGeometryDifference() {
-        val first = fixture()
-        val changedProfile = first.sps.copy(
-            profileTierLevel = first.sps.profileTierLevel.copy(levelIdc = 120)
+    @Test fun allowsDifferentValidSourcePpsTileLayoutsWithoutConfusingThemWithOutputGrid() {
+        val fullPicture = fixture(tilesEnabled = false)
+        val sourceWithTwoTiles = fixture(tilesEnabled = true)
+        val result = compare(fullPicture, sourceWithTwoTiles)
+        assertTrue(result.reasons.toString(), result.compatible)
+
+        val tileCell = HevcSourceCellSelection(
+            picture = picture(sourceWithTwoTiles, "channel-tiled"),
+            leftCtb = 0,
+            topCtb = 0,
+            widthInCtbs = 10,
+            heightInCtbs = 12
+        )
+        assertTrue(
+            HevcSourceCellCompatibility.validateSelection(tileCell).toString(),
+            HevcSourceCellCompatibility.validateSelection(tileCell).isEmpty()
+        )
+    }
+
+    @Test fun rejectsSourceCellsWithDifferentGeometryWhenTheyCannotMapToTheSameOutputCell() {
+        val first = fixture(tilesEnabled = false)
+        val secondBase = fixture(tilesEnabled = false)
+        val secondSps = secondBase.sps.copy(
+            width = 960,
+            height = 540,
+            displayWidth = 960,
+            displayHeight = 540,
+            picWidthInCtbs = 15,
+            picHeightInCtbs = 9
+        )
+        val secondPps = secondBase.pps.copy(
+            tileColumnWidthsInCtbs = listOf(15),
+            tileRowHeightsInCtbs = listOf(9)
+        )
+        val second = secondBase.copy(sps = secondSps, pps = secondPps)
+
+        // Different source picture sizes are allowed at the parameter-set layer. The selected
+        // cells must still map to equal coded dimensions before an output grid can be formed.
+        assertTrue(compare(first, second).reasons.toString(), compare(first, second).compatible)
+        val output = HevcOutputGridValidator.validate(
+            HevcOutputGridDimensions(2, 1),
+            listOf(
+                HevcOutputCellPlacement(fullCell(first, "feed-a"), 0, 0),
+                HevcOutputCellPlacement(fullCell(second, "feed-b"), 1, 0)
+            )
+        )
+        assertFalse(output.compatible)
+        assertTrue(output.reasons.any { it.contains("different CTB dimensions") ||
+            it.contains("different coded pixel dimensions") })
+    }
+
+    @Test fun rejectsDifferentCtbSizeBitDepthChromaAndProfileConstraints() {
+        val f = fixture(tilesEnabled = false)
+
+        val differentCtb = f.sps.copy(ctbSize = 32, log2CtbSize = 5)
+        val ctbResult = HevcParameterSetCompatibility.compare(
+            f.vps, f.sps, f.pps, f.vps, differentCtb, f.pps
+        )
+        assertFalse(ctbResult.compatible)
+        assertTrue(ctbResult.reasons.any { it.contains("CTB sizes differ") })
+
+        val bitDepth = f.sps.copy(bitDepthLuma = f.sps.bitDepthLuma + 2)
+        val bitDepthResult = HevcParameterSetCompatibility.compare(
+            f.vps, f.sps, f.pps, f.vps, bitDepth, f.pps
+        )
+        assertFalse(bitDepthResult.compatible)
+        assertTrue(bitDepthResult.reasons.any { it.contains("bit-depth") })
+
+        val chroma = f.sps.copy(chromaFormatIdc = 2)
+        val chromaResult = HevcParameterSetCompatibility.compare(
+            f.vps, f.sps, f.pps, f.vps, chroma, f.pps
+        )
+        assertFalse(chromaResult.compatible)
+        assertTrue(chromaResult.reasons.any { it.contains("chroma-format") })
+
+        val profile = f.sps.copy(
+            profileTierLevel = f.sps.profileTierLevel.copy(profileIdc = 2)
         )
         val profileResult = HevcParameterSetCompatibility.compare(
-            first.vps, first.sps, first.pps, first.vps, changedProfile, first.pps
+            f.vps, f.sps, f.pps, f.vps, profile, f.pps
         )
         assertFalse(profileResult.compatible)
-        assertTrue(profileResult.reasons.any { it.contains("SPS metadata differs") })
-
-        val changedGeometry = first.pps.copy(numTileColumns = first.pps.numTileColumns + 1)
-        val geometryResult = HevcParameterSetCompatibility.compare(
-            first.vps, first.sps, first.pps, first.vps, first.sps, changedGeometry
-        )
-        assertFalse(geometryResult.compatible)
-        assertTrue(geometryResult.reasons.any { it.contains("PPS metadata differs") })
+        assertTrue(profileResult.reasons.any { it.contains("profile or tier") })
     }
 
-    @Test fun rejectsSameParameterSetsWhenTileGeometryIsOutsideTheAssemblerProfile() {
-        val f = fixture()
-        val fourColumns = f.pps.copy(
-            numTileColumns = 4,
-            tileColumnWidthsInCtbs = listOf(5, 5, 5, 5)
+    @Test fun acceptsDifferentLevelIdsButRejectsDifferentReferenceAndTimingStructures() {
+        val f = fixture(tilesEnabled = false)
+        val otherLevel = f.sps.copy(
+            profileTierLevel = f.sps.profileTierLevel.copy(levelIdc = 123)
         )
-        val fourColumnResult = HevcParameterSetCompatibility.compare(
-            f.vps, f.sps, fourColumns, f.vps, f.sps, fourColumns
+        val levelResult = HevcParameterSetCompatibility.compare(
+            f.vps, f.sps, f.pps, f.vps, otherLevel, f.pps
         )
-        assertFalse(fourColumnResult.compatible)
-        assertTrue(fourColumnResult.reasons.any { it.contains("2-column by 1-row") })
+        assertTrue(levelResult.reasons.toString(), levelResult.compatible)
 
-        val unevenColumns = f.pps.copy(tileColumnWidthsInCtbs = listOf(8, 12))
-        val unevenResult = HevcParameterSetCompatibility.compare(
-            f.vps, f.sps, unevenColumns, f.vps, f.sps, unevenColumns
+        val differentPocWidth = f.sps.copy(log2MaxPicOrderCntLsb = f.sps.log2MaxPicOrderCntLsb + 1)
+        val pocResult = HevcParameterSetCompatibility.compare(
+            f.vps, f.sps, f.pps, f.vps, differentPocWidth, f.pps
         )
-        assertFalse(unevenResult.compatible)
-        assertTrue(unevenResult.reasons.any { it.contains("uniform, full-picture 2x1") })
+        assertFalse(pocResult.compatible)
+        assertTrue(pocResult.reasons.any { it.contains("POC widths") })
 
-        val missingGeometry = f.pps.copy(tileColumnWidthsInCtbs = null)
-        val missingResult = HevcParameterSetCompatibility.compare(
-            f.vps, f.sps, missingGeometry, f.vps, f.sps, missingGeometry
+        val differentReferences = f.sps.copy(
+            shortTermRefPicSets = listOf(
+                HevcParameterSets.ShortTermRefPicSet(
+                    negative = listOf(HevcParameterSets.ReferenceDelta(-1, true)),
+                    positive = emptyList()
+                )
+            )
         )
-        assertFalse(missingResult.compatible)
-        assertTrue(missingResult.reasons.any { it.contains("tile geometry is missing") })
-    }
+        val referenceResult = HevcParameterSetCompatibility.compare(
+            f.vps, f.sps, f.pps, f.vps, differentReferences, f.pps
+        )
+        assertFalse(referenceResult.compatible)
+        assertTrue(referenceResult.reasons.any { it.contains("reference-picture structures") })
 
-    @Test fun acceptsIdenticalParsedVuiAndRejectsVuiOrSpsExtensionDifferences() {
-        val f = fixture()
-        val vuiMetadata = HevcParameterSets.VuiMetadata(
+        val vui = HevcParameterSets.VuiMetadata(
             aspectRatioIdc = null,
             sarWidth = null,
             sarHeight = null,
@@ -73,36 +163,48 @@ class HevcParameterSetCompatibilityTest {
             matrixCoefficients = 3,
             timingInfoPresent = true,
             numUnitsInTick = 1,
-            timeScale = 25,
+            timeScale = 50,
             hrdParametersPresent = false,
             bitstreamRestrictionPresent = false
         )
-        val vui = f.sps.copy(vuiParametersPresent = true, vuiMetadata = vuiMetadata)
-        val identicalVuiResult = HevcParameterSetCompatibility.compare(
-            f.vps, vui, f.pps, f.vps, vui, f.pps
+        val timed = f.sps.copy(vuiParametersPresent = true, vuiMetadata = vui)
+        val differentTiming = timed.copy(vuiMetadata = vui.copy(timeScale = 25))
+        val timingResult = HevcParameterSetCompatibility.compare(
+            f.vps, timed, f.pps, f.vps, differentTiming, f.pps
         )
-        assertTrue(identicalVuiResult.reasons.toString(), identicalVuiResult.compatible)
+        assertFalse(timingResult.compatible)
+        assertTrue(timingResult.reasons.any { it.contains("VUI or picture-timing") })
+    }
 
-        val changedVui = vui.copy(vuiMetadata = vuiMetadata.copy(timeScale = 50))
-        val changedVuiResult = HevcParameterSetCompatibility.compare(
-            f.vps, vui, f.pps, f.vps, changedVui, f.pps
-        )
-        assertFalse(changedVuiResult.compatible)
-        assertTrue(changedVuiResult.reasons.any { it.contains("SPS metadata differs") })
+    @Test fun rejectsCroppedPicturesInvalidTileGeometryAndUnsupportedSliceSyntax() {
+        val f = fixture(tilesEnabled = false)
 
-        val unsupportedSpsExtension = vui.copy(spsExtensionPresent = true)
-        val spsExtensionResult = HevcParameterSetCompatibility.compare(
-            f.vps, unsupportedSpsExtension, f.pps, f.vps, unsupportedSpsExtension, f.pps
+        val crop = f.sps.copy(
+            conformanceWindowLeft = 1,
+            displayWidth = f.sps.width - 2
         )
-        assertFalse(spsExtensionResult.compatible)
-        assertTrue(spsExtensionResult.reasons.any { it.contains("SPS extension") })
+        val cropResult = HevcParameterSetCompatibility.compare(
+            f.vps, crop, f.pps, f.vps, crop, f.pps
+        )
+        assertFalse(cropResult.compatible)
+        assertTrue(cropResult.reasons.any { it.contains("Conformance-window crops") })
 
-        val extension = f.pps.copy(extensionPresent = true)
-        val extensionResult = HevcParameterSetCompatibility.compare(
-            f.vps, f.sps, extension, f.vps, f.sps, extension
+        val malformedTiles = f.pps.copy(
+            tilesEnabled = true,
+            uniformTileSpacing = false,
+            numTileColumns = 2,
+            numTileRows = 1,
+            explicitColumnWidthsMinus1 = listOf(4),
+            explicitRowHeightsMinus1 = emptyList(),
+            tileColumnWidthsInCtbs = listOf(5, 5),
+            tileRowHeightsInCtbs = listOf(12),
+            loopFilterAcrossTiles = true
         )
-        assertFalse(extensionResult.compatible)
-        assertTrue(extensionResult.reasons.any { it.contains("PPS extensions") })
+        val tileResult = HevcParameterSetCompatibility.compare(
+            f.vps, f.sps, malformedTiles, f.vps, f.sps, malformedTiles
+        )
+        assertFalse(tileResult.compatible)
+        assertTrue(tileResult.reasons.any { it.contains("does not cover its complete source picture") })
 
         val wavefront = f.pps.copy(entropyCodingSyncEnabled = true)
         val wavefrontResult = HevcParameterSetCompatibility.compare(
@@ -110,35 +212,102 @@ class HevcParameterSetCompatibilityTest {
         )
         assertFalse(wavefrontResult.compatible)
         assertTrue(wavefrontResult.reasons.any { it.contains("Wavefront") })
+
+        val deblockingOverride = f.pps.copy(deblockingFilterOverrideEnabled = true)
+        val deblockingResult = HevcParameterSetCompatibility.compare(
+            f.vps, f.sps, deblockingOverride, f.vps, f.sps, deblockingOverride
+        )
+        assertFalse(deblockingResult.compatible)
+        assertTrue(deblockingResult.reasons.any { it.contains("deblocking overrides") })
     }
 
-    @Test fun rejectsMissingOrNonTiledParameterSets() {
-        val f = fixture()
+    @Test fun rejectsInvalidOutputPlacementsAndDimensionOverflow() {
+        val f = fixture(tilesEnabled = false)
+        val a = fullCell(f, "feed-a")
+        val b = fullCell(f, "feed-b")
+
+        val duplicate = HevcOutputGridValidator.validate(
+            HevcOutputGridDimensions(2, 1),
+            listOf(
+                HevcOutputCellPlacement(a, 0, 0),
+                HevcOutputCellPlacement(b, 0, 0)
+            )
+        )
+        assertFalse(duplicate.compatible)
+        assertTrue(duplicate.reasons.any { it.contains("duplicate") || it.contains("unfilled") })
+
+        val tooWideSps = f.sps.copy(
+            width = 32768,
+            displayWidth = 32768,
+            picWidthInCtbs = 512
+        )
+        val tooWidePps = f.pps.copy(
+            tileColumnWidthsInCtbs = listOf(512)
+        )
+        val tooWide = f.copy(sps = tooWideSps, pps = tooWidePps)
+        val overflow = HevcOutputGridValidator.validate(
+            HevcOutputGridDimensions(2, 1),
+            listOf(
+                HevcOutputCellPlacement(fullCell(tooWide, "wide-a"), 0, 0),
+                HevcOutputCellPlacement(fullCell(tooWide, "wide-b"), 1, 0)
+            )
+        )
+        assertFalse(overflow.compatible)
+        assertTrue(overflow.reasons.any { it.contains("exceed supported HEVC bounds") })
+    }
+
+    @Test fun rejectsMissingParameterSetsAndAcceptsDifferentSourceParameterSetIds() {
+        val f = fixture(tilesEnabled = false)
         val missing = HevcParameterSetCompatibility.compare(
             null, f.sps, f.pps, f.vps, f.sps, f.pps
         )
         assertFalse(missing.compatible)
         assertTrue(missing.reasons.any { it.contains("VPS is missing") })
 
-        val noTiles = f.pps.copy(tilesEnabled = false)
-        val result = HevcParameterSetCompatibility.compare(
-            f.vps, f.sps, noTiles, f.vps, f.sps, noTiles
-        )
-        assertFalse(result.compatible)
-        assertTrue(result.reasons.any { it.contains("must declare HEVC tiles") })
+        val reidentified = f.withDifferentParameterSetIds()
+        val result = compare(f, reidentified)
+        assertTrue(result.reasons.toString(), result.compatible)
     }
 
     private data class Fixture(
         val vps: HevcParameterSets.VpsMetadata,
         val sps: HevcParameterSets.SpsMetadata,
         val pps: HevcParameterSets.PpsMetadata
+    ) {
+        fun withDifferentParameterSetIds() = copy(
+            vps = vps.copy(vpsId = (vps.vpsId + 1) % 16),
+            sps = sps.copy(vpsId = (sps.vpsId + 1) % 16, spsId = (sps.spsId + 1) % 16),
+            pps = pps.copy(ppsId = (pps.ppsId + 1) % 64, spsId = (pps.spsId + 1) % 16)
+        )
+    }
+
+    private fun compare(first: Fixture, second: Fixture) =
+        HevcParameterSetCompatibility.compare(
+            first.vps, first.sps, first.pps, second.vps, second.sps, second.pps
+        )
+
+    private fun picture(f: Fixture, id: String) = HevcSourcePicture(
+        feed = HevcSourceFeedIdentity(id),
+        geometry = HevcSourcePictureGeometry.from(f.sps),
+        parameterSets = HevcSourceParameterSets(f.vps, f.sps, f.pps)
     )
 
-    private fun fixture(): Fixture {
+    private fun fullCell(f: Fixture, id: String): HevcSourceCellSelection {
+        val sps = f.sps
+        return HevcSourceCellSelection(
+            picture = picture(f, id),
+            leftCtb = 0,
+            topCtb = 0,
+            widthInCtbs = sps.picWidthInCtbs,
+            heightInCtbs = sps.picHeightInCtbs
+        )
+    }
+
+    private fun fixture(tilesEnabled: Boolean): Fixture {
         val vps = HevcParameterSets.parseVps(nal(32, BitWriter().apply {
             write(1, 4); write(1, 1); write(1, 1); write(0, 6)
             write(0, 3); write(1, 1); write(0xffff, 16)
-            write(0, 8); write(0, 32); write(0, 32); write(0, 16); write(0, 8)
+            write(0, 8 + 32 + 32 + 16 + 8) // profile-tier-level
             write(1, 1) // ordering info present
             writeUe(4); writeUe(2); writeUe(0)
             write(0, 6); writeUe(0) // layer sets
@@ -146,13 +315,13 @@ class HevcParameterSetCompatibilityTest {
             write(0, 1) // no VPS extension
         }.finish()))
         val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
-        val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits(tilesEnabled)), sps)
         return Fixture(vps, sps, pps)
     }
 
     private fun spsBits(): ByteArray = BitWriter().apply {
         write(1, 4); write(0, 3); write(1, 1)
-        write(0, 8 + 32 + 4 + 44 + 8) // general PTL
+        write(0, 8 + 32 + 4 + 44 + 8)
         writeUe(0); writeUe(1) // SPS id, 4:2:0
         writeUe(1280); writeUe(720); write(0, 1) // dimensions, no crop
         writeUe(0); writeUe(0); writeUe(4) // bit depth, POC width
@@ -171,7 +340,7 @@ class HevcParameterSetCompatibilityTest {
         write(0, 1) // no SPS extension
     }.finish()
 
-    private fun ppsBits(): ByteArray = BitWriter().apply {
+    private fun ppsBits(tilesEnabled: Boolean): ByteArray = BitWriter().apply {
         writeUe(0); writeUe(0) // PPS and SPS ids
         write(0, 1); write(0, 1); write(0, 3) // dependent slices, output flag, extra bits
         write(0, 1); write(0, 1) // sign hiding and CABAC init
@@ -179,9 +348,12 @@ class HevcParameterSetCompatibilityTest {
         write(0, 1); write(0, 1); write(0, 1) // constrained intra, transform skip, CU QP delta
         writeSe(0); writeSe(0); write(0, 1) // chroma QP offsets, slice offsets flag
         write(0, 1); write(0, 1); write(0, 1) // weighted pred/bipred, transquant bypass
-        write(1, 1); write(0, 1) // tiles enabled, entropy sync disabled
-        writeUe(1); writeUe(0) // two columns, one row
-        write(1, 1); write(1, 1) // uniform tile spacing, loop filter across tiles
+        write(if (tilesEnabled) 1 else 0, 1)
+        write(0, 1) // entropy coding sync disabled
+        if (tilesEnabled) {
+            writeUe(1); writeUe(0) // two columns, one row
+            write(1, 1); write(1, 1) // uniform tile spacing, loop filter across tiles
+        }
         write(1, 1) // loop filter across slices
         write(0, 1) // no deblocking control
         write(0, 1) // no PPS scaling-list data

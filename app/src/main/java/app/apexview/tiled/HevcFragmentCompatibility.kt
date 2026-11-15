@@ -116,28 +116,24 @@ internal object HevcFragmentCompatibility {
             if (firstConfig.parameterSetFingerprints.isEmpty() ||
                 secondConfig.parameterSetFingerprints.isEmpty()) {
                 reasons += "Raw VPS/SPS/PPS NAL fingerprints are missing"
-            } else if (firstConfig.parameterSetFingerprints != secondConfig.parameterSetFingerprints) {
-                reasons += "Raw VPS/SPS/PPS NAL bytes differ"
             }
-            val configFieldsMatch =
+            // Independent source encoders are expected to produce different parameter-set bytes.
+            // Parsed source syntax is checked below; WP2 generates fresh output parameter sets.
+            val sourceConfigFieldsMatch =
                 firstConfig.configurationVersion == secondConfig.configurationVersion &&
                 firstConfig.profileSpace == secondConfig.profileSpace &&
                 firstConfig.tierFlag == secondConfig.tierFlag &&
                 firstConfig.profileIdc == secondConfig.profileIdc &&
                 firstConfig.compatibilityFlags == secondConfig.compatibilityFlags &&
                 firstConfig.constraintIndicatorFlags == secondConfig.constraintIndicatorFlags &&
-                firstConfig.levelIdc == secondConfig.levelIdc &&
-                firstConfig.minSpatialSegmentationIdc == secondConfig.minSpatialSegmentationIdc &&
-                firstConfig.parallelismType == secondConfig.parallelismType &&
                 firstConfig.chromaFormat == secondConfig.chromaFormat &&
                 firstConfig.bitDepthLuma == secondConfig.bitDepthLuma &&
                 firstConfig.bitDepthChroma == secondConfig.bitDepthChroma &&
-                firstConfig.averageFrameRate == secondConfig.averageFrameRate &&
-                firstConfig.constantFrameRate == secondConfig.constantFrameRate &&
                 firstConfig.temporalLayers == secondConfig.temporalLayers &&
-                firstConfig.temporalIdNested == secondConfig.temporalIdNested &&
-                firstConfig.nalLengthSize == secondConfig.nalLengthSize
-            if (!configFieldsMatch) reasons += "HEVC decoder configuration fields differ"
+                firstConfig.temporalIdNested == secondConfig.temporalIdNested
+            if (!sourceConfigFieldsMatch) {
+                reasons += "HEVC source profile, chroma, bit-depth or temporal-layer constraints differ"
+            }
 
             if (firstConfig.vps.size != 1 || firstConfig.sps.size != 1 || firstConfig.pps.size != 1 ||
                 secondConfig.vps.size != 1 || secondConfig.sps.size != 1 || secondConfig.pps.size != 1) {
