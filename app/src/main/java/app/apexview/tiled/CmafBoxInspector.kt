@@ -209,11 +209,17 @@ internal object CmafBoxInspector {
     private data class TfhdDefaults(val trackId: Long, val defaultSampleDuration: Long?)
 
     private fun readTrackId(p: ByteBuffer): Long? {
-        if (p.remaining() < 16) return null
+        if (p.remaining() < 4) return null
         val version = u8(p)
+        val creationAndModificationBytes = when (version) {
+            0 -> 8
+            1 -> 16
+            else -> return null
+        }
+        if (p.remaining() < 3 + creationAndModificationBytes + 4) return null
         p.position(p.position() + 3) // FullBox flags
-        p.position(p.position() + if (version == 1) 16 else 8)
-        return if (p.remaining() >= 4) u32(p) else null
+        p.position(p.position() + creationAndModificationBytes)
+        return u32(p)
     }
 
     private fun parseTrexDefaults(
@@ -289,6 +295,8 @@ internal object CmafBoxInspector {
         require(p.remaining() >= 8) { "Truncated tfhd box" }
         u8(p) // version
         val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
+        val knownFlags = 0x000001 or 0x000002 or 0x000008 or 0x000010 or 0x000020
+        require((flags and knownFlags.inv()) == 0) { "Unsupported tfhd flags" }
         val trackId = u32(p)
         if ((flags and 0x000001) != 0) skip(p, 8) // base_data_offset
         if ((flags and 0x000002) != 0) skip(p, 4) // sample_description_index
@@ -303,11 +311,13 @@ internal object CmafBoxInspector {
         require(p.remaining() >= 8) { "Truncated tfdt box" }
         val version = u8(p)
         p.position(p.position() + 3) // FullBox flags
-        return when (version) {
+        val time = when (version) {
             0 -> u32(p)
             1 -> readUnsignedLong(p)
             else -> throw IllegalArgumentException("Unsupported tfdt version $version")
         }
+        require(!p.hasRemaining()) { "Unexpected trailing bytes in tfdt box" }
+        return time
     }
 
     private fun parseTrun(
@@ -320,6 +330,8 @@ internal object CmafBoxInspector {
         val version = u8(p)
         require(version in 0..1) { "Unsupported trun version $version" }
         val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
+        val knownFlags = 0x000001 or 0x000004 or 0x000100 or 0x000200 or 0x000400 or 0x000800
+        require((flags and knownFlags.inv()) == 0) { "Unsupported trun flags" }
         val countLong = u32(p)
         require(countLong <= MAX_FRAGMENT_SAMPLES.toLong() - output.size) {
             "Fragment sample count exceeds limit"
@@ -347,13 +359,18 @@ internal object CmafBoxInspector {
 
     private fun parseSencSummary(p: ByteBuffer): SencSummary {
         require(p.remaining() >= 8) { "Truncated senc box" }
-        u8(p) // version
+        val version = u8(p)
+        require(version == 0) { "Unsupported senc version $version" }
         val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
+        require((flags and 0xfffffc) == 0) { "Unsupported senc flags" }
+        // Flag 0 carries algorithm_id, per-sample IV size and a 16-byte KID override.
+        // Skip that metadata without retaining the KID.
+        if ((flags and 0x000001) != 0) skip(p, 20)
         val sampleCount = u32(p)
         require(sampleCount <= MAX_FRAGMENT_SAMPLES.toLong()) {
             "senc sample count exceeds limit"
         }
-        // The IV and optional subsample encryption data remain deliberately unread.
+        // The per-sample IV and optional subsample maps remain deliberately unread.
         return SencSummary(sampleCount, (flags and 0x000002) != 0)
     }
 
