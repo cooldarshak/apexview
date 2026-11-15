@@ -16,13 +16,25 @@ internal object HevcParameterSets {
         val temporalIdNesting: Boolean
     )
 
+    data class ProfileTierLevelFields(
+        val profileSpace: Int,
+        val tierFlag: Boolean,
+        val profileIdc: Int,
+        val compatibilityFlags: Long,
+        val constraintIndicatorFlags: Long
+    )
+
     data class ProfileTierLevel(
         val profileSpace: Int,
         val tierFlag: Boolean,
         val profileIdc: Int,
         val compatibilityFlags: Long,
         val constraintIndicatorFlags: Long,
-        val levelIdc: Int
+        val levelIdc: Int,
+        val subLayerProfilePresent: List<Boolean>,
+        val subLayerLevelPresent: List<Boolean>,
+        val subLayerProfiles: List<ProfileTierLevelFields?>,
+        val subLayerLevelIdcs: List<Int?>
     )
 
     data class ReferenceDelta(val deltaPoc: Int, val usedByCurrent: Boolean)
@@ -456,12 +468,17 @@ internal object HevcParameterSets {
         return HevcBitReader(HevcBitstream.ebspToRbsp(nal.copyOfRange(2, nal.size)))
     }
 
-    private fun parseProfileTierLevel(bits: HevcBitReader, maxSubLayersMinus1: Int): ProfileTierLevel {
+    private fun parseProfileTierLevelFields(bits: HevcBitReader): ProfileTierLevelFields {
         val profileSpace = bits.readBits(2)
         val tierFlag = bits.readBit() != 0
         val profileIdc = bits.readBits(5)
         val compatibility = bits.readBits(32).toLong() and 0xffffffffL
-        val constraints = (bits.readBits(32).toLong() shl 16) or bits.readBits(16).toLong()
+        val constraints = ((bits.readBits(32).toLong() and 0xffffffffL) shl 16) or bits.readBits(16).toLong()
+        return ProfileTierLevelFields(profileSpace, tierFlag, profileIdc, compatibility, constraints)
+    }
+
+    private fun parseProfileTierLevel(bits: HevcBitReader, maxSubLayersMinus1: Int): ProfileTierLevel {
+        val general = parseProfileTierLevelFields(bits)
         val levelIdc = bits.readBits(8)
         val profilePresent = BooleanArray(maxSubLayersMinus1)
         val levelPresent = BooleanArray(maxSubLayersMinus1)
@@ -472,11 +489,17 @@ internal object HevcParameterSets {
         if (maxSubLayersMinus1 > 0) {
             for (i in maxSubLayersMinus1 until 8) bits.skipBits(2)
         }
+        val subLayerProfiles = MutableList<ProfileTierLevelFields?>(maxSubLayersMinus1) { null }
+        val subLayerLevels = MutableList<Int?>(maxSubLayersMinus1) { null }
         for (i in 0 until maxSubLayersMinus1) {
-            if (profilePresent[i]) bits.skipBits(8 + 32 + 48)
-            if (levelPresent[i]) bits.skipBits(8)
+            if (profilePresent[i]) subLayerProfiles[i] = parseProfileTierLevelFields(bits)
+            if (levelPresent[i]) subLayerLevels[i] = bits.readBits(8)
         }
-        return ProfileTierLevel(profileSpace, tierFlag, profileIdc, compatibility, constraints, levelIdc)
+        return ProfileTierLevel(
+            general.profileSpace, general.tierFlag, general.profileIdc,
+            general.compatibilityFlags, general.constraintIndicatorFlags, levelIdc,
+            profilePresent.toList(), levelPresent.toList(), subLayerProfiles, subLayerLevels
+        )
     }
 
     private fun readUe(bits: HevcBitReader, max: Int, field: String): Int {
