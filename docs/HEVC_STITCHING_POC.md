@@ -1,6 +1,6 @@
 # HEVC stitching proof of concept
 
-Status: Phase 1.5, investigation and parser foundation.
+Status: Phase 1.6, investigation and parser foundation with inter-predicted short-term RPS support.
 
 ## Goal
 
@@ -63,6 +63,12 @@ The first prototype must not modify FeedPlayer or the production playback graph.
 ## Current synthetic fixture boundary
 
 The fixture generator uses FFmpeg/libx265 to create two disposable, time-aligned HEVC test streams. It checks codec, dimensions, frame rate and frame count. It does not split a single encoded picture into independent tile streams, rewrite slice headers, combine streams, or prove decoder interoperability. The next engineering gate is bitstream-level SPS/PPS, POC, tile geometry and slice-header analysis before any stitcher is attempted.
+
+### Predicted short-term RPS parser update
+
+The bounded parser now expands inter-predicted short-term reference picture sets into explicit negative and positive POC deltas, including `delta_idx_minus1` for an inline slice-header RPS. The derivation follows the ordering in H.265 7.4.8 and retains both `used_by_curr_pic` and `use_delta` semantics. Synthetic tests cover an SPS-predicted set and an inline predicted set that references an earlier SPS entry.
+
+This closes one parser gap only. It does not establish complete H.265 conformance or slice-header rewrite safety; weighted prediction, entry-point offsets, extension syntax, fuller parameter-set comparison, real tiled fixtures, and one-decoder reconstruction remain outstanding.
 
 ## Current known risk
 
