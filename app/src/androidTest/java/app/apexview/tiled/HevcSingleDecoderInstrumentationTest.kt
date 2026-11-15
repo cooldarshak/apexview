@@ -4,7 +4,12 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaCodecList
+import android.media.ImageReader
+import android.graphics.ImageFormat
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.SystemClock
+import java.util.concurrent.atomic.AtomicInteger
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -18,8 +23,9 @@ import org.junit.runner.RunWith
 /**
  * Device-side proof harness for the synthetic tile reassembly only.
  *
- * This does not touch F1 streams, licences or the production player graph. One MediaCodec
- * decoder is created for the reassembled synthetic MP4 and all output frames are drained.
+ * This does not touch F1 streams, licences or the production player graph. One hardware
+ * MediaCodec decoder renders the reassembled synthetic MP4 to one ImageReader Surface.
+ * The listener counts the actual frames delivered to that single output surface.
  */
 @RunWith(AndroidJUnit4::class)
 class HevcSingleDecoderInstrumentationTest {
@@ -32,6 +38,21 @@ class HevcSingleDecoderInstrumentationTest {
         }
 
         val extractor = MediaExtractor()
+        val outputReader = ImageReader.newInstance(
+            EXPECTED_WIDTH, EXPECTED_HEIGHT, ImageFormat.YUV_420_888, MAX_SURFACE_IMAGES
+        )
+        val outputThread = HandlerThread("ApexviewHevcOutputSurface").apply { start() }
+        val renderedFrames = AtomicInteger(0)
+        outputReader.setOnImageAvailableListener({ reader ->
+            while (true) {
+                val image = reader.acquireNextImage() ?: break
+                try {
+                    renderedFrames.incrementAndGet()
+                } finally {
+                    image.close()
+                }
+            }
+        }, Handler(outputThread.looper))
         var decoder: MediaCodec? = null
         var decoderInstancesCreated = 0
         try {
@@ -68,7 +89,7 @@ class HevcSingleDecoderInstrumentationTest {
             decoderInstancesCreated++
             val decoderName = decoder.name
             assertTrue("Created decoder is not hardware accelerated", decoder.codecInfo.isHardwareAccelerated)
-            decoder.configure(format, null, null, 0)
+            decoder.configure(format, outputReader.surface, null, 0)
             decoder.start()
 
             var inputEnded = false
@@ -115,16 +136,31 @@ class HevcSingleDecoderInstrumentationTest {
                     }
                     MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
                     else -> if (outputIndex >= 0) {
-                        if (info.size > 0) decodedFrames++
                         val eos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
-                        decoder.releaseOutputBuffer(outputIndex, false)
-                        if (eos) outputEnded = true
+                        if (eos) {
+                            decoder.releaseOutputBuffer(outputIndex, false)
+                            outputEnded = true
+                        } else {
+                            decodedFrames++
+                            // Render each decoded picture into the same ImageReader Surface.
+                            decoder.releaseOutputBuffer(outputIndex, true)
+                        }
                     }
                 }
             }
 
             assertTrue("Decoder did not reach end of stream before timeout", outputEnded)
-            assertEquals("Unexpected decoded frame count", EXPECTED_FRAMES, decodedFrames)
+            val renderDeadline = SystemClock.elapsedRealtime() + RENDER_TIMEOUT_MS
+            while (renderedFrames.get() < EXPECTED_FRAMES &&
+                SystemClock.elapsedRealtime() < renderDeadline) {
+                SystemClock.sleep(RENDER_POLL_MS)
+            }
+            assertEquals("Unexpected decoder output-frame count", EXPECTED_FRAMES, decodedFrames)
+            assertEquals(
+                "Unexpected number of frames rendered to the single ImageReader Surface",
+                EXPECTED_FRAMES,
+                renderedFrames.get()
+            )
             assertEquals("Exactly one decoder instance must be created", 1, decoderInstancesCreated)
             assertEquals(EXPECTED_WIDTH, outputWidth)
             assertEquals(EXPECTED_HEIGHT, outputHeight)
@@ -135,8 +171,9 @@ class HevcSingleDecoderInstrumentationTest {
             Log.i(
                 LOG_TAG,
                 "SYNTHETIC_SINGLE_HARDWARE_DECODER_PASS decoder=$decoderName " +
-                    "hardwareAccelerated=true decoderInstancesCreated=$decoderInstancesCreated frames=$decodedFrames " +
-                    "dimensions=${outputWidth}x${outputHeight} metrics={$metricSummary}"
+                    "hardwareAccelerated=true decoderInstancesCreated=$decoderInstancesCreated " +
+                    "outputSurfacesCreated=1 outputSurfaceFrames=${renderedFrames.get()} " +
+                    "decoderFrames=$decodedFrames dimensions=${outputWidth}x${outputHeight} metrics={$metricSummary}"
             )
         } finally {
             try {
@@ -146,6 +183,9 @@ class HevcSingleDecoderInstrumentationTest {
             }
             decoder?.release()
             extractor.release()
+            outputReader.close()
+            outputThread.quitSafely()
+            outputThread.join(2_000)
             sampleFile.delete()
         }
     }
@@ -157,5 +197,8 @@ class HevcSingleDecoderInstrumentationTest {
         const val EXPECTED_HEIGHT = 128
         const val CODEC_TIMEOUT_US = 10_000L
         const val DECODE_TIMEOUT_MS = 60_000L
+        const val RENDER_TIMEOUT_MS = 15_000L
+        const val RENDER_POLL_MS = 10L
+        const val MAX_SURFACE_IMAGES = 8
     }
 }

@@ -122,7 +122,11 @@ adb logcat -d -s ApexviewHevcProof:I
 
 A valid device result must contain
 `SYNTHETIC_SINGLE_HARDWARE_DECODER_PASS`, `hardwareAccelerated=true`,
-`decoderInstancesCreated=1`, `frames=50`, and `dimensions=256x128`. A Gradle compile,
+`decoderInstancesCreated=1`, `outputSurfacesCreated=1`,
+`outputSurfaceFrames=50`, `decoderFrames=50`, and `dimensions=256x128`.
+The instrumentation test uses an ImageReader-backed output Surface and counts the 50
+frames actually delivered to that one surface, rather than configuring MediaCodec with
+a null output surface. A Gradle compile,
 APK upload, emulator run, or FFmpeg decode is not a substitute for this physical-device
 runtime result. If the device has no hardware HEVC decoder, the test fails rather than
 silently accepting a software fallback.
