@@ -33,6 +33,7 @@ class HevcSingleDecoderInstrumentationTest {
 
         val extractor = MediaExtractor()
         var decoder: MediaCodec? = null
+        var decoderInstancesCreated = 0
         try {
             extractor.setDataSource(sampleFile.absolutePath)
             val trackIndex = (0 until extractor.trackCount).firstOrNull { index ->
@@ -50,14 +51,21 @@ class HevcSingleDecoderInstrumentationTest {
             // second MediaCodec for this media sequence.
             val hardwareCodecInfo = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
                 .firstOrNull { codec ->
-                    !codec.isEncoder && codec.isHardwareAccelerated &&
-                        codec.supportedTypes.any { it.equals(mime, ignoreCase = true) }
+                    if (codec.isEncoder || !codec.isHardwareAccelerated ||
+                        codec.supportedTypes.none { it.equals(mime, ignoreCase = true) }) {
+                        false
+                    } else {
+                        runCatching {
+                            codec.getCapabilitiesForType(mime!!).isFormatSupported(format)
+                        }.getOrDefault(false)
+                    }
                 }
             assertNotNull("No hardware-accelerated HEVC decoder is available", hardwareCodecInfo)
             assertTrue("Selected HEVC codec is not hardware accelerated", hardwareCodecInfo!!.isHardwareAccelerated)
 
             // Exactly one hardware decoder is instantiated for the complete 50-frame stream.
             decoder = MediaCodec.createByCodecName(hardwareCodecInfo.name)
+            decoderInstancesCreated++
             val decoderName = decoder.name
             assertTrue("Created decoder is not hardware accelerated", decoder.codecInfo.isHardwareAccelerated)
             decoder.configure(format, null, null, 0)
@@ -66,8 +74,8 @@ class HevcSingleDecoderInstrumentationTest {
             var inputEnded = false
             var outputEnded = false
             var decodedFrames = 0
-            var outputWidth: Int? = null
-            var outputHeight: Int? = null
+            var outputWidth: Int? = format.getInteger(MediaFormat.KEY_WIDTH)
+            var outputHeight: Int? = format.getInteger(MediaFormat.KEY_HEIGHT)
             val info = MediaCodec.BufferInfo()
             val deadline = SystemClock.elapsedRealtime() + DECODE_TIMEOUT_MS
 
@@ -117,6 +125,7 @@ class HevcSingleDecoderInstrumentationTest {
 
             assertTrue("Decoder did not reach end of stream before timeout", outputEnded)
             assertEquals("Unexpected decoded frame count", EXPECTED_FRAMES, decodedFrames)
+            assertEquals("Exactly one decoder instance must be created", 1, decoderInstancesCreated)
             assertEquals(EXPECTED_WIDTH, outputWidth)
             assertEquals(EXPECTED_HEIGHT, outputHeight)
             val codecMetrics = decoder.metrics
@@ -126,7 +135,7 @@ class HevcSingleDecoderInstrumentationTest {
             Log.i(
                 LOG_TAG,
                 "SYNTHETIC_SINGLE_HARDWARE_DECODER_PASS decoder=$decoderName " +
-                    "hardwareAccelerated=true decoderInstancesCreated=1 frames=$decodedFrames " +
+                    "hardwareAccelerated=true decoderInstancesCreated=$decoderInstancesCreated frames=$decodedFrames " +
                     "dimensions=${outputWidth}x${outputHeight} metrics={$metricSummary}"
             )
         } finally {

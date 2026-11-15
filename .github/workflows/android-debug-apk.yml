@@ -133,13 +133,14 @@ jobs:
           echo "Persistent APK signing key configured." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Assemble debug APK
+        id: assemble_apks
         if: always() && !cancelled()
         run: |
           chmod +x ./gradlew
           ./gradlew --no-daemon assembleDebug assembleDebugAndroidTest
 
       - name: Upload debug APK
-        if: success() && env.APK_SIGNING_READY == 'true'
+        if: always() && steps.assemble_apks.outcome == 'success' && env.APK_SIGNING_READY == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: apexview-custom-debug-apk
@@ -147,8 +148,17 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Upload temporary POC debug APK for device proof
+        if: always() && steps.assemble_apks.outcome == 'success' && env.APK_SIGNING_READY != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apexview-hevc-single-decoder-base-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Upload single-decoder instrumentation APK
-        if: success()
+        if: always() && steps.assemble_apks.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: apexview-hevc-single-decoder-instrumentation
