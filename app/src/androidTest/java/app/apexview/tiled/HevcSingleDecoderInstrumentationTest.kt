@@ -31,11 +31,21 @@ import org.junit.runner.RunWith
 class HevcSingleDecoderInstrumentationTest {
     @Test
     fun decodesReassembledSyntheticTilePictureSequenceWithOneMediaCodec() {
-        val context = InstrumentationRegistry.getInstrumentation().context
-        val sampleFile = File(context.cacheDir, "apexview-hevc-single-decoder-proof.mp4")
-        context.assets.open("reassembled.mp4").use { input ->
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val assetContext = instrumentation.context
+        // Instrumentation package cache directories are not guaranteed to exist on every
+        // Android build. Keep the fixture in the target app sandbox and create the directory
+        // explicitly before opening the output stream.
+        val targetCacheDir = instrumentation.targetContext.cacheDir
+        assertTrue(
+            "Unable to create target app cache directory: ${targetCacheDir.absolutePath}",
+            targetCacheDir.isDirectory || targetCacheDir.mkdirs()
+        )
+        val sampleFile = File(targetCacheDir, "apexview-hevc-single-decoder-proof.mp4")
+        assetContext.assets.open("reassembled.mp4").use { input ->
             sampleFile.outputStream().use { output -> input.copyTo(output) }
         }
+        assertTrue("Synthetic HEVC fixture was not copied to app cache", sampleFile.isFile && sampleFile.length() > 0L)
 
         val extractor = MediaExtractor()
         val outputReader = ImageReader.newInstance(
