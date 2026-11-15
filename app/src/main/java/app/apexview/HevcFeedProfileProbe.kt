@@ -19,6 +19,7 @@ import app.apexview.tiled.HevcParameterSets
 internal object HevcFeedProfileProbe {
     data class Snapshot(
         val label: String,
+        val group: String,
         val summary: String,
         val mime: String?,
         val codecs: String?,
@@ -32,7 +33,7 @@ internal object HevcFeedProfileProbe {
 
     fun summarize(trackType: Int, format: Format): String = inspect(trackType, format).summary
 
-    fun inspect(trackType: Int, format: Format, label: String = "feed"): Snapshot {
+    fun inspect(trackType: Int, format: Format, label: String = "feed", group: String = "session"): Snapshot {
         val initializationData = format.initializationData
         val nals = initializationData.flatMap { csd ->
             runCatching { HevcBitstream.splitAnnexB(csd) }.getOrElse {
@@ -106,6 +107,7 @@ internal object HevcFeedProfileProbe {
             "vps={$vpsSummary} sps={$spsSummary} pps={$ppsSummary}"
         return Snapshot(
             label = label,
+            group = group,
             summary = summary,
             mime = format.sampleMimeType,
             codecs = format.codecs,
@@ -126,11 +128,16 @@ internal object HevcFeedProfileProbe {
  */
 internal object HevcFeedProfileCapture {
     private val profiles = linkedMapOf<String, HevcFeedProfileProbe.Snapshot>()
+    private var activeGroup: String? = null
     var diagnostic by mutableStateOf("HEVC_PROFILE_WAITING_FOR_FEED_A_AND_FEED_B")
         private set
 
     @Synchronized
     fun record(snapshot: HevcFeedProfileProbe.Snapshot) {
+        if (activeGroup != snapshot.group) {
+            profiles.clear()
+            activeGroup = snapshot.group
+        }
         profiles.remove(snapshot.label)
         profiles[snapshot.label] = snapshot
         while (profiles.size > 2) profiles.remove(profiles.keys.first())
@@ -138,7 +145,8 @@ internal object HevcFeedProfileCapture {
     }
 
     @Synchronized
-    fun updateDrm(label: String, securityLevel: String, keysLoaded: Boolean) {
+    fun updateDrm(group: String, label: String, securityLevel: String, keysLoaded: Boolean) {
+        if (activeGroup != group) return
         val current = profiles[label] ?: return
         profiles[label] = current.copy(
             drmSecurityLevel = securityLevel.takeIf { it.isNotBlank() },
