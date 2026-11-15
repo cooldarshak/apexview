@@ -561,8 +561,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         suspend fun fetchOptionalStage(path: String, label: String = path.substringAfterLast('/')): String? =
             runCatching { fetchStage(path, label) }.getOrNull()
 
-        progress("GET ${ref.year}/Index.json · matching session metadata…")
-        val (path, type) = findSession(ref, watchedUtc)
+        val index = JSONObject(fetchStage("${ref.year}/Index.json"))
+        progress("Matching meeting/session keys in F1 index…")
+        val (path, type) = findSession(ref, watchedUtc, index)
         progress("Archive session resolved: $path · type=$type")
         val drivers = parseDrivers(JSONObject(fetchStage(path + "DriverList.json")))
         val heartbeat = fetchStage(path + "Heartbeat.jsonStream")
@@ -1024,9 +1025,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
     }
 
     /** Finds the session's archive path by F1's session key, else by meeting and session name. */
-    private fun findSession(ref: SessionRef, watchedUtc: Long?): Pair<String, String> {
+    private fun findSession(ref: SessionRef, watchedUtc: Long?, index: JSONObject): Pair<String, String> {
         val lookupUtc = archiveLookupTime(watchedUtc, ref.sessionStartUtcMs)
-        val meetings = JSONObject(fetch("${ref.year}/Index.json")).getJSONArray("Meetings")
+        val meetings = index.getJSONArray("Meetings")
         var byName: Pair<String, String>? = null
         var byNameLength = 0
         // The meeting's sessions with their start times, for when the name doesn't say which;
