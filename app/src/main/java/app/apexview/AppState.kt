@@ -1525,7 +1525,24 @@ class AppState(
                             "ApexviewTiming",
                             "content=$contentId archive clock=${watched ?: "unavailable"} catalogStart=${ref!!.sessionStartUtcMs ?: "unavailable"}",
                         )
-                        val loaded = LiveTimingArchive(token!!, userAgent).load(ref!!, watched)
+                        val loaded = LiveTimingArchive(token!!, userAgent).load(
+                            ref = ref!!,
+                            watchedUtc = watched,
+                            onProgress = { status ->
+                                if (timingContentId == contentId) mapStatus = status
+                            },
+                            onPartial = { partial ->
+                                if (timingContentId == contentId) {
+                                    rememberOutline(partial)
+                                    showTiming(partial)
+                                    mapStatus = when {
+                                        partial.outline.size >= 8 -> null
+                                        partial.tracks.isEmpty() -> "Loading track positions…"
+                                        else -> "Track data loaded; waiting for a usable circuit outline…"
+                                    }
+                                }
+                            },
+                        )
                         if (timingContentId != contentId) return@launch
                         rememberOutline(loaded)
                         showTiming(loaded)
