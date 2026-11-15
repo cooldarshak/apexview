@@ -40,7 +40,7 @@ class CmafBoxInspectorTest {
     }
 
     @Test fun readsFragmentDecodeAndPresentationTimesWithoutSamplePayloads() {
-        val init = fragmentedInitSegment(trackId = 7, timescale = 90000)
+        val init = fragmentedInitSegment(trackId = 7, timescale = 90000, includeEncryption = true)
         val tfhd = box("tfhd", byteArrayOf(0, 0, 0, 0) + int(7))
         val tfdt = box("tfdt", byteArrayOf(0, 0, 0, 0) + int(9000))
         val trun = box("trun",
@@ -48,7 +48,11 @@ class CmafBoxInspectorTest {
                 int(3000) + int(120) +
                 int(3000) + int(-60)
         )
-        val senc = box("senc", byteArrayOf(0, 0, 0, 2) + int(2) + ByteArray(20))
+        val sampleOneEncryption = ByteArray(16) + short(1) + short(3) + int(100)
+        val sampleTwoEncryption = ByteArray(16) + short(2) +
+            short(0) + int(50) + short(5) + int(90)
+        val senc = box("senc", byteArrayOf(0, 0, 0, 2) + int(2) +
+            sampleOneEncryption + sampleTwoEncryption)
         val traf = box("traf", tfhd + tfdt + trun + senc +
             box("saiz", byteArrayOf(0, 0, 0, 0) + byteArrayOf(16) + int(2)) +
             box("saio", byteArrayOf(0, 0, 0, 0) + int(1) + int(100)) +
@@ -74,10 +78,40 @@ class CmafBoxInspectorTest {
         assertTrue(timing.sampleEncryptionBoxPresent)
         assertTrue(timing.subsampleEncryptionSignalled!!)
         assertEquals(2L, timing.sampleEncryptionCount)
+        assertTrue(timing.sampleEncryptionStructureComplete)
+        assertNull(timing.sencOverrideIvSize)
+        assertEquals(listOf(16, 16), timing.sampleEncryptionMetadata.map { it.ivSize })
+        assertEquals(listOf(1, 2), timing.sampleEncryptionMetadata.map { it.subsampleRanges!!.size })
+        assertEquals(
+            listOf(3, 0, 5),
+            timing.sampleEncryptionMetadata.flatMap { it.subsampleRanges!! }.map { it.clearBytes }
+        )
+        assertEquals(
+            listOf(100L, 50L, 90L),
+            timing.sampleEncryptionMetadata.flatMap { it.subsampleRanges!! }.map { it.encryptedBytes }
+        )
         assertTrue(timing.sampleAuxiliarySizesPresent)
         assertTrue(timing.sampleAuxiliaryOffsetsPresent)
         assertTrue(timing.sampleGroupDescriptionPresent)
         assertTrue(timing.sampleToGroupPresent)
+    }
+
+
+    @Test fun doesNotGuessSampleIvLengthsWhenTencDefaultsAreMissing() {
+        val init = fragmentedInitSegment(trackId = 21, timescale = 90000)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(21))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(1) + int(3000))
+        // No senc override parameters are supplied, and the init has no tenc defaults.
+        val senc = box("senc", byteArrayOf(0,0,0,2) + int(1) + ByteArray(18))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + senc))
+        )
+        val fragment = report.fragments.single()
+        assertTrue(fragment.sampleEncryptionBoxPresent)
+        assertFalse(fragment.sampleEncryptionStructureComplete)
+        assertTrue(fragment.sampleEncryptionMetadata.isEmpty())
+        assertTrue(report.errors.isEmpty())
     }
 
     @Test fun acceptsDefaultBaseIsMoofTfhdFlagAndReadsFragmentTiming() {
@@ -266,14 +300,28 @@ class CmafBoxInspectorTest {
     private fun fragmentedInitSegment(
         trackId: Int,
         timescale: Int,
-        includeTrex: Boolean = true
+        includeTrex: Boolean = true,
+        includeEncryption: Boolean = false
     ): ByteArray {
         val tkhd = box("tkhd", byteArrayOf(0,0,0,7) +
             int(0) + int(0) + int(trackId) + int(0) + ByteArray(60))
         val mdhd = box("mdhd", byteArrayOf(0,0,0,0) +
             int(0) + int(0) + int(timescale) + int(0) + short(0) + short(0))
         val hdlr = box("hdlr", byteArrayOf(0,0,0,0) + int(0) + ascii("vide") + ByteArray(12))
-        val trak = box("trak", tkhd + box("mdia", mdhd + hdlr))
+        val sampleEntry = if (includeEncryption) {
+            val tenc = box("tenc", byteArrayOf(1, 0, 0, 0, 0, 0x19, 1, 16) + ByteArray(16))
+            val protection = box("sinf",
+                box("frma", ascii("hvc1")) +
+                    box("schm", byteArrayOf(0,0,0,0) + ascii("cbcs") + int(0x00010000)) +
+                    box("schi", tenc)
+            )
+            visualSampleEntry("encv", 1920, 1080, protection)
+        } else {
+            visualSampleEntry("hvc1", 1920, 1080)
+        }
+        val stsd = box("stsd", byteArrayOf(0,0,0,0) + int(1) + sampleEntry)
+        val minf = box("minf", box("stbl", stsd))
+        val trak = box("trak", tkhd + box("mdia", mdhd + hdlr + minf))
         val mvex = if (includeTrex) box("mvex", box("trex",
             byteArrayOf(0,0,0,0) + int(trackId) + int(1) + int(0) + int(0) + int(0)
         )) else ByteArray(0)

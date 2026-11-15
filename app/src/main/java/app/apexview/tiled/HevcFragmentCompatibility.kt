@@ -158,7 +158,31 @@ internal object HevcFragmentCompatibility {
             if (firstFragment.subsampleEncryptionSignalled != secondFragment.subsampleEncryptionSignalled) {
                 reasons += "Subsample encryption signalling differs"
             }
-            reasons += "Per-sample IV and subsample encryption maps are not yet validated"
+            val firstStructureComplete = firstFragment.sampleEncryptionStructureComplete &&
+                firstFragment.sampleEncryptionMetadata.size == firstFragment.sampleCount
+            val secondStructureComplete = secondFragment.sampleEncryptionStructureComplete &&
+                secondFragment.sampleEncryptionMetadata.size == secondFragment.sampleCount
+            if (!firstStructureComplete || !secondStructureComplete) {
+                reasons += "Per-sample IV/subsample encryption structure is incomplete"
+            } else {
+                if (firstFragment.subsampleEncryptionSignalled == true &&
+                    firstFragment.sampleEncryptionMetadata.any { it.subsampleRanges == null }) {
+                    reasons += "First fragment subsample map is incomplete"
+                }
+                if (secondFragment.subsampleEncryptionSignalled == true &&
+                    secondFragment.sampleEncryptionMetadata.any { it.subsampleRanges == null }) {
+                    reasons += "Second fragment subsample map is incomplete"
+                }
+                if (firstFragment.subsampleEncryptionSignalled == false &&
+                    firstFragment.sampleEncryptionMetadata.any { it.subsampleRanges != null }) {
+                    reasons += "First fragment has unexpected subsample entries"
+                }
+                if (secondFragment.subsampleEncryptionSignalled == false &&
+                    secondFragment.sampleEncryptionMetadata.any { it.subsampleRanges != null }) {
+                    reasons += "Second fragment has unexpected subsample entries"
+                }
+                reasons += "IV byte values and KID identity are not retained or compared"
+            }
         }
         if (firstFragment.sampleAuxiliarySizesPresent || secondFragment.sampleAuxiliarySizesPresent ||
             firstFragment.sampleAuxiliaryOffsetsPresent || secondFragment.sampleAuxiliaryOffsetsPresent) {
