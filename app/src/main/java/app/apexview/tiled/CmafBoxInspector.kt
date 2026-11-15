@@ -149,6 +149,12 @@ internal object CmafBoxInspector {
         /** Number of entries in stsd. The inspector currently parses entry 1 only. */
         val sampleDescriptionCount: Int = 1
     )
+    data class TrackFragmentDefaults(
+        val trackId: Long,
+        val defaultSampleDescriptionIndex: Long,
+        val defaultSampleDuration: Long?,
+        val defaultSampleSize: Long?
+    )
     data class Report(
         val majorBrand: String?,
         val compatibleBrands: List<String>,
@@ -156,7 +162,11 @@ internal object CmafBoxInspector {
         val tracks: List<TrackMetadata>,
         val fragments: List<FragmentMetadata>,
         val fragmented: Boolean,
-        val errors: List<String>
+        val errors: List<String>,
+        /** Sanitised trex defaults needed to interpret following fragments without retaining init bytes. */
+        val fragmentDefaults: List<TrackFragmentDefaults> = emptyList(),
+        /** False when [tracks] and [fragmentDefaults] were supplied from a preceding init response. */
+        val initializationSegmentPresent: Boolean = tracks.isNotEmpty()
     )
 
     private val containers = setOf("moov", "trak", "mdia", "minf", "stbl", "edts", "dinf", "mvex",
@@ -164,7 +174,7 @@ internal object CmafBoxInspector {
     private const val MAX_BOXES = 20_000
     private const val MAX_DEPTH = 12
 
-    fun inspect(data: ByteArray): Report {
+    fun inspect(data: ByteArray, priorInitialization: Report? = null): Report {
         require(data.size >= 8) { "Input is too small to contain an ISO-BMFF box" }
         val errors = mutableListOf<String>()
         val boxes = parseBoxes(data, 0, data.size, 0, intArrayOf(0), errors)
@@ -176,7 +186,11 @@ internal object CmafBoxInspector {
             while (ftyp.remaining() >= 4) brands += readFourCc(ftyp)
         }
         val moov = boxes.firstOrNull { it.type == "moov" }
-        val tracks = moov?.children?.filter { it.type == "trak" }?.map { track(data, it, errors) }.orEmpty()
+        val parsedTracks = moov?.children?.filter { it.type == "trak" }?.map { track(data, it, errors) }.orEmpty()
+        // Media fragments normally arrive in separate HTTP responses from the init segment. Reuse
+        // parsed, sanitised init metadata so fragment timing and encryption defaults can be checked
+        // without retaining or replaying any init/sample bytes.
+        val tracks = parsedTracks.ifEmpty { priorInitialization?.tracks.orEmpty() }
         val trackTimescales = tracks.mapNotNull { item ->
             val id = item.trackId
             val scale = item.timescale
@@ -190,7 +204,15 @@ internal object CmafBoxInspector {
         val trackMetadataById = tracks.mapNotNull { item ->
             item.trackId?.let { it to item }
         }.toMap()
-        val trexDefaults = moov?.let { parseTrexDefaults(data, it, errors) }.orEmpty()
+        val trexDefaults = if (moov != null) {
+            parseTrexDefaults(data, moov, errors)
+        } else {
+            priorInitialization?.fragmentDefaults.orEmpty().associate { item ->
+                item.trackId to TrexDefaults(
+                    item.defaultSampleDescriptionIndex, item.defaultSampleDuration, item.defaultSampleSize
+                )
+            }
+        }
         val fragments = boxes.filter { it.type == "moof" }.flatMap { moof ->
             val trafs = moof.children.filter { it.type == "traf" }
             trafs.mapIndexedNotNull { index, traf ->
@@ -205,9 +227,18 @@ internal object CmafBoxInspector {
                 }
             }
         }
-        return Report(major, brands, boxes.map { it.type }, tracks, fragments,
+        return Report(
+            major, brands, boxes.map { it.type }, tracks, fragments,
             boxes.any { it.type == "moof" } || boxes.any { it.type == "moov" && it.children.any { c -> c.type == "mvex" } },
-            errors)
+            errors,
+            fragmentDefaults = trexDefaults.map { (trackId, defaults) ->
+                TrackFragmentDefaults(
+                    trackId, defaults.defaultSampleDescriptionIndex,
+                    defaults.defaultSampleDuration, defaults.defaultSampleSize
+                )
+            },
+            initializationSegmentPresent = parsedTracks.isNotEmpty()
+        )
     }
 
     private fun track(data: ByteArray, trak: Box, errors: MutableList<String>): TrackMetadata {
