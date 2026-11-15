@@ -164,6 +164,7 @@ internal object HevcFeedProfileCapture {
     private val feedProgress = linkedMapOf<String, FeedProgress>()
     private data class CmafFeedProgress(
         val videoTracks: MutableMap<Long, CmafBoxInspector.TrackMetadata> = linkedMapOf(),
+        var initializationReport: CmafBoxInspector.Report? = null,
         val latestFragments: MutableMap<Long, CmafBoxInspector.FragmentMetadata> = linkedMapOf(),
         var initSegmentsObserved: Int = 0,
         var mediaFragmentsObserved: Int = 0,
@@ -222,6 +223,10 @@ internal object HevcFeedProfileCapture {
         activeGroup == group && tileTestLabels.size == 2 && label in tileTestLabels
 
     @Synchronized
+    fun cmafInitializationReport(group: String, label: String): CmafBoxInspector.Report? =
+        if (activeGroup == group) cmafProgress[label]?.initializationReport else null
+
+    @Synchronized
     fun recordCmafParseFailure(group: String, label: String) {
         if (!shouldCaptureCmafInit(group, label)) return
         cmafProgress.getOrPut(label) { CmafFeedProgress() }.parseFailures++
@@ -243,8 +248,9 @@ internal object HevcFeedProfileCapture {
             track.handler == "vide" && (track.hevcConfiguration != null ||
                 track.sampleEntry in setOf("hvc1", "hev1", "encv", "dvhe", "dvh1"))
         }
-        if (videoTracks.isNotEmpty()) {
+        if (report.initializationSegmentPresent && videoTracks.isNotEmpty()) {
             progress.initSegmentsObserved++
+            progress.initializationReport = report
             videoTracks.forEach { track ->
                 track.trackId?.let { progress.videoTracks[it] = track }
             }
