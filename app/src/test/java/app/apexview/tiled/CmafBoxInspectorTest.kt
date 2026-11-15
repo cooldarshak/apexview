@@ -54,7 +54,7 @@ class CmafBoxInspectorTest {
         val senc = box("senc", byteArrayOf(0, 0, 0, 2) + int(2) +
             sampleOneEncryption + sampleTwoEncryption)
         val traf = box("traf", tfhd + tfdt + trun + senc +
-            box("saiz", byteArrayOf(0, 0, 0, 0) + byteArrayOf(16) + int(2)) +
+            box("saiz", byteArrayOf(0, 0, 0, 0) + byteArrayOf(0) + int(2) + byteArrayOf(25, 27)) +
             box("saio", byteArrayOf(0, 0, 0, 0) + int(1) + int(100)) +
             box("sgpd", ByteArray(8)) + box("sbgp", ByteArray(8))
         )
@@ -96,8 +96,8 @@ class CmafBoxInspectorTest {
         assertTrue(timing.sampleAuxiliaryOffsetsPresent)
         assertTrue(timing.sampleAuxiliaryInfoStructureComplete)
         assertEquals(2L, timing.sampleAuxiliaryMetadata!!.saizSampleCount)
-        assertEquals(16, timing.sampleAuxiliaryMetadata.defaultSampleInfoSize)
-        assertEquals(listOf(16, 16), timing.sampleAuxiliaryMetadata.sampleInfoSizes)
+        assertEquals(0, timing.sampleAuxiliaryMetadata.defaultSampleInfoSize)
+        assertEquals(listOf(25, 27), timing.sampleAuxiliaryMetadata.sampleInfoSizes)
         assertEquals(listOf(100L), timing.sampleAuxiliaryMetadata.saioOffsets)
         assertTrue(timing.sampleGroupDescriptionPresent)
         assertTrue(timing.sampleToGroupPresent)
@@ -204,6 +204,46 @@ class CmafBoxInspectorTest {
         assertFalse(timing.timingComplete)
         assertEquals(listOf(null), timing.sampleTimings.map { it.durationTicks })
         assertEquals(listOf(null), timing.sampleTimings.map { it.sampleSizeBytes })
+    }
+
+    @Test fun parsesSeigSampleGroupEncryptionOverridesWithoutRetainingKidOrConstantIv() {
+        val init = fragmentedInitSegment(trackId = 61, timescale = 90000, includeEncryption = true)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(61))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(2) + int(3000) + int(3000))
+        val entry = byteArrayOf(0, 0x19, 1, 8) + ByteArray(16)
+        val sgpd = box("sgpd", byteArrayOf(1,0,0,0) + ascii("seig") + int(0) + int(1) +
+            int(entry.size) + entry)
+        val sbgp = box("sbgp", byteArrayOf(0,0,0,0) + ascii("seig") + int(1) + int(2) + int(1))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + sgpd + sbgp))
+        )
+        val fragment = report.fragments.single()
+        assertTrue(report.errors.toString(), report.errors.isEmpty())
+        assertTrue(fragment.sampleGroupEncryptionPresent)
+        assertTrue(fragment.sampleGroupEncryptionStructureComplete)
+        val group = fragment.sampleGroupEncryptionMetadata!!
+        assertEquals(1, group.entries.size)
+        assertTrue(group.entries.single().isProtected)
+        assertEquals(8, group.entries.single().perSampleIvSize)
+        assertEquals(1, group.entries.single().cryptByteBlock)
+        assertEquals(9, group.entries.single().skipByteBlock)
+        assertEquals(listOf(CmafBoxInspector.SampleGroupRun(2, 1)), group.runs)
+    }
+
+    @Test fun rejectsSeigMappingWithMissingDescriptionEntry() {
+        val init = fragmentedInitSegment(trackId = 62, timescale = 90000)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(62))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(1) + int(3000))
+        val sbgp = box("sbgp", byteArrayOf(0,0,0,0) + ascii("seig") + int(1) + int(1) + int(2))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + sbgp))
+        )
+        val fragment = report.fragments.single()
+        assertTrue(fragment.sampleGroupEncryptionPresent)
+        assertFalse(fragment.sampleGroupEncryptionStructureComplete)
+        assertTrue(report.errors.any { it.contains("seig") })
     }
 
     @Test fun recognisesDurationIsEmptyWithoutInventingSampleTimings() {

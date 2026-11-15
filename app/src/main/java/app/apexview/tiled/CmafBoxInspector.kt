@@ -70,6 +70,24 @@ internal object CmafBoxInspector {
         val sampleInfoSizes: List<Int>,
         val saioOffsets: List<Long>
     )
+    data class SeigProtectionEntry(
+        val entryIndex: Int,
+        val isProtected: Boolean,
+        val perSampleIvSize: Int,
+        val cryptByteBlock: Int,
+        val skipByteBlock: Int,
+        val constantIvSize: Int?
+    )
+    data class SampleGroupRun(
+        val sampleCount: Long,
+        val groupDescriptionIndex: Long
+    )
+    data class SampleGroupEncryptionMetadata(
+        val descriptionVersion: Int?,
+        val defaultSampleDescriptionIndex: Long,
+        val entries: List<SeigProtectionEntry>,
+        val runs: List<SampleGroupRun>
+    )
     data class FragmentMetadata(
         val trackId: Long,
         val timescale: Long?,
@@ -91,7 +109,10 @@ internal object CmafBoxInspector {
         val sencOverrideIvSize: Int? = null,
         val sampleEncryptionRangesCoverSamples: Boolean = false,
         val sampleAuxiliaryInfoStructureComplete: Boolean = false,
-        val sampleAuxiliaryMetadata: SampleAuxiliaryMetadata? = null
+        val sampleAuxiliaryMetadata: SampleAuxiliaryMetadata? = null,
+        val sampleGroupEncryptionPresent: Boolean = false,
+        val sampleGroupEncryptionStructureComplete: Boolean = true,
+        val sampleGroupEncryptionMetadata: SampleGroupEncryptionMetadata? = null
     )
     data class TrackMetadata(
         val trackId: Long?,
@@ -353,14 +374,25 @@ internal object CmafBoxInspector {
                 null
             }
         }
+        val sencAuxiliarySizesMatch = if (sencBox != null && saiz != null && senc?.structureComplete == true) {
+            senc.sampleCount == saiz.sampleCount &&
+                senc.samples.size == saiz.sampleInfoSizes.size &&
+                senc.samples.indices.all { index ->
+                    val sample = senc.samples[index]
+                    val expectedSize = sample.ivSize.toLong() +
+                        (sample.subsampleRanges?.let { 2L + 6L * it.size } ?: 0L)
+                    expectedSize == saiz.sampleInfoSizes[index].toLong()
+                }
+        } else true
         val sampleAuxiliaryInfoStructureComplete =
             saiz != null && saio != null &&
                 saiz.sampleCount == samples.size.toLong() &&
                 (saio.offsets.size == 1 || saio.offsets.size == samples.size) &&
                 saiz.auxiliaryInfoType == saio.auxiliaryInfoType &&
-                saiz.auxiliaryInfoParameter == saio.auxiliaryInfoParameter
+                saiz.auxiliaryInfoParameter == saio.auxiliaryInfoParameter &&
+                sencAuxiliarySizesMatch
         if ((saizBox != null || saioBox != null) && !sampleAuxiliaryInfoStructureComplete) {
-            errors += "saiz/saio structure is incomplete or inconsistent with the fragment sample count"
+            errors += "saiz/saio structure is incomplete or inconsistent with the fragment sample/encryption metadata"
         }
         val sampleAuxiliaryMetadata = if (saiz != null && saio != null) {
             SampleAuxiliaryMetadata(
@@ -372,6 +404,12 @@ internal object CmafBoxInspector {
                 saio.offsets
             )
         } else null
+        val sampleGroupEncryption = try {
+            parseSampleGroupEncryption(data, traf, samples.size, errors)
+        } catch (e: Exception) {
+            errors += "Sample-group encryption metadata could not be parsed: ${e.message ?: e.javaClass.simpleName}"
+            SampleGroupParseResult(present = true, complete = false, metadata = null)
+        }
         val sampleEncryptionRangesCoverSamples = senc?.let { summary ->
             if (!summary.structureComplete || summary.sampleCount != samples.size.toLong()) {
                 false
@@ -410,7 +448,10 @@ internal object CmafBoxInspector {
             sencOverrideIvSize = senc?.overrideIvSize,
             sampleEncryptionRangesCoverSamples = sampleEncryptionRangesCoverSamples,
             sampleAuxiliaryInfoStructureComplete = sampleAuxiliaryInfoStructureComplete,
-            sampleAuxiliaryMetadata = sampleAuxiliaryMetadata
+            sampleAuxiliaryMetadata = sampleAuxiliaryMetadata,
+            sampleGroupEncryptionPresent = sampleGroupEncryption.present,
+            sampleGroupEncryptionStructureComplete = sampleGroupEncryption.complete,
+            sampleGroupEncryptionMetadata = sampleGroupEncryption.metadata
         )
     }
 
@@ -532,6 +573,188 @@ internal object CmafBoxInspector {
         }
         require(!p.hasRemaining()) { "Unexpected trailing bytes in saio box" }
         return SaioMetadata(auxiliaryInfoType, auxiliaryInfoParameter, offsets)
+    }
+
+    private data class ParsedSeigDescription(
+        val version: Int,
+        val defaultSampleDescriptionIndex: Long,
+        val entries: List<SeigProtectionEntry>
+    )
+
+    private data class ParsedSeigMapping(
+        val runs: List<SampleGroupRun>
+    )
+
+    private data class SampleGroupParseResult(
+        val present: Boolean,
+        val complete: Boolean,
+        val metadata: SampleGroupEncryptionMetadata?
+    )
+
+    private fun parseSampleGroupEncryption(
+        data: ByteArray,
+        traf: Box,
+        sampleCount: Int,
+        errors: MutableList<String>
+    ): SampleGroupParseResult {
+        val sgpdBoxes = traf.children.filter { it.type == "sgpd" }
+        val sbgpBoxes = traf.children.filter { it.type == "sbgp" }
+        val descriptions = sgpdBoxes.mapNotNull { box ->
+            try { parseSeigSgpd(payload(data, box)) }
+            catch (e: Exception) {
+                errors += "seig sample-group descriptions could not be parsed"
+                null
+            }
+        }
+        val mappings = sbgpBoxes.mapNotNull { box ->
+            try { parseSeigSbgp(payload(data, box)) }
+            catch (e: Exception) {
+                errors += "seig sample-to-group mapping could not be parsed"
+                null
+            }
+        }
+        val present = descriptions.isNotEmpty() || mappings.isNotEmpty()
+        if (!present) return SampleGroupParseResult(false, true, null)
+        if (descriptions.size > 1 || mappings.size > 1) {
+            errors += "Multiple seig sample-group boxes are not supported"
+            return SampleGroupParseResult(true, false, null)
+        }
+
+        val description = descriptions.singleOrNull()
+        val mapping = mappings.singleOrNull()
+        val entries = description?.entries.orEmpty()
+        val defaultIndex = description?.defaultSampleDescriptionIndex ?: 0L
+        if (defaultIndex > entries.size.toLong()) {
+            errors += "seig default sample-description index is out of range"
+            return SampleGroupParseResult(true, false, null)
+        }
+
+        val runs = mapping?.runs?.toMutableList() ?: mutableListOf()
+        if (mapping == null && defaultIndex > 0 && sampleCount > 0) {
+            runs += SampleGroupRun(sampleCount.toLong(), defaultIndex)
+        }
+        if (mapping != null && runs.isEmpty() && sampleCount > 0) {
+            errors += "seig sample-to-group mapping is empty"
+            return SampleGroupParseResult(true, false, null)
+        }
+
+        var mappedSamples = 0L
+        val resolvedRuns = mutableListOf<SampleGroupRun>()
+        for (run in runs) {
+            require(run.sampleCount > 0) { "seig sample-to-group run has zero samples" }
+            mappedSamples = Math.addExact(mappedSamples, run.sampleCount)
+            require(mappedSamples <= MAX_FRAGMENT_SAMPLES.toLong()) {
+                "seig sample-to-group sample count exceeds limit"
+            }
+            val effectiveIndex = if (run.groupDescriptionIndex == 0L) defaultIndex else run.groupDescriptionIndex
+            require(effectiveIndex <= entries.size.toLong()) {
+                "seig mapping references a missing local or unsupported track-level description"
+            }
+            resolvedRuns += run.copy(groupDescriptionIndex = effectiveIndex)
+        }
+        if (mapping != null && mappedSamples != sampleCount.toLong()) {
+            errors += "seig sample-to-group mapping count does not match fragment samples"
+            return SampleGroupParseResult(true, false, null)
+        }
+        val metadata = SampleGroupEncryptionMetadata(
+            descriptionVersion = description?.version,
+            defaultSampleDescriptionIndex = defaultIndex,
+            entries = entries,
+            runs = resolvedRuns
+        )
+        return SampleGroupParseResult(true, true, metadata)
+    }
+
+    private fun parseSeigSgpd(p: ByteBuffer): ParsedSeigDescription? {
+        require(p.remaining() >= 8) { "Truncated sgpd box" }
+        val version = u8(p)
+        require(version in 0..2) { "Unsupported sgpd version $version" }
+        val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
+        require(flags == 0) { "Unsupported sgpd flags" }
+        val groupingType = readFourCc(p)
+        if (groupingType != "seig") return null
+        val defaultLength = if (version >= 1) u32(p) else 0L
+        val defaultIndex = if (version >= 2) u32(p) else 0L
+        val entryCount = u32(p)
+        require(entryCount <= MAX_FRAGMENT_SAMPLES.toLong()) { "sgpd entry count exceeds limit" }
+        val entries = ArrayList<SeigProtectionEntry>(entryCount.toInt())
+        repeat(entryCount.toInt()) { index ->
+            val parsed = if (version >= 1 && defaultLength == 0L) {
+                val descriptionLength = u32(p)
+                require(descriptionLength in 20L..256L) { "Invalid seig description length" }
+                val bytes = ByteArray(descriptionLength.toInt())
+                p.get(bytes)
+                val entryBuffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
+                val entry = parseSeigEntry(entryBuffer, index + 1)
+                entry
+            } else if (version >= 1 && defaultLength > 0L) {
+                require(defaultLength in 20L..256L) { "Invalid default seig description length" }
+                val bytes = ByteArray(defaultLength.toInt())
+                p.get(bytes)
+                val entryBuffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
+                parseSeigEntry(entryBuffer, index + 1)
+            } else {
+                parseSeigEntry(p, index + 1)
+            }
+            entries += parsed
+        }
+        require(!p.hasRemaining()) { "Unexpected trailing bytes in seig sgpd" }
+        return ParsedSeigDescription(version, defaultIndex, entries)
+    }
+
+    private fun parseSeigEntry(p: ByteBuffer, index: Int): SeigProtectionEntry {
+        require(p.remaining() >= 20) { "Truncated seig sample-group entry" }
+        val reserved = u8(p)
+        require(reserved == 0) { "Unsupported seig multi-key/reserved flags" }
+        val pattern = u8(p)
+        val cryptByteBlock = pattern ushr 4
+        val skipByteBlock = pattern and 0x0f
+        val protectedValue = u8(p)
+        require(protectedValue in 0..1) { "Invalid seig isProtected value" }
+        val perSampleIvSize = u8(p)
+        require(perSampleIvSize in setOf(0, 8, 16)) { "Unsupported seig per-sample IV size" }
+        skip(p, 16) // KID bytes are deliberately skipped and never retained.
+        val isProtected = protectedValue == 1
+        var constantIvSize: Int? = null
+        if (isProtected && perSampleIvSize == 0) {
+            val size = u8(p)
+            require(size == 8 || size == 16) { "Unsupported seig constant IV size" }
+            skip(p, size)
+            constantIvSize = size
+        }
+        if (!isProtected) {
+            require(perSampleIvSize == 0) { "Clear seig group must not specify a per-sample IV" }
+        }
+        return SeigProtectionEntry(
+            entryIndex = index,
+            isProtected = isProtected,
+            perSampleIvSize = perSampleIvSize,
+            cryptByteBlock = cryptByteBlock,
+            skipByteBlock = skipByteBlock,
+            constantIvSize = constantIvSize
+        )
+    }
+
+    private fun parseSeigSbgp(p: ByteBuffer): ParsedSeigMapping? {
+        require(p.remaining() >= 8) { "Truncated sbgp box" }
+        val version = u8(p)
+        require(version in 0..1) { "Unsupported sbgp version $version" }
+        val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
+        require(flags == 0) { "Unsupported sbgp flags" }
+        val groupingType = readFourCc(p)
+        if (groupingType != "seig") return null
+        if (version == 1) skip(p, 4) // grouping_type_parameter
+        val entryCount = u32(p)
+        require(entryCount <= MAX_FRAGMENT_SAMPLES.toLong()) { "sbgp entry count exceeds limit" }
+        val runs = ArrayList<SampleGroupRun>(entryCount.toInt())
+        repeat(entryCount.toInt()) {
+            val sampleCount = u32(p)
+            val groupDescriptionIndex = u32(p)
+            require(sampleCount > 0) { "sbgp run has zero sample_count" }
+            runs += SampleGroupRun(sampleCount, groupDescriptionIndex)
+        }
+        require(!p.hasRemaining()) { "Unexpected trailing bytes in seig sbgp" }
+        return ParsedSeigMapping(runs)
     }
 
     private data class SencSummary(
