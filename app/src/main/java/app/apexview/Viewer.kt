@@ -387,12 +387,12 @@ fun ViewerScreen(app: AppState) {
             if (!laptop && app.layoutMode == LayoutMode.TV && tvPlan != null) {
                 val status = app.mapStatus ?: "Waiting for timing data…"
                 if (app.towerOpen && (app.timing == null || app.timing?.laps?.isEmpty() == true)) {
-                    TvOverlayPending("TIMING", tvPlan.tower, status)
+                    TvOverlayPending("TIMING", tvPlan.tower, status, app.timingDiagnostics, app.tvDecoderDiagnostic)
                 }
                 if (app.mapMode == MapMode.TRACK &&
                     (app.timing == null || (app.timing?.outline?.size ?: 0) < 8)
                 ) {
-                    TvOverlayPending("TRACK MAP", tvPlan.map, status)
+                    TvOverlayPending("TRACK MAP", tvPlan.map, status, app.timingDiagnostics, app.tvDecoderDiagnostic)
                 }
             }
         }
@@ -999,9 +999,15 @@ private fun TileView(app: AppState, tile: Tile) {
     }
 }
 
-/** A visible TV placeholder while live/archive timing is being resolved. */
+/** A visible TV diagnostic panel while live/archive timing is being resolved. */
 @Composable
-private fun TvOverlayPending(title: String, area: Area, status: String) {
+private fun TvOverlayPending(
+    title: String,
+    area: Area,
+    status: String,
+    diagnostics: List<String>,
+    decoderDiagnostic: String,
+) {
     val density = LocalDensity.current
     Box(
         Modifier
@@ -1014,9 +1020,17 @@ private fun TvOverlayPending(title: String, area: Area, status: String) {
             .background(Color(0xE6101010))
             .padding(12.dp),
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Text(title, style = Type.subhead.copy(color = Ink.primary, fontWeight = FontWeight.Bold))
-            Text(status, style = Type.footnote.copy(color = Ink.secondary), maxLines = 3)
+            Text(status, style = Type.footnote.copy(color = Ink.secondary), maxLines = 2)
+            Text(decoderDiagnostic, style = Type.caption.copy(color = Ink.secondary), maxLines = 2)
+            diagnostics.takeLast(5).forEach { line ->
+                Text(
+                    line,
+                    style = Type.caption.copy(color = Ink.secondary),
+                    maxLines = 2,
+                )
+            }
         }
     }
 }
