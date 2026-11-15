@@ -323,6 +323,54 @@ internal object HevcFeedProfileCapture {
         return if (reasons.isEmpty()) "PASS" else "REJECT: ${reasons.distinct().joinToString("; ")}"
     }
 
+    private fun tileMetadataLines(profile: HevcFeedProfileProbe.Snapshot): List<String> {
+        if (profile.parsedPps.isEmpty()) {
+            val sps = profile.parsedSps.singleOrNull()
+            return listOf(
+                "${profile.label}: HEVC_TILE_METADATA pps=unavailable tilesEnabled=unavailable " +
+                    "numTileColumns=unavailable numTileRows=unavailable " +
+                    "ctbPictureWidthInCtbs=${sps?.picWidthInCtbs ?: "unavailable"} " +
+                    "ctbPictureHeightInCtbs=${sps?.picHeightInCtbs ?: "unavailable"} " +
+                    "tileColumnWidthsInCtbs=unavailable tileRowHeightsInCtbs=unavailable " +
+                    "deblockingFilterOverrideEnabled=unavailable"
+            )
+        }
+
+        return profile.parsedPps.sortedBy { it.ppsId }.map { pps ->
+            val matchingSps = profile.parsedSps.filter { it.spsId == pps.spsId }
+            val sps = matchingSps.singleOrNull()
+            "${profile.label}: HEVC_TILE_METADATA ppsId=${pps.ppsId} spsId=${pps.spsId} " +
+                "tilesEnabled=${pps.tilesEnabled} numTileColumns=${pps.numTileColumns} " +
+                "numTileRows=${pps.numTileRows} " +
+                "ctbPictureWidthInCtbs=${sps?.picWidthInCtbs ?: "unavailable"} " +
+                "ctbPictureHeightInCtbs=${sps?.picHeightInCtbs ?: "unavailable"} " +
+                "tileColumnWidthsInCtbs=${pps.tileColumnWidthsInCtbs ?: "unavailable"} " +
+                "tileRowHeightsInCtbs=${pps.tileRowHeightsInCtbs ?: "unavailable"} " +
+                "deblockingFilterOverrideEnabled=${pps.deblockingFilterOverrideEnabled} " +
+                "deblockingFilterControlPresent=${pps.deblockingFilterControlPresent}" +
+                if (matchingSps.size > 1) " spsMetadata=ambiguous" else ""
+        }
+    }
+
+    /**
+     * Compares every parsed PPS field, keyed by PPS id. This is parsed metadata equality,
+     * not a byte-for-byte comparison of the original PPS NAL units.
+     */
+    private fun parsedPpsStructuresIdentical(
+        first: HevcFeedProfileProbe.Snapshot,
+        second: HevcFeedProfileProbe.Snapshot
+    ): String {
+        if (first.parsedPps.isEmpty() || second.parsedPps.isEmpty()) {
+            return "UNKNOWN (one or both feeds have no parsed PPS)"
+        }
+        val firstById = first.parsedPps.associateBy { it.ppsId }
+        val secondById = second.parsedPps.associateBy { it.ppsId }
+        if (firstById.size != first.parsedPps.size || secondById.size != second.parsedPps.size) {
+            return "UNKNOWN (duplicate PPS ids)"
+        }
+        return (firstById == secondById).toString()
+    }
+
     private fun buildDiagnostic(): String {
         val captured = if (tileTestLabels.size == 2) {
             val selected = tileTestLabels.mapNotNull(profiles::get)
@@ -343,15 +391,16 @@ internal object HevcFeedProfileCapture {
         if (captured.size == 1) {
             val first = captured.single()
             val pending = feedProgress.keys.filter { it !in profiles }
-            return listOf(
+            return (listOf(
                 "HEVC_PROFILE_CAPTURED",
                 "${first.label}: ${first.mime ?: "?"} ${first.codecs ?: "?"} ${first.width}x${first.height}@${first.frameRate}fps; " +
                     "delivery=${first.deliveryType}; chunksMs=${first.observedMediaChunkDurationsMs}; " +
-                    "VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}",
+                    "VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}"
+            ) + tileMetadataLines(first) + listOf(
                 progressLine(first.label),
                 if (pending.isEmpty()) "HEVC_PROFILE_WAITING_FOR_FEED_B"
                 else pending.joinToString("\n", prefix = "HEVC_PROFILE_WAITING_FOR_VIDEO_INPUT_FORMAT\n") { progressLine(it) }
-            ).joinToString("\n")
+            )).joinToString("\n")
         }
         val first = captured[0]
         val second = captured[1]
@@ -389,19 +438,28 @@ internal object HevcFeedProfileCapture {
             "DRM=${profile.drmSecurityLevel ?: "not-observed"},keysLoadedEventObserved=${profile.widevineKeysLoaded}," +
                 "decoder=${profile.videoDecoderName ?: "not-observed"},firstFrameRendered=${profile.firstFrameRendered}"
         val parameterGate = compareParsedParameterSets(first, second)
-        return listOf(
-            result,
-            "HEVC_TILE_ASSEMBLER_GATE=$parameterGate",
-            "${first.label}: ${first.mime ?: "?"} ${first.codecs ?: "?"} ${first.width}x${first.height}@${first.frameRate}fps; " +
-                "VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}; " +
-                "delivery=${first.deliveryType}; chunksMs=${first.observedMediaChunkDurationsMs}",
-            "${first.label}: ${drm(first)}",
-            "${second.label}: ${second.mime ?: "?"} ${second.codecs ?: "?"} ${second.width}x${second.height}@${second.frameRate}fps; " +
-                "VPS/SPS/PPS=${second.parsedParameterCounts}; fingerprint=${second.parameterSetFingerprint ?: "unavailable"}; " +
-                "delivery=${second.deliveryType}; chunksMs=${second.observedMediaChunkDurationsMs}",
-            "${second.label}: ${drm(second)}",
-            if (reasons.isEmpty()) "CMAF timing, encryption layout and secure-surface feasibility remain unverified."
-            else "Mismatch reasons: ${reasons.joinToString("; ")}. CMAF timing, encryption layout and secure-surface feasibility remain unverified."
-        ).joinToString("\n")
+        return buildList {
+            add(result)
+            add("HEVC_TILE_ASSEMBLER_GATE=$parameterGate")
+            add(
+                "${first.label}: ${first.mime ?: "?"} ${first.codecs ?: "?"} ${first.width}x${first.height}@${first.frameRate}fps; " +
+                    "VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}; " +
+                    "delivery=${first.deliveryType}; chunksMs=${first.observedMediaChunkDurationsMs}"
+            )
+            addAll(tileMetadataLines(first))
+            add("${first.label}: ${drm(first)}")
+            add(
+                "${second.label}: ${second.mime ?: "?"} ${second.codecs ?: "?"} ${second.width}x${second.height}@${second.frameRate}fps; " +
+                    "VPS/SPS/PPS=${second.parsedParameterCounts}; fingerprint=${second.parameterSetFingerprint ?: "unavailable"}; " +
+                    "delivery=${second.deliveryType}; chunksMs=${second.observedMediaChunkDurationsMs}"
+            )
+            addAll(tileMetadataLines(second))
+            add("${second.label}: ${drm(second)}")
+            add("HEVC_TILE_PARSED_PPS_STRUCTURES_IDENTICAL=${parsedPpsStructuresIdentical(first, second)}")
+            add(
+                if (reasons.isEmpty()) "CMAF timing, encryption layout and secure-surface feasibility remain unverified."
+                else "Mismatch reasons: ${reasons.joinToString("; ")}. CMAF timing, encryption layout and secure-surface feasibility remain unverified."
+            )
+        }.joinToString("\n")
     }
 }

@@ -90,9 +90,11 @@ class HevcFeedProfileProbeTest {
         HevcFeedProfileCapture.updateDrm("content-100", "channel-1", "L1", keysLoaded = true)
         HevcFeedProfileCapture.updateVideoDecoder("content-100", "channel-1", "c2.qti.hevc.decoder")
         HevcFeedProfileCapture.updateFirstFrameRendered("content-100", "channel-1")
-        HevcFeedProfileCapture.record(
-            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, second, "channel-2", "content-100")
+        val secondSnapshot = HevcFeedProfileProbe.inspect(
+            C.TRACK_TYPE_VIDEO, second, "channel-2", "content-100"
         )
+        HevcFeedProfileCapture.record(secondSnapshot)
+        HevcFeedProfileCapture.selectTileTestFeeds("content-100", listOf("channel-1", "channel-2"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_FORMAT_MATCH"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("\nHEVC_TILE_ASSEMBLER_GATE=PASS"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-1: DRM="))
@@ -104,6 +106,25 @@ class HevcFeedProfileProbeTest {
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("keysLoadedEventObserved=true"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("decoder=c2.qti.hevc.decoder"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("firstFrameRendered=true"))
+        val tileDiagnostic = HevcFeedProfileCapture.diagnostic
+        assertTrue(tileDiagnostic.contains("channel-1: HEVC_TILE_METADATA"))
+        assertTrue(tileDiagnostic.contains("channel-2: HEVC_TILE_METADATA"))
+        assertTrue(tileDiagnostic.contains("tilesEnabled=true"))
+        assertTrue(tileDiagnostic.contains("numTileColumns=2"))
+        assertTrue(tileDiagnostic.contains("numTileRows=1"))
+        assertTrue(Regex("ctbPictureWidthInCtbs=\\d+").containsMatchIn(tileDiagnostic))
+        assertTrue(Regex("ctbPictureHeightInCtbs=\\d+").containsMatchIn(tileDiagnostic))
+        assertTrue(tileDiagnostic.contains("tileColumnWidthsInCtbs="))
+        assertTrue(tileDiagnostic.contains("tileRowHeightsInCtbs="))
+        assertTrue(tileDiagnostic.contains("deblockingFilterOverrideEnabled="))
+        assertTrue(tileDiagnostic.contains("HEVC_TILE_PARSED_PPS_STRUCTURES_IDENTICAL=true"))
+
+        val changedPpsSnapshot = secondSnapshot.copy(
+            parsedPps = secondSnapshot.parsedPps.map { it.copy(numTileRows = it.numTileRows + 1) }
+        )
+        HevcFeedProfileCapture.record(changedPpsSnapshot)
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("numTileRows=2"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_TILE_PARSED_PPS_STRUCTURES_IDENTICAL=false"))
 
         HevcFeedProfileCapture.record(
             HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, second, "channel-3", "content-101")
@@ -185,6 +206,10 @@ class HevcFeedProfileProbeTest {
 
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_FORMAT_MISMATCH"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_TILE_ASSEMBLER_GATE=INCOMPLETE"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("tilesEnabled=unavailable"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("ctbPictureWidthInCtbs=unavailable"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("deblockingFilterOverrideEnabled=unavailable"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_TILE_PARSED_PPS_STRUCTURES_IDENTICAL=UNKNOWN"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("secure-surface feasibility remain unverified"))
     }
     @Test
