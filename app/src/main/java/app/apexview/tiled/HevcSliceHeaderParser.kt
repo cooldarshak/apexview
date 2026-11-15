@@ -78,68 +78,69 @@ internal object HevcSliceHeaderParser {
         val outputFlag = if (pps.outputFlagPresent) bits.readBit() != 0 else null
         val colourPlane = if (sps.separateColourPlane) bits.readBits(2) else null
 
-        if (header.type == 19 || header.type == 20) {
-            return SliceHeader(
-                header.type, firstSlice, noOutput, ppsId, false, address, sliceType,
-                outputFlag, colourPlane, 0, null, null, emptyList(),
-                false, false, false, initialBits - bits.bitsRemaining
-            )
-        }
+        val isIdr = header.type == 19 || header.type == 20
+        var pocLsb: Int? = null
+        var fromSps: Boolean? = null
+        var shortTermIndex: Int? = null
+        val references = mutableListOf<ReferencePicture>()
 
-        val pocLsb = bits.readBits(sps.log2MaxPicOrderCntLsb)
-        // This flag is present for every non-IDR slice, including when the SPS defines
-        // zero short-term sets. A zero SPS-set count requires the inline RPS path.
-        val fromSps = bits.readBit() != 0
-        val shortTermIndex: Int?
-        val shortTermSet: HevcParameterSets.ShortTermRefPicSet
-        if (fromSps) {
-            require(sps.shortTermRefPicSets.isNotEmpty()) {
-                "Slice selects an SPS short-term RPS but the SPS contains none"
+        // IDR pictures infer POC LSB zero and carry no RPS syntax. The temporal-MVP and
+        // SAO flags below still belong to the independent slice header and must be consumed.
+        if (!isIdr) {
+            pocLsb = bits.readBits(sps.log2MaxPicOrderCntLsb)
+            // Present for every non-IDR slice, including when the SPS has zero RPS entries.
+            fromSps = bits.readBit() != 0
+            val shortTermSet = if (fromSps) {
+                require(sps.shortTermRefPicSets.isNotEmpty()) {
+                    "Slice selects an SPS short-term RPS but the SPS contains none"
+                }
+                shortTermIndex = if (sps.shortTermRefPicSets.size > 1) {
+                    bits.readBits(ceilLog2(sps.shortTermRefPicSets.size))
+                } else 0
+                require(shortTermIndex in sps.shortTermRefPicSets.indices) {
+                    "SPS short-term RPS index is out of range"
+                }
+                sps.shortTermRefPicSets[shortTermIndex!!]
+            } else {
+                HevcParameterSets.parseShortTermRefPicSet(
+                    bits, sps.shortTermRefPicSets.size, sps.shortTermRefPicSets.size,
+                    sps.shortTermRefPicSets
+                )
             }
-            shortTermIndex = if (sps.shortTermRefPicSets.size > 1) {
-                bits.readBits(ceilLog2(sps.shortTermRefPicSets.size))
-            } else 0
-            require(shortTermIndex in sps.shortTermRefPicSets.indices) { "SPS short-term RPS index is out of range" }
-            shortTermSet = sps.shortTermRefPicSets[shortTermIndex]
-        } else {
-            shortTermIndex = null
-            shortTermSet = HevcParameterSets.parseShortTermRefPicSet(
-                bits, sps.shortTermRefPicSets.size, sps.shortTermRefPicSets.size, sps.shortTermRefPicSets
-            )
-        }
 
-        val references = shortTermSet.all.map {
-            ReferencePicture(it.deltaPoc, null, it.usedByCurrent, false)
-        }.toMutableList()
-
-        if (sps.longTermRefPicsPresent) {
-            val numLongTermSps = if (sps.longTermRefPics.isNotEmpty()) {
-                readUe(bits, sps.longTermRefPics.size, "num_long_term_sps")
-            } else 0
-            val numLongTermPictures = readUe(bits, 32, "num_long_term_pics")
-            require(numLongTermSps + numLongTermPictures <= 32) {
-                "Slice long-term RPS exceeds supported reference count"
+            references += shortTermSet.all.map {
+                ReferencePicture(it.deltaPoc, null, it.usedByCurrent, false)
             }
-            repeat(numLongTermSps + numLongTermPictures) { index ->
-                val ref = if (index < numLongTermSps) {
-                    val spsIndex = if (sps.longTermRefPics.size > 1) {
-                        bits.readBits(ceilLog2(sps.longTermRefPics.size))
-                    } else 0
-                    require(spsIndex in sps.longTermRefPics.indices) {
-                        "Long-term SPS reference index is out of range"
+
+            if (sps.longTermRefPicsPresent) {
+                val numLongTermSps = if (sps.longTermRefPics.isNotEmpty()) {
+                    readUe(bits, sps.longTermRefPics.size, "num_long_term_sps")
+                } else 0
+                val numLongTermPictures = readUe(bits, 32, "num_long_term_pics")
+                require(numLongTermSps + numLongTermPictures <= 32) {
+                    "Slice long-term RPS exceeds supported reference count"
+                }
+                repeat(numLongTermSps + numLongTermPictures) { index ->
+                    val ref = if (index < numLongTermSps) {
+                        val spsIndex = if (sps.longTermRefPics.size > 1) {
+                            bits.readBits(ceilLog2(sps.longTermRefPics.size))
+                        } else 0
+                        require(spsIndex in sps.longTermRefPics.indices) {
+                            "Long-term SPS reference index is out of range"
+                        }
+                        sps.longTermRefPics[spsIndex]
+                    } else {
+                        HevcParameterSets.LongTermReference(
+                            bits.readBits(sps.log2MaxPicOrderCntLsb),
+                            bits.readBit() != 0
+                        )
                     }
-                    sps.longTermRefPics[spsIndex]
-                } else {
-                    HevcParameterSets.LongTermReference(
-                        bits.readBits(sps.log2MaxPicOrderCntLsb),
-                        bits.readBit() != 0
+                    val deltaPresent = bits.readBit() != 0
+                    val deltaCycle = if (deltaPresent) bits.readUnsignedExpGolomb() else null
+                    references += ReferencePicture(
+                        null, ref.pocLsb, ref.usedByCurrent, true, deltaCycle
                     )
                 }
-                val deltaPresent = bits.readBit() != 0
-                val deltaCycle = if (deltaPresent) bits.readUnsignedExpGolomb() else null
-                references += ReferencePicture(
-                    null, ref.pocLsb, ref.usedByCurrent, true, deltaCycle
-                )
             }
         }
 
@@ -176,8 +177,11 @@ internal object HevcSliceHeaderParser {
 }
 
 /**
- * Computes PicOrderCntVal from the coded POC LSB sequence. The tracker follows the HEVC wrap rule
- * and only advances its Tid0 anchor for temporal-id-zero pictures other than RADL/RASL pictures.
+ * Computes PicOrderCntVal using the H.265 wrap and random-access rules.
+ *
+ * noRaslOutputFlag is derived from bitstream position by the analyzer: it is always true for
+ * IDR/BLA, and for CRA only at the first picture in the bitstream or the first picture after EOS
+ * (unless an external HandleCraAsBla policy is explicitly introduced).
  */
 internal class HevcPocTracker {
     private var previousTid0PocMsb = 0L
@@ -188,7 +192,13 @@ internal class HevcPocTracker {
         previousTid0PocLsb = 0L
     }
 
-    fun derive(nalUnitType: Int, temporalIdPlus1: Int, pocLsb: Int, log2MaxPocLsb: Int): Long {
+    fun derive(
+        nalUnitType: Int,
+        temporalIdPlus1: Int,
+        pocLsb: Int,
+        log2MaxPocLsb: Int,
+        noRaslOutputFlag: Boolean = nalUnitType in 16..20
+    ): Long {
         require(temporalIdPlus1 in 1..7) { "Invalid temporal_id_plus1" }
         require(log2MaxPocLsb in 4..16) { "Unsupported POC LSB width" }
         val maxPocLsb = 1L shl log2MaxPocLsb
@@ -198,21 +208,30 @@ internal class HevcPocTracker {
             reset()
             return 0L
         }
-        val isBla = nalUnitType in 16..18
-        val previousMsb = if (isBla) 0L else previousTid0PocMsb
-        val previousLsb = if (isBla) 0L else previousTid0PocLsb
+
+        val isIrap = nalUnitType in 16..23
+        val resetPocMsb = isIrap && (nalUnitType in 16..18 || noRaslOutputFlag)
         val current = pocLsb.toLong()
-        val pocMsb = when {
-            current < previousLsb && previousLsb - current >= maxPocLsb / 2L ->
-                previousMsb + maxPocLsb
-            current > previousLsb && current - previousLsb > maxPocLsb / 2L ->
-                previousMsb - maxPocLsb
-            else -> previousMsb
+        val pocMsb = if (resetPocMsb) {
+            // For IRAP with NoRaslOutputFlag=1 the standard sets PicOrderCntMsb to zero.
+            // Do not run the wrap comparison against an artificial zero anchor.
+            0L
+        } else {
+            when {
+                current < previousTid0PocLsb &&
+                    previousTid0PocLsb - current >= maxPocLsb / 2L ->
+                    previousTid0PocMsb + maxPocLsb
+                current > previousTid0PocLsb &&
+                    current - previousTid0PocLsb > maxPocLsb / 2L ->
+                    previousTid0PocMsb - maxPocLsb
+                else -> previousTid0PocMsb
+            }
         }
         val poc = pocMsb + current
 
-        val isRadlOrRasl = nalUnitType in 6..9
-        if (temporalIdPlus1 == 1 && !isRadlOrRasl) {
+        // prevTid0Pic excludes every sub-layer non-reference (SLNR) picture, not only RADL/RASL.
+        val isSlnr = nalUnitType in setOf(0, 2, 4, 6, 8, 10, 12, 14)
+        if (temporalIdPlus1 == 1 && !isSlnr) {
             previousTid0PocMsb = pocMsb
             previousTid0PocLsb = current
         }

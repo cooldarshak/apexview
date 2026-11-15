@@ -64,6 +64,8 @@ class HevcStreamAlignmentAnalyzerTest {
 
     private fun idrSlice(): ByteArray = BitWriter().apply {
         write(1, 1); write(1, 1); writeUe(0); write(0, 2); writeUe(2)
+        write(1, 1) // temporal MVP
+        write(1, 1); write(1, 1) // SAO luma/chroma
     }.finish()
 
     private fun pSlice(poc: Int, referenceCount: Int): ByteArray = BitWriter().apply {

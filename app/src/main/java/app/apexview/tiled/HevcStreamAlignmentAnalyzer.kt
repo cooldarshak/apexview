@@ -47,9 +47,12 @@ internal object HevcStreamAlignmentAnalyzer {
         val pocTracker = HevcPocTracker()
         val frames = mutableListOf<FrameBuilder>()
         val nals = HevcBitstream.splitAnnexB(annexB)
+        var sawCodedPicture = false
+        var afterEndOfSequence = false
 
         for (nal in nals) {
             when (nal.type) {
+                36 -> afterEndOfSequence = true // EOS_NUT
                 33 -> {
                     val sps = HevcParameterSets.parseSps(nal.bytes)
                     spsById[sps.spsId] = sps
@@ -68,23 +71,65 @@ internal object HevcStreamAlignmentAnalyzer {
 
                     if (slice.firstSliceSegmentInPicture) {
                         require(!slice.dependentSliceSegment) { "A first slice segment cannot be dependent" }
+                        // IDR infers POC LSB zero; it is not present in the slice header.
                         val pocLsb = slice.picOrderCntLsb
-                            ?: error("Independent slice has no POC LSB")
+                            ?: if (nal.type == 19 || nal.type == 20) 0
+                            else error("Independent non-IDR slice has no POC LSB")
+                        val isIrap = nal.type in 16..23
+                        val noRaslOutputFlag = isIrap && when {
+                            nal.type in 16..20 -> true // BLA and IDR are always reset points
+                            else -> !sawCodedPicture || afterEndOfSequence
+                        }
                         val poc = pocTracker.derive(
-                            nal.type, nal.temporalIdPlus1, pocLsb, sps.log2MaxPicOrderCntLsb
+                            nal.type, nal.temporalIdPlus1, pocLsb, sps.log2MaxPicOrderCntLsb,
+                            noRaslOutputFlag = noRaslOutputFlag
                         )
                         frames += FrameBuilder(
-                            frames.size, poc, pocLsb, slice.sliceType
-                                ?: error("Independent slice has no slice_type"),
-                            slice.references, mutableListOf(slice.sliceSegmentAddress)
+                            decodeIndex = frames.size,
+                            poc = poc,
+                            pocLsb = pocLsb,
+                            sliceType = slice.sliceType ?: error("Independent slice has no slice_type"),
+                            ppsId = slice.ppsId,
+                            noOutputOfPriorPictures = slice.noOutputOfPriorPictures,
+                            picOutputFlag = slice.picOutputFlag,
+                            shortTermRpsFromSps = slice.shortTermRpsFromSps,
+                            shortTermRpsIndex = slice.shortTermRpsIndex,
+                            temporalMvpEnabled = slice.temporalMvpEnabled,
+                            references = slice.references,
+                            sliceSegmentAddresses = mutableListOf(slice.sliceSegmentAddress)
                         )
+                        sawCodedPicture = true
+                        afterEndOfSequence = false
                     } else {
                         val current = frames.lastOrNull()
                             ?: error("Slice segment appeared before the first slice of a picture")
-                        if (slice.picOrderCntLsb != null) {
-                            require(slice.picOrderCntLsb == current.pocLsb) {
-                                "POC LSB changed between slice segments in one picture"
+                        require(slice.ppsId == current.ppsId) {
+                            "PPS changed between slice segments in one picture"
+                        }
+                        require(slice.noOutputOfPriorPictures == current.noOutputOfPriorPictures) {
+                            "no_output_of_prior_pics_flag changed between slice segments in one picture"
+                        }
+                        if (!slice.dependentSliceSegment) {
+                            val segmentPocLsb = slice.picOrderCntLsb
+                                ?: if (nal.type == 19 || nal.type == 20) 0 else null
+                            require(segmentPocLsb == current.pocLsb) {
+                                "POC LSB changed between independent slice segments in one picture"
                             }
+                            require(slice.picOutputFlag == current.picOutputFlag) {
+                                "pic_output_flag changed between slice segments in one picture"
+                            }
+                            require(slice.shortTermRpsFromSps == current.shortTermRpsFromSps &&
+                                slice.shortTermRpsIndex == current.shortTermRpsIndex
+                            ) { "Short-term RPS selection changed between slice segments in one picture" }
+                            require(slice.references == current.references) {
+                                "Reference picture set changed between slice segments in one picture"
+                            }
+                            require(slice.temporalMvpEnabled == current.temporalMvpEnabled) {
+                                "slice_temporal_mvp_enabled_flag changed between slice segments in one picture"
+                            }
+                        }
+                        require(slice.sliceSegmentAddress !in current.sliceSegmentAddresses) {
+                            "Duplicate slice_segment_address in one picture"
                         }
                         current.sliceSegmentAddresses += slice.sliceSegmentAddress
                     }
@@ -140,6 +185,12 @@ internal object HevcStreamAlignmentAnalyzer {
         val poc: Long,
         val pocLsb: Int,
         val sliceType: Int,
+        val ppsId: Int,
+        val noOutputOfPriorPictures: Boolean?,
+        val picOutputFlag: Boolean?,
+        val shortTermRpsFromSps: Boolean?,
+        val shortTermRpsIndex: Int?,
+        val temporalMvpEnabled: Boolean?,
         val references: List<HevcSliceHeaderParser.ReferencePicture>,
         val sliceSegmentAddresses: MutableList<Int>
     ) {

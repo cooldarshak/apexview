@@ -57,12 +57,18 @@ class HevcSliceHeaderParserTest {
             writeUe(0) // PPS id
             write(0, 2) // reserved header bits
             writeUe(2) // I slice
+            write(1, 1) // temporal MVP is still present for IDR
+            write(1, 1); write(1, 1) // SAO luma/chroma are still present for IDR
         }.finish()
         val slice = HevcSliceHeaderParser.parse(nal(20, bits), sps, pps)
 
         assertTrue(slice.noOutputOfPriorPictures!!)
-        assertEquals(0, slice.picOrderCntLsb)
+        assertNull(slice.picOrderCntLsb) // inferred as zero, not signalled
+        assertNull(slice.shortTermRpsFromSps)
         assertTrue(slice.references.isEmpty())
+        assertTrue(slice.temporalMvpEnabled!!)
+        assertTrue(slice.sampleAdaptiveOffsetLuma!!)
+        assertTrue(slice.sampleAdaptiveOffsetChroma!!)
     }
 
     @Test
@@ -108,6 +114,32 @@ class HevcSliceHeaderParserTest {
         }
         assertEquals(256L, tracker.derive(1, 1, 0, 8))
         assertEquals(257L, tracker.derive(1, 1, 1, 8))
+    }
+
+    @Test
+    fun resetsPocMsbForBlaInsteadOfWrappingAgainstZero() {
+        val tracker = HevcPocTracker()
+        assertEquals(10L, tracker.derive(1, 1, 10, 8))
+        assertEquals(240L, tracker.derive(16, 1, 240, 8))
+        assertEquals(241L, tracker.derive(1, 1, 241, 8))
+    }
+
+    @Test
+    fun appliesCraNoRaslOutputFlagOnlyWhenSequenceContextRequiresIt() {
+        val atRandomAccessPoint = HevcPocTracker()
+        assertEquals(240L, atRandomAccessPoint.derive(21, 1, 240, 8, noRaslOutputFlag = true))
+
+        val inMiddleOfSequence = HevcPocTracker()
+        assertEquals(10L, inMiddleOfSequence.derive(1, 1, 10, 8))
+        assertEquals(-16L, inMiddleOfSequence.derive(21, 1, 240, 8, noRaslOutputFlag = false))
+    }
+
+    @Test
+    fun doesNotUseTrailNonReferencePicturesAsPocAnchors() {
+        val tracker = HevcPocTracker()
+        assertEquals(100L, tracker.derive(1, 1, 100, 8))
+        assertEquals(250L, tracker.derive(0, 1, 250, 8)) // TRAIL_N is SLNR
+        assertEquals(101L, tracker.derive(1, 1, 101, 8))
     }
 
     private fun spsBits(includeSpsRps: Boolean = false): ByteArray = BitWriter().apply {
