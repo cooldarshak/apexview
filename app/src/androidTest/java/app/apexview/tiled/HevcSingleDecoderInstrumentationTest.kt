@@ -80,19 +80,71 @@ class HevcSingleDecoderInstrumentationTest {
 
             // The harness deliberately creates exactly one decoder and never constructs a
             // second MediaCodec for this media sequence.
-            val hardwareCodecInfo = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
-                .firstOrNull { codec ->
-                    if (codec.isEncoder || !codec.isHardwareAccelerated ||
-                        codec.supportedTypes.none { it.equals(mime, ignoreCase = true) }) {
-                        false
-                    } else {
-                        runCatching {
-                            codec.getCapabilitiesForType(mime!!).isFormatSupported(format)
-                        }.getOrDefault(false)
+            val hevcDecoders = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
+                .filter { codec ->
+                    !codec.isEncoder && codec.supportedTypes.any {
+                        it.equals(mime, ignoreCase = true)
                     }
                 }
-            assertNotNull("No hardware-accelerated HEVC decoder is available", hardwareCodecInfo)
-            assertTrue("Selected HEVC codec is not hardware accelerated", hardwareCodecInfo!!.isHardwareAccelerated)
+
+            // Report the complete device codec view before selecting anything. The previous
+            // preflight required isFormatSupported(format) to return true, which can be more
+            // restrictive than MediaCodec.configure() for extractor-provided CSD/metadata.
+            // Keep that result diagnostic and let the real configure call be authoritative.
+            val codecDiagnostics = hevcDecoders.joinToString(separator = "\\n") { codec ->
+                val capabilities = runCatching {
+                    codec.getCapabilitiesForType(mime!!)
+                }.getOrNull()
+                val video = capabilities?.videoCapabilities
+                val formatSupported = capabilities?.let { caps ->
+                    runCatching { caps.isFormatSupported(format) }.getOrNull()
+                }
+                val profiles = capabilities?.profileLevels?.joinToString { level ->
+                    "${level.profile}/${level.level}"
+                } ?: "unavailable"
+                "name=${codec.name},hardware=${codec.isHardwareAccelerated}," +
+                    "software=${codec.isSoftwareOnly},vendor=${codec.isVendor}," +
+                    "formatSupported=${formatSupported ?: "unknown"}," +
+                    "profiles=$profiles," +
+                    "widths=${video?.supportedWidths ?: "unknown"}," +
+                    "heights=${video?.supportedHeights ?: "unknown"}," +
+                    "alignment=${video?.widthAlignment ?: "?"}x${video?.heightAlignment ?: "?"}"
+            }
+            Log.i(
+                LOG_TAG,
+                "HEVC_DECODER_DISCOVERY mime=$mime width=${format.getInteger(MediaFormat.KEY_WIDTH)} " +
+                    "height=${format.getInteger(MediaFormat.KEY_HEIGHT)} " +
+                    "candidateCount=${hevcDecoders.size} candidates={$codecDiagnostics}"
+            )
+
+            val hardwareCandidates = hevcDecoders.filter { it.isHardwareAccelerated }
+            assertTrue(
+                "No hardware-accelerated HEVC decoder is advertised by Android. " +
+                    "Device codec diagnostics: {$codecDiagnostics}",
+                hardwareCandidates.isNotEmpty()
+            )
+
+            // Prefer a candidate whose advertised capabilities accept the extracted format,
+            // but do not reject the candidate solely on this advisory preflight. configure()
+            // below is the definitive test and its exception will be preserved in the failure.
+            val hardwareCodecInfo = hardwareCandidates.sortedByDescending { codec ->
+                runCatching {
+                    codec.getCapabilitiesForType(mime!!).isFormatSupported(format)
+                }.getOrDefault(false)
+            }.first()
+            val advertisedFormatSupport = runCatching {
+                hardwareCodecInfo.getCapabilitiesForType(mime!!).isFormatSupported(format)
+            }.getOrDefault(false)
+            Log.i(
+                LOG_TAG,
+                "HEVC_DECODER_SELECTED name=${hardwareCodecInfo.name} " +
+                    "hardwareAccelerated=${hardwareCodecInfo.isHardwareAccelerated} " +
+                    "isFormatSupported=$advertisedFormatSupport; attempting MediaCodec.configure"
+            )
+            assertTrue(
+                "Selected HEVC codec is not hardware accelerated: ${hardwareCodecInfo.name}",
+                hardwareCodecInfo.isHardwareAccelerated
+            )
 
             // Exactly one hardware decoder is instantiated for the complete 50-frame stream.
             decoder = MediaCodec.createByCodecName(hardwareCodecInfo.name)
