@@ -386,6 +386,14 @@ internal object CmafBoxInspector {
         val totalDuration = if (samples.isNotEmpty() && samples.all { it.durationTicks != null }) {
             samples.fold(0L) { total, item -> Math.addExact(total, item.durationTicks!!) }
         } else null
+        val sampleGroupEncryption = try {
+            parseSampleGroupEncryption(
+                data, traf, samples.size, trackMetadataById[tfhd.trackId], errors
+            )
+        } catch (e: Exception) {
+            errors += "Sample-group encryption metadata could not be parsed: ${e.message ?: e.javaClass.simpleName}"
+            SampleGroupParseResult(present = true, complete = false, metadata = null)
+        }
         val sencBox = traf.children.firstOrNull { it.type == "senc" }
         val senc = sencBox?.let { box ->
             try {
@@ -445,14 +453,6 @@ internal object CmafBoxInspector {
                 saio.offsets
             )
         } else null
-        val sampleGroupEncryption = try {
-            parseSampleGroupEncryption(
-                data, traf, samples.size, trackMetadataById[tfhd.trackId], errors
-            )
-        } catch (e: Exception) {
-            errors += "Sample-group encryption metadata could not be parsed: ${e.message ?: e.javaClass.simpleName}"
-            SampleGroupParseResult(present = true, complete = false, metadata = null)
-        }
         val sampleEncryptionRangesCoverSamples = senc?.let { summary ->
             if (!summary.structureComplete || summary.sampleCount != samples.size.toLong()) {
                 false
