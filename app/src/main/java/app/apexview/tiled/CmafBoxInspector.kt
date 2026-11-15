@@ -49,7 +49,8 @@ internal object CmafBoxInspector {
         val decodeTimeTicks: Long?,
         val presentationTimeTicks: Long?,
         val durationTicks: Long?,
-        val compositionOffsetTicks: Long?
+        val compositionOffsetTicks: Long?,
+        val sampleSizeBytes: Long? = null
     )
     /** Byte-range shape only. No encrypted bytes, IV bytes or key identifiers are retained. */
     data class SubsampleEncryptionRange(
@@ -78,7 +79,8 @@ internal object CmafBoxInspector {
         val durationIsEmpty: Boolean = false,
         val sampleEncryptionStructureComplete: Boolean = false,
         val sampleEncryptionMetadata: List<SampleEncryptionMetadata> = emptyList(),
-        val sencOverrideIvSize: Int? = null
+        val sencOverrideIvSize: Int? = null,
+        val sampleEncryptionRangesCoverSamples: Boolean = false
     )
     data class TrackMetadata(
         val trackId: Long?,
@@ -228,7 +230,13 @@ internal object CmafBoxInspector {
     private data class TfhdDefaults(
         val trackId: Long,
         val defaultSampleDuration: Long?,
+        val defaultSampleSize: Long?,
         val durationIsEmpty: Boolean
+    )
+
+    private data class TrexDefaults(
+        val defaultSampleDuration: Long,
+        val defaultSampleSize: Long
     )
 
     private fun readTrackId(p: ByteBuffer): Long? {
@@ -249,18 +257,25 @@ internal object CmafBoxInspector {
         data: ByteArray,
         moov: Box,
         errors: MutableList<String>
-    ): Map<Long, Long> {
-        val defaults = mutableMapOf<Long, Long>()
+    ): Map<Long, TrexDefaults> {
+        val defaults = mutableMapOf<Long, TrexDefaults>()
         flatten(moov).filter { it.type == "trex" }.forEach { box ->
             try {
                 val p = payload(data, box)
                 require(p.remaining() >= 24) { "Truncated trex box" }
-                p.position(p.position() + 4) // FullBox header
+                val version = u8(p)
+                val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
+                require(version == 0 && flags == 0) { "Unsupported trex FullBox header" }
                 val trackId = u32(p)
-                p.position(p.position() + 4) // default_sample_description_index
-                defaults[trackId] = u32(p)
+                require(trackId > 0) { "Invalid trex track ID" }
+                skip(p, 4) // default_sample_description_index
+                val defaultDuration = u32(p)
+                val defaultSize = u32(p)
+                skip(p, 4) // default_sample_flags
+                require(!p.hasRemaining()) { "Unexpected trailing bytes in trex box" }
+                defaults[trackId] = TrexDefaults(defaultDuration, defaultSize)
             } catch (e: Exception) {
-                errors += "Track default duration could not be parsed: ${e.message ?: e.javaClass.simpleName}"
+                errors += "Track defaults could not be parsed: ${e.message ?: e.javaClass.simpleName}"
             }
         }
         return defaults
@@ -269,7 +284,7 @@ internal object CmafBoxInspector {
     private fun parseFragmentTrack(
         data: ByteArray,
         traf: Box,
-        trexDefaults: Map<Long, Long>,
+        trexDefaults: Map<Long, TrexDefaults>,
         timescales: Map<Long, Long>,
         trackEncryptionDefaults: Map<Long, TrackEncryptionMetadata>,
         errors: MutableList<String>
@@ -279,7 +294,9 @@ internal object CmafBoxInspector {
         val tfhd = parseTfhd(payload(data, tfhdBox))
         val baseDecodeTime = traf.children.firstOrNull { it.type == "tfdt" }
             ?.let { parseTfdt(payload(data, it)) }
-        val defaultDuration = tfhd.defaultSampleDuration ?: trexDefaults[tfhd.trackId]
+        val trex = trexDefaults[tfhd.trackId]
+        val defaultDuration = tfhd.defaultSampleDuration ?: trex?.defaultSampleDuration
+        val defaultSampleSize = tfhd.defaultSampleSize ?: trex?.defaultSampleSize
         val truns = traf.children.filter { it.type == "trun" }
         if (tfhd.durationIsEmpty) {
             require(truns.isEmpty()) { "duration-is-empty traf must not contain trun boxes" }
@@ -292,6 +309,7 @@ internal object CmafBoxInspector {
             decodeCursor = parseTrun(
                 payload(data, trun),
                 defaultDuration,
+                defaultSampleSize,
                 decodeCursor,
                 samples
             )
@@ -308,6 +326,22 @@ internal object CmafBoxInspector {
                 null
             }
         }
+        val sampleEncryptionRangesCoverSamples = senc?.let { summary ->
+            if (!summary.structureComplete || summary.sampleCount != samples.size.toLong()) {
+                false
+            } else if (!summary.subsampleEncryption) {
+                true
+            } else {
+                summary.samples.size == samples.size && summary.samples.indices.all { index ->
+                    val sampleSize = samples[index].sampleSizeBytes ?: return@all false
+                    val ranges = summary.samples[index].subsampleRanges ?: return@all false
+                    val coveredBytes = ranges.fold(0L) { total, range ->
+                        Math.addExact(total, Math.addExact(range.clearBytes.toLong(), range.encryptedBytes))
+                    }
+                    coveredBytes == sampleSize
+                }
+            }
+        } == true
         return FragmentMetadata(
             trackId = tfhd.trackId,
             timescale = timescales[tfhd.trackId],
@@ -327,7 +361,8 @@ internal object CmafBoxInspector {
             durationIsEmpty = tfhd.durationIsEmpty,
             sampleEncryptionStructureComplete = senc?.structureComplete == true,
             sampleEncryptionMetadata = senc?.samples.orEmpty(),
-            sencOverrideIvSize = senc?.overrideIvSize
+            sencOverrideIvSize = senc?.overrideIvSize,
+            sampleEncryptionRangesCoverSamples = sampleEncryptionRangesCoverSamples
         )
     }
 
@@ -344,10 +379,10 @@ internal object CmafBoxInspector {
         if ((flags and 0x000001) != 0) skip(p, 8) // base_data_offset
         if ((flags and 0x000002) != 0) skip(p, 4) // sample_description_index
         val defaultDuration = if ((flags and 0x000008) != 0) u32(p) else null
-        if ((flags and 0x000010) != 0) skip(p, 4) // default_sample_size
+        val defaultSampleSize = if ((flags and 0x000010) != 0) u32(p) else null
         if ((flags and 0x000020) != 0) skip(p, 4) // default_sample_flags
         require(!p.hasRemaining()) { "Unexpected trailing bytes in tfhd box" }
-        return TfhdDefaults(trackId, defaultDuration, (flags and 0x010000) != 0)
+        return TfhdDefaults(trackId, defaultDuration, defaultSampleSize, (flags and 0x010000) != 0)
     }
 
     private fun parseTfdt(p: ByteBuffer): Long {
@@ -367,6 +402,7 @@ internal object CmafBoxInspector {
     private fun parseTrun(
         p: ByteBuffer,
         defaultDuration: Long?,
+        defaultSampleSize: Long?,
         initialDecodeTime: Long?,
         output: MutableList<SampleTiming>
     ): Long? {
@@ -386,13 +422,13 @@ internal object CmafBoxInspector {
         var cursor = initialDecodeTime
         repeat(count) {
             val duration = if ((flags and 0x000100) != 0) u32(p) else defaultDuration
-            if ((flags and 0x000200) != 0) skip(p, 4) // sample_size
+            val sampleSize = if ((flags and 0x000200) != 0) u32(p) else defaultSampleSize
             if ((flags and 0x000400) != 0) skip(p, 4) // sample_flags
             val compositionOffset = if ((flags and 0x000800) != 0) {
                 if (version == 1) readSignedInt(p) else u32(p)
             } else 0L
             val presentationTime = cursor?.let { Math.addExact(it, compositionOffset) }
-            output += SampleTiming(cursor, presentationTime, duration, compositionOffset)
+            output += SampleTiming(cursor, presentationTime, duration, compositionOffset, sampleSize)
             cursor = if (cursor != null && duration != null) Math.addExact(cursor, duration) else null
         }
         require(!p.hasRemaining()) { "Unexpected trailing bytes in trun box" }

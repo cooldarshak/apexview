@@ -44,9 +44,9 @@ class CmafBoxInspectorTest {
         val tfhd = box("tfhd", byteArrayOf(0, 0, 0, 0) + int(7))
         val tfdt = box("tfdt", byteArrayOf(0, 0, 0, 0) + int(9000))
         val trun = box("trun",
-            byteArrayOf(1, 0, 9, 0) + int(2) +
-                int(3000) + int(120) +
-                int(3000) + int(-60)
+            byteArrayOf(1, 0, 11, 0) + int(2) +
+                int(3000) + int(103) + int(120) +
+                int(3000) + int(145) + int(-60)
         )
         val sampleOneEncryption = ByteArray(16) + short(1) + short(3) + int(100)
         val sampleTwoEncryption = ByteArray(16) + short(2) +
@@ -75,10 +75,12 @@ class CmafBoxInspectorTest {
         assertEquals(listOf(9120L, 11940L), timing.sampleTimings.map { it.presentationTimeTicks })
         assertEquals(listOf(3000L, 3000L), timing.sampleTimings.map { it.durationTicks })
         assertEquals(listOf(120L, -60L), timing.sampleTimings.map { it.compositionOffsetTicks })
+        assertEquals(listOf(103L, 145L), timing.sampleTimings.map { it.sampleSizeBytes })
         assertTrue(timing.sampleEncryptionBoxPresent)
         assertTrue(timing.subsampleEncryptionSignalled!!)
         assertEquals(2L, timing.sampleEncryptionCount)
         assertTrue(timing.sampleEncryptionStructureComplete)
+        assertTrue(timing.sampleEncryptionRangesCoverSamples)
         assertNull(timing.sencOverrideIvSize)
         assertEquals(listOf(16, 16), timing.sampleEncryptionMetadata.map { it.ivSize })
         assertEquals(listOf(1, 2), timing.sampleEncryptionMetadata.map { it.subsampleRanges!!.size })
@@ -133,6 +135,22 @@ class CmafBoxInspectorTest {
         assertFalse(fragment.sampleEncryptionStructureComplete)
         assertTrue(fragment.sampleEncryptionMetadata.isEmpty())
         assertTrue(report.errors.isEmpty())
+    }
+
+    @Test fun rejectsSencSubsampleMapThatDoesNotCoverTheDeclaredSampleSize() {
+        val init = fragmentedInitSegment(trackId = 31, timescale = 90000, includeEncryption = true)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(31))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,3,0) + int(1) + int(3000) + int(104))
+        // One IV, followed by 3 clear + 100 encrypted bytes. Total map coverage is 103, not 104.
+        val senc = box("senc", byteArrayOf(0,0,0,2) + int(1) +
+            ByteArray(16) + short(1) + short(3) + int(100))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + senc))
+        )
+        val fragment = report.fragments.single()
+        assertTrue(fragment.sampleEncryptionStructureComplete)
+        assertFalse(fragment.sampleEncryptionRangesCoverSamples)
     }
 
     @Test fun acceptsDefaultBaseIsMoofTfhdFlagAndReadsFragmentTiming() {

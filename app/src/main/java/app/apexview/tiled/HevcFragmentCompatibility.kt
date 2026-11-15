@@ -166,6 +166,14 @@ internal object HevcFragmentCompatibility {
                 reasons += "Per-sample IV/subsample encryption structure is incomplete"
             } else {
                 if (firstFragment.subsampleEncryptionSignalled == true &&
+                    !firstFragment.sampleEncryptionRangesCoverSamples) {
+                    reasons += "First fragment subsample ranges do not cover the declared sample sizes"
+                }
+                if (secondFragment.subsampleEncryptionSignalled == true &&
+                    !secondFragment.sampleEncryptionRangesCoverSamples) {
+                    reasons += "Second fragment subsample ranges do not cover the declared sample sizes"
+                }
+                if (firstFragment.subsampleEncryptionSignalled == true &&
                     firstFragment.sampleEncryptionMetadata.any { it.subsampleRanges == null }) {
                     reasons += "First fragment subsample map is incomplete"
                 }
