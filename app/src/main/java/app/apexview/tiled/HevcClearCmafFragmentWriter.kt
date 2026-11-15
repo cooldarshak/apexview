@@ -55,7 +55,7 @@ internal object HevcClearCmafFragmentWriter {
         require(mediaBytes <= Int.MAX_VALUE - 8L) { "mdat payload exceeds the supported box size" }
 
         val samplePayload = ByteArrayOutputStream(mediaBytes.toInt())
-        samples.forEach { samplePayload.write(sample.data) }
+        samples.forEach { sample -> samplePayload.write(sample.data) }
         val mediaData = samplePayload.toByteArray()
 
         val mfhd = fullBox("mfhd", 0, 0, uint32(sequenceNumber))
