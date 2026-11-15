@@ -93,3 +93,25 @@ Phase 2 must not start by wiring a speculative stitcher into production playback
 
 The F1 Tizen project describes an F1-specific HEVC packaging profile and CBCS handling. Android Media3/MediaCodec DRM integration may not expose the protected compressed samples in a form that permits stitching. That is a gating technical question. A clear synthetic single-decoder demonstration is necessary but not sufficient to prove protected F1 playback.
 \n\n### Synthetic assembler scope and limitation\n\nThe Kotlin assembler supports only two independent tile slices per picture in a fixed, pre-aligned elementary-stream sequence. Annex-B has no timestamps; production inputs must be aligned using verified CMAF decode/presentation timing before reaching this API. It rejects non-VCL metadata NALs other than VPS/SPS/PPS, unsupported PPS tools, non-uniform tile layouts, dependent slices, and picture/reference mismatches. It does not decrypt samples, handle CBCS subsample maps, rewrite slice headers, or integrate with FeedPlayer. No protected F1 sample is read or modified.\n
+
+## Running the physical-device MediaCodec proof
+
+The CI build creates two artifacts from the same commit: the normal debug APK and the
+`apexview-hevc-single-decoder-instrumentation` APK. Both must be installed together on a
+physical Android device with a hardware HEVC decoder (Android API 29 or newer).
+
+With ADB connected to that device:
+
+```bash
+adb install -r app-debug.apk
+adb install -r app-debug-androidTest.apk
+adb shell am instrument -w app.apexview_custom.test/androidx.test.runner.AndroidJUnitRunner
+adb logcat -d -s ApexviewHevcProof:I
+```
+
+A valid device result must contain
+`SYNTHETIC_SINGLE_HARDWARE_DECODER_PASS`, `hardwareAccelerated=true`,
+`decoderInstancesCreated=1`, `frames=50`, and `dimensions=256x128`. A Gradle compile,
+APK upload, emulator run, or FFmpeg decode is not a substitute for this physical-device
+runtime result. If the device has no hardware HEVC decoder, the test fails rather than
+silently accepting a software fallback.

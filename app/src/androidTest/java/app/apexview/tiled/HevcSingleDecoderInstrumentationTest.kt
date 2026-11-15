@@ -3,6 +3,7 @@ package app.apexview.tiled
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaCodecList
 import android.os.SystemClock
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -47,8 +48,18 @@ class HevcSingleDecoderInstrumentationTest {
 
             // The harness deliberately creates exactly one decoder and never constructs a
             // second MediaCodec for this media sequence.
-            decoder = MediaCodec.createDecoderByType(mime!!)
+            val hardwareCodecInfo = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
+                .firstOrNull { codec ->
+                    !codec.isEncoder && codec.isHardwareAccelerated &&
+                        codec.supportedTypes.any { it.equals(mime, ignoreCase = true) }
+                }
+            assertNotNull("No hardware-accelerated HEVC decoder is available", hardwareCodecInfo)
+            assertTrue("Selected HEVC codec is not hardware accelerated", hardwareCodecInfo!!.isHardwareAccelerated)
+
+            // Exactly one hardware decoder is instantiated for the complete 50-frame stream.
+            decoder = MediaCodec.createByCodecName(hardwareCodecInfo.name)
             val decoderName = decoder.name
+            assertTrue("Created decoder is not hardware accelerated", decoder.codecInfo.isHardwareAccelerated)
             decoder.configure(format, null, null, 0)
             decoder.start()
 
@@ -108,10 +119,15 @@ class HevcSingleDecoderInstrumentationTest {
             assertEquals("Unexpected decoded frame count", EXPECTED_FRAMES, decodedFrames)
             assertEquals(EXPECTED_WIDTH, outputWidth)
             assertEquals(EXPECTED_HEIGHT, outputHeight)
+            val codecMetrics = decoder.metrics
+            val metricSummary = codecMetrics.keySet().sorted().joinToString { key ->
+                "$key=${codecMetrics.get(key)}"
+            }
             Log.i(
                 LOG_TAG,
-                "SYNTHETIC_SINGLE_DECODER_PASS decoder=$decoderName decoderInstancesCreated=1 " +
-                    "frames=$decodedFrames dimensions=${outputWidth}x${outputHeight}"
+                "SYNTHETIC_SINGLE_HARDWARE_DECODER_PASS decoder=$decoderName " +
+                    "hardwareAccelerated=true decoderInstancesCreated=1 frames=$decodedFrames " +
+                    "dimensions=${outputWidth}x${outputHeight} metrics={$metricSummary}"
             )
         } finally {
             try {
