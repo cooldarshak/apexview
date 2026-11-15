@@ -590,6 +590,30 @@ class AppState(
         private set
     var mapStatus by mutableStateOf<String?>(null)
         private set
+    /** Recent timing/map diagnostics shown in the TV overlay while data is resolving. */
+    var timingDiagnostics by mutableStateOf<List<String>>(emptyList())
+        private set
+    private var timingDiagnosticStartedAtMs = 0L
+
+    private fun recordTimingDiagnostic(message: String, reset: Boolean = false) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (reset || timingDiagnosticStartedAtMs == 0L) {
+            timingDiagnosticStartedAtMs = now
+            timingDiagnostics = emptyList()
+        }
+        val elapsed = ((now - timingDiagnosticStartedAtMs).coerceAtLeast(0L) / 1000.0)
+        val entry = "%05.1fs  %s".format(java.util.Locale.US, elapsed, message)
+        timingDiagnostics = (timingDiagnostics + entry).takeLast(8)
+        android.util.Log.i("ApexviewTiming", entry)
+    }
+
+    /** Live decoder status for the TV overlay; no codec capability query is repeated here. */
+    val tvDecoderDiagnostic: String
+        get() = if (!isTv) "Decoder diagnostics: phone" else {
+            val visible = tiles.count { it.feed.showingVideo }
+            val held = tiles.count { it.heldForDecoder }
+            "HEVC decoder budget $cachedDecoderBudget · video $visible/${tiles.size} · held $held"
+        }
     /** Edge by default; the last style picked is remembered. */
     var mapMode by mutableStateOf(savedMapMode())
         private set
@@ -1472,10 +1496,11 @@ class AppState(
      */
     private fun loadTiming(contentId: Long) {
         timingContentId = contentId
+        recordTimingDiagnostic("Starting timing load for content=$contentId", reset = true)
         pitDriver = null
         timing = null
         speedsJob?.cancel()
-        mapStatus = "Loading the track map..."
+        mapStatus = "Resolving F1 session…"
         liveFeed?.cancel()
         liveFeed = scope.launch {
             var attempt = 0
@@ -1487,6 +1512,10 @@ class AppState(
                     token == null -> "not signed in to F1's timing yet"
                     else -> null
                 }
+                recordTimingDiagnostic(
+                    "Session metadata: " + (ref?.let { "meeting=${it.meetingKey}, session=${it.sessionKey}, year=${it.year}" } ?: "missing") +
+                        "; timing token=" + if (token == null) "missing" else "present"
+                )
                 if (problem == null) {
                     // Prefer F1's catalog signal for a known-live session. Otherwise wait for a
                     // real, non-placeholder player window before choosing live timing or archive.
@@ -1501,7 +1530,7 @@ class AppState(
                         kotlinx.coroutines.delay(1_000)
                         continue
                     }
-                    android.util.Log.i("ApexviewTiming", "content=$contentId: using ${if (live) "live timing" else "timing archive"}")
+                    recordTimingDiagnostic("Source selected: " + if (live) "LIVE" else "ARCHIVE")
                     if (live) {
                         // Show the transport stage immediately. A TV with no program clock used to
                         // sit on the generic "Loading" label while the socket was still starting.
@@ -1521,20 +1550,26 @@ class AppState(
                     try {
                         // When the picture was broadcast: identifies the session if the title can't.
                         val watched = leaderTile()?.takeIf { it.contentId == contentId }?.feed?.wallClockMs()
-                        android.util.Log.i(
-                            "ApexviewTiming",
-                            "content=$contentId archive clock=${watched ?: "unavailable"} catalogStart=${ref!!.sessionStartUtcMs ?: "unavailable"}",
+                        recordTimingDiagnostic(
+                            "Archive lookup: videoClock=${watched ?: "unavailable"}, catalogStart=${ref!!.sessionStartUtcMs ?: "unavailable"}"
                         )
                         val loaded = LiveTimingArchive(token!!, userAgent).load(
                             ref = ref!!,
                             watchedUtc = watched,
                             onProgress = { status ->
-                                if (timingContentId == contentId) mapStatus = status
+                                if (timingContentId == contentId) {
+                                    mapStatus = status
+                                    recordTimingDiagnostic(status)
+                                }
                             },
                             onPartial = { partial ->
                                 if (timingContentId == contentId) {
                                     rememberOutline(partial)
                                     showTiming(partial)
+                                    recordTimingDiagnostic(
+                                        "Partial data: drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
+                                            "cars=${partial.tracks.size}, outlinePoints=${partial.outline.size / 2}"
+                                    )
                                     mapStatus = when {
                                         partial.outline.size >= 8 -> null
                                         partial.tracks.isEmpty() -> "Loading track positions…"
@@ -1546,13 +1581,18 @@ class AppState(
                         if (timingContentId != contentId) return@launch
                         rememberOutline(loaded)
                         showTiming(loaded)
+                        recordTimingDiagnostic(
+                            "Archive complete: drivers=${loaded.drivers.size}, laps=${loaded.laps.size}, " +
+                                "cars=${loaded.tracks.size}, outlinePoints=${loaded.outline.size / 2}"
+                        )
                         mapStatus = if (loaded.outline.isEmpty()) "Couldn't trace the track; showing cars only" else null
                         return@launch
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
                     } catch (e: Exception) {
                         if (timingContentId != contentId) return@launch
-                        mapStatus = "Map unavailable: ${e.message}. Trying again…"
+                        recordTimingDiagnostic("ARCHIVE ERROR: ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                        mapStatus = "Archive failed: ${e.javaClass.simpleName}: ${e.message}. Retrying…"
                     }
                 } else {
                     mapStatus = "Map unavailable: $problem. Trying again…"
