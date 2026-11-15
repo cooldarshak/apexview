@@ -25,11 +25,16 @@ internal object HevcFeedCompatibility {
         secondPps: HevcParameterSets.PpsMetadata
     ): Result {
         val reasons = mutableListOf<String>()
-        if (firstSps.vuiParametersPresent || secondSps.vuiParametersPresent) {
-            reasons += "SPS VUI is present but not yet parsed"
+        if (firstSps.vuiParametersPresent && firstSps.vuiMetadata == null ||
+            secondSps.vuiParametersPresent && secondSps.vuiMetadata == null) {
+            reasons += "SPS VUI is present but its metadata is incomplete"
         }
-        if (firstSps.spsExtensionPresent != false || secondSps.spsExtensionPresent != false) {
-            reasons += "SPS extension is present or cannot be determined"
+        if (!firstSps.vuiParametersPresent && firstSps.vuiMetadata != null ||
+            !secondSps.vuiParametersPresent && secondSps.vuiMetadata != null) {
+            reasons += "SPS VUI metadata is inconsistent with the presence flag"
+        }
+        if (firstSps.spsExtensionPresent || secondSps.spsExtensionPresent) {
+            reasons += "SPS extension is present but not supported"
         }
         if (firstPps.extensionPresent || secondPps.extensionPresent) {
             reasons += "PPS extension is present but not yet parsed"

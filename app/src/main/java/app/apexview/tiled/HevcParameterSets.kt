@@ -101,7 +101,7 @@ internal object HevcParameterSets {
         val pcmEnabled: Boolean,
         val strongIntraSmoothingEnabled: Boolean,
         val vuiParametersPresent: Boolean,
-        val vuiMetadata: VuiMetadata?,
+        val vuiMetadata: VuiMetadata? = null,
         val spsExtensionPresent: Boolean
     )
 

@@ -64,11 +64,11 @@ class HevcParameterSetCompatibilityTest {
         assertTrue(changedVuiResult.reasons.any { it.contains("SPS metadata differs") })
 
         val unsupportedSpsExtension = vui.copy(spsExtensionPresent = true)
-        val extensionResult = HevcParameterSetCompatibility.compare(
+        val spsExtensionResult = HevcParameterSetCompatibility.compare(
             f.vps, unsupportedSpsExtension, f.pps, f.vps, unsupportedSpsExtension, f.pps
         )
-        assertFalse(extensionResult.compatible)
-        assertTrue(extensionResult.reasons.any { it.contains("SPS extension") })
+        assertFalse(spsExtensionResult.compatible)
+        assertTrue(spsExtensionResult.reasons.any { it.contains("SPS extension") })
 
         val extension = f.pps.copy(extensionPresent = true)
         val extensionResult = HevcParameterSetCompatibility.compare(
