@@ -67,12 +67,7 @@ class HevcParameterSetParserTest {
     @Test fun derivesInlinePredictedRpsUsingDeltaIndexMinusOne() {
         val sps = HevcParameterSets.parseSps(nal(33, spsBitsWithPredictedRps()))
         val bits = BitWriter().apply {
-            write(1, 1) // stRpsIdx 0: no inter-RPS prediction flag
-            writeUe(1); writeUe(1) // source set: one negative, one positive
-            writeUe(0); write(1, 1) // -1, used by current
-            writeUe(1); write(1, 1) // +2, used by current
-
-            write(1, 1) // inline set uses inter-RPS prediction
+            write(1, 1) // inline inter_ref_pic_set_prediction_flag
             writeUe(1) // delta_idx_minus1: reference SPS set 0, not set 1
             write(0, 1) // delta_rps_sign: +1
             writeUe(0) // abs_delta_rps_minus1: 1
