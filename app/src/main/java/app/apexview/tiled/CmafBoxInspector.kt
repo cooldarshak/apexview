@@ -397,10 +397,20 @@ internal object CmafBoxInspector {
         val sencBox = traf.children.firstOrNull { it.type == "senc" }
         val senc = sencBox?.let { box ->
             try {
+                val effectiveSampleIvSizes = if (sampleGroupEncryption.complete) {
+                    resolveSampleIvSizes(
+                        samples.size,
+                        trackEncryptionDefaults[tfhd.trackId],
+                        sampleGroupEncryption.metadata
+                    )
+                } else null
                 parseSencSummary(
                     payload(data, box),
                     trackEncryptionDefaults[tfhd.trackId],
-                    forceIncomplete = sampleGroupEncryption.present
+                    effectiveSampleIvSizes = effectiveSampleIvSizes,
+                    hasSeigOverrides = sampleGroupEncryption.present,
+                    forceIncomplete = !sampleGroupEncryption.complete ||
+                        (sampleGroupEncryption.present && effectiveSampleIvSizes == null)
                 )
             } catch (e: Exception) {
                 errors += "Sample encryption structure could not be parsed: ${e.message ?: e.javaClass.simpleName}"
@@ -755,6 +765,38 @@ internal object CmafBoxInspector {
         return SampleGroupParseResult(true, true, metadata)
     }
 
+    /**
+     * Resolve the effective per-sample IV byte count after applying seig sample-group runs.
+     * A group index of zero inherits the track tenc default. Non-zero indices resolve against
+     * the already scope-qualified track/fragment entry indexes. No KID or IV value is read.
+     */
+    private fun resolveSampleIvSizes(
+        sampleCount: Int,
+        trackEncryption: TrackEncryptionMetadata?,
+        sampleGroups: SampleGroupEncryptionMetadata?
+    ): List<Int>? {
+        val trackIvSize = trackEncryption?.let {
+            if (it.defaultIsProtected) it.perSampleIvSize else 0
+        }
+        if (sampleGroups == null) {
+            return trackIvSize?.let { ivSize -> List(sampleCount) { ivSize } }
+        }
+
+        val entriesByIndex = sampleGroups.entries.associateBy { it.entryIndex.toLong() }
+        val result = ArrayList<Int>(sampleCount)
+        for (run in sampleGroups.runs) {
+            val ivSize = if (run.groupDescriptionIndex == 0L) {
+                trackIvSize ?: return null
+            } else {
+                val entry = entriesByIndex[run.groupDescriptionIndex] ?: return null
+                if (entry.isProtected) entry.perSampleIvSize else 0
+            }
+            if (run.sampleCount > (sampleCount - result.size).toLong()) return null
+            repeat(run.sampleCount.toInt()) { result += ivSize }
+        }
+        return result.takeIf { it.size == sampleCount }
+    }
+
     private fun parseSeigSgpd(p: ByteBuffer): ParsedSeigDescription? {
         require(p.remaining() >= 8) { "Truncated sgpd box" }
         val version = u8(p)
@@ -858,6 +900,8 @@ internal object CmafBoxInspector {
     private fun parseSencSummary(
         p: ByteBuffer,
         trackEncryption: TrackEncryptionMetadata?,
+        effectiveSampleIvSizes: List<Int>? = null,
+        hasSeigOverrides: Boolean = false,
         forceIncomplete: Boolean = false
     ): SencSummary {
         require(p.remaining() >= 8) { "Truncated senc box" }
@@ -880,24 +924,29 @@ internal object CmafBoxInspector {
         }
         val subsampleEncryption = (flags and 0x000002) != 0
 
-        // seig may override protection state and IV size per sample. Until the effective
-        // sample-to-group mapping is applied to every senc record, do not advance into the
-        // record bytes using tenc defaults. Retain only the declared sample count and flags.
-        if (forceIncomplete) {
+        // Do not parse record bytes when seig resolution is incomplete. A senc override
+        // combined with seig is also kept fail-closed until precedence is verified against
+        // the actual delivery profile.
+        if (forceIncomplete || (hasSeigOverrides && overrideIvSize != null)) {
             return SencSummary(sampleCount, subsampleEncryption, false, emptyList(), overrideIvSize)
         }
 
-        // Without tenc defaults or an explicit senc override, the IV byte count cannot be
-        // established safely. Preserve only the declared count and fail the crypto check closed.
-        val defaultIvSize = trackEncryption?.let {
-            if (it.defaultIsProtected) it.perSampleIvSize else 0
-        }
-        val effectiveIvSize = overrideIvSize ?: defaultIvSize
-            ?: return SencSummary(sampleCount, subsampleEncryption, false, emptyList(), null)
+        // Prefer resolved per-sample seig/tenc values. A senc override applies globally only
+        // when no seig mapping is active. Never infer a byte count from a KID or IV value.
+        val ivSizes = when {
+            overrideIvSize != null -> List(sampleCount.toInt()) { overrideIvSize }
+            effectiveSampleIvSizes != null -> effectiveSampleIvSizes
+                .takeIf { it.size == sampleCount.toInt() }
+            else -> trackEncryption?.let {
+                val defaultSize = if (it.defaultIsProtected) it.perSampleIvSize else 0
+                List(sampleCount.toInt()) { defaultSize }
+            }
+        } ?: return SencSummary(sampleCount, subsampleEncryption, false, emptyList(), overrideIvSize)
 
         val samples = ArrayList<SampleEncryptionMetadata>(sampleCount.toInt())
         var totalSubsampleEntries = 0L
-        repeat(sampleCount.toInt()) {
+        repeat(sampleCount.toInt()) { sampleIndex ->
+            val effectiveIvSize = ivSizes[sampleIndex]
             if (effectiveIvSize > 0) skip(p, effectiveIvSize) // Skip IV bytes without retaining them.
             val ranges: List<SubsampleEncryptionRange>? = if (subsampleEncryption) {
                 val count = u16(p)

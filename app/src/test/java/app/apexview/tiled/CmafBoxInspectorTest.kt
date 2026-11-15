@@ -341,7 +341,7 @@ class CmafBoxInspectorTest {
             fragment.sampleGroupEncryptionMetadata.runs)
     }
 
-    @Test fun doesNotParseSencUsingTencIvSizeWhenSeigOverridesAreActive() {
+    @Test fun parsesSencUsingEffectiveSeigIvSizeInsteadOfTencDefault() {
         val init = fragmentedInitSegment(trackId = 65, timescale = 90000, includeEncryption = true)
         val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(65))
         val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
@@ -359,6 +359,51 @@ class CmafBoxInspectorTest {
         assertTrue(fragment.sampleGroupEncryptionStructureComplete)
         assertTrue(fragment.sampleEncryptionBoxPresent)
         assertEquals(1L, fragment.sampleEncryptionCount)
+        assertTrue(fragment.sampleEncryptionStructureComplete)
+        assertEquals(listOf(8), fragment.sampleEncryptionMetadata.map { it.ivSize })
+        assertTrue(report.errors.isEmpty())
+    }
+
+    @Test fun resolvesMixedSeigAndTrackDefaultIvSizesPerSample() {
+        val init = fragmentedInitSegment(trackId = 66, timescale = 90000, includeEncryption = true)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(66))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(2) + int(3000) + int(3000))
+        val entry = byteArrayOf(0, 0x19, 1, 8) + ByteArray(16)
+        val sgpd = box("sgpd", byteArrayOf(1,0,0,0) + ascii("seig") + int(0) + int(1) +
+            int(entry.size) + entry)
+        val sbgp = box("sbgp", byteArrayOf(0,0,0,0) + ascii("seig") +
+            int(2) + int(1) + int(0x10001) + int(1) + int(0))
+        val senc = box("senc", byteArrayOf(0,0,0,0) + int(2) + ByteArray(8) + ByteArray(16))
+        val saiz = box("saiz", byteArrayOf(0,0,0,0, 0) + int(2) + byteArrayOf(8, 16))
+        val saio = box("saio", byteArrayOf(0,0,0,0) + int(1) + int(0))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) +
+                box("traf", tfhd + tfdt + trun + sgpd + sbgp + senc + saiz + saio))
+        )
+        val fragment = report.fragments.single()
+        assertTrue(report.errors.toString(), report.errors.isEmpty())
+        assertTrue(fragment.sampleEncryptionStructureComplete)
+        assertEquals(listOf(8, 16), fragment.sampleEncryptionMetadata.map { it.ivSize })
+        assertTrue(fragment.sampleAuxiliaryInfoStructureComplete)
+    }
+
+    @Test fun keepsSencOverrideAndActiveSeigCombinationIncomplete() {
+        val init = fragmentedInitSegment(trackId = 69, timescale = 90000, includeEncryption = true)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(69))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(1) + int(3000))
+        val entry = byteArrayOf(0, 0x19, 1, 8) + ByteArray(16)
+        val sgpd = box("sgpd", byteArrayOf(1,0,0,0) + ascii("seig") + int(0) + int(1) +
+            int(entry.size) + entry)
+        val sbgp = box("sbgp", byteArrayOf(0,0,0,0) + ascii("seig") + int(1) + int(1) + int(0x10001))
+        val senc = box("senc", byteArrayOf(0,0,1,0) + byteArrayOf(0,0,1,8) + ByteArray(16) + int(1) + ByteArray(8))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) +
+                box("traf", tfhd + tfdt + trun + sgpd + sbgp + senc))
+        )
+        val fragment = report.fragments.single()
+        assertTrue(fragment.sampleGroupEncryptionStructureComplete)
         assertFalse(fragment.sampleEncryptionStructureComplete)
         assertTrue(fragment.sampleEncryptionMetadata.isEmpty())
         assertTrue(report.errors.isEmpty())
@@ -373,12 +418,17 @@ class CmafBoxInspectorTest {
         val sgpd = box("sgpd", byteArrayOf(1,0,0,0) + ascii("seig") + int(0) + int(1) +
             int(entry.size) + entry)
         val sbgp = box("sbgp", byteArrayOf(0,0,0,0) + ascii("seig") + int(1) + int(1) + int(0x10001))
+        val senc = box("senc", byteArrayOf(0,0,0,0) + int(1))
         val report = CmafBoxInspector.inspect(
-            init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + sgpd + sbgp))
+            init + box("moof", box("mfhd", ByteArray(8)) +
+                box("traf", tfhd + tfdt + trun + sgpd + sbgp + senc))
         )
-        val entryMetadata = report.fragments.single().sampleGroupEncryptionMetadata!!.entries.single()
+        val fragment = report.fragments.single()
+        val entryMetadata = fragment.sampleGroupEncryptionMetadata!!.entries.single()
         assertEquals(0, entryMetadata.perSampleIvSize)
         assertEquals(16, entryMetadata.constantIvSize)
+        assertTrue(fragment.sampleEncryptionStructureComplete)
+        assertEquals(listOf(0), fragment.sampleEncryptionMetadata.map { it.ivSize })
     }
 
     @Test fun rejectsSeigMappingWithMissingDescriptionEntry() {
