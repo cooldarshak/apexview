@@ -546,17 +546,28 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         suspend fun publish(session: SessionTiming) {
             withContext(Dispatchers.Main) { onPartial(session) }
         }
+        suspend fun fetchStage(path: String, label: String = path.substringAfterLast('/')): String {
+            progress("GET $label…")
+            val started = android.os.SystemClock.elapsedRealtime()
+            return try {
+                val body = fetch(path)
+                progress("OK $label · ${body.length} chars · ${android.os.SystemClock.elapsedRealtime() - started}ms")
+                body
+            } catch (e: Exception) {
+                progress("FAIL $label · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                throw e
+            }
+        }
+        suspend fun fetchOptionalStage(path: String, label: String = path.substringAfterLast('/')): String? =
+            runCatching { fetchStage(path, label) }.getOrNull()
 
-        progress("Finding this session in F1's timing archive…")
+        progress("GET ${ref.year}/Index.json · matching session metadata…")
         val (path, type) = findSession(ref, watchedUtc)
-        progress("Loading driver list…")
-        val drivers = parseDrivers(JSONObject(fetch(path + "DriverList.json")))
-        progress("Reading the archive session clock…")
-        val heartbeat = fetch(path + "Heartbeat.jsonStream")
-        progress("Loading lap and sector timing…")
-        val timingStream = runCatching { fetch(path + "TimingData.jsonStream") }.getOrNull()
-        progress("Loading F1 lap details…")
-        val timingF1Stream = runCatching { fetch(path + "TimingDataF1.jsonStream") }.getOrNull().orEmpty()
+        progress("Archive session resolved: $path · type=$type")
+        val drivers = parseDrivers(JSONObject(fetchStage(path + "DriverList.json")))
+        val heartbeat = fetchStage(path + "Heartbeat.jsonStream")
+        val timingStream = fetchOptionalStage(path + "TimingData.jsonStream")
+        val timingF1Stream = fetchOptionalStage(path + "TimingDataF1.jsonStream").orEmpty()
 
         // Publish the tower as soon as its core data is ready. Track positions can be a much larger
         // archive download on Android TV, and must not keep the timing tower blank while they load.
@@ -583,7 +594,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         )
 
         progress("Loading track positions…")
-        val positions = fetch(path + "Position.z.jsonStream")
+        val positions = fetchStage(path + "Position.z.jsonStream")
         val tracks = parsePositions(positions)
         if (tracks.isEmpty()) throw IOException("The archive has no car positions for this session")
 
@@ -619,7 +630,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         )
 
         progress("Loading circuit details…")
+        progress("Loading circuit outline and corner metadata…")
+        val circuitStarted = android.os.SystemClock.elapsedRealtime()
         val circuit = ref.circuitKey?.let { runCatching { fetchCircuit(it, ref.year) }.getOrNull() }
+        progress("Circuit metadata ${if (circuit == null) "unavailable" else "loaded"} · ${android.os.SystemClock.elapsedRealtime() - circuitStarted}ms")
         val corners = circuit?.corners.orEmpty()
         if (outline.size < 8 && (circuit?.outline?.size ?: 0) >= 8) outline = circuit!!.outline
         if (circuit != null) {
@@ -644,26 +658,36 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             if (outline.size >= 8) "Loading optional race details…"
             else "Timing tower data is loaded, but F1 has not provided a usable circuit outline for the map…"
         )
-        val weather = runCatching { WeatherParser.parse(fetch(path + "WeatherData.jsonStream"), streamStart) }.getOrDefault(WeatherLog.NONE)
-        val started = runCatching { parseSessionStarted(fetch(path + "SessionStatus.jsonStream"), streamStart) }.getOrNull()
-        val control = runCatching { fetch(path + "RaceControlMessages.jsonStream") }.getOrNull()
+        val weather = fetchOptionalStage(path + "WeatherData.jsonStream")?.let {
+            runCatching { WeatherParser.parse(it, streamStart) }.getOrNull()
+        } ?: WeatherLog.NONE
+        val started = fetchOptionalStage(path + "SessionStatus.jsonStream")?.let {
+            runCatching { parseSessionStarted(it, streamStart) }.getOrNull()
+        }
+        val control = fetchOptionalStage(path + "RaceControlMessages.jsonStream")
         val chequered = control?.let { runCatching { parseChequered(it, streamStart) }.getOrNull() }
         // Restart times come in the track's local time; the session's offset from GMT turns them to UTC.
         val gmtOffset = runCatching { JSONObject(fetch(path + "SessionInfo.json")).optString("GmtOffset") }.getOrNull()
         val flags = TrackFlags(
             control?.let { runCatching { parseSectorFlags(it, streamStart) }.getOrNull() }.orEmpty(),
-            runCatching { parseTrackStatus(fetch(path + "TrackStatus.jsonStream"), streamStart) }.getOrDefault(emptyList()),
+            fetchOptionalStage(path + "TrackStatus.jsonStream")?.let {
+                runCatching { parseTrackStatus(it, streamStart) }.getOrDefault(emptyList())
+            }.orEmpty(),
             control?.let { runCatching { parseSafetyCarIn(it, streamStart) }.getOrNull() }.orEmpty(),
             control?.let { c -> gmtOffset?.let { runCatching { parseResumptions(c, streamStart, it) }.getOrNull() } }.orEmpty(),
             control?.let { runCatching { parseRedFlags(it, streamStart) }.getOrNull() }.orEmpty(),
         )
-        val tyres = runCatching { TyreParser.parse(fetch(path + "TimingAppData.jsonStream"), streamStart) }.getOrDefault(emptyMap())
-        val radio = runCatching { parseRadio(fetch(path + "TeamRadio.jsonStream")) }
-            .onSuccess { android.util.Log.i("ApexviewRadio", "archive radio for $path: ${it.size} clips") }
-            .onFailure { android.util.Log.w("ApexviewRadio", "archive radio for $path: ${it.message}") }
-            .getOrDefault(emptyList())
+        val tyres = fetchOptionalStage(path + "TimingAppData.jsonStream")?.let {
+            runCatching { TyreParser.parse(it, streamStart) }.getOrNull()
+        }.orEmpty()
+        val radio = fetchOptionalStage(path + "TeamRadio.jsonStream")?.let {
+            runCatching { parseRadio(it) }.getOrDefault(emptyList())
+        }.orEmpty()
+        android.util.Log.i("ApexviewRadio", "archive radio for $path: ${radio.size} clips")
         val isRace = type.contains("Race", ignoreCase = true)
-        val totalLaps = if (isRace) runCatching { parseTotalLaps(fetch(path + "LapCount.jsonStream")) }.getOrNull() else null
+        val totalLaps = if (isRace) fetchOptionalStage(path + "LapCount.jsonStream")?.let {
+            runCatching { parseTotalLaps(it) }.getOrNull()
+        } else null
         val grid = if (isRace && line != null) findGrid(TrackGeometry(outline), built, chequered) else null
 
         SessionTiming(
