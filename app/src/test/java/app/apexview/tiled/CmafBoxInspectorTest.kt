@@ -228,7 +228,7 @@ class CmafBoxInspectorTest {
         assertEquals(8, group.entries.single().perSampleIvSize)
         assertEquals(1, group.entries.single().cryptByteBlock)
         assertEquals(9, group.entries.single().skipByteBlock)
-        assertEquals(listOf(CmafBoxInspector.SampleGroupRun(2, 1)), group.runs)
+        assertEquals(listOf(CmafBoxInspector.SampleGroupRun(2, 0x10001)), group.runs)
     }
 
     @Test fun resolvesTrackLevelSeigDescriptionFromFragmentSbgpIndex() {
@@ -289,7 +289,7 @@ class CmafBoxInspectorTest {
         val entry = byteArrayOf(0, 0x19, 1, 0) + ByteArray(16) + byteArrayOf(16) + ByteArray(16)
         val sgpd = box("sgpd", byteArrayOf(1,0,0,0) + ascii("seig") + int(0) + int(1) +
             int(entry.size) + entry)
-        val sbgp = box("sbgp", byteArrayOf(0,0,0,0) + ascii("seig") + int(1) + int(1) + int(1))
+        val sbgp = box("sbgp", byteArrayOf(0,0,0,0) + ascii("seig") + int(1) + int(1) + int(0x10001))
         val report = CmafBoxInspector.inspect(
             init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + sgpd + sbgp))
         )
