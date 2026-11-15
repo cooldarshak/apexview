@@ -111,6 +111,12 @@ class HevcParameterSetCompatibilityTest {
         val vps = HevcParameterSets.parseVps(nal(32, BitWriter().apply {
             write(1, 4); write(1, 1); write(1, 1); write(0, 6)
             write(0, 3); write(1, 1); write(0xffff, 16)
+            write(0, 8); write(0, 32); write(0, 32); write(0, 16); write(0, 8)
+            write(1, 1) // ordering info present
+            writeUe(4); writeUe(2); writeUe(0)
+            write(0, 6); writeUe(0) // layer sets
+            write(0, 1) // no timing info
+            write(0, 1) // no VPS extension
         }.finish()))
         val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
         val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)

@@ -9,11 +9,49 @@ package app.apexview.tiled
  * Input must be clear NAL bytes, including the two-byte HEVC NAL header.
  */
 internal object HevcParameterSets {
+    data class HrdCommonMetadata(
+        val nalHrdPresent: Boolean,
+        val vclHrdPresent: Boolean,
+        val subPicHrdPresent: Boolean,
+        val tickDivisorMinus2: Int?,
+        val duCpbRemovalDelayIncrementLengthMinus1: Int?,
+        val subPicCpbParamsInPicTimingSei: Boolean?,
+        val dpbOutputDelayDuLengthMinus1: Int?,
+        val bitRateScale: Int?,
+        val cpbSizeScale: Int?,
+        val cpbSizeDuScale: Int?,
+        val initialCpbRemovalDelayLengthMinus1: Int?,
+        val auCpbRemovalDelayLengthMinus1: Int?,
+        val dpbOutputDelayLengthMinus1: Int?
+    )
+
+    data class VpsHrdParameters(
+        val layerSetIndex: Int,
+        val commonInfoPresent: Boolean,
+        val commonInfo: HrdCommonMetadata
+    )
+
     data class VpsMetadata(
         val vpsId: Int,
+        val baseLayerInternal: Boolean,
+        val baseLayerAvailable: Boolean,
         val maxLayers: Int,
         val maxSubLayers: Int,
-        val temporalIdNesting: Boolean
+        val temporalIdNesting: Boolean,
+        val profileTierLevel: ProfileTierLevel,
+        val subLayerOrderingInfoPresent: Boolean,
+        val maxDecPicBuffering: List<Int>,
+        val maxNumReorderPics: List<Int>,
+        val maxLatencyIncrease: List<Int>,
+        val maxLayerId: Int,
+        val numLayerSets: Int,
+        val timingInfoPresent: Boolean,
+        val numUnitsInTick: Long?,
+        val timeScale: Long?,
+        val pocProportionalToTiming: Boolean?,
+        val numTicksPocDiffOneMinus1: Int?,
+        val hrdParameters: List<VpsHrdParameters>,
+        val extensionPresent: Boolean
     )
 
     data class ProfileTierLevelFields(
@@ -143,17 +181,96 @@ internal object HevcParameterSets {
         val extensionFlags: Int?
     )
 
+    /**
+     * Parses the base VPS syntax through vps_extension_flag. Multilayer extension payloads are
+     * identified, not interpreted; the tile stitcher rejects them until their semantics are known.
+     */
     fun parseVps(nal: ByteArray): VpsMetadata {
         val bits = readerFor(nal, 32)
         val id = bits.readBits(4)
-        bits.readBit() // vps_base_layer_internal_flag
-        bits.readBit() // vps_base_layer_available_flag
+        val baseLayerInternal = bits.readBit() != 0
+        val baseLayerAvailable = bits.readBit() != 0
         val maxLayers = bits.readBits(6) + 1
-        val maxSubLayers = bits.readBits(3) + 1
-        require(maxSubLayers in 1..7) { "Invalid VPS sub-layer count" }
+        val maxSubLayersMinus1 = bits.readBits(3)
+        require(maxSubLayersMinus1 in 0..6) { "Invalid VPS sub-layer count" }
+        val maxSubLayers = maxSubLayersMinus1 + 1
         val nesting = bits.readBit() != 0
         require(bits.readBits(16) == 0xffff) { "Invalid VPS reserved bits" }
-        return VpsMetadata(id, maxLayers, maxSubLayers, nesting)
+        val profileTierLevel = parseProfileTierLevel(bits, maxSubLayersMinus1)
+
+        val orderingInfoPresent = bits.readBit() != 0
+        val maxDecPicBuffering = MutableList(maxSubLayers) { 0 }
+        val maxNumReorderPics = MutableList(maxSubLayers) { 0 }
+        val maxLatencyIncrease = MutableList(maxSubLayers) { 0 }
+        val firstLayer = if (orderingInfoPresent) 0 else maxSubLayersMinus1
+        for (layer in firstLayer..maxSubLayersMinus1) {
+            maxDecPicBuffering[layer] = readUe(bits, 32, "vps_max_dec_pic_buffering_minus1") + 1
+            maxNumReorderPics[layer] = readUe(bits, 32, "vps_max_num_reorder_pics")
+            maxLatencyIncrease[layer] = readUe(bits, 1024, "vps_max_latency_increase_plus1")
+        }
+        if (!orderingInfoPresent) {
+            for (layer in 0 until maxSubLayersMinus1) {
+                maxDecPicBuffering[layer] = maxDecPicBuffering[maxSubLayersMinus1]
+                maxNumReorderPics[layer] = maxNumReorderPics[maxSubLayersMinus1]
+                maxLatencyIncrease[layer] = maxLatencyIncrease[maxSubLayersMinus1]
+            }
+        }
+
+        val maxLayerId = bits.readBits(6)
+        val numLayerSetsMinus1 = readUe(bits, 1023, "vps_num_layer_sets_minus1")
+        repeat(numLayerSetsMinus1) {
+            repeat(maxLayerId + 1) { bits.readBit() } // layer_id_included_flag
+        }
+
+        val timingInfoPresent = bits.readBit() != 0
+        var numUnitsInTick: Long? = null
+        var timeScale: Long? = null
+        var pocProportionalToTiming: Boolean? = null
+        var numTicksPocDiffOneMinus1: Int? = null
+        val hrdParameters = mutableListOf<VpsHrdParameters>()
+        if (timingInfoPresent) {
+            numUnitsInTick = readUnsignedBits32(bits)
+            timeScale = readUnsignedBits32(bits)
+            require(numUnitsInTick > 0 && timeScale > 0) { "Invalid VPS timing information" }
+            pocProportionalToTiming = bits.readBit() != 0
+            if (pocProportionalToTiming) {
+                numTicksPocDiffOneMinus1 = readUe(bits, 32767, "vps_num_ticks_poc_diff_one_minus1")
+            }
+            val hrdCount = readUe(bits, 1024, "vps_num_hrd_parameters")
+            var previousCommonInfo: HrdCommonMetadata? = null
+            repeat(hrdCount) { index ->
+                val layerSetIndex = readUe(bits, numLayerSetsMinus1, "hrd_layer_set_idx")
+                val commonInfoPresent = if (index == 0) true else bits.readBit() != 0
+                val commonInfo = parseHrdParameters(
+                    bits, maxSubLayersMinus1, commonInfoPresent, previousCommonInfo
+                )
+                previousCommonInfo = commonInfo
+                hrdParameters += VpsHrdParameters(layerSetIndex, commonInfoPresent, commonInfo)
+            }
+        }
+        val extensionPresent = bits.readBit() != 0
+        return VpsMetadata(
+            vpsId = id,
+            baseLayerInternal = baseLayerInternal,
+            baseLayerAvailable = baseLayerAvailable,
+            maxLayers = maxLayers,
+            maxSubLayers = maxSubLayers,
+            temporalIdNesting = nesting,
+            profileTierLevel = profileTierLevel,
+            subLayerOrderingInfoPresent = orderingInfoPresent,
+            maxDecPicBuffering = maxDecPicBuffering,
+            maxNumReorderPics = maxNumReorderPics,
+            maxLatencyIncrease = maxLatencyIncrease,
+            maxLayerId = maxLayerId,
+            numLayerSets = numLayerSetsMinus1 + 1,
+            timingInfoPresent = timingInfoPresent,
+            numUnitsInTick = numUnitsInTick,
+            timeScale = timeScale,
+            pocProportionalToTiming = pocProportionalToTiming,
+            numTicksPocDiffOneMinus1 = numTicksPocDiffOneMinus1,
+            hrdParameters = hrdParameters,
+            extensionPresent = extensionPresent
+        )
     }
 
     fun parseSps(nal: ByteArray): SpsMetadata {
@@ -339,24 +456,51 @@ internal object HevcParameterSets {
         )
     }
 
-    private fun parseHrdParameters(bits: HevcBitReader, maxSubLayersMinus1: Int) {
-        val nalHrdPresent = bits.readBit() != 0
-        val vclHrdPresent = bits.readBit() != 0
-        var subPicHrdPresent = false
-        if (nalHrdPresent || vclHrdPresent) {
-            subPicHrdPresent = bits.readBit() != 0
-            if (subPicHrdPresent) {
-                bits.readBits(8) // tick_divisor_minus2
-                bits.readBits(5) // du_cpb_removal_delay_increment_length_minus1
-                bits.readBit() // sub_pic_cpb_params_in_pic_timing_sei_flag
-                bits.readBits(5) // dpb_output_delay_du_length_minus1
+    private fun parseHrdParameters(
+        bits: HevcBitReader,
+        maxSubLayersMinus1: Int,
+        commonInfoPresent: Boolean = true,
+        previousCommonInfo: HrdCommonMetadata? = null
+    ): HrdCommonMetadata {
+        val common = if (commonInfoPresent) {
+            val nalHrdPresent = bits.readBit() != 0
+            val vclHrdPresent = bits.readBit() != 0
+            var subPicHrdPresent = false
+            var tickDivisor: Int? = null
+            var duCpbDelayLength: Int? = null
+            var subPicTimingSei: Boolean? = null
+            var dpbOutputDuLength: Int? = null
+            var bitRateScale: Int? = null
+            var cpbSizeScale: Int? = null
+            var cpbSizeDuScale: Int? = null
+            var initialDelayLength: Int? = null
+            var auDelayLength: Int? = null
+            var dpbOutputLength: Int? = null
+            if (nalHrdPresent || vclHrdPresent) {
+                subPicHrdPresent = bits.readBit() != 0
+                if (subPicHrdPresent) {
+                    tickDivisor = bits.readBits(8)
+                    duCpbDelayLength = bits.readBits(5)
+                    subPicTimingSei = bits.readBit() != 0
+                    dpbOutputDuLength = bits.readBits(5)
+                }
+                bitRateScale = bits.readBits(4)
+                cpbSizeScale = bits.readBits(4)
+                if (subPicHrdPresent) cpbSizeDuScale = bits.readBits(4)
+                initialDelayLength = bits.readBits(5)
+                auDelayLength = bits.readBits(5)
+                dpbOutputLength = bits.readBits(5)
             }
-            bits.readBits(4) // bit_rate_scale
-            bits.readBits(4) // cpb_size_scale
-            if (subPicHrdPresent) bits.readBits(4) // cpb_size_du_scale
-            bits.readBits(5) // initial_cpb_removal_delay_length_minus1
-            bits.readBits(5) // au_cpb_removal_delay_length_minus1
-            bits.readBits(5) // dpb_output_delay_length_minus1
+            HrdCommonMetadata(
+                nalHrdPresent, vclHrdPresent, subPicHrdPresent,
+                tickDivisor, duCpbDelayLength, subPicTimingSei, dpbOutputDuLength,
+                bitRateScale, cpbSizeScale, cpbSizeDuScale,
+                initialDelayLength, auDelayLength, dpbOutputLength
+            )
+        } else {
+            requireNotNull(previousCommonInfo) {
+                "HRD common parameters are absent before a previous common parameter set"
+            }
         }
 
         for (layer in 0..maxSubLayersMinus1) {
@@ -369,9 +513,10 @@ internal object HevcParameterSets {
                 bits.readBit() != 0
             }
             val cpbCountMinus1 = if (lowDelayHrd) 0 else readUe(bits, 31, "cpb_cnt_minus1")
-            if (nalHrdPresent) skipSubLayerHrdParameters(bits, cpbCountMinus1, subPicHrdPresent)
-            if (vclHrdPresent) skipSubLayerHrdParameters(bits, cpbCountMinus1, subPicHrdPresent)
+            if (common.nalHrdPresent) skipSubLayerHrdParameters(bits, cpbCountMinus1, common.subPicHrdPresent)
+            if (common.vclHrdPresent) skipSubLayerHrdParameters(bits, cpbCountMinus1, common.subPicHrdPresent)
         }
+        return common
     }
 
     private fun skipSubLayerHrdParameters(

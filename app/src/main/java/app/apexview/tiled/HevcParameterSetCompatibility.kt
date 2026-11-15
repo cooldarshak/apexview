@@ -20,7 +20,15 @@ internal object HevcParameterSetCompatibility {
     ): Result {
         val reasons = mutableListOf<String>()
         if (firstVps == null || secondVps == null) reasons += "VPS is missing"
-        else if (firstVps != secondVps) reasons += "VPS metadata differs"
+        else {
+            if (firstVps != secondVps) reasons += "VPS metadata differs"
+            if (firstVps.extensionPresent || secondVps.extensionPresent) {
+                reasons += "VPS multilayer extension payload is present but not parsed"
+            }
+            if (firstVps.maxLayers != 1 || secondVps.maxLayers != 1) {
+                reasons += "Multilayer VPS configurations are outside the supported profile"
+            }
+        }
 
         if (firstSps == null || secondSps == null) {
             reasons += "SPS is missing"

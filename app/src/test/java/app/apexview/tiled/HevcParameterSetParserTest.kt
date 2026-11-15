@@ -7,16 +7,54 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class HevcParameterSetParserTest {
-    @Test fun parsesVpsIdentityAndLayerLimits() {
+    @Test fun parsesVpsOrderingLayerSetsTimingAndHrdParameters() {
         val bits = BitWriter().apply {
-            write(5, 4); write(1, 1); write(1, 1); write(0, 6)
-            write(1, 3); write(1, 1); write(0xffff, 16)
+            write(5, 4) // VPS id
+            write(1, 1); write(1, 1) // base-layer internal and available
+            write(0, 6) // one layer
+            write(1, 3); write(1, 1) // two sub-layers, temporal nesting
+            write(0xffff, 16)
+            write(0, 8); write(0, 32); write(0, 32); write(0, 16); write(0, 8) // general PTL
+            write(0, 1); write(0, 1) // sub-layer profile/level absent
+            write(0, 14) // reserved_zero_2bits for remaining sub-layers
+            write(1, 1) // ordering info present for all sub-layers
+            repeat(2) {
+                writeUe(4); writeUe(2); writeUe(0)
+            }
+            write(0, 6) // max layer ID
+            writeUe(0) // one layer set (base layer set only)
+            write(1, 1) // timing info present
+            write(1, 32); write(25, 32)
+            write(1, 1); writeUe(0) // POC proportional, one tick per POC
+            writeUe(1) // one HRD parameter set
+            writeUe(0) // layer_set_idx = 0
+            // First hrd_parameters has common_info_present_flag inferred true.
+            write(0, 1); write(0, 1) // no NAL or VCL HRD
+            repeat(2) { // each sub-layer: fixed rate, duration, and CPB count
+                write(1, 1); writeUe(0); writeUe(0)
+            }
+            write(0, 1) // no VPS extension
         }
         val vps = HevcParameterSets.parseVps(nal(32, bits.finish()))
         assertEquals(5, vps.vpsId)
+        assertTrue(vps.baseLayerInternal)
+        assertTrue(vps.baseLayerAvailable)
         assertEquals(1, vps.maxLayers)
         assertEquals(2, vps.maxSubLayers)
         assertTrue(vps.temporalIdNesting)
+        assertTrue(vps.subLayerOrderingInfoPresent)
+        assertEquals(listOf(5, 5), vps.maxDecPicBuffering)
+        assertEquals(listOf(2, 2), vps.maxNumReorderPics)
+        assertEquals(0, vps.maxLayerId)
+        assertEquals(1, vps.numLayerSets)
+        assertTrue(vps.timingInfoPresent)
+        assertEquals(1L, vps.numUnitsInTick)
+        assertEquals(25L, vps.timeScale)
+        assertEquals(true, vps.pocProportionalToTiming)
+        assertEquals(0, vps.numTicksPocDiffOneMinus1)
+        assertEquals(1, vps.hrdParameters.size)
+        assertFalse(vps.hrdParameters.single().commonInfo.nalHrdPresent)
+        assertFalse(vps.extensionPresent)
     }
 
     @Test fun extractsSpsDimensionsPocAndCtbGeometry() {
