@@ -549,10 +549,13 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
 
         progress("Finding this session in F1's timing archive…")
         val (path, type) = findSession(ref, watchedUtc)
-        progress("Loading driver and lap timing…")
+        progress("Loading driver list…")
         val drivers = parseDrivers(JSONObject(fetch(path + "DriverList.json")))
+        progress("Reading the archive session clock…")
         val heartbeat = fetch(path + "Heartbeat.jsonStream")
+        progress("Loading lap and sector timing…")
         val timingStream = runCatching { fetch(path + "TimingData.jsonStream") }.getOrNull()
+        progress("Loading F1 lap details…")
         val timingF1Stream = runCatching { fetch(path + "TimingDataF1.jsonStream") }.getOrNull().orEmpty()
 
         // Publish the tower as soon as its core data is ready. Track positions can be a much larger
