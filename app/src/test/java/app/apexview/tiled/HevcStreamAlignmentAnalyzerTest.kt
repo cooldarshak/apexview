@@ -52,6 +52,7 @@ class HevcStreamAlignmentAnalyzerTest {
         write(0, 1); write(0, 1); write(1, 1); write(0, 1)
         writeUe(0) // no SPS short-term sets
         write(0, 1); write(1, 1); write(1, 1); write(0, 1)
+        write(0, 1) // no SPS extension
     }.finish()
 
     private fun ppsBits(): ByteArray = BitWriter().apply {
@@ -60,6 +61,13 @@ class HevcStreamAlignmentAnalyzerTest {
         write(0, 1); write(0, 1); write(0, 1); writeSe(0); writeSe(0)
         write(0, 1); write(0, 1); write(0, 1); write(0, 1)
         write(1, 1); write(0, 1); writeUe(1); writeUe(1); write(1, 1); write(1, 1)
+        write(1, 1) // loop filter across slices
+        write(0, 1) // no deblocking filter control
+        write(0, 1) // no PPS scaling-list data
+        write(0, 1) // no list modification
+        writeUe(0) // parallel merge level
+        write(0, 1) // no slice header extension
+        write(0, 1) // no PPS extension
     }.finish()
 
     private fun idrSlice(): ByteArray = BitWriter().apply {
