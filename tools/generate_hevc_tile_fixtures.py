@@ -65,7 +65,7 @@ def first_slice_segment(nal):
     return bool(nal[2] & 0x80)
 
 
-def split_into_picture_access_units(nals):
+def split_into_picture_access_units(nals, expected_tile_slices=2):
     parameter_sets = []
     frames = []
     current = None
@@ -116,14 +116,17 @@ def split_into_picture_access_units(nals):
         raise RuntimeError(f"Expected {FRAME_COUNT} access units, found {len(frames)}")
 
     for frame_index, frame in enumerate(frames):
-        if len(frame["slices"]) != 2:
+        if len(frame["slices"]) != expected_tile_slices:
             raise RuntimeError(
-                f"Picture {frame_index} has {len(frame['slices'])} tile slices; expected exactly 2"
+                f"Picture {frame_index} has {len(frame['slices'])} tile slices; expected exactly {expected_tile_slices}"
             )
         if not first_slice_segment(frame["slices"][0]):
             raise RuntimeError(f"Picture {frame_index} first tile lacks first_slice_segment_in_pic_flag")
-        if first_slice_segment(frame["slices"][1]):
-            raise RuntimeError(f"Picture {frame_index} second tile unexpectedly starts a new picture")
+        for tile_index, tile in enumerate(frame["slices"][1:], start=1):
+            if first_slice_segment(tile):
+                raise RuntimeError(
+                    f"Picture {frame_index} continuation tile {tile_index} unexpectedly starts a new picture"
+                )
 
     return parameter_sets, frames
 

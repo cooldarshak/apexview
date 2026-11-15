@@ -106,6 +106,90 @@ class HevcSyntheticTileSplitTest {
     }
 
 
+    @Test fun kotlinAssemblerReconstructsFourComplementaryTilesInA2x2Grid() {
+        val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+        assumeTrue("Kvazaar tile fixture directory is not configured", !fixturePath.isNullOrBlank())
+        val directory = File(fixturePath!!)
+        val source = File(directory, "source_tiled_2x2.hevc")
+        val reference = File(directory, "reassembled_2x2.hevc")
+        val feeds = (0..3).map { File(directory, "feed_tile_$it.hevc") }
+        assumeTrue(
+            "Synthetic 2x2 tile fixtures are missing",
+            source.isFile && reference.isFile && feeds.all { it.isFile }
+        )
+
+        val sourceNals = HevcBitstream.splitAnnexB(source.readBytes())
+        val sourceVcl = sourceNals.filter { it.type in 0..31 }
+        assertEquals(200, sourceVcl.size)
+        val feedVcl = feeds.map { file ->
+            HevcBitstream.splitAnnexB(file.readBytes()).filter { it.type in 0..31 }
+        }
+        feedVcl.forEach { assertEquals(50, it.size) }
+        assertTrue(feedVcl.first().all { (it.bytes[2].toInt() and 0x80) != 0 })
+        feedVcl.drop(1).flatten().forEach { assertTrue((it.bytes[2].toInt() and 0x80) == 0) }
+
+        val sps = HevcParameterSets.parseSps(sourceNals.single { it.type == 33 }.bytes)
+        val pps = HevcParameterSets.parsePps(sourceNals.single { it.type == 34 }.bytes, sps)
+        assertTrue(pps.tilesEnabled)
+        assertEquals(2, pps.numTileColumns)
+        assertEquals(2, pps.numTileRows)
+        assertEquals(2, pps.tileColumnWidthsInCtbs?.size)
+        assertEquals(2, pps.tileRowHeightsInCtbs?.size)
+        assertEquals(sps.picWidthInCtbs, pps.tileColumnWidthsInCtbs?.sum())
+        assertEquals(sps.picHeightInCtbs, pps.tileRowHeightsInCtbs?.sum())
+
+        val result = try {
+            HevcTileStreamAssembler.assembleFourTileStreams(feeds.map { it.readBytes() })
+        } catch (failure: IllegalArgumentException) {
+            throw AssertionError("HEVC_TILE_2X2_ASSEMBLY_FAILURE: ${failure.message}", failure)
+        }
+        assertEquals(50, result.pictureCount)
+        assertEquals(4, result.tileSlicesPerPicture)
+        assertEquals(50, result.tileSliceSegmentAddresses.size)
+        val expectedAddresses = result.tileSliceSegmentAddresses.first()
+        assertEquals(4, expectedAddresses.size)
+        assertEquals(0, expectedAddresses[0])
+        assertTrue(expectedAddresses.zipWithNext().all { it.first < it.second })
+
+        val assembledNals = HevcBitstream.splitAnnexB(result.annexB)
+        val assembledVcl = assembledNals.filter { it.type in 0..31 }
+        assertEquals(sourceVcl.map { it.bytes.toList() }, assembledVcl.map { it.bytes.toList() })
+        assertArrayEquals(reference.readBytes(), result.annexB)
+
+        val sourceFrames = HevcStreamAlignmentAnalyzer.analyze(source.readBytes())
+        val assembledFrames = HevcStreamAlignmentAnalyzer.analyze(result.annexB)
+        assertEquals(sourceFrames, assembledFrames)
+        assertEquals(50, sourceFrames.size)
+        assertTrue(sourceFrames.all { it.sliceSegmentAddresses.size == 4 })
+        assertTrue(sourceFrames.all { it.sliceSegmentAddresses.distinct().size == 4 })
+
+        assumeTrue("FFmpeg is not installed; skipped independent decode check", ffmpegAvailable())
+        val assembledFile = File.createTempFile("apexview-kotlin-stitched-2x2-", ".hevc", directory)
+        try {
+            assembledFile.writeBytes(result.annexB)
+            assertEquals(frameHashes(source), frameHashes(assembledFile))
+        } finally {
+            assembledFile.delete()
+        }
+    }
+
+    @Test fun fourTileAssemblerRejectsAFeedInTheWrongTilePosition() {
+        val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+        assumeTrue("Kvazaar tile fixture directory is not configured", !fixturePath.isNullOrBlank())
+        val directory = File(fixturePath!!)
+        val feeds = (0..3).map { File(directory, "feed_tile_$it.hevc") }
+        assumeTrue("Synthetic 2x2 tile fixtures are missing", feeds.all { it.isFile })
+        var rejected = false
+        try {
+            HevcTileStreamAssembler.assembleFourTileStreams(
+                listOf(feeds[1], feeds[0], feeds[2], feeds[3]).map { it.readBytes() }
+            )
+        } catch (error: IllegalArgumentException) {
+            rejected = error.message?.contains("Unexpected tile slice address") == true
+        }
+        assertTrue("Assembler must reject a tile stream assigned to the wrong grid cell", rejected)
+    }
+
     @Test fun assemblerRejectsSpsReferencingDifferentVps() {
         val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
         assumeTrue("Kvazaar tile fixture directory is not configured", !fixturePath.isNullOrBlank())

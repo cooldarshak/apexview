@@ -3,128 +3,162 @@ package app.apexview.tiled
 import java.io.ByteArrayOutputStream
 
 /**
- * Reassembles the deliberately narrow synthetic 2x1 HEVC tile profile used by the POC.
+ * Reassembles aligned synthetic HEVC tile streams without rewriting slice headers or CABAC data.
  *
- * Input streams must already be sample/time aligned. Annex-B has no timestamps, so this API
- * must not align arbitrary live feeds. It validates both complementary slices for each picture
- * and emits their original NAL bytes in tile-scan order. No slice header or coded payload is
- * rewritten.
- *
- * The implementation fails closed on unsupported NALs, parameter-set differences, dependent
- * slices, unexpected tile geometry, missing pictures, and picture/reference mismatches.
+ * This POC accepts one independent slice per tile and only 2x1 or 2x2 uniform full-picture
+ * grids. Annex-B carries no timestamps: callers must establish sample/time alignment separately.
+ * This is a bitstream proof, not the production F1 CMAF compositor.
  */
 internal object HevcTileStreamAssembler {
     data class AssemblyResult(
         val annexB: ByteArray,
         val pictureCount: Int,
         val tileSlicesPerPicture: Int,
-        val sliceSegmentAddresses: List<Pair<Int, Int>>
+        val sliceSegmentAddresses: List<Pair<Int, Int>>,
+        val tileSliceSegmentAddresses: List<List<Int>> = emptyList()
     )
 
-    fun assembleTwoTileStreams(leftAnnexB: ByteArray, rightAnnexB: ByteArray): AssemblyResult {
-        val left = parseFeed("left", leftAnnexB)
-        val right = parseFeed("right", rightAnnexB)
+    fun assembleTwoTileStreams(leftAnnexB: ByteArray, rightAnnexB: ByteArray): AssemblyResult =
+        assembleTileStreams(listOf(leftAnnexB, rightAnnexB), columns = 2, rows = 1)
 
-        require(left.parameterSets.map { it.bytes.toList() } ==
-            right.parameterSets.map { it.bytes.toList() }) {
-            "Tile feeds do not carry byte-identical VPS/SPS/PPS"
-        }
-        require(left.sps == right.sps && left.pps == right.pps) {
-            "Tile feeds resolve to different parsed SPS/PPS metadata"
-        }
-        require(left.vcl.size == right.vcl.size && left.vcl.isNotEmpty()) {
-            "Tile feeds must contain the same non-zero number of picture slices"
-        }
+    fun assembleFourTileStreams(tileStreams: List<ByteArray>): AssemblyResult =
+        assembleTileStreams(tileStreams, columns = 2, rows = 2)
 
-        val sps = left.sps
-        val pps = left.pps
+    private fun assembleTileStreams(
+        tileStreams: List<ByteArray>,
+        columns: Int,
+        rows: Int
+    ): AssemblyResult {
+        require(columns == 2 && rows in 1..2) { "Only synthetic 2x1 and 2x2 grids are supported" }
+        require(tileStreams.size == columns * rows) {
+            "Expected ${columns * rows} tile streams, received ${tileStreams.size}"
+        }
+        val feeds = tileStreams.mapIndexed { index, bytes -> parseFeed("tile-$index", bytes) }
+        val firstFeed = feeds.first()
+
+        feeds.drop(1).forEachIndexed { index, feed ->
+            require(firstFeed.parameterSets.map { it.bytes.toList() } ==
+                feed.parameterSets.map { it.bytes.toList() }) {
+                "Tile feeds do not carry byte-identical VPS/SPS/PPS"
+            }
+            require(firstFeed.sps == feed.sps && firstFeed.pps == feed.pps) {
+                "Tile feeds resolve to different parsed SPS/PPS metadata"
+            }
+            require(firstFeed.vcl.size == feed.vcl.size) {
+                "Tile feed ${index + 1} has a different picture count"
+            }
+        }
+        require(firstFeed.vcl.isNotEmpty()) { "Tile feeds contain no pictures" }
+
+        val sps = firstFeed.sps
+        val pps = firstFeed.pps
         require(sps.width > 0 && sps.height > 0) { "Invalid SPS picture dimensions" }
         require(sps.spsExtensionPresent == false) {
             "SPS extensions are outside the supported synthetic profile"
         }
-        require(pps.tilesEnabled && pps.numTileColumns == 2 && pps.numTileRows == 1) {
-            "Only a 2-column by 1-row HEVC tile grid is supported"
+        require(pps.tilesEnabled && pps.numTileColumns == columns && pps.numTileRows == rows) {
+            "Expected a ${columns}x${rows} HEVC tile grid"
         }
+        require(pps.uniformTileSpacing == true) { "Only uniform HEVC tile spacing is supported" }
         require(!pps.entropyCodingSyncEnabled) { "Wavefront entropy coding is not supported" }
         require(!pps.weightedPredictionEnabled && !pps.weightedBipredictionEnabled) {
             "Weighted prediction is not supported"
         }
         require(pps.deblockingFilterOverrideEnabled != true) {
-            "Per-slice deblocking overrides are not supported"
+            "Per-slice deblocking overrides are not supported by this synthetic assembler"
         }
         require(!pps.scalingListDataPresent && !pps.listsModificationPresent &&
             !pps.sliceSegmentHeaderExtensionPresent && !pps.extensionPresent) {
             "PPS contains unsupported extension or slice-header tools"
         }
-        val tileColumnWidths = requireNotNull(pps.tileColumnWidthsInCtbs) {
+        val columnWidths = requireNotNull(pps.tileColumnWidthsInCtbs) {
             "PPS tile column geometry is missing"
         }
-        val tileRowHeights = requireNotNull(pps.tileRowHeightsInCtbs) {
+        val rowHeights = requireNotNull(pps.tileRowHeightsInCtbs) {
             "PPS tile row geometry is missing"
         }
-        require(tileColumnWidths.size == 2 && tileRowHeights.size == 1) {
-            "Parsed tile dimensions do not match a 2x1 grid"
+        require(columnWidths.size == columns && rowHeights.size == rows) {
+            "Parsed tile dimensions do not match the requested grid"
         }
-        require(tileColumnWidths[0] == tileColumnWidths[1] &&
-            tileColumnWidths.sum() == sps.picWidthInCtbs &&
-            tileRowHeights.single() == sps.picHeightInCtbs) {
-            "Only a uniform, full-picture 2x1 CTB layout is supported"
+        require(columnWidths.distinct().size == 1 && rowHeights.distinct().size == 1 &&
+            columnWidths.sum() == sps.picWidthInCtbs &&
+            rowHeights.sum() == sps.picHeightInCtbs) {
+            "Only uniform, full-picture CTB tile layouts are supported"
         }
 
-        val expectedRightAddress = tileColumnWidths[0]
+        val columnOffsets = columnWidths.scan(0) { total, width -> total + width }.dropLast(1)
+        val rowOffsets = rowHeights.scan(0) { total, height -> total + height }.dropLast(1)
+        val expectedAddresses = buildList {
+            for (row in 0 until rows) {
+                for (column in 0 until columns) {
+                    add(rowOffsets[row] * sps.picWidthInCtbs + columnOffsets[column])
+                }
+            }
+        }
+
         val output = ByteArrayOutputStream()
-        left.parameterSets.forEach { appendNal(output, it.bytes) }
-        val addresses = ArrayList<Pair<Int, Int>>(left.vcl.size)
+        firstFeed.parameterSets.forEach { appendNal(output, it.bytes) }
+        val pairedAddresses = ArrayList<Pair<Int, Int>>(if (rows == 1) firstFeed.vcl.size else 0)
+        val allAddresses = ArrayList<List<Int>>(firstFeed.vcl.size)
 
-        for (index in left.vcl.indices) {
-            val leftNal = left.vcl[index]
-            val rightNal = right.vcl[index]
-            require(leftNal.type == rightNal.type &&
-                leftNal.layerId == rightNal.layerId &&
-                leftNal.temporalIdPlus1 == rightNal.temporalIdPlus1) {
-                "NAL header mismatch at picture $index"
+        for (pictureIndex in firstFeed.vcl.indices) {
+            val nals = feeds.map { it.vcl[pictureIndex] }
+            val headers = nals.map { HevcSliceHeaderParser.parse(it.bytes, sps, pps) }
+            val referenceHeader = headers.first()
+            nals.drop(1).forEachIndexed { tileIndex, nal ->
+                require(nal.type == nals.first().type &&
+                    nal.layerId == nals.first().layerId &&
+                    nal.temporalIdPlus1 == nals.first().temporalIdPlus1) {
+                    "NAL header mismatch at picture $pictureIndex tile ${tileIndex + 1}"
+                }
             }
-
-            val first = HevcSliceHeaderParser.parse(leftNal.bytes, sps, pps)
-            val second = HevcSliceHeaderParser.parse(rightNal.bytes, sps, pps)
-            require(first.firstSliceSegmentInPicture && !second.firstSliceSegmentInPicture) {
-                "Picture $index does not contain the expected first/continuation tile slices"
+            require(referenceHeader.firstSliceSegmentInPicture &&
+                headers.drop(1).none { it.firstSliceSegmentInPicture }) {
+                "Picture $pictureIndex has invalid first/continuation tile slice flags"
             }
-            require(!first.dependentSliceSegment && !second.dependentSliceSegment) {
-                "Dependent tile slice segments are not supported"
+            headers.forEachIndexed { tileIndex, header ->
+                require(!header.dependentSliceSegment) {
+                    "Dependent tile slice segments are not supported"
+                }
+                require(header.sliceSegmentAddress == expectedAddresses[tileIndex]) {
+                    "Unexpected tile slice address at picture $pictureIndex tile $tileIndex: " +
+                        "${header.sliceSegmentAddress}, expected ${expectedAddresses[tileIndex]}"
+                }
+                require(header.entryPointOffsets.isEmpty()) {
+                    "Entry-point offsets inside a tile slice are not supported"
+                }
+                require(samePictureSyntax(referenceHeader, header)) {
+                    "Picture identity or reference syntax mismatch at picture $pictureIndex tile $tileIndex"
+                }
             }
-            require(first.sliceSegmentAddress == 0 &&
-                second.sliceSegmentAddress == expectedRightAddress) {
-                "Unexpected tile slice addresses at picture $index: " +
-                    "${first.sliceSegmentAddress},${second.sliceSegmentAddress}"
-            }
-            require(first.ppsId == second.ppsId &&
-                first.noOutputOfPriorPictures == second.noOutputOfPriorPictures &&
-                first.sliceType == second.sliceType &&
-                first.picOutputFlag == second.picOutputFlag &&
-                first.colourPlaneId == second.colourPlaneId &&
-                first.picOrderCntLsb == second.picOrderCntLsb &&
-                first.shortTermRpsFromSps == second.shortTermRpsFromSps &&
-                first.shortTermRpsIndex == second.shortTermRpsIndex &&
-                first.references == second.references &&
-                first.temporalMvpEnabled == second.temporalMvpEnabled &&
-                first.sampleAdaptiveOffsetLuma == second.sampleAdaptiveOffsetLuma &&
-                first.sampleAdaptiveOffsetChroma == second.sampleAdaptiveOffsetChroma) {
-                "Picture identity or reference syntax mismatch at picture $index"
-            }
-
-            appendNal(output, leftNal.bytes)
-            appendNal(output, rightNal.bytes)
-            addresses += first.sliceSegmentAddress to second.sliceSegmentAddress
+            nals.forEach { appendNal(output, it.bytes) }
+            val pictureAddresses = headers.map { it.sliceSegmentAddress }
+            allAddresses += pictureAddresses
+            if (rows == 1) pairedAddresses += pictureAddresses[0] to pictureAddresses[1]
         }
 
         return AssemblyResult(
             annexB = output.toByteArray(),
-            pictureCount = left.vcl.size,
-            tileSlicesPerPicture = 2,
-            sliceSegmentAddresses = addresses
+            pictureCount = firstFeed.vcl.size,
+            tileSlicesPerPicture = columns * rows,
+            sliceSegmentAddresses = pairedAddresses,
+            tileSliceSegmentAddresses = allAddresses
         )
     }
+
+    private fun samePictureSyntax(a: HevcSliceHeaderParser.SliceHeader, b: HevcSliceHeaderParser.SliceHeader): Boolean =
+        a.ppsId == b.ppsId &&
+            a.noOutputOfPriorPictures == b.noOutputOfPriorPictures &&
+            a.sliceType == b.sliceType &&
+            a.picOutputFlag == b.picOutputFlag &&
+            a.colourPlaneId == b.colourPlaneId &&
+            a.picOrderCntLsb == b.picOrderCntLsb &&
+            a.shortTermRpsFromSps == b.shortTermRpsFromSps &&
+            a.shortTermRpsIndex == b.shortTermRpsIndex &&
+            a.references == b.references &&
+            a.temporalMvpEnabled == b.temporalMvpEnabled &&
+            a.sampleAdaptiveOffsetLuma == b.sampleAdaptiveOffsetLuma &&
+            a.sampleAdaptiveOffsetChroma == b.sampleAdaptiveOffsetChroma
 
     private data class ParsedFeed(
         val parameterSets: List<HevcBitstream.NalUnit>,

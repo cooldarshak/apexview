@@ -30,7 +30,14 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class HevcSingleDecoderInstrumentationTest {
     @Test
-    fun decodesReassembledSyntheticTilePictureSequenceWithOneMediaCodec() {
+    fun decodesReassembledSyntheticTilePictureSequenceWithOneMediaCodec() =
+        decodeAssetWithOneHardwareDecoder("reassembled.mp4")
+
+    @Test
+    fun decodesReassembledSyntheticTwoByTwoPictureSequenceWithOneMediaCodec() =
+        decodeAssetWithOneHardwareDecoder("reassembled_2x2.mp4")
+
+    private fun decodeAssetWithOneHardwareDecoder(assetName: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val assetContext = instrumentation.context
         // Instrumentation package cache directories are not guaranteed to exist on every
@@ -41,8 +48,8 @@ class HevcSingleDecoderInstrumentationTest {
             "Unable to create target app cache directory: ${targetCacheDir.absolutePath}",
             targetCacheDir.isDirectory || targetCacheDir.mkdirs()
         )
-        val sampleFile = File(targetCacheDir, "apexview-hevc-single-decoder-proof.mp4")
-        assetContext.assets.open("reassembled.mp4").use { input ->
+        val sampleFile = File(targetCacheDir, "apexview-hevc-single-decoder-proof-$assetName")
+        assetContext.assets.open(assetName).use { input ->
             sampleFile.outputStream().use { output -> input.copyTo(output) }
         }
         assertTrue("Synthetic HEVC fixture was not copied to app cache", sampleFile.isFile && sampleFile.length() > 0L)
@@ -232,7 +239,7 @@ class HevcSingleDecoderInstrumentationTest {
             }
             Log.i(
                 LOG_TAG,
-                "SYNTHETIC_SINGLE_HARDWARE_DECODER_PASS decoder=$decoderName " +
+                "SYNTHETIC_SINGLE_HARDWARE_DECODER_PASS asset=$assetName decoder=$decoderName " +
                     "hardwareAccelerated=true decoderInstancesCreated=$decoderInstancesCreated " +
                     "outputSurfacesCreated=1 outputSurfaceFrames=${renderedFrames.get()} " +
                     "decoderFrames=$decodedFrames dimensions=${outputWidth}x${outputHeight} metrics={$metricSummary}"
