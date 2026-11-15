@@ -125,7 +125,9 @@ data class PlayInfo(
     /** Only standard, authorised single-feed contentPlay streams may emit the HEVC POC diagnostic. */
     val allowHevcProfileProbe: Boolean = false,
     /** Sanitised label only. Never contains a stream or licence URL. */
-    val profileLabel: String = "feed"
+    val profileLabel: String = "feed",
+    /** Scope key prevents captures from different sessions being compared. */
+    val profileGroup: String = "session"
 )
 
 /** One play session holding every feed of a content, keyed by channel ID. */
@@ -554,7 +556,8 @@ class F1TvApi(private val userAgent: String, private val chromeMajor: String) {
             licenseUrl = text(result, "laURL").ifEmpty { null },
             streamType = text(result, "streamType"),
             allowHevcProfileProbe = true,
-            profileLabel = channelId?.let { "channel-$it" } ?: "default-channel"
+            profileLabel = channelId?.let { "channel-$it" } ?: "default-channel",
+            profileGroup = "content-$contentId"
         )
     }
 
