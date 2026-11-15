@@ -59,6 +59,11 @@ class HevcSliceHeaderParserTest {
             write(1, 1) // use SPS short-term RPS; only one, so no index bits
             write(1, 1) // temporal MVP
             write(1, 1); write(0, 1) // SAO luma/chroma
+            write(0, 1) // num_ref_idx_active_override_flag
+            writeUe(0) // five_minus_max_num_merge_cand
+            writeSe(0) // slice_qp_delta
+            write(1, 1) // slice_loop_filter_across_slices_enabled_flag
+            writeUe(0) // num_entry_point_offsets
         }.finish()
         val slice = HevcSliceHeaderParser.parse(nal(1, bits), sps, pps)
 
@@ -80,6 +85,9 @@ class HevcSliceHeaderParserTest {
             writeUe(2) // I slice
             write(1, 1) // temporal MVP is still present for IDR
             write(1, 1); write(1, 1) // SAO luma/chroma are still present for IDR
+            writeSe(0) // slice_qp_delta
+            write(1, 1) // slice_loop_filter_across_slices_enabled_flag
+            writeUe(0) // num_entry_point_offsets
         }.finish()
         val slice = HevcSliceHeaderParser.parse(nal(20, bits), sps, pps)
 
@@ -126,6 +134,7 @@ class HevcSliceHeaderParserTest {
             write(1, 1) // deltaRps +1; used, use_delta inferred
             write(1, 1) // temporal MVP
             write(1, 1); write(1, 1) // SAO luma/chroma
+            write(0, 1); writeUe(0); writeSe(0); write(1, 1); writeUe(0)
         }.finish()
         val slice = HevcSliceHeaderParser.parse(nal(1, bits), sps, pps)
         assertFalse(slice.shortTermRpsFromSps!!)
