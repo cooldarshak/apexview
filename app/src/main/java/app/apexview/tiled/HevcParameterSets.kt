@@ -178,7 +178,14 @@ internal object HevcParameterSets {
         val log2ParallelMergeLevelMinus2: Int,
         val sliceSegmentHeaderExtensionPresent: Boolean,
         val extensionPresent: Boolean,
-        val extensionFlags: Int?
+        val extensionFlags: Int?,
+        val signDataHidingEnabled: Boolean = false,
+        val constrainedIntraPredictionEnabled: Boolean = false,
+        val transformSkipEnabled: Boolean = false,
+        val cuQpDeltaEnabled: Boolean = false,
+        val diffCuQpDeltaDepth: Int? = null,
+        val chromaQpOffsetCb: Int = 0,
+        val chromaQpOffsetCr: Int = 0
     )
 
     /**
@@ -547,7 +554,7 @@ internal object HevcParameterSets {
         val dependentSlices = bits.readBit() != 0
         val outputFlag = bits.readBit() != 0
         val extraHeaderBits = bits.readBits(3)
-        bits.readBit() // sign_data_hiding_enabled_flag
+        val signDataHidingEnabled = bits.readBit() != 0
         val cabacInitPresent = bits.readBit() != 0
         val numRefIdxL0Default = readUe(bits, 14, "num_ref_idx_l0_default_active_minus1")
         val numRefIdxL1Default = readUe(bits, 14, "num_ref_idx_l1_default_active_minus1")
@@ -562,11 +569,19 @@ internal object HevcParameterSets {
                 "PPS init_qp_minus26 exceeds the range for the SPS luma bit depth"
             }
         }
-        bits.readBit() // constrained_intra_pred_flag
-        bits.readBit() // transform_skip_enabled_flag
-        if (bits.readBit() != 0) readUe(bits, 6, "diff_cu_qp_delta_depth")
-        bits.readSignedExpGolomb() // pps_cb_qp_offset
-        bits.readSignedExpGolomb() // pps_cr_qp_offset
+        val constrainedIntraPredictionEnabled = bits.readBit() != 0
+        val transformSkipEnabled = bits.readBit() != 0
+        val cuQpDeltaEnabled = bits.readBit() != 0
+        val diffCuQpDeltaDepth = if (cuQpDeltaEnabled) {
+            readUe(bits, 6, "diff_cu_qp_delta_depth")
+        } else null
+        val chromaQpOffsetCbValue = bits.readSignedExpGolomb()
+        val chromaQpOffsetCrValue = bits.readSignedExpGolomb()
+        require(chromaQpOffsetCbValue in -12L..12L && chromaQpOffsetCrValue in -12L..12L) {
+            "PPS chroma QP offsets exceed HEVC range"
+        }
+        val chromaQpOffsetCb = chromaQpOffsetCbValue.toInt()
+        val chromaQpOffsetCr = chromaQpOffsetCrValue.toInt()
         val sliceChromaQpOffsetsPresent = bits.readBit() != 0
         val weightedPred = bits.readBit() != 0
         val weightedBipred = bits.readBit() != 0
@@ -634,7 +649,15 @@ internal object HevcParameterSets {
             columnWidths, rowHeights, loopFilter, weightedPred, weightedBipred, transquantBypass,
             loopFilterAcrossSlices, deblockingControlPresent, deblockingOverride, deblockingDisabled,
             betaOffset, tcOffset, scalingListDataPresent, listsModificationPresent,
-            log2ParallelMerge, sliceHeaderExtension, extensionPresent, extensionFlags)
+            log2ParallelMerge, sliceHeaderExtension, extensionPresent, extensionFlags,
+            signDataHidingEnabled = signDataHidingEnabled,
+            constrainedIntraPredictionEnabled = constrainedIntraPredictionEnabled,
+            transformSkipEnabled = transformSkipEnabled,
+            cuQpDeltaEnabled = cuQpDeltaEnabled,
+            diffCuQpDeltaDepth = diffCuQpDeltaDepth,
+            chromaQpOffsetCb = chromaQpOffsetCb,
+            chromaQpOffsetCr = chromaQpOffsetCr
+        )
     }
 
     /**

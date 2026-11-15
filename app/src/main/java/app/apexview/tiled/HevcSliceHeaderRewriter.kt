@@ -37,9 +37,24 @@ internal object HevcSliceHeaderRewriter {
         require(nalHeader.layerId == 0) { "Non-zero HEVC layers are not supported" }
         require(sourcePps.spsId == sourceSps.spsId) { "Source PPS/SPS identity mismatch" }
         require(outputPps.spsId == outputSps.spsId) { "Output PPS/SPS identity mismatch" }
+        require(!sourceSps.spsExtensionPresent && !outputSps.spsExtensionPresent) {
+            "SPS extensions are not supported by the slice rewriter"
+        }
+        require(!sourcePps.extensionPresent && !outputPps.extensionPresent) {
+            "PPS extensions are not supported by the slice rewriter"
+        }
         require(clearNalBytes in 3..nal.size) { "Invalid clear NAL prefix length" }
         requireCompatibleSps(sourceSps, outputSps)
         requireCompatiblePps(sourcePps, outputPps)
+        require(!sourceSps.scalingListDataPresent && !outputSps.scalingListDataPresent) {
+            "SPS scaling-list data is not supported by the slice rewriter"
+        }
+        require(!sourceSps.pcmEnabled && !outputSps.pcmEnabled) {
+            "SPS PCM coding is not supported by the slice rewriter"
+        }
+        require(!sourcePps.scalingListDataPresent && !outputPps.scalingListDataPresent) {
+            "PPS scaling-list data is not supported by the slice rewriter"
+        }
         require(!sourcePps.entropyCodingSyncEnabled && !outputPps.entropyCodingSyncEnabled) {
             "WPP/entropy-coding-sync slices are not supported"
         }
@@ -177,6 +192,13 @@ internal object HevcSliceHeaderRewriter {
         require(
             source.dependentSliceSegmentsEnabled == output.dependentSliceSegmentsEnabled &&
                 source.outputFlagPresent == output.outputFlagPresent &&
+                source.signDataHidingEnabled == output.signDataHidingEnabled &&
+                source.constrainedIntraPredictionEnabled == output.constrainedIntraPredictionEnabled &&
+                source.transformSkipEnabled == output.transformSkipEnabled &&
+                source.cuQpDeltaEnabled == output.cuQpDeltaEnabled &&
+                source.diffCuQpDeltaDepth == output.diffCuQpDeltaDepth &&
+                source.chromaQpOffsetCb == output.chromaQpOffsetCb &&
+                source.chromaQpOffsetCr == output.chromaQpOffsetCr &&
                 source.extraSliceHeaderBits == output.extraSliceHeaderBits &&
                 source.cabacInitPresent == output.cabacInitPresent &&
                 source.numRefIdxL0DefaultActiveMinus1 == output.numRefIdxL0DefaultActiveMinus1 &&

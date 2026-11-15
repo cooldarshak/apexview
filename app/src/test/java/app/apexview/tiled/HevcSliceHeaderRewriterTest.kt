@@ -136,9 +136,16 @@ class HevcSliceHeaderRewriterTest {
         write(1, 1); writeUe(4); writeUe(2); writeUe(0)
         writeUe(0); writeUe(3)
         writeUe(0); writeUe(0); writeUe(0); writeUe(0)
-        write(0, 1); write(0, 1); write(1, 1); write(0, 1)
-        writeUe(0)
-        write(0, 1); write(1, 1); write(1, 1); write(0, 1)
+        write(0, 1) // scaling lists disabled
+        write(0, 1) // AMP disabled
+        write(1, 1) // SAO enabled
+        write(0, 1) // PCM disabled
+        writeUe(0) // no short-term reference picture sets
+        write(0, 1) // long-term refs absent
+        write(1, 1) // temporal MVP enabled
+        write(1, 1) // strong smoothing
+        write(0, 1) // no VUI
+        write(0, 1) // no SPS extension
     }.finish()
 
     private fun ppsBits(id: Int, tiles: Boolean, wpp: Boolean = false): ByteArray =
