@@ -640,7 +640,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             )
         }
 
-        progress("Loading remaining race details…")
+        progress(
+            if (outline.size >= 8) "Loading optional race details…"
+            else "Timing tower data is loaded, but F1 has not provided a usable circuit outline for the map…"
+        )
         val weather = runCatching { WeatherParser.parse(fetch(path + "WeatherData.jsonStream"), streamStart) }.getOrDefault(WeatherLog.NONE)
         val started = runCatching { parseSessionStarted(fetch(path + "SessionStatus.jsonStream"), streamStart) }.getOrNull()
         val control = runCatching { fetch(path + "RaceControlMessages.jsonStream") }.getOrNull()
