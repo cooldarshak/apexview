@@ -534,32 +534,94 @@ internal fun streamOffsetMs(line: String): Long {
 class LiveTimingArchive(private val token: String, private val userAgent: String) {
 
     /** [watchedUtc]: when the video on screen was broadcast, if known; finds the session by time. */
-    suspend fun load(ref: SessionRef, watchedUtc: Long? = null): SessionTiming = withContext(Dispatchers.IO) {
+    suspend fun load(
+        ref: SessionRef,
+        watchedUtc: Long? = null,
+        onProgress: suspend (String) -> Unit = {},
+        onPartial: suspend (SessionTiming) -> Unit = {},
+    ): SessionTiming = withContext(Dispatchers.IO) {
+        suspend fun progress(status: String) {
+            withContext(Dispatchers.Main) { onProgress(status) }
+        }
+        suspend fun publish(session: SessionTiming) {
+            withContext(Dispatchers.Main) { onPartial(session) }
+        }
+
+        progress("Finding this session in F1's timing archive…")
         val (path, type) = findSession(ref, watchedUtc)
+        progress("Loading driver and lap timing…")
         val drivers = parseDrivers(JSONObject(fetch(path + "DriverList.json")))
+        val heartbeat = fetch(path + "Heartbeat.jsonStream")
+        val timingStream = runCatching { fetch(path + "TimingData.jsonStream") }.getOrNull()
+        val timingF1Stream = runCatching { fetch(path + "TimingDataF1.jsonStream") }.getOrNull().orEmpty()
+
+        // Publish the tower as soon as its core data is ready. Track positions can be a much larger
+        // archive download on Android TV, and must not keep the timing tower blank while they load.
+        val initialStart = parseStreamStart(heartbeat)
+        val initialStates = timingStream?.let { runCatching { parseStates(it, initialStart) }.getOrNull() }
+            ?: StateParse(emptyMap(), emptyList())
+        val initialLaps = timingStream?.let {
+            runCatching { DriverTimingParser.parse(it, initialStart, timingF1Stream) }.getOrNull()
+        }.orEmpty()
+        publish(
+            SessionTiming(
+                type = type,
+                drivers = drivers,
+                tracks = emptyMap(),
+                states = initialStates.states,
+                outline = FloatArray(0),
+                hasStartFinish = false,
+                corners = emptyList(),
+                startUtcMs = initialStart,
+                circuitKey = ref.circuitKey,
+                laps = initialLaps,
+                radioBase = BASE + path,
+            )
+        )
+
+        progress("Loading track positions…")
         val positions = fetch(path + "Position.z.jsonStream")
         val tracks = parsePositions(positions)
         if (tracks.isEmpty()) throw IOException("The archive has no car positions for this session")
 
-        // The heartbeat ties the streams' offsets to the clock. The 2026 Mexico race's put them
-        // 33 hours late, leaving the laps a day and a half away from the cars; where the cars'
-        // own timestamps disagree with it by more than a minute, they're the ones to trust.
-        val streamStart = streamStart(fetch(path + "Heartbeat.jsonStream"), positions)
-        val timingStream = runCatching { fetch(path + "TimingData.jsonStream") }.getOrNull()
-        val timingF1Stream = runCatching { fetch(path + "TimingDataF1.jsonStream") }.getOrNull().orEmpty()
-        val weather = runCatching { WeatherParser.parse(fetch(path + "WeatherData.jsonStream"), streamStart) }.getOrDefault(WeatherLog.NONE)
+        // Heartbeat anchors the stream clock. Some sessions have bad offsets; the cars' own
+        // timestamps win when they disagree with it by more than a minute.
+        val streamStart = streamStart(heartbeat, positions)
         val parsed = timingStream?.let { runCatching { parseStates(it, streamStart) }.getOrNull() }
             ?: StateParse(emptyMap(), emptyList())
-        val laps = timingStream?.let { runCatching { DriverTimingParser.parse(it, streamStart, timingF1Stream) }.getOrNull() }.orEmpty()
+        val laps = timingStream?.let {
+            runCatching { DriverTimingParser.parse(it, streamStart, timingF1Stream) }.getOrNull()
+        }.orEmpty()
+        val weather = runCatching { WeatherParser.parse(fetch(path + "WeatherData.jsonStream"), streamStart) }.getOrDefault(WeatherLog.NONE)
 
         val built = tracks.mapValues { it.value.build() }
         val traced = traceOutline(tracks.values.toList())
         val line = findStartFinish(traced, parsed.crossings, built)
-        val outline = if (line != null) startAt(traced, line) else traced
+        var outline = if (line != null) startAt(traced, line) else traced
         // Turn numbers and marshal sectors are a nice extra from a third party; the map works without them.
         val circuit = ref.circuitKey?.let { runCatching { fetchCircuit(it, ref.year) }.getOrNull() }
         val corners = circuit?.corners.orEmpty()
+        if (outline.size < 8 && (circuit?.outline?.size ?: 0) >= 8) outline = circuit!!.outline
 
+        // Publish the map as soon as its required track samples are ready. Weather, radio, tyres,
+        // race control and session extras are deliberately loaded afterwards and cannot block it.
+        publish(
+            SessionTiming(
+                type = type,
+                drivers = drivers,
+                tracks = built,
+                states = parsed.states,
+                outline = outline,
+                hasStartFinish = line != null,
+                corners = corners,
+                startUtcMs = streamStart,
+                circuitKey = ref.circuitKey,
+                laps = laps,
+                radioBase = BASE + path,
+            )
+        )
+
+        progress("Loading remaining race details…")
         val started = runCatching { parseSessionStarted(fetch(path + "SessionStatus.jsonStream"), streamStart) }.getOrNull()
         val control = runCatching { fetch(path + "RaceControlMessages.jsonStream") }.getOrNull()
         val chequered = control?.let { runCatching { parseChequered(it, streamStart) }.getOrNull() }
