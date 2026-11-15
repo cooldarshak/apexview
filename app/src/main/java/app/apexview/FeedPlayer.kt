@@ -9,6 +9,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -128,6 +129,7 @@ class FeedPlayer(
     private var state = "Starting"
     private var size = ""
     private var decoder = ""
+    private var lastFeedProfileDiagnostic: String? = null
     private var licensed = false
     private var speed = 1f
     private var lastDropped = 0
@@ -245,6 +247,23 @@ class FeedPlayer(
             }
         })
         player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onDownstreamFormatChanged(
+                eventTime: AnalyticsListener.EventTime,
+                mediaLoadData: MediaLoadData,
+            ) {
+                val format = mediaLoadData.trackFormat ?: return
+                val isVideo = mediaLoadData.trackType == C.TRACK_TYPE_VIDEO ||
+                    format.sampleMimeType?.startsWith("video/") == true
+                if (!isVideo) return
+                // This is a read-only observer of Media3's parsed codec configuration. It does
+                // not inspect sample payloads, URLs, PSSH, licence requests, KIDs or IV values.
+                val diagnostic = HevcFeedProfileProbe.summarize(mediaLoadData.trackType, format)
+                if (diagnostic != lastFeedProfileDiagnostic) {
+                    lastFeedProfileDiagnostic = diagnostic
+                    Log.i("ApexviewF1FeedProfile", diagnostic)
+                }
+            }
+
             override fun onVideoDecoderInitialized(
                 eventTime: AnalyticsListener.EventTime,
                 decoderName: String,
