@@ -406,8 +406,16 @@ internal object HevcParameterSets {
         val cabacInitPresent = bits.readBit() != 0
         val numRefIdxL0Default = readUe(bits, 14, "num_ref_idx_l0_default_active_minus1")
         val numRefIdxL1Default = readUe(bits, 14, "num_ref_idx_l1_default_active_minus1")
+        // QpBdOffsetY depends on SPS bit depth. Keep the syntax-level bound broad here,
+        // then apply the exact profile bound when the caller supplies the referenced SPS.
         val initQpMinus26 = bits.readSignedExpGolomb().toInt()
-        require(initQpMinus26 in -26..25) { "PPS init_qp_minus26 exceeds HEVC range" }
+        require(initQpMinus26 in -74..25) { "PPS init_qp_minus26 exceeds HEVC range" }
+        if (sps != null) {
+            val qpBdOffsetY = 6 * (sps.bitDepthLuma - 8)
+            require(initQpMinus26 in (-26 - qpBdOffsetY)..25) {
+                "PPS init_qp_minus26 exceeds the range for the SPS luma bit depth"
+            }
+        }
         bits.readBit() // constrained_intra_pred_flag
         bits.readBit() // transform_skip_enabled_flag
         if (bits.readBit() != 0) readUe(bits, 6, "diff_cu_qp_delta_depth")
