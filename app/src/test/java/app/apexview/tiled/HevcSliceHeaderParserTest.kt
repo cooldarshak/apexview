@@ -94,7 +94,7 @@ class HevcSliceHeaderParserTest {
         assertNull(slice.picOrderCntLsb) // inferred as zero, not signalled
         assertNull(slice.shortTermRpsFromSps)
         assertTrue(slice.references.isEmpty())
-        assertTrue(slice.temporalMvpEnabled!!)
+        assertFalse(slice.temporalMvpEnabled!!)
         assertTrue(slice.sampleAdaptiveOffsetLuma!!)
         assertTrue(slice.sampleAdaptiveOffsetChroma!!)
     }
