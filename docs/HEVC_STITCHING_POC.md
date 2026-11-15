@@ -1,6 +1,6 @@
 # HEVC stitching proof of concept
 
-Status: Phase 1.6, investigation and parser foundation with inter-predicted short-term RPS support.
+Status: Phase 1.8, bounded HEVC parameter-set parsing, CMAF init/fragment metadata inspection, and fail-closed compatibility checks. No stitcher or single-decoder proof exists yet.
 
 ## Goal
 
@@ -68,7 +68,26 @@ The fixture generator uses FFmpeg/libx265 to create two disposable, time-aligned
 
 The bounded parser now expands inter-predicted short-term reference picture sets into explicit negative and positive POC deltas, including `delta_idx_minus1` for an inline slice-header RPS. The derivation follows the ordering in H.265 7.4.8 and retains both `used_by_curr_pic` and `use_delta` semantics. Synthetic tests cover an SPS-predicted set and an inline predicted set that references an earlier SPS entry.
 
-This closes one parser gap only. It does not establish complete H.265 conformance or slice-header rewrite safety; weighted prediction, entry-point offsets, extension syntax, fuller parameter-set comparison, real tiled fixtures, and one-decoder reconstruction remain outstanding.
+This closes one parser gap only. It does not establish complete H.265 conformance or slice-header rewrite safety. The remaining slice-header gaps include weighted-prediction tables, per-slice deblocking overrides, entry-point offsets, slice-header extensions, CABAC boundaries and the syntax needed to safely rewrite multiple tile slice segments.
+
+### Parameter-set and CMAF inspection update
+
+The bounded SPS/PPS model now captures general and sub-layer profile-tier-level values, chroma format, bit depth, conformance-window display dimensions, DPB/reorder limits, tile geometry, loop-filter and deblocking metadata, and selected PPS coding tools. Unsupported VUI and parameter-set extensions are surfaced so the validator can reject them rather than silently assuming defaults.
+
+The hvcC reader now extracts decoder configuration fields and bounded VPS/SPS/PPS arrays. The track-level tenc reader records the protection scheme shape, pattern and IV-size metadata while skipping KID and constant-IV bytes. The fragmented MP4 reader extracts track IDs, timescales, tfdt decode-time anchors, trun sample durations and composition offsets. It derives decode and presentation timestamps only when the necessary timing fields are present.
+
+A separate compatibility check compares sample counts and exact media times across potentially different track timescales. It also checks decoder configuration and the parsed parameter sets. It deliberately rejects protected-fragment compatibility while KID identity, per-sample IV/subsample maps, external auxiliary data and sample-group overrides remain unverified. The current senc inspection only reads its header, flags and sample count; it does not decode IVs or subsample ranges.
+
+### Phase 1 exit gates still open
+
+- [ ] Inspect sanitized, non-secret metadata from two actual F1 feeds in an authorised session: manifest/codec, init-segment boxes, timescale, fragment timing, protection scheme and sample-encryption signalling. Do not retain protected samples, licence responses, KIDs or IVs.
+- [ ] Complete the encryption metadata comparison safely, including per-sample subsample ranges and any seig sample-group overrides. Do not infer compatibility from tenc alone.
+- [ ] Finish the supported slice-header subset, including weighted prediction and entry-point offsets, or explicitly constrain and prove a narrower encoder profile with tests.
+- [ ] Generate two complementary HEVC tile feeds from the same encoded picture. The current FFmpeg/libx265 fixtures are two independent full-frame encodes and are not a tiled-feed fixture.
+- [ ] Validate that the reconstructed synthetic stream is accepted by a standards-compliant HEVC decoder.
+- [ ] Instrument a physical Android device and prove one active MediaCodec decoder for the reconstructed synthetic stream, recording codec name, dimensions, frame cadence and decoder counters.
+
+Phase 2 must not start by wiring a speculative stitcher into production playback. Start it only after the complementary-tile fixture and the isolated one-decoder synthetic proof have passed. The existing multi-player path remains the fallback and must not be modified by this POC.
 
 ## Current known risk
 
