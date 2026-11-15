@@ -436,7 +436,7 @@ class AppState(
             cachedDecoderBudget = queryVideoDecoderBudget(context, effectiveMode, isTv = true)
             android.util.Log.i(
                 "ApexviewVideoBudget",
-                "TV AVC decoder budget=$cachedDecoderBudget, actualSoftwareDrm=$effectiveMode",
+                "TV HEVC decoder budget=$cachedDecoderBudget, actualSoftwareDrm=$effectiveMode",
             )
         }
         return cachedDecoderBudget
