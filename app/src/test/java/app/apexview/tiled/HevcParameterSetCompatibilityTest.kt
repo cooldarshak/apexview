@@ -33,6 +33,33 @@ class HevcParameterSetCompatibilityTest {
         assertTrue(geometryResult.reasons.any { it.contains("PPS metadata differs") })
     }
 
+    @Test fun rejectsSameParameterSetsWhenTileGeometryIsOutsideTheAssemblerProfile() {
+        val f = fixture()
+        val fourColumns = f.pps.copy(
+            numTileColumns = 4,
+            tileColumnWidthsInCtbs = listOf(5, 5, 5, 5)
+        )
+        val fourColumnResult = HevcParameterSetCompatibility.compare(
+            f.vps, f.sps, fourColumns, f.vps, f.sps, fourColumns
+        )
+        assertFalse(fourColumnResult.compatible)
+        assertTrue(fourColumnResult.reasons.any { it.contains("2-column by 1-row") })
+
+        val unevenColumns = f.pps.copy(tileColumnWidthsInCtbs = listOf(8, 12))
+        val unevenResult = HevcParameterSetCompatibility.compare(
+            f.vps, f.sps, unevenColumns, f.vps, f.sps, unevenColumns
+        )
+        assertFalse(unevenResult.compatible)
+        assertTrue(unevenResult.reasons.any { it.contains("uniform, full-picture 2x1") })
+
+        val missingGeometry = f.pps.copy(tileColumnWidthsInCtbs = null)
+        val missingResult = HevcParameterSetCompatibility.compare(
+            f.vps, f.sps, missingGeometry, f.vps, f.sps, missingGeometry
+        )
+        assertFalse(missingResult.compatible)
+        assertTrue(missingResult.reasons.any { it.contains("tile geometry is missing") })
+    }
+
     @Test fun acceptsIdenticalParsedVuiAndRejectsVuiOrSpsExtensionDifferences() {
         val f = fixture()
         val vuiMetadata = HevcParameterSets.VuiMetadata(

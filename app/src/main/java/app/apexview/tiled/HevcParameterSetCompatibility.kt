@@ -46,6 +46,24 @@ internal object HevcParameterSetCompatibility {
             if (!firstPps.tilesEnabled || !secondPps.tilesEnabled) {
                 reasons += "Both tracks must declare HEVC tiles"
             }
+            if (firstPps.numTileColumns != 2 || secondPps.numTileColumns != 2 ||
+                firstPps.numTileRows != 1 || secondPps.numTileRows != 1) {
+                reasons += "Only a 2-column by 1-row HEVC tile grid is supported"
+            }
+            if (firstSps.width <= 0 || firstSps.height <= 0 ||
+                secondSps.width <= 0 || secondSps.height <= 0) {
+                reasons += "SPS picture dimensions are invalid"
+            }
+            val columnWidths = firstPps.tileColumnWidthsInCtbs
+            val rowHeights = firstPps.tileRowHeightsInCtbs
+            if (columnWidths == null || rowHeights == null) {
+                reasons += "PPS tile geometry is missing"
+            } else if (columnWidths.size != 2 || rowHeights.size != 1 ||
+                columnWidths[0] != columnWidths[1] ||
+                columnWidths.sum() != firstSps.picWidthInCtbs ||
+                rowHeights.single() != firstSps.picHeightInCtbs) {
+                reasons += "Only a uniform, full-picture 2x1 CTB layout is supported"
+            }
             if (firstPps.entropyCodingSyncEnabled || secondPps.entropyCodingSyncEnabled) {
                 reasons += "Wavefront entropy coding is not supported"
             }
