@@ -55,7 +55,12 @@ class HevcSyntheticTileSplitTest {
         assertFalse(pps.entropyCodingSyncEnabled)
         assertEquals(2, pps.numTileColumns)
         assertEquals(1, pps.numTileRows)
-        assertEquals(listOf(2, 2), pps.tileColumnWidthsInCtbs)
+        assertTrue(sps.picWidthInCtbs % 2 == 0)
+        assertEquals(
+            listOf(sps.picWidthInCtbs / 2, sps.picWidthInCtbs / 2),
+            pps.tileColumnWidthsInCtbs
+        )
+        assertEquals(listOf(sps.picHeightInCtbs), pps.tileRowHeightsInCtbs)
 
         val sourceFrames = HevcStreamAlignmentAnalyzer.analyze(sourceBytes)
         val rebuiltFrames = HevcStreamAlignmentAnalyzer.analyze(rebuiltBytes)
