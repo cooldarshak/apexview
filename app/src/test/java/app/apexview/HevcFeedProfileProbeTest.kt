@@ -53,48 +53,54 @@ class HevcFeedProfileProbeTest {
     }
 
     @Test
-    fun comparesTwoFeedProfilesAndDoesNotMixDifferentContentSessions() {
+    fun comparesTheTwoComplementaryTileFeedProfilesThroughTheStrictGate() {
         val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
         assumeTrue("Synthetic HEVC tile fixture directory is not configured", !fixturePath.isNullOrBlank())
-        val feed = File(fixturePath!!, "feed_left.hevc")
-        assumeTrue("Synthetic HEVC CSD fixture is unavailable", feed.isFile)
-        val parameterSets = HevcBitstream.splitAnnexB(feed.readBytes()).filter { it.type in 32..34 }
-        val csd = ByteArray(parameterSets.sumOf { it.bytes.size + 4 })
-        var offset = 0
-        parameterSets.forEach { nal ->
-            csd[offset++] = 0
-            csd[offset++] = 0
-            csd[offset++] = 0
-            csd[offset++] = 1
-            nal.bytes.copyInto(csd, offset)
-            offset += nal.bytes.size
-        }
-        val format = Format.Builder()
-            .setSampleMimeType(MimeTypes.VIDEO_H265)
-            .setCodecs("hvc1")
-            .setWidth(256)
-            .setHeight(128)
-            .setFrameRate(25f)
-            .setInitializationData(listOf(csd))
-            .build()
 
+        fun formatFor(fileName: String): Format {
+            val feed = File(fixturePath!!, fileName)
+            assumeTrue("Synthetic HEVC feed $fileName is unavailable", feed.isFile)
+            val parameterSets = HevcBitstream.splitAnnexB(feed.readBytes()).filter { it.type in 32..34 }
+            val csd = ByteArray(parameterSets.sumOf { it.bytes.size + 4 })
+            var offset = 0
+            parameterSets.forEach { nal ->
+                csd[offset++] = 0
+                csd[offset++] = 0
+                csd[offset++] = 0
+                csd[offset++] = 1
+                nal.bytes.copyInto(csd, offset)
+                offset += nal.bytes.size
+            }
+            return Format.Builder()
+                .setSampleMimeType(MimeTypes.VIDEO_H265)
+                .setCodecs("hvc1")
+                .setWidth(256)
+                .setHeight(128)
+                .setFrameRate(25f)
+                .setInitializationData(listOf(csd))
+                .build()
+        }
+
+        val first = formatFor("feed_left.hevc")
+        val second = formatFor("feed_right.hevc")
         HevcFeedProfileCapture.record(
-            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-1", "content-100")
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, first, "channel-1", "content-100")
         )
         HevcFeedProfileCapture.updateMediaChunkDuration("content-100", "channel-1", "HLS", 6_000L)
         HevcFeedProfileCapture.updateDrm("content-100", "channel-1", "L1", keysLoaded = true)
         HevcFeedProfileCapture.record(
-            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-2", "content-100")
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, second, "channel-2", "content-100")
         )
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("CODEC_PROFILE_MATCH"))
-        assertTrue(HevcFeedProfileCapture.diagnostic.contains("chunksMs=[6000]"))
-        assertTrue(HevcFeedProfileCapture.diagnostic.contains("keysLoaded=true"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_PARAMETER_SET_GATE=PASS"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("CMAF timing"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-1"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-2"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("chunksMs=[6000]"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("keysLoaded=true"))
 
         HevcFeedProfileCapture.record(
-            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-3", "content-101")
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, second, "channel-3", "content-101")
         )
         assertTrue(HevcFeedProfileCapture.diagnostic.startsWith("HEVC_PROFILE_CAPTURED channel-3"))
     }
