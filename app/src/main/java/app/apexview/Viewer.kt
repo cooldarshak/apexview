@@ -966,11 +966,30 @@ private fun TileView(app: AppState, tile: Tile) {
         }
 
         if (app.settings.showStats) {
-            Text(
-                tile.feed.status,
-                style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow),
-                modifier = Modifier.align(Alignment.BottomStart).padding(start = 10.dp, end = 48.dp, bottom = 8.dp),
-            )
+            Column(
+                Modifier.align(Alignment.BottomStart).padding(start = 10.dp, end = 48.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    tile.feed.status,
+                    style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow),
+                    maxLines = 1
+                )
+                tile.feed.hevcProfileDiagnostic?.let { profile ->
+                    Text(
+                        profile,
+                        style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow),
+                        maxLines = 2
+                    )
+                }
+                if (app.tiles.firstOrNull()?.id == tile.id) {
+                    Text(
+                        HevcFeedProfileCapture.diagnostic,
+                        style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow),
+                        maxLines = 3
+                    )
+                }
+            }
         }
 
         AnimatedVisibility(app.chromeVisible && app.arranging, Modifier.align(Alignment.BottomEnd), enter = fadeIn(fade), exit = fadeOut(fade)) {
