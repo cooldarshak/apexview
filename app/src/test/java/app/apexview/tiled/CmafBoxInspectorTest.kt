@@ -258,6 +258,29 @@ class CmafBoxInspectorTest {
             fragment.sampleGroupEncryptionMetadata.runs)
     }
 
+    @Test fun doesNotParseSencUsingTencIvSizeWhenSeigOverridesAreActive() {
+        val init = fragmentedInitSegment(trackId = 65, timescale = 90000, includeEncryption = true)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(65))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(1) + int(3000))
+        val entry = byteArrayOf(0, 0x19, 1, 8) + ByteArray(16) // seig IV size is 8, tenc is 16
+        val sgpd = box("sgpd", byteArrayOf(1,0,0,0) + ascii("seig") + int(0) + int(1) +
+            int(entry.size) + entry)
+        val sbgp = box("sbgp", byteArrayOf(0,0,0,0) + ascii("seig") + int(1) + int(1) + int(0x10001))
+        val senc = box("senc", byteArrayOf(0,0,0,0) + int(1) + ByteArray(8))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) +
+                box("traf", tfhd + tfdt + trun + sgpd + sbgp + senc))
+        )
+        val fragment = report.fragments.single()
+        assertTrue(fragment.sampleGroupEncryptionStructureComplete)
+        assertTrue(fragment.sampleEncryptionBoxPresent)
+        assertEquals(1L, fragment.sampleEncryptionCount)
+        assertFalse(fragment.sampleEncryptionStructureComplete)
+        assertTrue(fragment.sampleEncryptionMetadata.isEmpty())
+        assertTrue(report.errors.isEmpty())
+    }
+
     @Test fun parsesSeigConstantIvSizeWithoutRetainingConstantIvBytes() {
         val init = fragmentedInitSegment(trackId = 63, timescale = 90000, includeEncryption = true)
         val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(63))

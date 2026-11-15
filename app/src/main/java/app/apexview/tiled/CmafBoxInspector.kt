@@ -389,7 +389,11 @@ internal object CmafBoxInspector {
         val sencBox = traf.children.firstOrNull { it.type == "senc" }
         val senc = sencBox?.let { box ->
             try {
-                parseSencSummary(payload(data, box), trackEncryptionDefaults[tfhd.trackId])
+                parseSencSummary(
+                    payload(data, box),
+                    trackEncryptionDefaults[tfhd.trackId],
+                    forceIncomplete = sampleGroupEncryption.present
+                )
             } catch (e: Exception) {
                 errors += "Sample encryption structure could not be parsed: ${e.message ?: e.javaClass.simpleName}"
                 null
@@ -850,7 +854,8 @@ internal object CmafBoxInspector {
 
     private fun parseSencSummary(
         p: ByteBuffer,
-        trackEncryption: TrackEncryptionMetadata?
+        trackEncryption: TrackEncryptionMetadata?,
+        forceIncomplete: Boolean = false
     ): SencSummary {
         require(p.remaining() >= 8) { "Truncated senc box" }
         val version = u8(p)
@@ -871,6 +876,13 @@ internal object CmafBoxInspector {
             "senc sample count exceeds limit"
         }
         val subsampleEncryption = (flags and 0x000002) != 0
+
+        // seig may override protection state and IV size per sample. Until the effective
+        // sample-to-group mapping is applied to every senc record, do not advance into the
+        // record bytes using tenc defaults. Retain only the declared sample count and flags.
+        if (forceIncomplete) {
+            return SencSummary(sampleCount, subsampleEncryption, false, emptyList(), overrideIvSize)
+        }
 
         // Without tenc defaults or an explicit senc override, the IV byte count cannot be
         // established safely. Preserve only the declared count and fail the crypto check closed.
