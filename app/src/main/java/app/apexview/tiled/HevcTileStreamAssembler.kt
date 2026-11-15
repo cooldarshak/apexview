@@ -39,8 +39,8 @@ internal object HevcTileStreamAssembler {
         val sps = left.sps
         val pps = left.pps
         require(sps.width > 0 && sps.height > 0) { "Invalid SPS picture dimensions" }
-        require(!sps.vuiParametersPresent && sps.spsExtensionPresent == false) {
-            "SPS VUI/extensions are outside the supported synthetic profile"
+        require(sps.spsExtensionPresent == false) {
+            "SPS extensions are outside the supported synthetic profile"
         }
         require(pps.tilesEnabled && pps.numTileColumns == 2 && pps.numTileRows == 1) {
             "Only a 2-column by 1-row HEVC tile grid is supported"

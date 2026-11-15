@@ -40,7 +40,25 @@ class HevcParameterSetParserTest {
         assertEquals(listOf(5), sps.maxDecPicBuffering)
         assertEquals(listOf(2), sps.maxNumReorderPics)
         assertFalse(sps.vuiParametersPresent)
+        assertEquals(null, sps.vuiMetadata)
         assertEquals(false, sps.spsExtensionPresent)
+    }
+
+    @Test fun parsesVuiAspectColourAndTimingMetadataBeforeSpsExtensionFlag() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits(withVui = true)))
+        val vui = sps.vuiMetadata!!
+        assertTrue(sps.vuiParametersPresent)
+        assertEquals(5, vui.videoFormat)
+        assertEquals(true, vui.videoFullRange)
+        assertEquals(1, vui.colourPrimaries)
+        assertEquals(2, vui.transferCharacteristics)
+        assertEquals(3, vui.matrixCoefficients)
+        assertTrue(vui.timingInfoPresent)
+        assertEquals(1L, vui.numUnitsInTick)
+        assertEquals(25L, vui.timeScale)
+        assertFalse(vui.hrdParametersPresent)
+        assertFalse(vui.bitstreamRestrictionPresent)
+        assertFalse(sps.spsExtensionPresent)
     }
 
     @Test fun appliesChromaAwareConformanceWindowAndCapturesBitDepth() {
@@ -158,7 +176,8 @@ class HevcParameterSetParserTest {
         cropTop: Int = 0,
         cropBottom: Int = 0,
         bitDepthLumaMinus8: Int = 0,
-        bitDepthChromaMinus8: Int = 0
+        bitDepthChromaMinus8: Int = 0,
+        withVui: Boolean = false
     ): ByteArray = BitWriter().apply {
         write(1, 4) // sps_video_parameter_set_id
         write(0, 3) // sps_max_sub_layers_minus1
@@ -189,7 +208,24 @@ class HevcParameterSetParserTest {
         write(0, 1) // long_term_ref_pics_present_flag
         write(1, 1) // sps_temporal_mvp_enabled_flag
         write(1, 1) // strong_intra_smoothing_enabled_flag
-        write(0, 1) // vui_parameters_present_flag
+        write(if (withVui) 1 else 0, 1) // vui_parameters_present_flag
+        if (withVui) {
+            write(0, 1) // aspect_ratio_info_present_flag
+            write(0, 1) // overscan_info_present_flag
+            write(1, 1) // video_signal_type_present_flag
+            write(5, 3) // video_format
+            write(1, 1) // video_full_range_flag
+            write(1, 1) // colour_description_present_flag
+            write(1, 8); write(2, 8); write(3, 8) // colour primaries/transfer/matrix
+            write(0, 1) // chroma_loc_info_present_flag
+            write(0, 1); write(0, 1); write(0, 1) // neutral chroma, field sequence, frame field
+            write(0, 1) // default display window absent
+            write(1, 1) // vui_timing_info_present_flag
+            write(1, 32); write(25, 32) // num_units_in_tick, time_scale
+            write(0, 1) // poc_proportional_to_timing_flag
+            write(0, 1) // vui_hrd_parameters_present_flag
+            write(0, 1) // bitstream_restriction_flag
+        }
         write(0, 1) // sps_extension_present_flag
     }.finish()
 

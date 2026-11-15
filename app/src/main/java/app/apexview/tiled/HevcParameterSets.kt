@@ -48,6 +48,22 @@ internal object HevcParameterSets {
         val all: List<ReferenceDelta> get() = negative + positive
     }
 
+    data class VuiMetadata(
+        val aspectRatioIdc: Int?,
+        val sarWidth: Int?,
+        val sarHeight: Int?,
+        val videoFormat: Int?,
+        val videoFullRange: Boolean?,
+        val colourPrimaries: Int?,
+        val transferCharacteristics: Int?,
+        val matrixCoefficients: Int?,
+        val timingInfoPresent: Boolean,
+        val numUnitsInTick: Long?,
+        val timeScale: Long?,
+        val hrdParametersPresent: Boolean,
+        val bitstreamRestrictionPresent: Boolean
+    )
+
     data class SpsMetadata(
         val vpsId: Int,
         val spsId: Int,
@@ -85,7 +101,8 @@ internal object HevcParameterSets {
         val pcmEnabled: Boolean,
         val strongIntraSmoothingEnabled: Boolean,
         val vuiParametersPresent: Boolean,
-        val spsExtensionPresent: Boolean?
+        val vuiMetadata: VuiMetadata?,
+        val spsExtensionPresent: Boolean
     )
 
     data class PpsMetadata(
@@ -224,9 +241,11 @@ internal object HevcParameterSets {
         val temporalMvp = bits.readBit() != 0
         val strongIntraSmoothing = bits.readBit() != 0
         val vuiPresent = bits.readBit() != 0
-        // VUI is deliberately not parsed yet. Its presence is exposed so a stitcher can
-        // reject streams whose colour/timing/display semantics are not fully compared.
-        val spsExtensionPresent = if (vuiPresent || bits.bitsRemaining == 0) null else bits.readBit() != 0
+        val vuiMetadata = if (vuiPresent) {
+            parseVuiParameters(bits, maxSubLayersMinus1)
+        } else null
+        require(bits.bitsRemaining > 0) { "SPS extension-present flag is missing" }
+        val spsExtensionPresent = bits.readBit() != 0
 
         return SpsMetadata(
             vpsId, spsId, maxSubLayersMinus1 + 1, temporalNesting,
@@ -237,9 +256,137 @@ internal object HevcParameterSets {
             conformanceLeft, conformanceRight, conformanceTop, conformanceBottom,
             displayWidth, displayHeight, maxDecPicBuffering, maxNumReorderPics,
             maxLatencyIncrease, scalingListEnabled, scalingListDataPresent,
-            ampEnabled, pcmEnabled, strongIntraSmoothing, vuiPresent, spsExtensionPresent
+            ampEnabled, pcmEnabled, strongIntraSmoothing, vuiPresent, vuiMetadata, spsExtensionPresent
         )
     }
+
+    private fun parseVuiParameters(bits: HevcBitReader, maxSubLayersMinus1: Int): VuiMetadata {
+        var aspectRatioIdc: Int? = null
+        var sarWidth: Int? = null
+        var sarHeight: Int? = null
+        if (bits.readBit() != 0) {
+            aspectRatioIdc = bits.readBits(8)
+            if (aspectRatioIdc == 255) {
+                sarWidth = bits.readBits(16)
+                sarHeight = bits.readBits(16)
+                require(sarWidth > 0 && sarHeight > 0) { "Invalid extended sample aspect ratio" }
+            }
+        }
+
+        if (bits.readBit() != 0) bits.readBit() // overscan_appropriate_flag
+
+        var videoFormat: Int? = null
+        var videoFullRange: Boolean? = null
+        var colourPrimaries: Int? = null
+        var transferCharacteristics: Int? = null
+        var matrixCoefficients: Int? = null
+        if (bits.readBit() != 0) {
+            videoFormat = bits.readBits(3)
+            videoFullRange = bits.readBit() != 0
+            if (bits.readBit() != 0) {
+                colourPrimaries = bits.readBits(8)
+                transferCharacteristics = bits.readBits(8)
+                matrixCoefficients = bits.readBits(8)
+            }
+        }
+
+        if (bits.readBit() != 0) {
+            readUe(bits, 5, "chroma_sample_loc_type_top_field")
+            readUe(bits, 5, "chroma_sample_loc_type_bottom_field")
+        }
+        bits.readBit() // neutral_chroma_indication_flag
+        bits.readBit() // field_seq_flag
+        bits.readBit() // frame_field_info_present_flag
+        if (bits.readBit() != 0) {
+            repeat(4) { readUe(bits, 32768, "def_disp_win_offset") }
+        }
+
+        val timingInfoPresent = bits.readBit() != 0
+        var numUnitsInTick: Long? = null
+        var timeScale: Long? = null
+        var hrdPresent = false
+        if (timingInfoPresent) {
+            numUnitsInTick = readUnsignedBits32(bits)
+            timeScale = readUnsignedBits32(bits)
+            require(numUnitsInTick > 0 && timeScale > 0) { "Invalid VUI timing information" }
+            if (bits.readBit() != 0) readUe(bits, 32767, "num_ticks_poc_diff_one_minus1")
+            hrdPresent = bits.readBit() != 0
+            if (hrdPresent) parseHrdParameters(bits, maxSubLayersMinus1)
+        }
+
+        val bitstreamRestrictionPresent = bits.readBit() != 0
+        if (bitstreamRestrictionPresent) {
+            bits.readBit() // tiles_fixed_structure_flag
+            bits.readBit() // motion_vectors_over_pic_boundaries_flag
+            bits.readBit() // restricted_ref_pic_lists_flag
+            readUe(bits, 32767, "min_spatial_segmentation_idc")
+            readUe(bits, 16, "max_bytes_per_pic_denom")
+            readUe(bits, 16, "max_bits_per_min_cu_denom")
+            readUe(bits, 16, "log2_max_mv_length_horizontal")
+            readUe(bits, 16, "log2_max_mv_length_vertical")
+        }
+
+        return VuiMetadata(
+            aspectRatioIdc, sarWidth, sarHeight, videoFormat, videoFullRange,
+            colourPrimaries, transferCharacteristics, matrixCoefficients,
+            timingInfoPresent, numUnitsInTick, timeScale, hrdPresent,
+            bitstreamRestrictionPresent
+        )
+    }
+
+    private fun parseHrdParameters(bits: HevcBitReader, maxSubLayersMinus1: Int) {
+        val nalHrdPresent = bits.readBit() != 0
+        val vclHrdPresent = bits.readBit() != 0
+        var subPicHrdPresent = false
+        if (nalHrdPresent || vclHrdPresent) {
+            subPicHrdPresent = bits.readBit() != 0
+            if (subPicHrdPresent) {
+                bits.readBits(8) // tick_divisor_minus2
+                bits.readBits(5) // du_cpb_removal_delay_increment_length_minus1
+                bits.readBit() // sub_pic_cpb_params_in_pic_timing_sei_flag
+                bits.readBits(5) // dpb_output_delay_du_length_minus1
+            }
+            bits.readBits(4) // bit_rate_scale
+            bits.readBits(4) // cpb_size_scale
+            if (subPicHrdPresent) bits.readBits(4) // cpb_size_du_scale
+            bits.readBits(5) // initial_cpb_removal_delay_length_minus1
+            bits.readBits(5) // au_cpb_removal_delay_length_minus1
+            bits.readBits(5) // dpb_output_delay_length_minus1
+        }
+
+        for (layer in 0..maxSubLayersMinus1) {
+            val fixedRateGeneral = bits.readBit() != 0
+            val fixedRateWithinCvs = if (fixedRateGeneral) true else bits.readBit() != 0
+            val lowDelayHrd = if (fixedRateWithinCvs) {
+                readUe(bits, 32767, "elemental_duration_in_tc_minus1")
+                false
+            } else {
+                bits.readBit() != 0
+            }
+            val cpbCountMinus1 = if (lowDelayHrd) 0 else readUe(bits, 31, "cpb_cnt_minus1")
+            if (nalHrdPresent) skipSubLayerHrdParameters(bits, cpbCountMinus1, subPicHrdPresent)
+            if (vclHrdPresent) skipSubLayerHrdParameters(bits, cpbCountMinus1, subPicHrdPresent)
+        }
+    }
+
+    private fun skipSubLayerHrdParameters(
+        bits: HevcBitReader,
+        cpbCountMinus1: Int,
+        subPicHrdPresent: Boolean
+    ) {
+        repeat(cpbCountMinus1 + 1) {
+            readUe(bits, Int.MAX_VALUE, "bit_rate_value_minus1")
+            readUe(bits, Int.MAX_VALUE, "cpb_size_value_minus1")
+            if (subPicHrdPresent) {
+                readUe(bits, Int.MAX_VALUE, "cpb_size_du_value_minus1")
+                readUe(bits, Int.MAX_VALUE, "bit_rate_du_value_minus1")
+            }
+            bits.readBit() // cbr_flag
+        }
+    }
+
+    private fun readUnsignedBits32(bits: HevcBitReader): Long =
+        bits.readBits(32).toLong() and 0xffffffffL
 
     fun parsePps(nal: ByteArray, sps: SpsMetadata? = null): PpsMetadata {
         val bits = readerFor(nal, 34)
