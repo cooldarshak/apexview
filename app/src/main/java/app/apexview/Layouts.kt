@@ -107,8 +107,26 @@ object Layouts {
 
     fun place(mode: LayoutMode, n: Int, width: Float, height: Float): List<Slot> = when {
         n == 0 -> emptyList()
+        mode == LayoutMode.TILE_TEST && n == 2 -> tileTestPair(width, height)
         mode == LayoutMode.GRID || mode == LayoutMode.TILE_TEST || n == 1 -> grid(n, 0f, 0f, width, height, center = true)
         else -> featured(n, width, height)
+    }
+
+    /** Two feeds side-by-side on landscape TV, stacked on portrait phones. */
+    private fun tileTestPair(width: Float, height: Float): List<Slot> {
+        val portrait = height >= width
+        val tileW = if (portrait) min(width, height / 2f * 16f / 9f)
+            else min(width / 2f, height * 16f / 9f)
+        val tileH = tileW * 9f / 16f
+        return if (portrait) {
+            val left = (width - tileW) / 2f
+            val top = (height - 2f * tileH) / 2f
+            listOf(Slot(left, top, tileW), Slot(left, top + tileH, tileW))
+        } else {
+            val left = (width - 2f * tileW) / 2f
+            val top = (height - tileH) / 2f
+            listOf(Slot(left, top, tileW), Slot(left + tileW, top, tileW))
+        }
     }
 
     private class Fit(val cols: Int, val rows: Int, val w: Float)

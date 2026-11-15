@@ -43,6 +43,13 @@ class LayoutsTest {
                     a.y < b.y + b.h - 1 && b.y < a.y + a.h - 1
             } })
             assertTrue(slots.all { it.w > 0f && it.h > 0f })
+            if (width >= height) {
+                assertTrue(slots[1].x > slots[0].x)
+                assertEquals(slots[0].y, slots[1].y, 0.1f)
+            } else {
+                assertEquals(slots[0].x, slots[1].x, 0.1f)
+                assertTrue(slots[1].y > slots[0].y)
+            }
         }
     }
 
