@@ -93,15 +93,15 @@ class HevcFeedProfileProbeTest {
         HevcFeedProfileCapture.record(
             HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, second, "channel-2", "content-100")
         )
-        assertTrue(HevcFeedProfileCapture.diagnostic.contains("CODEC_PROFILE_MATCH"))
-        assertTrue(HevcFeedProfileCapture.diagnostic.contains("\nHEVC_PARAMETER_SET_GATE=PASS"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_FORMAT_MATCH"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("\nHEVC_TILE_ASSEMBLER_GATE=PASS"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-1: DRM="))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-2: DRM="))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("CMAF timing"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-1"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-2"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("chunksMs=[6000]"))
-        assertTrue(HevcFeedProfileCapture.diagnostic.contains("keysLoaded=true"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("keysLoadedEventObserved=true"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("decoder=c2.qti.hevc.decoder"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("firstFrameRendered=true"))
 
@@ -132,7 +132,7 @@ class HevcFeedProfileProbeTest {
         HevcFeedProfileCapture.record(
             HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, second, "channel-b", "content-200")
         )
-        assertTrue(HevcFeedProfileCapture.diagnostic.contains("CODEC_PROFILE_MISMATCH"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_FORMAT_MISMATCH"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("dimensions differ"))
     }
 
@@ -148,7 +148,7 @@ class HevcFeedProfileProbeTest {
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_PROFILE_WAITING_FOR_VIDEO_INPUT_FORMAT"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-main: WAITING_FOR_VIDEO_INPUT_FORMAT"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("DRM=L1"))
-        assertTrue(HevcFeedProfileCapture.diagnostic.contains("keysLoaded=true"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("keysLoadedEventObserved=true"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("decoder=c2.qti.hevc.decoder"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("firstFrameRendered=true"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-onboard: WAITING_FOR_VIDEO_INPUT_FORMAT"))
@@ -165,6 +165,27 @@ class HevcFeedProfileProbeTest {
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_PROFILE_CAPTURED"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_PROFILE_WAITING_FOR_VIDEO_INPUT_FORMAT"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-onboard: WAITING_FOR_VIDEO_INPUT_FORMAT"))
+    }
+    @Test
+    fun formatMatchDoesNotImplySyntheticTileAssemblerCompatibility() {
+        val format = Format.Builder()
+            .setSampleMimeType(MimeTypes.VIDEO_H265)
+            .setCodecs("hvc1.1.6.L93.B0")
+            .setWidth(960)
+            .setHeight(540)
+            .setFrameRate(50f)
+            .build()
+        val group = "content-format-is-not-tile-proof"
+        HevcFeedProfileCapture.record(
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-a", group)
+        )
+        HevcFeedProfileCapture.record(
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-b", group)
+        )
+
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_FORMAT_MATCH"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_TILE_ASSEMBLER_GATE=INCOMPLETE"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("secure-surface feasibility remain unverified"))
     }
     @Test
     fun reportsMissingCsdWithoutFailingPlaybackDiagnostics() {

@@ -261,7 +261,7 @@ internal object HevcFeedProfileCapture {
         val progress = feedProgress.getValue(label)
         val state = if (label in profiles) "FORMAT_CAPTURED" else "WAITING_FOR_VIDEO_INPUT_FORMAT"
         return "$label: $state; DRM=${progress.drmSecurityLevel ?: "not-observed"}; " +
-            "keysLoaded=${progress.keysLoaded}; decoder=${progress.videoDecoderName ?: "not-observed"}; " +
+            "keysLoadedEventObserved=${progress.keysLoaded}; decoder=${progress.videoDecoderName ?: "not-observed"}; " +
             "firstFrameRendered=${progress.firstFrameRendered}"
     }
 
@@ -364,14 +364,14 @@ internal object HevcFeedProfileCapture {
                 add("reported frame rates differ")
             }
         }
-        val result = if (reasons.isEmpty()) "CODEC_PROFILE_MATCH" else "CODEC_PROFILE_MISMATCH"
+        val result = if (reasons.isEmpty()) "HEVC_FORMAT_MATCH" else "HEVC_FORMAT_MISMATCH"
         fun drm(profile: HevcFeedProfileProbe.Snapshot) =
-            "DRM=${profile.drmSecurityLevel ?: "not-observed"},keysLoaded=${profile.widevineKeysLoaded}," +
+            "DRM=${profile.drmSecurityLevel ?: "not-observed"},keysLoadedEventObserved=${profile.widevineKeysLoaded}," +
                 "decoder=${profile.videoDecoderName ?: "not-observed"},firstFrameRendered=${profile.firstFrameRendered}"
         val parameterGate = compareParsedParameterSets(first, second)
         return listOf(
             result,
-            "HEVC_PARAMETER_SET_GATE=$parameterGate",
+            "HEVC_TILE_ASSEMBLER_GATE=$parameterGate",
             "${first.label}: ${first.mime ?: "?"} ${first.codecs ?: "?"} ${first.width}x${first.height}@${first.frameRate}fps; " +
                 "VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}; " +
                 "delivery=${first.deliveryType}; chunksMs=${first.observedMediaChunkDurationsMs}",
