@@ -1517,6 +1517,7 @@ class AppState(
                     "Session metadata: " + (ref?.let { "meeting=${it.meetingKey}, session=${it.sessionKey}, year=${it.year}" } ?: "missing") +
                         "; timing token=" + if (token == null) "missing" else "present"
                 )
+                if (problem != null) recordTimingDiagnostic("BLOCKED: $problem")
                 if (problem == null) {
                     // Prefer F1's catalog signal for a known-live session. Otherwise wait for a
                     // real, non-placeholder player window before choosing live timing or archive.
