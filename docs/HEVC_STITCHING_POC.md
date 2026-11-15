@@ -1,6 +1,6 @@
 # HEVC stitching proof of concept
 
-Status: Phase 1 implementation is still under validation. Bounded HEVC/CMAF parsing, fail-closed compatibility checks, genuine complementary 2x1 synthetic tile fixtures, and an isolated Kotlin assembler are present. CI validation of the Kotlin reconstruction and encryption parser is ongoing. Physical Android hardware-decoder proof and authorised F1 feed inspection remain open.
+Status: The synthetic software reconstruction proof and physical Android single-hardware-decoder proof are complete for the narrow 256x128, 50-picture, 2x1 tile fixture. Phase 1 remains open pending sanitised metadata from two actual authorised F1 feeds and DRM/secure-surface feasibility. Active-seig senc record parsing and external saio auxiliary payload verification also remain open; encrypted compatibility stays rejected.
 
 ## Goal
 
@@ -89,7 +89,7 @@ The bounded senc parser obtains the IV size from tenc defaults or a senc overrid
 - [x] Prove the deliberately narrow synthetic HEVC profile with positive and negative fixtures. CI verifies 50 pictures with two complementary 2x1 tile slices per picture, tile addresses, shared VPS/SPS/PPS, POC/reference syntax, missing-picture rejection, reversed-tile rejection and mismatched NAL-header rejection. The assembler does not rewrite slice headers or claim generic HEVC support.
 - [x] Complete CI validation of the Kotlin assembler: output VCL NALs match the source sequence and FFmpeg decodes all 50 frames with hashes identical to the source. Current green run: #248, commit 3c1bfe072fd906b22291d93441fedf532416fee2.
 - [x] Build and upload matching signed debug and single-decoder instrumentation APKs. The instrumented test requires one hardware HEVC decoder and one ImageReader output Surface, and expects 50 decoded plus 50 rendered frames. The test has NOT yet been run on a physical device.
-- [ ] Install the app plus instrumentation APK on a physical Android device with hardware HEVC support and run the test. Capture codec name, hardware-accelerated status, one decoder, one output surface, 50 rendered frames and codec metrics. CI compilation/build and FFmpeg decode alone do not satisfy this.
+- [x] Install the app plus instrumentation APK on a physical Android device with hardware HEVC support and run the test. **Samsung Galaxy S22 Ultra (SM-S908E)** result supplied by the user on 2026-11-15: instrumentation `OK (1 test)`; `HEVC_DECODER_DISCOVERY` reported 8 HEVC decoders, including Qualcomm `c2.qti.hevc.decoder` and `OMX.qcom.video.decoder.hevc` hardware candidates; selected `c2.qti.hevc.decoder` (`hardwareAccelerated=true`, vendor codec). Its `isFormatSupported` preflight returned false, but the actual `MediaCodec.configure()` succeeded and the test rendered all 50 frames. Runtime marker: `SYNTHETIC_SINGLE_HARDWARE_DECODER_PASS`, `decoderInstancesCreated=1`, `outputSurfacesCreated=1`, `outputSurfaceFrames=50`, `decoderFrames=50`, `dimensions=256x128`. This closes the physical-device synthetic decoder gate only. It does not prove sustained playback, arbitrary HEVC compatibility or protected F1 feed support. Diagnostic harness CI build: run #251, commit `e89dbdbef3c1b14ff85b69e667a7a5c8b008b3fd`.
 - [ ] Inspect the DRM/secure-surface feasibility of actual authorised F1 delivery. Confirm the supported input representation can reach the intended secure decoder without weakening or bypassing Widevine. This requires a sanitised capture from the app's own signed-in session.
 
 
@@ -110,7 +110,11 @@ The Kotlin assembler supports only two independent tile slices per picture in a 
 
 The CI build creates two artifacts from the same commit: the normal debug APK and the
 `apexview-hevc-single-decoder-instrumentation` APK. Both must be installed together on a
-physical Android device with a hardware HEVC decoder (Android API 29 or newer).
+physical Android device with a hardware HEVC decoder (Android API 29 or newer). The first
+successful physical-device run was completed on a Samsung Galaxy S22 Ultra (SM-S908E)
+using Qualcomm `c2.qti.hevc.decoder`: one hardware decoder, one ImageReader surface and
+50 decoded/rendered synthetic frames. The decoder's `isFormatSupported()` advisory check
+reported false, but `MediaCodec.configure()` and the full decode/render test passed.
 
 With ADB connected to that device:
 
