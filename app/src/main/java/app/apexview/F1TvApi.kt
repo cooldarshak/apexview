@@ -132,7 +132,15 @@ data class PlayInfo(
 
 /** One play session holding every feed of a content, keyed by channel ID. */
 data class MultiPlay(val feeds: Map<Int, String>, val licenseUrl: String?, val streamType: String) {
-    fun stream(url: String) = PlayInfo(url, licenseUrl, streamType, allowHevcProfileProbe = false)
+    /** The observer reads only Media3's parsed Format/DRM callbacks, never URLs or protected samples. */
+    fun stream(url: String, channelId: Int?, contentId: Long) = PlayInfo(
+        url = url,
+        licenseUrl = licenseUrl,
+        streamType = streamType,
+        allowHevcProfileProbe = true,
+        profileLabel = channelId?.let { "channel-$it" } ?: "default-channel",
+        profileGroup = "content-$contentId"
+    )
 }
 
 /**
@@ -548,7 +556,7 @@ class F1TvApi(private val userAgent: String, private val chromeMajor: String) {
         )
     }
 
-    /** One feed in its own play session (`player_bm`, the web app's single player). */
+    /** One feed in its own play session (`player_bm`) or the authorised Premium multiview session (`player_tm`). */
     suspend fun contentPlay(contentId: Long, channelId: Int?): PlayInfo = withContext(Dispatchers.IO) {
         val result = play(contentId, "player_bm", channelId)
         PlayInfo(

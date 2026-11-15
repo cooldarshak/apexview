@@ -1481,10 +1481,14 @@ class AppState(
 
         val url = if (channel.channelId == null) session.feeds.values.firstOrNull()
         else session.feeds[channel.channelId]
-        return session.stream(url ?: throw IOException(
-            if (singleFeedPlan) "F1 didn't send this feed to your plan. Watching several at once needs F1 TV Premium."
-            else "F1 returned no stream for this channel"
-        ))
+        return session.stream(
+            url ?: throw IOException(
+                if (singleFeedPlan) "F1 didn't send this feed to your plan. Watching several at once needs F1 TV Premium."
+                else "F1 returned no stream for this channel"
+            ),
+            channel.channelId,
+            contentId
+        )
     }
 
     // Track map.
