@@ -583,24 +583,28 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             progress("SKIP TimingData.jsonStream · file unavailable; tower will have no lap-state history")
             StateParse(emptyMap(), emptyList())
         } else {
+            progress("PARSING TimingData state history · ${timingStream.length} chars")
+            val started = android.os.SystemClock.elapsedRealtime()
             try {
                 parseStates(timingStream, initialStart).also {
-                    progress("PARSED TimingData.jsonStream · ${it.states.size} driver state histories")
+                    progress("PARSED TimingData · drivers=${it.states.size} crossings=${it.crossings.size} · ${android.os.SystemClock.elapsedRealtime() - started}ms")
                 }
             } catch (e: Exception) {
-                progress("PARSE FAIL TimingData.jsonStream · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                progress("PARSE FAIL TimingData · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
                 StateParse(emptyMap(), emptyList())
             }
         }
         val initialLaps = if (timingStream == null) {
             emptyMap()
         } else {
+            progress("PARSING timing tower snapshots · TimingData=${timingStream.length} chars, TimingDataF1=${timingF1Stream.length} chars")
+            val started = android.os.SystemClock.elapsedRealtime()
             try {
                 DriverTimingParser.parse(timingStream, initialStart, timingF1Stream).also {
-                    progress("PARSED lap timing · ${it.size} drivers")
+                    progress("PARSED timing tower · drivers=${it.size} · ${android.os.SystemClock.elapsedRealtime() - started}ms")
                 }
             } catch (e: Exception) {
-                progress("PARSE FAIL lap timing · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                progress("PARSE FAIL timing tower · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
                 emptyMap()
             }
         }
@@ -622,35 +626,62 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
 
         progress("Loading track positions…")
         val positions = fetchStage(path + "Position.z.jsonStream")
-        val tracks = parsePositions(positions)
-        if (tracks.isEmpty()) throw IOException("The archive has no car positions for this session")
+        progress("PARSING Position.z.jsonStream · ${positions.length} chars")
+        val positionParseStarted = android.os.SystemClock.elapsedRealtime()
+        val positionReport = parsePositionsDetailed(positions)
+        val tracks = positionReport.tracks
+        progress(
+            "PARSED positions · records=${positionReport.decodedRecords}/${positionReport.inputRecords}, " +
+                "samples=${positionReport.positionSamples}, cars=${tracks.size}, malformed=${positionReport.malformedRecords} · " +
+                "${android.os.SystemClock.elapsedRealtime() - positionParseStarted}ms"
+        )
+        if (tracks.isEmpty()) {
+            throw IOException(
+                "No usable car positions (records=${positionReport.inputRecords}, " +
+                    "decoded=${positionReport.decodedRecords}, malformed=${positionReport.malformedRecords})"
+            )
+        }
 
         // Heartbeat anchors the stream clock. Some sessions have bad offsets; the cars' own
         // timestamps win when they disagree with it by more than a minute.
         val streamStart = streamStart(heartbeat, positions)
-        val parsed = if (timingStream == null) {
-            StateParse(emptyMap(), emptyList())
+        val corrected = streamStart != initialStart
+        val parsedAndLaps = if (!corrected || timingStream == null) {
+            progress("Timing clock ${if (corrected) "has no TimingData source" else "unchanged"} · reusing early timing parse")
+            initialStates to initialLaps
         } else {
-            try {
-                parseStates(timingStream, streamStart)
+            progress("Timing clock corrected by ${streamStart - initialStart}ms · reparsing timing once")
+            val stateStarted = android.os.SystemClock.elapsedRealtime()
+            val parsed = try {
+                parseStates(timingStream, streamStart).also {
+                    progress("REPARSED TimingData · drivers=${it.states.size} crossings=${it.crossings.size} · ${android.os.SystemClock.elapsedRealtime() - stateStarted}ms")
+                }
             } catch (e: Exception) {
-                progress("PARSE FAIL lap states with corrected clock · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                progress("PARSE FAIL corrected TimingData · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
                 StateParse(emptyMap(), emptyList())
             }
-        }
-        val laps = if (timingStream == null) {
-            emptyMap()
-        } else {
-            try {
-                DriverTimingParser.parse(timingStream, streamStart, timingF1Stream)
+            val lapStarted = android.os.SystemClock.elapsedRealtime()
+            val laps = try {
+                DriverTimingParser.parse(timingStream, streamStart, timingF1Stream).also {
+                    progress("REPARSED timing tower · drivers=${it.size} · ${android.os.SystemClock.elapsedRealtime() - lapStarted}ms")
+                }
             } catch (e: Exception) {
-                progress("PARSE FAIL lap timing with corrected clock · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                progress("PARSE FAIL corrected timing tower · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
                 emptyMap()
             }
+            parsed to laps
         }
+        val parsed = parsedAndLaps.first
+        val laps = parsedAndLaps.second
 
+        val geometryStarted = android.os.SystemClock.elapsedRealtime()
+        progress("Building track geometry · cars=${tracks.size}")
         val built = tracks.mapValues { it.value.build() }
         val traced = traceOutline(tracks.values.toList())
+        progress(
+            "TRACK GEOMETRY · samples=${tracks.values.sumOf { it.size }}, outlinePoints=${traced.size / 2} · " +
+                "${android.os.SystemClock.elapsedRealtime() - geometryStarted}ms"
+        )
         val line = findStartFinish(traced, parsed.crossings, built)
         var outline = if (line != null) startAt(traced, line) else traced
         // Publish the traced map immediately. Optional external circuit lookup may provide a
@@ -1153,14 +1184,43 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         return result
     }
 
-    internal fun parsePositions(stream: String): Map<String, TrackBuilder> {
+    internal data class PositionParseReport(
+        val tracks: Map<String, TrackBuilder>,
+        val inputRecords: Int,
+        val decodedRecords: Int,
+        val malformedRecords: Int,
+        val positionSamples: Int,
+    )
+
+    internal fun parsePositions(stream: String): Map<String, TrackBuilder> =
+        parsePositionsDetailed(stream).tracks
+
+    internal fun parsePositionsDetailed(stream: String): PositionParseReport {
         val tracks = mutableMapOf<String, TrackBuilder>()
+        var inputRecords = 0
+        var decodedRecords = 0
+        var malformedRecords = 0
+        var positionSamples = 0
         stream.lineSequence().forEach { line ->
-            if (line.length <= streamPrefixLength(line)) return@forEach
-            val json = runCatching { JSONObject(inflate(line.substring(streamPrefixLength(line)))) }.getOrNull() ?: return@forEach
+            val prefix = streamPrefixLength(line)
+            if (line.length <= prefix) return@forEach
+            inputRecords++
+            val json = try {
+                JSONObject(inflate(line.substring(prefix)))
+            } catch (_: Exception) {
+                malformedRecords++
+                return@forEach
+            }
+            val samples = json.optJSONArray("Position")
+            if (samples == null) {
+                malformedRecords++
+                return@forEach
+            }
+            decodedRecords++
+            positionSamples += samples.length()
             addPositions(json, tracks)
         }
-        return tracks
+        return PositionParseReport(tracks, inputRecords, decodedRecords, malformedRecords, positionSamples)
     }
 
     /**
