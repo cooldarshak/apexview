@@ -151,7 +151,7 @@ class HevcSliceHeaderParserTest {
 
     private fun pSliceBits(): ByteArray = BitWriter().apply {
         write(1, 1); writeUe(0); write(0, 2); writeUe(1)
-        write(42, 8); write(0, 1)
+        write(42, 8) // no short_term_ref_pic_set_sps_flag: SPS defines zero sets
         writeUe(2); writeUe(0)
         writeUe(0); write(1, 1)
         writeUe(2); write(0, 1)
