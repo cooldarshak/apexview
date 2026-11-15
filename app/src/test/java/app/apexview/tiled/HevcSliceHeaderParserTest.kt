@@ -40,7 +40,7 @@ class HevcSliceHeaderParserTest {
         assertFalse(slice.shortTermRpsFromSps!!)
         assertEquals(listOf(-1, -4), slice.references.map { it.deltaPoc })
         assertEquals(listOf(true, false), slice.references.map { it.usedByCurrent })
-        assertFalse(slice.temporalMvpEnabled!!)
+        assertTrue(slice.temporalMvpEnabled!!)
         assertTrue(slice.sampleAdaptiveOffsetLuma!!)
         assertTrue(slice.sampleAdaptiveOffsetChroma!!)
         assertTrue(slice.bitsConsumed > 0)
