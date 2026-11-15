@@ -443,19 +443,19 @@ internal object CmafBoxInspector {
         var totalSubsampleEntries = 0L
         repeat(sampleCount.toInt()) {
             if (effectiveIvSize > 0) skip(p, effectiveIvSize) // Skip IV bytes without retaining them.
-            val ranges = if (subsampleEncryption) {
+            val ranges: List<SubsampleEncryptionRange>? = if (subsampleEncryption) {
                 val count = u16(p)
                 totalSubsampleEntries = Math.addExact(totalSubsampleEntries, count.toLong())
                 require(totalSubsampleEntries <= MAX_TOTAL_SUBSAMPLE_ENTRIES) {
                     "senc subsample entry count exceeds limit"
                 }
-                buildList(count) {
-                    repeat(count) {
-                        val clearBytes = u16(p)
-                        val encryptedBytes = u32(p)
-                        add(SubsampleEncryptionRange(clearBytes, encryptedBytes))
-                    }
+                val entries = ArrayList<SubsampleEncryptionRange>(count)
+                repeat(count) {
+                    val clearBytes = u16(p)
+                    val encryptedBytes = u32(p)
+                    entries.add(SubsampleEncryptionRange(clearBytes, encryptedBytes))
                 }
+                entries
             } else null
             samples += SampleEncryptionMetadata(effectiveIvSize, ranges)
         }
