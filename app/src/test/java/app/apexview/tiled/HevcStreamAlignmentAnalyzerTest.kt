@@ -22,11 +22,12 @@ class HevcStreamAlignmentAnalyzerTest {
     }
 
     @Test
-    fun rejectsSamePocAndReferencesWhenOtherFirstSliceHeaderFieldsDiffer() {
-        val feedA = stream(pSlice(1, referenceCount = 1), pSlice(2, referenceCount = 2))
-        val feedB = stream(
-            pSlice(1, referenceCount = 1, temporalMvpEnabled = false),
-            pSlice(2, referenceCount = 2)
+    fun rejectsPictureIdentityMismatchEvenWhenPocAndReferencesMatch() {
+        val feedA = streamWithIdrNoOutputPriorPictures(
+            true, pSlice(1, referenceCount = 1), pSlice(2, referenceCount = 2)
+        )
+        val feedB = streamWithIdrNoOutputPriorPictures(
+            false, pSlice(1, referenceCount = 1), pSlice(2, referenceCount = 2)
         )
         val report = HevcStreamAlignmentAnalyzer.compare(
             HevcStreamAlignmentAnalyzer.analyze(feedA),
@@ -35,9 +36,9 @@ class HevcStreamAlignmentAnalyzerTest {
 
         assertTrue(report.pocAligned)
         assertTrue(report.referencesAligned)
-        assertTrue(!report.sliceHeadersAligned)
+        assertTrue(!report.pictureIdentityAligned)
         assertTrue(!report.fullyAligned)
-        assertTrue(report.mismatches.any { !it.sliceHeaderAligned })
+        assertTrue(report.mismatches.any { !it.pictureIdentityAligned })
     }
 
     @Test
@@ -55,8 +56,17 @@ class HevcStreamAlignmentAnalyzerTest {
         assertTrue(!report.referencesAligned)
     }
 
-    private fun stream(vararg pSlices: ByteArray): ByteArray {
-        val nals = listOf(nal(33, spsBits()), nal(34, ppsBits()), nal(20, idrSlice())) + pSlices.map { nal(1, it) }
+    private fun stream(vararg pSlices: ByteArray): ByteArray =
+        streamWithIdrNoOutputPriorPictures(true, *pSlices)
+
+    private fun streamWithIdrNoOutputPriorPictures(
+        noOutputOfPriorPictures: Boolean,
+        vararg pSlices: ByteArray
+    ): ByteArray {
+        val nals = listOf(
+            nal(33, spsBits()), nal(34, ppsBits()),
+            nal(20, idrSlice(noOutputOfPriorPictures))
+        ) + pSlices.map { nal(1, it) }
         return nals.fold(ByteArray(0)) { out, n -> out + byteArrayOf(0, 0, 0, 1) + n }
     }
 
@@ -89,8 +99,8 @@ class HevcStreamAlignmentAnalyzerTest {
         write(0, 1) // no PPS extension
     }.finish()
 
-    private fun idrSlice(): ByteArray = BitWriter().apply {
-        write(1, 1); write(1, 1); writeUe(0); write(0, 2); writeUe(2)
+    private fun idrSlice(noOutputOfPriorPictures: Boolean = true): ByteArray = BitWriter().apply {
+        write(1, 1); write(if (noOutputOfPriorPictures) 1 else 0, 1); writeUe(0); write(0, 2); writeUe(2)
         write(1, 1); write(1, 1) // SAO luma/chroma
         writeSe(0) // slice_qp_delta
         write(1, 1) // slice_loop_filter_across_slices_enabled_flag
