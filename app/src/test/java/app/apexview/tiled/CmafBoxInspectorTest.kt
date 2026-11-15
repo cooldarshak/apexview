@@ -39,6 +39,43 @@ class CmafBoxInspectorTest {
         assertTrue(report.fragmented)
     }
 
+    @Test fun reusesSanitisedInitMetadataWhenMediaFragmentIsASeparateResponse() {
+        val initReport = CmafBoxInspector.inspect(
+            box("ftyp", ascii("iso6") + int(0) + ascii("iso6cmfc")) +
+                fragmentedInitSegment(trackId = 907, timescale = 90000, includeEncryption = true)
+        )
+        assertTrue(initReport.initializationSegmentPresent)
+        assertEquals(1, initReport.fragmentDefaults.size)
+
+        val tfhd = box("tfhd", byteArrayOf(0, 0, 0, 0) + int(907))
+        val tfdt = box("tfdt", byteArrayOf(0, 0, 0, 0) + int(9000))
+        val trun = box("trun",
+            byteArrayOf(1, 0, 11, 0) + int(2) +
+                int(3000) + int(103) + int(120) +
+                int(3000) + int(145) + int(-60)
+        )
+        val sampleOneEncryption = ByteArray(16) + short(1) + short(3) + int(100)
+        val sampleTwoEncryption = ByteArray(16) + short(2) +
+            short(0) + int(50) + short(5) + int(90)
+        val senc = box("senc", byteArrayOf(0, 0, 0, 2) + int(2) +
+            sampleOneEncryption + sampleTwoEncryption)
+        val fragmentBytes = box("moof",
+            box("mfhd", byteArrayOf(0, 0, 0, 0) + int(2)) +
+                box("traf", tfhd + tfdt + trun + senc +
+                    box("saiz", byteArrayOf(0, 0, 0, 0) + byteArrayOf(0) + int(2) + byteArrayOf(24, 30)) +
+                    box("saio", byteArrayOf(0, 0, 0, 0) + int(1) + int(100)) +
+                    box("sgpd", ByteArray(8)) + box("sbgp", ByteArray(8))
+                )
+        )
+
+        val mediaReport = CmafBoxInspector.inspect(fragmentBytes, initReport)
+        assertFalse(mediaReport.initializationSegmentPresent)
+        assertEquals(907L, mediaReport.tracks.single().trackId)
+        assertEquals(90000L, mediaReport.fragments.single().timescale)
+        assertTrue(mediaReport.fragments.single().sampleEncryptionStructureComplete)
+        assertTrue(mediaReport.fragments.single().sampleEncryptionRangesCoverSamples)
+    }
+
     @Test fun readsFragmentDecodeAndPresentationTimesWithoutSamplePayloads() {
         val init = fragmentedInitSegment(trackId = 7, timescale = 90000, includeEncryption = true)
         val tfhd = box("tfhd", byteArrayOf(0, 0, 0, 0) + int(7))
