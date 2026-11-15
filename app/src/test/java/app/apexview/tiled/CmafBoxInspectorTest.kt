@@ -244,7 +244,8 @@ class CmafBoxInspectorTest {
         val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(66))
         val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
         val trun = box("trun", byteArrayOf(0,0,1,0) + int(2) + int(3000) + int(3000))
-        val senc = box("senc", byteArrayOf(0,0,0,0) + int(2))
+        // The track-level v2 default resolves both sample IV lengths to 8 bytes.
+        val senc = box("senc", byteArrayOf(0,0,0,0) + int(2) + ByteArray(16))
         val report = CmafBoxInspector.inspect(
             init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + senc))
         )
@@ -255,7 +256,8 @@ class CmafBoxInspectorTest {
         assertEquals(1L, fragment.sampleGroupEncryptionMetadata!!.defaultSampleDescriptionIndex)
         assertEquals(listOf(CmafBoxInspector.SampleGroupRun(2, 1)),
             fragment.sampleGroupEncryptionMetadata.runs)
-        assertFalse(fragment.sampleEncryptionStructureComplete)
+        assertTrue(fragment.sampleEncryptionStructureComplete)
+        assertEquals(listOf(8, 8), fragment.sampleEncryptionMetadata.map { it.ivSize })
     }
 
     @Test fun fragmentV2SeigDefaultOverridesTrackDefaultForUnmappedSamples() {
