@@ -559,7 +559,13 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             }
         }
         suspend fun fetchOptionalStage(path: String, label: String = path.substringAfterLast('/')): String? =
-            runCatching { fetchStage(path, label) }.getOrNull()
+            try {
+                fetchStage(path, label)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
 
         val index = JSONObject(fetchStage("${ref.year}/Index.json"))
         progress("Matching meeting/session keys in F1 index…")
