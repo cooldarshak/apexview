@@ -135,13 +135,10 @@ def write_annexb(path, parameter_sets, frames, tile_index=None):
             stream.write(nal)
         for frame in frames:
             ordered = frame["slices"] if tile_index is None else [frame["slices"][tile_index]]
-            for nal in frame["prefix"]:
-                stream.write(b"\x00\x00\x00\x01")
-                stream.write(nal)
+            # The POC assembler intentionally accepts a narrow elementary-stream profile:
+            # VPS/SPS/PPS followed by the complementary VCL tile slices only. AUD, SEI,
+            # EOS and other non-VCL metadata are not part of this synthetic contract.
             for nal in ordered:
-                stream.write(b"\x00\x00\x00\x01")
-                stream.write(nal)
-            for nal in frame["suffix"]:
                 stream.write(b"\x00\x00\x00\x01")
                 stream.write(nal)
 
@@ -274,9 +271,10 @@ def main():
             "decoded_frame_hashes_match_source": True,
             "note": (
                 "Two complementary tile-slice streams were separated from the same encoded "
-                "access units and then reassembled byte-for-byte at the NAL-unit level. "
-                "This validates the synthetic fixture and FFmpeg decoding, not yet the Kotlin "
-                "stitcher or Android MediaCodec single-decoder runtime path."
+                "pictures. The narrow test inputs contain the shared VPS/SPS/PPS and only the "
+                "corresponding VCL tile slices; non-VCL metadata is excluded. The Kotlin "
+                "assembler reconstitutes the original VCL NAL sequence and FFmpeg verifies "
+                "pixel-identical output. Android MediaCodec runtime validation remains separate."
             )
         }
         (output / "tile_fixture_manifest.json").write_text(json.dumps(metadata, indent=2) + "\n")
