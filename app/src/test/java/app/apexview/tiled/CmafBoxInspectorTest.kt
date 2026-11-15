@@ -39,6 +39,62 @@ class CmafBoxInspectorTest {
         assertTrue(report.fragmented)
     }
 
+    @Test fun readsFragmentDecodeAndPresentationTimesWithoutSamplePayloads() {
+        val init = fragmentedInitSegment(trackId = 7, timescale = 90000)
+        val tfhd = box("tfhd", byteArrayOf(0, 0, 0, 0) + int(7))
+        val tfdt = box("tfdt", byteArrayOf(0, 0, 0, 0) + int(9000))
+        val trun = box("trun",
+            byteArrayOf(1, 0, 9, 0) + int(2) +
+                int(3000) + int(120) +
+                int(3000) + int(-60)
+        )
+        val senc = box("senc", byteArrayOf(0, 0, 0, 2) + int(2) + ByteArray(20))
+        val traf = box("traf", tfhd + tfdt + trun + senc +
+            box("saiz", byteArrayOf(0, 0, 0, 0) + byteArrayOf(16) + int(2)) +
+            box("saio", byteArrayOf(0, 0, 0, 0) + int(1) + int(100)) +
+            box("sgpd", ByteArray(8)) + box("sbgp", ByteArray(8))
+        )
+        val fragment = box("moof", box("mfhd", byteArrayOf(0,0,0,0) + int(1)) + traf)
+        val report = CmafBoxInspector.inspect(init + fragment)
+        val track = report.tracks.single()
+        assertEquals(7L, track.trackId)
+        assertEquals(90000L, track.timescale)
+
+        val timing = report.fragments.single()
+        assertEquals(7L, timing.trackId)
+        assertEquals(90000L, timing.timescale)
+        assertEquals(9000L, timing.baseDecodeTimeTicks)
+        assertEquals(2, timing.sampleCount)
+        assertEquals(6000L, timing.totalDurationTicks)
+        assertTrue(timing.timingComplete)
+        assertEquals(listOf(9000L, 12000L), timing.sampleTimings.map { it.decodeTimeTicks })
+        assertEquals(listOf(9120L, 11940L), timing.sampleTimings.map { it.presentationTimeTicks })
+        assertEquals(listOf(3000L, 3000L), timing.sampleTimings.map { it.durationTicks })
+        assertEquals(listOf(120L, -60L), timing.sampleTimings.map { it.compositionOffsetTicks })
+        assertTrue(timing.sampleEncryptionBoxPresent)
+        assertTrue(timing.subsampleEncryptionSignalled!!)
+        assertEquals(2L, timing.sampleEncryptionCount)
+        assertTrue(timing.sampleAuxiliarySizesPresent)
+        assertTrue(timing.sampleAuxiliaryOffsetsPresent)
+        assertTrue(timing.sampleGroupDescriptionPresent)
+        assertTrue(timing.sampleToGroupPresent)
+    }
+
+    @Test fun marksFragmentTimingIncompleteRatherThanGuessingMissingDuration() {
+        val init = fragmentedInitSegment(trackId = 3, timescale = 1000)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(3))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(500))
+        val trun = box("trun", byteArrayOf(0,0,0,0) + int(2))
+        val fragment = box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun))
+        val timing = CmafBoxInspector.inspect(init + fragment).fragments.single()
+
+        assertEquals(2, timing.sampleCount)
+        assertFalse(timing.timingComplete)
+        assertEquals(listOf(500L, null), timing.sampleTimings.map { it.decodeTimeTicks })
+        assertEquals(listOf(null, null), timing.sampleTimings.map { it.durationTicks })
+        assertNull(timing.totalDurationTicks)
+    }
+
     @Test fun readsHevcDecoderConfigurationRecordFieldsWithoutSamples() {
         val hvcC = byteArrayOf(
             1, 0xa1.toByte(),
@@ -157,6 +213,19 @@ class CmafBoxInspectorTest {
             CmafBoxInspector.inspect(ByteArray(7))
             fail("Expected short input to be rejected")
         } catch (_: IllegalArgumentException) { }
+    }
+
+    private fun fragmentedInitSegment(trackId: Int, timescale: Int): ByteArray {
+        val tkhd = box("tkhd", byteArrayOf(0,0,0,7) +
+            int(0) + int(0) + int(trackId) + int(0) + ByteArray(60))
+        val mdhd = box("mdhd", byteArrayOf(0,0,0,0) +
+            int(0) + int(0) + int(timescale) + int(0) + short(0) + short(0))
+        val hdlr = box("hdlr", byteArrayOf(0,0,0,0) + int(0) + ascii("vide") + ByteArray(12))
+        val trak = box("trak", tkhd + box("mdia", mdhd + hdlr))
+        val mvex = box("mvex", box("trex",
+            byteArrayOf(0,0,0,0) + int(trackId) + int(1) + int(0) + int(0) + int(0)
+        ))
+        return box("moov", trak + mvex)
     }
 
     private fun inspectVisualEntry(entry: ByteArray): CmafBoxInspector.Report {
