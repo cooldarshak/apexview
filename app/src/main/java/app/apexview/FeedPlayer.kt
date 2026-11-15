@@ -206,7 +206,10 @@ class FeedPlayer(
             DataSource.Factory {
                 CmafMetadataInspectingDataSource(
                     upstream = http.createDataSource(),
-                    shouldCapture = {
+                    shouldCaptureInit = {
+                        HevcFeedProfileCapture.shouldCaptureCmafInit(stream.profileGroup, stream.profileLabel)
+                    },
+                    shouldCaptureMedia = {
                         HevcFeedProfileCapture.shouldCaptureCmaf(stream.profileGroup, stream.profileLabel)
                     },
                     onCmafResponse = { bytes ->
