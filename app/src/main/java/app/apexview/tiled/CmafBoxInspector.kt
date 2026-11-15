@@ -201,6 +201,7 @@ internal object CmafBoxInspector {
         repeat(arrayCount) {
             require(p.remaining() >= 3) { "Truncated hvcC NAL array header" }
             val arrayHeader = u8(p)
+            require((arrayHeader and 0x40) == 0) { "Invalid hvcC NAL array reserved bit" }
             val declaredType = arrayHeader and 0x3f
             val nalCount = u16(p)
             require(nalCount <= 1024) { "hvcC NAL array contains too many entries" }
