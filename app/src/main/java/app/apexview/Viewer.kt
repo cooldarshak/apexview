@@ -966,7 +966,9 @@ private fun TileView(app: AppState, tile: Tile) {
             )
         }
 
-        if (app.settings.showStats) {
+        // Tile testing is a diagnostic workflow, so keep its gate report visible even when
+        // the user's general playback statistics overlay is disabled.
+        if (app.settings.showStats || app.layoutMode == LayoutMode.TILE_TEST) {
             Column(
                 Modifier.align(Alignment.BottomStart).padding(start = 10.dp, end = 48.dp, bottom = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp)
