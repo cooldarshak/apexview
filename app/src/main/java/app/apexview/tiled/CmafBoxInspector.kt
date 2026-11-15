@@ -45,7 +45,30 @@ internal object CmafBoxInspector {
         val skipByteBlock: Int,
         val constantIvSize: Int?
     )
+    data class SampleTiming(
+        val decodeTimeTicks: Long?,
+        val presentationTimeTicks: Long?,
+        val durationTicks: Long?,
+        val compositionOffsetTicks: Long?
+    )
+    data class FragmentMetadata(
+        val trackId: Long,
+        val timescale: Long?,
+        val baseDecodeTimeTicks: Long?,
+        val sampleCount: Int,
+        val totalDurationTicks: Long?,
+        val sampleTimings: List<SampleTiming>,
+        val timingComplete: Boolean,
+        val sampleEncryptionBoxPresent: Boolean,
+        val subsampleEncryptionSignalled: Boolean?,
+        val sampleEncryptionCount: Long?,
+        val sampleAuxiliarySizesPresent: Boolean,
+        val sampleAuxiliaryOffsetsPresent: Boolean,
+        val sampleGroupDescriptionPresent: Boolean,
+        val sampleToGroupPresent: Boolean
+    )
     data class TrackMetadata(
+        val trackId: Long?,
         val handler: String?,
         val timescale: Long?,
         val sampleEntry: String?,
@@ -67,6 +90,7 @@ internal object CmafBoxInspector {
         val compatibleBrands: List<String>,
         val topLevelBoxes: List<String>,
         val tracks: List<TrackMetadata>,
+        val fragments: List<FragmentMetadata>,
         val fragmented: Boolean,
         val errors: List<String>
     )
@@ -87,15 +111,32 @@ internal object CmafBoxInspector {
             ftyp.position(ftyp.position() + 4)
             while (ftyp.remaining() >= 4) brands += readFourCc(ftyp)
         }
-        val tracks = boxes.firstOrNull { it.type == "moov" }?.children
-            ?.filter { it.type == "trak" }?.map { track(data, it, errors) }.orEmpty()
-        return Report(major, brands, boxes.map { it.type }, tracks,
+        val moov = boxes.firstOrNull { it.type == "moov" }
+        val tracks = moov?.children?.filter { it.type == "trak" }?.map { track(data, it, errors) }.orEmpty()
+        val trackTimescales = tracks.mapNotNull { item ->
+            val id = item.trackId
+            val scale = item.timescale
+            if (id != null && scale != null) id to scale else null
+        }.toMap()
+        val trexDefaults = moov?.let { parseTrexDefaults(data, it, errors) }.orEmpty()
+        val fragments = boxes.filter { it.type == "moof" }.flatMap { moof ->
+            moof.children.filter { it.type == "traf" }.mapNotNull { traf ->
+                try {
+                    parseFragmentTrack(data, traf, trexDefaults, trackTimescales)
+                } catch (e: Exception) {
+                    errors += "Fragment timing metadata could not be parsed: ${e.message ?: e.javaClass.simpleName}"
+                    null
+                }
+            }
+        }
+        return Report(major, brands, boxes.map { it.type }, tracks, fragments,
             boxes.any { it.type == "moof" } || boxes.any { it.type == "moov" && it.children.any { c -> c.type == "mvex" } },
             errors)
     }
 
     private fun track(data: ByteArray, trak: Box, errors: MutableList<String>): TrackMetadata {
         val all = flatten(trak).toMutableList()
+        val trackId = all.firstOrNull { it.type == "tkhd" }?.let { readTrackId(payload(data, it)) }
         val handler = all.firstOrNull { it.type == "hdlr" }?.let { payload(data, it) }?.let { p ->
             if (p.remaining() >= 12) { p.position(p.position() + 8); readFourCc(p) } else null
         }
@@ -157,13 +198,183 @@ internal object CmafBoxInspector {
             }
         }
         return TrackMetadata(
-            handler, timescale, sampleEntry, original, scheme,
+            trackId, handler, timescale, sampleEntry, original, scheme,
             sampleEntry == "encv" || sampleEntry == "enca" || scheme != null, width, height,
             hevcConfiguration, trackEncryption,
             all.any { it.type == "senc" }, all.any { it.type == "saiz" }, all.any { it.type == "saio" },
             all.any { it.type == "sgpd" }, all.any { it.type == "sbgp" }
         )
     }
+
+    private data class TfhdDefaults(val trackId: Long, val defaultSampleDuration: Long?)
+
+    private fun readTrackId(p: ByteBuffer): Long? {
+        if (p.remaining() < 16) return null
+        val version = u8(p)
+        p.position(p.position() + 3) // FullBox flags
+        p.position(p.position() + if (version == 1) 16 else 8)
+        return if (p.remaining() >= 4) u32(p) else null
+    }
+
+    private fun parseTrexDefaults(
+        data: ByteArray,
+        moov: Box,
+        errors: MutableList<String>
+    ): Map<Long, Long> {
+        val defaults = mutableMapOf<Long, Long>()
+        flatten(moov).filter { it.type == "trex" }.forEach { box ->
+            try {
+                val p = payload(data, box)
+                require(p.remaining() >= 24) { "Truncated trex box" }
+                p.position(p.position() + 4) // FullBox header
+                val trackId = u32(p)
+                p.position(p.position() + 4) // default_sample_description_index
+                defaults[trackId] = u32(p)
+            } catch (e: Exception) {
+                errors += "Track default duration could not be parsed: ${e.message ?: e.javaClass.simpleName}"
+            }
+        }
+        return defaults
+    }
+
+    private fun parseFragmentTrack(
+        data: ByteArray,
+        traf: Box,
+        trexDefaults: Map<Long, Long>,
+        timescales: Map<Long, Long>
+    ): FragmentMetadata {
+        val tfhdBox = traf.children.firstOrNull { it.type == "tfhd" }
+            ?: throw IllegalArgumentException("traf is missing tfhd")
+        val tfhd = parseTfhd(payload(data, tfhdBox))
+        val baseDecodeTime = traf.children.firstOrNull { it.type == "tfdt" }
+            ?.let { parseTfdt(payload(data, it)) }
+        val defaultDuration = tfhd.defaultSampleDuration ?: trexDefaults[tfhd.trackId]
+        val truns = traf.children.filter { it.type == "trun" }
+        require(truns.isNotEmpty()) { "traf is missing trun" }
+        val samples = mutableListOf<SampleTiming>()
+        var decodeCursor = baseDecodeTime
+        for (trun in truns) {
+            decodeCursor = parseTrun(
+                payload(data, trun),
+                defaultDuration,
+                decodeCursor,
+                samples
+            )
+        }
+        val totalDuration = if (samples.isNotEmpty() && samples.all { it.durationTicks != null }) {
+            samples.fold(0L) { total, item -> Math.addExact(total, item.durationTicks!!) }
+        } else null
+        val senc = traf.children.firstOrNull { it.type == "senc" }
+            ?.let { parseSencSummary(payload(data, it)) }
+        return FragmentMetadata(
+            trackId = tfhd.trackId,
+            timescale = timescales[tfhd.trackId],
+            baseDecodeTimeTicks = baseDecodeTime,
+            sampleCount = samples.size,
+            totalDurationTicks = totalDuration,
+            sampleTimings = samples,
+            timingComplete = baseDecodeTime != null && samples.isNotEmpty() &&
+                samples.all { it.decodeTimeTicks != null && it.durationTicks != null },
+            sampleEncryptionBoxPresent = senc != null,
+            subsampleEncryptionSignalled = senc?.subsampleEncryption,
+            sampleEncryptionCount = senc?.sampleCount,
+            sampleAuxiliarySizesPresent = traf.children.any { it.type == "saiz" },
+            sampleAuxiliaryOffsetsPresent = traf.children.any { it.type == "saio" },
+            sampleGroupDescriptionPresent = traf.children.any { it.type == "sgpd" },
+            sampleToGroupPresent = traf.children.any { it.type == "sbgp" }
+        )
+    }
+
+    private fun parseTfhd(p: ByteBuffer): TfhdDefaults {
+        require(p.remaining() >= 8) { "Truncated tfhd box" }
+        u8(p) // version
+        val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
+        val trackId = u32(p)
+        if ((flags and 0x000001) != 0) skip(p, 8) // base_data_offset
+        if ((flags and 0x000002) != 0) skip(p, 4) // sample_description_index
+        val defaultDuration = if ((flags and 0x000008) != 0) u32(p) else null
+        if ((flags and 0x000010) != 0) skip(p, 4) // default_sample_size
+        if ((flags and 0x000020) != 0) skip(p, 4) // default_sample_flags
+        require(!p.hasRemaining()) { "Unexpected trailing bytes in tfhd box" }
+        return TfhdDefaults(trackId, defaultDuration)
+    }
+
+    private fun parseTfdt(p: ByteBuffer): Long {
+        require(p.remaining() >= 8) { "Truncated tfdt box" }
+        val version = u8(p)
+        p.position(p.position() + 3) // FullBox flags
+        return when (version) {
+            0 -> u32(p)
+            1 -> readUnsignedLong(p)
+            else -> throw IllegalArgumentException("Unsupported tfdt version $version")
+        }
+    }
+
+    private fun parseTrun(
+        p: ByteBuffer,
+        defaultDuration: Long?,
+        initialDecodeTime: Long?,
+        output: MutableList<SampleTiming>
+    ): Long? {
+        require(p.remaining() >= 8) { "Truncated trun box" }
+        val version = u8(p)
+        require(version in 0..1) { "Unsupported trun version $version" }
+        val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
+        val countLong = u32(p)
+        require(countLong <= MAX_FRAGMENT_SAMPLES.toLong() - output.size) {
+            "Fragment sample count exceeds limit"
+        }
+        val count = countLong.toInt()
+        if ((flags and 0x000001) != 0) skip(p, 4) // data_offset
+        if ((flags and 0x000004) != 0) skip(p, 4) // first_sample_flags
+        var cursor = initialDecodeTime
+        repeat(count) {
+            val duration = if ((flags and 0x000100) != 0) u32(p) else defaultDuration
+            if ((flags and 0x000200) != 0) skip(p, 4) // sample_size
+            if ((flags and 0x000400) != 0) skip(p, 4) // sample_flags
+            val compositionOffset = if ((flags and 0x000800) != 0) {
+                if (version == 1) readSignedInt(p) else u32(p)
+            } else 0L
+            val presentationTime = cursor?.let { Math.addExact(it, compositionOffset) }
+            output += SampleTiming(cursor, presentationTime, duration, compositionOffset)
+            cursor = if (cursor != null && duration != null) Math.addExact(cursor, duration) else null
+        }
+        require(!p.hasRemaining()) { "Unexpected trailing bytes in trun box" }
+        return cursor
+    }
+
+    private data class SencSummary(val sampleCount: Long, val subsampleEncryption: Boolean)
+
+    private fun parseSencSummary(p: ByteBuffer): SencSummary {
+        require(p.remaining() >= 8) { "Truncated senc box" }
+        u8(p) // version
+        val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
+        val sampleCount = u32(p)
+        require(sampleCount <= MAX_FRAGMENT_SAMPLES.toLong()) {
+            "senc sample count exceeds limit"
+        }
+        // The IV and optional subsample encryption data remain deliberately unread.
+        return SencSummary(sampleCount, (flags and 0x000002) != 0)
+    }
+
+    private fun skip(p: ByteBuffer, count: Int) {
+        require(count >= 0 && p.remaining() >= count) { "Truncated ISO-BMFF field" }
+        p.position(p.position() + count)
+    }
+
+    private fun readUnsignedLong(p: ByteBuffer): Long {
+        require(p.remaining() >= 8) { "Truncated 64-bit time field" }
+        val value = p.long
+        require(value >= 0) { "64-bit media time exceeds supported signed range" }
+        return value
+    }
+
+    private fun readSignedInt(p: ByteBuffer): Long {
+        require(p.remaining() >= 4) { "Truncated signed composition offset" }
+        return p.int.toLong()
+    }
+
+    private const val MAX_FRAGMENT_SAMPLES = 100_000
 
     private fun parseHevcConfiguration(p: ByteBuffer): HevcConfiguration {
         require(p.remaining() >= 23) { "Truncated hvcC record" }
