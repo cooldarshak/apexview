@@ -142,6 +142,39 @@ class HevcSliceHeaderParserTest {
     }
 
     @Test
+    fun parsesSliceLevelDeblockingOverrideAndBothFilterOffsets() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits(deblockingOverride = true)), sps)
+        assertTrue(pps.deblockingFilterControlPresent)
+        assertTrue(pps.deblockingFilterOverrideEnabled!!)
+
+        val bits = BitWriter().apply {
+            write(1, 1); writeUe(0); write(0, 2); writeUe(1)
+            write(42, 8)
+            write(0, 1); writeUe(2); writeUe(0)
+            writeUe(0); write(1, 1); writeUe(2); write(0, 1)
+            write(1, 1) // temporal MVP
+            write(1, 1); write(1, 1) // SAO luma/chroma
+            write(0, 1) // active reference override false
+            writeUe(0) // five_minus_max_num_merge_cand
+            writeSe(0) // slice_qp_delta
+            write(1, 1) // slice_deblocking_filter_override_flag
+            write(0, 1) // slice_deblocking_filter_disabled_flag
+            writeSe(2) // slice_beta_offset_div2
+            writeSe(-1) // slice_tc_offset_div2
+            write(1, 1) // slice_loop_filter_across_slices_enabled_flag
+            writeUe(0) // num_entry_point_offsets
+        }.finish()
+        val slice = HevcSliceHeaderParser.parse(nal(1, bits), sps, pps)
+
+        assertTrue(slice.deblockingFilterOverride!!)
+        assertFalse(slice.deblockingFilterDisabled!!)
+        assertEquals(2, slice.betaOffsetDiv2)
+        assertEquals(-1, slice.tcOffsetDiv2)
+        assertTrue(slice.loopFilterAcrossSlices!!)
+    }
+
+    @Test
     fun parsesWeightedPredictionTableAndActiveReferenceCounts() {
         val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
         val pps = HevcParameterSets.parsePps(nal(34, ppsBits(weightedPred = true)), sps)

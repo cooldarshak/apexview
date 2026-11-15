@@ -84,6 +84,10 @@ jobs:
       - name: Run unit tests, including Kotlin analysis of real synthetic feeds
         run: |
           set +e
+          OUTPUT_PARAMETER_DIR="$RUNNER_TEMP/apexview-hevc-output-parameters"
+          mkdir -p "$OUTPUT_PARAMETER_DIR"
+          export APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR="$OUTPUT_PARAMETER_DIR"
+          echo "APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR=$OUTPUT_PARAMETER_DIR" >> "$GITHUB_ENV"
           chmod +x ./gradlew
           ./gradlew --no-daemon testDebugUnitTest
           TEST_STATUS=$?
@@ -106,6 +110,13 @@ jobs:
             echo "::endgroup::"
           fi
           exit "$TEST_STATUS"
+
+      - name: Independently decode generated output parameter sets and re-identified feeds
+        run: |
+          python3 tools/validate_hevc_output_parameters.py \
+            --source-dir "$RUNNER_TEMP/apexview-hevc-fixtures" \
+            --tile-dir "$RUNNER_TEMP/apexview-hevc-tile-fixtures" \
+            --output-dir "$RUNNER_TEMP/apexview-hevc-output-parameters"
 
       # This repository must sign every distributable APK with the same private key. Do not
       # fall back to the ephemeral debug.keystore on a hosted runner: Android will reject updates.
@@ -170,6 +181,16 @@ jobs:
           name: apexview-hevc-single-decoder-instrumentation
           path: app/build/outputs/apk/androidTest/debug/*.apk
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload HEVC output parameter validation evidence
+        if: always() && steps.assemble_apks.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apexview-hevc-output-parameter-validation
+          path: |
+            ${{ runner.temp }}/apexview-hevc-output-parameters/**
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload unit test reports
