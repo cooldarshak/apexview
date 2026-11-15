@@ -143,8 +143,9 @@ internal object HevcFeedProfileProbe {
 
 
 /**
- * Volatile, in-memory comparison of the last two standard single-feed observations. It holds
- * sanitised codec metadata only. It is not a CMAF/encryption compatibility or DRM-feasibility result.
+ * Volatile, in-memory comparison of the last two authorised feed observations from one F1 content
+ * session. It holds sanitised codec metadata only. It is not a CMAF/encryption compatibility or
+ * secure-surface feasibility result.
  */
 internal object HevcFeedProfileCapture {
     private val profiles = linkedMapOf<String, HevcFeedProfileProbe.Snapshot>()
@@ -258,11 +259,14 @@ internal object HevcFeedProfileCapture {
         val captured = profiles.values.toList()
         if (captured.size == 1) {
             val first = captured.single()
-            return "HEVC_PROFILE_CAPTURED ${first.label}: ${first.mime ?: "?"} ${first.codecs ?: "?"} " +
-                "${first.width}x${first.height}@${first.frameRate}fps; delivery=${first.deliveryType}; chunks(ms)=${first.observedMediaChunkDurationsMs}; " +
-                "parsed VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}; " +
-                "DRM=${first.drmSecurityLevel ?: "not-observed"},keysLoaded=${first.widevineKeysLoaded}; " +
-                "decoder=${first.videoDecoderName ?: "not-observed"},firstFrameRendered=${first.firstFrameRendered}"
+            return listOf(
+                "HEVC_PROFILE_CAPTURED",
+                "${first.label}: ${first.mime ?: "?"} ${first.codecs ?: "?"} ${first.width}x${first.height}@${first.frameRate}fps; " +
+                    "delivery=${first.deliveryType}; chunksMs=${first.observedMediaChunkDurationsMs}; " +
+                    "VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}",
+                "${first.label}: DRM=${first.drmSecurityLevel ?: "not-observed"}; keysLoaded=${first.widevineKeysLoaded}; " +
+                    "decoder=${first.videoDecoderName ?: "not-observed"}; firstFrameRendered=${first.firstFrameRendered}"
+            ).joinToString("\\n")
         }
         val first = captured[0]
         val second = captured[1]
@@ -300,12 +304,19 @@ internal object HevcFeedProfileCapture {
             "DRM=${profile.drmSecurityLevel ?: "not-observed"},keysLoaded=${profile.widevineKeysLoaded}," +
                 "decoder=${profile.videoDecoderName ?: "not-observed"},firstFrameRendered=${profile.firstFrameRendered}"
         val parameterGate = compareParsedParameterSets(first, second)
-        return "$result ${first.label} vs ${second.label}: " +
-            (reasons.ifEmpty { listOf("MIME, codec, dimensions and VPS/SPS/PPS fingerprint match") }.joinToString("; ")) +
-            ". HEVC_PARAMETER_SET_GATE=$parameterGate. CMAF timing, encryption layout and secure-surface feasibility are not established. " +
-            "${first.label}[${first.deliveryType},${first.width}x${first.height}@${first.frameRate}fps,${first.codecs ?: "?"}," +
-            "chunksMs=${first.observedMediaChunkDurationsMs},${drm(first)}]; " +
-            "${second.label}[${second.deliveryType},${second.width}x${second.height}@${second.frameRate}fps,${second.codecs ?: "?"}," +
-            "chunksMs=${second.observedMediaChunkDurationsMs},${drm(second)}]"
+        return listOf(
+            result,
+            "HEVC_PARAMETER_SET_GATE=$parameterGate",
+            "${first.label}: ${first.mime ?: "?"} ${first.codecs ?: "?"} ${first.width}x${first.height}@${first.frameRate}fps; " +
+                "VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}; " +
+                "delivery=${first.deliveryType}; chunksMs=${first.observedMediaChunkDurationsMs}",
+            "${first.label}: ${drm(first)}",
+            "${second.label}: ${second.mime ?: "?"} ${second.codecs ?: "?"} ${second.width}x${second.height}@${second.frameRate}fps; " +
+                "VPS/SPS/PPS=${second.parsedParameterCounts}; fingerprint=${second.parameterSetFingerprint ?: "unavailable"}; " +
+                "delivery=${second.deliveryType}; chunksMs=${second.observedMediaChunkDurationsMs}",
+            "${second.label}: ${drm(second)}",
+            if (reasons.isEmpty()) "CMAF timing, encryption layout and secure-surface feasibility remain unverified."
+            else "Mismatch reasons: ${reasons.joinToString("; ")}. CMAF timing, encryption layout and secure-surface feasibility remain unverified."
+        ).joinToString("\\n")
     }
 }
