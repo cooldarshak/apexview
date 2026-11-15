@@ -84,7 +84,7 @@ class CmafBoxInspectorTest {
         val init = fragmentedInitSegment(trackId = 11, timescale = 90000)
         val tfhd = box("tfhd", byteArrayOf(0, 2, 0, 0) + int(11))
         val tfdt = box("tfdt", byteArrayOf(0, 0, 0, 0) + int(9000))
-        val trun = box("trun", byteArrayOf(0, 1, 0, 0) + int(1) + int(3000))
+        val trun = box("trun", byteArrayOf(0, 0, 1, 0) + int(1) + int(3000))
         val traf = box("traf", tfhd + tfdt + trun)
         val fragment = box("moof", box("mfhd", byteArrayOf(0, 0, 0, 0) + int(2)) + traf)
 
