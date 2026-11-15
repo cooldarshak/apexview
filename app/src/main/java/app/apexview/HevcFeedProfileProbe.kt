@@ -148,62 +148,121 @@ internal object HevcFeedProfileProbe {
  * secure-surface feasibility result.
  */
 internal object HevcFeedProfileCapture {
+    private data class FeedProgress(
+        var drmSecurityLevel: String? = null,
+        var keysLoaded: Boolean = false,
+        var videoDecoderName: String? = null,
+        var firstFrameRendered: Boolean = false,
+        var deliveryType: String = "UNKNOWN",
+        val chunkDurationsMs: MutableList<Long> = mutableListOf()
+    )
+
     private val profiles = linkedMapOf<String, HevcFeedProfileProbe.Snapshot>()
+    private val feedProgress = linkedMapOf<String, FeedProgress>()
     private var activeGroup: String? = null
     var diagnostic by mutableStateOf("HEVC_PROFILE_WAITING_FOR_FEED_A_AND_FEED_B")
         private set
 
+    private fun selectGroup(group: String) {
+        if (activeGroup != group) {
+            profiles.clear()
+            feedProgress.clear()
+            activeGroup = group
+        }
+    }
+
+    @Synchronized
+    fun registerFeed(group: String, label: String) {
+        selectGroup(group)
+        feedProgress.getOrPut(label) { FeedProgress() }
+        diagnostic = buildDiagnostic()
+    }
+
     @Synchronized
     fun record(snapshot: HevcFeedProfileProbe.Snapshot) {
-        if (activeGroup != snapshot.group) {
-            profiles.clear()
-            activeGroup = snapshot.group
+        selectGroup(snapshot.group)
+        val progress = feedProgress.getOrPut(snapshot.label) { FeedProgress() }
+        progress.drmSecurityLevel = snapshot.drmSecurityLevel ?: progress.drmSecurityLevel
+        progress.keysLoaded = progress.keysLoaded || snapshot.widevineKeysLoaded
+        progress.videoDecoderName = snapshot.videoDecoderName ?: progress.videoDecoderName
+        progress.firstFrameRendered = progress.firstFrameRendered || snapshot.firstFrameRendered
+        if (snapshot.deliveryType != "UNKNOWN") progress.deliveryType = snapshot.deliveryType
+        if (snapshot.observedMediaChunkDurationsMs.isNotEmpty()) {
+            progress.chunkDurationsMs.clear()
+            progress.chunkDurationsMs.addAll(snapshot.observedMediaChunkDurationsMs.takeLast(8))
         }
+        val enriched = snapshot.copy(
+            deliveryType = progress.deliveryType,
+            observedMediaChunkDurationsMs = progress.chunkDurationsMs.toList(),
+            drmSecurityLevel = progress.drmSecurityLevel,
+            widevineKeysLoaded = progress.keysLoaded,
+            videoDecoderName = progress.videoDecoderName,
+            firstFrameRendered = progress.firstFrameRendered
+        )
         profiles.remove(snapshot.label)
-        profiles[snapshot.label] = snapshot
+        profiles[snapshot.label] = enriched
         while (profiles.size > 2) profiles.remove(profiles.keys.first())
+        while (feedProgress.size > 4) feedProgress.remove(feedProgress.keys.first())
         diagnostic = buildDiagnostic()
     }
 
     @Synchronized
     fun updateMediaChunkDuration(group: String, label: String, deliveryType: String, durationMs: Long) {
         if (activeGroup != group || durationMs !in 1_000L..12_000L) return
-        val current = profiles[label] ?: return
-        val durations = (current.observedMediaChunkDurationsMs + durationMs).takeLast(8)
-        profiles[label] = current.copy(
-            deliveryType = deliveryType,
-            observedMediaChunkDurationsMs = durations
-        )
+        val progress = feedProgress.getOrPut(label) { FeedProgress() }
+        progress.deliveryType = deliveryType
+        progress.chunkDurationsMs.add(durationMs)
+        while (progress.chunkDurationsMs.size > 8) progress.chunkDurationsMs.removeAt(0)
+        profiles[label]?.let { current ->
+            profiles[label] = current.copy(
+                deliveryType = progress.deliveryType,
+                observedMediaChunkDurationsMs = progress.chunkDurationsMs.toList()
+            )
+        }
         diagnostic = buildDiagnostic()
     }
 
     @Synchronized
     fun updateVideoDecoder(group: String, label: String, decoderName: String) {
         if (activeGroup != group) return
-        val current = profiles[label] ?: return
         val safeName = decoderName.filter { it.isLetterOrDigit() || it in "._-" }.take(96)
         if (safeName.isBlank()) return
-        profiles[label] = current.copy(videoDecoderName = safeName)
+        val progress = feedProgress.getOrPut(label) { FeedProgress() }
+        progress.videoDecoderName = safeName
+        profiles[label]?.let { profiles[label] = it.copy(videoDecoderName = safeName) }
         diagnostic = buildDiagnostic()
     }
 
     @Synchronized
     fun updateFirstFrameRendered(group: String, label: String) {
         if (activeGroup != group) return
-        val current = profiles[label] ?: return
-        profiles[label] = current.copy(firstFrameRendered = true)
+        val progress = feedProgress.getOrPut(label) { FeedProgress() }
+        progress.firstFrameRendered = true
+        profiles[label]?.let { profiles[label] = it.copy(firstFrameRendered = true) }
         diagnostic = buildDiagnostic()
     }
 
     @Synchronized
     fun updateDrm(group: String, label: String, securityLevel: String, keysLoaded: Boolean) {
         if (activeGroup != group) return
-        val current = profiles[label] ?: return
-        profiles[label] = current.copy(
-            drmSecurityLevel = securityLevel.takeIf { it.isNotBlank() },
-            widevineKeysLoaded = current.widevineKeysLoaded || keysLoaded
-        )
+        val progress = feedProgress.getOrPut(label) { FeedProgress() }
+        progress.drmSecurityLevel = securityLevel.takeIf { it.isNotBlank() } ?: progress.drmSecurityLevel
+        progress.keysLoaded = progress.keysLoaded || keysLoaded
+        profiles[label]?.let {
+            profiles[label] = it.copy(
+                drmSecurityLevel = progress.drmSecurityLevel,
+                widevineKeysLoaded = progress.keysLoaded
+            )
+        }
         diagnostic = buildDiagnostic()
+    }
+
+    private fun progressLine(label: String): String {
+        val progress = feedProgress.getValue(label)
+        val state = if (label in profiles) "FORMAT_CAPTURED" else "WAITING_FOR_VIDEO_INPUT_FORMAT"
+        return "$label: $state; DRM=${progress.drmSecurityLevel ?: "not-observed"}; " +
+            "keysLoaded=${progress.keysLoaded}; decoder=${progress.videoDecoderName ?: "not-observed"}; " +
+            "firstFrameRendered=${progress.firstFrameRendered}"
     }
 
     private fun compareParsedParameterSets(
@@ -255,17 +314,23 @@ internal object HevcFeedProfileCapture {
     }
 
     private fun buildDiagnostic(): String {
-        if (profiles.isEmpty()) return "HEVC_PROFILE_WAITING_FOR_FEED_A"
         val captured = profiles.values.toList()
+        if (captured.isEmpty()) {
+            if (feedProgress.isEmpty()) return "HEVC_PROFILE_WAITING_FOR_FEED_A_AND_FEED_B"
+            return (listOf("HEVC_PROFILE_WAITING_FOR_VIDEO_INPUT_FORMAT") +
+                feedProgress.keys.map(::progressLine)).joinToString("\n")
+        }
         if (captured.size == 1) {
             val first = captured.single()
+            val pending = feedProgress.keys.filter { it !in profiles }
             return listOf(
                 "HEVC_PROFILE_CAPTURED",
                 "${first.label}: ${first.mime ?: "?"} ${first.codecs ?: "?"} ${first.width}x${first.height}@${first.frameRate}fps; " +
                     "delivery=${first.deliveryType}; chunksMs=${first.observedMediaChunkDurationsMs}; " +
                     "VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}",
-                "${first.label}: DRM=${first.drmSecurityLevel ?: "not-observed"}; keysLoaded=${first.widevineKeysLoaded}; " +
-                    "decoder=${first.videoDecoderName ?: "not-observed"}; firstFrameRendered=${first.firstFrameRendered}"
+                progressLine(first.label),
+                if (pending.isEmpty()) "HEVC_PROFILE_WAITING_FOR_FEED_B"
+                else pending.joinToString("\n", prefix = "HEVC_PROFILE_WAITING_FOR_VIDEO_INPUT_FORMAT\n") { progressLine(it) }
             ).joinToString("\n")
         }
         val first = captured[0]

@@ -151,6 +151,9 @@ class FeedPlayer(
     @Volatile private var drmLevel = ""
 
     init {
+        if (stream.allowHevcProfileProbe) {
+            HevcFeedProfileCapture.registerFeed(stream.profileGroup, stream.profileLabel)
+        }
         val http = DefaultHttpDataSource.Factory()
             .setUserAgent(userAgent)
             .setAllowCrossProtocolRedirects(true)
@@ -252,7 +255,45 @@ class FeedPlayer(
                 refresh()
             }
         })
+        fun captureVideoProfile(format: Format, trackType: Int, source: String) {
+            if (!stream.allowHevcProfileProbe) return
+            val snapshot = HevcFeedProfileProbe.inspect(
+                trackType,
+                format,
+                label = stream.profileLabel,
+                group = stream.profileGroup
+            ).copy(
+                deliveryType = stream.streamType
+                    .uppercase()
+                    .filter { it.isLetterOrDigit() || it == '_' || it == '-' }
+                    .take(24)
+                    .ifBlank { "UNKNOWN" },
+                drmSecurityLevel = drmLevel.takeIf { it.isNotBlank() },
+                widevineKeysLoaded = licensed,
+                videoDecoderName = decoder.takeIf { it.isNotBlank() },
+                firstFrameRendered = firstFrameRendered
+            )
+            val diagnostic = snapshot.summary
+            if (diagnostic != lastFeedProfileDiagnostic) {
+                lastFeedProfileDiagnostic = diagnostic
+                hevcProfileDiagnostic = diagnostic.substringBefore(" vps=")
+                HevcFeedProfileCapture.record(snapshot)
+                Log.i(
+                    "ApexviewF1FeedProfile",
+                    "source=$source label=${stream.profileLabel} mime=${format.sampleMimeType} " +
+                        "csdCount=${format.initializationData.size}; $diagnostic"
+                )
+            }
+        }
         player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onVideoInputFormatChanged(
+                eventTime: AnalyticsListener.EventTime,
+                format: Format,
+                decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
+            ) {
+                captureVideoProfile(format, C.TRACK_TYPE_VIDEO, "video-input")
+            }
+
             override fun onDownstreamFormatChanged(
                 eventTime: AnalyticsListener.EventTime,
                 mediaLoadData: MediaLoadData,
@@ -261,34 +302,8 @@ class FeedPlayer(
                 val isVideo = mediaLoadData.trackType == C.TRACK_TYPE_VIDEO ||
                     format.sampleMimeType?.startsWith("video/") == true
                 if (!isVideo) return
-                // This is a read-only observer of Media3's parsed codec configuration. It does
-                // not inspect sample payloads, URLs, PSSH, licence requests, KIDs or IV values.
-                if (!stream.allowHevcProfileProbe) return
-                val snapshot = HevcFeedProfileProbe.inspect(
-                    mediaLoadData.trackType,
-                    format,
-                    label = stream.profileLabel,
-                    group = stream.profileGroup
-                ).copy(
-                    deliveryType = stream.streamType
-                        .uppercase()
-                        .filter { it.isLetterOrDigit() || it == '_' || it == '-' }
-                        .take(24)
-                        .ifBlank { "UNKNOWN" },
-                    drmSecurityLevel = drmLevel.takeIf { it.isNotBlank() },
-                    widevineKeysLoaded = licensed,
-                    videoDecoderName = decoder.takeIf { it.isNotBlank() },
-                    firstFrameRendered = firstFrameRendered
-                )
-                val diagnostic = snapshot.summary
-                if (diagnostic != lastFeedProfileDiagnostic) {
-                    lastFeedProfileDiagnostic = diagnostic
-                    hevcProfileDiagnostic = diagnostic.substringBefore(" vps=")
-                    HevcFeedProfileCapture.record(snapshot)
-                    Log.i("ApexviewF1FeedProfile", diagnostic)
-                }
+                captureVideoProfile(format, mediaLoadData.trackType, "downstream")
             }
-
             override fun onVideoDecoderInitialized(
                 eventTime: AnalyticsListener.EventTime,
                 decoderName: String,

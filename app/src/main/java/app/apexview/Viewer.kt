@@ -986,7 +986,7 @@ private fun TileView(app: AppState, tile: Tile) {
                     Text(
                         HevcFeedProfileCapture.diagnostic,
                         style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow),
-                        maxLines = 7
+                        maxLines = 10
                     )
                 }
             }

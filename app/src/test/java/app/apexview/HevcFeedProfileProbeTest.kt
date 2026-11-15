@@ -137,6 +137,36 @@ class HevcFeedProfileProbeTest {
     }
 
     @Test
+    fun reportsPerFeedWaitStateAndDecoderEvidenceBeforeVideoInputFormatArrives() {
+        val group = "content-wait-state-301"
+        HevcFeedProfileCapture.registerFeed(group, "channel-main")
+        HevcFeedProfileCapture.registerFeed(group, "channel-onboard")
+        HevcFeedProfileCapture.updateDrm(group, "channel-main", "L1", keysLoaded = true)
+        HevcFeedProfileCapture.updateVideoDecoder(group, "channel-main", "c2.qti.hevc.decoder")
+        HevcFeedProfileCapture.updateFirstFrameRendered(group, "channel-main")
+
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_PROFILE_WAITING_FOR_VIDEO_INPUT_FORMAT"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-main: WAITING_FOR_VIDEO_INPUT_FORMAT"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("DRM=L1"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("keysLoaded=true"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("decoder=c2.qti.hevc.decoder"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("firstFrameRendered=true"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-onboard: WAITING_FOR_VIDEO_INPUT_FORMAT"))
+
+        val noCsdFormat = Format.Builder()
+            .setSampleMimeType(MimeTypes.VIDEO_H265)
+            .setCodecs("hvc1")
+            .setWidth(1920)
+            .setHeight(1080)
+            .build()
+        HevcFeedProfileCapture.record(
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, noCsdFormat, "channel-main", group)
+        )
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_PROFILE_CAPTURED"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_PROFILE_WAITING_FOR_VIDEO_INPUT_FORMAT"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-onboard: WAITING_FOR_VIDEO_INPUT_FORMAT"))
+    }
+    @Test
     fun reportsMissingCsdWithoutFailingPlaybackDiagnostics() {
         val format = Format.Builder()
             .setSampleMimeType(MimeTypes.VIDEO_H265)
