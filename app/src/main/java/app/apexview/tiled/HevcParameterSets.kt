@@ -291,9 +291,13 @@ internal object HevcParameterSets {
             deblockingOverride = bits.readBit() != 0
             deblockingDisabled = bits.readBit() != 0
             if (deblockingDisabled == false) {
-                betaOffset = bits.readSignedExpGolomb().toInt()
-                tcOffset = bits.readSignedExpGolomb().toInt()
-                require(betaOffset in -6..6 && tcOffset in -6..6) { "PPS deblocking offsets exceed HEVC range" }
+                val parsedBetaOffset = bits.readSignedExpGolomb().toInt()
+                val parsedTcOffset = bits.readSignedExpGolomb().toInt()
+                require(parsedBetaOffset in -6..6 && parsedTcOffset in -6..6) {
+                    "PPS deblocking offsets exceed HEVC range"
+                }
+                betaOffset = parsedBetaOffset
+                tcOffset = parsedTcOffset
             }
         }
         val scalingListDataPresent = bits.readBit() != 0
@@ -312,10 +316,6 @@ internal object HevcParameterSets {
             log2ParallelMerge, sliceHeaderExtension, extensionPresent, extensionFlags)
     }
 
-    /**
-     * Parses a non-predicted short-term RPS. Predicted RPS chains are rejected for now rather
-     * than guessed, so downstream frame-alignment results remain fail-closed.
-     */
     /**
      * Parses an explicit or inter-predicted short-term RPS and expands it to absolute POC deltas.
      * The same derived representation is used for SPS sets and the inline slice-header set.
