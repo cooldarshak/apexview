@@ -2,6 +2,7 @@
 """Generate two disposable, synchronised HEVC test feeds. No F1 media is used."""
 import argparse
 import json
+import hashlib
 import re
 import shutil
 import subprocess
@@ -17,7 +18,7 @@ def probe(path):
     result = run([
         "ffprobe", "-v", "error", "-f", "hevc", "-count_frames",
         "-select_streams", "v:0", "-show_entries",
-        "stream=codec_name,width,height,r_frame_rate,nb_read_frames",
+        "stream=codec_name,profile,width,height,pix_fmt,r_frame_rate,nb_read_frames",
         "-of", "json", str(path),
     ])
     streams = json.loads(result.stdout).get("streams", [])
@@ -128,8 +129,8 @@ def main():
         temporary = not args.keep
 
     sources = {
-        "feed_a.hevc": "testsrc2=size=640x360:rate=25",
-        "feed_b.hevc": "smptebars=size=640x360:rate=25",
+        "feed_a.hevc": "testsrc2=size=960x540:rate=25",
+        "feed_b.hevc": "smptebars=size=960x540:rate=25",
     }
     metadata = {}
     for filename, source in sources.items():
@@ -139,7 +140,7 @@ def main():
             "-f", "lavfi", "-i", source, "-t", "2", "-an",
             "-c:v", "libx265", "-preset", "ultrafast",
             "-x265-params",
-            "log-level=error:bframes=0:repeat-headers=1:tile-columns=1:tile-rows=0:keyint=25:min-keyint=25:scenecut=0",
+            "log-level=error:bframes=0:repeat-headers=1:keyint=25:min-keyint=25:scenecut=0",
             "-f", "hevc", str(destination),
         ])
         metadata[filename] = probe(destination)
@@ -148,8 +149,17 @@ def main():
     for key in ("codec_name", "width", "height", "r_frame_rate", "nb_read_frames"):
         if first.get(key) != second.get(key):
             raise SystemExit(f"Feed mismatch for {key}: {first.get(key)} != {second.get(key)}")
-    if first.get("codec_name") != "hevc" or first.get("nb_read_frames") != "50":
+    if first.get("codec_name") != "hevc" or first.get("width") != 960 or first.get("height") != 540 or first.get("nb_read_frames") != "50":
         raise SystemExit(f"Unexpected synthetic stream metadata: {first}")
+
+    feed_a_bytes = (output / "feed_a.hevc").read_bytes()
+    feed_b_bytes = (output / "feed_b.hevc").read_bytes()
+    hashes = {
+        "feed_a_sha256": hashlib.sha256(feed_a_bytes).hexdigest(),
+        "feed_b_sha256": hashlib.sha256(feed_b_bytes).hexdigest(),
+    }
+    if hashes["feed_a_sha256"] == hashes["feed_b_sha256"]:
+        raise SystemExit("Independent source encodes unexpectedly produced identical bitstreams")
 
     signatures = {
         "feed_a": trace_frame_signatures(output / "feed_a.hevc"),
@@ -169,6 +179,8 @@ def main():
             "are complementary tile slices or can be reconstructed into one HEVC picture."
         ),
         "feeds": metadata,
+        "independent_bitstreams": hashes,
+        "source_picture_layout": "full-frame 1x1 PPS expected; no tile grid requested from encoder",
         "frame_alignment": alignment,
     }, indent=2))
     if temporary:

@@ -1,6 +1,7 @@
 package app.apexview.tiled
 
 import java.io.File
+import java.security.MessageDigest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -16,8 +17,24 @@ class HevcSyntheticFeedAlignmentTest {
         val feedBFile = File(directory, "feed_b.hevc")
         assumeTrue("Synthetic HEVC feed pair is not present", feedAFile.isFile && feedBFile.isFile)
 
-        val feedA = HevcStreamAlignmentAnalyzer.analyze(feedAFile.readBytes())
-        val feedB = HevcStreamAlignmentAnalyzer.analyze(feedBFile.readBytes())
+        val feedABytes = feedAFile.readBytes()
+        val feedBBytes = feedBFile.readBytes()
+        assertTrue("The two source encodes must be distinct bitstreams", !feedABytes.contentEquals(feedBBytes))
+        val feedAHash = MessageDigest.getInstance("SHA-256").digest(feedABytes)
+        val feedBHash = MessageDigest.getInstance("SHA-256").digest(feedBBytes)
+        assertTrue("Independent feed SHA-256 hashes must differ", !feedAHash.contentEquals(feedBHash))
+
+        val feedAParameterSets = parseSourceParameterSets(feedABytes)
+        val feedBParameterSets = parseSourceParameterSets(feedBBytes)
+        assertEquals(960, feedAParameterSets.first.width)
+        assertEquals(540, feedAParameterSets.first.height)
+        assertEquals(960, feedBParameterSets.first.width)
+        assertEquals(540, feedBParameterSets.first.height)
+        assertTrue("Feed A must be a 1x1 source picture", !feedAParameterSets.second.tilesEnabled)
+        assertTrue("Feed B must be a 1x1 source picture", !feedBParameterSets.second.tilesEnabled)
+
+        val feedA = HevcStreamAlignmentAnalyzer.analyze(feedABytes)
+        val feedB = HevcStreamAlignmentAnalyzer.analyze(feedBBytes)
         val report = HevcStreamAlignmentAnalyzer.compare(feedA, feedB)
 
         assertEquals(50, feedA.size)
@@ -38,5 +55,14 @@ class HevcSyntheticFeedAlignmentTest {
             report.fullyAligned
         )
         assertTrue("P frames should expose short-term references", feedA.drop(1).any { it.references.isNotEmpty() })
+    }
+
+    private fun parseSourceParameterSets(
+        annexB: ByteArray
+    ): Pair<HevcParameterSets.SpsMetadata, HevcParameterSets.PpsMetadata> {
+        val nals = HevcBitstream.splitAnnexB(annexB)
+        val sps = HevcParameterSets.parseSps(nals.first { it.type == 33 }.bytes)
+        val pps = HevcParameterSets.parsePps(nals.first { it.type == 34 }.bytes, sps)
+        return sps to pps
     }
 }
