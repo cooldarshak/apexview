@@ -387,6 +387,8 @@ class CmafBoxInspectorTest {
         assertEquals(0, config.spsCount)
         assertEquals(0, config.ppsCount)
         assertEquals(5, config.vps.single().vpsId)
+        assertTrue(config.parameterSetFingerprints.single().startsWith("vps:"))
+        assertEquals(64, config.parameterSetFingerprints.single().substringAfter(':').length)
         assertTrue(config.parameterSetErrors.isEmpty())
     }
 

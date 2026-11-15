@@ -2,6 +2,7 @@ package app.apexview.tiled
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.security.MessageDigest
 
 /**
  * Bounded, read-only ISO-BMFF/CMAF metadata inspector.
@@ -35,7 +36,9 @@ internal object CmafBoxInspector {
         val vps: List<HevcParameterSets.VpsMetadata>,
         val sps: List<HevcParameterSets.SpsMetadata>,
         val pps: List<HevcParameterSets.PpsMetadata>,
-        val parameterSetErrors: List<String>
+        val parameterSetErrors: List<String>,
+        /** Sorted SHA-256 fingerprints of raw VPS/SPS/PPS NALs; never sample or DRM bytes. */
+        val parameterSetFingerprints: List<String> = emptyList()
     )
     data class TrackEncryptionMetadata(
         val version: Int,
@@ -994,13 +997,27 @@ internal object CmafBoxInspector {
                 null
             }
         }
+        val parameterSetFingerprints = (
+            vpsNals.map { parameterSetFingerprint("vps", it) } +
+                spsNals.map { parameterSetFingerprint("sps", it) } +
+                ppsNals.map { parameterSetFingerprint("pps", it) }
+        ).sorted()
         return HevcConfiguration(
             version, profileSpace, tierFlag, profileIdc, compatibility, constraints, level,
             segmentationField and 0x0fff, parallelismField and 0x03, chromaField and 0x03,
             (lumaDepthField and 0x07) + 8, (chromaDepthField and 0x07) + 8,
             averageFrameRate, constantFrameRate, temporalLayers, temporalIdNested, nalLengthSize,
-            vpsNals.size, spsNals.size, ppsNals.size, vps, sps, pps, parameterErrors
+            vpsNals.size, spsNals.size, ppsNals.size, vps, sps, pps, parameterErrors,
+            parameterSetFingerprints
         )
+    }
+
+    private fun parameterSetFingerprint(kind: String, nal: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(nal)
+        val encoded = buildString(digest.size * 2) {
+            digest.forEach { value -> append("%02x".format(value.toInt() and 0xff)) }
+        }
+        return "$kind:$encoded"
     }
 
     /**

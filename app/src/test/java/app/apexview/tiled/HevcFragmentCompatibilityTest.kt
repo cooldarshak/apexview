@@ -69,6 +69,28 @@ class HevcFragmentCompatibilityTest {
         assertFalse(result.compatible)
     }
 
+    @Test fun rejectsDifferentRawParameterSetNalsEvenWhenParsedMetadataIsUnavailable() {
+        val firstConfig = config(listOf("vps:aa", "sps:bb", "pps:cc"))
+        val secondConfig = config(listOf("vps:aa", "sps:bb", "pps:dd"))
+        val firstTrack = track(90000).copy(hevcConfiguration = firstConfig)
+        val secondTrack = track(90000).copy(hevcConfiguration = secondConfig)
+        val timed = fragment(90000, 0,
+            listOf(CmafBoxInspector.SampleTiming(0, 0, 3000, 0)))
+        val result = HevcFragmentCompatibility.compare(firstTrack, timed, secondTrack, timed)
+        assertTrue(result.reasons.any { it.contains("Raw VPS/SPS/PPS NAL bytes differ") })
+        assertFalse(result.compatible)
+    }
+
+    @Test fun rejectsMissingRawParameterSetFingerprints() {
+        val incompleteConfig = config(emptyList())
+        val track = track(90000).copy(hevcConfiguration = incompleteConfig)
+        val timed = fragment(90000, 0,
+            listOf(CmafBoxInspector.SampleTiming(0, 0, 3000, 0)))
+        val result = HevcFragmentCompatibility.compare(track, timed, track.copy(), timed)
+        assertTrue(result.reasons.any { it.contains("fingerprints are missing") })
+        assertFalse(result.compatible)
+    }
+
     @Test fun rejectsSeigOverrideWithIncompleteStructureAndDoesNotAcceptProtectedSeigWithoutKidProof() {
         val plain = fragment(90000, 0,
             listOf(CmafBoxInspector.SampleTiming(0, 0, 3000, 0)))
@@ -127,6 +149,35 @@ class HevcFragmentCompatibilityTest {
         assertTrue(result.reasons.any { it.contains("Default KID identity has not been compared") })
         assertTrue(result.reasons.any { it.contains("Per-sample IV/subsample encryption structure is incomplete") })
     }
+
+    private fun config(parameterSetFingerprints: List<String>) =
+        CmafBoxInspector.HevcConfiguration(
+            configurationVersion = 1,
+            profileSpace = 0,
+            tierFlag = false,
+            profileIdc = 1,
+            compatibilityFlags = 0,
+            constraintIndicatorFlags = 0,
+            levelIdc = 120,
+            minSpatialSegmentationIdc = 0,
+            parallelismType = 0,
+            chromaFormat = 1,
+            bitDepthLuma = 8,
+            bitDepthChroma = 8,
+            averageFrameRate = 0,
+            constantFrameRate = 0,
+            temporalLayers = 1,
+            temporalIdNested = true,
+            nalLengthSize = 4,
+            vpsCount = 1,
+            spsCount = 1,
+            ppsCount = 1,
+            vps = emptyList(),
+            sps = emptyList(),
+            pps = emptyList(),
+            parameterSetErrors = emptyList(),
+            parameterSetFingerprints = parameterSetFingerprints
+        )
 
     private fun track(timescale: Long, encrypted: Boolean = false) =
         CmafBoxInspector.TrackMetadata(

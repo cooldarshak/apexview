@@ -96,6 +96,12 @@ internal object HevcFragmentCompatibility {
             if (firstConfig.parameterSetErrors.isNotEmpty() || secondConfig.parameterSetErrors.isNotEmpty()) {
                 reasons += "HEVC parameter-set parsing reported errors"
             }
+            if (firstConfig.parameterSetFingerprints.isEmpty() ||
+                secondConfig.parameterSetFingerprints.isEmpty()) {
+                reasons += "Raw VPS/SPS/PPS NAL fingerprints are missing"
+            } else if (firstConfig.parameterSetFingerprints != secondConfig.parameterSetFingerprints) {
+                reasons += "Raw VPS/SPS/PPS NAL bytes differ"
+            }
             val configFieldsMatch =
                 firstConfig.configurationVersion == secondConfig.configurationVersion &&
                 firstConfig.profileSpace == secondConfig.profileSpace &&
