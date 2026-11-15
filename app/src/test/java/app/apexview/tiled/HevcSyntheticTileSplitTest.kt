@@ -137,6 +137,50 @@ class HevcSyntheticTileSplitTest {
         assertTrue("Assembler must reject an SPS/VPS identity mismatch", rejected)
     }
 
+    @Test fun assemblerRejectsReversedTileFeeds() {
+        val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+        assumeTrue("Kvazaar tile fixture directory is not configured", !fixturePath.isNullOrBlank())
+        val directory = File(fixturePath!!)
+        val left = File(directory, "feed_left.hevc")
+        val right = File(directory, "feed_right.hevc")
+        assumeTrue("Synthetic complementary tile files are missing", left.isFile && right.isFile)
+
+        var rejected = false
+        try {
+            HevcTileStreamAssembler.assembleTwoTileStreams(right.readBytes(), left.readBytes())
+        } catch (error: IllegalArgumentException) {
+            rejected = error.message?.contains("first/continuation tile slices") == true
+        }
+        assertTrue("Assembler must reject the reversed tile order", rejected)
+    }
+
+    @Test fun assemblerRejectsTemporalLayerHeaderMismatchBeforeReassembly() {
+        val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+        assumeTrue("Kvazaar tile fixture directory is not configured", !fixturePath.isNullOrBlank())
+        val directory = File(fixturePath!!)
+        val left = File(directory, "feed_left.hevc")
+        val right = File(directory, "feed_right.hevc")
+        assumeTrue("Synthetic complementary tile files are missing", left.isFile && right.isFile)
+
+        val changedRight = ByteArrayOutputStream()
+        HevcBitstream.splitAnnexB(right.readBytes()).forEach { nal ->
+            val changed = nal.bytes.copyOf()
+            if (nal.type in 0..21) {
+                val oldHeader = changed[1].toInt() and 0xff
+                changed[1] = ((oldHeader and 0xf8) or 0x02).toByte()
+            }
+            appendNal(changedRight, changed)
+        }
+
+        var rejected = false
+        try {
+            HevcTileStreamAssembler.assembleTwoTileStreams(left.readBytes(), changedRight.toByteArray())
+        } catch (error: IllegalArgumentException) {
+            rejected = error.message?.contains("NAL header mismatch") == true
+        }
+        assertTrue("Assembler must reject mismatched nuh_temporal_id_plus1", rejected)
+    }
+
     @Test fun assemblerRejectsMissingPictureFromOneTileFeed() {
         val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
         assumeTrue("Kvazaar tile fixture directory is not configured", !fixturePath.isNullOrBlank())
