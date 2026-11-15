@@ -31,6 +31,29 @@ class HevcParameterSetParserTest {
         assertEquals(64, sps.ctbSize)
         assertEquals(30, sps.picWidthInCtbs)
         assertEquals(17, sps.picHeightInCtbs)
+        assertEquals(8, sps.bitDepthLuma)
+        assertEquals(8, sps.bitDepthChroma)
+        assertEquals(1920, sps.displayWidth)
+        assertEquals(1080, sps.displayHeight)
+        assertEquals(0, sps.profileTierLevel.profileIdc)
+        assertEquals(0, sps.profileTierLevel.levelIdc)
+        assertEquals(listOf(5), sps.maxDecPicBuffering)
+        assertEquals(listOf(2), sps.maxNumReorderPics)
+        assertFalse(sps.vuiParametersPresent)
+        assertEquals(false, sps.spsExtensionPresent)
+    }
+
+    @Test fun appliesChromaAwareConformanceWindowAndCapturesBitDepth() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits(
+            cropLeft = 1, cropRight = 2, cropTop = 1, cropBottom = 2,
+            bitDepthLumaMinus8 = 2, bitDepthChromaMinus8 = 1
+        )))
+        assertEquals(1914, sps.displayWidth)
+        assertEquals(1074, sps.displayHeight)
+        assertEquals(10, sps.bitDepthLuma)
+        assertEquals(9, sps.bitDepthChroma)
+        assertEquals(1, sps.conformanceWindowLeft)
+        assertEquals(2, sps.conformanceWindowRight)
     }
 
     @Test fun extractsUniformPpsTileGridAndCalculatesCtbPartitions() {
@@ -45,6 +68,30 @@ class HevcParameterSetParserTest {
         assertEquals(2, pps.numTileRows)
         assertEquals(listOf(15, 15), pps.tileColumnWidthsInCtbs)
         assertEquals(listOf(8, 9), pps.tileRowHeightsInCtbs)
+        assertFalse(pps.weightedPredictionEnabled)
+        assertFalse(pps.weightedBipredictionEnabled)
+        assertTrue(pps.loopFilterAcrossSlicesEnabled)
+        assertTrue(pps.deblockingFilterControlPresent)
+        assertFalse(pps.deblockingFilterOverrideEnabled!!)
+        assertFalse(pps.deblockingFilterDisabled!!)
+        assertEquals(1, pps.betaOffsetDiv2)
+        assertEquals(-1, pps.tcOffsetDiv2)
+        assertTrue(pps.listsModificationPresent)
+        assertEquals(2, pps.log2ParallelMergeLevelMinus2)
+        assertTrue(pps.sliceSegmentHeaderExtensionPresent)
+        assertFalse(pps.extensionPresent)
+    }
+
+    @Test fun parsesPpsWithoutTilesAndStillConsumesFollowingSyntax() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits(uniform = true, tiles = false)), sps)
+        assertFalse(pps.tilesEnabled)
+        assertEquals(1, pps.numTileColumns)
+        assertEquals(1, pps.numTileRows)
+        assertEquals(listOf(30), pps.tileColumnWidthsInCtbs)
+        assertEquals(listOf(17), pps.tileRowHeightsInCtbs)
+        assertTrue(pps.loopFilterAcrossSlicesEnabled)
+        assertEquals(2, pps.log2ParallelMergeLevelMinus2)
     }
 
     @Test fun extractsExplicitPpsTileWidthsAndHeights() {
@@ -105,7 +152,14 @@ class HevcParameterSetParserTest {
         }
     }
 
-    private fun spsBits(): ByteArray = BitWriter().apply {
+    private fun spsBits(
+        cropLeft: Int = 0,
+        cropRight: Int = 0,
+        cropTop: Int = 0,
+        cropBottom: Int = 0,
+        bitDepthLumaMinus8: Int = 0,
+        bitDepthChromaMinus8: Int = 0
+    ): ByteArray = BitWriter().apply {
         write(1, 4) // sps_video_parameter_set_id
         write(0, 3) // sps_max_sub_layers_minus1
         write(1, 1) // temporal nesting
@@ -114,8 +168,12 @@ class HevcParameterSetParserTest {
         writeUe(1) // 4:2:0 chroma
         writeUe(1920)
         writeUe(1080)
-        write(0, 1) // no conformance window
-        writeUe(0); writeUe(0) // bit depth
+        val hasCrop = cropLeft + cropRight + cropTop + cropBottom > 0
+        write(if (hasCrop) 1 else 0, 1)
+        if (hasCrop) {
+            writeUe(cropLeft); writeUe(cropRight); writeUe(cropTop); writeUe(cropBottom)
+        }
+        writeUe(bitDepthLumaMinus8); writeUe(bitDepthChromaMinus8) // bit depth
         writeUe(4) // log2_max_pic_order_cnt_lsb_minus4 = 4
         write(1, 1) // sub-layer ordering info for all layers
         writeUe(4); writeUe(2); writeUe(0)
@@ -132,6 +190,7 @@ class HevcParameterSetParserTest {
         write(1, 1) // sps_temporal_mvp_enabled_flag
         write(1, 1) // strong_intra_smoothing_enabled_flag
         write(0, 1) // vui_parameters_present_flag
+        write(0, 1) // sps_extension_present_flag
     }.finish()
 
     private fun spsBitsWithPredictedRps(): ByteArray = BitWriter().apply {
@@ -158,9 +217,10 @@ class HevcParameterSetParserTest {
         write(0, 1) // no long-term references
         write(1, 1); write(1, 1) // temporal MVP and strong smoothing
         write(0, 1) // no VUI
+        write(0, 1) // no SPS extension
     }.finish()
 
-    private fun ppsBits(uniform: Boolean, spsId: Int = 0): ByteArray = BitWriter().apply {
+    private fun ppsBits(uniform: Boolean, spsId: Int = 0, tiles: Boolean = true): ByteArray = BitWriter().apply {
         writeUe(0) // PPS id
         writeUe(spsId)
         write(1, 1) // dependent slice segments
@@ -173,15 +233,27 @@ class HevcParameterSetParserTest {
         writeSe(0); writeSe(0) // chroma QP offsets
         write(0, 1) // slice chroma QP offsets
         write(0, 1); write(0, 1); write(0, 1) // weighted pred/bipred/transquant
-        write(1, 1) // tiles enabled
+        write(if (tiles) 1 else 0, 1) // tiles enabled
         write(0, 1) // entropy coding sync disabled
-        writeUe(1); writeUe(1) // 2 columns, 2 rows
-        write(if (uniform) 1 else 0, 1)
-        if (!uniform) {
-            writeUe(14) // first tile column is 15 CTBs
-            writeUe(7)  // first tile row is 8 CTBs
+        if (tiles) {
+            writeUe(1); writeUe(1) // 2 columns, 2 rows
+            write(if (uniform) 1 else 0, 1)
+            if (!uniform) {
+                writeUe(14) // first tile column is 15 CTBs
+                writeUe(7)  // first tile row is 8 CTBs
+            }
+            write(1, 1) // loop filter across tiles
         }
-        write(1, 1) // loop filter across tiles
+        write(1, 1) // loop filter across slices
+        write(1, 1) // deblocking filter control present
+        write(0, 1) // deblocking override disabled
+        write(0, 1) // deblocking filter enabled
+        writeSe(1); writeSe(-1) // beta/tc offsets
+        write(0, 1) // no PPS scaling list data
+        write(1, 1) // lists modification present
+        writeUe(2) // log2 parallel merge level minus 2
+        write(1, 1) // slice segment header extension present
+        write(0, 1) // no PPS extension
     }.finish()
 
     private fun nal(type: Int, rbsp: ByteArray): ByteArray =
