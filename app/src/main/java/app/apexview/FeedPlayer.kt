@@ -130,6 +130,8 @@ class FeedPlayer(
     private var size = ""
     private var decoder = ""
     private var lastFeedProfileDiagnostic: String? = null
+    var hevcProfileDiagnostic by mutableStateOf<String?>(null)
+        private set
     private var licensed = false
     private var speed = 1f
     private var lastDropped = 0
@@ -172,6 +174,9 @@ class FeedPlayer(
                             }
                     }
                     drmLevel = runCatching { drm.getPropertyString("securityLevel") }.getOrDefault("?")
+                    if (stream.allowHevcProfileProbe) {
+                        HevcFeedProfileCapture.updateDrm(stream.profileLabel, drmLevel, keysLoaded = false)
+                    }
                     usesSoftwareDrm = drmLevel.equals("L3", ignoreCase = true)
                     if (forceL3 && !usesSoftwareDrm && drmWarning == null) {
                         drmWarning = "Requested L3; device reports $drmLevel"
@@ -258,9 +263,19 @@ class FeedPlayer(
                 // This is a read-only observer of Media3's parsed codec configuration. It does
                 // not inspect sample payloads, URLs, PSSH, licence requests, KIDs or IV values.
                 if (!stream.allowHevcProfileProbe) return
-                val diagnostic = HevcFeedProfileProbe.summarize(mediaLoadData.trackType, format)
+                val snapshot = HevcFeedProfileProbe.inspect(
+                    mediaLoadData.trackType,
+                    format,
+                    label = stream.profileLabel
+                ).copy(
+                    drmSecurityLevel = drmLevel.takeIf { it.isNotBlank() },
+                    widevineKeysLoaded = licensed
+                )
+                val diagnostic = snapshot.summary
                 if (diagnostic != lastFeedProfileDiagnostic) {
                     lastFeedProfileDiagnostic = diagnostic
+                    hevcProfileDiagnostic = diagnostic.substringBefore(" vps=")
+                    HevcFeedProfileCapture.record(snapshot)
                     Log.i("ApexviewF1FeedProfile", diagnostic)
                 }
             }
@@ -291,6 +306,9 @@ class FeedPlayer(
 
             override fun onDrmKeysLoaded(eventTime: AnalyticsListener.EventTime) {
                 licensed = true
+                if (stream.allowHevcProfileProbe) {
+                    HevcFeedProfileCapture.updateDrm(stream.profileLabel, drmLevel, keysLoaded = true)
+                }
                 refresh()
             }
         })
