@@ -9,15 +9,16 @@ import java.io.IOException
 import java.util.Arrays
 
 /**
- * Pass-through, read-only observer for the selected F1 tile-test feeds.
+ * Pass-through observer for selected F1 tile-test metadata.
  *
- * A bounded transient copy is made only for ISO-BMFF responses. The callback must inspect metadata
- * synchronously and must not retain the array. The copy is zeroed immediately after the callback.
- * Bytes delivered to ExoPlayer are never changed. This class does not decrypt or parse video samples.
+ * Only ISO-BMFF init responses are inspected for registered F1 feeds. Media fragments are inspected
+ * only for the two explicitly selected tile-test feeds. A bounded transient copy is passed to the
+ * parser synchronously and zeroed afterwards. Bytes returned to ExoPlayer are never changed.
  */
 internal class CmafMetadataInspectingDataSource(
     private val upstream: DataSource,
-    private val shouldCapture: () -> Boolean,
+    private val shouldCaptureInit: () -> Boolean,
+    private val shouldCaptureMedia: () -> Boolean,
     private val onCmafResponse: (ByteArray) -> Unit,
     private val onCaptureSkipped: () -> Unit = {},
     private val maxCaptureBytes: Int = DEFAULT_MAX_CAPTURE_BYTES,
@@ -30,6 +31,7 @@ internal class CmafMetadataInspectingDataSource(
     private var captureBuffer = ByteArray(0)
     private var captureSize = 0
     private var captureDisabled = false
+    private var captureAccepted = false
     private var captureOverflowed = false
     private var captureFinished = false
 
@@ -65,27 +67,51 @@ internal class CmafMetadataInspectingDataSource(
     }
 
     private fun observe(source: ByteArray, offset: Int, length: Int) {
-        if (captureDisabled || captureOverflowed || !safeShouldCapture()) return
+        if (captureDisabled || captureOverflowed || captureFinished) return
+
+        if (!captureAccepted) {
+            // Hold only the first eight bytes until the top-level box type can classify the response.
+            val prefixBytes = minOf(length, 8 - captureSize)
+            if (!append(source, offset, prefixBytes)) return
+            if (captureSize < 8) return
+
+            val boxType = String(captureBuffer, 4, 4, Charsets.US_ASCII)
+            captureAccepted = when (boxType) {
+                in INIT_BOX_TYPES -> safeShouldCaptureInit()
+                in MEDIA_BOX_TYPES -> safeShouldCaptureMedia()
+                else -> false
+            }
+            if (!captureAccepted) {
+                captureDisabled = true
+                wipeBuffer()
+                return
+            }
+
+            val remaining = length - prefixBytes
+            if (remaining > 0) append(source, offset + prefixBytes, remaining)
+        } else {
+            append(source, offset, length)
+        }
+    }
+
+    /** Appends bytes while keeping the response strictly below the configured memory bound. */
+    private fun append(source: ByteArray, offset: Int, length: Int): Boolean {
+        if (length <= 0) return true
         if (captureSize.toLong() + length.toLong() > maxCaptureBytes.toLong()) {
             captureOverflowed = true
             wipeBuffer()
-            return
+            return false
         }
         ensureCapacity(captureSize + length)
         source.copyInto(captureBuffer, captureSize, offset, offset + length)
         captureSize += length
-
-        // Manifests and other text responses are rejected as soon as the first box type is known.
-        if (captureSize >= 8 && !hasIsoBmffPrefix(captureBuffer, captureSize)) {
-            captureDisabled = true
-            wipeBuffer()
-        }
+        return true
     }
 
     private fun finishCapture() {
         if (captureFinished) return
         captureFinished = true
-        if (!safeShouldCapture()) {
+        if (!captureAccepted || captureDisabled || !safeShouldContinue()) {
             wipeBuffer()
             return
         }
@@ -94,7 +120,7 @@ internal class CmafMetadataInspectingDataSource(
             wipeBuffer()
             return
         }
-        if (captureDisabled || captureSize < 8 || !hasIsoBmffPrefix(captureBuffer, captureSize)) {
+        if (captureSize < 8) {
             wipeBuffer()
             return
         }
@@ -108,7 +134,18 @@ internal class CmafMetadataInspectingDataSource(
         }
     }
 
-    private fun safeShouldCapture(): Boolean = runCatching { shouldCapture() }.getOrDefault(false)
+    private fun safeShouldContinue(): Boolean = runCatching {
+        val type = String(captureBuffer, 4, 4, Charsets.US_ASCII)
+        when (type) {
+            in INIT_BOX_TYPES -> shouldCaptureInit()
+            in MEDIA_BOX_TYPES -> shouldCaptureMedia()
+            else -> false
+        }
+    }.getOrDefault(false)
+
+    private fun safeShouldCaptureInit(): Boolean = runCatching { shouldCaptureInit() }.getOrDefault(false)
+
+    private fun safeShouldCaptureMedia(): Boolean = runCatching { shouldCaptureMedia() }.getOrDefault(false)
 
     private fun ensureCapacity(required: Int) {
         if (captureBuffer.size >= required) return
@@ -126,6 +163,7 @@ internal class CmafMetadataInspectingDataSource(
     private fun resetCapture() {
         wipeBuffer()
         captureDisabled = false
+        captureAccepted = false
         captureOverflowed = false
         captureFinished = false
     }
@@ -136,17 +174,10 @@ internal class CmafMetadataInspectingDataSource(
         captureSize = 0
     }
 
-    private fun hasIsoBmffPrefix(bytes: ByteArray, size: Int): Boolean {
-        if (size < 8) return false
-        val type = String(bytes, 4, 4, Charsets.US_ASCII)
-        return type in RECOGNISED_TOP_LEVEL_BOXES
-    }
-
     private companion object {
         const val INITIAL_BUFFER_BYTES = 16 * 1024
         const val DEFAULT_MAX_CAPTURE_BYTES = 8 * 1024 * 1024
-        val RECOGNISED_TOP_LEVEL_BOXES = setOf(
-            "ftyp", "styp", "moov", "moof", "sidx", "emsg", "prft", "free", "skip"
-        )
+        val INIT_BOX_TYPES = setOf("ftyp", "moov")
+        val MEDIA_BOX_TYPES = setOf("styp", "moof")
     }
 }
