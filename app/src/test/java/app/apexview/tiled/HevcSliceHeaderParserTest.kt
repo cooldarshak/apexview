@@ -17,7 +17,7 @@ class HevcSliceHeaderParserTest {
         assertEquals(1, slice.sliceType)
         assertEquals(42, slice.picOrderCntLsb)
         assertFalse(slice.shortTermRpsFromSps!!)
-        assertEquals(listOf(-1, -3), slice.references.map { it.deltaPoc })
+        assertEquals(listOf(-1, -4), slice.references.map { it.deltaPoc })
         assertEquals(listOf(true, false), slice.references.map { it.usedByCurrent })
         assertTrue(slice.temporalMvpEnabled!!)
         assertTrue(slice.sampleAdaptiveOffsetLuma!!)
@@ -151,7 +151,8 @@ class HevcSliceHeaderParserTest {
 
     private fun pSliceBits(): ByteArray = BitWriter().apply {
         write(1, 1); writeUe(0); write(0, 2); writeUe(1)
-        write(42, 8) // no short_term_ref_pic_set_sps_flag: SPS defines zero sets
+        write(42, 8)
+        write(0, 1) // short_term_ref_pic_set_sps_flag, present even with zero SPS sets
         writeUe(2); writeUe(0)
         writeUe(0); write(1, 1)
         writeUe(2); write(0, 1)

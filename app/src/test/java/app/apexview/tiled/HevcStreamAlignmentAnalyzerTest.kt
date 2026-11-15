@@ -68,7 +68,8 @@ class HevcStreamAlignmentAnalyzerTest {
 
     private fun pSlice(poc: Int, referenceCount: Int): ByteArray = BitWriter().apply {
         write(1, 1); writeUe(0); write(0, 2); writeUe(1)
-        write(poc, 8) // SPS defines zero sets, so no short_term_ref_pic_set_sps_flag
+        write(poc, 8)
+        write(0, 1) // short_term_ref_pic_set_sps_flag is always present for non-IDR pictures
         writeUe(referenceCount); writeUe(0)
         repeat(referenceCount) { writeUe(0); write(1, 1) }
         write(1, 1) // temporal MVP
