@@ -52,6 +52,74 @@ class HevcFeedProfileProbeTest {
     }
 
     @Test
+    fun comparesTwoFeedProfilesAndDoesNotMixDifferentContentSessions() {
+        val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+        assumeTrue("Synthetic HEVC tile fixture directory is not configured", !fixturePath.isNullOrBlank())
+        val feed = File(fixturePath!!, "feed_left.hevc")
+        assumeTrue("Synthetic HEVC CSD fixture is unavailable", feed.isFile)
+        val parameterSets = HevcBitstream.splitAnnexB(feed.readBytes()).filter { it.type in 32..34 }
+        val csd = ByteArray(parameterSets.sumOf { it.bytes.size + 4 })
+        var offset = 0
+        parameterSets.forEach { nal ->
+            csd[offset++] = 0
+            csd[offset++] = 0
+            csd[offset++] = 0
+            csd[offset++] = 1
+            nal.bytes.copyInto(csd, offset)
+            offset += nal.bytes.size
+        }
+        val format = Format.Builder()
+            .setSampleMimeType(MimeTypes.VIDEO_H265)
+            .setCodecs("hvc1")
+            .setWidth(256)
+            .setHeight(128)
+            .setFrameRate(25f)
+            .setInitializationData(listOf(csd))
+            .build()
+
+        HevcFeedProfileCapture.record(
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-1", "content-100")
+        )
+        HevcFeedProfileCapture.record(
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-2", "content-100")
+        )
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("CODEC_PROFILE_MATCH"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("CMAF timing"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-1"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-2"))
+
+        HevcFeedProfileCapture.record(
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-3", "content-101")
+        )
+        assertTrue(HevcFeedProfileCapture.diagnostic.startsWith("HEVC_PROFILE_CAPTURED channel-3"))
+    }
+
+    @Test
+    fun reportsCodecProfileMismatchWithoutClaimingCmafCompatibility() {
+        val first = Format.Builder()
+            .setSampleMimeType(MimeTypes.VIDEO_H265)
+            .setCodecs("hvc1")
+            .setWidth(1920)
+            .setHeight(1080)
+            .build()
+        val second = Format.Builder()
+            .setSampleMimeType(MimeTypes.VIDEO_H265)
+            .setCodecs("hvc1")
+            .setWidth(1280)
+            .setHeight(720)
+            .build()
+
+        HevcFeedProfileCapture.record(
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, first, "channel-a", "content-200")
+        )
+        HevcFeedProfileCapture.record(
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, second, "channel-b", "content-200")
+        )
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("CODEC_PROFILE_MISMATCH"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("dimensions differ"))
+    }
+
+    @Test
     fun reportsMissingCsdWithoutFailingPlaybackDiagnostics() {
         val format = Format.Builder()
             .setSampleMimeType(MimeTypes.VIDEO_H265)
