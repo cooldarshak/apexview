@@ -55,6 +55,43 @@ class HevcParameterSetParserTest {
         assertEquals(listOf(8, 9), pps.tileRowHeightsInCtbs)
     }
 
+    @Test fun derivesPredictedSpsShortTermRpsFromEarlierSet() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBitsWithPredictedRps()))
+        val predicted = sps.shortTermRefPicSets[1]
+
+        assertTrue(predicted.negative.isEmpty())
+        assertEquals(listOf(1, 3), predicted.positive.map { it.deltaPoc })
+        assertEquals(listOf(true, false), predicted.positive.map { it.usedByCurrent })
+    }
+
+    @Test fun derivesInlinePredictedRpsUsingDeltaIndexMinusOne() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBitsWithPredictedRps()))
+        val bits = BitWriter().apply {
+            write(1, 1) // stRpsIdx 0: no inter-RPS prediction flag
+            writeUe(1); writeUe(1) // source set: one negative, one positive
+            writeUe(0); write(1, 1) // -1, used by current
+            writeUe(1); write(1, 1) // +2, used by current
+
+            write(1, 1) // inline set uses inter-RPS prediction
+            writeUe(1) // delta_idx_minus1: reference SPS set 0, not set 1
+            write(0, 1) // delta_rps_sign: +1
+            writeUe(0) // abs_delta_rps_minus1: 1
+            write(0, 1); write(1, 1) // shifted -1 -> 0; keep in RPS but not used
+            write(0, 1); write(1, 1) // shifted +2 -> +3; keep in RPS but not used
+            write(1, 1) // +1 delta itself; used (use_delta inferred)
+        }
+        val parsed = HevcParameterSets.parseShortTermRefPicSet(
+            HevcBitReader(bits.finish()),
+            index = sps.shortTermRefPicSets.size,
+            totalSets = sps.shortTermRefPicSets.size,
+            previous = sps.shortTermRefPicSets,
+        )
+
+        assertTrue(parsed.negative.isEmpty())
+        assertEquals(listOf(1, 3), parsed.positive.map { it.deltaPoc })
+        assertEquals(listOf(true, false), parsed.positive.map { it.usedByCurrent })
+    }
+
     @Test fun rejectsPpsThatReferencesDifferentSps() {
         val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
         val wrongPps = HevcParameterSets.parsePps(nal(34, ppsBits(uniform = true, spsId = 1)))
@@ -100,6 +137,32 @@ class HevcParameterSetParserTest {
         write(1, 1) // sps_temporal_mvp_enabled_flag
         write(1, 1) // strong_intra_smoothing_enabled_flag
         write(0, 1) // vui_parameters_present_flag
+    }.finish()
+
+    private fun spsBitsWithPredictedRps(): ByteArray = BitWriter().apply {
+        write(1, 4); write(0, 3); write(1, 1)
+        write(0, 8 + 32 + 4 + 44 + 8)
+        writeUe(0); writeUe(1)
+        writeUe(1920); writeUe(1080); write(0, 1)
+        writeUe(0); writeUe(0); writeUe(4)
+        write(1, 1); writeUe(4); writeUe(2); writeUe(0)
+        writeUe(0); writeUe(3)
+        writeUe(0); writeUe(0); writeUe(0); writeUe(0)
+        write(0, 1); write(0, 1); write(1, 1); write(0, 1)
+        writeUe(2) // two short-term reference sets
+        // Set 0: explicit RPS with -1 and +2.
+        writeUe(1); writeUe(1)
+        writeUe(0); write(1, 1)
+        writeUe(1); write(1, 1)
+        // Set 1: predicted from set 0 with deltaRps = +1.
+        write(1, 1) // inter_ref_pic_set_prediction_flag
+        write(0, 1); writeUe(0) // positive deltaRps of 1
+        write(0, 1); write(1, 1) // source -1 shifts to 0; use_delta true, not used
+        write(0, 1); write(1, 1) // source +2 shifts to +3; use_delta true, not used
+        write(1, 1) // deltaRps +1 is used; use_delta inferred
+        write(0, 1) // no long-term references
+        write(1, 1); write(1, 1) // temporal MVP and strong smoothing
+        write(0, 1) // no VUI
     }.finish()
 
     private fun ppsBits(uniform: Boolean, spsId: Int = 0): ByteArray = BitWriter().apply {
