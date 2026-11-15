@@ -92,6 +92,10 @@ internal object HevcSliceHeaderParser {
         require(!pps.extensionPresent) {
             "PPS extensions are not parsed by the bounded slice-header parser"
         }
+        val qpBdOffsetY = 6 * (sps.bitDepthLuma - 8)
+        require(pps.initQpMinus26 in (-26 - qpBdOffsetY)..25) {
+            "PPS init_qp_minus26 exceeds the range for the SPS luma bit depth"
+        }
 
         val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal.copyOfRange(2, nal.size)))
         val initialBits = bits.bitsRemaining

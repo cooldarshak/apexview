@@ -188,10 +188,13 @@ internal object CmafBoxInspector {
         }.toMap()
         val trexDefaults = moov?.let { parseTrexDefaults(data, it, errors) }.orEmpty()
         val fragments = boxes.filter { it.type == "moof" }.flatMap { moof ->
-            moof.children.filter { it.type == "traf" }.mapNotNull { traf ->
+            val trafs = moof.children.filter { it.type == "traf" }
+            trafs.mapIndexedNotNull { index, traf ->
                 try {
-                    parseFragmentTrack(data, moof.start, traf, trexDefaults, trackTimescales,
-                        trackEncryptionDefaults, trackMetadataById, errors)
+                    parseFragmentTrack(
+                        data, moof.start, traf, isFirstTraf = index == 0,
+                        trexDefaults, trackTimescales, trackEncryptionDefaults, trackMetadataById, errors
+                    )
                 } catch (e: Exception) {
                     errors += "Fragment timing metadata could not be parsed: ${e.message ?: e.javaClass.simpleName}"
                     null
@@ -358,6 +361,7 @@ internal object CmafBoxInspector {
         data: ByteArray,
         moofStart: Int,
         traf: Box,
+        isFirstTraf: Boolean,
         trexDefaults: Map<Long, TrexDefaults>,
         timescales: Map<Long, Long>,
         trackEncryptionDefaults: Map<Long, TrackEncryptionMetadata>,
@@ -472,7 +476,13 @@ internal object CmafBoxInspector {
         val effectiveSampleIvSizes = if (sampleGroupEncryption.complete) {
             resolveSampleIvSizes(samples.size, trackEncryptionDefaults[tfhd.trackId], sampleGroupEncryption.metadata)
         } else null
-        val auxiliaryBaseOffset = tfhd.baseDataOffset ?: if (tfhd.defaultBaseIsMoof) moofStart.toLong() else null
+        // ISO-BMFF defines the first traf's implicit base-data-offset as the enclosing moof
+        // when neither base_data_offset nor default-base-is-moof is present. Later trafs may
+        // inherit the prior traf's data end; this inspector does not guess that boundary.
+        val auxiliaryBaseOffset = tfhd.baseDataOffset ?: when {
+            tfhd.defaultBaseIsMoof || isFirstTraf -> moofStart.toLong()
+            else -> null
+        }
         val externalAuxiliary = if (sencBox == null && saiz != null && saio != null) {
             try {
                 if (auxiliaryBaseOffset == null) {

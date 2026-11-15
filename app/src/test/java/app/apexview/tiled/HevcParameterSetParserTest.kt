@@ -152,6 +152,20 @@ class HevcParameterSetParserTest {
         assertEquals(listOf(true, false), parsed.positive.map { it.usedByCurrent })
     }
 
+    @Test fun acceptsPpsInitialQpAllowedByHigherBitDepthSps() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits(bitDepthLumaMinus8 = 2, bitDepthChromaMinus8 = 2)))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits(uniform = true, initQpMinus26 = -30)), sps)
+        assertEquals(10, sps.bitDepthLuma)
+        assertEquals(-30, pps.initQpMinus26)
+    }
+
+    @Test fun rejectsPpsInitialQpOutsideReferencedSpsBitDepthRange() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        assertThrows(IllegalArgumentException::class.java) {
+            HevcParameterSets.parsePps(nal(34, ppsBits(uniform = true, initQpMinus26 = -27)), sps)
+        }
+    }
+
     @Test fun rejectsPpsThatReferencesDifferentSps() {
         val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
         val wrongPps = HevcParameterSets.parsePps(nal(34, ppsBits(uniform = true, spsId = 1)))
@@ -256,7 +270,12 @@ class HevcParameterSetParserTest {
         write(0, 1) // no SPS extension
     }.finish()
 
-    private fun ppsBits(uniform: Boolean, spsId: Int = 0, tiles: Boolean = true): ByteArray = BitWriter().apply {
+    private fun ppsBits(
+        uniform: Boolean,
+        spsId: Int = 0,
+        tiles: Boolean = true,
+        initQpMinus26: Int = 0
+    ): ByteArray = BitWriter().apply {
         writeUe(0) // PPS id
         writeUe(spsId)
         write(1, 1) // dependent slice segments
@@ -264,7 +283,7 @@ class HevcParameterSetParserTest {
         write(2, 3) // extra slice-header bits
         write(0, 1); write(0, 1) // sign hiding, CABAC init
         writeUe(0); writeUe(0)
-        writeSe(0) // init QP
+        writeSe(initQpMinus26) // init QP
         write(0, 1); write(0, 1); write(0, 1) // constrained intra, transform skip, CU QP delta
         writeSe(0); writeSe(0) // chroma QP offsets
         write(0, 1) // slice chroma QP offsets

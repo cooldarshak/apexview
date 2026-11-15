@@ -105,6 +105,27 @@ class CmafBoxInspectorTest {
 
 
 
+    @Test fun resolvesFirstTrafImplicitBaseOffsetToMoofForExternalAuxiliaryRecords() {
+        val init = fragmentedInitSegment(trackId = 73, timescale = 90000, includeEncryption = true)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(73))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,3,0) + int(1) + int(3000) + int(64))
+        val saiz = box("saiz", byteArrayOf(0,0,0,0, 0) + int(1) + byteArrayOf(16))
+        fun moof(offset: Int) = box("moof", box("mfhd", ByteArray(8)) +
+            box("traf", tfhd + tfdt + trun + saiz +
+                box("saio", byteArrayOf(0,0,0,0) + int(1) + int(offset))))
+        val placeholder = moof(0)
+        val actualMoof = moof(placeholder.size + 8)
+        val report = CmafBoxInspector.inspect(
+            init + actualMoof + box("mdat", ByteArray(16) { it.toByte() })
+        )
+        val fragment = report.fragments.single()
+        assertTrue(report.errors.toString(), report.errors.isEmpty())
+        assertTrue(fragment.sampleAuxiliaryInfoStructureComplete)
+        assertTrue(fragment.sampleAuxiliaryPayloadStructureComplete)
+        assertEquals(listOf(16), fragment.sampleEncryptionMetadata.map { it.ivSize })
+    }
+
     @Test fun verifiesExternallyAddressedAuxiliaryRecordsFromOneContiguousSaioOffset() {
         val init = fragmentedInitSegment(trackId = 70, timescale = 90000, includeEncryption = true)
         val tfhd = box("tfhd", byteArrayOf(0,2,0,0) + int(70)) // default-base-is-moof
