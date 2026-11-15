@@ -37,6 +37,10 @@ import androidx.media3.exoplayer.source.MediaLoadData
  */
 internal const val F1_VIDEO_MIME_TYPE = "video/hevc"
 
+@Volatile
+internal var lastVideoDecoderDiagnostic: String = "HEVC decoder capabilities not queried yet"
+    private set
+
 internal fun supportsF1VideoMimeType(supportedTypes: Array<String>): Boolean =
     supportedTypes.any { it.equals(F1_VIDEO_MIME_TYPE, ignoreCase = true) }
 
@@ -69,6 +73,9 @@ internal fun queryVideoDecoderBudget(context: Context, softwareDrm: Boolean, isT
         val pool = hardware.ifEmpty { candidates }
         val reportedMax = pool.map { it.second }.filter { it > 0 }.maxOrNull()
         val budget = reportedVideoDecoderBudget(reportedMax, isTv = true)
+        lastVideoDecoderDiagnostic =
+            "HEVC codecs=" + pool.joinToString { it.first.name + ":" + it.second } +
+                "; reportedMax=$reportedMax; appBudget=$budget; secureRequired=${!softwareDrm}"
         Log.i(
             "ApexviewVideoBudget",
             "HEVC softwareDrm=$softwareDrm, codecs=" +
@@ -77,6 +84,7 @@ internal fun queryVideoDecoderBudget(context: Context, softwareDrm: Boolean, isT
         )
         budget
     }.getOrElse {
+        lastVideoDecoderDiagnostic = "HEVC capability query failed: ${it.javaClass.simpleName}: ${it.message}"
         Log.w("ApexviewVideoBudget", "Unable to query HEVC decoder capacity; allowing one TV video decoder", it)
         1
     }
