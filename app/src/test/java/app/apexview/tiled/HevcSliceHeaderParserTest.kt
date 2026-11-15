@@ -90,19 +90,26 @@ class HevcSliceHeaderParserTest {
     }
 
     @Test
-    fun rejectsPredictedShortTermRpsInsteadOfGuessingReferences() {
+    fun resolvesInterPredictedInlineRpsInsideSliceHeader() {
         val sps = HevcParameterSets.parseSps(nal(33, spsBits(includeSpsRps = true)))
         val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)
         val bits = BitWriter().apply {
             write(1, 1); writeUe(0); write(0, 2); writeUe(1)
             write(44, 8)
-            write(0, 1) // inline RPS
-            write(1, 1) // unsupported inter-RPS prediction flag (inline set is index 1)
-            writeUe(0) // delta_idx_minus1
+            write(0, 1) // inline RPS, not selected from SPS
+            write(1, 1) // inter-RPS prediction
+            writeUe(0) // delta_idx_minus1: use the sole SPS RPS
+            write(0, 1); writeUe(0) // positive deltaRps = +1
+            write(0, 1); write(1, 1) // shifted -1 becomes zero; retain but do not use
+            write(1, 1) // shifted +1 -> +2; used, use_delta inferred
+            write(1, 1) // deltaRps +1; used, use_delta inferred
+            write(1, 1) // temporal MVP
+            write(1, 1); write(1, 1) // SAO luma/chroma
         }.finish()
-        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
-            HevcSliceHeaderParser.parse(nal(1, bits), sps, pps)
-        }
+        val slice = HevcSliceHeaderParser.parse(nal(1, bits), sps, pps)
+        assertFalse(slice.shortTermRpsFromSps!!)
+        assertEquals(listOf(1, 2), slice.references.map { it.deltaPoc })
+        assertEquals(listOf(true, true), slice.references.map { it.usedByCurrent })
     }
 
     @Test
@@ -165,6 +172,7 @@ class HevcSliceHeaderParserTest {
         write(1, 1) // temporal MVP enabled
         write(1, 1) // strong smoothing
         write(0, 1) // no VUI
+        write(0, 1) // no SPS extension
     }.finish()
 
     private fun ppsBits(): ByteArray = BitWriter().apply {
@@ -178,7 +186,14 @@ class HevcSliceHeaderParserTest {
         write(0, 1); write(0, 1); write(0, 1); write(0, 1)
         write(1, 1); write(0, 1)
         writeUe(1); writeUe(1); write(1, 1)
-        write(1, 1)
+        write(1, 1) // loop filter across tiles
+        write(1, 1) // loop filter across slices
+        write(0, 1) // no deblocking filter control
+        write(0, 1) // no PPS scaling-list data
+        write(0, 1) // no list modification
+        writeUe(0) // parallel merge level
+        write(0, 1) // no slice header extension
+        write(0, 1) // no PPS extension
     }.finish()
 
     private fun pSliceBits(): ByteArray = BitWriter().apply {
