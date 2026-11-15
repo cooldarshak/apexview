@@ -268,7 +268,13 @@ internal object CmafBoxInspector {
         all.filter { it.type == "sgpd" }.forEach { box ->
             try {
                 parseSeigSgpd(payload(data, box))?.let { description ->
-                    trackSeigDescriptions.add(description)
+                    trackSeigDescriptions.add(
+                        SampleGroupDescriptionMetadata(
+                            version = description.version,
+                            defaultSampleDescriptionIndex = description.defaultSampleDescriptionIndex,
+                            entries = description.entries
+                        )
+                    )
                 }
             } catch (e: Exception) {
                 trackSeigStructureComplete = false
