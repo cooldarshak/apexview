@@ -235,6 +235,11 @@ class HevcSliceHeaderParserTest {
         writeUe(2); write(0, 1)
         write(1, 1) // temporal MVP enabled
         write(1, 1); write(1, 1) // SAO luma/chroma
+        write(0, 1) // num_ref_idx_active_override_flag
+        writeUe(0) // five_minus_max_num_merge_cand
+        writeSe(0) // slice_qp_delta
+        write(1, 1) // slice_loop_filter_across_slices_enabled_flag
+        writeUe(0) // num_entry_point_offsets
     }.finish()
 
     private fun nal(type: Int, rbsp: ByteArray, temporalIdPlus1: Int = 1): ByteArray =
