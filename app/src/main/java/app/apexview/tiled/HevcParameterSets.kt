@@ -683,7 +683,7 @@ private fun HevcBitReader.skipBits(count: Int) {
     }
 }
 
-private fun HevcBitReader.readSignedExpGolomb(): Long {
+internal fun HevcBitReader.readSignedExpGolomb(): Long {
     val codeNum = readUnsignedExpGolomb()
     return if ((codeNum and 1L) != 0L) (codeNum + 1L) / 2L else -(codeNum / 2L)
 }
