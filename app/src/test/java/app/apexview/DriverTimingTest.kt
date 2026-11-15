@@ -132,4 +132,33 @@ class DriverTimingTest {
         assertTrue(s.sectors.all { it == null })
         assertEquals("1:21.024", s.lastLap!!.time)
     }
+    @Test
+    fun timingTopicsAreMergedByTimestampRatherThanFileOrder() {
+        val primary = listOf(
+            """00:00:01.000{"Lines":{"16":{"Position":"1"}}}""",
+            """00:00:03.000{"Lines":{"16":{"Position":"3"}}}""",
+        ).joinToString("\n")
+        val supplement = listOf(
+            """00:00:02.000{"Lines":{"16":{"Position":"2"}}}""",
+            """00:00:04.000{"Lines":{"16":{"Position":"4"}}}""",
+        ).joinToString("\n")
+
+        val laps = DriverTimingParser.parse(primary, t0, supplement).getValue("16")
+        assertEquals(2, laps.at(t0 + 2_500)!!.position)
+        assertEquals(4, laps.at(t0 + 4_500)!!.position)
+    }
+
+    @Test
+    fun outOfOrderTopicFallsBackToChronologicalSorting() {
+        val primary = listOf(
+            """00:00:03.000{"Lines":{"16":{"Position":"3"}}}""",
+            """00:00:01.000{"Lines":{"16":{"Position":"1"}}}""",
+        ).joinToString("\n")
+        val supplement = """00:00:02.000{"Lines":{"16":{"Position":"2"}}}"""
+
+        val laps = DriverTimingParser.parse(primary, t0, supplement).getValue("16")
+        assertEquals(1, laps.at(t0 + 1_500)!!.position)
+        assertEquals(2, laps.at(t0 + 2_500)!!.position)
+        assertEquals(3, laps.at(t0 + 3_500)!!.position)
+    }
 }
