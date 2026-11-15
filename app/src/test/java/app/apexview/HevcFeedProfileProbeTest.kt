@@ -44,6 +44,7 @@ class HevcFeedProfileProbeTest {
         assertTrue(summary.contains("size=256x128"))
         assertTrue(summary.contains("tileGrid=2x1"))
         assertTrue(summary.contains("parameterNalCounts=1/1/1"))
+        assertTrue(summary.contains("parameterSetFingerprint="))
         assertFalse(summary.contains("license", ignoreCase = true))
         assertFalse(summary.contains("pssh", ignoreCase = true))
         assertFalse(summary.contains("kid", ignoreCase = true))
@@ -80,10 +81,14 @@ class HevcFeedProfileProbeTest {
         HevcFeedProfileCapture.record(
             HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-1", "content-100")
         )
+        HevcFeedProfileCapture.updateMediaChunkDuration("content-100", "channel-1", "HLS", 6_000L)
+        HevcFeedProfileCapture.updateDrm("content-100", "channel-1", "L1", keysLoaded = true)
         HevcFeedProfileCapture.record(
             HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-2", "content-100")
         )
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("CODEC_PROFILE_MATCH"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("chunksMs=[6000]"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("keysLoaded=true"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("CMAF timing"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-1"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-2"))
