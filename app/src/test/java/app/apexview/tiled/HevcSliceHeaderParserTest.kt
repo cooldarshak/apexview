@@ -8,6 +8,27 @@ import org.junit.Test
 
 class HevcSliceHeaderParserTest {
     @Test
+    fun rejectsReservedVclNalTypesAndTemporalLayersOutsideSpsLimit() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)
+        val reservedType = nal(31, pSliceBits())
+        try {
+            HevcSliceHeaderParser.parse(reservedType, sps, pps)
+            throw AssertionError("Reserved VCL NAL type must be rejected")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message!!.contains("Reserved or unsupported"))
+        }
+
+        val excessiveTemporalLayer = nal(1, pSliceBits(), temporalIdPlus1 = 2)
+        try {
+            HevcSliceHeaderParser.parse(excessiveTemporalLayer, sps, pps)
+            throw AssertionError("Temporal layer above SPS limit must be rejected")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message!!.contains("temporal_id_plus1"))
+        }
+    }
+
+    @Test
     fun parsesSlicePocAndUsedShortTermReferenceDeltas() {
         val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
         val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)
@@ -207,8 +228,8 @@ class HevcSliceHeaderParserTest {
         write(1, 1); write(1, 1) // SAO luma/chroma
     }.finish()
 
-    private fun nal(type: Int, rbsp: ByteArray): ByteArray =
-        byteArrayOf((type shl 1).toByte(), 0x01) + rbsp
+    private fun nal(type: Int, rbsp: ByteArray, temporalIdPlus1: Int = 1): ByteArray =
+        byteArrayOf((type shl 1).toByte(), temporalIdPlus1.toByte()) + rbsp
 
     private class BitWriter {
         private val bits = mutableListOf<Int>()

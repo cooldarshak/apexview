@@ -43,8 +43,13 @@ internal object HevcSliceHeaderParser {
         pps: HevcParameterSets.PpsMetadata
     ): SliceHeader {
         val header = HevcBitstream.parseNalHeader(nal)
-        require(header.type in 0..31) { "Expected a HEVC VCL NAL unit, got type ${header.type}" }
+        require(header.type in 0..21) {
+            "Reserved or unsupported HEVC VCL NAL type ${header.type}"
+        }
         require(header.layerId == 0) { "Non-zero HEVC layer IDs are not supported" }
+        require(header.temporalIdPlus1 <= sps.maxSubLayers) {
+            "HEVC temporal_id_plus1 exceeds the SPS sub-layer limit"
+        }
         require(nal.size > 2) { "Truncated HEVC slice NAL" }
         require(pps.spsId == sps.spsId) { "PPS references a different SPS" }
 
