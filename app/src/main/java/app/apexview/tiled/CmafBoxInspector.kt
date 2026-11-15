@@ -246,8 +246,8 @@ internal object CmafBoxInspector {
     )
 
     private data class TrexDefaults(
-        val defaultSampleDuration: Long,
-        val defaultSampleSize: Long
+        val defaultSampleDuration: Long?,
+        val defaultSampleSize: Long?
     )
 
     private fun readTrackId(p: ByteBuffer): Long? {
@@ -280,8 +280,8 @@ internal object CmafBoxInspector {
                 val trackId = u32(p)
                 require(trackId > 0) { "Invalid trex track ID" }
                 skip(p, 4) // default_sample_description_index
-                val defaultDuration = u32(p)
-                val defaultSize = u32(p)
+                val defaultDuration = u32(p).takeIf { it > 0 }
+                val defaultSize = u32(p).takeIf { it > 0 }
                 skip(p, 4) // default_sample_flags
                 require(!p.hasRemaining()) { "Unexpected trailing bytes in trex box" }
                 defaults[trackId] = TrexDefaults(defaultDuration, defaultSize)
@@ -711,16 +711,17 @@ internal object CmafBoxInspector {
      * sample-encryption payloads are skipped and never returned or logged.
      */
     private fun parseTrackEncryption(p: ByteBuffer): TrackEncryptionMetadata {
-        require(p.remaining() >= 4 + 2 + 2 + 16) { "Truncated tenc box" }
+        require(p.remaining() >= 4 + 1 + 2 + 16) { "Truncated tenc box" }
         val version = u8(p)
-        p.get(); p.get(); p.get() // FullBox flags
+        val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
         require(version in 0..1) { "Unsupported tenc version $version" }
+        require(flags == 0) { "Unsupported tenc flags" }
         val reserved = u8(p)
         require(reserved == 0) { "Invalid tenc reserved byte" }
-        val pattern = u8(p)
+        val pattern = if (version == 1) u8(p) else 0
         val cryptBlocks = if (version == 1) pattern ushr 4 else 0
         val skipBlocks = if (version == 1) pattern and 0x0f else 0
-        if (version == 0) require(pattern == 0) { "Invalid version 0 tenc reserved byte" }
+        require(p.remaining() >= 2 + 16) { "Truncated tenc protection defaults" }
         val isProtected = u8(p)
         val ivSize = u8(p)
         require(isProtected in 0..1) { "Invalid tenc default_isProtected value" }

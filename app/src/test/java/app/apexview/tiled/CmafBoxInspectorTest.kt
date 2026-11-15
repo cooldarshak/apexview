@@ -192,6 +192,20 @@ class CmafBoxInspectorTest {
         assertFalse(timing.durationIsEmpty)
     }
 
+    @Test fun doesNotTreatZeroTrexDefaultsAsRealSampleDurationsOrSizes() {
+        val init = fragmentedInitSegment(trackId = 51, timescale = 90000)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(51))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,0,0) + int(1))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun))
+        )
+        val timing = report.fragments.single()
+        assertFalse(timing.timingComplete)
+        assertEquals(listOf(null), timing.sampleTimings.map { it.durationTicks })
+        assertEquals(listOf(null), timing.sampleTimings.map { it.sampleSizeBytes })
+    }
+
     @Test fun recognisesDurationIsEmptyWithoutInventingSampleTimings() {
         val init = fragmentedInitSegment(trackId = 12, timescale = 90000)
         val tfhd = box("tfhd", byteArrayOf(0, 1, 0, 0) + int(12))
@@ -312,6 +326,23 @@ class CmafBoxInspectorTest {
         assertFalse(metadata.sampleEncryptionBoxPresent)
         assertFalse(metadata.sampleAuxiliarySizesPresent)
         assertFalse(metadata.sampleAuxiliaryOffsetsPresent)
+    }
+
+    @Test fun readsVersionZeroTencWithoutVersionOnePatternByte() {
+        val tenc = box("tenc", byteArrayOf(0,0,0,0, 0, 1, 8) + ByteArray(16))
+        val sinf = box("sinf",
+            box("frma", ascii("hvc1")) +
+                box("schm", byteArrayOf(0,0,0,0) + ascii("cenc") + int(0x00010000)) +
+                box("schi", tenc)
+        )
+        val metadata = inspectVisualEntry(visualSampleEntry("encv", 1280, 720, sinf)).tracks.single()
+        val protection = metadata.trackEncryption!!
+        assertEquals(0, protection.version)
+        assertTrue(protection.defaultIsProtected)
+        assertEquals(8, protection.perSampleIvSize)
+        assertEquals(0, protection.cryptByteBlock)
+        assertEquals(0, protection.skipByteBlock)
+        assertNull(protection.constantIvSize)
     }
 
     @Test fun reportsUnsupportedOrMalformedHevcConfigurationWithoutExposingPayload() {
