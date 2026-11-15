@@ -67,7 +67,15 @@ internal fun queryVideoDecoderBudget(context: Context, softwareDrm: Boolean, isT
         }
         val hardware = candidates.filter { it.first.isHardwareAccelerated }
         val pool = hardware.ifEmpty { candidates }
-        reportedVideoDecoderBudget(pool.map { it.second }.filter { it > 0 }.maxOrNull(), isTv = true)
+        val reportedMax = pool.map { it.second }.filter { it > 0 }.maxOrNull()
+        val budget = reportedVideoDecoderBudget(reportedMax, isTv = true)
+        Log.i(
+            "ApexviewVideoBudget",
+            "HEVC softwareDrm=$softwareDrm, codecs=" +
+                pool.joinToString { it.first.name + ":" + it.second } +
+                ", reportedMax=$reportedMax, appBudget=$budget",
+        )
+        budget
     }.getOrElse {
         Log.w("ApexviewVideoBudget", "Unable to query HEVC decoder capacity; allowing one TV video decoder", it)
         1
