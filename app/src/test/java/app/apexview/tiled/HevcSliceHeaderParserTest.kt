@@ -143,6 +143,61 @@ class HevcSliceHeaderParserTest {
     }
 
     @Test
+    fun parsesWeightedPredictionTableAndActiveReferenceCounts() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits(weightedPred = true)), sps)
+        val slice = HevcSliceHeaderParser.parse(nal(1, weightedPSliceBits()), sps, pps)
+
+        assertEquals(1, slice.numPicTotalCurrent)
+        assertEquals(1, slice.numRefIdxL0Active)
+        assertNull(slice.numRefIdxL1Active)
+        val table = slice.predictionWeightTable!!
+        assertEquals(1, table.lumaLog2WeightDenom)
+        assertEquals(1, table.chromaLog2WeightDenom)
+        assertEquals(PredictionWeightComponent(2, -1), table.list0.single().luma)
+        assertEquals(
+            listOf(PredictionWeightComponent(1, -2), PredictionWeightComponent(-1, 3)),
+            table.list0.single().chroma
+        )
+        assertTrue(table.list1.isEmpty())
+        assertEquals(0, slice.sliceQpDelta)
+    }
+
+    @Test
+    fun parsesReferenceListModificationAndCollocatedReferenceIndex() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(
+            nal(34, ppsBits(defaultL0Minus1 = 1, listsModification = true)), sps
+        )
+        val slice = HevcSliceHeaderParser.parse(nal(1, twoReferencePSliceBits()), sps, pps)
+
+        assertEquals(2, slice.numPicTotalCurrent)
+        assertEquals(2, slice.numRefIdxL0Active)
+        assertEquals(listOf(1, 0), slice.list0Modification)
+        assertTrue(slice.list1Modification.isEmpty())
+        assertEquals(true, slice.collocatedFromL0)
+        assertEquals(1, slice.collocatedReferenceIndex)
+    }
+
+    @Test
+    fun parsesPerSliceDeblockingOverridesEntryPointsAndHeaderExtensionLength() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(
+            nal(34, ppsBits(deblockingOverride = true, sliceHeaderExtension = true)), sps
+        )
+        val slice = HevcSliceHeaderParser.parse(nal(1, extendedPSliceBits()), sps, pps)
+
+        assertTrue(slice.deblockingFilterOverride!!)
+        assertFalse(slice.deblockingFilterDisabled!!)
+        assertEquals(2, slice.betaOffsetDiv2)
+        assertEquals(-1, slice.tcOffsetDiv2)
+        assertTrue(slice.loopFilterAcrossSlices!!)
+        assertEquals(listOf(2L, 4L), slice.entryPointOffsets)
+        assertEquals(2, slice.sliceHeaderExtensionLength)
+        assertTrue(slice.bitsConsumed > 0)
+    }
+
+    @Test
     fun derivesPocAcrossLsbWrap() {
         val tracker = HevcPocTracker()
         assertEquals(0L, tracker.derive(20, 1, 0, 8))
@@ -205,24 +260,37 @@ class HevcSliceHeaderParserTest {
         write(0, 1) // no SPS extension
     }.finish()
 
-    private fun ppsBits(): ByteArray = BitWriter().apply {
+    private fun ppsBits(
+        weightedPred: Boolean = false,
+        defaultL0Minus1: Int = 0,
+        listsModification: Boolean = false,
+        deblockingOverride: Boolean = false,
+        sliceHeaderExtension: Boolean = false
+    ): ByteArray = BitWriter().apply {
         writeUe(0); writeUe(0)
         write(1, 1); write(0, 1); write(2, 3)
         write(0, 1); write(0, 1)
-        writeUe(0); writeUe(0)
+        writeUe(defaultL0Minus1); writeUe(0)
         writeSe(0)
         write(0, 1); write(0, 1); write(0, 1)
         writeSe(0); writeSe(0)
-        write(0, 1); write(0, 1); write(0, 1); write(0, 1)
+        write(0, 1) // slice chroma QP offsets absent
+        write(if (weightedPred) 1 else 0, 1)
+        write(0, 1); write(0, 1)
         write(1, 1); write(0, 1)
         writeUe(1); writeUe(1); write(1, 1)
         write(1, 1) // loop filter across tiles
         write(1, 1) // loop filter across slices
-        write(0, 1) // no deblocking filter control
+        write(if (deblockingOverride) 1 else 0, 1)
+        if (deblockingOverride) {
+            write(1, 1) // deblocking_filter_override_enabled_flag
+            write(0, 1) // pps_deblocking_filter_disabled_flag
+            writeSe(0); writeSe(0)
+        }
         write(0, 1) // no PPS scaling-list data
-        write(0, 1) // no list modification
+        write(if (listsModification) 1 else 0, 1)
         writeUe(0) // parallel merge level
-        write(0, 1) // no slice header extension
+        write(if (sliceHeaderExtension) 1 else 0, 1)
         write(0, 1) // no PPS extension
     }.finish()
 
@@ -240,6 +308,65 @@ class HevcSliceHeaderParserTest {
         writeSe(0) // slice_qp_delta
         write(1, 1) // slice_loop_filter_across_slices_enabled_flag
         writeUe(0) // num_entry_point_offsets
+    }.finish()
+
+    private fun weightedPSliceBits(): ByteArray = BitWriter().apply {
+        write(1, 1); writeUe(0); write(0, 2); writeUe(1)
+        write(42, 8)
+        write(0, 1); writeUe(2); writeUe(0)
+        writeUe(0); write(1, 1); writeUe(2); write(0, 1)
+        write(1, 1) // temporal MVP
+        write(1, 1); write(1, 1) // SAO
+        write(0, 1) // active reference override false
+        writeUe(1) // luma_log2_weight_denom
+        writeSe(0) // delta_chroma_log2_weight_denom
+        write(1, 1) // luma_weight_l0_flag
+        write(1, 1) // chroma_weight_l0_flag
+        writeSe(2); writeSe(-1) // luma weight/offset
+        writeSe(1); writeSe(-2) // Cb weight/offset
+        writeSe(-1); writeSe(3) // Cr weight/offset
+        writeUe(0) // five_minus_max_num_merge_cand
+        writeSe(0) // slice_qp_delta
+        write(1, 1) // loop filter across slices
+        writeUe(0) // no tile entry points
+    }.finish()
+
+    private fun twoReferencePSliceBits(): ByteArray = BitWriter().apply {
+        write(1, 1); writeUe(0); write(0, 2); writeUe(1)
+        write(42, 8)
+        write(0, 1); writeUe(2); writeUe(0)
+        writeUe(0); write(1, 1); writeUe(1); write(1, 1)
+        write(1, 1) // temporal MVP
+        write(1, 1); write(1, 1) // SAO
+        write(0, 1) // active reference override false (PPS default is two)
+        write(1, 1) // ref_pic_list_modification_flag_l0
+        write(1, 1); write(0, 1) // list_entry_l0[0..1]
+        writeUe(1) // collocated_ref_idx
+        writeUe(0) // five_minus_max_num_merge_cand
+        writeSe(0) // slice_qp_delta
+        write(1, 1) // loop filter across slices
+        writeUe(0) // no tile entry points
+    }.finish()
+
+    private fun extendedPSliceBits(): ByteArray = BitWriter().apply {
+        write(1, 1); writeUe(0); write(0, 2); writeUe(1)
+        write(42, 8)
+        write(0, 1); writeUe(2); writeUe(0)
+        writeUe(0); write(1, 1); writeUe(2); write(0, 1)
+        write(1, 1) // temporal MVP
+        write(1, 1); write(1, 1) // SAO
+        write(0, 1) // active reference override false
+        writeUe(0) // five_minus_max_num_merge_cand
+        writeSe(0) // slice_qp_delta
+        write(1, 1) // slice_deblocking_filter_override_flag
+        write(0, 1) // slice_deblocking_filter_disabled_flag
+        writeSe(2); writeSe(-1) // beta and tc offsets
+        write(1, 1) // loop filter across slices
+        writeUe(2) // two tile entry points
+        writeUe(2) // offset_len_minus1 = 2
+        write(1, 3); write(3, 3) // offset_minus1 values => offsets 2 and 4
+        writeUe(2) // extension length
+        write(0xab, 8); write(0xcd, 8)
     }.finish()
 
     private fun nal(type: Int, rbsp: ByteArray, temporalIdPlus1: Int = 1): ByteArray =
