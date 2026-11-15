@@ -933,8 +933,9 @@ internal object CmafBoxInspector {
 
         // Prefer resolved per-sample seig/tenc values. A senc override applies globally only
         // when no seig mapping is active. Never infer a byte count from a KID or IV value.
-        val ivSizes = when {
-            overrideIvSize != null -> List(sampleCount.toInt()) { overrideIvSize }
+        val overrideIvSizeValue = overrideIvSize
+        val ivSizes: List<Int> = when {
+            overrideIvSizeValue != null -> List(sampleCount.toInt()) { overrideIvSizeValue }
             effectiveSampleIvSizes != null -> effectiveSampleIvSizes
                 .takeIf { it.size == sampleCount.toInt() }
             else -> trackEncryption?.let {
