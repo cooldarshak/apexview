@@ -185,14 +185,33 @@ object DriverTimingParser {
         val lapTimes = ArrayList<Long>()
         val lapCounts = ArrayList<Int>()
 
+        private fun sameCell(a: SectorCell?, b: SectorCell?): Boolean =
+            a === b || (a != null && b != null && a.time == b.time && a.pace == b.pace &&
+                a.segments == b.segments && a.previousTime == b.previousTime)
+
+        private fun sameSnapshot(a: DriverLaps.Snapshot, b: DriverLaps.Snapshot): Boolean =
+            a.position == b.position &&
+                a.sectors.indices.all { sameCell(a.sectors[it], b.sectors[it]) } &&
+                a.lapSectors.indices.all { sameCell(a.lapSectors[it], b.lapSectors[it]) } &&
+                sameCell(a.lastLap, b.lastLap) &&
+                a.gap == b.gap && a.inPit == b.inPit && a.toLeader == b.toLeader &&
+                a.ahead == b.ahead && a.retired == b.retired && sameCell(a.bestLap, b.bestLap)
+
         fun snap(t: Long) {
             val copy = DriverLaps.Snapshot(position, sector.toList(), lapSectors.toList(), lastLap, gap, inPit, toLeader, ahead, retired, bestLap)
-            if (times.isNotEmpty() && times.last() == t) {
-                snaps[snaps.lastIndex] = copy
-            } else {
-                times += t
-                snaps += copy
+            if (times.isNotEmpty()) {
+                val last = snaps.last()
+                if (times.last() == t) {
+                    if (!sameSnapshot(last, copy)) snaps[snaps.lastIndex] = copy
+                    return
+                }
+                // Archive topics often repeat every driver's full state in several deltas.
+                // Keep only observable state changes; crossings and lap counts are tracked in
+                // their own timestamp arrays and do not depend on storing duplicate snapshots.
+                if (sameSnapshot(last, copy)) return
             }
+            times += t
+            snaps += copy
         }
     }
 
@@ -201,26 +220,71 @@ object DriverTimingParser {
      * F1 publishes micro-sector segment status on the latter. Events are ordered by UTC so a
      * delayed snapshot from one topic cannot roll back a newer update from the other.
      */
+    private data class TimedLine(val time: Long, val source: Int, val line: String)
+
+    private fun timedLines(text: String, source: Int, streamStart: Long): Sequence<TimedLine> =
+        text.lineSequence().mapNotNull { line ->
+            val prefix = streamPrefixLength(line)
+            if (line.length <= prefix) null
+            else runCatching { TimedLine(streamStart + offsetMs(line), source, line) }.getOrNull()
+        }
+
+    /** F1's archived topic files are normally append-ordered. Check before using a bounded merge. */
+    private fun isChronological(text: String, streamStart: Long): Boolean {
+        var previous = Long.MIN_VALUE
+        for (line in text.lineSequence()) {
+            val prefix = streamPrefixLength(line)
+            if (line.length <= prefix) continue
+            val time = runCatching { streamStart + offsetMs(line) }.getOrNull() ?: continue
+            if (time < previous) return false
+            previous = time
+        }
+        return true
+    }
+
     fun parse(stream: String, streamStart: Long, timingF1: String = ""): Map<String, DriverLaps> {
         val drivers = mutableMapOf<String, Live>()
-        val events = sequenceOf(0 to stream, 1 to timingF1).flatMap { (source, text) ->
-            text.lineSequence().mapNotNull { line ->
-                val prefix = streamPrefixLength(line)
-                if (line.length <= prefix) null
-                else runCatching { Triple(streamStart + offsetMs(line), source, line) }.getOrNull()
-            }
-        }.sortedWith(compareBy<Triple<Long, Int, String>> { it.first }.thenBy { it.second })
-        events.forEach { (t, _, line) ->
-            val prefix = streamPrefixLength(line)
-            val lines = runCatching { JSONObject(line.substring(prefix)).optJSONObject("Lines") }.getOrNull() ?: return@forEach
+
+        fun consume(event: TimedLine) {
+            val prefix = streamPrefixLength(event.line)
+            val lines = runCatching { JSONObject(event.line.substring(prefix)).optJSONObject("Lines") }.getOrNull() ?: return
             lines.keys().forEach { number ->
                 val d = lines.optJSONObject(number) ?: return@forEach
                 val live = drivers.getOrPut(number) { Live() }
-                apply(live, d, t)
-                live.snap(t)
+                apply(live, d, event.time)
+                live.snap(event.time)
             }
         }
-        return drivers.mapValues { (_, l) -> DriverLaps(l.times.toLongArray(), l.snaps, l.crossings.toLongArray(), l.lapTimes.toLongArray(), l.lapCounts.toIntArray()) }
+
+        if (isChronological(stream, streamStart) && isChronological(timingF1, streamStart)) {
+            // Merge the two sorted topics with one pending line per source. This avoids creating
+            // and sorting a large in-memory Event list on Android TV for multi-megabyte archives.
+            val primary = timedLines(stream, 0, streamStart).iterator()
+            val supplement = timedLines(timingF1, 1, streamStart).iterator()
+            var a = if (primary.hasNext()) primary.next() else null
+            var b = if (supplement.hasNext()) supplement.next() else null
+            while (a != null || b != null) {
+                val takePrimary = b == null || (a != null &&
+                    (a.time < b.time || (a.time == b.time && a.source <= b.source)))
+                if (takePrimary) {
+                    consume(a!!)
+                    a = if (primary.hasNext()) primary.next() else null
+                } else {
+                    consume(b!!)
+                    b = if (supplement.hasNext()) supplement.next() else null
+                }
+            }
+        } else {
+            // Preserve the previous defensive behaviour for malformed/out-of-order archives.
+            timedLines(stream, 0, streamStart)
+                .plus(timedLines(timingF1, 1, streamStart))
+                .sortedWith(compareBy<TimedLine> { it.time }.thenBy { it.source })
+                .forEach(::consume)
+        }
+
+        return drivers.mapValues { (_, l) ->
+            DriverLaps(l.times.toLongArray(), l.snaps, l.crossings.toLongArray(), l.lapTimes.toLongArray(), l.lapCounts.toIntArray())
+        }
     }
 
     private fun apply(l: Live, d: JSONObject, t: Long) {
