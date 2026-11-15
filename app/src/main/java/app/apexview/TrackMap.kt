@@ -356,16 +356,16 @@ internal fun shouldShowMapLockControl(
 fun MapPanelView(app: AppState, timing: SessionTiming) {
     val panel = app.activeMapPanel
     val density = LocalDensity.current
-    val tvControls = app.isTv || app.layoutMode == LayoutMode.TV
+    val keepControlsForLayout = app.isTv || app.layoutMode == LayoutMode.TV
     var mapInteractionGeneration by remember(app) { mutableLongStateOf(0L) }
     var lockControlTemporarilyVisible by remember(app) { mutableStateOf(true) }
 
     // Lock the map, then leave the unobtrusive lock affordance visible briefly. Any subsequent
     // touch anywhere in the map panel restarts the five-second window. TV keeps it available for
     // D-pad navigation because there is no touch gesture to reveal a hidden control.
-    LaunchedEffect(app.mapLocked, mapInteractionGeneration, tvControls) {
+    LaunchedEffect(app.mapLocked, mapInteractionGeneration, app.isTv) {
         lockControlTemporarilyVisible = true
-        if (app.mapLocked && !tvControls) {
+        if (app.mapLocked && !app.isTv) {
             delay(MAP_LOCK_CONTROL_AUTO_HIDE_MS)
             lockControlTemporarilyVisible = false
         }
@@ -377,8 +377,8 @@ fun MapPanelView(app: AppState, timing: SessionTiming) {
             // requiredSize, not size: size() is capped at the screen width, while the track is
             // fitted to the full panel, so a panel wider than the screen lost its right side.
             .requiredSize(with(density) { panel.w.toDp() }, with(density) { panel.h.toDp() })
-            .pointerInput(app.mapLocked, tvControls) {
-                if (app.mapLocked && !tvControls) {
+            .pointerInput(app.mapLocked, app.isTv) {
+                if (app.mapLocked && !app.isTv) {
                     awaitPointerEventScope {
                         while (true) {
                             val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -392,14 +392,14 @@ fun MapPanelView(app: AppState, timing: SessionTiming) {
     ) {
         TrackDrawing(app, timing, panel.w, panel.h, panel.rotation)
         val showControls = shouldShowMapControls(
-            tvControls,
+            keepControlsForLayout,
             app.arranging,
             app.combinedOverlaysFloating,
             app.combinedOverlaysDocked,
         )
         val showLockControl = shouldShowMapLockControl(
             app.mapLocked,
-            tvControls,
+            app.isTv,
             lockControlTemporarilyVisible,
         )
         if (showControls && showLockControl) {
