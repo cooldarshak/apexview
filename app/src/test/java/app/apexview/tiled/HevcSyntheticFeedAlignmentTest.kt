@@ -29,14 +29,14 @@ class HevcSyntheticFeedAlignmentTest {
         val feedBParameterSets = parseSourceParameterSets(feedBBytes)
         // HEVC codes complete CTBs (64x64 here), so the coded height is padded to 544.
         // The SPS conformance window must expose the intended 960x540 display rectangle.
-        assertEquals(960, feedAParameterSets.second.displayWidth)
-        assertEquals(540, feedAParameterSets.second.displayHeight)
-        assertEquals(960, feedBParameterSets.second.displayWidth)
-        assertEquals(540, feedBParameterSets.second.displayHeight)
-        assertEquals(544, feedAParameterSets.second.height)
-        assertEquals(544, feedBParameterSets.second.height)
-        assertTrue("Feed A must be a 1x1 source picture", !feedAParameterSets.third.tilesEnabled)
-        assertTrue("Feed B must be a 1x1 source picture", !feedBParameterSets.third.tilesEnabled)
+        assertEquals(960, feedAParameterSets.sps.displayWidth)
+        assertEquals(540, feedAParameterSets.sps.displayHeight)
+        assertEquals(960, feedBParameterSets.sps.displayWidth)
+        assertEquals(540, feedBParameterSets.sps.displayHeight)
+        assertEquals(544, feedAParameterSets.sps.height)
+        assertEquals(544, feedBParameterSets.sps.height)
+        assertTrue("Feed A must be a 1x1 source picture", !feedAParameterSets.pps.tilesEnabled)
+        assertTrue("Feed B must be a 1x1 source picture", !feedBParameterSets.pps.tilesEnabled)
 
         val feedA = HevcStreamAlignmentAnalyzer.analyze(feedABytes)
         val feedB = HevcStreamAlignmentAnalyzer.analyze(feedBBytes)
@@ -74,16 +74,16 @@ class HevcSyntheticFeedAlignmentTest {
         val firstBytes = firstFile.readBytes()
         val secondBytes = secondFile.readBytes()
         val secondSets = parseSourceParameterSets(secondBytes)
-        val reidentified = rewriteFeedPpsId(secondBytes, secondSets.second, secondSets.third, 1)
+        val reidentified = rewriteFeedPpsId(secondBytes, secondSets.sps, secondSets.pps, 1)
         val reidentifiedSets = parseSourceParameterSets(reidentified)
-        assertEquals(0, parseSourceParameterSets(firstBytes).third.ppsId)
-        assertEquals(1, reidentifiedSets.third.ppsId)
-        assertEquals(reidentifiedSets.second.spsId, reidentifiedSets.third.spsId)
-        assertEquals(reidentifiedSets.first.vpsId, reidentifiedSets.second.vpsId)
+        assertEquals(0, parseSourceParameterSets(firstBytes).pps.ppsId)
+        assertEquals(1, reidentifiedSets.pps.ppsId)
+        assertEquals(reidentifiedSets.sps.spsId, reidentifiedSets.pps.spsId)
+        assertEquals(reidentifiedSets.vps.vpsId, reidentifiedSets.sps.vpsId)
 
         val parsedSlices = HevcBitstream.splitAnnexB(reidentified)
             .filter { it.type <= 31 }
-            .map { HevcSliceHeaderParser.parse(it.bytes, reidentifiedSets.second, reidentifiedSets.third) }
+            .map { HevcSliceHeaderParser.parse(it.bytes, reidentifiedSets.sps, reidentifiedSets.pps) }
         assertEquals(50, parsedSlices.size)
         assertTrue("Every rewritten slice must reference the rewritten PPS", parsedSlices.all { it.ppsId == 1 })
 
