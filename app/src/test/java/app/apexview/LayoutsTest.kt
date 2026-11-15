@@ -33,6 +33,20 @@ class LayoutsTest {
     }
 
     @Test
+    fun tileTestingUsesAnEvenTwoFeedGrid() {
+        for ((width, height) in listOf(1920f to 1080f, 1080f to 1920f, 1280f to 720f)) {
+            val slots = Layouts.place(LayoutMode.TILE_TEST, 2, width, height)
+            assertEquals(2, slots.size)
+            assertTrue(slots.all { it.x >= -0.5f && it.y >= -0.5f })
+            assertTrue(slots.none { a -> slots.any { b ->
+                a !== b && a.x < b.x + b.w - 1 && b.x < a.x + a.w - 1 &&
+                    a.y < b.y + b.h - 1 && b.y < a.y + a.h - 1
+            } })
+            assertTrue(slots.all { it.w > 0f && it.h > 0f })
+        }
+    }
+
+    @Test
     fun mapGetsRealSpaceNextToFourFeeds() {
         for (mode in LayoutMode.entries) {
             for ((sw, sh) in listOf(w to h, 2208f to 1840f, 1840f to 2208f)) {

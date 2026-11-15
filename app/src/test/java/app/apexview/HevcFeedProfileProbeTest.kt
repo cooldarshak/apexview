@@ -188,6 +188,34 @@ class HevcFeedProfileProbeTest {
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("secure-surface feasibility remain unverified"))
     }
     @Test
+    fun tileTestWaitsForAndComparesOnlyTheTwoSelectedChannels() {
+        val group = "content-manual-tile-test-44"
+        val format = Format.Builder()
+            .setSampleMimeType(MimeTypes.VIDEO_H265)
+            .setCodecs("hvc1.1.6.L93.B0")
+            .setWidth(960)
+            .setHeight(540)
+            .setFrameRate(50f)
+            .build()
+        HevcFeedProfileCapture.record(
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-1001", group)
+        )
+        HevcFeedProfileCapture.record(
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-1002", group)
+        )
+        HevcFeedProfileCapture.record(
+            HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-1003", group)
+        )
+        HevcFeedProfileCapture.selectTileTestFeeds(group, listOf("channel-1001", "channel-1003"))
+
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-1001"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-1003"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_FORMAT_MATCH"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_TILE_ASSEMBLER_GATE=INCOMPLETE"))
+        assertTrue(!HevcFeedProfileCapture.diagnostic.contains("channel-1002:"))
+    }
+
+    @Test
     fun reportsMissingCsdWithoutFailingPlaybackDiagnostics() {
         val format = Format.Builder()
             .setSampleMimeType(MimeTypes.VIDEO_H265)

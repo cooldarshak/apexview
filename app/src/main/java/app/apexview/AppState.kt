@@ -1316,7 +1316,8 @@ class AppState(
      */
     fun togglePick(channel: Channel) {
         val sheet = picker ?: return
-        val full = pickedCount(sheet) >= MAX_FEEDS
+        val selectionLimit = if (layoutMode == LayoutMode.TILE_TEST) 2 else MAX_FEEDS
+        val full = pickedCount(sheet) >= selectionLimit
         sheet.note = null
         when {
             isPlaying(sheet.contentId, channel) && channel in sheet.removing ->
@@ -1335,6 +1336,31 @@ class AppState(
     /** [fromStart]: a live session from the beginning of what F1 keeps, rather than at the live edge. */
     fun watchPicked(fromStart: Boolean = false) {
         val sheet = picker ?: return
+        if (layoutMode == LayoutMode.TILE_TEST) {
+            val count = pickedCount(sheet)
+            if (count != 2) {
+                sheet.note = "Tile testing needs exactly two feeds from this session. You have $count selected."
+                return
+            }
+            val labels = (
+                tiles.filter { it.contentId == sheet.contentId && it.channel !in sheet.removing }.map { it.channel } +
+                    sheet.selected
+                ).map { channel -> channel.channelId?.let { "channel-$it" } ?: "default-channel" }
+            if (labels.size != 2) {
+                sheet.note = "Choose exactly two different feeds from the same F1 session."
+                return
+            }
+            HevcFeedProfileCapture.selectTileTestFeeds("content-${sheet.contentId}", labels)
+            if (sheet.selected.isEmpty() && sheet.removing.isEmpty()) {
+                picker = null
+                browsing = false
+                handPlaced = false
+                layoutRequest++
+                message = "Tile test selected. Comparing the two chosen HEVC feeds."
+                showChrome()
+                return
+            }
+        }
         if (sheet.selected.isEmpty() && sheet.removing.isEmpty()) return
         // Silent tiles are swapped first, so the audio stays on the main broadcast.
         val freed = tiles.filter { it.contentId == sheet.contentId && it.channel in sheet.removing }
@@ -1809,7 +1835,7 @@ class AppState(
      */
     fun isMainTile(tile: Tile): Boolean {
         if (tiles.size == 1) return true
-        if (layoutMode == LayoutMode.GRID) return false
+        if (layoutMode == LayoutMode.GRID || layoutMode == LayoutMode.TILE_TEST) return false
         val big = tiles.firstOrNull { it.id == bigTileId } ?: tiles.maxByOrNull { it.w }
         return tile === big
     }
@@ -1951,6 +1977,31 @@ class AppState(
     /** Lays the feeds out afresh in [mode]. */
     fun chooseLayout(mode: LayoutMode) {
         mapGrabbed = false
+        if (mode == LayoutMode.TILE_TEST) {
+            val leader = leaderTile()
+            if (leader == null) {
+                message = "Start an F1 session first, then choose Tile testing."
+                showChrome()
+                return
+            }
+            if (tiles.any { it.contentId != leader.contentId }) {
+                message = "Tile testing compares two feeds from one F1 session. Close feeds from other sessions first."
+                showChrome()
+                return
+            }
+            layoutMode = LayoutMode.TILE_TEST
+            handPlaced = false
+            layoutRequest++
+            layoutSheetOpen = false
+            showChrome()
+            openPicker(
+                leader.contentId,
+                titles[leader.contentId].orEmpty().ifBlank { "Current F1 session" },
+                images[leader.contentId],
+                live = isLive,
+            )
+            return
+        }
         val enteringTvLayout = mode == LayoutMode.TV && layoutMode != LayoutMode.TV
         layoutMode = mode
         if (mode == LayoutMode.TV) {

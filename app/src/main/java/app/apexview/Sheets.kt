@@ -83,6 +83,8 @@ fun FeedPickerSheet(app: AppState, picker: FeedPicker) {
                 Text(picker.title, style = Type.title2)
                 Text(
                     picker.note ?: when {
+                        app.layoutMode == LayoutMode.TILE_TEST ->
+                            "Tile testing: select exactly two feeds from this session. Existing feeds are already selected. Unselect extras or add a second feed, then confirm."
                         app.singleFeedPlan -> "Your F1 TV plan may only play one feed at a time. Watching several at once needs F1 TV Premium."
                         app.tiles.isEmpty() -> "Pick up to 4. You can switch any of them while watching."
                         else -> "Feeds on screen are already picked. Unpick one to make room for another."
@@ -145,8 +147,12 @@ fun FeedPickerSheet(app: AppState, picker: FeedPicker) {
                 }
                 return@Column
             }
+            val tileTest = app.layoutMode == LayoutMode.TILE_TEST
+            val picked = app.pickedCount(picker)
             PrimaryButton(
                 when {
+                    tileTest && picked == 2 -> "Test these 2 feeds"
+                    tileTest -> "Choose exactly 2 feeds ($picked/2)"
                     adds == 0 && drops == 0 -> "Pick a feed"
                     app.tiles.isEmpty() -> if (adds == 1) "Watch 1 feed" else "Watch $adds feeds"
                     drops == 0 -> if (adds == 1) "Add 1 feed" else "Add $adds feeds"
@@ -154,7 +160,7 @@ fun FeedPickerSheet(app: AppState, picker: FeedPicker) {
                     else -> "Update feeds"
                 },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
-                enabled = adds > 0 || drops > 0,
+                enabled = if (tileTest) picker.channels != null && picked == 2 else adds > 0 || drops > 0,
                 onClick = { app.watchPicked() },
             )
         }

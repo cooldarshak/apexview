@@ -13,6 +13,7 @@ enum class LayoutMode(val label: String) {
     GRID("Grid"),
     /** Broadcast-style TV view: video left, timing tower top-right, track map below. */
     TV("TV"),
+    TILE_TEST("Tile testing"),
     /** The arrangement saved with Save layout; falls back to main + strip where there's none. */
     CUSTOM("My layout"),
 }
@@ -106,7 +107,7 @@ object Layouts {
 
     fun place(mode: LayoutMode, n: Int, width: Float, height: Float): List<Slot> = when {
         n == 0 -> emptyList()
-        mode == LayoutMode.GRID || n == 1 -> grid(n, 0f, 0f, width, height, center = true)
+        mode == LayoutMode.GRID || mode == LayoutMode.TILE_TEST || n == 1 -> grid(n, 0f, 0f, width, height, center = true)
         else -> featured(n, width, height)
     }
 

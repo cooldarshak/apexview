@@ -1370,6 +1370,8 @@ private fun LayoutSheet(app: AppState) {
                 when {
                     app.layoutMode == LayoutMode.TV ->
                         "Video fills the left two-thirds. The timing tower stays at the top-right, with the track map below. This is saved as the default for new sessions."
+                    app.layoutMode == LayoutMode.TILE_TEST ->
+                        "Choose exactly two feeds from the same F1 session. The feed picker opens so you can select them manually. The app compares their HEVC tile parameters and reports whether the current 2×1 test assembler accepts them. Normal playback remains unchanged."
                     hasSaved ->
                         "My layout is the one you saved for $n feed${if (n == 1) "" else "s"} with the phone ${app.wayUp}."
                     else ->

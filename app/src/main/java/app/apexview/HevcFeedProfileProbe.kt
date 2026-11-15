@@ -160,6 +160,7 @@ internal object HevcFeedProfileCapture {
     private val profiles = linkedMapOf<String, HevcFeedProfileProbe.Snapshot>()
     private val feedProgress = linkedMapOf<String, FeedProgress>()
     private var activeGroup: String? = null
+    private var tileTestLabels: List<String> = emptyList()
     var diagnostic by mutableStateOf("HEVC_PROFILE_WAITING_FOR_FEED_A_AND_FEED_B")
         private set
 
@@ -167,6 +168,7 @@ internal object HevcFeedProfileCapture {
         if (activeGroup != group) {
             profiles.clear()
             feedProgress.clear()
+            tileTestLabels = emptyList()
             activeGroup = group
         }
     }
@@ -175,6 +177,14 @@ internal object HevcFeedProfileCapture {
     fun registerFeed(group: String, label: String) {
         selectGroup(group)
         feedProgress.getOrPut(label) { FeedProgress() }
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun selectTileTestFeeds(group: String, labels: List<String>) {
+        selectGroup(group)
+        tileTestLabels = labels.distinct().take(2)
+        tileTestLabels.forEach { feedProgress.getOrPut(it) { FeedProgress() } }
         diagnostic = buildDiagnostic()
     }
 
@@ -201,7 +211,7 @@ internal object HevcFeedProfileCapture {
         )
         profiles.remove(snapshot.label)
         profiles[snapshot.label] = enriched
-        while (profiles.size > 2) profiles.remove(profiles.keys.first())
+        while (profiles.size > 8) profiles.remove(profiles.keys.first())
         while (feedProgress.size > 4) feedProgress.remove(feedProgress.keys.first())
         diagnostic = buildDiagnostic()
     }
@@ -314,7 +324,17 @@ internal object HevcFeedProfileCapture {
     }
 
     private fun buildDiagnostic(): String {
-        val captured = profiles.values.toList()
+        val captured = if (tileTestLabels.size == 2) {
+            val selected = tileTestLabels.mapNotNull(profiles::get)
+            if (selected.size < 2) {
+                return (listOf("TILE_TEST_WAITING_FOR_SELECTED_FEED_FORMATS") +
+                    tileTestLabels.map { label ->
+                        feedProgress.getOrPut(label) { FeedProgress() }
+                        progressLine(label)
+                    }).joinToString("\n")
+            }
+            selected
+        } else profiles.values.toList()
         if (captured.isEmpty()) {
             if (feedProgress.isEmpty()) return "HEVC_PROFILE_WAITING_FOR_FEED_A_AND_FEED_B"
             return (listOf("HEVC_PROFILE_WAITING_FOR_VIDEO_INPUT_FORMAT") +
