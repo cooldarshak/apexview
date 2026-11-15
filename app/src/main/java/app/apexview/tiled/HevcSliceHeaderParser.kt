@@ -229,9 +229,10 @@ internal class HevcPocTracker {
         }
         val poc = pocMsb + current
 
-        // prevTid0Pic excludes every sub-layer non-reference (SLNR) picture, not only RADL/RASL.
-        val isSlnr = nalUnitType in setOf(0, 2, 4, 6, 8, 10, 12, 14)
-        if (temporalIdPlus1 == 1 && !isSlnr) {
+        // prevTid0Pic excludes all RADL/RASL pictures plus every SLNR picture.
+        // RADL_R/RASL_R are reference pictures, but are still excluded from the POC anchor.
+        val excludedFromTid0Anchor = nalUnitType in setOf(0, 2, 4, 6, 7, 8, 9, 10, 12, 14)
+        if (temporalIdPlus1 == 1 && !excludedFromTid0Anchor) {
             previousTid0PocMsb = pocMsb
             previousTid0PocLsb = current
         }
