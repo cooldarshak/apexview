@@ -213,7 +213,10 @@ class FeedPlayer(
                         HevcFeedProfileCapture.shouldCaptureCmaf(stream.profileGroup, stream.profileLabel)
                     },
                     onCmafResponse = { bytes ->
-                        val report = runCatching { CmafBoxInspector.inspect(bytes) }.getOrNull()
+                        val initReport = HevcFeedProfileCapture.cmafInitializationReport(
+                            stream.profileGroup, stream.profileLabel
+                        )
+                        val report = runCatching { CmafBoxInspector.inspect(bytes, initReport) }.getOrNull()
                         if (report == null) {
                             HevcFeedProfileCapture.recordCmafParseFailure(stream.profileGroup, stream.profileLabel)
                         } else {
