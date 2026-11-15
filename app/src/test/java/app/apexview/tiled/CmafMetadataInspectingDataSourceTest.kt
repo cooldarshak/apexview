@@ -16,23 +16,21 @@ import java.io.IOException
 class CmafMetadataInspectingDataSourceTest {
 
     @Test
-    fun passesThroughBytesAndInspectsIsoBmffResponse() {
+    fun passesThroughBytesAndInspectsInitResponse() {
         val input = ftypBox()
-        val upstream = ByteArrayDataSource(input)
         var observedBrand: String? = null
         var captures = 0
-        val source = CmafMetadataInspectingDataSource(
-            upstream = upstream,
-            shouldCapture = { true },
+        val source = source(
+            input,
+            shouldCaptureInit = { true },
+            shouldCaptureMedia = { false },
             onCmafResponse = { bytes ->
                 captures++
                 observedBrand = CmafBoxInspector.inspect(bytes).majorBrand
             }
         )
 
-        val output = readAll(source, input.size)
-
-        assertArrayEquals(input, output)
+        assertArrayEquals(input, readAll(source, input.size))
         assertEquals(1, captures)
         assertEquals("isom", observedBrand)
     }
@@ -41,9 +39,10 @@ class CmafMetadataInspectingDataSourceTest {
     fun ignoresNonIsoBmffResponses() {
         val input = "#EXTM3U\n#EXT-X-VERSION:7\n".toByteArray()
         var captures = 0
-        val source = CmafMetadataInspectingDataSource(
-            upstream = ByteArrayDataSource(input),
-            shouldCapture = { true },
+        val source = source(
+            input,
+            shouldCaptureInit = { true },
+            shouldCaptureMedia = { true },
             onCmafResponse = { captures++ }
         )
 
@@ -52,13 +51,44 @@ class CmafMetadataInspectingDataSourceTest {
     }
 
     @Test
-    fun oversizedResponseIsSkippedWithoutChangingPlaybackBytes() {
+    fun capturesMediaOnlyWhenExplicitlySelected() {
+        val input = stypBox()
+        var captures = 0
+        val source = source(
+            input,
+            shouldCaptureInit = { true },
+            shouldCaptureMedia = { true },
+            onCmafResponse = { captures++ }
+        )
+
+        assertArrayEquals(input, readAll(source, input.size))
+        assertEquals(1, captures)
+    }
+
+    @Test
+    fun ignoresMediaWhenTileTestIsNotSelected() {
+        val input = stypBox()
+        var captures = 0
+        val source = source(
+            input,
+            shouldCaptureInit = { true },
+            shouldCaptureMedia = { false },
+            onCmafResponse = { captures++ }
+        )
+
+        assertArrayEquals(input, readAll(source, input.size))
+        assertEquals(0, captures)
+    }
+
+    @Test
+    fun oversizedInitResponseIsSkippedWithoutChangingPlaybackBytes() {
         val input = ftypBox() + ByteArray(64)
         var captures = 0
         var skipped = 0
-        val source = CmafMetadataInspectingDataSource(
-            upstream = ByteArrayDataSource(input),
-            shouldCapture = { true },
+        val source = source(
+            input,
+            shouldCaptureInit = { true },
+            shouldCaptureMedia = { false },
             onCmafResponse = { captures++ },
             onCaptureSkipped = { skipped++ },
             maxCaptureBytes = 16
@@ -70,18 +100,35 @@ class CmafMetadataInspectingDataSourceTest {
     }
 
     @Test
-    fun disabledCaptureDoesNotObserveResponse() {
+    fun disabledInitCaptureDoesNotObserveResponse() {
         val input = ftypBox()
         var captures = 0
-        val source = CmafMetadataInspectingDataSource(
-            upstream = ByteArrayDataSource(input),
-            shouldCapture = { false },
+        val source = source(
+            input,
+            shouldCaptureInit = { false },
+            shouldCaptureMedia = { false },
             onCmafResponse = { captures++ }
         )
 
         assertArrayEquals(input, readAll(source, input.size))
         assertEquals(0, captures)
     }
+
+    private fun source(
+        bytes: ByteArray,
+        shouldCaptureInit: () -> Boolean,
+        shouldCaptureMedia: () -> Boolean,
+        onCmafResponse: (ByteArray) -> Unit,
+        onCaptureSkipped: () -> Unit = {},
+        maxCaptureBytes: Int = 8 * 1024 * 1024
+    ) = CmafMetadataInspectingDataSource(
+        upstream = ByteArrayDataSource(bytes),
+        shouldCaptureInit = shouldCaptureInit,
+        shouldCaptureMedia = shouldCaptureMedia,
+        onCmafResponse = onCmafResponse,
+        onCaptureSkipped = onCaptureSkipped,
+        maxCaptureBytes = maxCaptureBytes
+    )
 
     private fun readAll(source: DataSource, expectedSize: Int): ByteArray {
         source.open(DataSpec.Builder().setUri(Uri.parse("https://example.invalid/segment.m4s")).build())
@@ -100,8 +147,12 @@ class CmafMetadataInspectingDataSourceTest {
         return output
     }
 
-    private fun ftypBox(): ByteArray = byteArrayOf(
-        0, 0, 0, 16, 'f'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte(),
+    private fun ftypBox(): ByteArray = box("ftyp")
+    private fun stypBox(): ByteArray = box("styp")
+
+    private fun box(type: String): ByteArray = byteArrayOf(
+        0, 0, 0, 16,
+        type[0].code.toByte(), type[1].code.toByte(), type[2].code.toByte(), type[3].code.toByte(),
         'i'.code.toByte(), 's'.code.toByte(), 'o'.code.toByte(), 'm'.code.toByte(),
         0, 0, 0, 0
     )
