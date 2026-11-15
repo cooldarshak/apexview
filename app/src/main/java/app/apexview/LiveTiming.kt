@@ -573,11 +573,31 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         // Publish the tower as soon as its core data is ready. Track positions can be a much larger
         // archive download on Android TV, and must not keep the timing tower blank while they load.
         val initialStart = parseStreamStart(heartbeat)
-        val initialStates = timingStream?.let { runCatching { parseStates(it, initialStart) }.getOrNull() }
-            ?: StateParse(emptyMap(), emptyList())
-        val initialLaps = timingStream?.let {
-            runCatching { DriverTimingParser.parse(it, initialStart, timingF1Stream) }.getOrNull()
-        }.orEmpty()
+        val initialStates = if (timingStream == null) {
+            progress("SKIP TimingData.jsonStream · file unavailable; tower will have no lap-state history")
+            StateParse(emptyMap(), emptyList())
+        } else {
+            try {
+                parseStates(timingStream, initialStart).also {
+                    progress("PARSED TimingData.jsonStream · ${it.states.size} driver state histories")
+                }
+            } catch (e: Exception) {
+                progress("PARSE FAIL TimingData.jsonStream · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                StateParse(emptyMap(), emptyList())
+            }
+        }
+        val initialLaps = if (timingStream == null) {
+            emptyMap()
+        } else {
+            try {
+                DriverTimingParser.parse(timingStream, initialStart, timingF1Stream).also {
+                    progress("PARSED lap timing · ${it.size} drivers")
+                }
+            } catch (e: Exception) {
+                progress("PARSE FAIL lap timing · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                emptyMap()
+            }
+        }
         publish(
             SessionTiming(
                 type = type,
@@ -602,11 +622,26 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         // Heartbeat anchors the stream clock. Some sessions have bad offsets; the cars' own
         // timestamps win when they disagree with it by more than a minute.
         val streamStart = streamStart(heartbeat, positions)
-        val parsed = timingStream?.let { runCatching { parseStates(it, streamStart) }.getOrNull() }
-            ?: StateParse(emptyMap(), emptyList())
-        val laps = timingStream?.let {
-            runCatching { DriverTimingParser.parse(it, streamStart, timingF1Stream) }.getOrNull()
-        }.orEmpty()
+        val parsed = if (timingStream == null) {
+            StateParse(emptyMap(), emptyList())
+        } else {
+            try {
+                parseStates(timingStream, streamStart)
+            } catch (e: Exception) {
+                progress("PARSE FAIL lap states with corrected clock · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                StateParse(emptyMap(), emptyList())
+            }
+        }
+        val laps = if (timingStream == null) {
+            emptyMap()
+        } else {
+            try {
+                DriverTimingParser.parse(timingStream, streamStart, timingF1Stream)
+            } catch (e: Exception) {
+                progress("PARSE FAIL lap timing with corrected clock · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                emptyMap()
+            }
+        }
 
         val built = tracks.mapValues { it.value.build() }
         val traced = traceOutline(tracks.values.toList())
@@ -630,7 +665,6 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             )
         )
 
-        progress("Loading circuit details…")
         progress("Loading circuit outline and corner metadata…")
         val circuitStarted = android.os.SystemClock.elapsedRealtime()
         val circuit = ref.circuitKey?.let { runCatching { fetchCircuit(it, ref.year) }.getOrNull() }
@@ -668,7 +702,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         val control = fetchOptionalStage(path + "RaceControlMessages.jsonStream")
         val chequered = control?.let { runCatching { parseChequered(it, streamStart) }.getOrNull() }
         // Restart times come in the track's local time; the session's offset from GMT turns them to UTC.
-        val gmtOffset = runCatching { JSONObject(fetch(path + "SessionInfo.json")).optString("GmtOffset") }.getOrNull()
+        val gmtOffset = fetchOptionalStage(path + "SessionInfo.json")?.let {
+            runCatching { JSONObject(it).optString("GmtOffset") }.getOrNull()
+        }
         val flags = TrackFlags(
             control?.let { runCatching { parseSectorFlags(it, streamStart) }.getOrNull() }.orEmpty(),
             fetchOptionalStage(path + "TrackStatus.jsonStream")?.let {
