@@ -69,6 +69,19 @@ class HevcFragmentCompatibilityTest {
         assertFalse(result.compatible)
     }
 
+    @Test fun rejectsAlternateSampleDescriptionIndexesEvenWhenBothTracksExposeTheSameSampleEntry() {
+        val first = fragment(90000, 9000, listOf(
+            CmafBoxInspector.SampleTiming(9000, 9120, 3000, 120)
+        )).copy(sampleDescriptionIndex = 2)
+        val second = first.copy()
+        val result = HevcFragmentCompatibility.compare(
+            track(90000).copy(sampleDescriptionCount = 2), first,
+            track(90000).copy(sampleDescriptionCount = 2), second
+        )
+        assertTrue(result.reasons.any { it.contains("Alternate sample-description metadata") })
+        assertFalse(result.compatible)
+    }
+
     @Test fun rejectsDifferentRawParameterSetNalsEvenWhenParsedMetadataIsUnavailable() {
         val firstConfig = config(listOf("vps:aa", "sps:bb", "pps:cc"))
         val secondConfig = config(listOf("vps:aa", "sps:bb", "pps:dd"))

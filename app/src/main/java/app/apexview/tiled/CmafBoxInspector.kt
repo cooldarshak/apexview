@@ -123,7 +123,9 @@ internal object CmafBoxInspector {
         val sampleAuxiliaryMetadata: SampleAuxiliaryMetadata? = null,
         val sampleGroupEncryptionPresent: Boolean = false,
         val sampleGroupEncryptionStructureComplete: Boolean = true,
-        val sampleGroupEncryptionMetadata: SampleGroupEncryptionMetadata? = null
+        val sampleGroupEncryptionMetadata: SampleGroupEncryptionMetadata? = null,
+        /** Effective 1-based stsd entry selected by tfhd or trex, when known. */
+        val sampleDescriptionIndex: Long? = null
     )
     data class TrackMetadata(
         val trackId: Long?,
@@ -143,7 +145,9 @@ internal object CmafBoxInspector {
         val sampleGroupDescriptionPresent: Boolean,
         val sampleToGroupPresent: Boolean,
         val seigSampleGroupDescription: SampleGroupDescriptionMetadata? = null,
-        val seigSampleGroupDescriptionStructureComplete: Boolean = true
+        val seigSampleGroupDescriptionStructureComplete: Boolean = true,
+        /** Number of entries in stsd. The inspector currently parses entry 1 only. */
+        val sampleDescriptionCount: Int = 1
     )
     data class Report(
         val majorBrand: String?,
@@ -216,11 +220,17 @@ internal object CmafBoxInspector {
         var sampleEntry: String? = null
         var width: Int? = null
         var height: Int? = null
+        var sampleDescriptionCount = 0
         if (stsdBox != null) {
             val stsd = payload(data, stsdBox)
-            // FullBox header (4) + entry_count (4) + sample_entry size (4).
-            if (stsd.remaining() >= 16) {
-                stsd.position(stsd.position() + 8)
+            // FullBox header (4) + entry_count (4) + first sample-entry header (8).
+            if (stsd.remaining() >= 8) {
+                stsd.position(stsd.position() + 4)
+                val entryCount = u32(stsd)
+                require(entryCount <= 256L) { "stsd entry count exceeds inspector limit" }
+                sampleDescriptionCount = entryCount.toInt()
+                if (entryCount > 0) {
+                    require(stsd.remaining() >= 8) { "stsd is missing its first sample entry" }
                 val entrySize = stsd.int.toLong() and 0xffffffffL
                 sampleEntry = readFourCc(stsd)
                 if (handler == "vide" && sampleEntry in setOf("avc1", "avc3", "hvc1", "hev1", "encv", "dvhe", "dvh1")) {
@@ -244,6 +254,7 @@ internal object CmafBoxInspector {
                         val entryChildren = parseBoxes(data, childStart, entryEnd, 1, intArrayOf(0), errors)
                         all += entryChildren.flatMap { flatten(it) }
                     }
+                }
                 }
             }
         }
@@ -297,7 +308,8 @@ internal object CmafBoxInspector {
             hevcConfiguration, trackEncryption,
             all.any { it.type == "senc" }, all.any { it.type == "saiz" }, all.any { it.type == "saio" },
             all.any { it.type == "sgpd" }, all.any { it.type == "sbgp" },
-            trackSeigDescriptions.singleOrNull(), trackSeigStructureComplete
+            trackSeigDescriptions.singleOrNull(), trackSeigStructureComplete,
+            sampleDescriptionCount = sampleDescriptionCount
         )
     }
 
@@ -305,12 +317,14 @@ internal object CmafBoxInspector {
         val trackId: Long,
         val baseDataOffset: Long?,
         val defaultBaseIsMoof: Boolean,
+        val sampleDescriptionIndex: Long?,
         val defaultSampleDuration: Long?,
         val defaultSampleSize: Long?,
         val durationIsEmpty: Boolean
     )
 
     private data class TrexDefaults(
+        val defaultSampleDescriptionIndex: Long,
         val defaultSampleDuration: Long?,
         val defaultSampleSize: Long?
     )
@@ -344,12 +358,13 @@ internal object CmafBoxInspector {
                 require(version == 0 && flags == 0) { "Unsupported trex FullBox header" }
                 val trackId = u32(p)
                 require(trackId > 0) { "Invalid trex track ID" }
-                skip(p, 4) // default_sample_description_index
+                val defaultSampleDescriptionIndex = u32(p)
+                require(defaultSampleDescriptionIndex > 0) { "Invalid trex default sample-description index" }
                 val defaultDuration = u32(p).takeIf { it > 0 }
                 val defaultSize = u32(p).takeIf { it > 0 }
                 skip(p, 4) // default_sample_flags
                 require(!p.hasRemaining()) { "Unexpected trailing bytes in trex box" }
-                defaults[trackId] = TrexDefaults(defaultDuration, defaultSize)
+                defaults[trackId] = TrexDefaults(defaultSampleDescriptionIndex, defaultDuration, defaultSize)
             } catch (e: Exception) {
                 errors += "Track defaults could not be parsed: ${e.message ?: e.javaClass.simpleName}"
             }
@@ -376,6 +391,18 @@ internal object CmafBoxInspector {
         val trex = trexDefaults[tfhd.trackId]
         val defaultDuration = tfhd.defaultSampleDuration ?: trex?.defaultSampleDuration
         val defaultSampleSize = tfhd.defaultSampleSize ?: trex?.defaultSampleSize
+        val sampleDescriptionIndex = tfhd.sampleDescriptionIndex ?: trex?.defaultSampleDescriptionIndex
+        val selectedDescriptionCount = trackMetadataById[tfhd.trackId]?.sampleDescriptionCount ?: 0
+        if (sampleDescriptionIndex == null) {
+            errors += "Fragment sample-description index is unavailable from tfhd/trex"
+        } else {
+            if (selectedDescriptionCount > 0 && sampleDescriptionIndex > selectedDescriptionCount.toLong()) {
+                errors += "Fragment sample-description index exceeds the track stsd entry count"
+            }
+            if (sampleDescriptionIndex != 1L) {
+                errors += "Alternate sample-description index $sampleDescriptionIndex is not parsed by this inspector"
+            }
+        }
         val truns = traf.children.filter { it.type == "trun" }
         if (tfhd.durationIsEmpty) {
             require(truns.isEmpty()) { "duration-is-empty traf must not contain trun boxes" }
@@ -550,7 +577,8 @@ internal object CmafBoxInspector {
             sampleAuxiliaryMetadata = sampleAuxiliaryMetadata,
             sampleGroupEncryptionPresent = sampleGroupEncryption.present,
             sampleGroupEncryptionStructureComplete = sampleGroupEncryption.complete,
-            sampleGroupEncryptionMetadata = sampleGroupEncryption.metadata
+            sampleGroupEncryptionMetadata = sampleGroupEncryption.metadata,
+            sampleDescriptionIndex = sampleDescriptionIndex
         )
     }
 
@@ -668,13 +696,15 @@ internal object CmafBoxInspector {
             "tfhd cannot set both base-data-offset-present and default-base-is-moof"
         }
         val baseDataOffset = if (baseDataOffsetPresent) readUnsignedLong(p) else null
-        if ((flags and 0x000002) != 0) skip(p, 4) // sample_description_index
+        val sampleDescriptionIndex = if ((flags and 0x000002) != 0) {
+            u32(p).also { require(it > 0) { "Invalid tfhd sample-description index" } }
+        } else null
         val defaultDuration = if ((flags and 0x000008) != 0) u32(p).takeIf { it > 0 } else null
         val defaultSampleSize = if ((flags and 0x000010) != 0) u32(p).takeIf { it > 0 } else null
         if ((flags and 0x000020) != 0) skip(p, 4) // default_sample_flags
         require(!p.hasRemaining()) { "Unexpected trailing bytes in tfhd box" }
         return TfhdDefaults(
-            trackId, baseDataOffset, defaultBaseIsMoof,
+            trackId, baseDataOffset, defaultBaseIsMoof, sampleDescriptionIndex,
             defaultDuration, defaultSampleSize, (flags and 0x010000) != 0
         )
     }

@@ -67,6 +67,7 @@ class CmafBoxInspectorTest {
         val timing = report.fragments.single()
         assertEquals(7L, timing.trackId)
         assertEquals(90000L, timing.timescale)
+        assertEquals(1L, timing.sampleDescriptionIndex)
         assertEquals(9000L, timing.baseDecodeTimeTicks)
         assertEquals(2, timing.sampleCount)
         assertEquals(6000L, timing.totalDurationTicks)
@@ -268,6 +269,21 @@ class CmafBoxInspectorTest {
         val fragment = report.fragments.single()
         assertFalse(fragment.sampleAuxiliaryInfoStructureComplete)
         assertTrue(report.errors.any { it.contains("saiz/saio structure") })
+    }
+
+    @Test fun reportsTrackSampleDescriptionCountAndSelectedTfhdEntry() {
+        val init = fragmentedInitSegment(
+            trackId = 74, timescale = 90000, sampleDescriptionCopies = 2
+        )
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,2) + int(74) + int(2))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(1) + int(3000))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun))
+        )
+        assertEquals(2, report.tracks.single().sampleDescriptionCount)
+        assertEquals(2L, report.fragments.single().sampleDescriptionIndex)
+        assertTrue(report.errors.any { it.contains("Alternate sample-description index 2") })
     }
 
     @Test fun acceptsDefaultBaseIsMoofTfhdFlagAndReadsFragmentTiming() {
@@ -733,7 +749,8 @@ class CmafBoxInspectorTest {
         timescale: Int,
         includeTrex: Boolean = true,
         includeEncryption: Boolean = false,
-        trackSeig: ByteArray = ByteArray(0)
+        trackSeig: ByteArray = ByteArray(0),
+        sampleDescriptionCopies: Int = 1
     ): ByteArray {
         val tkhd = box("tkhd", byteArrayOf(0,0,0,7) +
             int(0) + int(0) + int(trackId) + int(0) + ByteArray(60))
@@ -751,7 +768,9 @@ class CmafBoxInspectorTest {
         } else {
             visualSampleEntry("hvc1", 1920, 1080)
         }
-        val stsd = box("stsd", byteArrayOf(0,0,0,0) + int(1) + sampleEntry)
+        require(sampleDescriptionCopies > 0)
+        val stsd = box("stsd", byteArrayOf(0,0,0,0) + int(sampleDescriptionCopies) +
+            ByteArray(sampleDescriptionCopies).fold(ByteArray(0)) { acc, _ -> acc + sampleEntry })
         val minf = box("minf", box("stbl", stsd + trackSeig))
         val trak = box("trak", tkhd + box("mdia", mdhd + hdlr + minf))
         val mvex = if (includeTrex) box("mvex", box("trex",

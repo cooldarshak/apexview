@@ -31,6 +31,23 @@ internal object HevcFragmentCompatibility {
             firstTrack.originalFormat != secondTrack.originalFormat) {
             reasons += "Track sample-entry formats differ"
         }
+        if (firstFragment.sampleDescriptionIndex == null || secondFragment.sampleDescriptionIndex == null) {
+            reasons += "Effective fragment sample-description index is missing"
+        } else {
+            if (firstFragment.sampleDescriptionIndex != secondFragment.sampleDescriptionIndex) {
+                reasons += "Fragment sample-description indices differ"
+            }
+            if (firstFragment.sampleDescriptionIndex != 1L || secondFragment.sampleDescriptionIndex != 1L) {
+                reasons += "Alternate sample-description metadata is not parsed for stitching"
+            }
+            if (firstFragment.sampleDescriptionIndex > firstTrack.sampleDescriptionCount ||
+                secondFragment.sampleDescriptionIndex > secondTrack.sampleDescriptionCount) {
+                reasons += "Fragment selects a sample-description index outside stsd"
+            }
+        }
+        if (firstTrack.sampleDescriptionCount <= 0 || secondTrack.sampleDescriptionCount <= 0) {
+            reasons += "Track sample-description count is missing"
+        }
         if (firstTrack.width != secondTrack.width || firstTrack.height != secondTrack.height) {
             reasons += "Track display dimensions differ"
         }
