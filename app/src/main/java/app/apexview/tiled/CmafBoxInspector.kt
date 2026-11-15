@@ -264,7 +264,9 @@ internal object CmafBoxInspector {
         var trackSeigStructureComplete = true
         all.filter { it.type == "sgpd" }.forEach { box ->
             try {
-                parseSeigSgpd(payload(data, box))?.let(trackSeigDescriptions::add)
+                parseSeigSgpd(payload(data, box))?.let { description ->
+                    trackSeigDescriptions.add(description)
+                }
             } catch (e: Exception) {
                 trackSeigStructureComplete = false
                 errors += "Track-level seig sample-group descriptions could not be parsed"
