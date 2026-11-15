@@ -56,17 +56,22 @@ internal object HevcTileStreamAssembler {
             !pps.sliceSegmentHeaderExtensionPresent && !pps.extensionPresent) {
             "PPS contains unsupported extension or slice-header tools"
         }
-        require(pps.tileColumnWidthsInCtbs.size == 2 &&
-            pps.tileRowHeightsInCtbs.size == 1) {
+        val tileColumnWidths = requireNotNull(pps.tileColumnWidthsInCtbs) {
+            "PPS tile column geometry is missing"
+        }
+        val tileRowHeights = requireNotNull(pps.tileRowHeightsInCtbs) {
+            "PPS tile row geometry is missing"
+        }
+        require(tileColumnWidths.size == 2 && tileRowHeights.size == 1) {
             "Parsed tile dimensions do not match a 2x1 grid"
         }
-        require(pps.tileColumnWidthsInCtbs[0] == pps.tileColumnWidthsInCtbs[1] &&
-            pps.tileColumnWidthsInCtbs.sum() == sps.picWidthInCtbs &&
-            pps.tileRowHeightsInCtbs.single() == sps.picHeightInCtbs) {
+        require(tileColumnWidths[0] == tileColumnWidths[1] &&
+            tileColumnWidths.sum() == sps.picWidthInCtbs &&
+            tileRowHeights.single() == sps.picHeightInCtbs) {
             "Only a uniform, full-picture 2x1 CTB layout is supported"
         }
 
-        val expectedRightAddress = pps.tileColumnWidthsInCtbs[0]
+        val expectedRightAddress = tileColumnWidths[0]
         val output = ByteArrayOutputStream()
         left.parameterSets.forEach { appendNal(output, it.bytes) }
         val addresses = ArrayList<Pair<Int, Int>>(left.vcl.size)
