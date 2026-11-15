@@ -228,6 +228,26 @@ def main():
             )
             raise RuntimeError(f"Reassembled frame hashes differ; first mismatch: {first_difference}")
 
+        # Package the clear synthetic elementary stream in MP4 so an Android instrumentation
+        # test can pass it through MediaExtractor and exactly one MediaCodec decoder instance.
+        decoder_sample = output / "reassembled.mp4"
+        run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-r", str(FRAME_RATE), "-f", "hevc", "-i", str(reassembled),
+            "-frames:v", str(FRAME_COUNT), "-c:v", "copy", "-tag:v", "hvc1",
+            "-r", str(FRAME_RATE), str(decoder_sample)
+        ])
+        probe = run([
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name,width,height,nb_frames",
+            "-of", "json", str(decoder_sample)
+        ])
+        streams = json.loads(probe.stdout).get("streams", [])
+        if len(streams) != 1 or streams[0].get("codec_name") != "hevc":
+            raise RuntimeError("Could not package a single HEVC video track for MediaCodec proof")
+        if streams[0].get("width") != FRAME_WIDTH or streams[0].get("height") != FRAME_HEIGHT:
+            raise RuntimeError(f"Unexpected MediaCodec proof dimensions: {streams[0]}")
+
         left_nals = annexb_nals(left_feed.read_bytes())
         right_nals = annexb_nals(right_feed.read_bytes())
         metadata = {
@@ -249,6 +269,8 @@ def main():
             "left_feed_vcl_nals": sum(1 for t, _ in left_nals if t <= 31),
             "right_feed_vcl_nals": sum(1 for t, _ in right_nals if t <= 31),
             "reassembled_decoded_frames": len(reassembled_hashes),
+            "media_codec_test_asset": decoder_sample.name,
+            "media_codec_test_asset_bytes": decoder_sample.stat().st_size,
             "decoded_frame_hashes_match_source": True,
             "note": (
                 "Two complementary tile-slice streams were separated from the same encoded "
