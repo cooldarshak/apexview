@@ -138,7 +138,7 @@ class HevcSliceHeaderParserTest {
     fun doesNotUseTrailNonReferencePicturesAsPocAnchors() {
         val tracker = HevcPocTracker()
         assertEquals(100L, tracker.derive(1, 1, 100, 8))
-        assertEquals(250L, tracker.derive(0, 1, 250, 8)) // TRAIL_N is SLNR
+        assertEquals(-6L, tracker.derive(0, 1, 250, 8)) // wraps against the prior reference anchor
         assertEquals(101L, tracker.derive(1, 1, 101, 8))
     }
 
