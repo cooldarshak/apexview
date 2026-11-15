@@ -111,6 +111,10 @@ internal object HevcParameterSets {
         val dependentSliceSegmentsEnabled: Boolean,
         val outputFlagPresent: Boolean,
         val extraSliceHeaderBits: Int,
+        val cabacInitPresent: Boolean,
+        val numRefIdxL0DefaultActiveMinus1: Int,
+        val numRefIdxL1DefaultActiveMinus1: Int,
+        val sliceChromaQpOffsetsPresent: Boolean,
         val tilesEnabled: Boolean,
         val entropyCodingSyncEnabled: Boolean,
         val uniformTileSpacing: Boolean?,
@@ -398,16 +402,16 @@ internal object HevcParameterSets {
         val outputFlag = bits.readBit() != 0
         val extraHeaderBits = bits.readBits(3)
         bits.readBit() // sign_data_hiding_enabled_flag
-        bits.readBit() // cabac_init_present_flag
-        readUe(bits, 14, "num_ref_idx_l0_default_active_minus1")
-        readUe(bits, 14, "num_ref_idx_l1_default_active_minus1")
+        val cabacInitPresent = bits.readBit() != 0
+        val numRefIdxL0Default = readUe(bits, 14, "num_ref_idx_l0_default_active_minus1")
+        val numRefIdxL1Default = readUe(bits, 14, "num_ref_idx_l1_default_active_minus1")
         bits.readSignedExpGolomb() // init_qp_minus26
         bits.readBit() // constrained_intra_pred_flag
         bits.readBit() // transform_skip_enabled_flag
         if (bits.readBit() != 0) readUe(bits, 6, "diff_cu_qp_delta_depth")
         bits.readSignedExpGolomb() // pps_cb_qp_offset
         bits.readSignedExpGolomb() // pps_cr_qp_offset
-        bits.readBit() // pps_slice_chroma_qp_offsets_present_flag
+        val sliceChromaQpOffsetsPresent = bits.readBit() != 0
         val weightedPred = bits.readBit() != 0
         val weightedBipred = bits.readBit() != 0
         val transquantBypass = bits.readBit() != 0
@@ -467,7 +471,9 @@ internal object HevcParameterSets {
         val extensionPresent = bits.readBit() != 0
         val extensionFlags = if (extensionPresent) bits.readBits(8) else null
 
-        return PpsMetadata(ppsId, spsId, dependentSlices, outputFlag, extraHeaderBits,
+        return PpsMetadata(
+            ppsId, spsId, dependentSlices, outputFlag, extraHeaderBits,
+            cabacInitPresent, numRefIdxL0Default, numRefIdxL1Default, sliceChromaQpOffsetsPresent,
             tilesEnabled, entropySync, uniform, numColumns, numRows, explicitColumns, explicitRows,
             columnWidths, rowHeights, loopFilter, weightedPred, weightedBipred, transquantBypass,
             loopFilterAcrossSlices, deblockingControlPresent, deblockingOverride, deblockingDisabled,
