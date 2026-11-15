@@ -90,7 +90,7 @@ class HevcFragmentCompatibilityTest {
 
         assertTrue(result.reasons.any { it.contains("Fragment timing is incomplete") })
         assertTrue(result.reasons.any { it.contains("Default KID identity has not been compared") })
-        assertTrue(result.reasons.any { it.contains("Per-sample IV and subsample encryption maps") })
+        assertTrue(result.reasons.any { it.contains("Per-sample IV/subsample encryption structure is incomplete") })
     }
 
     private fun track(timescale: Long, encrypted: Boolean = false) =

@@ -97,6 +97,27 @@ class CmafBoxInspectorTest {
     }
 
 
+
+    @Test fun parsesSencOverrideIvSizeAndSkipsKidBytes() {
+        val init = fragmentedInitSegment(trackId = 22, timescale = 90000)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(22))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(1) + int(3000))
+        val sencOverride = byteArrayOf(0,0,1,0) + byteArrayOf(1,2,3,8) +
+            ByteArray(16) + int(1) + ByteArray(8)
+        val senc = box("senc", sencOverride)
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) + box("traf", tfhd + tfdt + trun + senc))
+        )
+        val fragment = report.fragments.single()
+
+        assertTrue(report.errors.toString(), report.errors.isEmpty())
+        assertTrue(fragment.sampleEncryptionStructureComplete)
+        assertEquals(8, fragment.sencOverrideIvSize)
+        assertEquals(listOf(8), fragment.sampleEncryptionMetadata.map { it.ivSize })
+        assertEquals(listOf(null), fragment.sampleEncryptionMetadata.map { it.subsampleRanges })
+    }
+
     @Test fun doesNotGuessSampleIvLengthsWhenTencDefaultsAreMissing() {
         val init = fragmentedInitSegment(trackId = 21, timescale = 90000)
         val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(21))
