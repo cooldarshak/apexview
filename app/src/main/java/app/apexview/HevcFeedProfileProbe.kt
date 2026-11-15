@@ -146,9 +146,8 @@ internal object HevcFeedProfileProbe {
 
 
 /**
- * Volatile, in-memory comparison of the last two authorised feed observations from one F1 content
- * session. It holds sanitised codec metadata only. It is not a CMAF/encryption compatibility or
- * secure-surface feasibility result.
+ * Volatile, in-memory comparison of sanitised codec and CMAF metadata from one F1 content session.
+ * It is not proof of encrypted-stream stitching or secure-surface feasibility.
  */
 internal object HevcFeedProfileCapture {
     private data class FeedProgress(
