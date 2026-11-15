@@ -40,6 +40,35 @@ class HevcFragmentCompatibilityTest {
         assertTrue(result.reasons.any { it.contains("sample 0 composition offset differs") })
     }
 
+    @Test fun rejectsFragmentTimescaleThatDisagreesWithInitTrack() {
+        val first = fragment(45000, 4500, listOf(
+            CmafBoxInspector.SampleTiming(4500, 4560, 1500, 60)
+        ))
+        val second = fragment(90000, 9000, listOf(
+            CmafBoxInspector.SampleTiming(9000, 9120, 3000, 120)
+        ))
+        val result = HevcFragmentCompatibility.compare(
+            track(90000), first, track(90000), second
+        )
+
+        assertTrue(result.reasons.any { it.contains("First fragment timescale") })
+        assertFalse(result.compatible)
+    }
+
+    @Test fun rejectsMissingInitTrackIdentityAndDurationEmptyFragments() {
+        val timed = fragment(90000, 9000, listOf(
+            CmafBoxInspector.SampleTiming(9000, 9120, 3000, 120)
+        ))
+        val empty = timed.copy(durationIsEmpty = true)
+        val result = HevcFragmentCompatibility.compare(
+            track(90000).copy(trackId = null), empty, track(90000), timed
+        )
+
+        assertTrue(result.reasons.any { it.contains("Fragment track ID is missing") })
+        assertTrue(result.reasons.any { it.contains("Empty-duration track fragments") })
+        assertFalse(result.compatible)
+    }
+
     @Test fun rejectsIncompleteTimingAndEncryptedFragmentsWithoutCompleteCryptoProof() {
         val incomplete = fragment(
             90000, null,

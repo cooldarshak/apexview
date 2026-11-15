@@ -23,9 +23,9 @@ internal object HevcFragmentCompatibility {
         if (firstTrack.handler != "vide" || secondTrack.handler != "vide") {
             reasons += "Both tracks must be video"
         }
-        if (firstTrack.trackId != null && firstTrack.trackId != firstFragment.trackId ||
-            secondTrack.trackId != null && secondTrack.trackId != secondFragment.trackId) {
-            reasons += "Fragment track ID does not match its init-segment track"
+        if (firstTrack.trackId == null || firstTrack.trackId != firstFragment.trackId ||
+            secondTrack.trackId == null || secondTrack.trackId != secondFragment.trackId) {
+            reasons += "Fragment track ID is missing or does not match its init-segment track"
         }
         if (firstTrack.sampleEntry != secondTrack.sampleEntry ||
             firstTrack.originalFormat != secondTrack.originalFormat) {
@@ -34,12 +34,26 @@ internal object HevcFragmentCompatibility {
         if (firstTrack.width != secondTrack.width || firstTrack.height != secondTrack.height) {
             reasons += "Track display dimensions differ"
         }
-        val firstScale = firstFragment.timescale ?: firstTrack.timescale
-        val secondScale = secondFragment.timescale ?: secondTrack.timescale
+        val firstScale = firstTrack.timescale
+        val secondScale = secondTrack.timescale
         if (firstScale == null || secondScale == null || firstScale <= 0 || secondScale <= 0) {
-            reasons += "Track timescale is missing or invalid"
+            reasons += "Init-segment track timescale is missing or invalid"
+        }
+        if (firstFragment.timescale != null && firstScale != null &&
+            firstFragment.timescale != firstScale) {
+            reasons += "First fragment timescale does not match its init-segment track"
+        }
+        if (secondFragment.timescale != null && secondScale != null &&
+            secondFragment.timescale != secondScale) {
+            reasons += "Second fragment timescale does not match its init-segment track"
         }
 
+        if (firstFragment.durationIsEmpty || secondFragment.durationIsEmpty) {
+            reasons += "Empty-duration track fragments cannot be used as media samples"
+        }
+        if (firstFragment.sampleCount <= 0 || secondFragment.sampleCount <= 0) {
+            reasons += "Both fragments must contain at least one media sample"
+        }
         if (!firstFragment.timingComplete || !secondFragment.timingComplete) {
             reasons += "Fragment timing is incomplete"
         }

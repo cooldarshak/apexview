@@ -65,7 +65,8 @@ internal object CmafBoxInspector {
         val sampleAuxiliarySizesPresent: Boolean,
         val sampleAuxiliaryOffsetsPresent: Boolean,
         val sampleGroupDescriptionPresent: Boolean,
-        val sampleToGroupPresent: Boolean
+        val sampleToGroupPresent: Boolean,
+        val durationIsEmpty: Boolean = false
     )
     data class TrackMetadata(
         val trackId: Long?,
@@ -206,7 +207,11 @@ internal object CmafBoxInspector {
         )
     }
 
-    private data class TfhdDefaults(val trackId: Long, val defaultSampleDuration: Long?)
+    private data class TfhdDefaults(
+        val trackId: Long,
+        val defaultSampleDuration: Long?,
+        val durationIsEmpty: Boolean
+    )
 
     private fun readTrackId(p: ByteBuffer): Long? {
         if (p.remaining() < 4) return null
@@ -256,7 +261,11 @@ internal object CmafBoxInspector {
             ?.let { parseTfdt(payload(data, it)) }
         val defaultDuration = tfhd.defaultSampleDuration ?: trexDefaults[tfhd.trackId]
         val truns = traf.children.filter { it.type == "trun" }
-        require(truns.isNotEmpty()) { "traf is missing trun" }
+        if (tfhd.durationIsEmpty) {
+            require(truns.isEmpty()) { "duration-is-empty traf must not contain trun boxes" }
+        } else {
+            require(truns.isNotEmpty()) { "traf is missing trun" }
+        }
         val samples = mutableListOf<SampleTiming>()
         var decodeCursor = baseDecodeTime
         for (trun in truns) {
@@ -279,7 +288,7 @@ internal object CmafBoxInspector {
             sampleCount = samples.size,
             totalDurationTicks = totalDuration,
             sampleTimings = samples,
-            timingComplete = baseDecodeTime != null && samples.isNotEmpty() &&
+            timingComplete = !tfhd.durationIsEmpty && baseDecodeTime != null && samples.isNotEmpty() &&
                 samples.all { it.decodeTimeTicks != null && it.durationTicks != null },
             sampleEncryptionBoxPresent = senc != null,
             subsampleEncryptionSignalled = senc?.subsampleEncryption,
@@ -287,30 +296,35 @@ internal object CmafBoxInspector {
             sampleAuxiliarySizesPresent = traf.children.any { it.type == "saiz" },
             sampleAuxiliaryOffsetsPresent = traf.children.any { it.type == "saio" },
             sampleGroupDescriptionPresent = traf.children.any { it.type == "sgpd" },
-            sampleToGroupPresent = traf.children.any { it.type == "sbgp" }
+            sampleToGroupPresent = traf.children.any { it.type == "sbgp" },
+            durationIsEmpty = tfhd.durationIsEmpty
         )
     }
 
     private fun parseTfhd(p: ByteBuffer): TfhdDefaults {
         require(p.remaining() >= 8) { "Truncated tfhd box" }
-        u8(p) // version
+        val version = u8(p)
+        require(version == 0) { "Unsupported tfhd version $version" }
         val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
-        val knownFlags = 0x000001 or 0x000002 or 0x000008 or 0x000010 or 0x000020
+        val knownFlags = 0x000001 or 0x000002 or 0x000008 or 0x000010 or 0x000020 or
+            0x010000 or 0x020000
         require((flags and knownFlags.inv()) == 0) { "Unsupported tfhd flags" }
         val trackId = u32(p)
+        require(trackId > 0) { "Invalid tfhd track ID" }
         if ((flags and 0x000001) != 0) skip(p, 8) // base_data_offset
         if ((flags and 0x000002) != 0) skip(p, 4) // sample_description_index
         val defaultDuration = if ((flags and 0x000008) != 0) u32(p) else null
         if ((flags and 0x000010) != 0) skip(p, 4) // default_sample_size
         if ((flags and 0x000020) != 0) skip(p, 4) // default_sample_flags
         require(!p.hasRemaining()) { "Unexpected trailing bytes in tfhd box" }
-        return TfhdDefaults(trackId, defaultDuration)
+        return TfhdDefaults(trackId, defaultDuration, (flags and 0x010000) != 0)
     }
 
     private fun parseTfdt(p: ByteBuffer): Long {
         require(p.remaining() >= 8) { "Truncated tfdt box" }
         val version = u8(p)
-        p.position(p.position() + 3) // FullBox flags
+        val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
+        require(flags == 0) { "Unsupported tfdt flags" }
         val time = when (version) {
             0 -> u32(p)
             1 -> readUnsignedLong(p)

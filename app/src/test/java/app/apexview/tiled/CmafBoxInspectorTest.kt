@@ -80,6 +80,54 @@ class CmafBoxInspectorTest {
         assertTrue(timing.sampleToGroupPresent)
     }
 
+    @Test fun acceptsDefaultBaseIsMoofTfhdFlagAndReadsFragmentTiming() {
+        val init = fragmentedInitSegment(trackId = 11, timescale = 90000)
+        val tfhd = box("tfhd", byteArrayOf(0, 2, 0, 0) + int(11))
+        val tfdt = box("tfdt", byteArrayOf(0, 0, 0, 0) + int(9000))
+        val trun = box("trun", byteArrayOf(0, 1, 0, 0) + int(1) + int(3000))
+        val traf = box("traf", tfhd + tfdt + trun)
+        val fragment = box("moof", box("mfhd", byteArrayOf(0, 0, 0, 0) + int(2)) + traf)
+
+        val report = CmafBoxInspector.inspect(init + fragment)
+        assertTrue(report.errors.toString(), report.errors.isEmpty())
+        val timing = report.fragments.single()
+        assertEquals(11L, timing.trackId)
+        assertEquals(90000L, timing.timescale)
+        assertEquals(9000L, timing.baseDecodeTimeTicks)
+        assertEquals(3000L, timing.totalDurationTicks)
+        assertTrue(timing.timingComplete)
+        assertFalse(timing.durationIsEmpty)
+    }
+
+    @Test fun recognisesDurationIsEmptyWithoutInventingSampleTimings() {
+        val init = fragmentedInitSegment(trackId = 12, timescale = 90000)
+        val tfhd = box("tfhd", byteArrayOf(0, 1, 0, 0) + int(12))
+        val tfdt = box("tfdt", byteArrayOf(0, 0, 0, 0) + int(12000))
+        val traf = box("traf", tfhd + tfdt)
+        val fragment = box("moof", box("mfhd", ByteArray(8)) + traf)
+
+        val report = CmafBoxInspector.inspect(init + fragment)
+        assertTrue(report.errors.toString(), report.errors.isEmpty())
+        val timing = report.fragments.single()
+        assertTrue(timing.durationIsEmpty)
+        assertEquals(0, timing.sampleCount)
+        assertTrue(timing.sampleTimings.isEmpty())
+        assertFalse(timing.timingComplete)
+    }
+
+    @Test fun rejectsDurationIsEmptyTrackFragmentThatContainsTrun() {
+        val init = fragmentedInitSegment(trackId = 13, timescale = 90000)
+        val tfhd = box("tfhd", byteArrayOf(0, 1, 0, 0) + int(13))
+        val trun = box("trun", byteArrayOf(0, 0, 0, 0) + int(1))
+        val traf = box("traf", tfhd + trun)
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) + traf)
+        )
+
+        assertTrue(report.fragments.isEmpty())
+        assertTrue(report.errors.any { it.contains("duration-is-empty") })
+    }
+
     @Test fun marksFragmentTimingIncompleteRatherThanGuessingMissingDuration() {
         val init = fragmentedInitSegment(trackId = 3, timescale = 1000, includeTrex = false)
         val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(3))
