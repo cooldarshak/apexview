@@ -1,6 +1,6 @@
 # HEVC stitching proof of concept
 
-Status: Phase 1.8, bounded HEVC parameter-set parsing, CMAF init/fragment metadata inspection, and fail-closed compatibility checks. No stitcher or single-decoder proof exists yet.
+Status: Phase 1.9. Bounded HEVC/CMAF parsing and fail-closed compatibility checks are in place. Complementary 2x1 synthetic tile fixtures and a narrow Kotlin assembler are under validation. Android MediaCodec runtime proof and authorised F1 metadata validation remain open.
 
 ## Goal
 
@@ -92,3 +92,4 @@ Phase 2 must not start by wiring a speculative stitcher into production playback
 ## Current known risk
 
 The F1 Tizen project describes an F1-specific HEVC packaging profile and CBCS handling. Android Media3/MediaCodec DRM integration may not expose the protected compressed samples in a form that permits stitching. That is a gating technical question. A clear synthetic single-decoder demonstration is necessary but not sufficient to prove protected F1 playback.
+\n\n### Synthetic assembler scope and limitation\n\nThe Kotlin assembler supports only two independent tile slices per picture in a fixed, pre-aligned elementary-stream sequence. Annex-B has no timestamps; production inputs must be aligned using verified CMAF decode/presentation timing before reaching this API. It rejects non-VCL metadata NALs other than VPS/SPS/PPS, unsupported PPS tools, non-uniform tile layouts, dependent slices, and picture/reference mismatches. It does not decrypt samples, handle CBCS subsample maps, rewrite slice headers, or integrate with FeedPlayer. No protected F1 sample is read or modified.\n

@@ -1,6 +1,8 @@
 package app.apexview.tiled
 
 import java.io.File
+import java.io.ByteArrayOutputStream
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -8,42 +10,30 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 class HevcSyntheticTileSplitTest {
-    @Test fun separatesAndReassemblesTwoComplementaryTilesFromFiftyPictures() {
+    @Test fun kotlinAssemblerReconstructsAndDecodesFiftyComplementaryTilePictures() {
         val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
         assumeTrue("Kvazaar tile fixture directory is not configured", !fixturePath.isNullOrBlank())
         val directory = File(fixturePath!!)
         val source = File(directory, "source_tiled.hevc")
         val leftFile = File(directory, "feed_left.hevc")
         val rightFile = File(directory, "feed_right.hevc")
-        val rebuiltFile = File(directory, "reassembled.hevc")
+        val referenceFile = File(directory, "reassembled.hevc")
         assumeTrue(
             "Synthetic complementary tile fixture files are missing",
-            source.isFile && leftFile.isFile && rightFile.isFile && rebuiltFile.isFile
+            source.isFile && leftFile.isFile && rightFile.isFile && referenceFile.isFile
         )
 
-        val sourceBytes = source.readBytes()
+        val sourceNals = HevcBitstream.splitAnnexB(source.readBytes())
         val leftNals = HevcBitstream.splitAnnexB(leftFile.readBytes())
         val rightNals = HevcBitstream.splitAnnexB(rightFile.readBytes())
-        val sourceNals = HevcBitstream.splitAnnexB(sourceBytes)
-        val rebuiltBytes = rebuiltFile.readBytes()
-
         val sourceVcl = sourceNals.filter { it.type in 0..31 }
         val leftVcl = leftNals.filter { it.type in 0..31 }
         val rightVcl = rightNals.filter { it.type in 0..31 }
         assertEquals(100, sourceVcl.size)
         assertEquals(50, leftVcl.size)
         assertEquals(50, rightVcl.size)
-
-        // Left feed carries the first tile of each picture. Right feed carries the
-        // continuation tile slice and is intentionally not a standalone full picture.
         assertTrue(leftVcl.all { (it.bytes[2].toInt() and 0x80) != 0 })
         assertTrue(rightVcl.all { (it.bytes[2].toInt() and 0x80) == 0 })
-
-        for (units in listOf(sourceNals, leftNals, rightNals)) {
-            assertTrue(units.any { it.type == 32 })
-            assertTrue(units.any { it.type == 33 })
-            assertTrue(units.any { it.type == 34 })
-        }
 
         val spsNal = sourceNals.single { it.type == 33 }
         val ppsNal = sourceNals.single { it.type == 34 }
@@ -62,11 +52,88 @@ class HevcSyntheticTileSplitTest {
         )
         assertEquals(listOf(sps.picHeightInCtbs), pps.tileRowHeightsInCtbs)
 
-        val sourceFrames = HevcStreamAlignmentAnalyzer.analyze(sourceBytes)
-        val rebuiltFrames = HevcStreamAlignmentAnalyzer.analyze(rebuiltBytes)
+        val result = HevcTileStreamAssembler.assembleTwoTileStreams(
+            leftFile.readBytes(), rightFile.readBytes()
+        )
+        assertEquals(50, result.pictureCount)
+        assertEquals(2, result.tileSlicesPerPicture)
+        assertTrue(result.sliceSegmentAddresses.all { it.first == 0 && it.second > 0 })
+        assertEquals(50, result.sliceSegmentAddresses.size)
+
+        val assembledNals = HevcBitstream.splitAnnexB(result.annexB)
+        val assembledVcl = assembledNals.filter { it.type in 0..31 }
+        assertEquals(
+            sourceVcl.map { it.bytes.toList() },
+            assembledVcl.map { it.bytes.toList() }
+        )
+        assertArrayEquals(referenceFile.readBytes(), result.annexB)
+
+        val sourceFrames = HevcStreamAlignmentAnalyzer.analyze(source.readBytes())
+        val assembledFrames = HevcStreamAlignmentAnalyzer.analyze(result.annexB)
         assertEquals(50, sourceFrames.size)
-        assertEquals(sourceFrames, rebuiltFrames)
+        assertEquals(sourceFrames, assembledFrames)
         assertTrue(sourceFrames.all { it.sliceSegmentAddresses.size == 2 })
         assertTrue(sourceFrames.all { it.sliceSegmentAddresses.distinct().size == 2 })
+
+        // CI installs FFmpeg before unit tests. It decodes the bytes emitted by the Kotlin
+        // assembler, then compares every output frame hash to the original encoded picture.
+        assumeTrue("FFmpeg is not installed; skipped independent decode check", ffmpegAvailable())
+        val assembledFile = File.createTempFile("apexview-kotlin-stitched-", ".hevc", directory)
+        try {
+            assembledFile.writeBytes(result.annexB)
+            assertEquals(frameHashes(source), frameHashes(assembledFile))
+        } finally {
+            assembledFile.delete()
+        }
+    }
+
+    @Test fun assemblerRejectsMissingPictureFromOneTileFeed() {
+        val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+        assumeTrue("Kvazaar tile fixture directory is not configured", !fixturePath.isNullOrBlank())
+        val directory = File(fixturePath!!)
+        val left = File(directory, "feed_left.hevc")
+        val right = File(directory, "feed_right.hevc")
+        assumeTrue("Synthetic complementary tile files are missing", left.isFile && right.isFile)
+
+        val rightNals = HevcBitstream.splitAnnexB(right.readBytes())
+        val truncatedRight = ByteArrayOutputStream()
+        rightNals.filter { it.type in 32..34 }.forEach { appendNal(truncatedRight, it.bytes) }
+        rightNals.filter { it.type in 0..31 }.dropLast(1).forEach { appendNal(truncatedRight, it.bytes) }
+
+        var rejected = false
+        try {
+            HevcTileStreamAssembler.assembleTwoTileStreams(
+                left.readBytes(), truncatedRight.toByteArray()
+            )
+        } catch (_: IllegalArgumentException) {
+            rejected = true
+        }
+        assertTrue("Assembler must reject a tile feed with a missing picture", rejected)
+    }
+
+    private fun ffmpegAvailable(): Boolean = try {
+        ProcessBuilder("ffmpeg", "-version").redirectErrorStream(true).start().waitFor() == 0
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun frameHashes(file: File): List<String> {
+        val process = ProcessBuilder(
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-f", "hevc", "-i", file.absolutePath, "-map", "0:v:0",
+            "-f", "framemd5", "-"
+        ).redirectErrorStream(true).start()
+        val lines = process.inputStream.bufferedReader().use { it.readLines() }
+        val exit = process.waitFor()
+        assertEquals("FFmpeg failed to decode ${file.name}: ${lines.joinToString("\n")}", 0, exit)
+        val hashes = lines.filter { it.isNotBlank() && !it.startsWith("#") }
+            .map { it.substringAfterLast(',').trim() }
+        assertEquals("Unexpected decoded frame count in ${file.name}", 50, hashes.size)
+        return hashes
+    }
+
+    private fun appendNal(output: ByteArrayOutputStream, nal: ByteArray) {
+        output.write(byteArrayOf(0, 0, 0, 1))
+        output.write(nal)
     }
 }
