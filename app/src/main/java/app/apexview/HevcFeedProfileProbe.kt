@@ -35,7 +35,9 @@ internal object HevcFeedProfileProbe {
         val parsedSps: List<HevcParameterSets.SpsMetadata>,
         val parsedPps: List<HevcParameterSets.PpsMetadata>,
         val drmSecurityLevel: String?,
-        val widevineKeysLoaded: Boolean
+        val widevineKeysLoaded: Boolean,
+        val videoDecoderName: String?,
+        val firstFrameRendered: Boolean
     )
 
     fun summarize(trackType: Int, format: Format): String = inspect(trackType, format).summary
@@ -132,7 +134,9 @@ internal object HevcFeedProfileProbe {
             parsedSps = sps,
             parsedPps = pps,
             drmSecurityLevel = null,
-            widevineKeysLoaded = false
+            widevineKeysLoaded = false,
+            videoDecoderName = null,
+            firstFrameRendered = false
         )
     }
 }
@@ -169,6 +173,24 @@ internal object HevcFeedProfileCapture {
             deliveryType = deliveryType,
             observedMediaChunkDurationsMs = durations
         )
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun updateVideoDecoder(group: String, label: String, decoderName: String) {
+        if (activeGroup != group) return
+        val current = profiles[label] ?: return
+        val safeName = decoderName.filter { it.isLetterOrDigit() || it in "._-" }.take(96)
+        if (safeName.isBlank()) return
+        profiles[label] = current.copy(videoDecoderName = safeName)
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun updateFirstFrameRendered(group: String, label: String) {
+        if (activeGroup != group) return
+        val current = profiles[label] ?: return
+        profiles[label] = current.copy(firstFrameRendered = true)
         diagnostic = buildDiagnostic()
     }
 
@@ -238,7 +260,9 @@ internal object HevcFeedProfileCapture {
             val first = captured.single()
             return "HEVC_PROFILE_CAPTURED ${first.label}: ${first.mime ?: "?"} ${first.codecs ?: "?"} " +
                 "${first.width}x${first.height}@${first.frameRate}fps; delivery=${first.deliveryType}; chunks(ms)=${first.observedMediaChunkDurationsMs}; " +
-                "parsed VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}"
+                "parsed VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}; " +
+                "DRM=${first.drmSecurityLevel ?: "not-observed"},keysLoaded=${first.widevineKeysLoaded}; " +
+                "decoder=${first.videoDecoderName ?: "not-observed"},firstFrameRendered=${first.firstFrameRendered}"
         }
         val first = captured[0]
         val second = captured[1]
@@ -273,7 +297,8 @@ internal object HevcFeedProfileCapture {
         }
         val result = if (reasons.isEmpty()) "CODEC_PROFILE_MATCH" else "CODEC_PROFILE_MISMATCH"
         fun drm(profile: HevcFeedProfileProbe.Snapshot) =
-            "DRM=${profile.drmSecurityLevel ?: "not-observed"},keysLoaded=${profile.widevineKeysLoaded}"
+            "DRM=${profile.drmSecurityLevel ?: "not-observed"},keysLoaded=${profile.widevineKeysLoaded}," +
+                "decoder=${profile.videoDecoderName ?: "not-observed"},firstFrameRendered=${profile.firstFrameRendered}"
         val parameterGate = compareParsedParameterSets(first, second)
         return "$result ${first.label} vs ${second.label}: " +
             (reasons.ifEmpty { listOf("MIME, codec, dimensions and VPS/SPS/PPS fingerprint match") }.joinToString("; ")) +

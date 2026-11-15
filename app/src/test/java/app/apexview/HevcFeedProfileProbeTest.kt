@@ -88,6 +88,8 @@ class HevcFeedProfileProbeTest {
         )
         HevcFeedProfileCapture.updateMediaChunkDuration("content-100", "channel-1", "HLS", 6_000L)
         HevcFeedProfileCapture.updateDrm("content-100", "channel-1", "L1", keysLoaded = true)
+        HevcFeedProfileCapture.updateVideoDecoder("content-100", "channel-1", "c2.qti.hevc.decoder")
+        HevcFeedProfileCapture.updateFirstFrameRendered("content-100", "channel-1")
         HevcFeedProfileCapture.record(
             HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, second, "channel-2", "content-100")
         )
@@ -98,6 +100,8 @@ class HevcFeedProfileProbeTest {
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-2"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("chunksMs=[6000]"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("keysLoaded=true"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("decoder=c2.qti.hevc.decoder"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("firstFrameRendered=true"))
 
         HevcFeedProfileCapture.record(
             HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, second, "channel-3", "content-101")

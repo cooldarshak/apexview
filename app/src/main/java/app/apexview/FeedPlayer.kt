@@ -133,6 +133,7 @@ class FeedPlayer(
     var hevcProfileDiagnostic by mutableStateOf<String?>(null)
         private set
     private var licensed = false
+    private var firstFrameRendered = false
     private var speed = 1f
     private var lastDropped = 0
     private var dropsPerSecond = 0
@@ -275,7 +276,9 @@ class FeedPlayer(
                         .take(24)
                         .ifBlank { "UNKNOWN" },
                     drmSecurityLevel = drmLevel.takeIf { it.isNotBlank() },
-                    widevineKeysLoaded = licensed
+                    widevineKeysLoaded = licensed,
+                    videoDecoderName = decoder.takeIf { it.isNotBlank() },
+                    firstFrameRendered = firstFrameRendered
                 )
                 val diagnostic = snapshot.summary
                 if (diagnostic != lastFeedProfileDiagnostic) {
@@ -293,6 +296,25 @@ class FeedPlayer(
                 initializationDurationMs: Long,
             ) {
                 decoder = decoderName
+                if (stream.allowHevcProfileProbe) {
+                    HevcFeedProfileCapture.updateVideoDecoder(
+                        stream.profileGroup, stream.profileLabel, decoderName
+                    )
+                }
+                refresh()
+            }
+
+            override fun onRenderedFirstFrame(
+                eventTime: AnalyticsListener.EventTime,
+                output: Any,
+                renderTimeMs: Long,
+            ) {
+                firstFrameRendered = true
+                if (stream.allowHevcProfileProbe) {
+                    HevcFeedProfileCapture.updateFirstFrameRendered(
+                        stream.profileGroup, stream.profileLabel
+                    )
+                }
                 refresh()
             }
 
