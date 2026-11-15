@@ -74,6 +74,9 @@ class HevcStreamAlignmentAnalyzerTest {
         write(1, 1); write(1, 1); writeUe(0); write(0, 2); writeUe(2)
         write(1, 1) // temporal MVP
         write(1, 1); write(1, 1) // SAO luma/chroma
+        writeSe(0) // slice_qp_delta
+        write(1, 1) // slice_loop_filter_across_slices_enabled_flag
+        writeUe(0) // num_entry_point_offsets
     }.finish()
 
     private fun pSlice(poc: Int, referenceCount: Int): ByteArray = BitWriter().apply {
@@ -84,6 +87,11 @@ class HevcStreamAlignmentAnalyzerTest {
         repeat(referenceCount) { writeUe(0); write(1, 1) }
         write(1, 1) // temporal MVP
         write(1, 1); write(1, 1) // SAO luma/chroma
+        write(0, 1) // num_ref_idx_active_override_flag
+        writeUe(0) // five_minus_max_num_merge_cand
+        writeSe(0) // slice_qp_delta
+        write(1, 1) // slice_loop_filter_across_slices_enabled_flag
+        writeUe(0) // num_entry_point_offsets
     }.finish()
 
     private fun nal(type: Int, rbsp: ByteArray): ByteArray =
