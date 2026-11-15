@@ -26,10 +26,7 @@ internal object HevcParameterSetCompatibility {
             reasons += "SPS is missing"
         } else {
             if (firstSps != secondSps) reasons += "SPS metadata differs"
-            if (firstSps.vuiParametersPresent || secondSps.vuiParametersPresent) {
-                reasons += "SPS VUI is not parsed by this POC"
-            }
-            if (firstSps.spsExtensionPresent != false || secondSps.spsExtensionPresent != false) {
+            if (firstSps.spsExtensionPresent || secondSps.spsExtensionPresent) {
                 reasons += "SPS extension is missing or unsupported"
             }
         }

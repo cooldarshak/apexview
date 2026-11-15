@@ -33,14 +33,42 @@ class HevcParameterSetCompatibilityTest {
         assertTrue(geometryResult.reasons.any { it.contains("PPS metadata differs") })
     }
 
-    @Test fun rejectsVuiExtensionsAndUnsupportedSliceSyntax() {
+    @Test fun acceptsIdenticalParsedVuiAndRejectsVuiOrSpsExtensionDifferences() {
         val f = fixture()
-        val vui = f.sps.copy(vuiParametersPresent = true, spsExtensionPresent = null)
-        val vuiResult = HevcParameterSetCompatibility.compare(
+        val vuiMetadata = HevcParameterSets.VuiMetadata(
+            aspectRatioIdc = null,
+            sarWidth = null,
+            sarHeight = null,
+            videoFormat = 5,
+            videoFullRange = true,
+            colourPrimaries = 1,
+            transferCharacteristics = 2,
+            matrixCoefficients = 3,
+            timingInfoPresent = true,
+            numUnitsInTick = 1,
+            timeScale = 25,
+            hrdParametersPresent = false,
+            bitstreamRestrictionPresent = false
+        )
+        val vui = f.sps.copy(vuiParametersPresent = true, vuiMetadata = vuiMetadata)
+        val identicalVuiResult = HevcParameterSetCompatibility.compare(
             f.vps, vui, f.pps, f.vps, vui, f.pps
         )
-        assertFalse(vuiResult.compatible)
-        assertTrue(vuiResult.reasons.any { it.contains("VUI") })
+        assertTrue(identicalVuiResult.reasons.toString(), identicalVuiResult.compatible)
+
+        val changedVui = vui.copy(vuiMetadata = vuiMetadata.copy(timeScale = 50))
+        val changedVuiResult = HevcParameterSetCompatibility.compare(
+            f.vps, vui, f.pps, f.vps, changedVui, f.pps
+        )
+        assertFalse(changedVuiResult.compatible)
+        assertTrue(changedVuiResult.reasons.any { it.contains("SPS metadata differs") })
+
+        val unsupportedSpsExtension = vui.copy(spsExtensionPresent = true)
+        val extensionResult = HevcParameterSetCompatibility.compare(
+            f.vps, unsupportedSpsExtension, f.pps, f.vps, unsupportedSpsExtension, f.pps
+        )
+        assertFalse(extensionResult.compatible)
+        assertTrue(extensionResult.reasons.any { it.contains("SPS extension") })
 
         val extension = f.pps.copy(extensionPresent = true)
         val extensionResult = HevcParameterSetCompatibility.compare(

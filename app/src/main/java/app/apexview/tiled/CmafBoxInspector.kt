@@ -426,8 +426,8 @@ internal object CmafBoxInspector {
         require(trackId > 0) { "Invalid tfhd track ID" }
         if ((flags and 0x000001) != 0) skip(p, 8) // base_data_offset
         if ((flags and 0x000002) != 0) skip(p, 4) // sample_description_index
-        val defaultDuration = if ((flags and 0x000008) != 0) u32(p) else null
-        val defaultSampleSize = if ((flags and 0x000010) != 0) u32(p) else null
+        val defaultDuration = if ((flags and 0x000008) != 0) u32(p).takeIf { it > 0 } else null
+        val defaultSampleSize = if ((flags and 0x000010) != 0) u32(p).takeIf { it > 0 } else null
         if ((flags and 0x000020) != 0) skip(p, 4) // default_sample_flags
         require(!p.hasRemaining()) { "Unexpected trailing bytes in tfhd box" }
         return TfhdDefaults(trackId, defaultDuration, defaultSampleSize, (flags and 0x010000) != 0)
