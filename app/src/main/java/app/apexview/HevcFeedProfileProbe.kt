@@ -215,8 +215,8 @@ internal object HevcFeedProfileCapture {
             if (first.frameRate > 0f && second.frameRate > 0f && first.frameRate != second.frameRate) {
                 add("reported frame rates differ")
             }
+            if (first.deliveryType != second.deliveryType) add("delivery type differs")
         }
-        if (first.deliveryType != second.deliveryType) reasons += "delivery type differs"
         val result = if (reasons.isEmpty()) "CODEC_PROFILE_MATCH" else "CODEC_PROFILE_MISMATCH"
         fun drm(profile: HevcFeedProfileProbe.Snapshot) =
             "DRM=${profile.drmSecurityLevel ?: "not-observed"},keysLoaded=${profile.widevineKeysLoaded}"
