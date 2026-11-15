@@ -94,7 +94,7 @@ class HevcFeedProfileProbeTest {
             HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, second, "channel-2", "content-100")
         )
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("CODEC_PROFILE_MATCH"))
-        assertTrue(HevcFeedProfileCapture.diagnostic.contains("\\nHEVC_PARAMETER_SET_GATE=PASS"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("\nHEVC_PARAMETER_SET_GATE=PASS"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-1: DRM="))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-2: DRM="))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("CMAF timing"))

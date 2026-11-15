@@ -266,7 +266,7 @@ internal object HevcFeedProfileCapture {
                     "VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}",
                 "${first.label}: DRM=${first.drmSecurityLevel ?: "not-observed"}; keysLoaded=${first.widevineKeysLoaded}; " +
                     "decoder=${first.videoDecoderName ?: "not-observed"}; firstFrameRendered=${first.firstFrameRendered}"
-            ).joinToString("\\n")
+            ).joinToString("\n")
         }
         val first = captured[0]
         val second = captured[1]
@@ -317,6 +317,6 @@ internal object HevcFeedProfileCapture {
             "${second.label}: ${drm(second)}",
             if (reasons.isEmpty()) "CMAF timing, encryption layout and secure-surface feasibility remain unverified."
             else "Mismatch reasons: ${reasons.joinToString("; ")}. CMAF timing, encryption layout and secure-surface feasibility remain unverified."
-        ).joinToString("\\n")
+        ).joinToString("\n")
     }
 }
