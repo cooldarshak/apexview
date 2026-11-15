@@ -98,6 +98,17 @@ class LiveTimingTest {
     }
 
     @Test
+    fun positionParserReportsMalformedRecordsWithoutDiscardingValidCars() {
+        val report = archive.parsePositionsDetailed(positionStream() + "00:00:00.000\"not-base64!\"\n")
+
+        assertTrue(report.inputRecords > report.decodedRecords)
+        assertTrue(report.decodedRecords > 0)
+        assertEquals(1, report.malformedRecords)
+        assertTrue(report.positionSamples > 0)
+        assertEquals(setOf("44", "1"), report.tracks.keys)
+    }
+
+    @Test
     fun heartbeatGivesStreamStart() {
         val heartbeat = stamp(5_000) + "{\"Utc\":\"2026-10-24T20:00:05.0000000Z\",\"_kf\":true}\r\n"
         assertEquals(t0, archive.parseStreamStart(heartbeat))
