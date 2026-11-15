@@ -641,10 +641,21 @@ class CmafBoxInspectorTest {
     }
 
     @Test fun parsesVpsParameterSetArrayFromHvcC() {
-        val vpsNal = byteArrayOf(0x40, 0x01) + BitWriter().apply {
-            write(5, 4); write(1, 1); write(1, 1); write(0, 6)
-            write(1, 3); write(1, 1); write(0xffff, 16)
+        val vpsRbsp = BitWriter().apply {
+            write(5, 4) // VPS id
+            write(1, 1); write(1, 1) // base layer internal/available
+            write(0, 6) // one layer
+            write(1, 3); write(1, 1) // two sub-layers, temporal nesting
+            write(0xffff, 16)
+            write(0, 8); write(0, 32); write(0, 32); write(0, 16); write(0, 8) // general PTL
+            write(0, 1); write(0, 1); write(0, 14) // sub-layer PTL flags/reserved
+            write(1, 1) // ordering info present for all sub-layers
+            repeat(2) { writeUe(4); writeUe(2); writeUe(0) }
+            write(0, 6); writeUe(0) // layer sets
+            write(0, 1) // timing info absent
+            write(0, 1) // VPS extension absent
         }.finish()
+        val vpsNal = byteArrayOf(0x40, 0x01) + rbspToEbsp(vpsRbsp)
         val header = byteArrayOf(
             1, 0xa1.toByte(),
             0x12, 0x34, 0x56, 0x78,
@@ -808,6 +819,13 @@ class CmafBoxInspectorTest {
         fun write(value: Int, count: Int) {
             for (i in count - 1 downTo 0) bits += (value ushr i) and 1
         }
+        fun writeUe(value: Int) {
+            require(value >= 0)
+            val code = value.toLong() + 1L
+            val width = 64 - java.lang.Long.numberOfLeadingZeros(code)
+            repeat(width - 1) { bits += 0 }
+            write(code.toInt(), width)
+        }
         fun finish(): ByteArray {
             bits += 1
             while (bits.size % 8 != 0) bits += 0
@@ -826,4 +844,19 @@ class CmafBoxInspectorTest {
     private fun int(value: Int): ByteArray = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(value).array()
     private fun short(value: Int): ByteArray = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort(value.toShort()).array()
     private fun ascii(value: String): ByteArray = value.toByteArray(Charsets.ISO_8859_1)
+
+    private fun rbspToEbsp(rbsp: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream()
+        var zeroCount = 0
+        rbsp.forEach { byte ->
+            val value = byte.toInt() and 0xff
+            if (zeroCount >= 2 && value <= 3) {
+                out.write(3)
+                zeroCount = 0
+            }
+            out.write(value)
+            zeroCount = if (value == 0) zeroCount + 1 else 0
+        }
+        return out.toByteArray()
+    }
 }

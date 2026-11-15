@@ -350,7 +350,23 @@ class HevcParameterSetParserTest {
     }.finish()
 
     private fun nal(type: Int, rbsp: ByteArray): ByteArray =
-        byteArrayOf((type shl 1).toByte(), 0x01) + rbsp
+        byteArrayOf((type shl 1).toByte(), 0x01) + rbspToEbsp(rbsp)
+
+    /** Encodes RBSP as EBSP for tests; VPS/SPS syntax often contains 00 00 00/01/02/03. */
+    private fun rbspToEbsp(rbsp: ByteArray): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        var zeroCount = 0
+        rbsp.forEach { byte ->
+            val value = byte.toInt() and 0xff
+            if (zeroCount >= 2 && value <= 3) {
+                out.write(3)
+                zeroCount = 0
+            }
+            out.write(value)
+            zeroCount = if (value == 0) zeroCount + 1 else 0
+        }
+        return out.toByteArray()
+    }
 
     private class BitWriter {
         private val bits = mutableListOf<Int>()

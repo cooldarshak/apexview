@@ -24,7 +24,19 @@ class HevcSyntheticFeedAlignmentTest {
         assertEquals(50, feedB.size)
         assertTrue("Synthetic feeds should have identical POC sequences", report.pocAligned)
         assertTrue("Synthetic feeds should have identical slice types and RPS", report.referencesAligned)
-        assertTrue("Every synthetic frame signature should align", report.fullyAligned)
+        assertTrue(
+            "Every synthetic frame signature should align. First differences: " +
+                report.mismatches.take(5).joinToString { mismatch ->
+                    val first = feedA[mismatch.decodeIndex].pictureIdentity
+                    val second = feedB[mismatch.decodeIndex].pictureIdentity
+                    "index=${mismatch.decodeIndex} type=${first.nalUnitType}/${second.nalUnitType} " +
+                        "pps=${first.ppsId}/${second.ppsId} noOutput=${first.noOutputOfPriorPictures}/${second.noOutputOfPriorPictures} " +
+                        "sliceType=${first.sliceType}/${second.sliceType} picOutput=${first.picOutputFlag}/${second.picOutputFlag} " +
+                        "colourPlane=${first.colourPlaneId}/${second.colourPlaneId} pocLsb=${first.picOrderCntLsb}/${second.picOrderCntLsb} " +
+                        "rps=${first.shortTermRpsFromSps}:${first.shortTermRpsIndex}/${second.shortTermRpsFromSps}:${second.shortTermRpsIndex}"
+                },
+            report.fullyAligned
+        )
         assertTrue("P frames should expose short-term references", feedA.drop(1).any { it.references.isNotEmpty() })
     }
 }
