@@ -52,14 +52,26 @@ class HevcSyntheticTileSplitTest {
         )
         assertEquals(listOf(sps.picHeightInCtbs), pps.tileRowHeightsInCtbs)
 
+        System.err.println(
+            "HEVC_TILE_PROFILE: width=${sps.width} height=${sps.height} ctb=${sps.ctbSize} " +
+                "ctbGrid=${sps.picWidthInCtbs}x${sps.picHeightInCtbs} vui=${sps.vuiParametersPresent} " +
+                "spsExtension=${sps.spsExtensionPresent} tiles=${pps.numTileColumns}x${pps.numTileRows} " +
+                "tileWidths=${pps.tileColumnWidthsInCtbs} tileHeights=${pps.tileRowHeightsInCtbs} " +
+                "dependentSlices=${pps.dependentSliceSegmentsEnabled} entropySync=${pps.entropyCodingSyncEnabled} " +
+                "weightedPred=${pps.weightedPredictionEnabled}/${pps.weightedBipredictionEnabled} " +
+                "deblockOverride=${pps.deblockingFilterOverrideEnabled} scaling=${pps.scalingListDataPresent} " +
+                "listsModification=${pps.listsModificationPresent} sliceHeaderExtension=${pps.sliceSegmentHeaderExtensionPresent} " +
+                "ppsExtension=${pps.extensionPresent}"
+        )
         val result = try {
             HevcTileStreamAssembler.assembleTwoTileStreams(
                 leftFile.readBytes(), rightFile.readBytes()
             )
         } catch (failure: IllegalArgumentException) {
-            System.err.println("HEVC_TILE_ASSEMBLY_FAILURE: ${failure.message}")
-            failure.printStackTrace(System.err)
-            throw failure
+            throw AssertionError(
+                "HEVC_TILE_ASSEMBLY_FAILURE: ${failure.message}",
+                failure
+            )
         }
         assertEquals(50, result.pictureCount)
         assertEquals(2, result.tileSlicesPerPicture)

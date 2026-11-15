@@ -77,8 +77,29 @@ jobs:
 
       - name: Run unit tests, including Kotlin analysis of real synthetic feeds
         run: |
+          set +e
           chmod +x ./gradlew
           ./gradlew --no-daemon testDebugUnitTest
+          TEST_STATUS=$?
+          if [ "$TEST_STATUS" -ne 0 ]; then
+            echo "::group::Detailed JVM unit-test failures"
+            python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+          for path in glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml"):
+              root = ET.parse(path).getroot()
+              for case in root.findall(".//testcase"):
+                  failure = case.find("failure")
+                  error = case.find("error")
+                  issue = failure if failure is not None else error
+                  if issue is not None:
+                      print(f"FAILED: {case.get('classname')}.{case.get('name')}")
+                      print(issue.get("message", ""))
+                      print(issue.text or "")
+          PY
+            echo "::endgroup::"
+          fi
+          exit "$TEST_STATUS"
 
       # This repository must sign every distributable APK with the same private key. Do not
       # fall back to the ephemeral debug.keystore on a hosted runner: Android will reject updates.
