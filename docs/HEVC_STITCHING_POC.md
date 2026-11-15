@@ -1,6 +1,6 @@
 # HEVC stitching proof of concept
 
-Status: Phase 1.9. Bounded HEVC/CMAF parsing and fail-closed compatibility checks are in place. Complementary 2x1 synthetic tile fixtures and a narrow Kotlin assembler are under validation. Android MediaCodec runtime proof and authorised F1 metadata validation remain open.
+Status: Phase 1 implementation is still under validation. Bounded HEVC/CMAF parsing, fail-closed compatibility checks, genuine complementary 2x1 synthetic tile fixtures, and an isolated Kotlin assembler are present. CI validation of the Kotlin reconstruction and encryption parser is ongoing. Physical Android hardware-decoder proof and authorised F1 feed inspection remain open.
 
 ## Goal
 
@@ -60,9 +60,13 @@ The first prototype must not modify FeedPlayer or the production playback graph.
 - Existing multi-player playback and its tests remain unchanged.
 - Any F1-specific limitation is documented with evidence from the actual authorised stream metadata.
 
-## Current synthetic fixture boundary
+## Current synthetic fixture and Kotlin assembler
 
-The fixture generator uses FFmpeg/libx265 to create two disposable, time-aligned HEVC test streams. It checks codec, dimensions, frame rate and frame count. It does not split a single encoded picture into independent tile streams, rewrite slice headers, combine streams, or prove decoder interoperability. The next engineering gate is bitstream-level SPS/PPS, POC, tile geometry and slice-header analysis before any stitcher is attempted.
+The CI fixture generator uses Kvazaar to encode one 256x128 HEVC sequence with a 2x1 tile grid and tile-slice mode. It separates each picture's first tile slice and continuation tile slice into two complementary Annex-B feeds. The right feed is intentionally not independently decodable. The fixture contains 50 pictures and 100 source VCL tile slices.
+
+The Kotlin assembler is deliberately narrow. It requires byte-identical VPS/SPS/PPS, checks the VPS/SPS/PPS ID chain, the 2x1 CTB geometry and the two expected slice-segment addresses for every picture. It checks picture order and reference syntax, then writes the original tile NALs in tile-scan order without modifying slice headers or coded payload. It rejects unsupported NAL types and syntax rather than trying to repair arbitrary HEVC streams.
+
+The test compares the Kotlin output with the deterministic reference stream, compares the parsed picture signatures and asks FFmpeg to decode the Kotlin-produced stream. The decoded frame hashes must match the original 50-picture source. This is evidence for the synthetic clear-stream subset only. It is not evidence that two arbitrary independent full-frame cameras, or F1's protected CMAF feeds, can be stitched.
 
 ### Predicted short-term RPS parser update
 
@@ -74,25 +78,32 @@ This closes one parser gap only. It does not establish complete H.265 conformanc
 
 The bounded SPS/PPS model now captures general and sub-layer profile-tier-level values, chroma format, bit depth, conformance-window display dimensions, DPB/reorder limits, tile geometry, loop-filter and deblocking metadata, and selected PPS coding tools. Unsupported VUI and parameter-set extensions are surfaced so the validator can reject them rather than silently assuming defaults.
 
-The hvcC reader now extracts decoder configuration fields and bounded VPS/SPS/PPS arrays. The track-level tenc reader records the protection scheme shape, pattern and IV-size metadata while skipping KID and constant-IV bytes. The fragmented MP4 reader extracts track IDs, timescales, tfdt decode-time anchors, trun sample durations and composition offsets. It derives decode and presentation timestamps only when the necessary timing fields are present.
+The hvcC reader extracts decoder configuration fields and bounded VPS/SPS/PPS arrays. The track-level tenc reader records protection scheme shape, pattern and IV-size defaults while skipping KID and constant-IV bytes. The fragmented MP4 reader extracts track IDs, timescales, tfdt decode-time anchors, trun sample durations and composition offsets. It derives decode and presentation timestamps only when the necessary timing fields are present.
 
-A separate compatibility check compares sample counts and exact media times across potentially different track timescales. It also checks decoder configuration and the parsed parameter sets. It deliberately rejects protected-fragment compatibility while KID identity, per-sample IV/subsample maps, external auxiliary data and sample-group overrides remain unverified. The current senc inspection only reads its header, flags and sample count; it does not decode IVs or subsample ranges.
+The bounded senc parser now obtains the effective IV size from tenc defaults or a senc override, skips IV and KID bytes without retaining them, and parses the clear/encrypted byte-range lengths when the subsample flag is set. Tests cover default IV size, override IV size, multiple subsample ranges and missing defaults. The compatibility validator still rejects protected stitching: it does not compare IV byte values or KID identity, does not resolve external saiz/saio auxiliary data, does not parse seig sample-group overrides, and does not yet verify every subsample range sum against the corresponding sample size. Parsing a map is not proof that protected samples may be combined.
 
 ### Phase 1 exit gates still open
 
-- [ ] Inspect sanitized, non-secret metadata from two actual F1 feeds in an authorised session: manifest/codec, init-segment boxes, timescale, fragment timing, protection scheme and sample-encryption signalling. Do not retain protected samples, licence responses, KIDs or IVs.
-- [ ] Complete the encryption metadata comparison safely, including per-sample subsample ranges and any seig sample-group overrides. Do not infer compatibility from tenc alone.
-- [ ] Finish the supported slice-header subset, including weighted prediction and entry-point offsets, or explicitly constrain and prove a narrower encoder profile with tests.
-- [ ] Generate two complementary HEVC tile feeds from the same encoded picture. The current FFmpeg/libx265 fixtures are two independent full-frame encodes and are not a tiled-feed fixture.
-- [ ] Validate that the reconstructed synthetic stream is accepted by a standards-compliant HEVC decoder.
-- [ ] Instrument a physical Android device and prove one active MediaCodec decoder for the reconstructed synthetic stream, recording codec name, dimensions, frame cadence and decoder counters.
+- [ ] Inspect sanitised, non-secret metadata from two actual F1 feeds in an authorised session: manifest/codec, init-segment boxes, timescale, fragment timing, protection scheme, and sample-encryption signalling. Do not retain protected samples, licence responses, KIDs or IVs.
+- [ ] Finish CMAF encryption structure checks: parse and validate saiz/saio, handle seig sample-group overrides, capture sample sizes and verify each parsed clear/encrypted subsample map covers exactly its corresponding sample. Do not retain keys, KIDs, IVs or protected sample data. Keep encrypted compatibility rejected until all required metadata can be proven.
+- [ ] Prove the supported HEVC slice-header subset with positive and negative fixtures. The assembler currently accepts only the explicitly tested independent 2x1 tile-slice profile and rejects dependent slices, WPP, weighted prediction, list modification, VUI/extensions and unsupported non-VCL NALs. It does not rewrite slice headers or claim generic HEVC support.
+- [ ] Complete CI validation of the Kotlin assembler: all 50 picture pairs must pass header/POC/reference checks, Kotlin output must match the deterministic NAL reference, and FFmpeg must decode all 50 frames with hashes identical to the source.
+- [ ] Build and install the app plus instrumentation APK, then run the MediaCodec test on a physical Android device with hardware HEVC support. Verify codec name, hardware-accelerated status, 50 decoded frames, 256x128 output and exactly one created decoder instance. CI compilation, a Gradle build, or FFmpeg decode alone does not satisfy this.
+- [ ] Only after the synthetic and device tests pass, inspect the DRM/secure-surface feasibility of the actual authorised F1 delivery. Confirm that the supported input representation can reach one secure decoder without weakening or bypassing Widevine.
+
+
 
 Phase 2 must not start by wiring a speculative stitcher into production playback. Start it only after the complementary-tile fixture and the isolated one-decoder synthetic proof have passed. The existing multi-player path remains the fallback and must not be modified by this POC.
 
 ## Current known risk
 
 The F1 Tizen project describes an F1-specific HEVC packaging profile and CBCS handling. Android Media3/MediaCodec DRM integration may not expose the protected compressed samples in a form that permits stitching. That is a gating technical question. A clear synthetic single-decoder demonstration is necessary but not sufficient to prove protected F1 playback.
-\n\n### Synthetic assembler scope and limitation\n\nThe Kotlin assembler supports only two independent tile slices per picture in a fixed, pre-aligned elementary-stream sequence. Annex-B has no timestamps; production inputs must be aligned using verified CMAF decode/presentation timing before reaching this API. It rejects non-VCL metadata NALs other than VPS/SPS/PPS, unsupported PPS tools, non-uniform tile layouts, dependent slices, and picture/reference mismatches. It does not decrypt samples, handle CBCS subsample maps, rewrite slice headers, or integrate with FeedPlayer. No protected F1 sample is read or modified.\n
+
+
+### Synthetic assembler scope and limitation
+
+The Kotlin assembler supports only two independent tile slices per picture in a fixed, pre-aligned elementary-stream sequence. Annex-B has no timestamps; production inputs must be aligned using verified CMAF decode/presentation timing before reaching this API. It rejects non-VCL metadata NALs other than VPS/SPS/PPS, unsupported PPS tools, non-uniform tile layouts, dependent slices, and picture/reference mismatches. It does not decrypt samples, handle CBCS subsample maps, rewrite slice headers, or integrate with FeedPlayer. No protected F1 sample is read or modified.
+
 
 ## Running the physical-device MediaCodec proof
 
