@@ -269,6 +269,11 @@ class FeedPlayer(
                     label = stream.profileLabel,
                     group = stream.profileGroup
                 ).copy(
+                    deliveryType = stream.streamType
+                        .uppercase()
+                        .filter { it.isLetterOrDigit() || it == '_' || it == '-' }
+                        .take(24)
+                        .ifBlank { "UNKNOWN" },
                     drmSecurityLevel = drmLevel.takeIf { it.isNotBlank() },
                     widevineKeysLoaded = licensed
                 )
@@ -301,7 +306,22 @@ class FeedPlayer(
                 if (mediaLoadData.dataType == C.DATA_TYPE_MEDIA &&
                     mediaLoadData.trackType != C.TRACK_TYPE_AUDIO && mediaLoadData.trackType != C.TRACK_TYPE_TEXT) {
                     val chunk = mediaLoadData.mediaEndTimeMs - mediaLoadData.mediaStartTimeMs
-                    if (chunk in 1_000..12_000) chunkMs = chunk
+                    if (chunk in 1_000..12_000) {
+                        chunkMs = chunk
+                        if (stream.allowHevcProfileProbe) {
+                            val deliveryType = stream.streamType
+                                .uppercase()
+                                .filter { it.isLetterOrDigit() || it == '_' || it == '-' }
+                                .take(24)
+                                .ifBlank { "UNKNOWN" }
+                            HevcFeedProfileCapture.updateMediaChunkDuration(
+                                stream.profileGroup,
+                                stream.profileLabel,
+                                deliveryType,
+                                chunk
+                            )
+                        }
+                    }
                 }
             }
 
