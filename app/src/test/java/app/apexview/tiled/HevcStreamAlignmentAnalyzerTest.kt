@@ -72,7 +72,6 @@ class HevcStreamAlignmentAnalyzerTest {
 
     private fun idrSlice(): ByteArray = BitWriter().apply {
         write(1, 1); write(1, 1); writeUe(0); write(0, 2); writeUe(2)
-        write(1, 1) // temporal MVP
         write(1, 1); write(1, 1) // SAO luma/chroma
         writeSe(0) // slice_qp_delta
         write(1, 1) // slice_loop_filter_across_slices_enabled_flag
