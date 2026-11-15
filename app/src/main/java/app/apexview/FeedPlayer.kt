@@ -175,7 +175,7 @@ class FeedPlayer(
                     }
                     drmLevel = runCatching { drm.getPropertyString("securityLevel") }.getOrDefault("?")
                     if (stream.allowHevcProfileProbe) {
-                        HevcFeedProfileCapture.updateDrm(stream.profileLabel, drmLevel, keysLoaded = false)
+                        HevcFeedProfileCapture.updateDrm(stream.profileGroup, stream.profileLabel, drmLevel, keysLoaded = false)
                     }
                     usesSoftwareDrm = drmLevel.equals("L3", ignoreCase = true)
                     if (forceL3 && !usesSoftwareDrm && drmWarning == null) {
@@ -266,7 +266,8 @@ class FeedPlayer(
                 val snapshot = HevcFeedProfileProbe.inspect(
                     mediaLoadData.trackType,
                     format,
-                    label = stream.profileLabel
+                    label = stream.profileLabel,
+                    group = stream.profileGroup
                 ).copy(
                     drmSecurityLevel = drmLevel.takeIf { it.isNotBlank() },
                     widevineKeysLoaded = licensed
@@ -307,7 +308,7 @@ class FeedPlayer(
             override fun onDrmKeysLoaded(eventTime: AnalyticsListener.EventTime) {
                 licensed = true
                 if (stream.allowHevcProfileProbe) {
-                    HevcFeedProfileCapture.updateDrm(stream.profileLabel, drmLevel, keysLoaded = true)
+                    HevcFeedProfileCapture.updateDrm(stream.profileGroup, stream.profileLabel, drmLevel, keysLoaded = true)
                 }
                 refresh()
             }
