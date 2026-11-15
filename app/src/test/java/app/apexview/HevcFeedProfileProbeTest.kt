@@ -108,7 +108,7 @@ class HevcFeedProfileProbeTest {
         HevcFeedProfileCapture.record(
             HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, second, "channel-3", "content-101")
         )
-        assertTrue(HevcFeedProfileCapture.diagnostic.startsWith("HEVC_PROFILE_CAPTURED channel-3"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.startsWith("HEVC_PROFILE_CAPTURED\\nchannel-3:"))
     }
 
     @Test
