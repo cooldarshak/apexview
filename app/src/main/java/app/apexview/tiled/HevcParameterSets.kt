@@ -114,6 +114,7 @@ internal object HevcParameterSets {
         val cabacInitPresent: Boolean,
         val numRefIdxL0DefaultActiveMinus1: Int,
         val numRefIdxL1DefaultActiveMinus1: Int,
+        val initQpMinus26: Int,
         val sliceChromaQpOffsetsPresent: Boolean,
         val tilesEnabled: Boolean,
         val entropyCodingSyncEnabled: Boolean,
@@ -405,7 +406,8 @@ internal object HevcParameterSets {
         val cabacInitPresent = bits.readBit() != 0
         val numRefIdxL0Default = readUe(bits, 14, "num_ref_idx_l0_default_active_minus1")
         val numRefIdxL1Default = readUe(bits, 14, "num_ref_idx_l1_default_active_minus1")
-        bits.readSignedExpGolomb() // init_qp_minus26
+        val initQpMinus26 = bits.readSignedExpGolomb().toInt()
+        require(initQpMinus26 in -26..25) { "PPS init_qp_minus26 exceeds HEVC range" }
         bits.readBit() // constrained_intra_pred_flag
         bits.readBit() // transform_skip_enabled_flag
         if (bits.readBit() != 0) readUe(bits, 6, "diff_cu_qp_delta_depth")
@@ -473,8 +475,8 @@ internal object HevcParameterSets {
 
         return PpsMetadata(
             ppsId, spsId, dependentSlices, outputFlag, extraHeaderBits,
-            cabacInitPresent, numRefIdxL0Default, numRefIdxL1Default, sliceChromaQpOffsetsPresent,
-            tilesEnabled, entropySync, uniform, numColumns, numRows, explicitColumns, explicitRows,
+            cabacInitPresent, numRefIdxL0Default, numRefIdxL1Default, initQpMinus26,
+            sliceChromaQpOffsetsPresent, tilesEnabled, entropySync, uniform, numColumns, numRows, explicitColumns, explicitRows,
             columnWidths, rowHeights, loopFilter, weightedPred, weightedBipred, transquantBypass,
             loopFilterAcrossSlices, deblockingControlPresent, deblockingOverride, deblockingDisabled,
             betaOffset, tcOffset, scalingListDataPresent, listsModificationPresent,
