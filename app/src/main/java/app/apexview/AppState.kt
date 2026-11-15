@@ -1665,10 +1665,11 @@ class AppState(
             }
             if (attempt == 20 && timingContentId == contentId) {
                 mapStatus = "Waiting for the TV stream's video timeline…"
+                recordTimingDiagnostic("No usable player timeline after 5s; checking again")
             }
             kotlinx.coroutines.delay(250)
         }
-        android.util.Log.w("ApexviewTiming", "content=$contentId: no usable video timeline after waiting; will retry without assuming replay")
+        recordTimingDiagnostic("No usable video timeline after 10s; source remains undecided")
         return null
     }
 
@@ -1692,6 +1693,7 @@ class AppState(
                 onStatus = { status ->
                     if (timingContentId == contentId) {
                         mapStatus = status
+                        recordTimingDiagnostic("LIVE: $status")
                     }
                 },
             )
@@ -1699,6 +1701,7 @@ class AppState(
             throw e
         } catch (e: Exception) {
             if (timingContentId == contentId) {
+                recordTimingDiagnostic("LIVE TIMING ERROR: ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
                 if (e.message?.contains("live timing moved on to another session") == true) {
                     knownLiveContentIds -= contentId
                     completedLiveTimingContentIds += contentId
