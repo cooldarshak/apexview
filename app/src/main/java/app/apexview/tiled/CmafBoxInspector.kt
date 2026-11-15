@@ -117,6 +117,9 @@ internal object CmafBoxInspector {
         val sencOverrideIvSize: Int? = null,
         val sampleEncryptionRangesCoverSamples: Boolean = false,
         val sampleAuxiliaryInfoStructureComplete: Boolean = false,
+        /** True only when inline senc or externally addressed auxiliary records were parsed completely. */
+        val sampleAuxiliaryPayloadStructureComplete: Boolean = false,
+        val sampleAuxiliaryPayloadSampleCount: Int = 0,
         val sampleAuxiliaryMetadata: SampleAuxiliaryMetadata? = null,
         val sampleGroupEncryptionPresent: Boolean = false,
         val sampleGroupEncryptionStructureComplete: Boolean = true,
@@ -187,7 +190,7 @@ internal object CmafBoxInspector {
         val fragments = boxes.filter { it.type == "moof" }.flatMap { moof ->
             moof.children.filter { it.type == "traf" }.mapNotNull { traf ->
                 try {
-                    parseFragmentTrack(data, traf, trexDefaults, trackTimescales,
+                    parseFragmentTrack(data, moof.start, traf, trexDefaults, trackTimescales,
                         trackEncryptionDefaults, trackMetadataById, errors)
                 } catch (e: Exception) {
                     errors += "Fragment timing metadata could not be parsed: ${e.message ?: e.javaClass.simpleName}"
@@ -297,6 +300,8 @@ internal object CmafBoxInspector {
 
     private data class TfhdDefaults(
         val trackId: Long,
+        val baseDataOffset: Long?,
+        val defaultBaseIsMoof: Boolean,
         val defaultSampleDuration: Long?,
         val defaultSampleSize: Long?,
         val durationIsEmpty: Boolean
@@ -351,6 +356,7 @@ internal object CmafBoxInspector {
 
     private fun parseFragmentTrack(
         data: ByteArray,
+        moofStart: Int,
         traf: Box,
         trexDefaults: Map<Long, TrexDefaults>,
         timescales: Map<Long, Long>,
@@ -463,6 +469,31 @@ internal object CmafBoxInspector {
                 saio.offsets
             )
         } else null
+        val effectiveSampleIvSizes = if (sampleGroupEncryption.complete) {
+            resolveSampleIvSizes(samples.size, trackEncryptionDefaults[tfhd.trackId], sampleGroupEncryption.metadata)
+        } else null
+        val auxiliaryBaseOffset = tfhd.baseDataOffset ?: if (tfhd.defaultBaseIsMoof) moofStart.toLong() else null
+        val externalAuxiliary = if (sencBox == null && saiz != null && saio != null) {
+            try {
+                if (auxiliaryBaseOffset == null) {
+                    throw IllegalArgumentException(
+                        "saio payload base is ambiguous; tfhd must provide base_data_offset or default-base-is-moof"
+                    )
+                }
+                if (effectiveSampleIvSizes == null) {
+                    throw IllegalArgumentException(
+                        "effective per-sample IV sizes are unavailable from tenc/seig metadata"
+                    )
+                }
+                parseExternalAuxiliaryRecords(
+                    data, auxiliaryBaseOffset, saio.offsets, saiz.sampleInfoSizes,
+                    effectiveSampleIvSizes, samples
+                )
+            } catch (e: Exception) {
+                errors += "External sample auxiliary payload could not be verified: ${e.message ?: e.javaClass.simpleName}"
+                null
+            }
+        } else null
         val sampleEncryptionRangesCoverSamples = senc?.let { summary ->
             if (!summary.structureComplete || summary.sampleCount != samples.size.toLong()) {
                 false
@@ -478,7 +509,7 @@ internal object CmafBoxInspector {
                     coveredBytes == sampleSize
                 }
             }
-        } == true
+        } == true || externalAuxiliary?.rangesCoverSamples == true
         return FragmentMetadata(
             trackId = tfhd.trackId,
             timescale = timescales[tfhd.trackId],
@@ -496,16 +527,119 @@ internal object CmafBoxInspector {
             sampleGroupDescriptionPresent = traf.children.any { it.type == "sgpd" },
             sampleToGroupPresent = traf.children.any { it.type == "sbgp" },
             durationIsEmpty = tfhd.durationIsEmpty,
-            sampleEncryptionStructureComplete = senc?.structureComplete == true,
-            sampleEncryptionMetadata = senc?.samples.orEmpty(),
+            sampleEncryptionStructureComplete = senc?.structureComplete == true ||
+                externalAuxiliary?.structureComplete == true,
+            sampleEncryptionMetadata = senc?.samples ?: externalAuxiliary?.samples.orEmpty(),
             sencOverrideIvSize = senc?.overrideIvSize,
             sampleEncryptionRangesCoverSamples = sampleEncryptionRangesCoverSamples,
             sampleAuxiliaryInfoStructureComplete = sampleAuxiliaryInfoStructureComplete,
+            sampleAuxiliaryPayloadStructureComplete =
+                senc?.structureComplete == true || externalAuxiliary?.structureComplete == true,
+            sampleAuxiliaryPayloadSampleCount = externalAuxiliary?.samples?.size
+                ?: senc?.samples?.size ?: 0,
             sampleAuxiliaryMetadata = sampleAuxiliaryMetadata,
             sampleGroupEncryptionPresent = sampleGroupEncryption.present,
             sampleGroupEncryptionStructureComplete = sampleGroupEncryption.complete,
             sampleGroupEncryptionMetadata = sampleGroupEncryption.metadata
         )
+    }
+
+    private data class ExternalAuxiliaryParseResult(
+        val structureComplete: Boolean,
+        val samples: List<SampleEncryptionMetadata>,
+        val rangesCoverSamples: Boolean
+    )
+
+    /**
+     * Reads only the auxiliary-record structure addressed by saio/saiz. IV bytes are skipped
+     * in place and never copied, retained, compared, or logged. Clear/encrypted byte-range
+     * lengths are retained solely as structural metadata.
+     *
+     * This bounded subset accepts one offset for a contiguous sample-record run, or one offset
+     * per sample. Other chunk-group layouts fail closed instead of guessing their boundaries.
+     */
+    private fun parseExternalAuxiliaryRecords(
+        data: ByteArray,
+        baseOffset: Long,
+        offsets: List<Long>,
+        sizes: List<Int>,
+        ivSizes: List<Int>,
+        samples: List<SampleTiming>
+    ): ExternalAuxiliaryParseResult {
+        require(sizes.size == samples.size && ivSizes.size == samples.size) {
+            "saiz/IV/sample count mismatch"
+        }
+        require(offsets.size == 1 || offsets.size == samples.size) {
+            "Only one contiguous saio offset or one offset per sample is supported"
+        }
+        val starts = ArrayList<Long>(samples.size)
+        if (offsets.size == 1) {
+            var cursor = Math.addExact(baseOffset, offsets.single())
+            sizes.forEach { size ->
+                starts += cursor
+                cursor = Math.addExact(cursor, size.toLong())
+            }
+        } else {
+            offsets.forEach { offset -> starts += Math.addExact(baseOffset, offset) }
+        }
+
+        val ranges = starts.indices.map { index ->
+            val start = starts[index]
+            val size = sizes[index]
+            require(size >= 0) { "Negative saiz entry size" }
+            val end = Math.addExact(start, size.toLong())
+            require(start >= 0 && end <= data.size.toLong()) {
+                "saio sample auxiliary record lies outside the supplied media segment"
+            }
+            start until end
+        }
+        val sortedRanges = ranges.sortedBy { it.first }
+        for (index in 1 until sortedRanges.size) {
+            require(sortedRanges[index - 1].last < sortedRanges[index].first) {
+                "saio sample auxiliary records overlap"
+            }
+        }
+
+        val parsed = ArrayList<SampleEncryptionMetadata>(samples.size)
+        var allSubsampleRangesCoverSamples = true
+        for (index in samples.indices) {
+            val start = starts[index].toInt()
+            val size = sizes[index]
+            val ivSize = ivSizes[index]
+            require(ivSize in setOf(0, 8, 16)) {
+                "Unsupported effective per-sample IV size"
+            }
+            require(size >= ivSize) {
+                "saiz record is shorter than its effective IV"
+            }
+            val record = ByteBuffer.wrap(data, start, size).slice().order(ByteOrder.BIG_ENDIAN)
+            record.position(ivSize) // Skip IV without retaining its value.
+            val subsamples = if (!record.hasRemaining()) {
+                null
+            } else {
+                require(record.remaining() >= 2) {
+                    "External auxiliary record has a truncated subsample count"
+                }
+                val count = u16(record)
+                require(record.remaining() == count * 6) {
+                    "External auxiliary subsample table length does not match saiz"
+                }
+                List(count) {
+                    SubsampleEncryptionRange(u16(record), u32(record))
+                }
+            }
+            if (subsamples != null) {
+                val sampleSize = samples[index].sampleSizeBytes
+                val covered = subsamples.fold(0L) { total, item ->
+                    Math.addExact(total, Math.addExact(item.clearBytes.toLong(), item.encryptedBytes))
+                }
+                if (sampleSize == null || covered != sampleSize) {
+                    allSubsampleRangesCoverSamples = false
+                }
+            }
+            parsed += SampleEncryptionMetadata(ivSize, subsamples)
+        }
+        return ExternalAuxiliaryParseResult(true, parsed, allSubsampleRangesCoverSamples)
     }
 
     private fun parseTfhd(p: ByteBuffer): TfhdDefaults {
@@ -518,13 +652,21 @@ internal object CmafBoxInspector {
         require((flags and knownFlags.inv()) == 0) { "Unsupported tfhd flags" }
         val trackId = u32(p)
         require(trackId > 0) { "Invalid tfhd track ID" }
-        if ((flags and 0x000001) != 0) skip(p, 8) // base_data_offset
+        val baseDataOffsetPresent = (flags and 0x000001) != 0
+        val defaultBaseIsMoof = (flags and 0x020000) != 0
+        require(!(baseDataOffsetPresent && defaultBaseIsMoof)) {
+            "tfhd cannot set both base-data-offset-present and default-base-is-moof"
+        }
+        val baseDataOffset = if (baseDataOffsetPresent) readUnsignedLong(p) else null
         if ((flags and 0x000002) != 0) skip(p, 4) // sample_description_index
         val defaultDuration = if ((flags and 0x000008) != 0) u32(p).takeIf { it > 0 } else null
         val defaultSampleSize = if ((flags and 0x000010) != 0) u32(p).takeIf { it > 0 } else null
         if ((flags and 0x000020) != 0) skip(p, 4) // default_sample_flags
         require(!p.hasRemaining()) { "Unexpected trailing bytes in tfhd box" }
-        return TfhdDefaults(trackId, defaultDuration, defaultSampleSize, (flags and 0x010000) != 0)
+        return TfhdDefaults(
+            trackId, baseDataOffset, defaultBaseIsMoof,
+            defaultDuration, defaultSampleSize, (flags and 0x010000) != 0
+        )
     }
 
     private fun parseTfdt(p: ByteBuffer): Long {
