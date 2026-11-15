@@ -27,7 +27,7 @@ class HevcSyntheticFeedAlignmentTest {
 
         val feedAParameterSets = parseSourceParameterSets(feedABytes)
         val feedBParameterSets = parseSourceParameterSets(feedBBytes)
-        // HEVC codes complete CTBs (64x64 here), so the coded height is padded to 544.
+        // HEVC codes complete CTBs, so the coded height is padded to 544.
         // The SPS conformance window must expose the intended 960x540 display rectangle.
         assertEquals(960, feedAParameterSets.sps.displayWidth)
         assertEquals(540, feedAParameterSets.sps.displayHeight)
