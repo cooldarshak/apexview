@@ -8,6 +8,7 @@ import java.security.MessageDigest
 import androidx.media3.common.MimeTypes
 import app.apexview.tiled.HevcBitstream
 import app.apexview.tiled.HevcParameterSets
+import app.apexview.tiled.HevcParameterSetCompatibility
 
 /**
  * Sanitised read-only summary of the codec configuration Media3 already parsed for a video track.
