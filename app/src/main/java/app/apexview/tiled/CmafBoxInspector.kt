@@ -1106,16 +1106,28 @@ internal object CmafBoxInspector {
         }
         val subsampleEncryption = (flags and 0x000002) != 0
 
-        // Do not parse record bytes when seig resolution is incomplete. A senc override
-        // combined with seig is also kept fail-closed until precedence is verified against
-        // the actual delivery profile.
-        if (forceIncomplete || (hasSeigOverrides && overrideIvSize != null)) {
+        // Do not parse record bytes when seig resolution is incomplete. The legacy PIFF
+        // override carries one IV_size for the whole senc box, while seig can change IV size
+        // per sample. Parse the combination only when the resolved per-sample widths all agree
+        // with that single override width; otherwise the record boundaries are ambiguous.
+        if (forceIncomplete) {
             return SencSummary(sampleCount, subsampleEncryption, false, emptyList(), overrideIvSize)
         }
-
-        // Prefer resolved per-sample seig/tenc values. A senc override applies globally only
-        // when no seig mapping is active. Never infer a byte count from a KID or IV value.
         val overrideIvSizeValue = overrideIvSize
+        if (hasSeigOverrides && overrideIvSizeValue != null) {
+            val groupIvSizes = effectiveSampleIvSizes
+            if (groupIvSizes == null ||
+                groupIvSizes.size != sampleCount.toInt() ||
+                groupIvSizes.any { it != overrideIvSizeValue }
+            ) {
+                return SencSummary(sampleCount, subsampleEncryption, false, emptyList(), overrideIvSize)
+            }
+        }
+
+        // PIFF senc override supplies the single IV width for this record table. If a seig
+        // mapping is also present, the equality check above proves that every mapped sample
+        // uses that same width. This is structural parsing only: AlgorithmID/KID are skipped
+        // and no encrypted compatibility decision is made from them.
         val ivSizes: List<Int> = when {
             overrideIvSizeValue != null -> List(sampleCount.toInt()) { overrideIvSizeValue }
             effectiveSampleIvSizes != null -> effectiveSampleIvSizes
