@@ -167,7 +167,7 @@ class HevcFeedProfileProbeTest {
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-onboard: WAITING_FOR_VIDEO_INPUT_FORMAT"))
     }
     @Test
-    fun formatMatchDoesNotImplySyntheticTileAssemblerCompatibility() {
+    fun incompleteFormatCannotPassSyntheticTileAssemblerGate() {
         val format = Format.Builder()
             .setSampleMimeType(MimeTypes.VIDEO_H265)
             .setCodecs("hvc1.1.6.L93.B0")
@@ -183,7 +183,7 @@ class HevcFeedProfileProbeTest {
             HevcFeedProfileProbe.inspect(C.TRACK_TYPE_VIDEO, format, "channel-b", group)
         )
 
-        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_FORMAT_MATCH"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_FORMAT_MISMATCH"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_TILE_ASSEMBLER_GATE=INCOMPLETE"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("secure-surface feasibility remain unverified"))
     }
@@ -210,7 +210,7 @@ class HevcFeedProfileProbeTest {
 
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-1001"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("channel-1003"))
-        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_FORMAT_MATCH"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_FORMAT_MISMATCH"))
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_TILE_ASSEMBLER_GATE=INCOMPLETE"))
         assertTrue(!HevcFeedProfileCapture.diagnostic.contains("channel-1002:"))
     }

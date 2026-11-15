@@ -1223,7 +1223,7 @@ class AppState(
             channels = session.map { it.channel.key() },
             bigChannel = big.channel.key(),
             audioChannel = (session.firstOrNull { it.audible } ?: big).channel.key(),
-            layoutMode = layoutMode.name,
+            layoutMode = (if (layoutMode == LayoutMode.TILE_TEST) LayoutMode.GRID else layoutMode).name,
             mapMode = mapMode.name,
             layout = layout,
         )
