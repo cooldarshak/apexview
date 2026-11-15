@@ -12,7 +12,6 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
@@ -46,7 +45,6 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.awaitFirstDown
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -381,12 +379,13 @@ fun MapPanelView(app: AppState, timing: SessionTiming) {
             .requiredSize(with(density) { panel.w.toDp() }, with(density) { panel.h.toDp() })
             .pointerInput(app.mapLocked, tvControls) {
                 if (app.mapLocked && !tvControls) {
-                    awaitEachGesture {
-                        awaitFirstDown(
-                            requireUnconsumed = false,
-                            pass = PointerEventPass.Initial,
-                        )
-                        mapInteractionGeneration++
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.changes.any { it.pressed && !it.previousPressed }) {
+                                mapInteractionGeneration++
+                            }
+                        }
                     }
                 }
             }
