@@ -118,11 +118,17 @@ data class WeekendContent(
 }
 
 /** What contentPlay returns: the stream, and the Widevine license URL when the stream is protected. */
-data class PlayInfo(val url: String, val licenseUrl: String?, val streamType: String)
+data class PlayInfo(
+    val url: String,
+    val licenseUrl: String?,
+    val streamType: String,
+    /** Only standard, authorised single-feed contentPlay streams may emit the HEVC POC diagnostic. */
+    val allowHevcProfileProbe: Boolean = false
+)
 
 /** One play session holding every feed of a content, keyed by channel ID. */
 data class MultiPlay(val feeds: Map<Int, String>, val licenseUrl: String?, val streamType: String) {
-    fun stream(url: String) = PlayInfo(url, licenseUrl, streamType)
+    fun stream(url: String) = PlayInfo(url, licenseUrl, streamType, allowHevcProfileProbe = false)
 }
 
 /**
@@ -545,6 +551,7 @@ class F1TvApi(private val userAgent: String, private val chromeMajor: String) {
             url = result.getString("url"),
             licenseUrl = text(result, "laURL").ifEmpty { null },
             streamType = text(result, "streamType"),
+            allowHevcProfileProbe = true
         )
     }
 

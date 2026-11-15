@@ -257,6 +257,7 @@ class FeedPlayer(
                 if (!isVideo) return
                 // This is a read-only observer of Media3's parsed codec configuration. It does
                 // not inspect sample payloads, URLs, PSSH, licence requests, KIDs or IV values.
+                if (!stream.allowHevcProfileProbe) return
                 val diagnostic = HevcFeedProfileProbe.summarize(mediaLoadData.trackType, format)
                 if (diagnostic != lastFeedProfileDiagnostic) {
                     lastFeedProfileDiagnostic = diagnostic
