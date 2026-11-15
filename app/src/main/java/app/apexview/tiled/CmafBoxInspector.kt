@@ -599,9 +599,11 @@ internal object CmafBoxInspector {
     ): SampleGroupParseResult {
         val sgpdBoxes = traf.children.filter { it.type == "sgpd" }
         val sbgpBoxes = traf.children.filter { it.type == "sbgp" }
+        var parseFailed = false
         val descriptions = sgpdBoxes.mapNotNull { box ->
             try { parseSeigSgpd(payload(data, box)) }
             catch (e: Exception) {
+                parseFailed = true
                 errors += "seig sample-group descriptions could not be parsed"
                 null
             }
@@ -609,11 +611,13 @@ internal object CmafBoxInspector {
         val mappings = sbgpBoxes.mapNotNull { box ->
             try { parseSeigSbgp(payload(data, box)) }
             catch (e: Exception) {
+                parseFailed = true
                 errors += "seig sample-to-group mapping could not be parsed"
                 null
             }
         }
         val present = descriptions.isNotEmpty() || mappings.isNotEmpty()
+        if (parseFailed) return SampleGroupParseResult(true, false, null)
         if (!present) return SampleGroupParseResult(false, true, null)
         if (descriptions.size > 1 || mappings.size > 1) {
             errors += "Multiple seig sample-group boxes are not supported"

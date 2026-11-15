@@ -69,6 +69,41 @@ class HevcFragmentCompatibilityTest {
         assertFalse(result.compatible)
     }
 
+    @Test fun rejectsSeigOverrideWithIncompleteStructureAndDoesNotAcceptProtectedSeigWithoutKidProof() {
+        val plain = fragment(90000, 0,
+            listOf(CmafBoxInspector.SampleTiming(0, 0, 3000, 0)))
+        val protectedEntry = CmafBoxInspector.SeigProtectionEntry(
+            entryIndex = 1, isProtected = true, perSampleIvSize = 8,
+            cryptByteBlock = 1, skipByteBlock = 9, constantIvSize = null
+        )
+        val groupMetadata = CmafBoxInspector.SampleGroupEncryptionMetadata(
+            descriptionVersion = 1,
+            defaultSampleDescriptionIndex = 0,
+            entries = listOf(protectedEntry),
+            runs = listOf(CmafBoxInspector.SampleGroupRun(1, 1))
+        )
+        val incomplete = plain.copy(
+            sampleGroupEncryptionPresent = true,
+            sampleGroupEncryptionStructureComplete = false
+        )
+        val incompleteResult = HevcFragmentCompatibility.compare(
+            track(90000), incomplete, track(90000), plain
+        )
+        assertTrue(incompleteResult.reasons.any { it.contains("presence differs") })
+        assertTrue(incompleteResult.reasons.any { it.contains("structure is incomplete") })
+
+        val protected = plain.copy(
+            sampleGroupEncryptionPresent = true,
+            sampleGroupEncryptionStructureComplete = true,
+            sampleGroupEncryptionMetadata = groupMetadata
+        )
+        val result = HevcFragmentCompatibility.compare(
+            track(90000), protected, track(90000), protected.copy()
+        )
+        assertTrue(result.reasons.any { it.contains("KID identity has not been compared") })
+        assertFalse(result.compatible)
+    }
+
     @Test fun rejectsIncompleteTimingAndEncryptedFragmentsWithoutCompleteCryptoProof() {
         val incomplete = fragment(
             90000, null,

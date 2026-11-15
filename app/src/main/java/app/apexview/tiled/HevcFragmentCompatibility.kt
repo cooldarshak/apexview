@@ -145,10 +145,10 @@ internal object HevcFragmentCompatibility {
 
         val firstCrypto = firstFragment.sampleEncryptionBoxPresent ||
             firstFragment.sampleAuxiliarySizesPresent || firstFragment.sampleAuxiliaryOffsetsPresent ||
-            firstFragment.sampleGroupDescriptionPresent || firstFragment.sampleToGroupPresent
+            firstFragment.sampleGroupEncryptionPresent
         val secondCrypto = secondFragment.sampleEncryptionBoxPresent ||
             secondFragment.sampleAuxiliarySizesPresent || secondFragment.sampleAuxiliaryOffsetsPresent ||
-            secondFragment.sampleGroupDescriptionPresent || secondFragment.sampleToGroupPresent
+            secondFragment.sampleGroupEncryptionPresent
         if (firstCrypto != secondCrypto) reasons += "Fragment encryption metadata presence differs"
         if (firstFragment.sampleEncryptionBoxPresent || secondFragment.sampleEncryptionBoxPresent) {
             if (firstFragment.sampleEncryptionCount != firstFragment.sampleCount.toLong() ||
@@ -196,9 +196,23 @@ internal object HevcFragmentCompatibility {
             firstFragment.sampleAuxiliaryOffsetsPresent || secondFragment.sampleAuxiliaryOffsetsPresent) {
             reasons += "External sample-encryption auxiliary data is not yet parsed"
         }
-        if (firstFragment.sampleGroupDescriptionPresent || secondFragment.sampleGroupDescriptionPresent ||
-            firstFragment.sampleToGroupPresent || secondFragment.sampleToGroupPresent) {
-            reasons += "Sample-group encryption overrides are not yet parsed"
+        if (firstFragment.sampleGroupEncryptionPresent != secondFragment.sampleGroupEncryptionPresent) {
+            reasons += "seig sample-group encryption override presence differs"
+        }
+        if (firstFragment.sampleGroupEncryptionPresent || secondFragment.sampleGroupEncryptionPresent) {
+            if (!firstFragment.sampleGroupEncryptionStructureComplete ||
+                !secondFragment.sampleGroupEncryptionStructureComplete) {
+                reasons += "seig sample-group encryption structure is incomplete"
+            } else if (firstFragment.sampleGroupEncryptionMetadata != secondFragment.sampleGroupEncryptionMetadata) {
+                reasons += "seig sample-group encryption metadata differs"
+            }
+            val firstHasProtectedGroup = firstFragment.sampleGroupEncryptionMetadata
+                ?.entries?.any { it.isProtected } == true
+            val secondHasProtectedGroup = secondFragment.sampleGroupEncryptionMetadata
+                ?.entries?.any { it.isProtected } == true
+            if (firstHasProtectedGroup || secondHasProtectedGroup) {
+                reasons += "seig KID identity has not been compared"
+            }
         }
 
         return Result(reasons.isEmpty(), reasons.distinct())
