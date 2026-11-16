@@ -31,9 +31,9 @@ class HevcSyntheticFeedAlignmentTest {
         // HEVC codes complete CTBs, so the coded height is padded to 544.
         // The SPS conformance window must expose the intended 960x540 display rectangle.
         assertEquals(960, feedAParameterSets.sps.displayWidth)
-        assertEquals(544, feedAParameterSets.sps.displayHeight)
+        assertEquals(540, feedAParameterSets.sps.displayHeight)
         assertEquals(960, feedBParameterSets.sps.displayWidth)
-        assertEquals(544, feedBParameterSets.sps.displayHeight)
+        assertEquals(540, feedBParameterSets.sps.displayHeight)
         assertEquals(544, feedAParameterSets.sps.height)
         assertEquals(544, feedBParameterSets.sps.height)
         assertFalse("Feed A must disable temporal motion vector prediction", feedAParameterSets.sps.temporalMvpEnabled)
@@ -135,7 +135,7 @@ class HevcSyntheticFeedAlignmentTest {
         assertEquals(1920, composed.codedWidth)
         assertEquals(544, composed.codedHeight)
         assertEquals(1920, composed.displayWidth)
-        assertEquals(544, composed.displayHeight)
+        assertEquals(540, composed.displayHeight)
         assertEquals(2, composed.tileColumnWidthsInCtbs.size)
         assertEquals(1, composed.tileRowHeightsInCtbs.size)
         assertEquals(2, composed.pictures.first().evidence.size)

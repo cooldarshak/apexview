@@ -39,7 +39,7 @@ def main():
 
     frame_count = 50
     output_width = 1920
-    output_height = 544
+    output_height = 540
     expected = run_bytes([
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-f", "hevc", "-i", str(feed_a),
@@ -77,7 +77,7 @@ def main():
         "source_pps_ids": [0, 1],
         "output_grid": "2x1",
         "decoded_frames": frame_count,
-        "output_dimensions": "1920x544",
+        "output_dimensions": "1920x540",
         "reference_sha256": expected_hash,
         "composed_sha256": actual_hash,
         "pixel_identical_to_horizontal_source_stack": True,

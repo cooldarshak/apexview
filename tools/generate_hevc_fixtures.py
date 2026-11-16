@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 FRAME_WIDTH = 960
-FRAME_HEIGHT = 544
+FRAME_HEIGHT = 540
 FRAME_RATE = 25
 FRAME_COUNT = 50
 
@@ -138,7 +138,7 @@ def main():
         "encoder": "Kvazaar",
         "encoder_license": "BSD-3-Clause",
         "independent_source_encodes": True,
-        "source_picture_layout": "one 960x544 tile and one independent slice per picture",
+        "source_picture_layout": "one 960x540 display tile (544 coded lines with conformance crop) and one independent slice per picture",
         "motion_vector_constraint": "frametilemargin",
         "temporal_motion_vector_prediction": "disabled",
         "wpp": "disabled",
