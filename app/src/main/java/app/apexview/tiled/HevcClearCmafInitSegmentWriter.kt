@@ -145,7 +145,7 @@ internal object HevcClearCmafInitSegmentWriter {
         return ftyp + moov
     }
 
-    private fun writeHevcConfiguration(
+    internal fun writeHevcConfiguration(
         output: HevcOutputParameterSetWriter.Output,
         sps: HevcParameterSets.SpsMetadata
     ): ByteArray = writeSourceHevcConfiguration(
