@@ -1469,7 +1469,7 @@ private fun LayoutSheet(app: AppState) {
                     app.layoutMode == LayoutMode.TILE_TEST ->
                         "Choose exactly two feeds from the same F1 session. The feed picker opens so you can select them manually. The app compares their HEVC tile parameters and reports whether the current 2×1 test assembler accepts them. Normal playback remains unchanged."
                     app.layoutMode == LayoutMode.SINGLE_DECODER_TEST ->
-                        "Use the 2–4 archive feeds already playing in this session. Their video decoders are stopped, then the protected composed grid is played through one video decoder. The selected audio feed continues playing."
+                        "Choose Layout → Single-decoder test while 2–4 feeds from the same archive are playing. ApexView stops their individual video decoders, then plays the protected composed grid through one video decoder. The selected audio feed continues playing."
                     hasSaved ->
                         "My layout is the one you saved for $n feed${if (n == 1) "" else "s"} with the phone ${app.wayUp}."
                     else ->
