@@ -328,13 +328,17 @@ internal object ProtectedHevcPictureComposer {
         val noRaslOutput = input.noRaslOutputFlag ?: (header.nalUnitType in 16..20)
         val pocTrackerAfter = input.pocTracker.fork()
         val fullPoc = try {
-            pocTrackerAfter.derive(
+            val derived = pocTrackerAfter.derive(
                 nalUnitType = header.nalUnitType,
                 temporalIdPlus1 = header.temporalIdPlus1,
                 pocLsb = requireNotNull(pocLsb),
                 log2MaxPocLsb = sps.log2MaxPicOrderCntLsb,
                 noRaslOutputFlag = noRaslOutput
             )
+            require(pocTrackerAfter.hasIrapAnchor) {
+                "A valid temporal-id-zero IRAP reference anchor is required for protected cross-feed composition"
+            }
+            derived
         } catch (error: Exception) {
             val detail = error.message ?: error.javaClass.simpleName
             throw IllegalArgumentException("$context: $label full POC is unavailable: " + detail)

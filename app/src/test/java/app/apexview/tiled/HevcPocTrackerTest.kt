@@ -7,18 +7,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HevcPocTrackerTest {
-    @Test fun refusesToInventFullPocBeforeAnIrapAnchor() {
+    @Test fun legacyPocDerivationStillSupportsSequencesWithoutAnInitialIrap() {
         val tracker = HevcPocTracker()
-        val error = assertThrows(IllegalArgumentException::class.java) {
+        assertEquals(
+            3L,
             tracker.derive(
                 nalUnitType = 1,
                 temporalIdPlus1 = 1,
                 pocLsb = 3,
                 log2MaxPocLsb = 8
             )
-        }
-        assertTrue(error.message!!.contains("before a valid IRAP reference anchor"))
-        assertFalse(tracker.hasReferenceAnchor)
+        )
+        assertTrue(tracker.hasReferenceAnchor)
+        assertFalse(tracker.hasIrapAnchor)
     }
 
     @Test fun idrEstablishesAnchorForFollowingInterPictures() {
@@ -33,6 +34,7 @@ class HevcPocTrackerTest {
             )
         )
         assertTrue(tracker.hasReferenceAnchor)
+        assertTrue(tracker.hasIrapAnchor)
         assertEquals(
             1L,
             tracker.derive(
@@ -44,11 +46,13 @@ class HevcPocTrackerTest {
         )
         tracker.reset()
         assertFalse(tracker.hasReferenceAnchor)
+        assertFalse(tracker.hasIrapAnchor)
     }
 
-    @Test fun craWithoutNoRaslOutputFlagRequiresAValidEarlierAnchor() {
+    @Test fun craWithoutNoRaslOutputFlagUsesExistingPrevTid0ButDoesNotEstablishIrapAnchor() {
         val tracker = HevcPocTracker()
-        val error = assertThrows(IllegalArgumentException::class.java) {
+        assertEquals(
+            12L,
             tracker.derive(
                 nalUnitType = 21,
                 temporalIdPlus1 = 1,
@@ -56,8 +60,9 @@ class HevcPocTrackerTest {
                 log2MaxPocLsb = 8,
                 noRaslOutputFlag = false
             )
-        }
-        assertTrue(error.message!!.contains("before a valid IRAP reference anchor"))
+        )
+        assertTrue(tracker.hasReferenceAnchor)
+        assertFalse(tracker.hasIrapAnchor)
     }
 
     @Test fun blaAndCraWithNoRaslOutputFlagEstablishAnAnchor() {
@@ -72,6 +77,7 @@ class HevcPocTrackerTest {
             )
         )
         assertTrue(bla.hasReferenceAnchor)
+        assertTrue(bla.hasIrapAnchor)
 
         val cra = HevcPocTracker()
         assertEquals(
@@ -85,5 +91,6 @@ class HevcPocTrackerTest {
             )
         )
         assertTrue(cra.hasReferenceAnchor)
+        assertTrue(cra.hasIrapAnchor)
     }
 }

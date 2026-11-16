@@ -477,14 +477,19 @@ internal class HevcPocTracker {
     private var previousTid0PocMsb = 0L
     private var previousTid0PocLsb = 0L
 
-    /** True only after a valid temporal-id-zero IRAP picture has established a POC anchor. */
+    /** True after any valid temporal-id-zero reference picture has established prevTid0Pic. */
     var hasReferenceAnchor: Boolean = false
+        private set
+
+    /** True only after a temporal-id-zero IDR/BLA or CRA with NoRaslOutputFlag=1. */
+    var hasIrapAnchor: Boolean = false
         private set
 
     fun reset() {
         previousTid0PocMsb = 0L
         previousTid0PocLsb = 0L
         hasReferenceAnchor = false
+        hasIrapAnchor = false
     }
 
     /** Creates an isolated working copy so a failed composition cannot advance the live tracker. */
@@ -492,6 +497,7 @@ internal class HevcPocTracker {
         it.previousTid0PocMsb = previousTid0PocMsb
         it.previousTid0PocLsb = previousTid0PocLsb
         it.hasReferenceAnchor = hasReferenceAnchor
+        it.hasIrapAnchor = hasIrapAnchor
     }
 
     /** Commits a successfully validated working copy back into this feed's tracker. */
@@ -499,6 +505,7 @@ internal class HevcPocTracker {
         previousTid0PocMsb = snapshot.previousTid0PocMsb
         previousTid0PocLsb = snapshot.previousTid0PocLsb
         hasReferenceAnchor = snapshot.hasReferenceAnchor
+        hasIrapAnchor = snapshot.hasIrapAnchor
     }
 
     fun derive(
@@ -516,15 +523,15 @@ internal class HevcPocTracker {
 
         if (nalUnitType == 19 || nalUnitType == 20) {
             reset()
-            if (temporalIdPlus1 == 1) hasReferenceAnchor = true
+            if (temporalIdPlus1 == 1) {
+                hasReferenceAnchor = true
+                hasIrapAnchor = true
+            }
             return 0L
         }
 
         val isIrap = nalUnitType in 16..23
         val resetPocMsb = isIrap && (nalUnitType in 16..18 || noRaslOutputFlag)
-        require(resetPocMsb || hasReferenceAnchor) {
-            "Full HEVC POC cannot be derived before a valid IRAP reference anchor"
-        }
         val current = pocLsb.toLong()
 
         val pocMsb = if (resetPocMsb) {
@@ -551,6 +558,7 @@ internal class HevcPocTracker {
             previousTid0PocMsb = pocMsb
             previousTid0PocLsb = current
             hasReferenceAnchor = true
+            if (resetPocMsb) hasIrapAnchor = true
         }
         return poc
     }
