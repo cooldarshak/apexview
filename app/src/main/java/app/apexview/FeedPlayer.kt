@@ -118,6 +118,9 @@ class FeedPlayer(
     /** Auto or a maximum requested video rendition shared by the viewer. */
     videoQuality: VideoQuality = VideoQuality.AUTO,
 ) {
+    /** Authorized per-channel F1 offer used by the DASH segment-only capture path. */
+    internal val sourceStream: PlayInfo = stream
+
     var status by mutableStateOf("Starting")
         private set
 
