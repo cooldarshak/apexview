@@ -403,6 +403,20 @@ internal object HevcFeedProfileCapture {
             )
             if (!gate.compatible) reasons += gate.reasons.map { "PPS $ppsId: $it" }
         }
+        listOf(first, second).forEach { profile ->
+            if (profile.parsedPps.isEmpty()) {
+                reasons += "${profile.label}: source tile layout is unavailable"
+            } else {
+                profile.parsedPps.forEach { pps ->
+                    val tileCount = pps.numTileColumns.toLong() * pps.numTileRows.toLong()
+                    if (!pps.tilesEnabled) {
+                        reasons += "${profile.label} PPS ${pps.ppsId}: tiles are disabled; this is a full-frame picture, not a source tile grid"
+                    } else if (tileCount < 2L) {
+                        reasons += "${profile.label} PPS ${pps.ppsId}: tile layout contains fewer than two source tiles"
+                    }
+                }
+            }
+        }
         return if (reasons.isEmpty()) "PASS" else "REJECT: ${reasons.distinct().joinToString("; ")}"
     }
 
@@ -615,6 +629,20 @@ internal object HevcFeedProfileCapture {
                 secondConfig?.vps?.singleOrNull(), secondConfig?.sps?.singleOrNull(), secondConfig?.pps?.singleOrNull()
             )
             lines += "CMAF_HEVC_TILE_CONFIG_GATE=${if (tileGate.compatible) "MATCH" else "NOT_COMPATIBLE"}; reasons=${tileGate.reasons.ifEmpty { listOf("none") }.joinToString("|")}"
+            val sourceTileReasons = buildList {
+                listOf("first" to firstConfig?.pps, "second" to secondConfig?.pps).forEach { (name, ppsSets) ->
+                    if (ppsSets.isNullOrEmpty()) {
+                        add("$name feed source tile layout is unavailable")
+                    } else {
+                        ppsSets.forEach { pps ->
+                            val count = pps.numTileColumns.toLong() * pps.numTileRows.toLong()
+                            if (!pps.tilesEnabled) add("$name feed PPS ${pps.ppsId}: tiles are disabled")
+                            else if (count < 2L) add("$name feed PPS ${pps.ppsId}: fewer than two source tiles")
+                        }
+                    }
+                }
+            }
+            lines += "CMAF_SOURCE_TILE_LAYOUT_GATE=${if (sourceTileReasons.isEmpty()) "PASS" else "NOT_COMPATIBLE"}; reasons=${sourceTileReasons.ifEmpty { listOf("none") }.joinToString("|")}"
         } else {
             lines += "CMAF_TRACK_COMPARISON=WAITING_FOR_BOTH_VIDEO_INIT_SEGMENTS"
         }
