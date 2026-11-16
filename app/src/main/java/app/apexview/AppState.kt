@@ -1398,6 +1398,9 @@ class AppState(
     /** Start the protected one-decoder path for a normal Android TV live multiview session. */
     private fun startTvLiveCompositionIfEligible(contentId: Long) {
         if (!isTv || layoutMode == LayoutMode.TILE_TEST) return
+        // A feed was added to an already composed session. Restore the source players and layout
+        // before rebuilding the selected-feed set, otherwise the old grid host remains detached.
+        if (protectedCompositionHost != null) stopProtectedCompositionPresentation()
         val isKnownLive = contentId in knownLiveContentIds || liveNow.any { it.contentId == contentId }
         if (!isKnownLive) return
         val sessionTiles = tiles.filter { it.contentId == contentId }
