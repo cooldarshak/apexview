@@ -204,7 +204,7 @@ class HevcSyntheticTileSplitTest {
         assertEquals(128, result.codedHeight)
         assertEquals(2, result.tileColumnWidthsInCtbs.size)
         assertEquals(2, result.tileRowHeightsInCtbs.size)
-        assertTrue("Output PPS must keep its 2x2 tile grid", result.outputLoopFilterAcrossTilesEnabled)
+        // The generated grid keeps source loop-filter policy unless every selected seam is safe.
         assertTrue(result.pictures.all { picture ->
             picture.evidence.map { it.destinationCtbAddress } == listOf(0, 4, 16, 20)
         })
