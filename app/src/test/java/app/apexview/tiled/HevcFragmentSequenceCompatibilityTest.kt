@@ -87,7 +87,7 @@ class HevcFragmentSequenceCompatibilityTest {
 
         val referenceMismatch = sequence(
             90_000, listOf(0, 6_000), 3_000, listOf(0, 1, 2, 3),
-            referenceOverrides = mapOf(2 to listOf(HevcSliceHeaderParser.ReferencePicture(deltaPoc = -1, pocLsb = null, usedByCurrent = true, longTerm = false)))
+            referenceOverrides = mapOf(2 to listOf(HevcSliceHeaderParser.ReferencePicture(deltaPoc = -2, pocLsb = null, usedByCurrent = true, longTerm = false)))
         )
         val referenceResult = HevcFragmentSequenceCompatibility.compare(first, referenceMismatch)
         assertFalse(referenceResult.compatible)
