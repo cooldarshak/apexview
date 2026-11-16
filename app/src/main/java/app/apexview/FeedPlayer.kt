@@ -566,14 +566,16 @@ class FeedPlayer(
     }
 
     /** Restores this player's original feed and releases its bounded composed-media window. */
-    fun stopProtectedComposedPlayback() {
+    fun stopProtectedComposedPlayback(positionMs: Long? = null) {
         protectedLiveDashSource?.release()
         protectedLiveDashSource = null
         videoSuppressedByProtectedComposition = false
-        if (initialStartPositionMs == C.TIME_UNSET) {
+        val restorePositionMs = positionMs?.coerceAtLeast(0L)
+            ?: initialStartPositionMs.takeIf { it != C.TIME_UNSET }
+        if (restorePositionMs == null) {
             player.setMediaItem(originalMediaItem)
         } else {
-            player.setMediaItem(originalMediaItem, initialStartPositionMs)
+            player.setMediaItem(originalMediaItem, restorePositionMs)
         }
         videoOn = initialVideoEnabled
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()

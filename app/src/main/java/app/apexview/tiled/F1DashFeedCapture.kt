@@ -254,6 +254,202 @@ internal class F1DashFeedCapture(
         }
     }
 
+    /**
+     * Captures the next aligned encrypted CMAF segment at the current VOD playback position.
+     * Unlike [captureNext], this does not choose the newest segment in the manifest, which would
+     * jump an archive straight to its final segment. Calls are serialized by the owning test job.
+     */
+    suspend fun captureAtPosition(
+        group: String,
+        feeds: List<Feed>,
+        playbackPositionMs: Long
+    ): Snapshot = withContext(Dispatchers.IO) {
+        require(group.isNotBlank()) { "Composition group is required" }
+        require(feeds.size in setOf(2, 3, 4, 6)) {
+            "Archive HEVC composition needs 2, 3, 4 or 6 selected feeds"
+        }
+        require(playbackPositionMs >= 0L) { "Archive playback position cannot be negative" }
+        require(feeds.map { it.label }.distinct().size == feeds.size &&
+            feeds.all { it.label.isNotBlank() && it.manifestUrl.isNotBlank() }) {
+            "Selected F1 feed labels and DASH URLs must be present and unique"
+        }
+
+        try {
+            val loaded = coroutineScope {
+                feeds.map { feed -> async { loadFeed(feed) } }.awaitAll()
+            }
+            val chosenSize = chooseCommonHevcSize(loaded)
+                ?: throw IOException("Archive feeds do not expose a common HEVC rendition at or below ${maximumVideoHeight}p")
+            val selectedWithIndexes = loaded.map { item ->
+                val representation = item.representationFor(chosenSize.first, chosenSize.second)
+                val index = representation.index
+                    ?: throw IOException("${item.feed.label}: archive DASH representation has no in-manifest segment index")
+                val init = representation.initializationUri
+                    ?: throw IOException("${item.feed.label}: archive DASH representation has no initialization segment")
+                val base = representation.baseUrls.firstOrNull()?.url
+                    ?: throw IOException("${item.feed.label}: archive DASH representation has no BaseURL")
+                item.copy(
+                    representation = representation,
+                    index = index,
+                    initializationUri = init,
+                    baseUrl = base
+                )
+            }
+            selectedWithIndexes.forEach { rememberWidevinePssh(it.representation.format) }
+
+            coroutineScope {
+                selectedWithIndexes.map { item ->
+                    async {
+                        val initKey = initializationKey(item)
+                        if (initializationByLabel[item.feed.label]?.key != initKey) {
+                            val bytes = readBounded(
+                                item,
+                                item.initializationUri,
+                                MAX_INITIALIZATION_BYTES,
+                                "archive initialization"
+                            )
+                            try {
+                                val report = CmafBoxInspector.inspect(bytes)
+                                if (report.errors.isNotEmpty() || !report.initializationSegmentPresent) {
+                                    throw IOException(
+                                        "${item.feed.label}: invalid archive CMAF initialization: " +
+                                            report.errors.joinToString("; ").take(180)
+                                    )
+                                }
+                                ProtectedHevcLiveComposition.recordCmafResponse(
+                                    group, item.feed.label, bytes, report
+                                )
+                                initializationByLabel[item.feed.label] = InitState(initKey, report)
+                            } finally {
+                                bytes.fill(0)
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+
+            val candidateWindows = selectedWithIndexes.map { item ->
+                archiveSegmentsNearPosition(item, playbackPositionMs)
+            }
+            val previous = lastCapturedSegmentStartUs
+            val aligned = ArchiveDashSegmentSelector.selectAligned(
+                candidateWindows = candidateWindows.map { window ->
+                    window.map { ArchiveDashSegmentSelector.Candidate(it.number, it.absoluteStartUs) }
+                },
+                targetTimeUs = Math.multiplyExact(playbackPositionMs, 1_000L),
+                previousStartUs = previous,
+                toleranceUs = segmentTimeToleranceUs,
+            )?.map { SegmentCandidate(it.number, it.absoluteStartUs) }
+                ?: return@withContext Snapshot(
+                    selectedWidth = chosenSize.first,
+                    selectedHeight = chosenSize.second,
+                    selectedCodecs = selectedWithIndexes.first().representation.format.codecs,
+                    alignedSegmentTimeUs = null,
+                    capturedFeeds = 0,
+                    compositionStatus = ProtectedHevcLiveComposition.status(group),
+                    detail = if (previous == null) {
+                        "Waiting for a common archive segment at the current playback position"
+                    } else {
+                        "Waiting for the next contiguous archive segment"
+                    },
+                )
+
+            val media = coroutineScope {
+                selectedWithIndexes.zip(aligned).map { (item, segment) ->
+                    async {
+                        val bytes = readBounded(
+                            item,
+                            item.index.getSegmentUrl(segment.number),
+                            MAX_MEDIA_FRAGMENT_BYTES,
+                            "archive media fragment"
+                        )
+                        val init = initializationByLabel[item.feed.label]
+                            ?: throw IOException("${item.feed.label}: archive initialization was not captured")
+                        try {
+                            val report = CmafBoxInspector.inspect(bytes, init.report)
+                            if (report.errors.isNotEmpty() || report.initializationSegmentPresent ||
+                                report.fragments.none {
+                                    it.trackId == init.report.tracks.singleOrNull { track -> track.handler == "vide" }?.trackId
+                                }) {
+                                throw IOException(
+                                    "${item.feed.label}: invalid archive HEVC fragment: " +
+                                        report.errors.joinToString("; ").take(180)
+                                )
+                            }
+                            item.feed.label to bytes.also {
+                                ProtectedHevcLiveComposition.recordCmafResponse(
+                                    group, item.feed.label, it, report
+                                )
+                            }
+                        } catch (error: Throwable) {
+                            bytes.fill(0)
+                            throw error
+                        }
+                    }
+                }.awaitAll()
+            }
+            media.forEach { (_, bytes) -> bytes.fill(0) }
+            lastCapturedSegmentStartUs = aligned.first().absoluteStartUs
+
+            Snapshot(
+                selectedWidth = chosenSize.first,
+                selectedHeight = chosenSize.second,
+                selectedCodecs = selectedWithIndexes.first().representation.format.codecs,
+                alignedSegmentTimeUs = aligned.first().absoluteStartUs,
+                capturedFeeds = media.size,
+                compositionStatus = ProtectedHevcLiveComposition.status(group),
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Snapshot(
+                selectedWidth = null,
+                selectedHeight = null,
+                selectedCodecs = null,
+                alignedSegmentTimeUs = null,
+                capturedFeeds = 0,
+                compositionStatus = ProtectedHevcLiveComposition.status(group),
+                detail = (error.message ?: error.javaClass.simpleName)
+                    .replace(Regex("https?://\\S+"), "[feed URL]")
+                    .take(240),
+            )
+        }
+    }
+
+    private fun archiveSegmentsNearPosition(
+        feed: LoadedFeed,
+        playbackPositionMs: Long
+    ): List<SegmentCandidate> {
+        val durationUs = feed.periodDurationUs
+        if (durationUs <= 0L || durationUs == C.TIME_UNSET) {
+            throw IOException("${feed.feed.label}: archive DASH Period has no finite duration")
+        }
+        val index = feed.index
+        val count = index.getSegmentCount(durationUs)
+        if (count <= 0L || count == DashSegmentIndex.INDEX_UNBOUNDED.toLong()) {
+            throw IOException("${feed.feed.label}: archive DASH index is not a finite VOD index")
+        }
+        val first = index.firstSegmentNum
+        val last = Math.addExact(first, count - 1L)
+        val periodStartUs = Math.multiplyExact(feed.period.startMs, 1_000L)
+        val absolutePositionUs = Math.multiplyExact(playbackPositionMs, 1_000L)
+        val positionInPeriodUs = absolutePositionUs - periodStartUs
+        if (positionInPeriodUs < 0L || positionInPeriodUs >= durationUs) {
+            throw IOException(
+                "${feed.feed.label}: current playback position is outside the final DASH Period"
+            )
+        }
+        val current = index.getSegmentNum(positionInPeriodUs, durationUs).coerceIn(first, last)
+        val begin = maxOf(first, current - RECENT_SEGMENT_WINDOW)
+        val end = minOf(last, current + ARCHIVE_LOOKAHEAD_SEGMENTS)
+        return (begin..end).map { number ->
+            SegmentCandidate(
+                number = number,
+                absoluteStartUs = Math.addExact(periodStartUs, index.getTimeUs(number))
+            )
+        }
+    }
+
     /** Defensive copy of the selected DASH representation's Widevine initialization data. */
     fun widevinePssh(): ByteArray? = latestWidevinePssh?.copyOf()
 
@@ -451,6 +647,7 @@ internal class F1DashFeedCapture(
 
     private companion object {
         const val RECENT_SEGMENT_WINDOW = 6L
+        const val ARCHIVE_LOOKAHEAD_SEGMENTS = 3L
         const val MAX_INITIALIZATION_BYTES = 2 * 1024 * 1024
         const val MAX_MEDIA_FRAGMENT_BYTES = 8 * 1024 * 1024
     }
