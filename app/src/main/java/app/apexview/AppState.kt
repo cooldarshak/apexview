@@ -22,12 +22,14 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.util.Calendar
 import kotlin.math.abs
 import app.apexview.tiled.ProtectedHevcLiveComposition
+import app.apexview.tiled.F1DashFeedCapture
 
 /** A feed's window on the canvas. Positions and sizes are in pixels. */
 class Tile(val id: Int, val contentId: Long, channel: Channel, feed: FeedPlayer) {
@@ -301,6 +303,8 @@ class AppState(
     private val openLogin: () -> Unit,
 ) {
     private var api = F1TvApi(userAgent, chromeMajor)
+    private var f1DashCaptureJob: Job? = null
+    private var f1DashCapture: F1DashFeedCapture? = null
     private val prefs = context.getSharedPreferences("f1mv", Context.MODE_PRIVATE)
 
     // Video budget: only feeds you can see decode video, each at its tile's size, less as the phone heats up.
@@ -334,6 +338,9 @@ class AppState(
     }
 
     fun close() {
+        f1DashCaptureJob?.cancel()
+        f1DashCaptureJob = null
+        f1DashCapture = null
         power?.removeThermalStatusListener(thermalListener)
     }
 
@@ -1355,11 +1362,16 @@ class AppState(
             HevcFeedProfileCapture.selectTileTestFeeds(compositionGroup, labels)
             ProtectedHevcLiveComposition.selectFeeds(compositionGroup, labels)
             if (sheet.selected.isEmpty() && sheet.removing.isEmpty()) {
+                if (isTv) startRealF1DashCapture(sheet.contentId, labels)
                 picker = null
                 browsing = false
                 handPlaced = false
                 layoutRequest++
-                message = "Tile test selected. Comparing the two chosen HEVC feeds."
+                message = if (isTv) {
+                    "Reading real F1 HEVC segments for one-decoder composition."
+                } else {
+                    "Tile test selected. Comparing the two chosen HEVC feeds."
+                }
                 showChrome()
                 return
             }
@@ -1374,6 +1386,48 @@ class AppState(
         if (adds.isNotEmpty()) addFeeds(sheet.contentId, adds, fromStart)
         picker = null
         browsing = false
+    }
+
+    /**
+     * F1 Tizen's live grid fetches each feed's init and aligned media segments independently,
+     * then stitches them into one HEVC representation. This is the Android/Media3 equivalent
+     * acquisition stage: direct DASH DataSource requests only, never an extra player or decoder.
+     */
+    private fun startRealF1DashCapture(contentId: Long, labels: List<String>) {
+        val byLabel = tiles.filter { it.contentId == contentId }.associateBy {
+            it.channel.channelId?.let { id -> "channel-$id" } ?: "default-channel"
+        }
+        val feeds = labels.mapNotNull { label ->
+            byLabel[label]?.let { tile ->
+                F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url)
+            }
+        }
+        if (feeds.size != labels.size || feeds.size !in setOf(2, 3, 4, 6)) {
+            message = "Could not start F1 tile capture: selected feed URLs are not all available."
+            return
+        }
+        f1DashCaptureJob?.cancel()
+        f1DashCapture?.reset()
+        val capture = F1DashFeedCapture(userAgent = userAgent)
+        f1DashCapture = capture
+        val group = "content-$contentId"
+        f1DashCaptureJob = scope.launch {
+            var lastMessage: String? = null
+            while (true) {
+                val snapshot = capture.captureNext(group, feeds)
+                val nextMessage = when {
+                    snapshot.detail != null -> "F1 feed capture: ${snapshot.detail}"
+                    snapshot.capturedFeeds > 0 ->
+                        "Real F1 CMAF captured from ${snapshot.capturedFeeds} feeds. ${snapshot.compositionStatus}"
+                    else -> "F1 feed capture: ${snapshot.compositionStatus}"
+                }
+                if (nextMessage != lastMessage) {
+                    message = nextMessage
+                    lastMessage = nextMessage
+                }
+                kotlinx.coroutines.delay(1_000)
+            }
+        }
     }
 
     /** Room for more feeds; past four the phone's decoders start to freeze. */
