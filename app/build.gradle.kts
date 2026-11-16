@@ -91,6 +91,12 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
         unitTests.isIncludeAndroidResources = true
+        unitTests.all {
+            // Robolectric fetches android-all-instrumented at test runtime, outside Gradle's
+            // dependency resolver. Use Maven Central's canonical endpoint to avoid repo1 429s.
+            it.systemProperty("robolectric.dependency.repo.url", "https://repo.maven.apache.org/maven2")
+            it.systemProperty("robolectric.dependency.repo.id", "mavenCentral")
+        }
     }
 
     // CI generates this disposable MP4 from the complementary synthetic tile slices.

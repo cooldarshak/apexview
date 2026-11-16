@@ -105,7 +105,7 @@ class HevcFragmentSequenceCompatibilityTest {
         val result = HevcFragmentSequenceCompatibility.compare(first, second)
 
         assertFalse(result.compatible)
-        assertTrue(result.reasons.any { it.contains("sample 0 random-access/dependency flags differ") }.not())
+        assertFalse(result.reasons.contains("sample 0 random-access/dependency flags differ"))
         assertTrue(result.reasons.any { it.contains("fragment 1 sample 0 random-access/dependency flags differ") })
     }
 

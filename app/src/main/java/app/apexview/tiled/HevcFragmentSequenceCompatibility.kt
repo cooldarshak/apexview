@@ -122,8 +122,8 @@ internal object HevcFragmentSequenceCompatibility {
             if (base == null) {
                 reasons += "fragment $fragmentIndex base decode time is unavailable"
             } else if (expectedDecodeTime != null && base != expectedDecodeTime) {
-                val relation = if (base > expectedDecodeTime) "gap" else "overlap"
-                reasons += "fragment $fragmentIndex decode timeline has a $relation: expected $expectedDecodeTime ticks, found $base"
+                val relation = if (base > expectedDecodeTime) "a gap" else "an overlap"
+                reasons += "fragment $fragmentIndex decode timeline has $relation: expected $expectedDecodeTime ticks, found $base"
             }
 
             var cursor = base
