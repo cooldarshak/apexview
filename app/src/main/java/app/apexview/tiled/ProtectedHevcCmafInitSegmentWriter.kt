@@ -74,7 +74,7 @@ internal object ProtectedHevcCmafInitSegmentWriter {
             "$context: unsupported stsd version or flags"
         }
         require(u32(stsdPayload) == 1L) { "$context: exactly one sample description is supported" }
-        val entries = parseBoxes(source, stsdPayload.position() + stsd.payloadStart, stsd.end)
+        val entries = parseBoxes(source, stsd.payloadStart + 8, stsd.end)
         val entry = entries.singleOrNull()?.takeIf { it.type == "encv" }
             ?: throw IllegalArgumentException("$context: active description is not one encv sample entry")
         require(entry.header == 8 && entry.size >= 86L) {
