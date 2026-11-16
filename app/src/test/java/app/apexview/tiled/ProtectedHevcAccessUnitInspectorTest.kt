@@ -2,7 +2,9 @@ package app.apexview.tiled
 
 import java.io.ByteArrayOutputStream
 import java.io.File
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -31,6 +33,50 @@ class ProtectedHevcAccessUnitInspectorTest {
         assertTrue(report.slices.all { it.thirdClearCabacByteOffset != null })
         assertTrue(report.nals.all { !it.fullyClear })
         if (report.isIdrPicture) assertEquals(0, report.pictureOrderCountLsb)
+    }
+
+    @Test fun protectedSliceRewriterPreservesCiphertextAndRebuildsExactNalProtectionMap() {
+        val fixture = firstFourTilePicture()
+        val sample = lengthPrefixedSample(fixture.sliceNals, encryptedTailBytes = 1)
+        val layout = ProtectedHevcSampleLayout.inspect(sample.bytes, 4, sample.ranges)
+        val accessUnit = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(
+            sample.bytes, layout, fixture.sps, fixture.pps,
+            context = "synthetic protected slice rewrite"
+        )
+
+        assertEquals(listOf(0, 2, 4, 6), accessUnit.slices.map { it.header.sliceSegmentAddress })
+        accessUnit.slices.forEachIndexed { index, slice ->
+            val mapped = layout.nals.single { it.index == slice.nalIndex }
+            val sourceNal = sample.bytes.copyOfRange(
+                mapped.nalOffset, mapped.nalOffset + mapped.nalLength
+            )
+            val rewritten = ProtectedHevcSliceHeaderRewriter.rewrite(
+                sample = sample.bytes,
+                layout = layout,
+                accessUnit = accessUnit,
+                nalIndex = slice.nalIndex,
+                sourceSps = fixture.sps,
+                sourcePps = fixture.pps,
+                outputSps = fixture.sps,
+                outputPps = fixture.pps,
+                destinationAddress = listOf(0, 2, 4, 6)[index],
+                context = "synthetic protected tile $index"
+            )
+
+            assertEquals(listOf(0, 2, 4, 6)[index], rewritten.destinationAddress)
+            assertEquals(slice.thirdClearCabacByteOffset, rewritten.sourceTailOffset)
+            assertArrayEquals(
+                sourceNal.copyOfRange(rewritten.sourceTailOffset, sourceNal.size),
+                rewritten.nal.copyOfRange(rewritten.outputTailOffset, rewritten.nal.size)
+            )
+            assertEquals(1L, rewritten.encryptedByteCount)
+            assertEquals(1, rewritten.protectionRanges.filterNot { it.isClear }.sumOf { it.lengthBytes })
+            assertFalse(rewritten.protectionRanges.last().isClear)
+            assertEquals(0xA5.toByte(), rewritten.nal.last())
+            assertEquals(rewritten.nal.size, rewritten.protectionRanges.sumOf { it.lengthBytes })
+            assertEquals(0, rewritten.protectionRanges.first().offset)
+            assertEquals(rewritten.nal.size, rewritten.protectionRanges.last().endExclusive)
+        }
     }
 
     @Test fun rejectsSliceHeaderWhenSubsampleMapExposesOnlyNalHeaderAndOnePayloadByte() {

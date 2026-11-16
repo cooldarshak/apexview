@@ -19,6 +19,13 @@ class ProtectedHevcSampleLayoutTest {
         assertEquals(0, nal.layerId)
         assertEquals(1, nal.temporalIdPlus1)
         assertEquals(3, nal.clearNalPrefixBytes)
+        assertEquals(
+            listOf(
+                ProtectedHevcSampleLayout.ProtectionRange(0, 3, true),
+                ProtectedHevcSampleLayout.ProtectionRange(3, 2, false)
+            ),
+            nal.protectionRanges
+        )
     }
 
     @Test fun mapsMultipleNalsAcrossDistinctSubsamplePairs() {
@@ -39,6 +46,37 @@ class ProtectedHevcSampleLayoutTest {
         assertEquals(2, report.nals[1].nalType)
         assertEquals(3, report.nals[0].clearNalPrefixBytes)
         assertEquals(3, report.nals[1].clearNalPrefixBytes)
+        assertEquals(
+            listOf(ProtectedHevcSampleLayout.ProtectionRange(0, 3, true)),
+            report.nals[0].protectionRanges
+        )
+        assertEquals(
+            listOf(
+                ProtectedHevcSampleLayout.ProtectionRange(0, 3, true),
+                ProtectedHevcSampleLayout.ProtectionRange(3, 1, false)
+            ),
+            report.nals[1].protectionRanges
+        )
+    }
+
+    @Test fun mapsAlternatingClearAndEncryptedSubsampleRegionsWithinOneNal() {
+        val sample = byteArrayOf(
+            0, 0, 0, 6, 0x02, 0x01, 0x7e, 0x55, 0x66, 0x77
+        )
+        val report = ProtectedHevcSampleLayout.inspect(
+            sample, 4, listOf(
+                CmafBoxInspector.SubsampleEncryptionRange(7, 2),
+                CmafBoxInspector.SubsampleEncryptionRange(1, 0)
+            )
+        )
+        assertEquals(
+            listOf(
+                ProtectedHevcSampleLayout.ProtectionRange(0, 3, true),
+                ProtectedHevcSampleLayout.ProtectionRange(3, 2, false),
+                ProtectedHevcSampleLayout.ProtectionRange(5, 1, true)
+            ),
+            report.nals.single().protectionRanges
+        )
     }
 
     @Test fun rejectsNalLengthPrefixThatCrossesIntoEncryptedBytes() {
