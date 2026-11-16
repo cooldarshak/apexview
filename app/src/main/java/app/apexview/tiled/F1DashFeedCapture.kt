@@ -92,6 +92,7 @@ internal class F1DashFeedCapture(
         )
 
     private val initializationByLabel = linkedMapOf<String, InitState>()
+    @Volatile private var latestWidevinePssh: ByteArray? = null
     private var lastCapturedSegmentStartUs: Long? = null
 
     init {
@@ -142,6 +143,7 @@ internal class F1DashFeedCapture(
                     ?: throw IOException("${item.feed.label}: DASH representation has no BaseURL")
                 item.copy(index = index, initializationUri = init, baseUrl = base)
             }
+            selectedWithIndexes.forEach { rememberWidevinePssh(it.representation.format) }
 
             // Install/refresh all source initialization segments before accepting media samples.
             coroutineScope {
@@ -252,9 +254,28 @@ internal class F1DashFeedCapture(
         }
     }
 
+    /** Defensive copy of the selected DASH representation's Widevine initialization data. */
+    fun widevinePssh(): ByteArray? = latestWidevinePssh?.copyOf()
+
+    private fun rememberWidevinePssh(format: Format) {
+        val drmInitData = format.drmInitData ?: return
+        val schemeData = (0 until drmInitData.schemeDataCount)
+            .asSequence()
+            .map(drmInitData::get)
+            .firstOrNull { it.uuid == C.WIDEVINE_UUID && it.data != null }
+            ?: return
+        synchronized(this) {
+            if (latestWidevinePssh == null) {
+                latestWidevinePssh = schemeData.data?.copyOf()
+            }
+        }
+    }
+
     fun reset() {
         initializationByLabel.clear()
         lastCapturedSegmentStartUs = null
+        latestWidevinePssh?.fill(0)
+        latestWidevinePssh = null
     }
 
     private suspend fun loadFeed(feed: Feed): LoadedFeed = withContext(Dispatchers.IO) {

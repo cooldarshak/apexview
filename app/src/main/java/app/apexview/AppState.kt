@@ -1453,7 +1453,7 @@ class AppState(
                 val snapshot = capture.captureNext(group, feeds)
                 val outputWindow = ProtectedHevcLiveComposition.outputWindow(group)
                 if (outputWindow != null) {
-                    val pssh: ByteArray? = null
+                    val pssh = capture.widevinePssh()
                     try {
                         if (!composedPlaybackStarted) {
                             // Keep each source feed audio-only, then wait for its video decoder
