@@ -183,13 +183,16 @@ class HevcSyntheticTileSplitTest {
         val sourceBytes = source.readBytes()
         val result = try {
             HevcTizenGridComposer.composeAnnexBStreams(
-                feedStreams = listOf(sourceBytes, sourceBytes),
+                // Four logical source feeds exercise the Tizen (feed, sourceTile) cell mapping.
+                // The pixel oracle remains this same deterministic source frame for all four
+                // cells; independently encoded full-frame sources are covered by the 2x1 path.
+                feedStreams = List(4) { sourceBytes.copyOf() },
                 grid = HevcOutputGridDimensions(columns = 2, rows = 2),
                 cells = listOf(
                     HevcTizenGridComposer.CellSelection(0, 0, 0, 0),
-                    HevcTizenGridComposer.CellSelection(0, 1, 1, 0),
-                    HevcTizenGridComposer.CellSelection(0, 2, 0, 1),
-                    HevcTizenGridComposer.CellSelection(0, 3, 1, 1)
+                    HevcTizenGridComposer.CellSelection(1, 1, 1, 0),
+                    HevcTizenGridComposer.CellSelection(2, 2, 0, 1),
+                    HevcTizenGridComposer.CellSelection(3, 3, 1, 1)
                 ),
                 frameRateNumerator = 25,
                 outputNalLengthSize = 4
@@ -199,7 +202,12 @@ class HevcSyntheticTileSplitTest {
         }
 
         assertEquals(50, result.pictures.size)
+        assertEquals(4, result.sourcePictureIdentities.size)
         assertEquals(200, result.pictures.sumOf { it.evidence.size })
+        assertTrue(result.pictures.all { picture ->
+            picture.evidence.map { it.feedIndex } == listOf(0, 1, 2, 3) &&
+                picture.evidence.map { it.sourceTileIndex } == listOf(0, 1, 2, 3)
+        })
         assertEquals(256, result.codedWidth)
         assertEquals(128, result.codedHeight)
         assertEquals(2, result.tileColumnWidthsInCtbs.size)
