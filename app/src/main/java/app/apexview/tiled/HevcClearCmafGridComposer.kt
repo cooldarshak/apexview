@@ -232,7 +232,8 @@ internal object HevcClearCmafGridComposer {
             metadata += fragmentMetadata
         }
 
-        require(metadata.sumOf { it.sampleCount } == sampleCount) {
+        val extractedSampleCount = fragments.sumOf { it.samples.size }
+        require(metadata.sumOf { it.sampleCount } == extractedSampleCount) {
             "Feed ${feed.label} CMAF fragment sample counts are inconsistent"
         }
         return ParsedFeed(
