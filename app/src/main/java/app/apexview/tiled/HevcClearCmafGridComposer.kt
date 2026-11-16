@@ -410,14 +410,14 @@ internal object HevcClearCmafGridComposer {
         require(s.remaining() >= 8) { "Truncated stsd" }
         s.position(s.position() + 4)
         require(readU32(s) == 1L) { "Only one sample description is supported" }
-        val entryStart = stsd.payloadStart + s.position()
+        val entryStart = s.position()
         val entrySize = readU32(ByteBuffer.wrap(init, entryStart, stsd.end - entryStart).order(ByteOrder.BIG_ENDIAN))
         require(entrySize >= 86 && entryStart + entrySize <= stsd.end) { "Invalid visual sample entry" }
         val childStart = entryStart + 8 + 78
         val hvcC = boxes(init, childStart, (entryStart + entrySize).toInt()).single { it.type == "hvcC" }
         val p = ByteBuffer.wrap(init, hvcC.payloadStart, hvcC.end - hvcC.payloadStart).order(ByteOrder.BIG_ENDIAN)
         require(p.remaining() >= 23) { "Truncated hvcC" }
-        p.position(21)
+        p.position(p.position() + 21)
         val encodedLengthSize = (p.get().toInt() and 0x03) + 1
         require(encodedLengthSize == nalLengthSize) { "hvcC NAL length size changed during parsing" }
         val arrays = p.get().toInt() and 0xff
