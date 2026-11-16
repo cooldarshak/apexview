@@ -304,7 +304,8 @@ class HevcFeedProfileProbeTest {
                 sampleEncryptionBoxPresent = false,
                 sampleAuxiliarySizesPresent = false,
                 sampleAuxiliaryOffsetsPresent = false,
-                sampleGroupDescriptionPresent = false
+                sampleGroupDescriptionPresent = false,
+                sampleToGroupPresent = false
             )
             return CmafBoxInspector.Report(
                 majorBrand = "iso6",
