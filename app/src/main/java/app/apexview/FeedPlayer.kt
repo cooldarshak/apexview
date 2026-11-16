@@ -585,8 +585,9 @@ class FeedPlayer(
 
     /** Clears only the source-tile video lock, keeping the TV's normal video budget in charge. */
     fun clearProtectedCompositionVideoRole() {
+        // Let AppState's TV/thermal visibility budget decide whether this feed gets video again.
+        // Enabling every source player here would briefly recreate the multi-decoder problem.
         videoSuppressedByProtectedComposition = false
-        setVideo(initialVideoEnabled, viewW.coerceAtLeast(1), viewH.coerceAtLeast(1))
     }
 
     /**

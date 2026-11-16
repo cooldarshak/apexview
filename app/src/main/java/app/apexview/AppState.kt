@@ -1434,7 +1434,7 @@ class AppState(
                 val snapshot = capture.captureNext(group, feeds)
                 val outputWindow = ProtectedHevcLiveComposition.outputWindow(group)
                 if (outputWindow != null) {
-                    val pssh = null
+                    val pssh: ByteArray? = null
                     try {
                         if (!composedPlaybackStarted) {
                             // Keep each source feed audio-only, then wait for its video decoder
@@ -1526,6 +1526,7 @@ class AppState(
         protectedCompositionHost = null
         ProtectedHevcLiveComposition.clearAll()
         HevcFeedProfileCapture.clearTileTestSelection()
+        applyVideoBudget()
         layoutRequest++
     }
 
@@ -1621,6 +1622,21 @@ class AppState(
                     loadTiming(leader.contentId)
                 }
                 applyVideoBudget()
+            }
+            // Normal Android TV live multiview also uses the composed representation. This is
+            // not limited to the two-feed diagnostic tile-test workflow.
+            val sessionTiles = tiles.filter { it.contentId == contentId }
+            val isKnownLive = contentId in knownLiveContentIds || liveNow.any { it.contentId == contentId }
+            if (isTv && layoutMode != LayoutMode.TILE_TEST && isKnownLive &&
+                sessionTiles.size in 2..4) {
+                val labels = sessionTiles.map { tile ->
+                    tile.channel.channelId?.let { "channel-$it" } ?: "default-channel"
+                }
+                if (labels.distinct().size == labels.size) {
+                    val group = "content-$contentId"
+                    ProtectedHevcLiveComposition.selectFeeds(group, labels)
+                    startRealF1DashCapture(contentId, labels)
+                }
             }
         }
     }
