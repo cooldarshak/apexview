@@ -28,6 +28,13 @@ internal object ProtectedHevcCmafSampleExtractor {
         }
     }
 
+    data class ExtractedFragmentInfo(
+        val track: CmafBoxInspector.TrackMetadata,
+        val fragment: CmafBoxInspector.FragmentMetadata,
+        val timescale: Long,
+        val baseDecodeTimeTicks: Long
+    )
+
     data class ExtractedFragment(
         val track: CmafBoxInspector.TrackMetadata,
         val fragment: CmafBoxInspector.FragmentMetadata,
@@ -58,6 +65,40 @@ internal object ProtectedHevcCmafSampleExtractor {
         sampleIndices: Set<Int>,
         context: String = "Protected F1 CMAF extraction"
     ): ExtractedFragment {
+        val retained = ArrayList<ExtractedSample>(sampleIndices.size)
+        val info = visitSamples(initializationSegment, mediaFragment, sampleIndices, context) { sample ->
+            retained += ExtractedSample(
+                sample.sampleIndex,
+                sample.sampleBytes.copyOf(),
+                sample.perSampleIvBytes?.copyOf()
+            )
+        }
+        return ExtractedFragment(
+            info.track, info.fragment, info.timescale, info.baseDecodeTimeTicks, retained
+        )
+    }
+
+    /**
+     * Visits selected samples one at a time and zeroes the temporary sample/IV immediately after
+     * the callback. The caller must copy only the small amount of data it needs to retain.
+     */
+    fun forEachSample(
+        initializationSegment: ByteArray,
+        mediaFragment: ByteArray,
+        sampleIndices: Set<Int>,
+        context: String = "Protected F1 CMAF extraction",
+        onSample: (ExtractedSample) -> Unit
+    ): ExtractedFragmentInfo = visitSamples(
+        initializationSegment, mediaFragment, sampleIndices, context, onSample
+    )
+
+    private fun visitSamples(
+        initializationSegment: ByteArray,
+        mediaFragment: ByteArray,
+        sampleIndices: Set<Int>,
+        context: String,
+        onSample: (ExtractedSample) -> Unit
+    ): ExtractedFragmentInfo {
         require(initializationSegment.isNotEmpty()) { "$context: active init segment is empty" }
         require(mediaFragment.isNotEmpty()) { "$context: active media fragment is empty" }
         require(sampleIndices.isNotEmpty()) { "$context: no samples were selected for extraction" }
@@ -191,10 +232,6 @@ internal object ProtectedHevcCmafSampleExtractor {
         require(tfhds.size == 1 && tfdtBoxes.size == 1 && truns.size == 1 && sencBoxes.size == 1) {
             "$context: exactly one tfhd, tfdt, trun and inline senc are required"
         }
-        require(trafChildren.none { it.type == "saio" && it.type == "senc" }) {
-            "$context: invalid auxiliary box structure"
-        }
-
         val trackId = parseTfhd(mediaFragment, tfhds.single(), context)
         require(trackId == fragment.trackId && trackId == track.trackId) {
             "$context: tfhd track ID does not match the active video track"
@@ -211,20 +248,21 @@ internal object ProtectedHevcCmafSampleExtractor {
             fragment, sampleIndices, context
         )
 
-        val samples = ArrayList<ExtractedSample>(sampleIndices.size)
         try {
             sampleIndices.sorted().forEach { index ->
                 val range = ranges[index]
                 val sampleBytes = mediaFragment.copyOfRange(range.offset, range.offset + range.size)
-                samples += ExtractedSample(index, sampleBytes, selectedIvs.remove(index))
+                val temporary = ExtractedSample(index, sampleBytes, selectedIvs.remove(index))
+                try {
+                    onSample(temporary)
+                } finally {
+                    temporary.close()
+                }
             }
-        } catch (error: Throwable) {
-            samples.forEach(ExtractedSample::close)
+        } finally {
             selectedIvs.values.forEach { it.fill(0) }
-            throw error
         }
-        selectedIvs.values.forEach { it.fill(0) }
-        return ExtractedFragment(track, fragment, timescale, baseDecodeTime, samples)
+        return ExtractedFragmentInfo(track, fragment, timescale, baseDecodeTime)
     }
 
     private fun parseTfhd(data: ByteArray, box: Box, context: String): Long {
@@ -354,7 +392,7 @@ internal object ProtectedHevcCmafSampleExtractor {
             repeat(fragment.sampleCount) { index ->
                 val rawIv = if (ivSize > 0) {
                     require(p.remaining() >= ivSize) { "$context: truncated per-sample IV" }
-                    ByteArray(ivSize).also(p::get)
+                    ByteArray(ivSize).also { p.get(it) }
                 } else null
                 try {
                     val ivIdentity = rawIv?.let { ProtectedValueFingerprint.fromBytes("iv", it) }
