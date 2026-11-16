@@ -1395,6 +1395,22 @@ class AppState(
         browsing = false
     }
 
+    /** Start the protected one-decoder path for a normal Android TV live multiview session. */
+    private fun startTvLiveCompositionIfEligible(contentId: Long) {
+        if (!isTv || layoutMode == LayoutMode.TILE_TEST) return
+        val isKnownLive = contentId in knownLiveContentIds || liveNow.any { it.contentId == contentId }
+        if (!isKnownLive) return
+        val sessionTiles = tiles.filter { it.contentId == contentId }
+        if (sessionTiles.size !in 2..4) return
+        val labels = sessionTiles.map { tile ->
+            tile.channel.channelId?.let { "channel-$it" } ?: "default-channel"
+        }
+        if (labels.distinct().size != labels.size) return
+        val group = "content-$contentId"
+        ProtectedHevcLiveComposition.selectFeeds(group, labels)
+        startRealF1DashCapture(contentId, labels)
+    }
+
     /**
      * F1 Tizen's live grid fetches each feed's init and aligned media segments independently,
      * then stitches them into one HEVC representation. This is the Android/Media3 equivalent
@@ -1625,19 +1641,7 @@ class AppState(
             }
             // Normal Android TV live multiview also uses the composed representation. This is
             // not limited to the two-feed diagnostic tile-test workflow.
-            val sessionTiles = tiles.filter { it.contentId == contentId }
-            val isKnownLive = contentId in knownLiveContentIds || liveNow.any { it.contentId == contentId }
-            if (isTv && layoutMode != LayoutMode.TILE_TEST && isKnownLive &&
-                sessionTiles.size in 2..4) {
-                val labels = sessionTiles.map { tile ->
-                    tile.channel.channelId?.let { "channel-$it" } ?: "default-channel"
-                }
-                if (labels.distinct().size == labels.size) {
-                    val group = "content-$contentId"
-                    ProtectedHevcLiveComposition.selectFeeds(group, labels)
-                    startRealF1DashCapture(contentId, labels)
-                }
-            }
+            startTvLiveCompositionIfEligible(contentId)
         }
     }
 
@@ -2121,6 +2125,8 @@ class AppState(
     fun switchFeed(tile: Tile, channel: Channel) {
         tileMenu = null
         if (channel == tile.channel) return
+        val restartComposition = isTv && f1DashCaptureJob != null
+        if (restartComposition) stopProtectedCompositionPresentation()
         // The feed up top in laptop mode switched from its own menu: offer the way back too.
         if (laptopActive && tile.id == bigTileId) rememberBroadcast()
         task("Switching to ${channel.title}") {
@@ -2144,12 +2150,16 @@ class AppState(
             tile.channel = channel
             old.release()
             if (failures.isNotEmpty()) message = failures.joinToString("\n")
+            if (restartComposition) startTvLiveCompositionIfEligible(tile.contentId)
         }
     }
 
     /** Lays the feeds out afresh in [mode]. */
     fun chooseLayout(mode: LayoutMode) {
         mapGrabbed = false
+        if (mode != layoutMode && (protectedCompositionHost != null || f1DashCaptureJob != null)) {
+            stopProtectedCompositionPresentation()
+        }
         if (mode == LayoutMode.TILE_TEST) {
             val leader = leaderTile()
             if (leader == null) {
