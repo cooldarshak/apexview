@@ -488,7 +488,7 @@ class FeedPlayer(
      * Reuses this FeedPlayer's ExoPlayer, renderer, output Surface, DRM manager and F1-token-bearing
      * license callback. Other selected FeedPlayers remain audio-only.
      */
-    fun startProtectedComposedPlayback(
+    internal fun startProtectedComposedPlayback(
         window: ProtectedHevcLiveComposition.OutputWindow,
         widevinePssh: ByteArray?
     ) {
@@ -523,7 +523,7 @@ class FeedPlayer(
     }
 
     /** Publishes a newer live CMAF window without rebuilding the player or DRM session. */
-    fun publishProtectedComposedOutput(
+    internal fun publishProtectedComposedOutput(
         window: ProtectedHevcLiveComposition.OutputWindow,
         widevinePssh: ByteArray?
     ) {
