@@ -161,13 +161,19 @@ internal object HevcFeedProfileCapture {
 
     private val profiles = linkedMapOf<String, HevcFeedProfileProbe.Snapshot>()
     private val feedProgress = linkedMapOf<String, FeedProgress>()
+    private data class ObservedCmafFragment(
+        val track: CmafBoxInspector.TrackMetadata,
+        val fragment: CmafBoxInspector.FragmentMetadata
+    )
     private data class CmafFeedProgress(
         val videoTracks: MutableMap<Long, CmafBoxInspector.TrackMetadata> = linkedMapOf(),
         // Keep a bounded catalogue: F1 can switch representations while a player is alive,
         // and track IDs are routinely reused across those init segments.
         val initializationReports: MutableList<CmafBoxInspector.Report> = mutableListOf(),
         val videoTrackCandidates: MutableList<CmafBoxInspector.TrackMetadata> = mutableListOf(),
-        val latestFragments: MutableMap<Long, CmafBoxInspector.FragmentMetadata> = linkedMapOf(),
+        // Keep an ordered, bounded window. A single "latest" fragment cannot establish whether
+        // two feed timelines differ by a stable offset or are simply at different live positions.
+        val fragmentHistory: MutableList<ObservedCmafFragment> = mutableListOf(),
         var initSegmentsObserved: Int = 0,
         var mediaFragmentsObserved: Int = 0,
         var parseFailures: Int = 0,
@@ -203,7 +209,7 @@ internal object HevcFeedProfileCapture {
         tileTestLabels.forEach { label ->
             feedProgress.getOrPut(label) { FeedProgress() }
             cmafProgress[label]?.let {
-                it.latestFragments.clear()
+                it.fragmentHistory.clear()
                 it.mediaFragmentsObserved = 0
             }
         }
@@ -237,13 +243,12 @@ internal object HevcFeedProfileCapture {
                     track.handler == "vide" && track.width == expected.width && track.height == expected.height
                 }
             }
-            if (matching.size == 1) return matching.single()
-            // Multiple matching init segments are still ambiguous; do not parse media against
-            // whichever representation happened to arrive last.
-            if (matching.size > 1) return null
+            // Never fall back to a lone but differently sized representation. Media3's selected
+            // format is authoritative for the player; a 480x270 init segment must not be treated
+            // as the init segment for a 1920x1080 stream just because it arrived first.
+            return matching.singleOrNull()
         }
-        // A single observed representation is safe to use. With multiple candidates and no
-        // exact Media3 format match, fail closed rather than pairing fragments with the wrong hvcC.
+        // Without a selected Media3 format, only a single observed representation is unambiguous.
         return reports.singleOrNull()
     }
 
@@ -297,18 +302,20 @@ internal object HevcFeedProfileCapture {
             while (progress.videoTrackCandidates.size > 16) progress.videoTrackCandidates.removeAt(0)
         }
         val selectedForTileTest = shouldCaptureCmaf(group, label)
-        val fragments = if (selectedForTileTest) report.fragments.filter { fragment ->
-            fragment.trackId in progress.videoTracks
-        } else emptyList()
+        val fragments = if (selectedForTileTest) report.fragments else emptyList()
         if (fragments.isNotEmpty()) {
-            progress.mediaFragmentsObserved += fragments.size
-            fragments.forEach { progress.latestFragments[it.trackId] = it }
+            val reportVideoTracks = report.tracks.filter { it.handler == "vide" }
+            fragments.forEach { fragment ->
+                val matchingTrack = reportVideoTracks.singleOrNull { it.trackId == fragment.trackId }
+                if (matchingTrack != null) {
+                    progress.mediaFragmentsObserved++
+                    progress.fragmentHistory.add(ObservedCmafFragment(matchingTrack, fragment))
+                }
+            }
+            while (progress.fragmentHistory.size > 24) progress.fragmentHistory.removeAt(0)
         }
         if (report.errors.isNotEmpty()) {
             progress.parseFailures += report.errors.size.coerceAtMost(8)
-        }
-        while (progress.latestFragments.size > 4) {
-            progress.latestFragments.remove(progress.latestFragments.keys.first())
         }
         diagnostic = buildDiagnostic()
     }
@@ -614,6 +621,36 @@ internal object HevcFeedProfileCapture {
     private fun buildCmafDiagnostic(): String {
         if (tileTestLabels.size != 2) return ""
         val states = tileTestLabels.map { label -> label to cmafProgress[label] }
+        fun selectedTrack(label: String, state: CmafFeedProgress?): CmafBoxInspector.TrackMetadata? {
+            val candidates = state?.videoTrackCandidates.orEmpty()
+            val expected = profiles[label]
+            val exact = if (expected == null) emptyList() else candidates.filter {
+                it.width == expected.width && it.height == expected.height
+            }
+            return when {
+                exact.size == 1 -> exact.single()
+                exact.size > 1 -> null
+                expected == null && candidates.size == 1 -> candidates.single()
+                else -> null
+            }
+        }
+        fun sameRepresentation(
+            first: CmafBoxInspector.TrackMetadata,
+            second: CmafBoxInspector.TrackMetadata
+        ): Boolean = first.trackId == second.trackId &&
+            first.width == second.width && first.height == second.height &&
+            first.timescale == second.timescale && first.sampleEntry == second.sampleEntry &&
+            first.originalFormat == second.originalFormat &&
+            first.hevcConfiguration?.parameterSetFingerprints ==
+                second.hevcConfiguration?.parameterSetFingerprints
+        fun fragmentsFor(
+            state: CmafFeedProgress?,
+            track: CmafBoxInspector.TrackMetadata?
+        ): List<CmafBoxInspector.FragmentMetadata> {
+            if (state == null || track == null) return emptyList()
+            return state.fragmentHistory.filter { sameRepresentation(it.track, track) }
+                .map { it.fragment }
+        }
         val lines = mutableListOf(
             "F1_CMAF_READ_ONLY_INSPECTOR=ACTIVE",
             "CMAF_CAPTURE_SCOPE=two selected feeds; bounded in-memory ISO-BMFF metadata only"
@@ -621,18 +658,15 @@ internal object HevcFeedProfileCapture {
         states.forEach { (label, state) ->
             val expected = profiles[label]
             val candidates = state?.videoTrackCandidates.orEmpty()
-            val exactCandidates = if (expected == null) emptyList() else candidates.filter {
-                it.width == expected.width && it.height == expected.height
-            }
-            val track = when {
-                exactCandidates.size == 1 -> exactCandidates.single()
-                exactCandidates.size > 1 -> null
-                candidates.size == 1 -> candidates.single()
-                else -> null
-            }
-            val fragment = track?.trackId?.let { state?.latestFragments?.get(it) }
+            val track = selectedTrack(label, state)
+            val feedFragments = fragmentsFor(state, track)
+            val fragment = feedFragments.lastOrNull()
             if (track == null) {
-                if (candidates.size > 1) {
+                if (candidates.isNotEmpty() && expected != null &&
+                    candidates.none { it.width == expected.width && it.height == expected.height }) {
+                    lines += "$label: CMAF_REPRESENTATION_NOT_FOUND; Media3Format=${expected.width}x${expected.height}; observed=" +
+                        candidates.joinToString("|") { "${it.width ?: 0}x${it.height ?: 0}/track=${it.trackId ?: "?"}/timescale=${it.timescale ?: "?"}" }
+                } else if (candidates.size > 1) {
                     lines += "$label: CMAF_REPRESENTATION_AMBIGUOUS; Media3Format=${expected?.width ?: "unknown"}x${expected?.height ?: "unknown"}; candidates=" +
                         candidates.joinToString("|") { "${it.width ?: 0}x${it.height ?: 0}/track=${it.trackId ?: "?"}/timescale=${it.timescale ?: "?"}" }
                 }
@@ -646,7 +680,10 @@ internal object HevcFeedProfileCapture {
                 lines += "$label: tencPresent=${protection != null}; protected=${protection?.defaultIsProtected ?: "unknown"}; perSampleIvSize=${protection?.perSampleIvSize ?: "unknown"}; pattern=${protection?.cryptByteBlock ?: 0}/${protection?.skipByteBlock ?: 0}; initSegments=${state?.initSegmentsObserved ?: 0}; mediaFragments=${state?.mediaFragmentsObserved ?: 0}"
                 if (fragment != null) {
                     val firstSample = fragment.sampleTimings.firstOrNull()
+                    val firstBase = feedFragments.firstOrNull()?.baseDecodeTimeTicks
+                    val lastBase = feedFragments.lastOrNull()?.baseDecodeTimeTicks
                     lines += "$label: fragmentSamples=${fragment.sampleCount}; baseDecodeTicks=${fragment.baseDecodeTimeTicks ?: "unknown"}; firstDts=${firstSample?.decodeTimeTicks ?: "unknown"}; firstPts=${firstSample?.presentationTimeTicks ?: "unknown"}; firstDurationTicks=${firstSample?.durationTicks ?: "unknown"}; timingComplete=${fragment.timingComplete}"
+                    lines += "$label: orderedFragmentWindow=${feedFragments.size}; firstBaseDecodeTicks=${firstBase ?: "unknown"}; lastBaseDecodeTicks=${lastBase ?: "unknown"}"
                     lines += "$label: senc=${fragment.sampleEncryptionBoxPresent}; subsample=${fragment.subsampleEncryptionSignalled ?: "unknown"}; encryptionStructureComplete=${fragment.sampleEncryptionStructureComplete}; rangesCoverSamples=${fragment.sampleEncryptionRangesCoverSamples}; saizSaioComplete=${fragment.sampleAuxiliaryInfoStructureComplete}; auxiliaryRecordsComplete=${fragment.sampleAuxiliaryPayloadStructureComplete}; seigComplete=${fragment.sampleGroupEncryptionStructureComplete}"
                 } else {
                     lines += "$label: CMAF_MEDIA_FRAGMENT=WAITING"
@@ -657,10 +694,12 @@ internal object HevcFeedProfileCapture {
             }
         }
 
-        val firstTrack = states.firstOrNull()?.second?.videoTracks?.values?.firstOrNull()
-        val secondTrack = states.getOrNull(1)?.second?.videoTracks?.values?.firstOrNull()
-        val firstFragment = firstTrack?.trackId?.let { states.firstOrNull()?.second?.latestFragments?.get(it) }
-        val secondFragment = secondTrack?.trackId?.let { states.getOrNull(1)?.second?.latestFragments?.get(it) }
+        val firstTrack = states.firstOrNull()?.let { (label, state) -> selectedTrack(label, state) }
+        val secondTrack = states.getOrNull(1)?.let { (label, state) -> selectedTrack(label, state) }
+        val firstFragments = fragmentsFor(states.firstOrNull()?.second, firstTrack)
+        val secondFragments = fragmentsFor(states.getOrNull(1)?.second, secondTrack)
+        val firstFragment = firstFragments.lastOrNull()
+        val secondFragment = secondFragments.lastOrNull()
         if (firstTrack != null && secondTrack != null) {
             val firstTiming = firstFragment?.sampleTimings?.mapNotNull { it.durationTicks }?.distinct()?.singleOrNull()
             val secondTiming = secondFragment?.sampleTimings?.mapNotNull { it.durationTicks }?.distinct()?.singleOrNull()
