@@ -23,26 +23,12 @@ class HevcClearCmafGridComposerTest {
             val vps = nals.first { it.type == 32 }.bytes
             val sps = nals.first { it.type == 33 }.bytes
             val pps = nals.first { it.type == 34 }.bytes
-            val parsedVps = HevcParameterSets.parseVps(vps)
-            val parsedSps = HevcParameterSets.parseSps(sps)
-            val parsedPps = HevcParameterSets.parsePps(pps, parsedSps)
-            val outputParameters = HevcOutputParameterSetWriter.generate(
-                vps, sps, pps,
-                HevcOutputParameterSetWriter.Request(
-                    parsedVps.vpsId, parsedSps.spsId, parsedPps.ppsId,
-                    parsedSps.width, parsedSps.height,
-                    requireNotNull(parsedPps.tileColumnWidthsInCtbs),
-                    requireNotNull(parsedPps.tileRowHeightsInCtbs),
-                    loopFilterAcrossTilesEnabled = false,
-                    frameRateNumerator = 25
-                )
-            )
-            val init = HevcClearCmafInitSegmentWriter.write(
-                HevcClearCmafInitSegmentWriter.Request(
-                    trackId = index + 1L,
-                    mediaTimescale = 90_000,
-                    parameterSets = outputParameters
-                )
+            val init = HevcClearCmafInitSegmentWriter.writeSource(
+                trackId = index + 1L,
+                mediaTimescale = 90_000,
+                vpsNal = vps,
+                spsNal = sps,
+                ppsNal = pps
             )
             val pictures = splitPictures(nals)
             assertEquals(50, pictures.size)
