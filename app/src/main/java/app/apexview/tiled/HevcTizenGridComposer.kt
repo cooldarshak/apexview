@@ -169,12 +169,21 @@ internal object HevcTizenGridComposer {
             }
         }
 
-        val canGateLoopFilter = selectedByFrame.flatten().withIndex().all { (flatIndex, selected) ->
-            val selection = orderedSelections[flatIndex % orderedSelections.size]
-            val feed = feeds[selection.feedIndex]
-            feed.pps.loopFilterAcrossSlicesEnabled &&
-                selected.header.loopFilterAcrossSlicesFieldBit != null
+        // The output PPS flag is global. Enable filtering across output tile seams only
+        // when every seam corresponds to adjacent source tiles from the same source feed.
+        // Independent full-frame feeds are never filtered into one another at their boundary.
+        val allOutputTileSeamsAreSourceTileSeams = orderedSelections.indices.all { outputIndex ->
+            hasOwnLeftAndTopEdges(orderedSelections, outputIndex, feeds)
         }
+        val canGateLoopFilter = allOutputTileSeamsAreSourceTileSeams &&
+            selectedByFrame.flatten().withIndex().all { (flatIndex, selected) ->
+                val selection = orderedSelections[flatIndex % orderedSelections.size]
+                val feed = feeds[selection.feedIndex]
+                feed.pps.tilesEnabled &&
+                    feed.pps.loopFilterAcrossTiles == true &&
+                    feed.pps.loopFilterAcrossSlicesEnabled &&
+                    selected.header.loopFilterAcrossSlicesFieldBit != null
+            }
         val templateFeed = feeds[orderedSelections.first().feedIndex]
         val generated = HevcOutputParameterSetWriter.generate(
             sourceVpsNal = templateFeed.vpsNal,

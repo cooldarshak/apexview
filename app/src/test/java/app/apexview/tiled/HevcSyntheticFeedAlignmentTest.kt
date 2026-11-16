@@ -4,6 +4,7 @@ import java.io.File
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -123,6 +124,10 @@ class HevcSyntheticFeedAlignmentTest {
             frameRateDenominator = 1
         )
         assertEquals(50, composed.pictures.size)
+        assertFalse(
+            "Output PPS must disable cross-tile filtering at independent-feed seams",
+            composed.outputLoopFilterAcrossTilesEnabled
+        )
         assertEquals(1920, composed.codedWidth)
         assertEquals(544, composed.codedHeight)
         assertEquals(1920, composed.displayWidth)
