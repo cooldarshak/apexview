@@ -230,6 +230,21 @@ internal object HevcFeedProfileCapture {
     fun shouldCaptureCmaf(group: String, label: String): Boolean =
         activeGroup == group && tileTestLabels.size == 2 && label in tileTestLabels
 
+    private fun matchesSelectedMediaFormat(
+        track: CmafBoxInspector.TrackMetadata,
+        expected: HevcFeedProfileProbe.Snapshot
+    ): Boolean {
+        val sampleEntryDimensionsMatch =
+            track.width == expected.width && track.height == expected.height
+        val codecDimensionsMatch = track.hevcConfiguration?.sps.orEmpty().any { sps ->
+            (sps.width == expected.width && sps.height == expected.height) ||
+                (sps.displayWidth == expected.width && sps.displayHeight == expected.height)
+        }
+        // Sample-entry dimensions can be display-scaled independently of the HEVC SPS coded
+        // dimensions. Accept either exact representation match, never a merely "single candidate".
+        return sampleEntryDimensionsMatch || codecDimensionsMatch
+    }
+
     @Synchronized
     fun cmafInitializationReport(group: String, label: String): CmafBoxInspector.Report? {
         if (activeGroup != group) return null
@@ -240,7 +255,7 @@ internal object HevcFeedProfileCapture {
         if (expected != null) {
             val matching = reports.filter { report ->
                 report.tracks.any { track ->
-                    track.handler == "vide" && track.width == expected.width && track.height == expected.height
+                    track.handler == "vide" && matchesSelectedMediaFormat(track, expected)
                 }
             }
             // Never fall back to a lone but differently sized representation. Media3's selected
@@ -625,7 +640,7 @@ internal object HevcFeedProfileCapture {
             val candidates = state?.videoTrackCandidates.orEmpty()
             val expected = profiles[label]
             val exact = if (expected == null) emptyList() else candidates.filter {
-                it.width == expected.width && it.height == expected.height
+                matchesSelectedMediaFormat(it, expected)
             }
             return when {
                 exact.size == 1 -> exact.single()
@@ -663,9 +678,13 @@ internal object HevcFeedProfileCapture {
             val fragment = feedFragments.lastOrNull()
             if (track == null) {
                 if (candidates.isNotEmpty() && expected != null &&
-                    candidates.none { it.width == expected.width && it.height == expected.height }) {
+                    candidates.none { matchesSelectedMediaFormat(it, expected) }) {
                     lines += "$label: CMAF_REPRESENTATION_NOT_FOUND; Media3Format=${expected.width}x${expected.height}; observed=" +
-                        candidates.joinToString("|") { "${it.width ?: 0}x${it.height ?: 0}/track=${it.trackId ?: "?"}/timescale=${it.timescale ?: "?"}" }
+                        candidates.joinToString("|") { candidate ->
+                            val spsSizes = candidate.hevcConfiguration?.sps.orEmpty()
+                                .joinToString(",") { "${it.width}x${it.height}" }.ifEmpty { "unknown" }
+                            "${candidate.width ?: 0}x${candidate.height ?: 0}/sps=$spsSizes/track=${candidate.trackId ?: "?"}/timescale=${candidate.timescale ?: "?"}"
+                        }
                 } else if (candidates.size > 1) {
                     lines += "$label: CMAF_REPRESENTATION_AMBIGUOUS; Media3Format=${expected?.width ?: "unknown"}x${expected?.height ?: "unknown"}; candidates=" +
                         candidates.joinToString("|") { "${it.width ?: 0}x${it.height ?: 0}/track=${it.trackId ?: "?"}/timescale=${it.timescale ?: "?"}" }
