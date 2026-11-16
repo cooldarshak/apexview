@@ -477,9 +477,28 @@ internal class HevcPocTracker {
     private var previousTid0PocMsb = 0L
     private var previousTid0PocLsb = 0L
 
+    /** True only after a valid temporal-id-zero IRAP picture has established a POC anchor. */
+    var hasReferenceAnchor: Boolean = false
+        private set
+
     fun reset() {
         previousTid0PocMsb = 0L
         previousTid0PocLsb = 0L
+        hasReferenceAnchor = false
+    }
+
+    /** Creates an isolated working copy so a failed composition cannot advance the live tracker. */
+    fun fork(): HevcPocTracker = HevcPocTracker().also {
+        it.previousTid0PocMsb = previousTid0PocMsb
+        it.previousTid0PocLsb = previousTid0PocLsb
+        it.hasReferenceAnchor = hasReferenceAnchor
+    }
+
+    /** Commits a successfully validated working copy back into this feed's tracker. */
+    fun commitFrom(snapshot: HevcPocTracker) {
+        previousTid0PocMsb = snapshot.previousTid0PocMsb
+        previousTid0PocLsb = snapshot.previousTid0PocLsb
+        hasReferenceAnchor = snapshot.hasReferenceAnchor
     }
 
     fun derive(
@@ -491,16 +510,21 @@ internal class HevcPocTracker {
     ): Long {
         require(temporalIdPlus1 in 1..7) { "Invalid temporal_id_plus1" }
         require(log2MaxPocLsb in 4..16) { "Unsupported POC LSB width" }
+        require(nalUnitType in 0..23) { "Unsupported HEVC NAL unit type for POC derivation" }
         val maxPocLsb = 1L shl log2MaxPocLsb
         require(pocLsb.toLong() in 0 until maxPocLsb) { "POC LSB is outside SPS range" }
 
         if (nalUnitType == 19 || nalUnitType == 20) {
             reset()
+            if (temporalIdPlus1 == 1) hasReferenceAnchor = true
             return 0L
         }
 
         val isIrap = nalUnitType in 16..23
         val resetPocMsb = isIrap && (nalUnitType in 16..18 || noRaslOutputFlag)
+        require(resetPocMsb || hasReferenceAnchor) {
+            "Full HEVC POC cannot be derived before a valid IRAP reference anchor"
+        }
         val current = pocLsb.toLong()
 
         val pocMsb = if (resetPocMsb) {
@@ -518,7 +542,7 @@ internal class HevcPocTracker {
                 else -> previousTid0PocMsb
             }
         }
-        val poc = pocMsb + current
+        val poc = Math.addExact(pocMsb, current)
 
         // prevTid0Pic excludes all RADL/RASL pictures plus every SLNR picture.
         // RADL_R/RASL_R are reference pictures, but are still excluded from the POC anchor.
@@ -526,6 +550,7 @@ internal class HevcPocTracker {
         if (temporalIdPlus1 == 1 && !excludedFromTid0Anchor) {
             previousTid0PocMsb = pocMsb
             previousTid0PocLsb = current
+            hasReferenceAnchor = true
         }
         return poc
     }

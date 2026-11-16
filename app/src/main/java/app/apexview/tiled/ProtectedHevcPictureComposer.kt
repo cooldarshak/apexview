@@ -1,0 +1,455 @@
+package app.apexview.tiled
+
+import java.math.BigInteger
+
+/**
+ * Cross-feed gate and orchestrator for one protected HEVC picture.
+ *
+ * Inputs are individual protected CMAF samples. This validates each sample's cbcs defaults,
+ * per-sample IV identity, subsample map, POC, picture identity and timestamps before rewriting
+ * one selected source tile from each feed into a single length-prefixed sample.
+ *
+ * The output is sample bytes plus a CENC subsample map. It is not an encrypted CMAF fragment or
+ * init segment. Raw KID/IV values are never exposed, and encrypted payload bytes are never read.
+ */
+internal object ProtectedHevcPictureComposer {
+    data class FeedSample(
+        val feedId: String,
+        val sampleBytes: ByteArray,
+        val track: CmafBoxInspector.TrackMetadata,
+        val fragment: CmafBoxInspector.FragmentMetadata,
+        val sampleIndex: Int,
+        val sourceTileIndex: Int,
+        val destinationAddress: Int,
+        /** Per-feed tracker advanced through preceding samples in decode order. */
+        val pocTracker: HevcPocTracker,
+        /** Required for CRA (NAL type 21) when NoRaslOutputFlag is known by the caller. */
+        val noRaslOutputFlag: Boolean? = null
+    )
+
+    data class Contribution(
+        val feedId: String,
+        val sourceTileIndex: Int,
+        val destinationAddress: Int,
+        val fullPictureOrderCount: Long
+    )
+
+    data class Result(
+        val sampleBytes: ByteArray,
+        val nalLengthSize: Int,
+        val subsampleRanges: List<CmafBoxInspector.SubsampleEncryptionRange>,
+        val encryptedByteCount: Long,
+        val decodeTimeTicks: Long,
+        val presentationTimeTicks: Long,
+        val durationTicks: Long,
+        val compositionOffsetTicks: Long,
+        val timescale: Long,
+        val sampleFlags: Long,
+        val fullPictureOrderCount: Long,
+        val contributions: List<Contribution>
+    )
+
+    private data class PreparedFeed(
+        val input: FeedSample,
+        val sps: HevcParameterSets.SpsMetadata,
+        val pps: HevcParameterSets.PpsMetadata,
+        val vps: HevcParameterSets.VpsMetadata,
+        val layout: ProtectedHevcSampleLayout.Report,
+        val accessUnit: ProtectedHevcAccessUnitInspector.Report,
+        val selectedSlice: ProtectedHevcAccessUnitInspector.SliceRegion,
+        val pictureIdentity: HevcPictureIdentityCompatibility.PictureIdentity,
+        val protection: CmafBoxInspector.TrackEncryptionMetadata,
+        val sampleEncryption: CmafBoxInspector.SampleEncryptionMetadata,
+        val timing: CmafBoxInspector.SampleTiming,
+        val timescale: Long,
+        val pocTrackerAfter: HevcPocTracker
+    )
+
+    fun compose(
+        feeds: List<FeedSample>,
+        outputSps: HevcParameterSets.SpsMetadata,
+        outputPps: HevcParameterSets.PpsMetadata,
+        outputNalLengthSize: Int = 4,
+        context: String = "Protected HEVC picture composition"
+    ): Result {
+        require(feeds.size in MIN_FEEDS..MAX_FEEDS) {
+            "$context: between $MIN_FEEDS and $MAX_FEEDS protected feeds are supported"
+        }
+        require(outputNalLengthSize in 1..4) {
+            "$context: output NAL length size must be between one and four bytes"
+        }
+        require(feeds.indices.all { first ->
+            (first + 1 until feeds.size).none { second ->
+                feeds[first].pocTracker === feeds[second].pocTracker
+            }
+        }) {
+            "$context: each feed requires its own independent POC tracker"
+        }
+        require(feeds.all { it.feedId.isNotBlank() } &&
+            feeds.map { it.feedId }.distinct().size == feeds.size) {
+            "$context: feed IDs must be non-empty and unique"
+        }
+        val expectedTileStarts = outputTileStarts(outputSps, outputPps)
+        require(expectedTileStarts != null && expectedTileStarts.size == feeds.size) {
+            "$context: output PPS tile count must exactly match the selected feed count"
+        }
+        require(feeds.map { it.destinationAddress }.distinct().size == feeds.size &&
+            feeds.map { it.destinationAddress }.toSet() == expectedTileStarts) {
+            "$context: each output tile must receive exactly one selected feed"
+        }
+
+        val prepared = feeds.mapIndexed { index, input ->
+            prepareFeed(input, "feed $index (" + input.feedId + ")", context)
+        }
+        val first = prepared.first()
+
+        prepared.drop(1).forEachIndexed { index, candidate ->
+            val label = "feed " + (index + 1) + " (" + candidate.input.feedId + ")"
+            require(candidate.input.track.width == first.input.track.width &&
+                candidate.input.track.height == first.input.track.height) {
+                "$context: $label source picture dimensions differ"
+            }
+            val parameterCompatibility = HevcParameterSetCompatibility.compare(
+                first.vps, first.sps, first.pps,
+                candidate.vps, candidate.sps, candidate.pps
+            )
+            require(parameterCompatibility.compatible) {
+                "$context: $label source HEVC coding configuration is incompatible: " +
+                    parameterCompatibility.reasons.joinToString("; ")
+            }
+            compareProtection(first, candidate, label, context)
+            compareTiming(first, candidate, label, context)
+            val pictureCompatibility = HevcPictureIdentityCompatibility.compare(
+                listOf(first.pictureIdentity), listOf(candidate.pictureIdentity)
+            )
+            require(pictureCompatibility.compatible) {
+                "$context: $label does not contain the same coded picture: " +
+                    pictureCompatibility.reasons.joinToString("; ")
+            }
+        }
+
+        val rewritten = prepared.map { feed ->
+            ProtectedHevcSliceHeaderRewriter.rewrite(
+                sample = feed.input.sampleBytes,
+                layout = feed.layout,
+                accessUnit = feed.accessUnit,
+                nalIndex = feed.selectedSlice.nalIndex,
+                sourceSps = feed.sps,
+                sourcePps = feed.pps,
+                outputSps = outputSps,
+                outputPps = outputPps,
+                destinationAddress = feed.input.destinationAddress,
+                context = context + " (" + feed.input.feedId + ")"
+            )
+        }
+        val composed = ProtectedHevcSampleComposer.compose(
+            slices = rewritten,
+            nalLengthSize = outputNalLengthSize,
+            context = context
+        )
+        // Only commit POC state after every validation, rewrite and sample-map build succeeded.
+        prepared.forEach { feed ->
+            feed.input.pocTracker.commitFrom(feed.pocTrackerAfter)
+        }
+        val timing = first.timing
+        return Result(
+            sampleBytes = composed.sampleBytes,
+            nalLengthSize = composed.nalLengthSize,
+            subsampleRanges = composed.subsampleRanges,
+            encryptedByteCount = composed.encryptedByteCount,
+            decodeTimeTicks = requireNotNull(timing.decodeTimeTicks),
+            presentationTimeTicks = requireNotNull(timing.presentationTimeTicks),
+            durationTicks = requireNotNull(timing.durationTicks),
+            compositionOffsetTicks = requireNotNull(timing.compositionOffsetTicks),
+            timescale = first.timescale,
+            sampleFlags = requireNotNull(timing.sampleFlags),
+            fullPictureOrderCount = first.pictureIdentity.pictureOrderCount,
+            contributions = prepared.map { feed ->
+                Contribution(
+                    feedId = feed.input.feedId,
+                    sourceTileIndex = feed.input.sourceTileIndex,
+                    destinationAddress = feed.input.destinationAddress,
+                    fullPictureOrderCount = feed.pictureIdentity.pictureOrderCount
+                )
+            }
+        )
+    }
+
+    private fun prepareFeed(
+        input: FeedSample,
+        label: String,
+        context: String
+    ): PreparedFeed {
+        val track = input.track
+        val fragment = input.fragment
+        require(track.handler == "vide" && track.encrypted &&
+            track.sampleEntry == "encv" && track.originalFormat in setOf("hvc1", "hev1") &&
+            track.protectionScheme == "cbcs") {
+            "$context: $label must be a protected cbcs HEVC video track"
+        }
+        val protection = requireNotNull(track.trackEncryption) {
+            "$context: $label track encryption defaults are missing"
+        }
+        require(protection.defaultIsProtected && protection.defaultKidIdentity != null) {
+            "$context: $label protected default KID identity is unavailable"
+        }
+        require(protection.perSampleIvSize in setOf(0, 8, 16)) {
+            "$context: $label track IV size is unsupported"
+        }
+        if (protection.perSampleIvSize == 0) {
+            require(protection.constantIvSize in setOf(8, 16) &&
+                protection.constantIvIdentity != null) {
+                "$context: $label constant IV identity is unavailable"
+            }
+        }
+
+        // This first version deliberately rejects sample-group/PIFF overrides. Their effective
+        // per-sample protection mapping must be resolved before they can be composed safely.
+        require(!track.sampleGroupDescriptionPresent && !track.sampleToGroupPresent &&
+            track.seigSampleGroupDescription == null &&
+            track.seigSampleGroupDescriptionStructureComplete) {
+            "$context: $label track-level sample-group encryption is not supported"
+        }
+        require(fragment.sampleDescriptionIndex == 1L) {
+            "$context: $label effective sample-description index is missing or unsupported"
+        }
+        require(!fragment.sampleGroupDescriptionPresent && !fragment.sampleToGroupPresent &&
+            !fragment.sampleGroupEncryptionPresent && fragment.sampleGroupEncryptionStructureComplete) {
+            "$context: $label fragment sample-group overrides are not supported"
+        }
+        require(fragment.sencOverrideIvSize == null &&
+            fragment.sencOverrideKidIdentity == null) {
+            "$context: $label PIFF/senc override fields are not supported"
+        }
+        require(fragment.sampleEncryptionStructureComplete &&
+            fragment.sampleEncryptionCount == fragment.sampleCount.toLong() &&
+            fragment.sampleEncryptionMetadata.size == fragment.sampleCount) {
+            "$context: $label per-sample encryption records are incomplete"
+        }
+        require(fragment.subsampleEncryptionSignalled == true &&
+            fragment.sampleEncryptionRangesCoverSamples) {
+            "$context: $label does not expose complete explicit subsample encryption maps"
+        }
+        require(input.sampleIndex in 0 until fragment.sampleCount &&
+            input.sampleIndex < fragment.sampleTimings.size) {
+            "$context: $label selected sample index is outside the fragment"
+        }
+        val timing = fragment.sampleTimings[input.sampleIndex]
+        require(timing.sampleSizeBytes == input.sampleBytes.size.toLong()) {
+            "$context: $label selected sample size does not match timing metadata"
+        }
+        require(timing.sampleFlags != null) {
+            "$context: $label selected sample random-access/dependency flags are unavailable"
+        }
+        require(timing.decodeTimeTicks != null && timing.presentationTimeTicks != null &&
+            timing.durationTicks != null && timing.durationTicks > 0L &&
+            timing.compositionOffsetTicks != null) {
+            "$context: $label selected sample timing is incomplete"
+        }
+
+        val encryption = fragment.sampleEncryptionMetadata[input.sampleIndex]
+        require(encryption.ivSize == protection.perSampleIvSize) {
+            "$context: $label sample IV size differs from effective track defaults"
+        }
+        if (encryption.ivSize > 0) {
+            require(encryption.ivIdentity != null) {
+                "$context: $label sample IV identity is unavailable"
+            }
+        } else {
+            require(protection.constantIvIdentity != null) {
+                "$context: $label constant IV identity is unavailable"
+            }
+        }
+        val ranges = requireNotNull(encryption.subsampleRanges) {
+            "$context: $label selected sample does not contain an explicit subsample map"
+        }
+        require(ranges.isNotEmpty()) {
+            "$context: $label selected sample subsample map is empty"
+        }
+        if (fragment.sampleAuxiliarySizesPresent || fragment.sampleAuxiliaryOffsetsPresent) {
+            require(fragment.sampleAuxiliaryInfoStructureComplete &&
+                fragment.sampleAuxiliaryPayloadStructureComplete &&
+                fragment.sampleAuxiliaryPayloadSampleCount == fragment.sampleCount) {
+                "$context: $label sample auxiliary information is incomplete"
+            }
+            val auxiliary = fragment.sampleAuxiliaryMetadata
+            require(auxiliary != null &&
+                (auxiliary.auxiliaryInfoType == null || auxiliary.auxiliaryInfoType == "cbcs") &&
+                (auxiliary.auxiliaryInfoParameter == null || auxiliary.auxiliaryInfoParameter == 0L)) {
+                "$context: $label sample auxiliary-info type/parameter is unsupported"
+            }
+        }
+
+        val configuration = requireNotNull(track.hevcConfiguration) {
+            "$context: $label HEVC decoder configuration is missing"
+        }
+        require(configuration.parameterSetErrors.isEmpty() &&
+            configuration.vps.size == 1 && configuration.sps.size == 1 &&
+            configuration.pps.size == 1 && configuration.parameterSetFingerprints.isNotEmpty()) {
+            "$context: $label must expose exactly one completely parsed VPS, SPS and PPS"
+        }
+        val vps = configuration.vps.single()
+        val sps = configuration.sps.single()
+        val pps = configuration.pps.single()
+        require(sps.displayWidth == track.width && sps.displayHeight == track.height) {
+            "$context: $label HEVC parameter-set dimensions differ from track sample entry"
+        }
+        require(configuration.nalLengthSize in 1..4) {
+            "$context: $label HEVC NAL length size is unsupported"
+        }
+        val layout = ProtectedHevcSampleLayout.inspect(
+            sample = input.sampleBytes,
+            nalLengthSize = configuration.nalLengthSize,
+            subsampleRanges = ranges,
+            context = "$context $label"
+        )
+        val accessUnit = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(
+            sample = input.sampleBytes,
+            layout = layout,
+            sps = sps,
+            pps = pps,
+            vps = vps,
+            context = "$context $label"
+        )
+        val selectedSlice = accessUnit.slices.singleOrNull {
+            it.tile.index == input.sourceTileIndex
+        } ?: throw IllegalArgumentException(
+            "$context: $label selected source tile " + input.sourceTileIndex + " is missing or ambiguous"
+        )
+        require(selectedSlice.readyForCurrentHeaderRewriter) {
+            "$context: $label selected source tile does not expose the clear CABAC prefix required for rewriting"
+        }
+
+        val header = selectedSlice.header
+        val pocLsb = header.picOrderCntLsb ?: if (header.nalUnitType in 19..20) 0 else null
+        require(pocLsb != null) {
+            "$context: $label selected source tile has no picture-order-count LSB"
+        }
+        val noRaslOutput = input.noRaslOutputFlag ?: (header.nalUnitType in 16..20)
+        val pocTrackerAfter = input.pocTracker.fork()
+        val fullPoc = try {
+            pocTrackerAfter.derive(
+                nalUnitType = header.nalUnitType,
+                temporalIdPlus1 = header.temporalIdPlus1,
+                pocLsb = requireNotNull(pocLsb),
+                log2MaxPocLsb = sps.log2MaxPicOrderCntLsb,
+                noRaslOutputFlag = noRaslOutput
+            )
+        } catch (error: Exception) {
+            val detail = error.message ?: error.javaClass.simpleName
+            throw IllegalArgumentException("$context: $label full POC is unavailable: " + detail)
+        }
+        val pictureIdentity = HevcPictureIdentityCompatibility.identify(header, fullPoc)
+        val scale = requireNotNull(track.timescale)
+        require(scale > 0L && (fragment.timescale == null || fragment.timescale == scale)) {
+            "$context: $label track/fragment timescale is missing or inconsistent"
+        }
+
+        return PreparedFeed(
+            input, sps, pps, vps, layout, accessUnit, selectedSlice,
+            pictureIdentity, protection, encryption, timing, scale, pocTrackerAfter
+        )
+    }
+
+    private fun compareProtection(
+        first: PreparedFeed,
+        second: PreparedFeed,
+        label: String,
+        context: String
+    ) {
+        val a = first.protection
+        val b = second.protection
+        val shapeA = a.copy(defaultKidIdentity = null, constantIvIdentity = null)
+        val shapeB = b.copy(defaultKidIdentity = null, constantIvIdentity = null)
+        require(shapeA == shapeB) {
+            "$context: $label cbcs scheme, IV size or encryption pattern differs"
+        }
+        require(a.defaultKidIdentity == b.defaultKidIdentity) {
+            "$context: $label default KID identity differs"
+        }
+        if (a.perSampleIvSize == 0) {
+            require(a.constantIvIdentity == b.constantIvIdentity) {
+                "$context: $label constant IV identity differs"
+            }
+        } else {
+            require(first.sampleEncryption.ivSize == second.sampleEncryption.ivSize &&
+                first.sampleEncryption.ivIdentity == second.sampleEncryption.ivIdentity) {
+                "$context: $label selected sample IV identity differs"
+            }
+        }
+    }
+
+    private fun compareTiming(
+        first: PreparedFeed,
+        second: PreparedFeed,
+        label: String,
+        context: String
+    ) {
+        val a = first.timing
+        val b = second.timing
+        compareMediaTime("decode time", a.decodeTimeTicks, first.timescale,
+            b.decodeTimeTicks, second.timescale, label, context)
+        compareMediaTime("presentation time", a.presentationTimeTicks, first.timescale,
+            b.presentationTimeTicks, second.timescale, label, context)
+        compareMediaTime("sample duration", a.durationTicks, first.timescale,
+            b.durationTicks, second.timescale, label, context)
+        compareMediaTime("composition offset", a.compositionOffsetTicks, first.timescale,
+            b.compositionOffsetTicks, second.timescale, label, context)
+        val flagsA = requireNotNull(a.sampleFlags)
+        val flagsB = requireNotNull(b.sampleFlags)
+        require((flagsA and RESERVED_SAMPLE_FLAGS_MASK) == 0L &&
+            (flagsB and RESERVED_SAMPLE_FLAGS_MASK) == 0L &&
+            ((flagsA xor flagsB) and RANDOM_ACCESS_DEPENDENCY_MASK) == 0L) {
+            "$context: $label sample sync/random-access dependency flags differ or are invalid"
+        }
+    }
+
+    private fun compareMediaTime(
+        label: String,
+        aTicks: Long?,
+        aScale: Long,
+        bTicks: Long?,
+        bScale: Long,
+        feedLabel: String,
+        context: String
+    ) {
+        require(aTicks != null && bTicks != null) {
+            "$context: $feedLabel $label is unavailable"
+        }
+        val left = BigInteger.valueOf(aTicks).multiply(BigInteger.valueOf(bScale))
+        val right = BigInteger.valueOf(bTicks).multiply(BigInteger.valueOf(aScale))
+        require(left == right) {
+            "$context: $feedLabel $label differs; timestamp offsets are not silently rebased"
+        }
+    }
+
+    private fun outputTileStarts(
+        sps: HevcParameterSets.SpsMetadata,
+        pps: HevcParameterSets.PpsMetadata
+    ): Set<Int>? {
+        val columns = pps.tileColumnWidthsInCtbs ?: return null
+        val rows = pps.tileRowHeightsInCtbs ?: return null
+        if (columns.isEmpty() || rows.isEmpty() ||
+            columns.size != pps.numTileColumns || rows.size != pps.numTileRows ||
+            columns.any { it <= 0 } || rows.any { it <= 0 }) return null
+        if (columns.sumOf { it.toLong() } != sps.picWidthInCtbs.toLong() ||
+            rows.sumOf { it.toLong() } != sps.picHeightInCtbs.toLong()) return null
+        if (!pps.tilesEnabled && (columns.size != 1 || rows.size != 1)) return null
+        val starts = linkedSetOf<Int>()
+        var top = 0
+        rows.forEach { rowHeight ->
+            var left = 0
+            columns.forEach { columnWidth ->
+                starts += Math.addExact(Math.multiplyExact(top, sps.picWidthInCtbs), left)
+                left = Math.addExact(left, columnWidth)
+            }
+            top = Math.addExact(top, rowHeight)
+        }
+        return starts
+    }
+
+    private const val MIN_FEEDS = 2
+    private const val MAX_FEEDS = 6
+    private const val RESERVED_SAMPLE_FLAGS_MASK = 0xf0000000L
+    private const val RANDOM_ACCESS_DEPENDENCY_MASK = 0x0fff0000L
+}
