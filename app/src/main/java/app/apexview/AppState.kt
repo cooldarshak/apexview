@@ -1451,6 +1451,7 @@ class AppState(
                 }
                 append("HEVC/CMAF preflight: " + if (preflightPassed) "PASS\n" else "${snapshot?.detail ?: "VALIDATING"}\n")
                 append("Media protection: ${capture.protection}\n")
+                append("Composition: ${snapshot?.compositionStatus ?: "VALIDATING"}\n")
                 append("Source decoders released (callbacks): $releasedCount\n")
                 append("Composed decoder: ${composedCodec ?: "NOT OBSERVED"}\n")
                 append("First composed frame: ${if (composedFirstFrameSeen) "YES" else "NO"}\n")

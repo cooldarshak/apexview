@@ -48,6 +48,8 @@ class F1HlsFeedCaptureTest {
             assertTrue(capture.clearOutput)
             val output = capture.outputWindow("native-hls-$count")!!
             assertEquals(1, output.fragments.size)
+            assertEquals(960 * count, output.fragments.single().width)
+            assertEquals(540, output.fragments.single().height)
             val packaged = ProtectedHevcComposedDashPackageBuilder.build(output, null,
                 output.fragments.first().baseDecodeTimeTicks, System.currentTimeMillis(), clearOutput = true)
             assertEquals(1, Regex("<Representation ").findAll(packaged.manifest).count())
@@ -161,6 +163,59 @@ seg.m4s
         assertEquals(false, snapshot.failure?.retryable)
         assertTrue(snapshot.detail.orEmpty().contains("alignment failure"))
         assertTrue(network.requested.all { it.endsWith(".m3u8") })
+    }
+
+    @Test fun acceptsCmafPrefixBoxesTfhdDefaultsAndVersionZeroTruns() = runBlocking {
+        val original = network(2)
+        val files = original.files.mapValues { (uri, bytes) -> if (uri.endsWith(".m4s")) compactFragment(bytes) else bytes }
+        val capture = F1ArchiveFeedCapture("test", "auth", "entitled", Network(files).factory)
+        val snapshot = capture.captureAtPosition("hls-defaults", feeds(2), 0)
+        assertNull(snapshot.detail, snapshot.failure)
+        val output = capture.outputWindow("hls-defaults")!!
+        assertEquals(25, output.fragments.single().sampleCount)
+        output.zero(); capture.reset()
+    }
+
+    private fun compactFragment(bytes: ByteArray): ByteArray {
+        fun children(parent: ByteArray): List<ByteArray> {
+            val result = mutableListOf<ByteArray>()
+            var at = 8
+            while (at < parent.size) {
+                val size = ByteBuffer.wrap(parent, at, 4).int
+                result += parent.copyOfRange(at, at + size)
+                at += size
+            }
+            return result
+        }
+        fun type(box: ByteArray) = box.copyOfRange(4, 8).toString(Charsets.US_ASCII)
+        fun box(type: String, payload: ByteArray) = ByteBuffer.allocate(payload.size + 8).putInt(payload.size + 8)
+            .put(type.toByteArray(Charsets.US_ASCII)).put(payload).array()
+        fun full(type: String, flags: Int, payload: ByteArray) = box(type, ByteBuffer.allocate(payload.size + 4).putInt(flags).put(payload).array())
+        val moofSize = ByteBuffer.wrap(bytes, 0, 4).int
+        val parts = children(bytes.copyOfRange(0, moofSize))
+        val mfhd = parts.single { type(it) == "mfhd" }
+        val traf = children(parts.single { type(it) == "traf" })
+        val oldHeader = traf.single { type(it) == "tfhd" }
+        val tfdt = traf.single { type(it) == "tfdt" }
+        val oldRun = ByteBuffer.wrap(traf.single { type(it) == "trun" })
+        val count = oldRun.getInt(12)
+        oldRun.position(20)
+        val entries = ByteBuffer.allocate(count * 8)
+        repeat(count) {
+            assertEquals(3600, oldRun.int)
+            val size = oldRun.int
+            val flags = oldRun.int
+            assertEquals(0, oldRun.int)
+            entries.putInt(size).putInt(flags)
+        }
+        val tfhd = full("tfhd", 0x02000A, ByteBuffer.allocate(12).putInt(ByteBuffer.wrap(oldHeader).getInt(12)).putInt(1).putInt(3600).array())
+        fun moof(offset: Int): ByteArray {
+            val trun = full("trun", 0x000601, ByteBuffer.allocate(8 + entries.capacity()).putInt(count).putInt(offset).put(entries.array()).array())
+            return box("moof", mfhd + box("traf", tfhd + tfdt + trun))
+        }
+        val provisional = moof(0)
+        val styp = box("styp", "msdh".toByteArray() + ByteArray(4) + "msdhmsix".toByteArray())
+        return styp + moof(provisional.size + 8) + bytes.copyOfRange(moofSize, bytes.size)
     }
 
     private fun feeds(count: Int) = (0 until count).map { F1DashFeedCapture.Feed("channel-$it", "https://media.test/f$it/master.m3u8") }

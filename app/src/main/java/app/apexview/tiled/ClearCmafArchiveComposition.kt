@@ -17,7 +17,15 @@ internal class ClearCmafArchiveComposition {
         val timescale = requireNotNull(track.timescale)
         val sampleDuration = fragment.sampleTimings.map { requireNotNull(it.durationTicks) }.distinct().single()
         val divisor = java.math.BigInteger.valueOf(timescale).gcd(java.math.BigInteger.valueOf(sampleDuration)).longValueExact()
-        val columns = if (feeds.size == 4) 2 else feeds.size
+        val configuration = requireNotNull(track.hevcConfiguration)
+        val sps = configuration.sps.single()
+        val pps = configuration.pps.single()
+        val sourceCellHeight = if (pps.tilesEnabled) {
+            minOf(sps.height, requireNotNull(pps.tileRowHeightsInCtbs).first() * sps.ctbSize)
+        } else sps.height
+        // A partial bottom CTB cannot become an interior row without changing CABAC data.
+        // Keep those feeds in one row; genuinely full source tiles can use the 2x2 grid.
+        val columns = if (feeds.size == 4 && sourceCellHeight % sps.ctbSize == 0) 2 else feeds.size
         val rows = feeds.size / columns
         val independentlyDecodable = fragment.sampleTimings.first().sampleFlags?.let { (it and 0x00010000L) == 0L } == true
         val previous = if (independentlyDecodable) 0 else sourceHistory[feeds.first().label]?.size ?: 0
@@ -56,7 +64,7 @@ internal class ClearCmafArchiveComposition {
             }
             sequence += newFragments.size
             while (history.size > 3) history.removeAt(0).zero()
-            status = "CLEAR_HEVC_CMAF_COMPOSED_NOT_YET_PLAYED"
+            status = "CLEAR_HEVC_CMAF_COMPOSED_NOT_YET_PLAYED; layout=${columns}x${rows}"
         } catch (error: Throwable) { newFragments.forEach { it.zero() }; throw error
         } finally { output.initializationSegment.fill(0) }
     }
