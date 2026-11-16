@@ -125,6 +125,24 @@ class HevcFragmentSequenceCompatibilityTest {
     }
 
     @Test
+    fun rejectsReservedSampleFlagBitsEvenWhenBothFeedsHaveTheSameInvalidValue() {
+        val valid = sequence(90_000, listOf(0, 6_000), 3_000, listOf(0, 1, 2, 3))
+        val firstFragment = valid.fragments.first()
+        val invalidTimings = firstFragment.sampleTimings.mapIndexed { index, sample ->
+            if (index == 1) sample.copy(sampleFlags = (sample.sampleFlags ?: 0L) or 0x10000000L)
+            else sample
+        }
+        val invalid = valid.copy(
+            fragments = listOf(firstFragment.copy(sampleTimings = invalidTimings)) + valid.fragments.drop(1)
+        )
+
+        val result = HevcFragmentSequenceCompatibility.compare(invalid, invalid)
+
+        assertFalse(result.compatible)
+        assertTrue(result.reasons.any { it.contains("reserved sample_flags bits are non-zero") })
+    }
+
+    @Test
     fun rejectsInternallyNonContiguousSampleDecodeTimes() {
         val first = sequence(90_000, listOf(0, 6_000), 3_000, listOf(0, 1, 2, 3))
         val badFragment = first.fragments.first().copy(

@@ -163,8 +163,11 @@ internal object HevcFragmentSequenceCompatibility {
                 } else {
                     reasons += "fragment $fragmentIndex sample $sampleIndex presentation/composition timing is incomplete"
                 }
-                if (sample.sampleFlags == null) {
+                val sampleFlags = sample.sampleFlags
+                if (sampleFlags == null) {
                     reasons += "fragment $fragmentIndex sample $sampleIndex random-access/dependency flags are unavailable"
+                } else if ((sampleFlags and RESERVED_SAMPLE_FLAGS_MASK) != 0L) {
+                    reasons += "fragment $fragmentIndex sample $sampleIndex reserved sample_flags bits are non-zero"
                 }
                 totalSamples++
             }
@@ -213,4 +216,5 @@ internal object HevcFragmentSequenceCompatibility {
     }
 
     private const val RANDOM_ACCESS_DEPENDENCY_MASK = 0x0fff0000L
+    private const val RESERVED_SAMPLE_FLAGS_MASK = 0xf0000000L
 }

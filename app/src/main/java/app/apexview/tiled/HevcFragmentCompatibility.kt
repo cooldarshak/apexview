@@ -10,6 +10,7 @@ import java.math.BigInteger
  * encryption/subsample map are verified without exposing key or IV material.
  */
 internal object HevcFragmentCompatibility {
+    private const val RESERVED_SAMPLE_FLAGS_MASK = 0xf0000000L
     data class Result(val compatible: Boolean, val reasons: List<String>)
 
     fun compare(
@@ -107,6 +108,10 @@ internal object HevcFragmentCompatibility {
                     if (firstFlags == null || secondFlags == null) {
                         reasons += "sample $index sync/random-access flags are unavailable"
                     } else {
+                        if ((firstFlags and RESERVED_SAMPLE_FLAGS_MASK) != 0L ||
+                            (secondFlags and RESERVED_SAMPLE_FLAGS_MASK) != 0L) {
+                            reasons += "sample $index reserved sample_flags bits are non-zero"
+                        }
                         val randomAccessMask = 0x0fff0000L
                         if (((firstFlags xor secondFlags) and randomAccessMask) != 0L) {
                             reasons += "sample $index sync/random-access dependency flags differ"

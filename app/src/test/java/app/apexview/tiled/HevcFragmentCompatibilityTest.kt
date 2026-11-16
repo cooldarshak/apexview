@@ -177,6 +177,17 @@ class HevcFragmentCompatibilityTest {
         assertTrue(result.reasons.any { it.contains("sync/random-access dependency flags differ") })
     }
 
+    @Test fun rejectsReservedSampleFlagBitsEvenWhenBothFeedsAgree() {
+        val malformed = fragment(90000, 0, listOf(
+            CmafBoxInspector.SampleTiming(0, 0, 3000, 0, sampleFlags = 0x12000000L)
+        ))
+        val result = HevcFragmentCompatibility.compare(
+            track(90000), malformed, track(90000), malformed.copy()
+        )
+        assertTrue(result.reasons.any { it.contains("reserved sample_flags bits are non-zero") })
+        assertFalse(result.compatible)
+    }
+
     @Test fun rejectsMissingSampleSyncFlagsInsteadOfAssumingRandomAccess() {
         val first = fragment(90000, 0, listOf(
             CmafBoxInspector.SampleTiming(0, 0, 3000, 0)
