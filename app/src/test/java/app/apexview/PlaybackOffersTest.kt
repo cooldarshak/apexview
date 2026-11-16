@@ -45,4 +45,12 @@ class PlaybackOffersTest {
         assertEquals(ManifestProtocol.DASH, ManifestProtocol.fromBody("<?xml version=\"1.0\"?><MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\"/>".toByteArray()))
         assertEquals(ManifestProtocol.UNKNOWN, ManifestProtocol.fromBody("<html>Sign in</html>".toByteArray()))
     }
+
+    @Test fun multiPlayRetainsTheSelectedChannelsProtocolAndLicense() {
+        val selected = PlayInfo("https://example.test/channel.mpd", "dash-license", "DASH_WV",
+            profileLabel = "channel-1033", requestedPlatform = "WEB_DASH", playerType = "player_tm")
+        val session = MultiPlay(mapOf(1033 to selected.url), "global-license", "HLS", mapOf(1033 to selected))
+        assertSame(selected, session.stream(selected.url, 1033, 123))
+        assertEquals("DASH_WV", session.stream(selected.url, 1033, 123).streamType)
+    }
 }

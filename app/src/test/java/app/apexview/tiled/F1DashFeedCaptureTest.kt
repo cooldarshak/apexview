@@ -8,6 +8,7 @@ import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import java.io.IOException
 
 @RunWith(RobolectricTestRunner::class)
 class F1DashFeedCaptureTest {
@@ -49,5 +50,14 @@ class F1DashFeedCaptureTest {
         val snapshot = capture("<html>Access denied</html>").captureAtPosition("test-html", feeds(), 0)
         assertEquals(false, snapshot.failure?.retryable)
         assertTrue(snapshot.detail.orEmpty().contains("not a DASH manifest"))
+    }
+
+    @Test fun networkReadCanRetryWithoutLeakingItsSignedUrl() = runBlocking {
+        val capture = F1DashFeedCapture("ApexView-test", "test-auth", "test-entitlement",
+            dataSourceFactory = DataSource.Factory { throw IOException("https://example.test/?token=NEVER_LOG") })
+        val snapshot = capture.captureAtPosition("test-network", feeds(), 0)
+        assertEquals(true, snapshot.failure?.retryable)
+        assertTrue(snapshot.detail.orEmpty().contains("network read failed"))
+        assertFalse(snapshot.detail.orEmpty().contains("NEVER_LOG"))
     }
 }

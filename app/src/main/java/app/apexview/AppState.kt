@@ -1420,7 +1420,7 @@ class AppState(
         val host = selectedTiles.firstOrNull { !it.audible } ?: selectedTiles.first()
         val audioMaster = selectedTiles.firstOrNull { it !== host && it.audible }
             ?: selectedTiles.first { it !== host }
-        val group = "archive-content-$contentId"
+        val group = "archive-content-$contentId-${java.util.UUID.randomUUID()}"
         f1DashCaptureJob?.cancel()
         val capture = F1DashFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
         f1DashCapture = capture
@@ -1436,6 +1436,7 @@ class AppState(
         var composedCodec: String? = null
 
         fun diagnostics() {
+            if (f1DashCapture != null && f1DashCapture !== capture) return
             val snapshot = lastSnapshot
             singleDecoderDiagnostic = buildString {
                 append("Source: F1 Archive · Selected feeds: ${selectedTiles.size}\n")
@@ -1445,7 +1446,7 @@ class AppState(
                     append("$label manifest: ${snapshot?.actualManifests?.get(label)?.name ?: "UNVERIFIED"}\n")
                 }
                 append("HEVC/CMAF preflight: " + if (preflightPassed) "PASS\n" else "${snapshot?.detail ?: "VALIDATING"}\n")
-                append("Source decoders released: $releasedCount\n")
+                append("Source decoders released (callbacks): $releasedCount\n")
                 append("Composed decoder: ${composedCodec ?: "NOT OBSERVED"}\n")
                 append("Active video decoders (app callbacks): ${tiles.sumOf { it.feed.activeVideoDecoderCount }}\n")
                 append("First composed frame: ${if (composedFirstFrameSeen) "YES" else "NO"}\n")
@@ -1454,7 +1455,8 @@ class AppState(
             }
         }
         fun restore(replacedHost: Boolean) {
-            if (restored) return
+            // A newer layout/test may already own these players after cancelling this job.
+            if (restored || f1DashCapture !== capture) return
             restored = true
             if (protectedCompositionHost != null) {
                 stopProtectedCompositionPresentation()
@@ -1508,6 +1510,7 @@ class AppState(
                         }
                     },
                     releaseSources = {
+                        val decodersBefore = selectedTiles.sumOf { it.feed.activeVideoDecoderCount }
                         selectedTiles.forEach { tile ->
                             tile.feed.setProtectedCompositionVideoRole(false,
                                 (tile.w * context.resources.displayMetrics.density).toInt().coerceAtLeast(1),
@@ -1516,9 +1519,9 @@ class AppState(
                         val releaseResults = coroutineScope {
                             selectedTiles.map { tile -> async { tile.feed.awaitVideoDecoderRelease(3_000L) } }.awaitAll()
                         }
-                        releasedCount = releaseResults.count { it }
-                        if (releaseResults.any { !it }) throw IOException("Decoder release failed for ${selectedTiles.size - releasedCount} source players")
-                        android.util.Log.i("ApexviewSingleDecoder", "Preflight PASS. All $releasedCount source video decoders released.")
+                        releasedCount = (decodersBefore - selectedTiles.sumOf { it.feed.activeVideoDecoderCount }).coerceAtLeast(0)
+                        if (releaseResults.any { !it }) throw IOException("Decoder release failed for ${releaseResults.count { !it }} source players")
+                        android.util.Log.i("ApexviewSingleDecoder", "Preflight PASS. All source players decoder-free; observed releases=$releasedCount.")
                     },
                     replaceHost = { window ->
                         if (host.audible) setAudio(audioMaster)

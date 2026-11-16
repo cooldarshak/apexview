@@ -581,7 +581,7 @@ class F1TvApi(private val userAgent: String, private val chromeMajor: String) {
         }
         MultiPlay(
             feeds = streams.mapValues { it.value.url },
-            licenseUrl = text(result, "laURL").ifEmpty { null },
+            licenseUrl = text(result, "laURL").ifEmpty { text(result, "laUrl") }.ifEmpty { null },
             streamType = text(result, "streamType"),
             streamsByChannel = streams,
         )
@@ -591,7 +591,7 @@ class F1TvApi(private val userAgent: String, private val chromeMajor: String) {
         channel: JSONObject, result: JSONObject, contentId: Long, channelId: Int?, player: String, fallback: Boolean
     ): PlayInfo {
         val reported = text(result, "streamType")
-        val offers = PlaybackOffers.read(channel, reported, text(result, "laURL").ifEmpty { null })
+        val offers = PlaybackOffers.read(channel, reported, text(result, "laURL").ifEmpty { text(result, "laUrl") }.ifEmpty { null })
         val selected = PlaybackOffers.preferred(offers, preferDash = platform.endsWith("DASH"))
         val diagnostic = PlaybackOffers.diagnostic(platform, player, contentId, channelId, reported, offers, selected, fallback)
         android.util.Log.i("ApexviewPlaybackOffer", diagnostic +

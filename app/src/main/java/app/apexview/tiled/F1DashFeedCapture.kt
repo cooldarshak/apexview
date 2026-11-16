@@ -221,20 +221,15 @@ internal class F1DashFeedCapture(
                                         report.errors.joinToString("; ").take(180)
                                 )
                             }
-                            item.feed.label to bytes.also {
-                                // Report is retained separately from encrypted sample bytes.
-                                ProtectedHevcLiveComposition.recordCmafResponse(
-                                    group, item.feed.label, it, report
-                                )
-                            }
-                        } catch (error: Throwable) {
+                            ProtectedHevcLiveComposition.recordCmafResponse(group, item.feed.label, bytes, report)
+                            item.feed.label
+                        } finally {
+                            // Also clear successful siblings when another feed fails/cancels.
                             bytes.fill(0)
-                            throw error
                         }
                     }
                 }.awaitAll()
             }
-            media.forEach { (_, bytes) -> bytes.fill(0) }
             lastCapturedSegmentStartUs = aligned.first().absoluteStartUs
 
             Snapshot(
@@ -384,19 +379,15 @@ internal class F1DashFeedCapture(
                                         report.errors.joinToString("; ").take(180)
                                 )
                             }
-                            item.feed.label to bytes.also {
-                                ProtectedHevcLiveComposition.recordCmafResponse(
-                                    group, item.feed.label, it, report
-                                )
-                            }
-                        } catch (error: Throwable) {
+                            ProtectedHevcLiveComposition.recordCmafResponse(group, item.feed.label, bytes, report)
+                            item.feed.label
+                        } finally {
+                            // Also clear successful siblings when another feed fails/cancels.
                             bytes.fill(0)
-                            throw error
                         }
                     }
                 }.awaitAll()
             }
-            media.forEach { (_, bytes) -> bytes.fill(0) }
             ProtectedHevcLiveComposition.rejectionReason(group)?.let {
                 throw PermanentCaptureException("HEVC/CMAF composition rejected: $it")
             }
