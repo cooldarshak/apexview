@@ -218,15 +218,16 @@ internal object HevcClearCmafGridComposer {
             }
             val parsed = parseFragmentSamples(bytes, fragmentMetadata)
             parsed.samples.forEachIndexed { sampleIndex, sample ->
-                val nals = splitLengthPrefixed(sample.bytes, config.nalLengthSize)
-                val vcl = nals.filter { HevcBitstream.parseNalHeader(it).type in 0..31 }
-                require(vcl.isNotEmpty()) {
-                    "Feed ${feed.label} fragment $fragmentIndex sample $sampleIndex contains no VCL NAL"
-                }
-                require(vcl.count { isFirstSlice(it) } == 1) {
-                    "Feed ${feed.label} fragment $fragmentIndex sample $sampleIndex must contain exactly one first slice"
-                }
-                nals.forEach { appendAnnexB(annexB, it) }
+                val accessUnit = HevcAccessUnitInspector.inspectLengthPrefixedSample(
+                    sample = sample.bytes,
+                    nalLengthSize = config.nalLengthSize,
+                    vps = config.vps.single(),
+                    sps = config.sps.single(),
+                    pps = config.pps.single(),
+                    context = "Feed " + feed.label + " fragment " + fragmentIndex +
+                        " sample " + sampleIndex
+                )
+                accessUnit.nalUnits.forEach { appendAnnexB(annexB, it) }
             }
             fragments += parsed
             metadata += fragmentMetadata

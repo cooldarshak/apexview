@@ -343,6 +343,123 @@ class HevcSliceHeaderParserTest {
         assertEquals(101L, tracker.derive(1, 1, 101, 8))
     }
 
+    @Test
+    fun inspectsSingleSliceAsFullFrameWhenPpsHasNoTileGrid() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits(tilesEnabled = false)), sps)
+        val report = HevcAccessUnitInspector.inspectLengthPrefixedSample(
+            lengthPrefixedSample(nal(1, pSliceBits(tilesEnabled = false))),
+            nalLengthSize = 4,
+            sps = sps,
+            pps = pps
+        )
+        assertEquals(1, report.nalUnits.size)
+        assertEquals(1, report.slices.size)
+        assertEquals(42, report.pictureOrderCountLsb)
+        assertEquals(0, report.slices.single().header.sliceSegmentAddress)
+        assertEquals(0, report.slices.single().tile.index)
+        assertEquals(1, report.sourceTileCount)
+        assertTrue(report.fullFrameSingleSlice)
+        assertTrue(report.independentSliceEligible)
+    }
+
+    @Test
+    fun inspectsIndependentSlicesAtTheirSourceTileBoundaries() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)
+        val report = HevcAccessUnitInspector.inspectLengthPrefixedSample(
+            lengthPrefixedSample(
+                nal(1, pSliceBits()),
+                nal(1, independentPSliceSegmentBits(address = 15, poc = 42))
+            ),
+            nalLengthSize = 4,
+            sps = sps,
+            pps = pps
+        )
+        assertEquals(listOf(0, 15), report.slices.map { it.header.sliceSegmentAddress })
+        assertEquals(listOf(0, 1), report.slices.map { it.tile.index })
+        assertEquals(listOf(0, 1), report.slices.map { it.tile.column })
+        assertEquals(listOf(0, 0), report.slices.map { it.tile.row })
+        assertTrue(report.independentSliceEligible)
+        assertFalse(report.fullFrameSingleSlice)
+        assertEquals(42, report.pictureOrderCountLsb)
+        assertEquals(listOf(-1, -4), report.pictureIdentity.references.map { it.deltaPoc })
+    }
+
+    @Test
+    fun rejectsDependentSliceSegmentsInsideCmafSample() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)
+        try {
+            HevcAccessUnitInspector.inspectLengthPrefixedSample(
+                lengthPrefixedSample(nal(1, pSliceBits()), nal(1, dependentPSliceSegmentBits(15))),
+                nalLengthSize = 4,
+                sps = sps,
+                pps = pps
+            )
+            throw AssertionError("Dependent slice segments must not be eligible source cells")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message!!.contains("Dependent slice segments"))
+        }
+    }
+
+    @Test
+    fun rejectsMixedPocInsideOneCmafSample() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)
+        try {
+            HevcAccessUnitInspector.inspectLengthPrefixedSample(
+                lengthPrefixedSample(
+                    nal(1, pSliceBits()),
+                    nal(1, independentPSliceSegmentBits(address = 15, poc = 43))
+                ),
+                nalLengthSize = 4,
+                sps = sps,
+                pps = pps
+            )
+            throw AssertionError("Different POC values must not share one access unit")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message!!.contains("full POC differs"))
+        }
+    }
+
+    @Test
+    fun rejectsMultiplePicturesInsideOneCmafSample() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)
+        try {
+            HevcAccessUnitInspector.inspectLengthPrefixedSample(
+                lengthPrefixedSample(nal(1, pSliceBits()), nal(1, pSliceBits())),
+                nalLengthSize = 4,
+                sps = sps,
+                pps = pps
+            )
+            throw AssertionError("A CMAF sample must contain exactly one picture")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message!!.contains("more than one coded picture"))
+        }
+    }
+
+    @Test
+    fun rejectsIndependentSliceThatDoesNotStartAtTileBoundary() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)
+        try {
+            HevcAccessUnitInspector.inspectLengthPrefixedSample(
+                lengthPrefixedSample(
+                    nal(1, pSliceBits()),
+                    nal(1, independentPSliceSegmentBits(address = 1, poc = 42))
+                ),
+                nalLengthSize = 4,
+                sps = sps,
+                pps = pps
+            )
+            throw AssertionError("A slice inside a tile must not be treated as a tile")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message!!.contains("complete source tile boundary"))
+        }
+    }
+
     private fun spsBits(includeSpsRps: Boolean = false): ByteArray = BitWriter().apply {
         write(1, 4); write(0, 3); write(1, 1)
         write(0, 8 + 32 + 4 + 44 + 8)
@@ -376,7 +493,8 @@ class HevcSliceHeaderParserTest {
         defaultL1Minus1: Int = 0,
         listsModification: Boolean = false,
         deblockingOverride: Boolean = false,
-        sliceHeaderExtension: Boolean = false
+        sliceHeaderExtension: Boolean = false,
+        tilesEnabled: Boolean = true
     ): ByteArray = BitWriter().apply {
         writeUe(0); writeUe(0)
         write(1, 1); write(0, 1); write(2, 3)
@@ -389,9 +507,11 @@ class HevcSliceHeaderParserTest {
         write(if (weightedPred) 1 else 0, 1)
         write(if (weightedBipred) 1 else 0, 1)
         write(0, 1)
-        write(1, 1); write(0, 1)
-        writeUe(1); writeUe(1); write(1, 1)
-        write(1, 1) // loop filter across tiles
+        write(if (tilesEnabled) 1 else 0, 1); write(0, 1)
+        if (tilesEnabled) {
+            writeUe(1); writeUe(1); write(1, 1)
+            write(1, 1) // loop filter across tiles
+        }
         write(1, 1) // loop filter across slices
         write(if (deblockingOverride) 1 else 0, 1)
         if (deblockingOverride) {
@@ -406,7 +526,7 @@ class HevcSliceHeaderParserTest {
         write(0, 1) // no PPS extension
     }.finish()
 
-    private fun pSliceBits(): ByteArray = BitWriter().apply {
+    private fun pSliceBits(tilesEnabled: Boolean = true): ByteArray = BitWriter().apply {
         write(1, 1); writeUe(0); write(0, 2); writeUe(1)
         write(42, 8)
         write(0, 1) // short_term_ref_pic_set_sps_flag, present even with zero SPS sets
@@ -419,8 +539,32 @@ class HevcSliceHeaderParserTest {
         writeUe(0) // five_minus_max_num_merge_cand
         writeSe(0) // slice_qp_delta
         write(1, 1) // slice_loop_filter_across_slices_enabled_flag
-        writeUe(0) // num_entry_point_offsets
+        if (tilesEnabled) writeUe(0) // num_entry_point_offsets
     }.finish()
+
+    private fun independentPSliceSegmentBits(address: Int, poc: Int): ByteArray = BitWriter().apply {
+        write(0, 1); writeUe(0); write(0, 1); write(address, 9)
+        write(0, 2); writeUe(1); write(poc, 8)
+        write(0, 1); writeUe(2); writeUe(0)
+        writeUe(0); write(1, 1)
+        writeUe(2); write(0, 1)
+        write(1, 1); write(1, 1); write(1, 1)
+        write(0, 1); writeUe(0); writeSe(0); write(1, 1); writeUe(0)
+    }.finish()
+
+    private fun dependentPSliceSegmentBits(address: Int): ByteArray = BitWriter().apply {
+        write(0, 1); writeUe(0); write(1, 1); write(address, 9)
+    }.finish()
+
+    private fun lengthPrefixedSample(vararg nals: ByteArray): ByteArray =
+        nals.fold(ByteArray(0)) { output, nal ->
+            output + byteArrayOf(
+                (nal.size ushr 24).toByte(),
+                (nal.size ushr 16).toByte(),
+                (nal.size ushr 8).toByte(),
+                nal.size.toByte()
+            ) + nal
+        }
 
     private fun weightedPSliceBits(): ByteArray = BitWriter().apply {
         write(1, 1); writeUe(0); write(0, 2); writeUe(1)
