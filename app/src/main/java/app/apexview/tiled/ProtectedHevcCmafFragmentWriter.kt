@@ -136,7 +136,7 @@ internal object ProtectedHevcCmafFragmentWriter {
             fullBox("tfdt", 1, 0, uint64(request.baseDecodeTimeTicks))
         }
         val senc = buildSenc(request.samples, request.perSampleIvSize)
-        val saiz = fullBox("saiz", byteArrayOf(0) +
+        val saiz = fullBox("saiz", 0, 0, byteArrayOf(0) +
             uint32(request.samples.size.toLong()) + auxiliarySizes.map { it.toByte() }.toByteArray())
         val mfhd = fullBox("mfhd", 0, 0, uint32(request.sequenceNumber))
 
