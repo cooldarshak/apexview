@@ -697,14 +697,30 @@ internal object HevcFeedProfileCapture {
                 val protection = track.trackEncryption
                 lines += "$label: trackId=${track.trackId}; codec=${track.originalFormat ?: track.sampleEntry ?: "unknown"}; ${track.width ?: 0}x${track.height ?: 0}; timescale=${track.timescale ?: "unknown"}; scheme=${track.protectionScheme ?: "none"}; encrypted=${track.encrypted}"
                 lines += "$label: hvcC VPS/SPS/PPS=${config?.vps?.size ?: 0}/${config?.sps?.size ?: 0}/${config?.pps?.size ?: 0}; tileGrid=${pps?.numTileColumns ?: "unknown"}x${pps?.numTileRows ?: "unknown"}; tileColumnsCTB=${pps?.tileColumnWidthsInCtbs ?: "unknown"}"
-                lines += "$label: tencPresent=${protection != null}; protected=${protection?.defaultIsProtected ?: "unknown"}; perSampleIvSize=${protection?.perSampleIvSize ?: "unknown"}; pattern=${protection?.cryptByteBlock ?: 0}/${protection?.skipByteBlock ?: 0}; initSegments=${state?.initSegmentsObserved ?: 0}; mediaFragments=${state?.mediaFragmentsObserved ?: 0}"
+                val ivMode = when {
+                    protection == null -> "NOT_SIGNALED"
+                    !protection.defaultIsProtected -> "CLEAR"
+                    protection.perSampleIvSize > 0 -> "PER_SAMPLE"
+                    protection.constantIvSize != null -> "CONSTANT"
+                    else -> "UNRESOLVED"
+                }
+                lines += "$label: tencPresent=${protection != null}; protected=${protection?.defaultIsProtected ?: "unknown"}; ivMode=$ivMode; perSampleIvSize=${protection?.perSampleIvSize ?: "unknown"}; constantIvSize=${protection?.constantIvSize ?: "unknown"}; pattern=${protection?.cryptByteBlock ?: 0}/${protection?.skipByteBlock ?: 0}; initSegments=${state?.initSegmentsObserved ?: 0}; mediaFragments=${state?.mediaFragmentsObserved ?: 0}"
                 if (fragment != null) {
                     val firstSample = fragment.sampleTimings.firstOrNull()
                     val firstBase = feedFragments.firstOrNull()?.baseDecodeTimeTicks
                     val lastBase = feedFragments.lastOrNull()?.baseDecodeTimeTicks
                     lines += "$label: fragmentSamples=${fragment.sampleCount}; baseDecodeTicks=${fragment.baseDecodeTimeTicks ?: "unknown"}; firstDts=${firstSample?.decodeTimeTicks ?: "unknown"}; firstPts=${firstSample?.presentationTimeTicks ?: "unknown"}; firstDurationTicks=${firstSample?.durationTicks ?: "unknown"}; timingComplete=${fragment.timingComplete}"
                     lines += "$label: orderedFragmentWindow=${feedFragments.size}; firstBaseDecodeTicks=${firstBase ?: "unknown"}; lastBaseDecodeTicks=${lastBase ?: "unknown"}"
-                    lines += "$label: senc=${fragment.sampleEncryptionBoxPresent}; subsample=${fragment.subsampleEncryptionSignalled ?: "unknown"}; encryptionStructureComplete=${fragment.sampleEncryptionStructureComplete}; rangesCoverSamples=${fragment.sampleEncryptionRangesCoverSamples}; saizSaioComplete=${fragment.sampleAuxiliaryInfoStructureComplete}; auxiliaryRecordsComplete=${fragment.sampleAuxiliaryPayloadStructureComplete}; seigComplete=${fragment.sampleGroupEncryptionStructureComplete}"
+                    val sampleIvSizes = fragment.sampleEncryptionMetadata
+                        .map { it.ivSize }.distinct().sorted().ifEmpty { listOf(-1) }
+                    val subsampleRangeCounts = fragment.sampleEncryptionMetadata
+                        .mapNotNull { it.subsampleRanges?.size }.distinct().sorted().ifEmpty { listOf(-1) }
+                    val auxiliary = fragment.sampleAuxiliaryMetadata
+                    val seigLayout = fragment.sampleGroupEncryptionMetadata?.entries.orEmpty()
+                        .map { entry ->
+                            "protected=${entry.isProtected},ivSize=${entry.perSampleIvSize},constantIvSize=${entry.constantIvSize ?: "none"},pattern=${entry.cryptByteBlock}/${entry.skipByteBlock}"
+                        }.distinct()
+                    lines += "$label: senc=${fragment.sampleEncryptionBoxPresent}; subsample=${fragment.subsampleEncryptionSignalled ?: "unknown"}; encryptionStructureComplete=${fragment.sampleEncryptionStructureComplete}; rangesCoverSamples=${fragment.sampleEncryptionRangesCoverSamples}; sampleIvSizes=${if (sampleIvSizes == listOf(-1)) "unavailable" else sampleIvSizes}; subsampleRangeCounts=${if (subsampleRangeCounts == listOf(-1)) "unavailable" else subsampleRangeCounts}; saizSaioComplete=${fragment.sampleAuxiliaryInfoStructureComplete}; saizSampleCount=${auxiliary?.saizSampleCount ?: "unknown"}; saizDefaultSize=${auxiliary?.defaultSampleInfoSize ?: "unknown"}; saizSizeClasses=${auxiliary?.sampleInfoSizes?.distinct()?.sorted() ?: "unknown"}; saioEntryCount=${auxiliary?.saioOffsets?.size ?: "unknown"}; auxiliaryRecordsComplete=${fragment.sampleAuxiliaryPayloadStructureComplete}; auxiliaryRecordSamples=${fragment.sampleAuxiliaryPayloadSampleCount}; seigComplete=${fragment.sampleGroupEncryptionStructureComplete}; seigLayout=${seigLayout.ifEmpty { listOf("unavailable") }}"
                 } else {
                     lines += "$label: CMAF_MEDIA_FRAGMENT=WAITING"
                 }
@@ -790,7 +806,8 @@ internal object HevcFeedProfileCapture {
             lines += "CMAF_FRAGMENT_COMPARISON=WAITING_FOR_BOTH_VIDEO_MEDIA_FRAGMENTS"
         }
         lines += "HEVC_SLICE_HEADER_ANALYSIS=NOT_READ; protected media sample bytes are not inspected"
-        lines += "DRM_SAFETY=KID values and IV values are never read or displayed; no decryption is attempted"
+        lines += "CMAF_ENCRYPTION_METADATA=STRUCTURE_ONLY; keyIdsAndIvBytes=NOT_RETAINED_OR_DISPLAYED"
+        lines += "DRM_SAFETY=KID values and IV values are never displayed; no decryption is attempted"
         return lines.joinToString("\n")
     }
 

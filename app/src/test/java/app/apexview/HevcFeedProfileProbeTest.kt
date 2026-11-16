@@ -274,6 +274,127 @@ class HevcFeedProfileProbeTest {
         assertTrue(summary.contains("pps={unavailable}"))
     }
     @Test
+    fun cmafDiagnosticsReportIvAndAuxiliaryRecordShapeWithoutSensitiveValues() {
+        val group = "content-cmaf-encryption-shape"
+        fun snapshot(label: String) = HevcFeedProfileProbe.inspect(
+            C.TRACK_TYPE_VIDEO,
+            Format.Builder()
+                .setSampleMimeType(MimeTypes.VIDEO_H265)
+                .setCodecs("hvc1")
+                .setWidth(1920)
+                .setHeight(1080)
+                .setFrameRate(50f)
+                .build(),
+            label,
+            group
+        )
+        HevcFeedProfileCapture.record(snapshot("channel-enc-a"))
+        HevcFeedProfileCapture.record(snapshot("channel-enc-b"))
+        HevcFeedProfileCapture.selectTileTestFeeds(group, listOf("channel-enc-a", "channel-enc-b"))
+
+        fun report(trackId: Long): CmafBoxInspector.Report {
+            val track = CmafBoxInspector.TrackMetadata(
+                trackId = trackId,
+                handler = "vide",
+                timescale = 50_000L,
+                sampleEntry = "encv",
+                originalFormat = "hvc1",
+                protectionScheme = "cbcs",
+                encrypted = true,
+                width = 1920,
+                height = 1080,
+                hevcConfiguration = null,
+                trackEncryption = CmafBoxInspector.TrackEncryptionMetadata(
+                    version = 1,
+                    defaultIsProtected = true,
+                    perSampleIvSize = 16,
+                    cryptByteBlock = 1,
+                    skipByteBlock = 9,
+                    constantIvSize = null
+                ),
+                sampleEncryptionBoxPresent = true,
+                sampleAuxiliarySizesPresent = true,
+                sampleAuxiliaryOffsetsPresent = true,
+                sampleGroupDescriptionPresent = false,
+                sampleToGroupPresent = false
+            )
+            val timings = listOf(
+                CmafBoxInspector.SampleTiming(0L, 0L, 1_000L, 0L, 124L, 0L),
+                CmafBoxInspector.SampleTiming(1_000L, 1_000L, 1_000L, 0L, 124L, 0L)
+            )
+            val fragment = CmafBoxInspector.FragmentMetadata(
+                trackId = trackId,
+                timescale = 50_000L,
+                baseDecodeTimeTicks = 0L,
+                sampleCount = 2,
+                totalDurationTicks = 2_000L,
+                sampleTimings = timings,
+                timingComplete = true,
+                sampleEncryptionBoxPresent = true,
+                subsampleEncryptionSignalled = true,
+                sampleEncryptionCount = 2L,
+                sampleAuxiliarySizesPresent = true,
+                sampleAuxiliaryOffsetsPresent = true,
+                sampleGroupDescriptionPresent = false,
+                sampleToGroupPresent = false,
+                sampleEncryptionStructureComplete = true,
+                sampleEncryptionMetadata = listOf(
+                    CmafBoxInspector.SampleEncryptionMetadata(
+                        ivSize = 16,
+                        subsampleRanges = listOf(CmafBoxInspector.SubsampleEncryptionRange(24, 100L))
+                    ),
+                    CmafBoxInspector.SampleEncryptionMetadata(
+                        ivSize = 16,
+                        subsampleRanges = listOf(CmafBoxInspector.SubsampleEncryptionRange(24, 100L))
+                    )
+                ),
+                sampleEncryptionRangesCoverSamples = true,
+                sampleAuxiliaryInfoStructureComplete = true,
+                sampleAuxiliaryPayloadStructureComplete = true,
+                sampleAuxiliaryPayloadSampleCount = 2,
+                sampleAuxiliaryMetadata = CmafBoxInspector.SampleAuxiliaryMetadata(
+                    auxiliaryInfoType = null,
+                    auxiliaryInfoParameter = null,
+                    saizSampleCount = 2L,
+                    defaultSampleInfoSize = 0,
+                    sampleInfoSizes = listOf(24, 24),
+                    saioOffsets = listOf(100L)
+                ),
+                sampleGroupEncryptionPresent = false,
+                sampleGroupEncryptionStructureComplete = true,
+                sampleDescriptionIndex = 1L
+            )
+            return CmafBoxInspector.Report(
+                majorBrand = "iso6",
+                compatibleBrands = listOf("iso6", "cmfc"),
+                topLevelBoxes = listOf("ftyp", "moov", "moof"),
+                tracks = listOf(track),
+                fragments = listOf(fragment),
+                fragmented = true,
+                errors = emptyList(),
+                initializationSegmentPresent = true
+            )
+        }
+
+        HevcFeedProfileCapture.recordCmafReport(group, "channel-enc-a", report(1L))
+        HevcFeedProfileCapture.recordCmafReport(group, "channel-enc-b", report(7L))
+        val diagnostic = HevcFeedProfileCapture.diagnostic
+
+        assertTrue(diagnostic.contains("ivMode=PER_SAMPLE"))
+        assertTrue(diagnostic.contains("perSampleIvSize=16"))
+        assertTrue(diagnostic.contains("constantIvSize=unknown"))
+        assertTrue(diagnostic.contains("sampleIvSizes=[16]"))
+        assertTrue(diagnostic.contains("subsampleRangeCounts=[1]"))
+        assertTrue(diagnostic.contains("saizSampleCount=2"))
+        assertTrue(diagnostic.contains("saizSizeClasses=[24]"))
+        assertTrue(diagnostic.contains("saioEntryCount=1"))
+        assertTrue(diagnostic.contains("auxiliaryRecordSamples=2"))
+        assertTrue(diagnostic.contains("CMAF_ENCRYPTION_METADATA=STRUCTURE_ONLY"))
+        assertTrue(diagnostic.contains("keyIdsAndIvBytes=NOT_RETAINED_OR_DISPLAYED"))
+        assertFalse(diagnostic.contains("000102030405060708090a0b0c0d0e0f"))
+    }
+
+    @Test
     fun cmafInitSelectionNeverFallsBackToARepresentationWithDifferentMedia3Dimensions() {
         fun format(label: String) = HevcFeedProfileProbe.inspect(
             C.TRACK_TYPE_VIDEO,
