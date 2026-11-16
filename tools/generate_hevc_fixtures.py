@@ -100,8 +100,8 @@ def main():
         temporary = not args.keep
 
     sources = {
-        "feed_a.hevc": "testsrc2=size=960x544:rate=25",
-        "feed_b.hevc": "testsrc=size=960x544:rate=25",
+        "feed_a.hevc": "testsrc2=size=960x540:rate=25",
+        "feed_b.hevc": "testsrc=size=960x540:rate=25",
     }
     metadata = {}
     with tempfile.TemporaryDirectory(prefix="apexview-motion-constrained-") as temporary_dir:
