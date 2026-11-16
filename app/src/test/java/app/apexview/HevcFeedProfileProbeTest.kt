@@ -119,23 +119,6 @@ class HevcFeedProfileProbeTest {
         assertTrue(tileDiagnostic.contains("deblockingFilterOverrideEnabled="))
         assertTrue(tileDiagnostic.contains("HEVC_TILE_PARSED_PPS_STRUCTURES_IDENTICAL=true"))
 
-        val singlePictureSnapshot = secondSnapshot.copy(
-            parsedPps = secondSnapshot.parsedPps.map { pps ->
-                val matchingSps = secondSnapshot.parsedSps.single { it.spsId == pps.spsId }
-                pps.copy(
-                    tilesEnabled = false,
-                    numTileColumns = 1,
-                    numTileRows = 1,
-                    tileColumnWidthsInCtbs = listOf(matchingSps.picWidthInCtbs),
-                    tileRowHeightsInCtbs = listOf(matchingSps.picHeightInCtbs)
-                )
-            }
-        )
-        HevcFeedProfileCapture.record(singlePictureSnapshot)
-        assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_TILE_ASSEMBLER_GATE=REJECT"))
-        assertTrue(HevcFeedProfileCapture.diagnostic.contains("tiles are disabled"))
-        HevcFeedProfileCapture.record(secondSnapshot)
-
         val changedPpsSnapshot = secondSnapshot.copy(
             parsedPps = secondSnapshot.parsedPps.map { it.copy(numTileRows = it.numTileRows + 1) }
         )

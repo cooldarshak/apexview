@@ -409,10 +409,10 @@ internal object HevcFeedProfileCapture {
             } else {
                 profile.parsedPps.forEach { pps ->
                     val tileCount = pps.numTileColumns.toLong() * pps.numTileRows.toLong()
-                    if (!pps.tilesEnabled) {
-                        reasons += "${profile.label} PPS ${pps.ppsId}: tiles are disabled; this is a full-frame picture, not a source tile grid"
-                    } else if (tileCount < 2L) {
-                        reasons += "${profile.label} PPS ${pps.ppsId}: tile layout contains fewer than two source tiles"
+                    val sourceSps = profile.parsedSps.singleOrNull { it.spsId == pps.spsId }
+                    val isTizenSingleCell = sourceSps?.width == 960 && sourceSps.height == 544
+                    if ((!pps.tilesEnabled || tileCount < 2L) && !isTizenSingleCell) {
+                        reasons += "${profile.label} PPS ${pps.ppsId}: no multi-tile grid and full-frame source is not the supported 960x544 single-cell profile"
                     }
                 }
             }
@@ -630,14 +630,20 @@ internal object HevcFeedProfileCapture {
             )
             lines += "CMAF_HEVC_TILE_CONFIG_GATE=${if (tileGate.compatible) "MATCH" else "NOT_COMPATIBLE"}; reasons=${tileGate.reasons.ifEmpty { listOf("none") }.joinToString("|")}"
             val sourceTileReasons = buildList {
-                listOf("first" to firstConfig?.pps, "second" to secondConfig?.pps).forEach { (name, ppsSets) ->
-                    if (ppsSets.isNullOrEmpty()) {
+                listOf(
+                    Triple("first", firstConfig?.pps, firstConfig?.sps),
+                    Triple("second", secondConfig?.pps, secondConfig?.sps)
+                ).forEach { (name, ppsSets, spsSets) ->
+                    if (ppsSets.isNullOrEmpty() || spsSets.isNullOrEmpty()) {
                         add("$name feed source tile layout is unavailable")
                     } else {
                         ppsSets.forEach { pps ->
                             val count = pps.numTileColumns.toLong() * pps.numTileRows.toLong()
-                            if (!pps.tilesEnabled) add("$name feed PPS ${pps.ppsId}: tiles are disabled")
-                            else if (count < 2L) add("$name feed PPS ${pps.ppsId}: fewer than two source tiles")
+                            val sps = spsSets.singleOrNull { it.spsId == pps.spsId }
+                            val tizenSingleCell = sps?.width == 960 && sps.height == 544
+                            if ((!pps.tilesEnabled || count < 2L) && !tizenSingleCell) {
+                                add("$name feed PPS ${pps.ppsId}: no multi-tile grid and full-frame source is not the supported 960x544 single-cell profile")
+                            }
                         }
                     }
                 }
