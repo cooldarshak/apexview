@@ -11,9 +11,9 @@ def run(args):
     return subprocess.run(args, check=True, text=True, capture_output=True)
 
 
-def hashes(args):
+def hashes(args, map_stream="0:v:0"):
     result = run(["ffmpeg", "-hide_banner", "-loglevel", "error", *args,
-                  "-map", "0:v:0", "-f", "framemd5", "-"])
+                  "-map", map_stream, "-f", "framemd5", "-"])
     return [line.split(",")[-1].strip() for line in result.stdout.splitlines()
             if line and not line.startswith("#")]
 
@@ -42,7 +42,8 @@ def main():
         raise SystemExit(f"Unexpected composed CMAF stream metadata: {stream}")
 
     expected = hashes(["-f", "hevc", "-i", str(a), "-f", "hevc", "-i", str(b),
-                       "-filter_complex", "[0:v][1:v]hstack=inputs=2"])
+                       "-filter_complex", "[0:v][1:v]hstack=inputs=2[grid]"],
+                      map_stream="[grid]")
     actual = hashes(["-i", str(cmaf)])
     if len(expected) != 50 or actual != expected:
         mismatch = next((i for i, pair in enumerate(zip(expected, actual))
