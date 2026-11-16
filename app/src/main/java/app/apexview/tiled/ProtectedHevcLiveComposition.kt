@@ -162,7 +162,7 @@ internal object ProtectedHevcLiveComposition {
             if (report.initializationSegmentPresent) {
                 captureInitialization(session, state, bytes, report)
             } else if (label in session.labels) {
-                captureMediaFragment(session, state, bytes)
+                captureMediaFragment(session, state, bytes, report)
                 tryCompose(session)
             }
         } catch (error: Exception) {
@@ -286,7 +286,8 @@ internal object ProtectedHevcLiveComposition {
     private fun captureMediaFragment(
         session: Session,
         state: FeedState,
-        bytes: ByteArray
+        bytes: ByteArray,
+        report: CmafBoxInspector.Report
     ) {
         val initBytes = requireNotNull(state.initializationSegment) {
             "media fragment arrived before its active initialization segment"
@@ -300,7 +301,15 @@ internal object ProtectedHevcLiveComposition {
         val activeTrack = requireNotNull(state.track)
         val hevc = requireNotNull(activeTrack.hevcConfiguration)
         val sps = hevc.sps.single()
-        val selectedIndices = (0 until MAX_FRAGMENT_SAMPLE_COUNT).toSet()
+        val fragmentMetadata = report.fragments.singleOrNull()
+            ?: throw IllegalArgumentException("active media response must contain exactly one CMAF track fragment")
+        require(fragmentMetadata.sampleCount in 1..MAX_FRAGMENT_SAMPLE_COUNT) {
+            "active media fragment sample count is outside the bounded HEVC inspection window"
+        }
+        require(fragmentMetadata.trackId == activeTrack.trackId) {
+            "active media fragment track ID differs from the selected protected video track"
+        }
+        val selectedIndices = (0 until fragmentMetadata.sampleCount).toSet()
         val workingTracker = state.pocTracker.fork()
         var nextOrdinal = state.nextSequenceOrdinal
         var sawCodedPicture = state.sawCodedPicture

@@ -426,7 +426,7 @@ internal object ProtectedHevcPictureComposer {
             }
             require(input.fragmentBaseDecodeTimeTicks != null &&
                 input.fragmentBaseDecodeTimeTicks == evidence.fragmentBaseDecodeTimeTicks &&
-                feed.fragment.baseDecodeTimeTicks == evidence.fragmentBaseDecodeTimeTicks) {
+                input.fragment.baseDecodeTimeTicks == evidence.fragmentBaseDecodeTimeTicks) {
                 "$context: " + input.feedId +
                     " selected sample belongs to a different or unverified CMAF fragment tfdt"
             }
