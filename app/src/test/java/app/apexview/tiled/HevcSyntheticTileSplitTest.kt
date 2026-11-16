@@ -213,9 +213,15 @@ class HevcSyntheticTileSplitTest {
         assertEquals(2, result.tileColumnWidthsInCtbs.size)
         assertEquals(2, result.tileRowHeightsInCtbs.size)
         // The generated grid keeps source loop-filter policy unless every selected seam is safe.
-        assertTrue(result.pictures.all { picture ->
-            picture.evidence.map { it.destinationCtbAddress } == listOf(0, 4, 16, 20)
-        })
+        val expectedDestinationAddresses = listOf(0, 4, 16, 20)
+        result.pictures.forEachIndexed { frameIndex, picture ->
+            assertEquals(
+                "Frame $frameIndex destination CTB addresses: " +
+                    picture.evidence.map { it.destinationCtbAddress },
+                expectedDestinationAddresses,
+                picture.evidence.map { it.destinationCtbAddress }
+            )
+        }
 
         assumeTrue("FFmpeg is not installed; skipped independent 2x2 decode check", ffmpegAvailable())
         val composedFile = File.createTempFile("apexview-tizen-grid-2x2-", ".hevc", directory)
