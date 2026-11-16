@@ -132,6 +132,12 @@ jobs:
             --fixture-dir "$RUNNER_TEMP/apexview-hevc-tile-fixtures" \
             --output-dir "$RUNNER_TEMP/apexview-hevc-output-parameters"
 
+      - name: Independently decode Tizen-style CMAF grid composition and compare hstack pixels
+        run: |
+          python3 tools/validate_hevc_cmaf_grid.py \
+            --fixture-dir "$RUNNER_TEMP/apexview-hevc-fixtures" \
+            --output-dir "$RUNNER_TEMP/apexview-hevc-output-parameters"
+
       - name: Configure persistent APK signing
         id: apk_signing
         env:
