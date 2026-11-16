@@ -63,7 +63,7 @@ internal object HevcClearCmafGridComposer {
         val fragments: List<SourceFragment>,
         val inspectorFragments: List<CmafBoxInspector.FragmentMetadata>,
         val annexB: ByteArray,
-        val pictureSignatures: List<HevcFrameSignature>
+        val pictureIdentities: List<HevcPictureIdentityCompatibility.PictureIdentity>
     )
 
     fun compose(request: Request): Output {
@@ -155,22 +155,7 @@ internal object HevcClearCmafGridComposer {
         label = label,
         track = feed.track,
         fragments = feed.inspectorFragments,
-        pictures = feed.pictureSignatures.map { signature ->
-            HevcPictureIdentityCompatibility.PictureIdentity(
-                nalUnitType = signature.pictureIdentity.nalUnitType,
-                ppsId = signature.pictureIdentity.ppsId,
-                noOutputOfPriorPictures = signature.pictureIdentity.noOutputOfPriorPictures,
-                sliceType = signature.pictureIdentity.sliceType,
-                picOutputFlag = signature.pictureIdentity.picOutputFlag,
-                colourPlaneId = signature.pictureIdentity.colourPlaneId,
-                picOrderCntLsb = signature.pictureIdentity.picOrderCntLsb,
-                shortTermRpsFromSps = signature.pictureIdentity.shortTermRpsFromSps,
-                shortTermRpsIndex = signature.pictureIdentity.shortTermRpsIndex,
-                references = signature.pictureIdentity.references,
-                pictureOrderCount = signature.poc,
-                temporalIdPlus1 = 1
-            )
-        }
+        pictures = feed.pictureIdentities
     )
 
     private fun parseFeed(feed: Feed, feedIndex: Int): ParsedFeed {
@@ -251,11 +236,27 @@ internal object HevcClearCmafGridComposer {
         require(signatures.size == sampleCount) {
             "Feed ${feed.label} HEVC picture count does not match CMAF sample count"
         }
+        val firstSlices = fragments.flatMap { fragment ->
+            fragment.samples.map { sample ->
+                splitLengthPrefixed(sample.bytes, config.nalLengthSize)
+                    .first { HevcBitstream.parseNalHeader(it).type in 0..31 &&
+                        isFirstSlice(it) }
+            }
+        }
+        val spsById = config.sps.associateBy { it.spsId }
+        val ppsById = config.pps.associateBy { it.ppsId }
+        val identities = firstSlices.zip(signatures).map { (nal, signature) ->
+            val ppsId = readSlicePpsId(nal)
+            val pps = requireNotNull(ppsById[ppsId]) { "Slice references unknown PPS $ppsId" }
+            val sps = requireNotNull(spsById[pps.spsId]) { "PPS references unknown SPS ${pps.spsId}" }
+            val header = HevcSliceHeaderParser.parse(nal, sps, pps)
+            HevcPictureIdentityCompatibility.identify(header, signature.poc)
+        }
         require(metadata.sumOf { it.sampleCount } == sampleCount) {
             "Feed ${feed.label} CMAF fragment sample counts are inconsistent"
         }
         return ParsedFeed(
-            track, config, rawParameterSets, fragments, metadata, elementaryStream, signatures
+            track, config, rawParameterSets, fragments, metadata, elementaryStream, identities
         )
     }
 
@@ -458,6 +459,16 @@ internal object HevcClearCmafGridComposer {
         }
         require(offset == sample.size && result.isNotEmpty()) { "CMAF sample contains no complete NAL units" }
         return result
+    }
+
+    private fun readSlicePpsId(nal: ByteArray): Int {
+        val type = HevcBitstream.parseNalHeader(nal).type
+        val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal.copyOfRange(2, nal.size)))
+        bits.readBit()
+        if (type in 16..23) bits.readBit()
+        val id = bits.readUnsignedExpGolomb()
+        require(id <= 63L) { "slice_pic_parameter_set_id exceeds supported range" }
+        return id.toInt()
     }
 
     private fun isFirstSlice(nal: ByteArray): Boolean {
