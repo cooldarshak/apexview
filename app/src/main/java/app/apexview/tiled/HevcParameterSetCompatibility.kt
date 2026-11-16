@@ -85,7 +85,6 @@ internal object HevcParameterSetCompatibility {
             if (firstPps.entropyCodingSyncEnabled || secondPps.entropyCodingSyncEnabled) reasons += "Wavefront entropy coding is not supported"
             if (firstPps.weightedPredictionEnabled || firstPps.weightedBipredictionEnabled ||
                 secondPps.weightedPredictionEnabled || secondPps.weightedBipredictionEnabled) reasons += "Weighted prediction is not supported by the slice-header rewrite profile"
-            if (firstPps.deblockingFilterOverrideEnabled == true || secondPps.deblockingFilterOverrideEnabled == true) reasons += "Per-slice deblocking overrides are not supported by the slice-header rewrite profile"
             if (firstPps.scalingListDataPresent || secondPps.scalingListDataPresent) reasons += "PPS scaling-list data is not supported"
             if (firstPps.listsModificationPresent || secondPps.listsModificationPresent) reasons += "Reference-list modification syntax is not supported"
             if (firstPps.sliceSegmentHeaderExtensionPresent || secondPps.sliceSegmentHeaderExtensionPresent) reasons += "Slice-segment header extensions are not supported"

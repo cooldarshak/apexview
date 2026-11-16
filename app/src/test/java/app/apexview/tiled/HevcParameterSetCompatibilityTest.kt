@@ -223,12 +223,16 @@ class HevcParameterSetCompatibilityTest {
         assertFalse(wavefrontResult.compatible)
         assertTrue(wavefrontResult.reasons.any { it.contains("Wavefront") })
 
-        val deblockingOverride = f.pps.copy(deblockingFilterOverrideEnabled = true)
-        val deblockingResult = HevcParameterSetCompatibility.compare(
-            f.vps, f.sps, deblockingOverride, f.vps, f.sps, deblockingOverride
-        )
-        assertFalse(deblockingResult.compatible)
-        assertTrue(deblockingResult.reasons.any { it.contains("deblocking overrides") })
+        val deblockingSource = fixture(tilesEnabled = false, deblockingOverride = true)
+        val equivalentOverride = deblockingSource.withDifferentParameterSetIds()
+        val deblockingResult = compare(deblockingSource, equivalentOverride)
+        assertTrue(deblockingResult.reasons.toString(), deblockingResult.compatible)
+
+        val mismatchedOverride = compare(deblockingSource, fixture(tilesEnabled = false))
+        assertFalse(mismatchedOverride.compatible)
+        assertTrue(mismatchedOverride.reasons.any {
+            it.contains("PPS slice/coding syntax differs")
+        })
     }
 
     @Test fun rejectsInvalidOutputPlacementsAndDimensionOverflow() {
@@ -313,7 +317,7 @@ class HevcParameterSetCompatibilityTest {
         )
     }
 
-    private fun fixture(tilesEnabled: Boolean): Fixture {
+    private fun fixture(tilesEnabled: Boolean, deblockingOverride: Boolean = false): Fixture {
         val vps = HevcParameterSets.parseVps(nal(32, BitWriter().apply {
             write(1, 4); write(1, 1); write(1, 1); write(0, 6)
             write(0, 3); write(1, 1); write(0xffff, 16)
@@ -325,7 +329,7 @@ class HevcParameterSetCompatibilityTest {
             write(0, 1) // no VPS extension
         }.finish()))
         val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
-        val pps = HevcParameterSets.parsePps(nal(34, ppsBits(tilesEnabled)), sps)
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits(tilesEnabled, deblockingOverride)), sps)
         return Fixture(vps, sps, pps)
     }
 
@@ -350,7 +354,7 @@ class HevcParameterSetCompatibilityTest {
         write(0, 1) // no SPS extension
     }.finish()
 
-    private fun ppsBits(tilesEnabled: Boolean): ByteArray = BitWriter().apply {
+    private fun ppsBits(tilesEnabled: Boolean, deblockingOverride: Boolean): ByteArray = BitWriter().apply {
         writeUe(0); writeUe(0) // PPS and SPS ids
         write(0, 1); write(0, 1); write(0, 3) // dependent slices, output flag, extra bits
         write(0, 1); write(0, 1) // sign hiding and CABAC init
@@ -365,7 +369,12 @@ class HevcParameterSetCompatibilityTest {
             write(1, 1); write(1, 1) // uniform tile spacing, loop filter across tiles
         }
         write(1, 1) // loop filter across slices
-        write(0, 1) // no deblocking control
+        write(if (deblockingOverride) 1 else 0, 1) // deblocking_filter_control_present_flag
+        if (deblockingOverride) {
+            write(1, 1) // pps_deblocking_filter_override_enabled_flag
+            write(0, 1) // pps_deblocking_filter_disabled_flag
+            writeSe(0); writeSe(0) // default beta/tc offsets
+        }
         write(0, 1) // no PPS scaling-list data
         write(0, 1) // no reference-list modification
         writeUe(0) // parallel merge level

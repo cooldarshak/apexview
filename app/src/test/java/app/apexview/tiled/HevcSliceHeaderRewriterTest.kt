@@ -53,6 +53,52 @@ class HevcSliceHeaderRewriterTest {
     }
 
     @Test
+    fun preservesTizenStylePerSliceDeblockingOverrideWhenRewritingCellHeader() {
+        val sourceSps = HevcParameterSets.parseSps(nal(33, spsBits(1920, 1080)))
+        val outputSps = HevcParameterSets.parseSps(nal(33, spsBits(3840, 1080)))
+        val sourcePps = HevcParameterSets.parsePps(
+            nal(34, ppsBits(0, tiles = false, deblockingOverride = true)), sourceSps
+        )
+        val outputPps = HevcParameterSets.parsePps(
+            nal(34, ppsBits(1, tiles = true, deblockingOverride = true)), outputSps
+        )
+        assertTrue(sourcePps.deblockingFilterOverrideEnabled)
+        assertTrue(outputPps.deblockingFilterOverrideEnabled)
+
+        val sourceNal = nal(
+            1,
+            pSliceWithDeblockingOverrideBits() + byteArrayOf(0x21, 0x32, 0x43, 0x54)
+        )
+        val sourceHeader = HevcSliceHeaderParser.parse(sourceNal, sourceSps, sourcePps)
+        assertEquals(true, sourceHeader.deblockingFilterOverride)
+        assertEquals(false, sourceHeader.deblockingFilterDisabled)
+        assertEquals(2, sourceHeader.betaOffsetDiv2)
+        assertEquals(-1, sourceHeader.tcOffsetDiv2)
+
+        val rewritten = HevcSliceHeaderRewriter.rewrite(
+            nal = sourceNal,
+            sourceSps = sourceSps,
+            sourcePps = sourcePps,
+            outputSps = outputSps,
+            outputPps = outputPps,
+            destinationAddress = 30
+        )
+        val outputHeader = HevcSliceHeaderParser.parse(rewritten.nal, outputSps, outputPps)
+        assertEquals(30, outputHeader.sliceSegmentAddress)
+        assertEquals(sourceHeader.deblockingFilterOverride, outputHeader.deblockingFilterOverride)
+        assertEquals(sourceHeader.deblockingFilterDisabled, outputHeader.deblockingFilterDisabled)
+        assertEquals(sourceHeader.betaOffsetDiv2, outputHeader.betaOffsetDiv2)
+        assertEquals(sourceHeader.tcOffsetDiv2, outputHeader.tcOffsetDiv2)
+
+        val sourceRbsp = HevcBitstream.ebspToRbsp(sourceNal.copyOfRange(2, sourceNal.size))
+        val outputRbsp = HevcBitstream.ebspToRbsp(rewritten.nal.copyOfRange(2, rewritten.nal.size))
+        assertArrayEquals(
+            sourceRbsp.copyOfRange(sourceHeader.bitsConsumed / 8, sourceRbsp.size),
+            outputRbsp.copyOfRange(outputHeader.bitsConsumed / 8, outputRbsp.size)
+        )
+    }
+
+    @Test
     fun makesDestinationAddressZeroTheOutputFirstSlice() {
         val sourceSps = HevcParameterSets.parseSps(nal(33, spsBits(1920, 1080)))
         val outputSps = HevcParameterSets.parseSps(nal(33, spsBits(3840, 1080)))
@@ -148,7 +194,7 @@ class HevcSliceHeaderRewriterTest {
         write(0, 1) // no SPS extension
     }.finish()
 
-    private fun ppsBits(id: Int, tiles: Boolean, wpp: Boolean = false): ByteArray =
+    private fun ppsBits(id: Int, tiles: Boolean, wpp: Boolean = false, deblockingOverride: Boolean = false): ByteArray =
         BitWriter().apply {
             writeUe(id); writeUe(0)
             write(1, 1); write(0, 1); write(2, 3)
@@ -163,13 +209,31 @@ class HevcSliceHeaderRewriterTest {
                 writeUe(1); writeUe(0); write(1, 1); write(1, 1)
             }
             write(1, 1) // loop_filter_across_slices_enabled_flag
-            write(0, 1) // deblocking_filter_control_present_flag
+            write(if (deblockingOverride) 1 else 0, 1) // deblocking_filter_control_present_flag
+            if (deblockingOverride) {
+                write(1, 1) // pps_deblocking_filter_override_enabled_flag
+                write(0, 1) // pps_deblocking_filter_disabled_flag
+                writeSe(0); writeSe(0) // default beta/tc offsets
+            }
             write(0, 1) // pps_scaling_list_data_present_flag
             write(0, 1) // lists_modification_present_flag
             writeUe(0)
             write(0, 1) // slice_segment_header_extension_present_flag
             write(0, 1) // pps_extension_present_flag
         }.finish()
+
+    private fun pSliceWithDeblockingOverrideBits(): ByteArray = BitWriter().apply {
+        write(1, 1); writeUe(0); write(0, 2); writeUe(1)
+        write(42, 8)
+        write(0, 1); writeUe(2); writeUe(0)
+        writeUe(0); write(1, 1); writeUe(2); write(0, 1)
+        write(1, 1); write(1, 1); write(1, 1)
+        write(0, 1); writeUe(0); writeSe(0)
+        write(1, 1) // slice_deblocking_filter_override_flag
+        write(0, 1) // slice_deblocking_filter_disabled_flag
+        writeSe(2); writeSe(-1) // slice beta/tc offsets
+        write(1, 1) // loop_filter_across_slices_enabled_flag
+    }.finish()
 
     private fun pSliceBits(): ByteArray = BitWriter().apply {
         write(1, 1); writeUe(0); write(0, 2); writeUe(1)
