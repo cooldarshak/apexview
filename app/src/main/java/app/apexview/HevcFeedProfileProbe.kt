@@ -614,6 +614,19 @@ internal object HevcFeedProfileCapture {
     private fun buildCmafDiagnostic(): String {
         if (tileTestLabels.size != 2) return ""
         val states = tileTestLabels.map { label -> label to cmafProgress[label] }
+        fun selectedTrack(label: String, state: CmafFeedProgress?): CmafBoxInspector.TrackMetadata? {
+            val candidates = state?.videoTrackCandidates.orEmpty()
+            val expected = profiles[label]
+            val exact = if (expected == null) emptyList() else candidates.filter {
+                it.width == expected.width && it.height == expected.height
+            }
+            return when {
+                exact.size == 1 -> exact.single()
+                exact.size > 1 -> null
+                candidates.size == 1 -> candidates.single()
+                else -> null
+            }
+        }
         val lines = mutableListOf(
             "F1_CMAF_READ_ONLY_INSPECTOR=ACTIVE",
             "CMAF_CAPTURE_SCOPE=two selected feeds; bounded in-memory ISO-BMFF metadata only"
@@ -621,15 +634,7 @@ internal object HevcFeedProfileCapture {
         states.forEach { (label, state) ->
             val expected = profiles[label]
             val candidates = state?.videoTrackCandidates.orEmpty()
-            val exactCandidates = if (expected == null) emptyList() else candidates.filter {
-                it.width == expected.width && it.height == expected.height
-            }
-            val track = when {
-                exactCandidates.size == 1 -> exactCandidates.single()
-                exactCandidates.size > 1 -> null
-                candidates.size == 1 -> candidates.single()
-                else -> null
-            }
+            val track = selectedTrack(label, state)
             val fragment = track?.trackId?.let { state?.latestFragments?.get(it) }
             if (track == null) {
                 if (candidates.size > 1) {
@@ -657,8 +662,8 @@ internal object HevcFeedProfileCapture {
             }
         }
 
-        val firstTrack = states.firstOrNull()?.second?.videoTracks?.values?.firstOrNull()
-        val secondTrack = states.getOrNull(1)?.second?.videoTracks?.values?.firstOrNull()
+        val firstTrack = states.firstOrNull()?.let { (label, state) -> selectedTrack(label, state) }
+        val secondTrack = states.getOrNull(1)?.let { (label, state) -> selectedTrack(label, state) }
         val firstFragment = firstTrack?.trackId?.let { states.firstOrNull()?.second?.latestFragments?.get(it) }
         val secondFragment = secondTrack?.trackId?.let { states.getOrNull(1)?.second?.latestFragments?.get(it) }
         if (firstTrack != null && secondTrack != null) {
