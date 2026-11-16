@@ -62,8 +62,8 @@ class HevcSliceHeaderRewriterTest {
         val outputPps = HevcParameterSets.parsePps(
             nal(34, ppsBits(1, tiles = true, deblockingOverride = true)), outputSps
         )
-        assertTrue(sourcePps.deblockingFilterOverrideEnabled)
-        assertTrue(outputPps.deblockingFilterOverrideEnabled)
+        assertEquals(true, sourcePps.deblockingFilterOverrideEnabled)
+        assertEquals(true, outputPps.deblockingFilterOverrideEnabled)
 
         val sourceNal = nal(
             1,
