@@ -179,13 +179,16 @@ internal object ProtectedHevcLiveComposition {
     ) {
         val session = sessions[group]
         try {
-            if (report.errors.isNotEmpty()) {
-                if (session != null) stateFailure(
-                    session, "$label: active CMAF response did not parse cleanly"
-                )
-                return
-            }
             if (report.initializationSegmentPresent) {
+                // DASH audio and video commonly use separate init segments. Only retain the
+                // protected HEVC video init; audio init responses are not composition inputs.
+                if (report.tracks.none { it.handler == "vide" }) return
+                if (report.errors.isNotEmpty()) {
+                    if (session != null) stateFailure(
+                        session, "$label: active video CMAF initialization did not parse cleanly"
+                    )
+                    return
+                }
                 cacheInitialization(group, label, bytes, report)
                 val state = session?.feeds?.get(label)
                 if (session != null && state != null) {
@@ -193,6 +196,14 @@ internal object ProtectedHevcLiveComposition {
                 }
             } else if (session != null) {
                 val state = session.feeds[label] ?: return
+                val activeVideoTrackId = state.track?.trackId ?: return
+                // Ignore audio-only fragments. A video response with multiple trafs remains
+                // unsupported until the extractor can validate and select one traf unambiguously.
+                if (report.fragments.none { it.trackId == activeVideoTrackId }) return
+                if (report.errors.isNotEmpty()) {
+                    stateFailure(session, "$label: active protected video fragment did not parse cleanly")
+                    return
+                }
                 captureMediaFragment(session, state, bytes, report)
                 tryCompose(session)
             }
@@ -376,125 +387,145 @@ internal object ProtectedHevcLiveComposition {
         val currentBuffers = linkedMapOf<Long, BufferedPicture>()
         var visited = 0
 
-        val info = ProtectedHevcCmafSampleExtractor.forEachSample(
-            initializationSegment = initBytes,
-            mediaFragment = bytes,
-            sampleIndices = selectedIndices,
-            context = "F1 protected feed " + state.label
-        ) { fragmentInfo, sample ->
-            if (visited == 0) {
-                require(fragmentInfo.track.trackId == activeTrack.trackId &&
-                    fragmentInfo.track.hevcConfiguration?.parameterSetFingerprints ==
-                        hevc.parameterSetFingerprints) {
-                    "media fragment does not match the captured active HEVC representation"
+        var windowCommitted = false
+        try {
+            val info = ProtectedHevcCmafSampleExtractor.forEachSample(
+                initializationSegment = initBytes,
+                mediaFragment = bytes,
+                sampleIndices = selectedIndices,
+                context = "F1 protected feed " + state.label
+            ) { fragmentInfo, sample ->
+                if (visited == 0) {
+                    require(fragmentInfo.track.trackId == activeTrack.trackId &&
+                        fragmentInfo.track.hevcConfiguration?.parameterSetFingerprints ==
+                            hevc.parameterSetFingerprints) {
+                        "media fragment does not match the captured active HEVC representation"
+                    }
+                }
+                visited++
+                val index = sample.sampleIndex
+                val timing = fragmentInfo.fragment.sampleTimings.getOrNull(index)
+                    ?: throw IllegalArgumentException("sample timing row is missing")
+                val encryption = fragmentInfo.fragment.sampleEncryptionMetadata.getOrNull(index)
+                    ?: throw IllegalArgumentException("sample encryption row is missing")
+                val ranges = requireNotNull(encryption.subsampleRanges) {
+                    "sample has no explicit CBCS subsample map"
+                }
+                val sampleLayout = ProtectedHevcSampleLayout.inspect(
+                    sample = sample.sampleBytes,
+                    nalLengthSize = hevc.nalLengthSize,
+                    subsampleRanges = ranges,
+                    context = "F1 protected feed " + state.label + " sample " + index
+                )
+                val accessUnit = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(
+                    sample = sample.sampleBytes,
+                    layout = sampleLayout,
+                    sps = sps,
+                    pps = hevc.pps.single(),
+                    vps = hevc.vps.single(),
+                    context = "F1 protected feed " + state.label + " sample " + index
+                )
+                require(accessUnit.slices.isNotEmpty()) {
+                    "sample contains no parsed independent HEVC slice"
+                }
+                val header = accessUnit.slices.first().header
+                val pocLsb = header.picOrderCntLsb
+                    ?: if (header.nalUnitType in 19..20) 0 else null
+                require(pocLsb != null) {
+                    "sample has no usable POC LSB in its clear slice header"
+                }
+                val noRaslOutputFlag = when {
+                    header.nalUnitType in 16..20 -> true
+                    header.nalUnitType in 21..23 ->
+                        !sawCodedPicture || afterEndOfSequence
+                    else -> false
+                }
+                val trackerBefore = workingTracker.fork()
+                val fullPoc = workingTracker.derive(
+                    nalUnitType = header.nalUnitType,
+                    temporalIdPlus1 = header.temporalIdPlus1,
+                    pocLsb = pocLsb,
+                    log2MaxPocLsb = sps.log2MaxPicOrderCntLsb,
+                    noRaslOutputFlag = noRaslOutputFlag
+                )
+                val hasVerifiedAnchor = workingTracker.hasIrapAnchor &&
+                    workingTracker.irapAnchorPictureOrderCount != null
+                val anchorPoc = workingTracker.irapAnchorPictureOrderCount
+                val pictureIdentity = HevcPictureIdentityCompatibility.identify(header, fullPoc)
+                val currentOrdinal = nextOrdinal
+                nextOrdinal = Math.addExact(nextOrdinal, 1L)
+    
+                val firstVclNalIndex = accessUnit.slices.minOf { it.nalIndex }
+                val endOfSequenceAfterPicture = accessUnit.nals.any {
+                    it.index > firstVclNalIndex && it.nalType in 36..37
+                }
+                afterEndOfSequence = endOfSequenceAfterPicture
+                sawCodedPicture = true
+    
+                if (hasVerifiedAnchor && anchorPoc != null) {
+                    val picture = HevcPictureSequenceAligner.PictureSample(
+                        sampleIndex = index,
+                        timing = timing.copy(),
+                        picture = pictureIdentity,
+                        irapAnchorPictureOrderCount = anchorPoc,
+                        sequenceSampleOrdinal = currentOrdinal,
+                        fragmentBaseDecodeTimeTicks =
+                            requireNotNull(fragmentInfo.fragment.baseDecodeTimeTicks)
+                    )
+                    val buffered = BufferedPicture(
+                        picture = picture,
+                        sampleBytes = sample.sampleBytes.copyOf(),
+                        perSampleIvBytes = sample.perSampleIvBytes?.copyOf(),
+                        perSampleIvIdentity = encryption.ivIdentity,
+                        track = fragmentInfo.track,
+                        fragment = fragmentInfo.fragment,
+                        noRaslOutputFlag = noRaslOutputFlag,
+                        pocTrackerBefore = trackerBefore
+                    )
+                    currentPictures += picture
+                    currentBuffers[currentOrdinal] = buffered
                 }
             }
-            visited++
-            val index = sample.sampleIndex
-            val timing = fragmentInfo.fragment.sampleTimings.getOrNull(index)
-                ?: throw IllegalArgumentException("sample timing row is missing")
-            val encryption = fragmentInfo.fragment.sampleEncryptionMetadata.getOrNull(index)
-                ?: throw IllegalArgumentException("sample encryption row is missing")
-            val ranges = requireNotNull(encryption.subsampleRanges) {
-                "sample has no explicit CBCS subsample map"
+    
+            require(visited == info.fragment.sampleCount && visited > 0) {
+                "not every sample in the active CMAF fragment was inspected"
             }
-            val sampleLayout = ProtectedHevcSampleLayout.inspect(
-                sample = sample.sampleBytes,
-                nalLengthSize = hevc.nalLengthSize,
-                subsampleRanges = ranges,
-                context = "F1 protected feed " + state.label + " sample " + index
-            )
-            val accessUnit = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(
-                sample = sample.sampleBytes,
-                layout = sampleLayout,
-                sps = sps,
-                pps = hevc.pps.single(),
-                vps = hevc.vps.single(),
-                context = "F1 protected feed " + state.label + " sample " + index
-            )
-            require(accessUnit.slices.isNotEmpty()) {
-                "sample contains no parsed independent HEVC slice"
+            require(currentPictures.size <= MAX_FRAGMENT_SAMPLE_COUNT) {
+                "protected picture window exceeds the supported sample count"
             }
-            val header = accessUnit.slices.first().header
-            val pocLsb = header.picOrderCntLsb
-                ?: if (header.nalUnitType in 19..20) 0 else null
-            require(pocLsb != null) {
-                "sample has no usable POC LSB in its clear slice header"
+            val decodeTimeBase = requireNotNull(info.baseDecodeTimeTicks)
+            require(info.fragment.baseDecodeTimeTicks == decodeTimeBase &&
+                info.timescale == activeTrack.timescale) {
+                "active media fragment timescale/tfdt does not match its initialization segment"
             }
-            val noRaslOutputFlag = when {
-                header.nalUnitType in 16..20 -> true
-                header.nalUnitType in 21..23 ->
-                    !sawCodedPicture || afterEndOfSequence
-                else -> false
+    
+    
+            require(visited == info.fragment.sampleCount && visited > 0) {
+                "not every sample in the active CMAF fragment was inspected"
             }
-            val trackerBefore = workingTracker.fork()
-            val fullPoc = workingTracker.derive(
-                nalUnitType = header.nalUnitType,
-                temporalIdPlus1 = header.temporalIdPlus1,
-                pocLsb = pocLsb,
-                log2MaxPocLsb = sps.log2MaxPicOrderCntLsb,
-                noRaslOutputFlag = noRaslOutputFlag
-            )
-            val hasVerifiedAnchor = workingTracker.hasIrapAnchor &&
-                workingTracker.irapAnchorPictureOrderCount != null
-            val anchorPoc = workingTracker.irapAnchorPictureOrderCount
-            val pictureIdentity = HevcPictureIdentityCompatibility.identify(header, fullPoc)
-            val currentOrdinal = nextOrdinal
-            nextOrdinal = Math.addExact(nextOrdinal, 1L)
+            require(currentPictures.size <= MAX_FRAGMENT_SAMPLE_COUNT) {
+                "protected picture window exceeds the supported sample count"
+            }
+            val decodeTimeBase = requireNotNull(info.baseDecodeTimeTicks)
+            require(info.fragment.baseDecodeTimeTicks == decodeTimeBase &&
+                info.timescale == activeTrack.timescale) {
+                "active media fragment timescale/tfdt does not match its initialization segment"
+            }
 
-            val firstVclNalIndex = accessUnit.slices.minOf { it.nalIndex }
-            val endOfSequenceAfterPicture = accessUnit.nals.any {
-                it.index > firstVclNalIndex && it.nalType in 36..37
-            }
-            afterEndOfSequence = endOfSequenceAfterPicture
-            sawCodedPicture = true
-
-            if (hasVerifiedAnchor && anchorPoc != null) {
-                val picture = HevcPictureSequenceAligner.PictureSample(
-                    sampleIndex = index,
-                    timing = timing.copy(),
-                    picture = pictureIdentity,
-                    irapAnchorPictureOrderCount = anchorPoc,
-                    sequenceSampleOrdinal = currentOrdinal,
-                    fragmentBaseDecodeTimeTicks =
-                        requireNotNull(fragmentInfo.fragment.baseDecodeTimeTicks)
-                )
-                val buffered = BufferedPicture(
-                    picture = picture,
-                    sampleBytes = sample.sampleBytes.copyOf(),
-                    perSampleIvBytes = sample.perSampleIvBytes?.copyOf(),
-                    perSampleIvIdentity = encryption.ivIdentity,
-                    track = fragmentInfo.track,
-                    fragment = fragmentInfo.fragment,
-                    noRaslOutputFlag = noRaslOutputFlag,
-                    pocTrackerBefore = trackerBefore
-                )
-                currentPictures += picture
-                currentBuffers[currentOrdinal] = buffered
-            }
+            state.clearWindow()
+            state.picturesByOrdinal.putAll(currentBuffers)
+            state.window = currentPictures.toList()
+            state.pocTracker.commitFrom(workingTracker)
+            state.nextSequenceOrdinal = nextOrdinal
+            state.sawCodedPicture = sawCodedPicture
+            state.afterEndOfSequence = afterEndOfSequence
+            session.status = "PROTECTED_F1_SAMPLE_WINDOW_CAPTURED"
+            session.lastFailure = null
+            windowCommitted = true
+        } catch (error: Throwable) {
+            if (!windowCommitted) currentBuffers.values.forEach(BufferedPicture::zero)
+            throw error
         }
-
-        require(visited == info.fragment.sampleCount && visited > 0) {
-            "not every sample in the active CMAF fragment was inspected"
-        }
-        require(currentPictures.size <= MAX_FRAGMENT_SAMPLE_COUNT) {
-            "protected picture window exceeds the supported sample count"
-        }
-        val decodeTimeBase = requireNotNull(info.baseDecodeTimeTicks)
-        require(info.fragment.baseDecodeTimeTicks == decodeTimeBase &&
-            info.timescale == activeTrack.timescale) {
-            "active media fragment timescale/tfdt does not match its initialization segment"
-        }
-
-        state.clearWindow()
-        state.picturesByOrdinal.putAll(currentBuffers)
-        state.window = currentPictures.toList()
-        state.pocTracker.commitFrom(workingTracker)
-        state.nextSequenceOrdinal = nextOrdinal
-        state.sawCodedPicture = sawCodedPicture
-        state.afterEndOfSequence = afterEndOfSequence
-        session.status = "PROTECTED_F1_SAMPLE_WINDOW_CAPTURED"
-        session.lastFailure = null
     }
 
     private fun tryCompose(session: Session) {
