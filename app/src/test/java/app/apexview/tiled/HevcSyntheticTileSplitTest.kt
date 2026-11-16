@@ -210,10 +210,13 @@ class HevcSyntheticTileSplitTest {
         })
         assertEquals(256, result.codedWidth)
         assertEquals(128, result.codedHeight)
-        assertEquals(2, result.tileColumnWidthsInCtbs.size)
-        assertEquals(2, result.tileRowHeightsInCtbs.size)
+        assertEquals(listOf(2, 2), result.tileColumnWidthsInCtbs)
+        assertEquals(listOf(1, 1), result.tileRowHeightsInCtbs)
+        val outputSps = HevcParameterSets.parseSps(result.outputParameters.sps)
+        assertEquals(4, outputSps.picWidthInCtbs)
+        assertEquals(2, outputSps.picHeightInCtbs)
         // The generated grid keeps source loop-filter policy unless every selected seam is safe.
-        val expectedDestinationAddresses = listOf(0, 4, 16, 20)
+        val expectedDestinationAddresses = listOf(0, 2, 4, 6)
         result.pictures.forEachIndexed { frameIndex, picture ->
             assertEquals(
                 "Frame $frameIndex destination CTB addresses: " +
