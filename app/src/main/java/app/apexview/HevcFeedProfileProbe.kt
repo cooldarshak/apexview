@@ -12,6 +12,7 @@ import app.apexview.tiled.HevcParameterSetCompatibility
 import app.apexview.tiled.CmafBoxInspector
 import app.apexview.tiled.HevcFeedCompatibility
 import app.apexview.tiled.HevcFragmentCompatibility
+import app.apexview.tiled.HevcFragmentTimelineAlignment
 
 /**
  * Sanitised read-only summary of the codec configuration Media3 already parsed for a video track.
@@ -765,6 +766,21 @@ internal object HevcFeedProfileCapture {
             lines += "CMAF_SOURCE_TILE_LAYOUT_GATE=${if (sourceTileReasons.isEmpty()) "PASS" else "NOT_COMPATIBLE"}; reasons=${sourceTileReasons.ifEmpty { listOf("none") }.joinToString("|")}"
         } else {
             lines += "CMAF_TRACK_COMPARISON=WAITING_FOR_BOTH_VIDEO_INIT_SEGMENTS"
+        }
+
+        if (firstTrack != null && secondTrack != null) {
+            val alignment = HevcFragmentTimelineAlignment.compare(
+                firstTrack, firstFragments, secondTrack, secondFragments
+            )
+            val offset = alignment.offsetMillis?.let { "${it}ms" } ?: "unknown"
+            val offsetRange = if (alignment.minimumOffsetMillis != null && alignment.maximumOffsetMillis != null) {
+                "${alignment.minimumOffsetMillis}..${alignment.maximumOffsetMillis}ms"
+            } else {
+                "unknown"
+            }
+            lines += "CMAF_ORDERED_TIMELINE_ALIGNMENT=${alignment.classification}; secondMinusFirst=$offset; range=$offsetRange; comparedFragments=${alignment.comparedFragments}; comparedSamples=${alignment.comparedSamples}; pairing=ordered-window-index; pictureIdentity=NOT_CHECKED; timestampsModified=false; reasons=${alignment.reasons.ifEmpty { listOf("none") }.joinToString("|")}"
+        } else {
+            lines += "CMAF_ORDERED_TIMELINE_ALIGNMENT=WAITING_FOR_BOTH_SELECTED_VIDEO_REPRESENTATIONS"
         }
 
         if (firstTrack != null && secondTrack != null && firstFragment != null && secondFragment != null) {
