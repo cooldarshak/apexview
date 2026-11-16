@@ -163,7 +163,10 @@ internal object HevcFeedProfileCapture {
     private val feedProgress = linkedMapOf<String, FeedProgress>()
     private data class CmafFeedProgress(
         val videoTracks: MutableMap<Long, CmafBoxInspector.TrackMetadata> = linkedMapOf(),
-        var initializationReport: CmafBoxInspector.Report? = null,
+        // Keep a bounded catalogue: F1 can switch representations while a player is alive,
+        // and track IDs are routinely reused across those init segments.
+        val initializationReports: MutableList<CmafBoxInspector.Report> = mutableListOf(),
+        val videoTrackCandidates: MutableList<CmafBoxInspector.TrackMetadata> = mutableListOf(),
         val latestFragments: MutableMap<Long, CmafBoxInspector.FragmentMetadata> = linkedMapOf(),
         var initSegmentsObserved: Int = 0,
         var mediaFragmentsObserved: Int = 0,
@@ -222,8 +225,27 @@ internal object HevcFeedProfileCapture {
         activeGroup == group && tileTestLabels.size == 2 && label in tileTestLabels
 
     @Synchronized
-    fun cmafInitializationReport(group: String, label: String): CmafBoxInspector.Report? =
-        if (activeGroup == group) cmafProgress[label]?.initializationReport else null
+    fun cmafInitializationReport(group: String, label: String): CmafBoxInspector.Report? {
+        if (activeGroup != group) return null
+        val state = cmafProgress[label] ?: return null
+        val expected = profiles[label]
+        val reports = state.initializationReports
+        if (reports.isEmpty()) return null
+        if (expected != null) {
+            val matching = reports.filter { report ->
+                report.tracks.any { track ->
+                    track.handler == "vide" && track.width == expected.width && track.height == expected.height
+                }
+            }
+            if (matching.size == 1) return matching.single()
+            // Multiple matching init segments are still ambiguous; do not parse media against
+            // whichever representation happened to arrive last.
+            if (matching.size > 1) return null
+        }
+        // A single observed representation is safe to use. With multiple candidates and no
+        // exact Media3 format match, fail closed rather than pairing fragments with the wrong hvcC.
+        return reports.singleOrNull()
+    }
 
     @Synchronized
     fun recordCmafParseFailure(group: String, label: String) {
@@ -249,10 +271,30 @@ internal object HevcFeedProfileCapture {
         }
         if (report.initializationSegmentPresent && videoTracks.isNotEmpty()) {
             progress.initSegmentsObserved++
-            progress.initializationReport = report
+            val signature = videoTracks.map { track ->
+                listOf(track.trackId, track.width, track.height, track.timescale,
+                    track.sampleEntry, track.hevcConfiguration?.parameterSetFingerprints)
+            }.toString()
+            val alreadyKnown = progress.initializationReports.any { existing ->
+                existing.tracks.filter { it.handler == "vide" }.map { track ->
+                    listOf(track.trackId, track.width, track.height, track.timescale,
+                        track.sampleEntry, track.hevcConfiguration?.parameterSetFingerprints)
+                }.toString() == signature
+            }
+            if (!alreadyKnown) progress.initializationReports.add(report)
+            while (progress.initializationReports.size > 12) progress.initializationReports.removeAt(0)
             videoTracks.forEach { track ->
+                if (progress.videoTrackCandidates.none { existing ->
+                    existing.trackId == track.trackId && existing.width == track.width &&
+                        existing.height == track.height && existing.timescale == track.timescale &&
+                        existing.hevcConfiguration?.parameterSetFingerprints ==
+                            track.hevcConfiguration?.parameterSetFingerprints
+                }) {
+                    progress.videoTrackCandidates.add(track)
+                }
                 track.trackId?.let { progress.videoTracks[it] = track }
             }
+            while (progress.videoTrackCandidates.size > 16) progress.videoTrackCandidates.removeAt(0)
         }
         val selectedForTileTest = shouldCaptureCmaf(group, label)
         val fragments = if (selectedForTileTest) report.fragments.filter { fragment ->
@@ -577,9 +619,23 @@ internal object HevcFeedProfileCapture {
             "CMAF_CAPTURE_SCOPE=two selected feeds; bounded in-memory ISO-BMFF metadata only"
         )
         states.forEach { (label, state) ->
-            val track = state?.videoTracks?.values?.firstOrNull()
-            val fragment = track?.trackId?.let { state.latestFragments[it] }
+            val expected = profiles[label]
+            val candidates = state?.videoTrackCandidates.orEmpty()
+            val exactCandidates = if (expected == null) emptyList() else candidates.filter {
+                it.width == expected.width && it.height == expected.height
+            }
+            val track = when {
+                exactCandidates.size == 1 -> exactCandidates.single()
+                exactCandidates.size > 1 -> null
+                candidates.size == 1 -> candidates.single()
+                else -> null
+            }
+            val fragment = track?.trackId?.let { state?.latestFragments?.get(it) }
             if (track == null) {
+                if (candidates.size > 1) {
+                    lines += "$label: CMAF_REPRESENTATION_AMBIGUOUS; Media3Format=${expected?.width ?: "unknown"}x${expected?.height ?: "unknown"}; candidates=" +
+                        candidates.joinToString("|") { "${it.width ?: 0}x${it.height ?: 0}/track=${it.trackId ?: "?"}/timescale=${it.timescale ?: "?"}" }
+                }
                 lines += "$label: CMAF_INIT=WAITING; initSegments=${state?.initSegmentsObserved ?: 0}; mediaFragments=${state?.mediaFragmentsObserved ?: 0}; parseFailures=${state?.parseFailures ?: 0}; overLimit=${state?.overLimitSegments ?: 0}"
             } else {
                 val config = track.hevcConfiguration
