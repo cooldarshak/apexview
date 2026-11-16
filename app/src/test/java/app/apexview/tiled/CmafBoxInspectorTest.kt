@@ -360,6 +360,44 @@ class CmafBoxInspectorTest {
         assertEquals(listOf(null), timing.sampleTimings.map { it.sampleSizeBytes })
     }
 
+    @Test fun rejectsThe2023SeigMultiKeyFlagInsteadOfParsingItAsOneKey() {
+        val init = fragmentedInitSegment(trackId = 81, timescale = 90000, includeEncryption = true)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(81))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(1) + int(3000))
+        // ISO/IEC 23001-7:2023: the high bit is multi_key_flag. This inspector supports
+        // the legacy single-key seig entry and must reject this entry before reading key_count.
+        val entry = byteArrayOf(0x80.toByte(), 0x19, 1, 8) + ByteArray(16)
+        val sgpd = box("sgpd", byteArrayOf(1,0,0,0) + ascii("seig") + int(0) + int(1) +
+            int(entry.size) + entry)
+        val sbgp = box("sbgp", byteArrayOf(0,0,0,0) + ascii("seig") +
+            int(1) + int(1) + int(0x10001))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) +
+                box("traf", tfhd + tfdt + trun + sgpd + sbgp))
+        )
+
+        assertFalse(report.fragments.single().sampleGroupEncryptionStructureComplete)
+        assertTrue(report.errors.any { it.contains("Unsupported seig multi-key/reserved flags") })
+    }
+
+    @Test fun rejectsVersionOneSencMultiIvRecordsUntilTheirSubsampleIndexesAreParsed() {
+        val init = fragmentedInitSegment(trackId = 82, timescale = 90000, includeEncryption = true)
+        val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(82))
+        val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+        val trun = box("trun", byteArrayOf(0,0,1,0) + int(1) + int(3000))
+        // Version 1 encodes multi_IV_count, multi_subindex_IV and multi_subindex ranges.
+        // It is not interchangeable with the version-0 IV + clear/encrypted-byte pairs.
+        val senc = box("senc", byteArrayOf(1,0,0,0) + int(1) + ByteArray(32))
+        val report = CmafBoxInspector.inspect(
+            init + box("moof", box("mfhd", ByteArray(8)) +
+                box("traf", tfhd + tfdt + trun + senc))
+        )
+
+        assertFalse(report.fragments.single().sampleEncryptionStructureComplete)
+        assertTrue(report.errors.any { it.contains("Unsupported senc version 1") })
+    }
+
     @Test fun parsesSeigSampleGroupEncryptionOverridesWithoutRetainingKidOrConstantIv() {
         val init = fragmentedInitSegment(trackId = 61, timescale = 90000, includeEncryption = true)
         val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(61))
