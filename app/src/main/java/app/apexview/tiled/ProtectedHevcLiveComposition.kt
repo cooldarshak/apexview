@@ -500,18 +500,6 @@ internal object ProtectedHevcLiveComposition {
             }
     
     
-            require(visited == info.fragment.sampleCount && visited > 0) {
-                "not every sample in the active CMAF fragment was inspected"
-            }
-            require(currentPictures.size <= MAX_FRAGMENT_SAMPLE_COUNT) {
-                "protected picture window exceeds the supported sample count"
-            }
-            val decodeTimeBase = requireNotNull(info.baseDecodeTimeTicks)
-            require(info.fragment.baseDecodeTimeTicks == decodeTimeBase &&
-                info.timescale == activeTrack.timescale) {
-                "active media fragment timescale/tfdt does not match its initialization segment"
-            }
-
             state.clearWindow()
             state.picturesByOrdinal.putAll(currentBuffers)
             state.window = currentPictures.toList()
