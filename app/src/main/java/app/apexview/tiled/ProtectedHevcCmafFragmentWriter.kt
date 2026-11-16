@@ -15,6 +15,8 @@ internal object ProtectedHevcCmafFragmentWriter {
         val sampleBytes: ByteArray,
         val subsampleRanges: List<CmafBoxInspector.SubsampleEncryptionRange>,
         val perSampleIvBytes: ByteArray?,
+        /** Fingerprint captured from the selected main-feed senc record. */
+        val perSampleIvIdentity: ProtectedValueFingerprint?,
         val durationTicks: Long,
         val sampleFlags: Long,
         val compositionOffsetTicks: Long
@@ -93,16 +95,16 @@ internal object ProtectedHevcCmafFragmentWriter {
                 "$context: output sample " + index + " has no supported subsample map"
             }
             if (request.perSampleIvSize == 0) {
-                require(sample.perSampleIvBytes == null) {
-                    "$context: constant-IV output sample unexpectedly contains a per-sample IV"
+                require(sample.perSampleIvBytes == null && sample.perSampleIvIdentity == null) {
+                    "$context: constant-IV output sample unexpectedly contains a per-sample IV identity"
                 }
             } else {
                 val iv = sample.perSampleIvBytes
                 require(iv != null && iv.size == request.perSampleIvSize) {
                     "$context: output sample " + index + " has no matching per-sample IV"
                 }
-                val expectedIv = fragmentIvIdentity(initReport, track, request, index)
-                require(ProtectedValueFingerprint.fromBytes("iv", iv) == expectedIv) {
+                val expectedIv = sample.perSampleIvIdentity
+                require(expectedIv != null && ProtectedValueFingerprint.fromBytes("iv", iv) == expectedIv) {
                     "$context: output sample " + index + " IV differs from the requested master-feed sample identity"
                 }
             }
@@ -159,7 +161,7 @@ internal object ProtectedHevcCmafFragmentWriter {
         val sencAuxOffset = 8L + mfhd.size.toLong() + 8L + tfhd.size.toLong() +
             tfdt.size.toLong() + placeholderTrun.size.toLong() + 16L
         require(sencAuxOffset <= UINT32_MAX) { "$context: saio offset exceeds version-0 uint32" }
-        val saio = fullBox("saio", uint32(1) + uint32(sencAuxOffset))
+        val saio = fullBox("saio", 0, 0, uint32(1) + uint32(sencAuxOffset))
         val trafPlaceholder = box("traf", tfhd + tfdt + placeholderTrun + senc + saiz + saio)
         val moofPlaceholder = box("moof", mfhd + trafPlaceholder)
 
@@ -225,21 +227,6 @@ internal object ProtectedHevcCmafFragmentWriter {
             }
         }
         return result
-    }
-
-    private fun fragmentIvIdentity(
-        initReport: CmafBoxInspector.Report,
-        track: CmafBoxInspector.TrackMetadata,
-        request: Request,
-        sampleIndex: Int
-    ): ProtectedValueFingerprint {
-        // A per-sample IV identity is validated against the final senc by the independent
-        // round-trip parser below. It cannot be derived from tenc, so the caller must supply the
-        // actual main-feed IV and the corresponding identity was checked by the composer.
-        return ProtectedValueFingerprint.fromBytes(
-            "iv",
-            requireNotNull(request.samples[sampleIndex].perSampleIvBytes)
-        )
     }
 
     private fun validateSubsamples(sample: Sample, index: Int, context: String) {
