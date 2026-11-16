@@ -19,7 +19,9 @@ internal object HevcPictureSequenceAligner {
         val picture: HevcPictureIdentityCompatibility.PictureIdentity,
         val irapAnchorPictureOrderCount: Long?,
         /** Monotonic ordinal across the complete feed sequence, not just this fragment. */
-        val sequenceSampleOrdinal: Long = sampleIndex.toLong()
+        val sequenceSampleOrdinal: Long = sampleIndex.toLong(),
+        /** tfdt for the exact CMAF fragment containing this local sample index. */
+        val fragmentBaseDecodeTimeTicks: Long? = null
     )
 
     data class FeedWindow(
@@ -34,7 +36,8 @@ internal object HevcPictureSequenceAligner {
         val timescale: Long,
         val timing: CmafBoxInspector.SampleTiming,
         val picture: HevcPictureIdentityCompatibility.PictureIdentity,
-        val irapAnchorPictureOrderCount: Long?
+        val irapAnchorPictureOrderCount: Long?,
+        val fragmentBaseDecodeTimeTicks: Long? = null
     )
 
     data class PictureMatch(
@@ -163,11 +166,13 @@ internal object HevcPictureSequenceAligner {
             } else {
                 val previous = current.lastOrNull()
                 val sequential = previous == null ||
-                    (candidate.master.sampleIndex.toLong() ==
-                        previous.master.sampleIndex.toLong() + 1L &&
+                    (runCatching {
+                        Math.addExact(previous.master.sequenceSampleOrdinal, 1L)
+                    }.getOrNull() == candidate.master.sequenceSampleOrdinal &&
                         candidate.byFeed.indices.all { index ->
-                            candidate.byFeed[index].sampleIndex.toLong() ==
-                                previous.byFeed[index].sampleIndex.toLong() + 1L
+                            runCatching {
+                                Math.addExact(previous.byFeed[index].sequenceSampleOrdinal, 1L)
+                            }.getOrNull() == candidate.byFeed[index].sequenceSampleOrdinal
                         })
                 if (!sequential) closeRun()
                 current += candidate
@@ -238,7 +243,8 @@ internal object HevcPictureSequenceAligner {
                     timescale = feed.timescale,
                     timing = sample.timing.copy(),
                     picture = snapshotPicture(sample.picture),
-                    irapAnchorPictureOrderCount = sample.irapAnchorPictureOrderCount
+                    irapAnchorPictureOrderCount = sample.irapAnchorPictureOrderCount,
+                    fragmentBaseDecodeTimeTicks = sample.fragmentBaseDecodeTimeTicks
                 )
             }
             PictureMatch(
@@ -284,11 +290,11 @@ internal object HevcPictureSequenceAligner {
                 runCatching { Math.addExact(it.sequenceSampleOrdinal, 1L) }.getOrNull()
             }
             if (sample.sampleIndex < 0 || sample.sequenceSampleOrdinal < 0L ||
-                (previous != null &&
-                    sample.sampleIndex.toLong() != previous.sampleIndex.toLong() + 1L) ||
-                (previous != null && expectedSequenceOrdinal != sample.sequenceSampleOrdinal)) {
+                (previous != null && expectedSequenceOrdinal != sample.sequenceSampleOrdinal) ||
+                (sample.fragmentBaseDecodeTimeTicks != null &&
+                    sample.fragmentBaseDecodeTimeTicks < 0L)) {
                 reasons += context + ": feed " + feed.feedId +
-                    " fragment indices/global sequence sample ordinals are not contiguous"
+                    " fragment-local index/global sequence ordinal or tfdt anchor is invalid"
             }
             val timing = sample.timing
             if (timing.decodeTimeTicks == null || timing.presentationTimeTicks == null ||

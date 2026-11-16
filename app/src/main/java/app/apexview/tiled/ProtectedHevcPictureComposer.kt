@@ -26,7 +26,9 @@ internal object ProtectedHevcPictureComposer {
         /** Required for CRA (NAL type 21) when NoRaslOutputFlag is known by the caller. */
         val noRaslOutputFlag: Boolean? = null,
         /** Monotonic ordinal across the feed's complete CMAF sequence. Required with alignment proof. */
-        val sequenceSampleOrdinal: Long? = null
+        val sequenceSampleOrdinal: Long? = null,
+        /** tfdt of the exact source fragment; binds fragment-local sampleIndex to its container. */
+        val fragmentBaseDecodeTimeTicks: Long? = null
     )
 
     data class Contribution(
@@ -421,6 +423,12 @@ internal object ProtectedHevcPictureComposer {
             }
             require(feed.timescale == evidence.timescale && feed.timing == evidence.timing) {
                 "$context: " + input.feedId + " selected sample timing differs from the inspected alignment evidence"
+            }
+            require(input.fragmentBaseDecodeTimeTicks != null &&
+                input.fragmentBaseDecodeTimeTicks == evidence.fragmentBaseDecodeTimeTicks &&
+                feed.fragment.baseDecodeTimeTicks == evidence.fragmentBaseDecodeTimeTicks) {
+                "$context: " + input.feedId +
+                    " selected sample belongs to a different or unverified CMAF fragment tfdt"
             }
             require(feed.pictureIdentity == evidence.picture) {
                 "$context: " + input.feedId + " selected full picture identity differs from the alignment proof"
