@@ -39,7 +39,10 @@ class ProtectedHevcPictureComposerTest {
         assertEquals(0L, result.fullPictureOrderCount)
         assertEquals(4L, result.encryptedByteCount)
         assertEquals(4, result.subsampleRanges.count { it.encryptedBytes == 1L })
-        assertTrue(feeds.all { it.pocTracker.hasReferenceAnchor && it.pocTracker.hasIrapAnchor })
+        assertTrue(feeds.all {
+            it.pocTracker.hasReferenceAnchor && it.pocTracker.hasIrapAnchor &&
+                it.pocTracker.irapAnchorPictureOrderCount == 0L
+        })
 
         val layout = ProtectedHevcSampleLayout.inspect(
             result.sampleBytes, result.nalLengthSize, result.subsampleRanges

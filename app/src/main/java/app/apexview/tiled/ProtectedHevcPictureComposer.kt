@@ -335,7 +335,8 @@ internal object ProtectedHevcPictureComposer {
                 log2MaxPocLsb = sps.log2MaxPicOrderCntLsb,
                 noRaslOutputFlag = noRaslOutput
             )
-            require(pocTrackerAfter.hasIrapAnchor) {
+            require(pocTrackerAfter.hasIrapAnchor &&
+                pocTrackerAfter.irapAnchorPictureOrderCount != null) {
                 "A valid temporal-id-zero IRAP reference anchor is required for protected cross-feed composition"
             }
             derived

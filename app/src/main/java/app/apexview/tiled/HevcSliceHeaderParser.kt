@@ -485,11 +485,16 @@ internal class HevcPocTracker {
     var hasIrapAnchor: Boolean = false
         private set
 
+    /** Full POC of the temporal-id-zero IRAP that established this sequence epoch. */
+    var irapAnchorPictureOrderCount: Long? = null
+        private set
+
     fun reset() {
         previousTid0PocMsb = 0L
         previousTid0PocLsb = 0L
         hasReferenceAnchor = false
         hasIrapAnchor = false
+        irapAnchorPictureOrderCount = null
     }
 
     /** Creates an isolated working copy so a failed composition cannot advance the live tracker. */
@@ -498,6 +503,7 @@ internal class HevcPocTracker {
         it.previousTid0PocLsb = previousTid0PocLsb
         it.hasReferenceAnchor = hasReferenceAnchor
         it.hasIrapAnchor = hasIrapAnchor
+        it.irapAnchorPictureOrderCount = irapAnchorPictureOrderCount
     }
 
     /** Commits a successfully validated working copy back into this feed's tracker. */
@@ -506,6 +512,7 @@ internal class HevcPocTracker {
         previousTid0PocLsb = snapshot.previousTid0PocLsb
         hasReferenceAnchor = snapshot.hasReferenceAnchor
         hasIrapAnchor = snapshot.hasIrapAnchor
+        irapAnchorPictureOrderCount = snapshot.irapAnchorPictureOrderCount
     }
 
     fun derive(
@@ -526,6 +533,7 @@ internal class HevcPocTracker {
             if (temporalIdPlus1 == 1) {
                 hasReferenceAnchor = true
                 hasIrapAnchor = true
+                irapAnchorPictureOrderCount = 0L
             }
             return 0L
         }
@@ -558,7 +566,10 @@ internal class HevcPocTracker {
             previousTid0PocMsb = pocMsb
             previousTid0PocLsb = current
             hasReferenceAnchor = true
-            if (resetPocMsb) hasIrapAnchor = true
+            if (resetPocMsb) {
+                hasIrapAnchor = true
+                irapAnchorPictureOrderCount = poc
+            }
         }
         return poc
     }

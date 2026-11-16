@@ -35,6 +35,7 @@ class HevcPocTrackerTest {
         )
         assertTrue(tracker.hasReferenceAnchor)
         assertTrue(tracker.hasIrapAnchor)
+        assertEquals(0L, tracker.irapAnchorPictureOrderCount)
         assertEquals(
             1L,
             tracker.derive(
@@ -47,6 +48,7 @@ class HevcPocTrackerTest {
         tracker.reset()
         assertFalse(tracker.hasReferenceAnchor)
         assertFalse(tracker.hasIrapAnchor)
+        assertEquals(null, tracker.irapAnchorPictureOrderCount)
     }
 
     @Test fun craWithoutNoRaslOutputFlagUsesExistingPrevTid0ButDoesNotEstablishIrapAnchor() {
@@ -63,6 +65,7 @@ class HevcPocTrackerTest {
         )
         assertTrue(tracker.hasReferenceAnchor)
         assertFalse(tracker.hasIrapAnchor)
+        assertEquals(null, tracker.irapAnchorPictureOrderCount)
     }
 
     @Test fun blaAndCraWithNoRaslOutputFlagEstablishAnAnchor() {
@@ -78,6 +81,7 @@ class HevcPocTrackerTest {
         )
         assertTrue(bla.hasReferenceAnchor)
         assertTrue(bla.hasIrapAnchor)
+        assertEquals(12L, bla.irapAnchorPictureOrderCount)
 
         val cra = HevcPocTracker()
         assertEquals(
@@ -92,5 +96,6 @@ class HevcPocTrackerTest {
         )
         assertTrue(cra.hasReferenceAnchor)
         assertTrue(cra.hasIrapAnchor)
+        assertEquals(21L, cra.irapAnchorPictureOrderCount)
     }
 }
