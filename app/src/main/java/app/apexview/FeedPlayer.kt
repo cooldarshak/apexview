@@ -118,9 +118,6 @@ class FeedPlayer(
     /** Auto or a maximum requested video rendition shared by the viewer. */
     videoQuality: VideoQuality = VideoQuality.AUTO,
 ) {
-    /** Original authorized per-channel feed offer. Kept in memory for direct DASH segment capture. */
-    internal val sourceStream: PlayInfo = stream
-
     var status by mutableStateOf("Starting")
         private set
 

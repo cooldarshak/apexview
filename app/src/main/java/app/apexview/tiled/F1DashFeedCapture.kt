@@ -339,7 +339,7 @@ internal class F1DashFeedCapture(
         val periodDurationUs = feed.periodDurationUs
         var first = index.firstSegmentNum
         var count = index.getSegmentCount(periodDurationUs)
-        if (count == DashSegmentIndex.INDEX_UNBOUNDED || count <= 0L) {
+        if (count == DashSegmentIndex.INDEX_UNBOUNDED.toLong() || count <= 0L) {
             val nowUnixTimeUs = System.currentTimeMillis() * 1_000L
             first = index.getFirstAvailableSegmentNum(periodDurationUs, nowUnixTimeUs)
             count = index.getAvailableSegmentCount(periodDurationUs, nowUnixTimeUs)

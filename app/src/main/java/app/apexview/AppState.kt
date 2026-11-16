@@ -2061,6 +2061,9 @@ class AppState(
             return
         }
         val enteringTvLayout = mode == LayoutMode.TV && layoutMode != LayoutMode.TV
+        f1DashCaptureJob?.cancel()
+        f1DashCaptureJob = null
+        f1DashCapture = null
         HevcFeedProfileCapture.clearTileTestSelection()
         ProtectedHevcLiveComposition.clearAll()
         layoutMode = mode
@@ -3252,6 +3255,11 @@ class AppState(
         votePromptOpen = false
         nextLive = null
         liveAtStart = null
+        f1DashCaptureJob?.cancel()
+        f1DashCaptureJob = null
+        f1DashCapture = null
+        ProtectedHevcLiveComposition.clearAll()
+        HevcFeedProfileCapture.clearTileTestSelection()
         tiles.forEach { it.feed.release() }
         tiles.clear()
         sessions.clear()
