@@ -33,6 +33,8 @@ import kotlin.math.abs
 import app.apexview.tiled.ProtectedHevcLiveComposition
 import app.apexview.tiled.F1DashFeedCapture
 import app.apexview.tiled.ArchiveCompositionStartup
+import app.apexview.tiled.F1ArchiveFeedCapture
+import app.apexview.tiled.CmafCaptureLifecycle
 
 /** A feed's window on the canvas. Positions and sizes are in pixels. */
 class Tile(val id: Int, val contentId: Long, channel: Channel, feed: FeedPlayer) {
@@ -312,9 +314,10 @@ class AppState(
     var singleDecoderDiagnostic by mutableStateOf<String?>(null)
         private set
     val observedActiveVideoDecoders get() = tiles.sumOf { it.feed.activeVideoDecoderCount }
-    private var f1DashCapture: F1DashFeedCapture? = null
+    private var f1DashCapture: CmafCaptureLifecycle? = null
     private var protectedCompositionHost: Tile? = null
     private var protectedCompositionAudioMaster: Tile? = null
+    private var composedArchiveOriginMs: Long? = null
     private var protectedCompositionBounds: Map<Tile, ProtectedTileBounds> = emptyMap()
     private data class ProtectedTileBounds(val x: Float, val y: Float, val w: Float, val h: Float, val z: Float)
     private val prefs = context.getSharedPreferences("f1mv", Context.MODE_PRIVATE)
@@ -1423,7 +1426,7 @@ class AppState(
             ?: selectedTiles.first { it !== host }
         val group = "archive-content-$contentId-${java.util.UUID.randomUUID()}"
         f1DashCaptureJob?.cancel()
-        val capture = F1DashFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
+        val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
         f1DashCapture = capture
         ProtectedHevcLiveComposition.selectFeeds(group, labels)
         val startup = ArchiveCompositionStartup()
@@ -1447,6 +1450,7 @@ class AppState(
                     append("$label manifest: ${snapshot?.actualManifests?.get(label)?.name ?: "UNVERIFIED"}\n")
                 }
                 append("HEVC/CMAF preflight: " + if (preflightPassed) "PASS\n" else "${snapshot?.detail ?: "VALIDATING"}\n")
+                append("Media protection: ${capture.protection}\n")
                 append("Source decoders released (callbacks): $releasedCount\n")
                 append("Composed decoder: ${composedCodec ?: "NOT OBSERVED"}\n")
                 append("First composed frame: ${if (composedFirstFrameSeen) "YES" else "NO"}\n")
@@ -1465,6 +1469,7 @@ class AppState(
                 selectedTiles.forEach { it.feed.clearProtectedCompositionVideoRole() }
                 applyVideoBudget()
             }
+            composedArchiveOriginMs = null
             layoutMode = previousLayout
             layoutRequest++
         }
@@ -1482,7 +1487,7 @@ class AppState(
                             lastSnapshot = snapshot
                             diagnostics()
                             snapshot.failure?.takeUnless { it.retryable }?.let { throw IOException(it.reason) }
-                            prepared = ProtectedHevcLiveComposition.outputWindow(group)
+                            prepared = capture.outputWindow(group)
                             if (prepared == null) {
                                 if (android.os.SystemClock.elapsedRealtime() >= deadline) {
                                     throw IOException("Archive preflight timed out: ${snapshot.detail ?: snapshot.compositionStatus}")
@@ -1492,15 +1497,15 @@ class AppState(
                         }
                         prepared.also { window ->
                             val licenses = selectedTiles.map { it.feed.sourceStream.licenseUrl }.distinct()
-                            if (licenses.size != 1 || licenses.single().isNullOrBlank()) {
+                            if (!capture.clearOutput && (licenses.size != 1 || !host.feed.hasLoadedDrmKeys)) {
                                 window.zero()
-                                throw IOException("DRM/session incompatibility: composed playback needs one shared authorised Widevine licence endpoint.")
+                                throw IOException("DRM/session incompatibility: protected composed playback needs the existing authorised Widevine session and loaded keys.")
                             }
                             val pssh = capture.widevinePssh()
                             try {
                                 app.apexview.tiled.ProtectedHevcComposedDashPackageBuilder.build(
                                     window, pssh, window.fragments.first().baseDecodeTimeTicks,
-                                    System.currentTimeMillis()
+                                    System.currentTimeMillis(), clearOutput = capture.clearOutput,
                                 ).zero()
                                 preflightPassed = true
                             } catch (error: Exception) {
@@ -1525,7 +1530,10 @@ class AppState(
                     },
                     replaceHost = { window ->
                         if (host.audible) setAudio(audioMaster)
-                        host.feed.startProtectedComposedPlayback(window, capture.widevinePssh())
+                        composedArchiveOriginMs = (lastSnapshot?.alignedSegmentTimeUs ?: 0L) / 1000L
+                        host.feed.startProtectedComposedPlayback(window, capture.widevinePssh(),
+                            clearOutput = capture.clearOutput,
+                            startPositionMs = (audioMaster.feed.player.currentPosition - requireNotNull(composedArchiveOriginMs)).coerceAtLeast(0L))
                         layoutMode = LayoutMode.SINGLE_DECODER_TEST
                         showProtectedCompositionPresentation(host, selectedTiles, audioMaster)
                     },
@@ -1544,7 +1552,7 @@ class AppState(
                     val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
                     lastSnapshot = snapshot
                     snapshot.failure?.takeUnless { it.retryable }?.let { throw IOException(it.reason) }
-                    if (snapshot.capturedFeeds > 0) ProtectedHevcLiveComposition.outputWindow(group)?.let {
+                    if (snapshot.capturedFeeds > 0) capture.outputWindow(group)?.let {
                         host.feed.publishProtectedComposedOutput(it, capture.widevinePssh())
                     }
                     diagnostics()
@@ -1723,6 +1731,7 @@ class AppState(
         val resumePositionMs = protectedCompositionAudioMaster?.feed?.player?.currentPosition
         if (restorePlayer) protectedCompositionHost?.feed?.stopProtectedComposedPlayback(resumePositionMs)
         protectedCompositionAudioMaster = null
+        composedArchiveOriginMs = null
         tiles.forEach { tile ->
             tile.protectedCompositionHidden = false
             tile.feed.clearProtectedCompositionVideoRole()
@@ -3707,7 +3716,7 @@ class AppState(
 
     // Shared playback. The first tile leads; the others follow it.
 
-    private fun leaderTile() = tiles.firstOrNull()
+    private fun leaderTile() = protectedCompositionAudioMaster ?: tiles.firstOrNull()
 
     fun togglePlay() {
         playing = !playing
@@ -3816,6 +3825,12 @@ class AppState(
     }
 
     fun seekTo(targetMs: Long) {
+        if (composedArchiveOriginMs != null) {
+            stopProtectedCompositionPresentation()
+            layoutMode = LayoutMode.GRID
+            singleDecoderDiagnostic = singleDecoderDiagnostic?.replace("Playback: ACTIVE", "Playback: STOPPED FOR SEEK")
+            message = "Archive seek restored normal playback. Run Single-decoder test again at the new position."
+        }
         val leader = leaderTile() ?: return
         // A live stream's length can be unknown; then only the start bounds the seek (the player
         // stops at the live edge itself). Clamping to an unknown length sent skips back to 0.
@@ -3856,8 +3871,11 @@ class AppState(
         if (++saveTicks % 10 == 0) saveWatch()
         watchStrain()
 
+        composedArchiveOriginMs?.let { origin ->
+            protectedCompositionHost?.feed?.syncComposedArchivePosition(leader.player.currentPosition - origin, playing)
+        }
         val leaderClock = leader.wallClockMs()
-        tiles.drop(1).forEach { tile ->
+        tiles.filter { it !== leaderTile && it !== protectedCompositionHost }.forEach { tile ->
             val feed = tile.feed
             if (tile.contentId != leaderTile.contentId || feed.player.playbackState != Player.STATE_READY) {
                 feed.driftMs = null

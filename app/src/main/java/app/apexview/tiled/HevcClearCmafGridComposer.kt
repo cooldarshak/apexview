@@ -13,7 +13,7 @@ import java.nio.ByteOrder
  *
  * Current supported container profile is intentionally narrow: one video track, one hvc1/hev1
  * sample description, one moof/traf/trun/mdat per media fragment, default-base-is-moof, and
- * explicit per-sample duration/size/flags/composition offset. Unsupported layouts fail closed.
+ * resolved sample duration/size/flags/composition offset from trun/tfhd/trex. Unsupported layouts fail closed.
  */
 internal object HevcClearCmafGridComposer {
     data class Feed(
@@ -251,8 +251,8 @@ internal object HevcClearCmafGridComposer {
             ?: error("Expected exactly one moof")
         val mdat = top.singleOrNull { it.type == "mdat" }
             ?: error("Expected exactly one mdat")
-        require(top.size == 2 && top[0].type == "moof" && top[1].type == "mdat") {
-            "Only a moof followed by one mdat is supported"
+        require(top.filter { it.type !in setOf("styp", "sidx", "emsg", "prft", "free") }.map { it.type } == listOf("moof", "mdat")) {
+            "Expected one moof followed by one mdat with optional CMAF metadata boxes"
         }
         val traf = boxes(bytes, moof.payloadStart, moof.end).singleOrNull { it.type == "traf" }
             ?: error("Expected exactly one traf")
@@ -269,7 +269,7 @@ internal object HevcClearCmafGridComposer {
         require(h.remaining() >= 8) { "Truncated tfhd" }
         val hVersion = h.get().toInt() and 0xff
         val hFlags = readU24(h)
-        require(hVersion == 0 && (hFlags and 0x020000) != 0 && (hFlags and 0x000001) == 0) {
+        require(hVersion == 0 && (hFlags and 0x000001) == 0) {
             "tfhd must use default-base-is-moof without an explicit base_data_offset"
         }
         val trackId = readU32(h)
@@ -277,10 +277,10 @@ internal object HevcClearCmafGridComposer {
         if ((hFlags and 0x000002) != 0) {
             require(readU32(h) == 1L) { "Only sample description index 1 is supported" }
         }
-        require((hFlags and 0x000008) == 0 && (hFlags and 0x000010) == 0 &&
-            (hFlags and 0x000020) == 0) {
-            "tfhd default sample values are not supported; trun must carry explicit sample fields"
-        }
+        val defaultDuration = if ((hFlags and 0x000008) != 0) readU32(h) else null
+        val defaultSize = if ((hFlags and 0x000010) != 0) readU32(h) else null
+        val defaultFlags = if ((hFlags and 0x000020) != 0) readU32(h) else null
+        require(!h.hasRemaining()) { "Unexpected trailing tfhd bytes" }
 
         val d = ByteBuffer.wrap(bytes, tfdt.payloadStart, tfdt.end - tfdt.payloadStart).order(ByteOrder.BIG_ENDIAN)
         require(d.remaining() >= 8) { "Truncated tfdt" }
@@ -300,14 +300,12 @@ internal object HevcClearCmafGridComposer {
         require(t.remaining() >= 12) { "Truncated trun" }
         val version = t.get().toInt() and 0xff
         val flags = readU24(t)
-        require(version == 1 && (flags and 0x000001) != 0 &&
-            (flags and 0x000100) != 0 && (flags and 0x000200) != 0 &&
-            (flags and 0x000400) != 0 && (flags and 0x000800) != 0) {
-            "trun must explicitly carry data offset, duration, size, flags and signed composition offset"
-        }
+        require(version in 0..1 && (flags and 0x000001) != 0) { "trun needs a supported version and data offset" }
+        require((flags and 0x000004) == 0 || (flags and 0x000400) == 0) { "trun cannot carry both first-sample and per-sample flags" }
         val sampleCount = readU32(t)
         require(sampleCount == metadata.sampleCount.toLong()) { "trun sample count differs from inspected metadata" }
         val dataOffset = t.int.toLong()
+        val firstSampleFlags = if ((flags and 0x000004) != 0) readU32(t) else null
         val sampleStart = Math.addExact(moof.start.toLong(), dataOffset)
         require(sampleStart >= mdat.payloadStart.toLong() && sampleStart <= mdat.end.toLong()) {
             "trun data offset does not point into mdat"
@@ -315,11 +313,12 @@ internal object HevcClearCmafGridComposer {
         val samples = ArrayList<SourceSample>(metadata.sampleCount)
         var cursor = sampleStart
         repeat(metadata.sampleCount) { index ->
-            require(t.remaining() >= 16) { "Truncated trun sample $index" }
-            val duration = readU32(t)
-            val size = readU32(t)
-            val sampleFlags = readU32(t)
-            val compositionOffset = t.int.toLong()
+            val timing = metadata.sampleTimings[index]
+            val duration = if ((flags and 0x000100) != 0) readU32(t) else defaultDuration ?: requireNotNull(timing.durationTicks)
+            val size = if ((flags and 0x000200) != 0) readU32(t) else defaultSize ?: requireNotNull(timing.sampleSizeBytes)
+            val sampleFlags = if ((flags and 0x000400) != 0) readU32(t) else
+                (if (index == 0) firstSampleFlags else null) ?: defaultFlags ?: requireNotNull(timing.sampleFlags)
+            val compositionOffset = if ((flags and 0x000800) == 0) 0L else if (version == 0) readU32(t) else t.int.toLong()
             require(duration > 0 && size > 0 && size <= Int.MAX_VALUE) {
                 "Invalid duration or size in trun sample $index"
             }
@@ -327,7 +326,6 @@ internal object HevcClearCmafGridComposer {
             require(cursor >= mdat.payloadStart && end <= mdat.end.toLong()) {
                 "Sample $index extends outside mdat"
             }
-            val timing = metadata.sampleTimings[index]
             require(timing.durationTicks == duration &&
                 timing.compositionOffsetTicks == compositionOffset &&
                 timing.sampleFlags == sampleFlags &&

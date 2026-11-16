@@ -47,7 +47,8 @@ internal object ProtectedHevcComposedDashPackageBuilder {
         window: ProtectedHevcLiveComposition.OutputWindow,
         widevinePssh: ByteArray?,
         presentationTimeOffsetTicks: Long,
-        availabilityStartTimeMs: Long
+        availabilityStartTimeMs: Long,
+        clearOutput: Boolean = false,
     ): Package {
         val init = window.initializationSegment
         require(init.isNotEmpty()) { "Protected composed init segment is empty" }
@@ -64,15 +65,19 @@ internal object ProtectedHevcComposedDashPackageBuilder {
             "Protected composed DASH requires exactly one track"
         }
         val track = initReport.tracks.single()
-        require(
-            track.handler == "vide" &&
-                track.encrypted &&
-                track.sampleEntry == "encv" &&
-                track.originalFormat in setOf("hvc1", "hev1") &&
-                track.protectionScheme == "cbcs" &&
-                track.trackEncryption?.defaultIsProtected == true
-        ) {
-            "Protected composed DASH requires one encrypted CBCS HEVC track"
+        if (clearOutput) {
+            require(track.handler == "vide" && track.sampleEntry in setOf("hvc1", "hev1") &&
+                !track.encrypted && track.protectionScheme == null && track.trackEncryption == null &&
+                !track.sampleEncryptionBoxPresent && !track.sampleAuxiliarySizesPresent &&
+                !track.sampleAuxiliaryOffsetsPresent && !track.sampleGroupDescriptionPresent && !track.sampleToGroupPresent) {
+                "Clear composed output rejects encrypted tracks and encryption metadata"
+            }
+        } else {
+            require(track.handler == "vide" && track.encrypted && track.sampleEntry == "encv" &&
+                track.originalFormat in setOf("hvc1", "hev1") && track.protectionScheme == "cbcs" &&
+                track.trackEncryption?.defaultIsProtected == true) {
+                "Protected composed DASH requires one encrypted CBCS HEVC track"
+            }
         }
         val trackId = requireNotNull(track.trackId) { "Protected composed track ID is missing" }
         val timescale = requireNotNull(track.timescale)
@@ -81,14 +86,18 @@ internal object ProtectedHevcComposedDashPackageBuilder {
             ?: error("Protected composed video width is invalid")
         val height = requireNotNull(track.height).takeIf { it > 0 }
             ?: error("Protected composed video height is invalid")
-        val tenc = requireNotNull(track.trackEncryption)
-        require(tenc.defaultKidIdentity != null && tenc.perSampleIvSize in setOf(0, 8, 16)) {
-            "Protected composed CBCS defaults are incomplete"
-        }
-        val defaultKid = readDefaultKid(init)
-        val pssh = findWidevinePssh(init) ?: normalizeWidevinePssh(widevinePssh)
-        requireNotNull(pssh) {
-            "Widevine PSSH is missing from both the composed init and source DASH manifest"
+        val protectionXml = if (clearOutput) "" else {
+            val tenc = requireNotNull(track.trackEncryption)
+            require(tenc.defaultKidIdentity != null && tenc.perSampleIvSize in setOf(0, 8, 16)) {
+                "Protected composed CBCS defaults are incomplete"
+            }
+            val defaultKid = readDefaultKid(init)
+            val pssh = findWidevinePssh(init) ?: normalizeWidevinePssh(widevinePssh)
+            requireNotNull(pssh) { "Widevine PSSH is missing from both the composed init and source manifest" }
+            val encoded = Base64.getEncoder().encodeToString(pssh)
+            pssh.fill(0)
+            """<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cbcs" cenc:default_KID="$defaultKid"/>
+      <ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" value="Widevine"><cenc:pssh>$encoded</cenc:pssh></ContentProtection>"""
         }
 
         var previousSequence = 0L
@@ -129,13 +138,21 @@ internal object ProtectedHevcComposedDashPackageBuilder {
                     report.errors.joinToString("; ")
             }
             val parsed = report.fragments.single()
-            require(parsed.trackId == trackId && parsed.sampleCount == fragment.sampleCount &&
-                parsed.sampleEncryptionBoxPresent &&
-                parsed.sampleEncryptionStructureComplete &&
-                parsed.sampleEncryptionCount == fragment.sampleCount.toLong() &&
-                parsed.subsampleEncryptionSignalled == true &&
-                parsed.sampleEncryptionRangesCoverSamples) {
-                "Protected output fragment $index lost its CBCS sample metadata"
+            require(parsed.trackId == trackId && parsed.sampleCount == fragment.sampleCount) {
+                "Composed fragment differs from its initialized track"
+            }
+            if (clearOutput) {
+                require(!parsed.sampleEncryptionBoxPresent && !parsed.sampleAuxiliarySizesPresent &&
+                    !parsed.sampleAuxiliaryOffsetsPresent && !parsed.sampleGroupDescriptionPresent &&
+                    !parsed.sampleToGroupPresent && !parsed.sampleGroupEncryptionPresent) {
+                    "Clear composed output rejects fragment encryption metadata"
+                }
+            } else {
+                require(parsed.sampleEncryptionBoxPresent && parsed.sampleEncryptionStructureComplete &&
+                    parsed.sampleEncryptionCount == fragment.sampleCount.toLong() &&
+                    parsed.subsampleEncryptionSignalled == true && parsed.sampleEncryptionRangesCoverSamples) {
+                    "Protected output fragment $index lost its CBCS sample metadata"
+                }
             }
 
             val end = Math.addExact(fragment.baseDecodeTimeTicks, fragment.durationTicks)
@@ -169,8 +186,6 @@ internal object ProtectedHevcComposedDashPackageBuilder {
         val delayTicks = durations.last()
         val delaySeconds = isoDuration(delayTicks, timescale)
         val ast = DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochMilli(availabilityStartTimeMs))
-        val psshBase64 = Base64.getEncoder().encodeToString(pssh)
-        pssh.fill(0)
 
         val manifest = """<?xml version="1.0" encoding="UTF-8"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
@@ -185,15 +200,10 @@ internal object ProtectedHevcComposedDashPackageBuilder {
   <Period id="protected-hevc-grid" start="PT0S">
     <AdaptationSet id="1" contentType="video" mimeType="video/mp4"
                    segmentAlignment="true" startWithSAP="1">
-      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"
-                         value="cbcs" cenc:default_KID="$defaultKid"/>
-      <ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"
-                         value="Widevine">
-        <cenc:pssh>$psshBase64</cenc:pssh>
-      </ContentProtection>
+      $protectionXml
       <Representation id="apexview-protected-grid"
                       bandwidth="$bandwidth"
-                      codecs="${track.originalFormat}"
+                      codecs="${if (clearOutput) track.sampleEntry else track.originalFormat}"
                       width="$width" height="$height">
         <SegmentList timescale="$timescale"
                      startNumber="${first.sequenceNumber}"
@@ -357,7 +367,7 @@ internal object ProtectedHevcComposedDashPackageBuilder {
  * defensive copies, so retiring the old rolling window cannot zero bytes being read by Media3.
  */
 @OptIn(UnstableApi::class)
-internal class ProtectedHevcLiveDashSource {
+internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = false) {
     private var currentPackage: ProtectedHevcComposedDashPackageBuilder.Package? = null
     private var presentationTimeOffsetTicks: Long? = null
     private var availabilityStartTimeMs: Long? = null
@@ -396,7 +406,8 @@ internal class ProtectedHevcLiveDashSource {
                 window = window,
                 widevinePssh = widevinePssh,
                 presentationTimeOffsetTicks = requireNotNull(presentationTimeOffsetTicks),
-                availabilityStartTimeMs = requireNotNull(availabilityStartTimeMs)
+                availabilityStartTimeMs = requireNotNull(availabilityStartTimeMs),
+                clearOutput = clearOutput,
             )
             val previous = currentPackage
             currentPackage = next

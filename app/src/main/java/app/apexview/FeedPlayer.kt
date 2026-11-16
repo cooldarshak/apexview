@@ -151,6 +151,7 @@ class FeedPlayer(
     var hevcProfileDiagnostic by mutableStateOf<String?>(null)
         private set
     private var licensed = false
+    val hasLoadedDrmKeys: Boolean get() = licensed
     private var firstFrameRendered = false
     var activeVideoDecoderCount by mutableStateOf(0)
         private set
@@ -515,9 +516,11 @@ class FeedPlayer(
      */
     internal fun startProtectedComposedPlayback(
         window: ProtectedHevcLiveComposition.OutputWindow,
-        widevinePssh: ByteArray?
+        widevinePssh: ByteArray?,
+        clearOutput: Boolean = false,
+        startPositionMs: Long? = null,
     ) {
-        val nextSource = ProtectedHevcLiveDashSource()
+        val nextSource = ProtectedHevcLiveDashSource(clearOutput)
         firstFrameRendered = false
         error = null
         problem = null
@@ -538,7 +541,8 @@ class FeedPlayer(
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
                 .build()
-            player.setMediaSource(mediaSource)
+            if (startPositionMs == null) player.setMediaSource(mediaSource)
+            else player.setMediaSource(mediaSource, startPositionMs)
             previous?.release()
             player.playWhenReady = true
             player.prepare()
@@ -548,6 +552,21 @@ class FeedPlayer(
         } finally {
             widevinePssh?.fill(0)
         }
+    }
+
+    /** The rolling composed window and the source archive do not share player positions. */
+    internal fun syncComposedArchivePosition(relativeArchiveMs: Long, playing: Boolean) {
+        if (protectedLiveDashSource == null || player.currentTimeline.isEmpty) return
+        val window = player.currentTimeline.getWindow(player.currentMediaItemIndex, Timeline.Window())
+        val target = relativeArchiveMs - window.positionInFirstPeriodMs
+        if (player.playbackState == Player.STATE_READY && target >= 0 &&
+            (player.duration <= 0 || target < player.duration)) {
+            val drift = player.currentPosition - target
+            if (kotlin.math.abs(drift) > 1_000L) player.seekTo(target)
+            else if (playing && kotlin.math.abs(drift) > 100L) setSpeed(if (drift > 0) 0.97f else 1.03f)
+            else setSpeed(1f)
+        }
+        player.playWhenReady = playing
     }
 
     /** Publishes a newer live CMAF window without rebuilding the player or DRM session. */

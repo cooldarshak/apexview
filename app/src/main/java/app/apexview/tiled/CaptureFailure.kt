@@ -13,7 +13,7 @@ internal data class CaptureFailure(val reason: String, val retryable: Boolean) {
             is HttpDataSource.InvalidResponseCodeException -> CaptureFailure(
                 "F1 media HTTP ${error.responseCode}", error.responseCode in setOf(408, 429) || error.responseCode >= 500
             )
-            is ParserException -> CaptureFailure("Invalid or unsupported DASH manifest", false)
+            is ParserException -> CaptureFailure("Invalid or unsupported media manifest", false)
             is IOException -> CaptureFailure("F1 media network read failed (${error.javaClass.simpleName})", true)
             else -> CaptureFailure("Capture validation failed (${error.javaClass.simpleName})", false)
         }

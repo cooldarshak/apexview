@@ -68,6 +68,21 @@ def main():
         json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2))
 
+    native = output / "native_hls_archive_grid.mp4"
+    if not native.is_file():
+        raise SystemExit("Missing native HLS archive capture/composition evidence")
+    native_hashes = hashes(["-i", str(native)])
+    if native_hashes != expected:
+        raise SystemExit("Native HLS archive output differs from independently decoded source hstack")
+    native_manifest = (output / "native_hls_archive_grid.mpd").read_text()
+    if "ContentProtection" in native_manifest or native_manifest.count("<Representation ") != 1:
+        raise SystemExit("Native clear HLS output must contain one representation and no invented DRM")
+    native_result = {"result": "NATIVE_HLS_ARCHIVE_CMAF_PASS", "frames": len(native_hashes),
+                     "frame_hashes_match_hstack_reference": True,
+                     "sha256": hashlib.sha256(native.read_bytes()).hexdigest()}
+    (output / "native_hls_archive_grid_validation.json").write_text(json.dumps(native_result, indent=2) + "\n")
+    print(json.dumps(native_result, indent=2))
+
 
 if __name__ == "__main__":
     main()

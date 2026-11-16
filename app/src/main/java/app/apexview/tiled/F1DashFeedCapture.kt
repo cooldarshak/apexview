@@ -47,7 +47,7 @@ internal class F1DashFeedCapture(
     private val maximumVideoHeight: Int = 2160,
     private val segmentTimeToleranceUs: Long = 250_000L,
     dataSourceFactory: DataSource.Factory? = null,
-) {
+) : CmafCaptureLifecycle {
     data class Feed(
         val label: String,
         val manifestUrl: String,
@@ -470,7 +470,7 @@ internal class F1DashFeedCapture(
         }
     }
 
-    fun reset() {
+    override fun reset() {
         initializationByLabel.clear()
         actualProtocols.clear()
         lastCapturedSegmentStartUs = null

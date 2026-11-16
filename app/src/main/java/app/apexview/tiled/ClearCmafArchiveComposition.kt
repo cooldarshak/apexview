@@ -1,0 +1,75 @@
+package app.apexview.tiled
+
+/** Runtime adapter for genuinely clear HEVC CMAF. Protected tracks remain rejected by the composer. */
+internal class ClearCmafArchiveComposition {
+    private var initialization: ByteArray? = null
+    private val history = mutableListOf<ProtectedHevcLiveComposition.OutputFragment>()
+    private var sequence = 1L
+    private val sourceHistory = mutableMapOf<String, MutableList<ByteArray>>()
+    var status: String = "WAITING_FOR_CLEAR_CMAF"
+        private set
+
+    fun compose(feeds: List<HevcClearCmafGridComposer.Feed>) {
+        val source = CmafBoxInspector.inspect(feeds.first().initializationSegment)
+        val track = source.tracks.single { it.handler == "vide" }
+        require(!track.encrypted) { "Clear runtime rejects encrypted source tracks" }
+        val fragment = CmafBoxInspector.inspect(feeds.first().mediaFragments.first(), source).fragments.single()
+        val timescale = requireNotNull(track.timescale)
+        val sampleDuration = fragment.sampleTimings.map { requireNotNull(it.durationTicks) }.distinct().single()
+        val divisor = java.math.BigInteger.valueOf(timescale).gcd(java.math.BigInteger.valueOf(sampleDuration)).longValueExact()
+        val columns = if (feeds.size == 4) 2 else feeds.size
+        val rows = feeds.size / columns
+        val independentlyDecodable = fragment.sampleTimings.first().sampleFlags?.let { (it and 0x00010000L) == 0L } == true
+        val previous = if (independentlyDecodable) 0 else sourceHistory[feeds.first().label]?.size ?: 0
+        require(previous < 3) { "Clear HLS archive did not provide a random-access picture within the bounded source window" }
+        val composingFeeds = feeds.map { feed ->
+            feed.copy(mediaFragments = (if (independentlyDecodable) emptyList() else sourceHistory[feed.label].orEmpty()) + feed.mediaFragments)
+        }
+        val output = HevcClearCmafGridComposer.compose(HevcClearCmafGridComposer.Request(
+            composingFeeds, HevcOutputGridDimensions(columns, rows),
+            feeds.indices.map { HevcTizenGridComposer.CellSelection(it, 0, it % columns, it / columns) },
+            firstOutputSequenceNumber = sequence - previous,
+            frameRateNumerator = (timescale / divisor).toInt(), frameRateDenominator = (sampleDuration / divisor).toInt()
+        ))
+        val initReport = CmafBoxInspector.inspect(output.initializationSegment)
+        val outputTrack = initReport.tracks.single()
+        output.mediaFragments.take(previous).forEach { it.fill(0) }
+        val newFragments = output.mediaFragments.drop(previous).mapIndexed { index, bytes ->
+            val metadata = CmafBoxInspector.inspect(bytes, initReport).fragments.single()
+            ProtectedHevcLiveComposition.OutputFragment(sequence + index, bytes, timescale,
+                requireNotNull(metadata.baseDecodeTimeTicks), requireNotNull(metadata.totalDurationTicks), metadata.sampleCount,
+                requireNotNull(outputTrack.width), requireNotNull(outputTrack.height), feeds.associate { it.label to 0L })
+        }
+        try {
+            history.lastOrNull()?.let { previous ->
+                require(previous.baseDecodeTimeTicks + previous.durationTicks == newFragments.first().baseDecodeTimeTicks) {
+                    "Clear archive output is not decode-time contiguous"
+                }
+                require(initialization!!.contentEquals(output.initializationSegment)) { "Clear archive initialization changed" }
+            }
+            if (initialization == null) initialization = output.initializationSegment.copyOf()
+            history += newFragments
+            feeds.forEach { feed ->
+                val stored = sourceHistory.getOrPut(feed.label) { mutableListOf() }
+                if (independentlyDecodable) { stored.forEach { it.fill(0) }; stored.clear() }
+                stored += feed.mediaFragments.map { it.copyOf() }
+            }
+            sequence += newFragments.size
+            while (history.size > 3) history.removeAt(0).zero()
+            status = "CLEAR_HEVC_CMAF_COMPOSED_NOT_YET_PLAYED"
+        } catch (error: Throwable) { newFragments.forEach { it.zero() }; throw error
+        } finally { output.initializationSegment.fill(0) }
+    }
+
+    fun hasOutput(): Boolean = initialization != null && history.isNotEmpty()
+
+    fun outputWindow(): ProtectedHevcLiveComposition.OutputWindow? = initialization?.let {
+        ProtectedHevcLiveComposition.OutputWindow(it.copyOf(), history.map { fragment -> fragment.detached() })
+    }
+
+    fun reset() {
+        initialization?.fill(0); initialization = null
+        history.forEach { it.zero() }; history.clear()
+        sourceHistory.values.flatten().forEach { it.fill(0) }; sourceHistory.clear(); sequence = 1L; status = "WAITING_FOR_CLEAR_CMAF"
+    }
+}
