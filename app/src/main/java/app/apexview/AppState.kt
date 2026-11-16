@@ -311,6 +311,7 @@ class AppState(
     private var f1DashCaptureJob: Job? = null
     var singleDecoderDiagnostic by mutableStateOf<String?>(null)
         private set
+    val observedActiveVideoDecoders get() = tiles.sumOf { it.feed.activeVideoDecoderCount }
     private var f1DashCapture: F1DashFeedCapture? = null
     private var protectedCompositionHost: Tile? = null
     private var protectedCompositionAudioMaster: Tile? = null
@@ -1448,7 +1449,6 @@ class AppState(
                 append("HEVC/CMAF preflight: " + if (preflightPassed) "PASS\n" else "${snapshot?.detail ?: "VALIDATING"}\n")
                 append("Source decoders released (callbacks): $releasedCount\n")
                 append("Composed decoder: ${composedCodec ?: "NOT OBSERVED"}\n")
-                append("Active video decoders (app callbacks): ${tiles.sumOf { it.feed.activeVideoDecoderCount }}\n")
                 append("First composed frame: ${if (composedFirstFrameSeen) "YES" else "NO"}\n")
                 append("Playback: $playback")
                 terminalReason?.let { append("\n$it") }

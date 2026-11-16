@@ -1457,6 +1457,7 @@ private fun LayoutSheet(app: AppState) {
             Text("Layout", style = Type.title2)
             app.singleDecoderDiagnostic?.let { diagnostic ->
                 Text(diagnostic, style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
+                Text("Active video decoders (app callbacks): ${app.observedActiveVideoDecoders}", style = Type.footnote)
             }
             val n = app.tiles.size
             val hasSaved = app.savedLayout(n) != null
