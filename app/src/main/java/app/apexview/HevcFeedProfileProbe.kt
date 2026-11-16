@@ -237,13 +237,12 @@ internal object HevcFeedProfileCapture {
                     track.handler == "vide" && track.width == expected.width && track.height == expected.height
                 }
             }
-            if (matching.size == 1) return matching.single()
-            // Multiple matching init segments are still ambiguous; do not parse media against
-            // whichever representation happened to arrive last.
-            if (matching.size > 1) return null
+            // Never fall back to a lone but differently sized representation. Media3's selected
+            // format is authoritative for the player; a 480x270 init segment must not be treated
+            // as the init segment for a 1920x1080 stream just because it arrived first.
+            return matching.singleOrNull()
         }
-        // A single observed representation is safe to use. With multiple candidates and no
-        // exact Media3 format match, fail closed rather than pairing fragments with the wrong hvcC.
+        // Without a selected Media3 format, only a single observed representation is unambiguous.
         return reports.singleOrNull()
     }
 
@@ -623,7 +622,7 @@ internal object HevcFeedProfileCapture {
             return when {
                 exact.size == 1 -> exact.single()
                 exact.size > 1 -> null
-                candidates.size == 1 -> candidates.single()
+                expected == null && candidates.size == 1 -> candidates.single()
                 else -> null
             }
         }
@@ -637,7 +636,11 @@ internal object HevcFeedProfileCapture {
             val track = selectedTrack(label, state)
             val fragment = track?.trackId?.let { state?.latestFragments?.get(it) }
             if (track == null) {
-                if (candidates.size > 1) {
+                if (candidates.isNotEmpty() && expected != null &&
+                    candidates.none { it.width == expected.width && it.height == expected.height }) {
+                    lines += "$label: CMAF_REPRESENTATION_NOT_FOUND; Media3Format=${expected.width}x${expected.height}; observed=" +
+                        candidates.joinToString("|") { "${it.width ?: 0}x${it.height ?: 0}/track=${it.trackId ?: "?"}/timescale=${it.timescale ?: "?"}" }
+                } else if (candidates.size > 1) {
                     lines += "$label: CMAF_REPRESENTATION_AMBIGUOUS; Media3Format=${expected?.width ?: "unknown"}x${expected?.height ?: "unknown"}; candidates=" +
                         candidates.joinToString("|") { "${it.width ?: 0}x${it.height ?: 0}/track=${it.trackId ?: "?"}/timescale=${it.timescale ?: "?"}" }
                 }
