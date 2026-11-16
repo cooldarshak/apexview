@@ -87,7 +87,7 @@ class HevcFragmentSequenceCompatibilityTest {
 
         val referenceMismatch = sequence(
             90_000, listOf(0, 6_000), 3_000, listOf(0, 1, 2, 3),
-            referenceOverrides = mapOf(2 to listOf(HevcSliceHeaderParser.ReferencePicture(-1, false)))
+            referenceOverrides = mapOf(2 to listOf(HevcSliceHeaderParser.ReferencePicture(deltaPoc = -1, pocLsb = null, usedByCurrent = true, longTerm = false)))
         )
         val referenceResult = HevcFragmentSequenceCompatibility.compare(first, referenceMismatch)
         assertFalse(referenceResult.compatible)
@@ -214,7 +214,7 @@ class HevcFragmentSequenceCompatibilityTest {
                 sliceType = if (index == 0) 2 else 1,
                 noOutputOfPriorPictures = if (index == 0) true else null,
                 references = referenceOverrides[index] ?: if (index == 0) emptyList()
-                    else listOf(HevcSliceHeaderParser.ReferencePicture(-1, false)),
+                    else listOf(HevcSliceHeaderParser.ReferencePicture(deltaPoc = -1, pocLsb = null, usedByCurrent = true, longTerm = false)),
                 picOutputFlag = true,
                 shortTermRpsFromSps = false,
                 shortTermRpsIndex = null

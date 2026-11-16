@@ -182,10 +182,6 @@ internal object HevcFragmentSequenceCompatibility {
             reasons += "parsed HEVC picture count does not match the fragment sample count"
         }
         sequence.pictures.forEachIndexed { index, picture ->
-            if (picture.pictureOrderCount < 0L) {
-                // HEVC POC can be negative after a legal wrap/reordering pattern, so this is
-                // diagnostic only; it must not be used as a rejection condition.
-            }
             if (picture.temporalIdPlus1 !in 1..7) {
                 reasons += "sample $index temporal_id_plus1 is outside the HEVC range"
             }
