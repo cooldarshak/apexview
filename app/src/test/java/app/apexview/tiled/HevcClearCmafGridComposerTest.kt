@@ -85,10 +85,26 @@ class HevcClearCmafGridComposerTest {
         assertEquals(180_000L, report.fragments.single().totalDurationTicks)
         assertTrue(report.fragments.single().timingComplete)
 
+        val dashPackage = HevcComposedDashPackageBuilder.build(
+            output.initializationSegment,
+            output.mediaFragments
+        )
+        assertEquals(1920, dashPackage.width)
+        assertEquals(540, dashPackage.height)
+        assertEquals(50, dashPackage.sampleCount)
+        assertEquals(output.fragmentCount, dashPackage.fragmentCount)
+        assertEquals(3, dashPackage.resources.size)
+        assertEquals(1, Regex("<Representation ").findAll(dashPackage.manifest).count())
+        assertEquals(output.fragmentCount, Regex("<SegmentURL ").findAll(dashPackage.manifest).count())
+        assertTrue(dashPackage.manifest.contains("codecs=\"hvc1\""))
+        assertTrue(dashPackage.manifest.contains("sourceURL=\"init.mp4\""))
+        assertFalse("Clear output must not advertise DRM protection", dashPackage.manifest.contains("ContentProtection"))
+
         val evidenceDirectory = System.getenv("APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR")
             ?.takeIf { it.isNotBlank() }?.let(::File)
         assumeTrue("CI evidence directory is not configured", evidenceDirectory != null)
         assertTrue(evidenceDirectory!!.mkdirs() || evidenceDirectory.isDirectory)
+        File(evidenceDirectory, "hevc_tizen_cmaf_grid.mpd").writeText(dashPackage.manifest)
         File(evidenceDirectory, "hevc_tizen_cmaf_grid.mp4").writeBytes(
             output.initializationSegment + output.mediaFragments.single()
         )

@@ -1,6 +1,6 @@
 # F1 HEVC Grid Composer: implementation plan
 
-Status: Architecture direction selected; implementation not yet started. This is a plan, not evidence that real F1 streams have already been composed or decoded.
+Status: WP0-WP5 have a green synthetic clear-CMAF composition path. WP6 now has an isolated Media3 single-player DASH adapter and a physical-device instrumentation harness in progress; its exact-commit CI and device validation are still pending. The protected F1 CBCS packaging path and actual F1 feed playback remain open. This plan is not evidence that real F1 streams have already been composed or decoded.
 
 ## Objective
 

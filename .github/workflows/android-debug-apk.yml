@@ -138,6 +138,16 @@ jobs:
             --fixture-dir "$RUNNER_TEMP/apexview-hevc-fixtures" \
             --output-dir "$RUNNER_TEMP/apexview-hevc-output-parameters"
 
+      - name: Stage composed clear CMAF for Media3 device instrumentation
+        run: |
+          set -euo pipefail
+          TILE_FIXTURE_DIR="$RUNNER_TEMP/apexview-hevc-tile-fixtures"
+          OUTPUT_PARAMETER_DIR="$RUNNER_TEMP/apexview-hevc-output-parameters"
+          test -s "$OUTPUT_PARAMETER_DIR/hevc_tizen_cmaf_grid.mp4"
+          test -s "$OUTPUT_PARAMETER_DIR/hevc_tizen_cmaf_grid.mpd"
+          cp "$OUTPUT_PARAMETER_DIR/hevc_tizen_cmaf_grid.mp4" "$TILE_FIXTURE_DIR/hevc_tizen_cmaf_grid.mp4"
+          ls -lh "$TILE_FIXTURE_DIR/hevc_tizen_cmaf_grid.mp4"
+
       - name: Configure persistent APK signing
         id: apk_signing
         env:
