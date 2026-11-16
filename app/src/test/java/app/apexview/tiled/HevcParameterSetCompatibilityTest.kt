@@ -121,7 +121,7 @@ class HevcParameterSetCompatibilityTest {
         assertTrue(profileResult.reasons.any { it.contains("profile or tier") })
     }
 
-    @Test fun acceptsDifferentLevelIdsButRejectsDifferentReferenceAndTimingStructures() {
+    @Test fun acceptsDifferentLevelIdsAndIndependentVuiTimingButRejectsDifferentReferenceStructures() {
         val f = fixture(tilesEnabled = false)
         val otherLevel = f.sps.copy(
             profileTierLevel = f.sps.profileTierLevel.copy(levelIdc = 123)
@@ -172,8 +172,19 @@ class HevcParameterSetCompatibilityTest {
         val timingResult = HevcParameterSetCompatibility.compare(
             f.vps, timed, f.pps, f.vps, differentTiming, f.pps
         )
-        assertFalse(timingResult.compatible)
-        assertTrue(timingResult.reasons.any { it.contains("VUI or picture-timing") })
+        // VUI timing belongs to the source track. Different complete timing metadata is
+        // allowed at the coded-cell parameter-set layer; WP4 validates sample timestamps.
+        assertTrue(timingResult.reasons.toString(), timingResult.compatible)
+
+        // Do not silently accept a VUI that the bounded parser could not fully understand.
+        val incompleteVui = timed.copy(vuiMetadata = null)
+        val incompleteVuiResult = HevcParameterSetCompatibility.compare(
+            f.vps, incompleteVui, f.pps, f.vps, timed, f.pps
+        )
+        assertFalse(incompleteVuiResult.compatible)
+        assertTrue(incompleteVuiResult.reasons.any {
+            it.contains("VUI metadata is present but could not be parsed completely")
+        })
     }
 
     @Test fun acceptsDifferentSourceCropsButRejectsInvalidTileGeometryAndUnsupportedSliceSyntax() {
