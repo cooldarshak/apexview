@@ -126,6 +126,12 @@ jobs:
 
       # This repository must sign every distributable APK with the same private key. Do not
       # fall back to the ephemeral debug.keystore on a hosted runner: Android will reject updates.
+      - name: Independently decode clear HEVC CMAF init and media fragments
+        run: |
+          python3 tools/validate_hevc_clear_cmaf.py \
+            --fixture-dir "$RUNNER_TEMP/apexview-hevc-tile-fixtures" \
+            --output-dir "$RUNNER_TEMP/apexview-hevc-output-parameters"
+
       - name: Configure persistent APK signing
         id: apk_signing
         env:
