@@ -1,6 +1,7 @@
 package app.apexview.tiled
 
 import java.math.BigInteger
+import java.util.Collections
 
 /**
  * Aligns independent HEVC CMAF feed windows by full POC and parsed picture identity, not by
@@ -12,10 +13,13 @@ import java.math.BigInteger
  */
 internal object HevcPictureSequenceAligner {
     data class PictureSample(
+        /** Sample index within the inspected CMAF fragment. */
         val sampleIndex: Int,
         val timing: CmafBoxInspector.SampleTiming,
         val picture: HevcPictureIdentityCompatibility.PictureIdentity,
-        val irapAnchorPictureOrderCount: Long?
+        val irapAnchorPictureOrderCount: Long?,
+        /** Monotonic ordinal across the complete feed sequence, not just this fragment. */
+        val sequenceSampleOrdinal: Long = sampleIndex.toLong()
     )
 
     data class FeedWindow(
@@ -24,10 +28,21 @@ internal object HevcPictureSequenceAligner {
         val samples: List<PictureSample>
     )
 
+    data class AlignedSampleEvidence(
+        val sampleIndex: Int,
+        val sequenceSampleOrdinal: Long,
+        val timescale: Long,
+        val timing: CmafBoxInspector.SampleTiming,
+        val picture: HevcPictureIdentityCompatibility.PictureIdentity,
+        val irapAnchorPictureOrderCount: Long?
+    )
+
     data class PictureMatch(
         val masterSampleIndex: Int,
         val sampleIndicesByFeed: Map<String, Int>,
-        val fullPictureOrderCount: Long
+        val fullPictureOrderCount: Long,
+        /** Exact sample evidence inspected by the aligner for this picture in every feed. */
+        val sampleEvidenceByFeed: Map<String, AlignedSampleEvidence> = emptyMap()
     )
 
     data class ExactOffset(
@@ -37,13 +52,37 @@ internal object HevcPictureSequenceAligner {
         val offsetMillis: Long?
     )
 
-    data class Result(
+    /**
+     * A proof object can only be minted by this aligner. Collections exposed from it are
+     * immutable snapshots; composer-side validation still checks all selected sample evidence.
+     */
+    class Result internal constructor(
         val compatible: Boolean,
         val masterFeedId: String?,
         val irapAnchorPictureOrderCount: Long?,
-        val matches: List<PictureMatch>,
-        val offsetsByFeed: Map<String, ExactOffset>,
-        val reasons: List<String>
+        matches: List<PictureMatch>,
+        offsetsByFeed: Map<String, ExactOffset>,
+        reasons: List<String>,
+        private val issuerToken: Any
+    ) {
+        val matches: List<PictureMatch> = Collections.unmodifiableList(matches.toList())
+        val offsetsByFeed: Map<String, ExactOffset> =
+            Collections.unmodifiableMap(LinkedHashMap(offsetsByFeed))
+        val reasons: List<String> = Collections.unmodifiableList(reasons.toList())
+
+        internal fun wasIssuedBy(expectedIssuer: Any): Boolean = issuerToken === expectedIssuer
+    }
+
+    private val proofIssuer = Any()
+
+    fun isAuthentic(result: Result): Boolean = result.wasIssuedBy(proofIssuer)
+
+    private fun snapshotPicture(
+        picture: HevcPictureIdentityCompatibility.PictureIdentity
+    ) = picture.copy(
+        references = Collections.unmodifiableList(picture.references.toList()),
+        list0Modification = Collections.unmodifiableList(picture.list0Modification.toList()),
+        list1Modification = Collections.unmodifiableList(picture.list1Modification.toList())
     )
 
     private data class Candidate(val master: PictureSample, val byFeed: List<PictureSample>)
@@ -187,12 +226,27 @@ internal object HevcPictureSequenceAligner {
         }
 
         val matches = bestRun.map { candidate ->
+            val sampleIndices = feeds.indices.associate { index ->
+                feeds[index].feedId to candidate.byFeed[index].sampleIndex
+            }
+            val evidence = feeds.indices.associate { index ->
+                val feed = feeds[index]
+                val sample = candidate.byFeed[index]
+                feed.feedId to AlignedSampleEvidence(
+                    sampleIndex = sample.sampleIndex,
+                    sequenceSampleOrdinal = sample.sequenceSampleOrdinal,
+                    timescale = feed.timescale,
+                    timing = sample.timing.copy(),
+                    picture = snapshotPicture(sample.picture),
+                    irapAnchorPictureOrderCount = sample.irapAnchorPictureOrderCount
+                )
+            }
             PictureMatch(
                 masterSampleIndex = candidate.master.sampleIndex,
-                sampleIndicesByFeed = feeds.indices.associate { index ->
-                    feeds[index].feedId to candidate.byFeed[index].sampleIndex
-                },
-                fullPictureOrderCount = candidate.master.picture.pictureOrderCount
+                sampleIndicesByFeed = Collections.unmodifiableMap(LinkedHashMap(sampleIndices)),
+                fullPictureOrderCount = candidate.master.picture.pictureOrderCount,
+                sampleEvidenceByFeed =
+                    Collections.unmodifiableMap(LinkedHashMap(evidence))
             )
         }
         return Result(
@@ -201,7 +255,8 @@ internal object HevcPictureSequenceAligner {
             irapAnchorPictureOrderCount = sharedAnchorPoc,
             matches = if (reasons.isEmpty()) matches else emptyList(),
             offsetsByFeed = if (reasons.isEmpty()) offsets else emptyMap(),
-            reasons = reasons.distinct().take(MAX_REASONS)
+            reasons = reasons.distinct().take(MAX_REASONS),
+            issuerToken = proofIssuer
         )
     }
 
@@ -224,10 +279,16 @@ internal object HevcPictureSequenceAligner {
                 " has no consistent verified temporal-id-zero IRAP POC anchor"
         }
         feed.samples.forEachIndexed { index, sample ->
-            if (sample.sampleIndex < 0 ||
-                (index > 0 && sample.sampleIndex.toLong() !=
-                    feed.samples[index - 1].sampleIndex.toLong() + 1L)) {
-                reasons += context + ": feed " + feed.feedId + " sample ordinals are not contiguous"
+            val previous = feed.samples.getOrNull(index - 1)
+            val expectedSequenceOrdinal = previous?.let {
+                runCatching { Math.addExact(it.sequenceSampleOrdinal, 1L) }.getOrNull()
+            }
+            if (sample.sampleIndex < 0 || sample.sequenceSampleOrdinal < 0L ||
+                (previous != null &&
+                    sample.sampleIndex.toLong() != previous.sampleIndex.toLong() + 1L) ||
+                (previous != null && expectedSequenceOrdinal != sample.sequenceSampleOrdinal)) {
+                reasons += context + ": feed " + feed.feedId +
+                    " fragment indices/global sequence sample ordinals are not contiguous"
             }
             val timing = sample.timing
             if (timing.decodeTimeTicks == null || timing.presentationTimeTicks == null ||
@@ -327,7 +388,8 @@ internal object HevcPictureSequenceAligner {
         irapAnchorPictureOrderCount = irapAnchorPoc,
         matches = emptyList(),
         offsetsByFeed = emptyMap(),
-        reasons = reasons.distinct().take(MAX_REASONS)
+        reasons = reasons.distinct().take(MAX_REASONS),
+        issuerToken = proofIssuer
     )
 
     private const val MIN_FEEDS = 2

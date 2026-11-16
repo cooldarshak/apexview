@@ -24,7 +24,9 @@ internal object ProtectedHevcPictureComposer {
         /** Per-feed tracker advanced through preceding samples in decode order. */
         val pocTracker: HevcPocTracker,
         /** Required for CRA (NAL type 21) when NoRaslOutputFlag is known by the caller. */
-        val noRaslOutputFlag: Boolean? = null
+        val noRaslOutputFlag: Boolean? = null,
+        /** Monotonic ordinal across the feed's complete CMAF sequence. Required with alignment proof. */
+        val sequenceSampleOrdinal: Long? = null
     )
 
     data class Contribution(
@@ -70,7 +72,8 @@ internal object ProtectedHevcPictureComposer {
         outputSps: HevcParameterSets.SpsMetadata,
         outputPps: HevcParameterSets.PpsMetadata,
         outputNalLengthSize: Int = 4,
-        context: String = "Protected HEVC picture composition"
+        context: String = "Protected HEVC picture composition",
+        alignmentProof: HevcPictureSequenceAligner.Result? = null
     ): Result {
         require(feeds.size in MIN_FEEDS..MAX_FEEDS) {
             "$context: between $MIN_FEEDS and $MAX_FEEDS protected feeds are supported"
@@ -102,6 +105,9 @@ internal object ProtectedHevcPictureComposer {
             prepareFeed(input, "feed $index (" + input.feedId + ")", context)
         }
         val first = prepared.first()
+        if (alignmentProof != null) {
+            validateAlignmentProof(alignmentProof, prepared, context)
+        }
 
         prepared.drop(1).forEachIndexed { index, candidate ->
             val label = "feed " + (index + 1) + " (" + candidate.input.feedId + ")"
@@ -118,7 +124,10 @@ internal object ProtectedHevcPictureComposer {
                     parameterCompatibility.reasons.joinToString("; ")
             }
             compareProtection(first, candidate, label, context)
-            compareTiming(first, candidate, label, context)
+            compareTiming(
+                first, candidate, label, context,
+                allowProvenTimestampOffset = alignmentProof != null
+            )
             val pictureCompatibility = HevcPictureIdentityCompatibility.compare(
                 listOf(first.pictureIdentity), listOf(candidate.pictureIdentity)
             )
@@ -356,6 +365,113 @@ internal object ProtectedHevcPictureComposer {
         )
     }
 
+    private fun validateAlignmentProof(
+        proof: HevcPictureSequenceAligner.Result,
+        prepared: List<PreparedFeed>,
+        context: String
+    ) {
+        require(HevcPictureSequenceAligner.isAuthentic(proof)) {
+            "$context: alignment proof was not issued by the HEVC sequence aligner"
+        }
+        require(proof.compatible && proof.reasons.isEmpty() && proof.matches.isNotEmpty()) {
+            "$context: alignment proof is incomplete or rejected"
+        }
+
+        val feedIds = prepared.map { it.input.feedId }
+        val feedIdSet = feedIds.toSet()
+        require(proof.masterFeedId == feedIds.first()) {
+            "$context: designated main feed differs from the alignment proof master"
+        }
+        require(proof.offsetsByFeed.keys == feedIdSet) {
+            "$context: alignment proof does not contain exactly the selected feeds"
+        }
+        val anchorPoc = requireNotNull(proof.irapAnchorPictureOrderCount) {
+            "$context: alignment proof has no verified IRAP epoch"
+        }
+        val masterOffset = proof.offsetsByFeed[feedIds.first()]
+        require(masterOffset != null && masterOffset.numerator == BigInteger.ZERO &&
+            masterOffset.denominator == BigInteger.ONE) {
+            "$context: alignment proof main-feed offset is invalid"
+        }
+
+        val picturePoc = prepared.first().pictureIdentity.pictureOrderCount
+        val matching = proof.matches.filter { it.fullPictureOrderCount == picturePoc }
+        require(matching.size == 1) {
+            "$context: alignment proof does not identify exactly one selected full-POC picture"
+        }
+        val match = matching.single()
+        require(match.masterSampleIndex == prepared.first().input.sampleIndex) {
+            "$context: alignment proof main-feed fragment sample index is stale"
+        }
+        require(match.sampleIndicesByFeed.keys == feedIdSet &&
+            match.sampleEvidenceByFeed.keys == feedIdSet) {
+            "$context: alignment proof sample evidence is incomplete or contains unexpected feeds"
+        }
+
+        prepared.forEach { feed ->
+            val input = feed.input
+            val evidence = match.sampleEvidenceByFeed.getValue(input.feedId)
+            require(input.sequenceSampleOrdinal != null &&
+                input.sequenceSampleOrdinal == evidence.sequenceSampleOrdinal) {
+                "$context: " + input.feedId + " global sequence sample ordinal is missing or stale"
+            }
+            require(input.sampleIndex == evidence.sampleIndex &&
+                match.sampleIndicesByFeed[input.feedId] == evidence.sampleIndex) {
+                "$context: " + input.feedId + " selected fragment sample is outside the alignment proof"
+            }
+            require(feed.timescale == evidence.timescale && feed.timing == evidence.timing) {
+                "$context: " + input.feedId + " selected sample timing differs from the inspected alignment evidence"
+            }
+            require(feed.pictureIdentity == evidence.picture) {
+                "$context: " + input.feedId + " selected full picture identity differs from the alignment proof"
+            }
+            require(evidence.irapAnchorPictureOrderCount == anchorPoc &&
+                feed.pocTrackerAfter.hasIrapAnchor &&
+                feed.pocTrackerAfter.irapAnchorPictureOrderCount == anchorPoc) {
+                "$context: " + input.feedId + " selected sample belongs to a different IRAP POC epoch"
+            }
+        }
+
+        val master = prepared.first()
+        prepared.drop(1).forEach { feed ->
+            val expected = proof.offsetsByFeed.getValue(feed.input.feedId)
+            val dtsOffset = exactTimestampOffset(
+                requireNotNull(master.timing.decodeTimeTicks), master.timescale,
+                requireNotNull(feed.timing.decodeTimeTicks), feed.timescale
+            )
+            val ptsOffset = exactTimestampOffset(
+                requireNotNull(master.timing.presentationTimeTicks), master.timescale,
+                requireNotNull(feed.timing.presentationTimeTicks), feed.timescale
+            )
+            require(dtsOffset.first == expected.numerator &&
+                dtsOffset.second == expected.denominator) {
+                "$context: " + feed.input.feedId + " actual DTS offset differs from the exact proven offset"
+            }
+            require(ptsOffset.first == expected.numerator &&
+                ptsOffset.second == expected.denominator) {
+                "$context: " + feed.input.feedId + " actual PTS offset differs from the exact proven offset"
+            }
+        }
+    }
+
+    private fun exactTimestampOffset(
+        masterTicks: Long,
+        masterTimescale: Long,
+        feedTicks: Long,
+        feedTimescale: Long
+    ): Pair<BigInteger, BigInteger> {
+        require(masterTimescale > 0L && feedTimescale > 0L) {
+            "Timestamp timescales must be positive"
+        }
+        val numerator = BigInteger.valueOf(feedTicks)
+            .multiply(BigInteger.valueOf(masterTimescale))
+            .subtract(BigInteger.valueOf(masterTicks).multiply(BigInteger.valueOf(feedTimescale)))
+        val denominator = BigInteger.valueOf(masterTimescale)
+            .multiply(BigInteger.valueOf(feedTimescale))
+        val divisor = numerator.abs().gcd(denominator)
+        return numerator.divide(divisor) to denominator.divide(divisor)
+    }
+
     private fun compareProtection(
         first: PreparedFeed,
         second: PreparedFeed,
@@ -388,14 +504,17 @@ internal object ProtectedHevcPictureComposer {
         first: PreparedFeed,
         second: PreparedFeed,
         label: String,
-        context: String
+        context: String,
+        allowProvenTimestampOffset: Boolean
     ) {
         val a = first.timing
         val b = second.timing
-        compareMediaTime("decode time", a.decodeTimeTicks, first.timescale,
-            b.decodeTimeTicks, second.timescale, label, context)
-        compareMediaTime("presentation time", a.presentationTimeTicks, first.timescale,
-            b.presentationTimeTicks, second.timescale, label, context)
+        if (!allowProvenTimestampOffset) {
+            compareMediaTime("decode time", a.decodeTimeTicks, first.timescale,
+                b.decodeTimeTicks, second.timescale, label, context)
+            compareMediaTime("presentation time", a.presentationTimeTicks, first.timescale,
+                b.presentationTimeTicks, second.timescale, label, context)
+        }
         compareMediaTime("sample duration", a.durationTicks, first.timescale,
             b.durationTicks, second.timescale, label, context)
         compareMediaTime("composition offset", a.compositionOffsetTicks, first.timescale,
