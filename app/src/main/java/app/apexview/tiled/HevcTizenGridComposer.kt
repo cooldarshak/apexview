@@ -50,6 +50,7 @@ internal object HevcTizenGridComposer {
         val tileColumnWidthsInCtbs: List<Int>,
         val tileRowHeightsInCtbs: List<Int>,
         val pictures: List<ComposedPicture>,
+        val sourcePictureIdentities: List<List<HevcPictureIdentityCompatibility.PictureIdentity>>,
         val annexB: ByteArray,
         val outputLoopFilterAcrossTilesEnabled: Boolean
     )
@@ -276,6 +277,7 @@ internal object HevcTizenGridComposer {
             tileColumnWidthsInCtbs = generated.tileColumnWidthsInCtbs,
             tileRowHeightsInCtbs = generated.tileRowHeightsInCtbs,
             pictures = outputPictures,
+            sourcePictureIdentities = feeds.map { it.pictureIdentities },
             annexB = outputStream.toByteArray(),
             outputLoopFilterAcrossTilesEnabled = outputPps.loopFilterAcrossTiles == true
         )

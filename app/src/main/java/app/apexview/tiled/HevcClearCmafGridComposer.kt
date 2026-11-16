@@ -62,8 +62,7 @@ internal object HevcClearCmafGridComposer {
         val parameterSets: List<ByteArray>,
         val fragments: List<SourceFragment>,
         val inspectorFragments: List<CmafBoxInspector.FragmentMetadata>,
-        val annexB: ByteArray,
-        val pictureIdentities: List<HevcPictureIdentityCompatibility.PictureIdentity>
+        val annexB: ByteArray
     )
 
     fun compose(request: Request): Output {
@@ -78,19 +77,6 @@ internal object HevcClearCmafGridComposer {
 
         val parsedFeeds = request.feeds.mapIndexed { index, feed -> parseFeed(feed, index) }
         val first = parsedFeeds.first()
-        parsedFeeds.drop(1).forEachIndexed { offset, candidate ->
-            require(candidate.fragments.size == first.fragments.size) {
-                "Feed ${offset + 1} fragment count differs from feed 0"
-            }
-            val compatibility = HevcFragmentSequenceCompatibility.compare(
-                sequence(request.feeds[0].label, first),
-                sequence(request.feeds[offset + 1].label, candidate)
-            )
-            require(compatibility.compatible) {
-                "CMAF feed timing/picture compatibility failed: ${compatibility.reasons.joinToString("; ")}"
-            }
-        }
-
         val composed = HevcTizenGridComposer.composeAnnexBStreams(
             feedStreams = parsedFeeds.map { it.annexB },
             grid = request.outputGrid,
@@ -101,6 +87,21 @@ internal object HevcClearCmafGridComposer {
         )
         require(composed.pictures.size == first.fragments.sumOf { it.samples.size }) {
             "Composed picture count does not match the CMAF sample sequence"
+        }
+        require(composed.sourcePictureIdentities.size == parsedFeeds.size) {
+            "Composer did not return source picture identity for every feed"
+        }
+        parsedFeeds.drop(1).forEachIndexed { offset, candidate ->
+            require(candidate.fragments.size == first.fragments.size) {
+                "Feed ${offset + 1} fragment count differs from feed 0"
+            }
+            val compatibility = HevcFragmentSequenceCompatibility.compare(
+                sequence(request.feeds[0].label, first, composed.sourcePictureIdentities[0]),
+                sequence(request.feeds[offset + 1].label, candidate, composed.sourcePictureIdentities[offset + 1])
+            )
+            require(compatibility.compatible) {
+                "CMAF feed timing/picture compatibility failed: ${compatibility.reasons.joinToString("; ")}"
+            }
         }
 
         val init = HevcClearCmafInitSegmentWriter.write(
@@ -150,12 +151,13 @@ internal object HevcClearCmafGridComposer {
 
     private fun sequence(
         label: String,
-        feed: ParsedFeed
+        feed: ParsedFeed,
+        pictures: List<HevcPictureIdentityCompatibility.PictureIdentity>
     ) = HevcFragmentSequenceCompatibility.FeedSequence(
         label = label,
         track = feed.track,
         fragments = feed.inspectorFragments,
-        pictures = feed.pictureIdentities
+        pictures = pictures
     )
 
     private fun parseFeed(feed: Feed, feedIndex: Int): ParsedFeed {
@@ -230,33 +232,11 @@ internal object HevcClearCmafGridComposer {
             metadata += fragmentMetadata
         }
 
-        val elementaryStream = annexB.toByteArray()
-        val signatures = HevcStreamAlignmentAnalyzer.analyze(elementaryStream)
-        val sampleCount = fragments.sumOf { it.samples.size }
-        require(signatures.size == sampleCount) {
-            "Feed ${feed.label} HEVC picture count does not match CMAF sample count"
-        }
-        val firstSlices = fragments.flatMap { fragment ->
-            fragment.samples.map { sample ->
-                splitLengthPrefixed(sample.bytes, config.nalLengthSize)
-                    .first { HevcBitstream.parseNalHeader(it).type in 0..31 &&
-                        isFirstSlice(it) }
-            }
-        }
-        val spsById = config.sps.associateBy { it.spsId }
-        val ppsById = config.pps.associateBy { it.ppsId }
-        val identities = firstSlices.zip(signatures).map { (nal, signature) ->
-            val ppsId = readSlicePpsId(nal)
-            val pps = requireNotNull(ppsById[ppsId]) { "Slice references unknown PPS $ppsId" }
-            val sps = requireNotNull(spsById[pps.spsId]) { "PPS references unknown SPS ${pps.spsId}" }
-            val header = HevcSliceHeaderParser.parse(nal, sps, pps)
-            HevcPictureIdentityCompatibility.identify(header, signature.poc)
-        }
         require(metadata.sumOf { it.sampleCount } == sampleCount) {
             "Feed ${feed.label} CMAF fragment sample counts are inconsistent"
         }
         return ParsedFeed(
-            track, config, rawParameterSets, fragments, metadata, elementaryStream, identities
+            track, config, rawParameterSets, fragments, metadata, annexB.toByteArray()
         )
     }
 
