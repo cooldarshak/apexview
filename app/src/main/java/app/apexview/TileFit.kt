@@ -15,6 +15,8 @@ class TileFit {
     @Volatile var height = Int.MAX_VALUE
     /** This feed's part of the connection, while other feeds are downloading pictures too. */
     @Volatile var share = 1f
+    /** 0 means automatic tile fitting; otherwise prefer the best available height up to this cap. */
+    @Volatile var qualityHeight = 0
 }
 
 /**
@@ -27,6 +29,14 @@ internal fun bandwidthShares(areas: List<Float>): List<Float> {
 }
 
 private const val MIN_BANDWIDTH_SHARE = 0.1f
+
+/** Highest rendition height available without exceeding the user's manual quality choice. */
+internal fun highestAvailableVideoHeightAtOrBelow(
+    renditions: List<Pair<Int, Int>>,
+    maxHeight: Int,
+): Int? = renditions.mapNotNull { (_, height) ->
+    height.takeIf { it > 0 && it <= maxHeight }
+}.maxOrNull()
 
 /**
  * The most pixels a tile of this size needs: the smallest rendition that fills it, or the largest
@@ -73,11 +83,20 @@ class TileFitSelectionFactory(private val fit: TileFit) : AdaptiveTrackSelection
         Clock.DEFAULT,
     ) {
         override fun canSelectFormat(format: Format, trackBitrate: Int, effectiveBitrate: Long): Boolean {
-            val fits = format.width <= 0 || format.height <= 0 ||
-                format.width * format.height <= pixelCeiling(
-                    (0 until length()).map { getFormat(it).let { f -> f.width to f.height } },
-                    fit.width, fit.height,
-                )
+            val availableRenditions = (0 until length()).map {
+                getFormat(it).let { candidate -> candidate.width to candidate.height }
+            }
+            val forcedHeight = fit.qualityHeight.takeIf { it > 0 }?.let {
+                highestAvailableVideoHeightAtOrBelow(availableRenditions, it)
+            }
+            val fits = if (forcedHeight != null && format.height > 0) {
+                // Manual quality pins the resolution while AdaptiveTrackSelection can still
+                // move between bitrates at that resolution. Auto retains tile-size fitting.
+                format.height == forcedHeight
+            } else {
+                format.width <= 0 || format.height <= 0 ||
+                    format.width * format.height <= pixelCeiling(availableRenditions, fit.width, fit.height)
+            }
             return fits && super.canSelectFormat(format, trackBitrate, effectiveBitrate)
         }
     }

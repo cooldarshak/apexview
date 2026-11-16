@@ -114,6 +114,8 @@ class FeedPlayer(
     startWithVideo: Boolean = true,
     /** Where a replay starts (ms), set before loading so nothing loads for the wrong spot. */
     startMs: Long = C.TIME_UNSET,
+    /** Auto or a maximum requested video rendition shared by the viewer. */
+    videoQuality: VideoQuality = VideoQuality.AUTO,
 ) {
     var status by mutableStateOf("Starting")
         private set
@@ -148,7 +150,8 @@ class FeedPlayer(
     var buffering by mutableStateOf(true)
         private set
 
-    private val fit = TileFit()
+    private val fit = TileFit().apply { qualityHeight = videoQuality.targetHeight }
+    private var selectedVideoQuality = videoQuality
 
     // Written on the playback thread when the DRM session opens.
     @Volatile private var drmLevel = ""
@@ -249,6 +252,7 @@ class FeedPlayer(
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !startWithVideo)
             .setPreferredAudioLanguage(commentary)
             .setPreferredTextLanguage(commentary)
+            .setMaxVideoSize(videoQuality.maxWidth, videoQuality.maxHeight)
             .build()
         player.addListener(object : Player.Listener {
             override fun onTimelineChanged(timeline: Timeline, reason: Int) {
@@ -458,6 +462,21 @@ class FeedPlayer(
     /** This feed's part of the connection among those showing a picture. */
     fun setBandwidthShare(share: Float) {
         fit.share = share
+    }
+
+    /**
+     * Changes the rendition preference without recreating the player or its Widevine session.
+     * A manual choice caps resolution and pins the adaptive selection to the highest available
+     * height at or below that cap; bitrate adaptation at that height remains enabled.
+     */
+    fun setVideoQuality(value: VideoQuality) {
+        if (selectedVideoQuality == value) return
+        selectedVideoQuality = value
+        fit.qualityHeight = value.targetHeight
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setMaxVideoSize(value.maxWidth, value.maxHeight)
+            .build()
+        refresh()
     }
 
     /** Keeps the picture going at the size it already has, whatever size its window is now. */

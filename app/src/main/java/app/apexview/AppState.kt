@@ -1484,6 +1484,7 @@ class AppState(
         subtitles = settings.subtitles,
         commentary = settings.commentary,
         startWithVideo = startWithVideo,
+        videoQuality = settings.videoQuality,
         startMs = startMs,
     )
 
@@ -3305,6 +3306,14 @@ class AppState(
     var playbackSpeed by mutableStateOf(prefs.getFloat(PREF_SPEED, 1f).takeIf { it in SPEEDS } ?: 1f)
         private set
     var speedSheetOpen by mutableStateOf(false)
+    var qualitySheetOpen by mutableStateOf(false)
+
+    fun chooseVideoQuality(value: VideoQuality) {
+        settings.updateVideoQuality(value)
+        tiles.forEach { it.feed.setVideoQuality(value) }
+        qualitySheetOpen = false
+        showChrome()
+    }
 
     fun chooseSpeed(value: Float) {
         val slower = value < playbackSpeed

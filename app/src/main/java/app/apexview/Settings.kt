@@ -5,6 +5,23 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
+/** Resolution preference applied to every active and newly opened feed. */
+enum class VideoQuality(
+    val label: String,
+    val maxWidth: Int,
+    val maxHeight: Int,
+    val targetHeight: Int,
+) {
+    AUTO("Auto", Int.MAX_VALUE, Int.MAX_VALUE, 0),
+    P720("720p", 1280, 720, 720),
+    P1080("1080p", 1920, 1080, 1080);
+
+    companion object {
+        fun fromPreference(value: String?): VideoQuality =
+            values().firstOrNull { it.name == value } ?: AUTO
+    }
+}
+
 /** Uses the same Leanback/UiMode checks as the viewer and remote-control path. */
 internal fun isTvDevice(context: Context): Boolean =
     context.packageManager.hasSystemFeature("android.software.leanback") ||
@@ -31,9 +48,18 @@ class Settings(context: Context) {
     var votePrompt by mutableStateOf(prefs.getBoolean("votePrompt", true))
         private set
 
+    /** Video rendition cap shared by all feeds and retained for the next session. */
+    var videoQuality by mutableStateOf(VideoQuality.fromPreference(prefs.getString("videoQuality", null)))
+        private set
+
     /** The onboards' speed, in [MPH] or [KMH]. */
     var speedUnit by mutableStateOf(prefs.getString("speedUnit", MPH) ?: MPH)
         private set
+
+    fun updateVideoQuality(value: VideoQuality) {
+        videoQuality = value
+        prefs.edit().putString("videoQuality", value.name).apply()
+    }
 
     fun updatePlatform(value: String) { platform = value; prefs.edit().putString("platform", value).apply() }
     fun updateSoftwareDrm(value: Boolean) { softwareDrm = value; prefs.edit().putBoolean("softwareDrm", value).apply() }

@@ -28,6 +28,18 @@ class TileFitTest {
     }
 
     @Test
+    fun manualQualityChoosesTheRequestedRenditionWhenAvailable() {
+        assertEquals(720, highestAvailableVideoHeightAtOrBelow(renditions, 720))
+        assertEquals(1080, highestAvailableVideoHeightAtOrBelow(renditions, 1080))
+    }
+
+    @Test
+    fun manualQualityFallsBackToTheHighestAvailableRenditionBelowTheCap() {
+        assertEquals(360, highestAvailableVideoHeightAtOrBelow(listOf(640 to 360, 1920 to 1080), 720))
+        assertEquals(null, highestAvailableVideoHeightAtOrBelow(listOf(1920 to 1080), 720))
+    }
+
+    @Test
     fun aFeedAloneHasTheWholeConnection() {
         assertEquals(listOf(1f), bandwidthShares(listOf(1920f * 1080f)))
     }

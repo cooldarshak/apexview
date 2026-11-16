@@ -133,7 +133,7 @@ class HevcFeedProfileProbeTest {
         )
         HevcFeedProfileCapture.record(singlePictureSnapshot)
         assertTrue(HevcFeedProfileCapture.diagnostic.contains("HEVC_TILE_ASSEMBLER_GATE=REJECT"))
-        assertTrue(HevcFeedProfileCapture.diagnostic.contains("tiles are disabled"))
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("no multi-tile grid"))
         HevcFeedProfileCapture.record(secondSnapshot)
 
         val changedPpsSnapshot = secondSnapshot.copy(

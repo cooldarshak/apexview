@@ -524,6 +524,7 @@ fun ViewerScreen(app: AppState) {
     if (app.mapSheetOpen) MapSheet(app)
     if (app.layoutSheetOpen) LayoutSheet(app)
     if (app.speedSheetOpen) SpeedSheet(app)
+    if (app.qualitySheetOpen) VideoQualitySheet(app)
     LaptopPrompt(app)
 }
 
@@ -745,6 +746,17 @@ private fun BottomChrome(app: AppState, cutout: Clearance) {
             }
             Spacer(Modifier.width(4.dp))
             // The speed, always shown; bright when it isn't normal.
+            Text(
+                "Quality ${app.settings.videoQuality.label}",
+                style = Type.footnote.copy(
+                    color = if (app.settings.videoQuality == VideoQuality.AUTO) Ink.secondary else Ink.primary,
+                    fontWeight = if (app.settings.videoQuality == VideoQuality.AUTO) null else FontWeight.SemiBold,
+                ),
+                modifier = Modifier
+                    .semantics { contentDescription = "Video quality ${app.settings.videoQuality.label}" }
+                    .pressable { app.qualitySheetOpen = true; app.showChrome() }
+                    .padding(8.dp),
+            )
             Text(
                 speedLabel(app.playbackSpeed),
                 style = Type.footnote.copy(color = if (app.playbackSpeed == 1f) Ink.secondary else Ink.primary, fontWeight = if (app.playbackSpeed == 1f) null else FontWeight.SemiBold),
@@ -1375,6 +1387,48 @@ private fun SpeedSheet(app: AppState) {
             if (app.playbackSpeed != 1f) Row(Modifier.padding(top = 16.dp)) {
                 SecondaryButton("Back to normal speed") { app.chooseSpeed(1f); app.speedSheetOpen = false }
             }
+        }
+    }
+}
+
+/** Video rendition shared by every feed; Auto keeps the existing tile-fit adaptive behaviour. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VideoQualitySheet(app: AppState) {
+    ModalBottomSheet(
+        onDismissRequest = { app.qualitySheetOpen = false },
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = Ink.surface,
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+    ) {
+        KeepSystemBarsHidden()
+        val current = remember { FocusRequester() }
+        LaunchedEffect(Unit) { runCatching { current.requestFocus() } }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp)
+        ) {
+            Text("Video quality", style = Type.title2)
+            Segments(
+                options = VideoQuality.values().toList(),
+                chosen = app.settings.videoQuality,
+                label = { it.label },
+                modifier = Modifier.padding(top = 20.dp).fillMaxWidth(),
+                focus = current,
+                onPick = app::chooseVideoQuality,
+            )
+            Text(
+                when (app.settings.videoQuality) {
+                    VideoQuality.AUTO -> "Auto chooses a rendition for each tile's size and available bandwidth."
+                    else -> "Requests ${app.settings.videoQuality.label} across every feed. When that exact rendition is unavailable, the highest available rendition below it is used. Higher settings can buffer, especially with several feeds."
+                },
+                style = Type.footnote,
+                modifier = Modifier.padding(top = 12.dp),
+            )
         }
     }
 }
