@@ -19,6 +19,54 @@ internal object HevcClearCmafInitSegmentWriter {
         val handlerName: String = "ApexView HEVC"
     )
 
+    /**
+     * Writes a clear source-feed init segment without changing the source VPS/SPS/PPS syntax.
+     * This is used only for synthetic clear inputs and parsed clear CMAF sources. Protected
+     * sample entries and encryption signalling are never accepted or generated here.
+     */
+    fun writeSource(
+        trackId: Long,
+        mediaTimescale: Long,
+        vpsNal: ByteArray,
+        spsNal: ByteArray,
+        ppsNal: ByteArray,
+        handlerName: String = "ApexView source HEVC"
+    ): ByteArray {
+        require(trackId in 1 until UINT32_MAX) { "Track ID must leave room for next_track_ID" }
+        require(mediaTimescale in 1..UINT32_MAX) { "Media timescale is outside uint32 range" }
+        require(handlerName.isNotBlank() && handlerName.all { it.code in 0x20..0x7e } &&
+            handlerName.toByteArray(Charsets.US_ASCII).size <= 31) {
+            "Handler name must be printable ASCII and fit the sample-entry field"
+        }
+        val vps = HevcParameterSets.parseVps(vpsNal)
+        val sps = HevcParameterSets.parseSps(spsNal)
+        val pps = HevcParameterSets.parsePps(ppsNal, sps)
+        require(sps.vpsId == vps.vpsId && pps.spsId == sps.spsId) {
+            "Source VPS/SPS/PPS references are inconsistent"
+        }
+        require(vps.maxLayers == 1 && !vps.extensionPresent &&
+            !sps.spsExtensionPresent && !pps.extensionPresent) {
+            "Source parameter-set extensions are not supported"
+        }
+        require(sps.displayWidth in 1..0xffff && sps.displayHeight in 1..0xffff) {
+            "Source display dimensions exceed the visual sample-entry range"
+        }
+        val hvcC = writeSourceHevcConfiguration(listOf(
+            32 to vpsNal, 33 to spsNal, 34 to ppsNal
+        ), sps)
+        val ftyp = box(
+            "ftyp",
+            ascii("iso6") + uint32(1) + ascii("iso6") + ascii("cmfc") + ascii("hvc1")
+        )
+        val moov = box(
+            "moov",
+            movieHeader(MOVIE_TIMESCALE, trackId + 1) +
+                trackBox(trackId, mediaTimescale, sps.displayWidth, sps.displayHeight, hvcC, handlerName) +
+                box("mvex", trackExtends(trackId))
+        )
+        return ftyp + moov
+    }
+
     fun write(request: Request): ByteArray {
         require(request.trackId in 1 until UINT32_MAX) {
             "Track ID must leave room for next_track_ID"
@@ -100,13 +148,18 @@ internal object HevcClearCmafInitSegmentWriter {
     private fun writeHevcConfiguration(
         output: HevcOutputParameterSetWriter.Output,
         sps: HevcParameterSets.SpsMetadata
+    ): ByteArray = writeSourceHevcConfiguration(
+        listOf(32 to output.vps, 33 to output.sps, 34 to output.pps),
+        sps,
+        output.levelIdc
+    )
+
+    private fun writeSourceHevcConfiguration(
+        parameterSets: List<Pair<Int, ByteArray>>,
+        sps: HevcParameterSets.SpsMetadata,
+        levelIdc: Int = sps.profileTierLevel.levelIdc
     ): ByteArray {
         val ptl = sps.profileTierLevel
-        val parameterSets = listOf(
-            32 to output.vps,
-            33 to output.sps,
-            34 to output.pps
-        )
         parameterSets.forEach { (type, nal) ->
             require(HevcBitstream.parseNalHeader(nal).type == type) {
                 "hvcC parameter-set array contains the wrong NAL type"
@@ -126,7 +179,7 @@ internal object HevcClearCmafInitSegmentWriter {
         record.write(uint8(profileByte))
         record.write(uint32(ptl.compatibilityFlags))
         record.write(uint48(ptl.constraintIndicatorFlags))
-        record.write(uint8(output.levelIdc))
+        record.write(uint8(levelIdc))
         record.write(uint16(0xf000)) // reserved bits and min_spatial_segmentation_idc
         record.write(uint8(0xfe)) // reserved bits and parallelismType=2 (tile-based)
         record.write(uint8(0xfc or sps.chromaFormatIdc))
