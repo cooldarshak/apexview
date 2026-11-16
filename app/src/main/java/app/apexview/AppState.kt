@@ -24,6 +24,8 @@ import androidx.media3.common.Timeline
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.util.Calendar
@@ -1440,6 +1442,13 @@ class AppState(
         }
         if (host.audible) setAudio(audioMaster)
 
+        android.util.Log.i(
+            "ApexviewSingleDecoder",
+            "START archive content=$contentId feeds=${labels.joinToString()} host=" +
+                (host.channel.channelId?.let { "channel-$it" } ?: "default-channel") +
+                " audioMaster=" +
+                (audioMaster.channel.channelId?.let { "channel-$it" } ?: "default-channel")
+        )
         f1DashCaptureJob = scope.launch {
             try {
                 // Disable source video first. Do not prepare the composed player until Android
@@ -1451,10 +1460,27 @@ class AppState(
                         height = (tile.h * context.resources.displayMetrics.density).toInt().coerceAtLeast(1)
                     )
                 }
-                val released = selectedTiles.all { it.feed.awaitVideoDecoderRelease(3_000L) }
-                if (!released) {
-                    throw IOException("Android did not release every archive video decoder.")
+                android.util.Log.i(
+                    "ApexviewSingleDecoder",
+                    "Source video disabled for all ${selectedTiles.size} archive players; waiting for decoder release."
+                )
+                val releaseResults = coroutineScope {
+                    selectedTiles.map { tile ->
+                        async { tile.feed.awaitVideoDecoderRelease(3_000L) }
+                    }.awaitAll()
                 }
+                val unreleased = selectedTiles.zip(releaseResults)
+                    .filterNot { (_, released) -> released }
+                    .map { (tile, _) -> tile.channel.title }
+                if (unreleased.isNotEmpty()) {
+                    throw IOException(
+                        "Android did not release archive video decoders for: ${unreleased.joinToString()}"
+                    )
+                }
+                android.util.Log.i(
+                    "ApexviewSingleDecoder",
+                    "All ${selectedTiles.size} source video decoders released. Starting protected composed capture."
+                )
 
                 val firstOutputDeadline = android.os.SystemClock.elapsedRealtime() + 15_000L
                 var composedPlaybackStarted = false
@@ -1467,9 +1493,19 @@ class AppState(
                         val pssh = capture.widevinePssh()
                         try {
                             if (!composedPlaybackStarted) {
+                                android.util.Log.i(
+                                    "ApexviewSingleDecoder",
+                                    "Starting composed archive video: ${outputWindow.width}x${outputWindow.height}, " +
+                                        "fragments=${outputWindow.fragments.size}, psshPresent=${pssh != null}."
+                                )
                                 host.feed.startProtectedComposedPlayback(outputWindow, pssh)
                                 showProtectedCompositionPresentation(host, selectedTiles, audioMaster)
                                 composedPlaybackStarted = true
+                                android.util.Log.i(
+                                    "ApexviewSingleDecoder",
+                                    "COMPOSED archive playback started on existing host player; " +
+                                        "videoDecoderCount=1 target, audioMaster=${audioMaster.channel.title}."
+                                )
                             } else {
                                 host.feed.publishProtectedComposedOutput(outputWindow, pssh)
                             }
@@ -1489,6 +1525,11 @@ class AppState(
                             "Single-decoder archive test: aligning protected replay segments at ${archivePositionMs / 1_000}s."
                     }
                     if (nextMessage != lastMessage) {
+                        if (snapshot.detail != null) {
+                            android.util.Log.w("ApexviewSingleDecoder", nextMessage)
+                        } else {
+                            android.util.Log.i("ApexviewSingleDecoder", nextMessage)
+                        }
                         message = nextMessage
                         lastMessage = nextMessage
                     }
@@ -1498,6 +1539,7 @@ class AppState(
                         throw IOException("No aligned protected archive fragments were available within 15 seconds.")
                     }
                     if (audioMaster.feed.player.playbackState == androidx.media3.common.Player.STATE_ENDED) {
+                        android.util.Log.i("ApexviewSingleDecoder", "Archive audio master reached STATE_ENDED.")
                         break
                     }
                     // Poll faster than the archive segment duration. The selector only accepts
@@ -1505,18 +1547,35 @@ class AppState(
                     kotlinx.coroutines.delay(250L)
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                android.util.Log.i("ApexviewSingleDecoder", "Archive single-decoder test cancelled.")
                 throw cancelled
             } catch (error: Exception) {
-                message = "Single-decoder archive test failed: ${error.message ?: error.javaClass.simpleName}"
-                if (protectedCompositionHost == null) {
+                android.util.Log.e(
+                    "ApexviewSingleDecoder",
+                    "Archive single-decoder test failed; restoring the original archive players.",
+                    error
+                )
+                if (protectedCompositionHost != null) {
+                    // If the composed player has already taken over, restore the host's original
+                    // feed at the audio master's current archive position and unhide the sources.
+                    runCatching { stopProtectedCompositionPresentation() }
+                        .onFailure { restoreError ->
+                            android.util.Log.e(
+                                "ApexviewSingleDecoder",
+                                "Failed to restore the original archive presentation.",
+                                restoreError
+                            )
+                        }
+                } else {
                     selectedTiles.forEach { it.feed.clearProtectedCompositionVideoRole() }
                     ProtectedHevcLiveComposition.clearSelection(group)
-                    if (layoutMode == LayoutMode.SINGLE_DECODER_TEST) {
-                        layoutMode = LayoutMode.GRID
-                        layoutRequest++
-                    }
                     applyVideoBudget()
                 }
+                if (layoutMode == LayoutMode.SINGLE_DECODER_TEST) {
+                    layoutMode = LayoutMode.GRID
+                    layoutRequest++
+                }
+                message = "Single-decoder archive test failed: ${error.message ?: error.javaClass.simpleName}"
             } finally {
                 if (f1DashCapture === capture) {
                     capture.reset()
