@@ -39,6 +39,8 @@ import kotlin.math.abs
 @OptIn(UnstableApi::class)
 internal class F1DashFeedCapture(
     userAgent: String,
+    ascendon: String,
+    entitlement: String,
     private val maximumVideoHeight: Int = 2160,
     private val segmentTimeToleranceUs: Long = 250_000L,
 ) {
@@ -82,12 +84,21 @@ internal class F1DashFeedCapture(
     private val httpFactory = DefaultHttpDataSource.Factory()
         .setUserAgent(userAgent)
         .setAllowCrossProtocolRedirects(true)
+        .setDefaultRequestProperties(
+            mapOf(
+                "ascendontoken" to ascendon,
+                "entitlementtoken" to entitlement,
+            )
+        )
 
     private val initializationByLabel = linkedMapOf<String, InitState>()
     private var lastCapturedSegmentStartUs: Long? = null
 
     init {
         require(userAgent.isNotBlank()) { "F1 media User-Agent is required" }
+        require(ascendon.isNotBlank() && entitlement.isNotBlank()) {
+            "F1 media authorization tokens are required for DASH segment capture"
+        }
         require(maximumVideoHeight > 0) { "Maximum HEVC rendition height must be positive" }
         require(segmentTimeToleranceUs in 1..1_000_000L) {
             "DASH feed alignment tolerance is outside the supported range"

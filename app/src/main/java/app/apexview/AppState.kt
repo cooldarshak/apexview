@@ -1408,7 +1408,11 @@ class AppState(
         }
         f1DashCaptureJob?.cancel()
         f1DashCapture?.reset()
-        val capture = F1DashFeedCapture(userAgent = userAgent)
+        val capture = F1DashFeedCapture(
+            userAgent = userAgent,
+            ascendon = api.ascendon.orEmpty(),
+            entitlement = api.entitlement.orEmpty(),
+        )
         f1DashCapture = capture
         val group = "content-$contentId"
         f1DashCaptureJob = scope.launch {
