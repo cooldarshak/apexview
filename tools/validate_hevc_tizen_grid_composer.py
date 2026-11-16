@@ -38,6 +38,8 @@ def main():
             raise SystemExit(f"Required composition proof input is missing: {path}")
 
     frame_count = 50
+    output_width = 1920
+    output_height = 544
     expected = run_bytes([
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-f", "hevc", "-i", str(feed_a),
@@ -47,7 +49,7 @@ def main():
         "-pix_fmt", "yuv420p", "-f", "rawvideo", "pipe:1"
     ])
     actual = decoded_bytes(composed, frame_count)
-    expected_bytes = 1920 * 540 * 3 // 2 * frame_count
+    expected_bytes = output_width * output_height * 3 // 2 * frame_count
     if len(expected) != expected_bytes or len(actual) != expected_bytes:
         raise SystemExit(
             f"Unexpected decoded byte count: reference={len(expected)}, "
@@ -70,11 +72,12 @@ def main():
         "result": "PASS",
         "composer": "native Kotlin Tizen-style per-source-cell slice composition",
         "source_feeds": [feed_a.name, feed_b.name],
+        "motion_constrained_fixture": "Kvazaar frametilemargin, TMVP disabled",
         "source_feeds_are_independent_encodes": True,
         "source_pps_ids": [0, 1],
         "output_grid": "2x1",
         "decoded_frames": frame_count,
-        "output_dimensions": "1920x540",
+        "output_dimensions": "1920x544",
         "reference_sha256": expected_hash,
         "composed_sha256": actual_hash,
         "pixel_identical_to_horizontal_source_stack": True,

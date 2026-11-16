@@ -45,8 +45,7 @@ jobs:
           set -euo pipefail
           sudo apt-get -o Acquire::Languages=none -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --no-install-recommends -y ffmpeg
-          ffmpeg -hide_banner -encoders 2>&1 | grep -q libx265
-          ffmpeg -hide_banner -bsfs 2>&1 | grep -q trace_headers
+          ffmpeg -hide_banner -decoders 2>&1 | grep -q hevc
       - name: Build Kvazaar HEVC encoder with tile support
         timeout-minutes: 15
         run: |

@@ -311,6 +311,9 @@ internal object HevcTizenGridComposer {
             !pps.extensionPresent) {
             "Source feed $index uses unsupported parameter-set extensions"
         }
+        require(!sps.temporalMvpEnabled) {
+            "Source feed $index uses temporal motion vector prediction (TMVP), unsupported by the F1 Tizen stitching profile"
+        }
 
         val signatures = HevcStreamAlignmentAnalyzer.analyze(annexB)
         val pictureNals = mutableListOf<MutableList<ByteArray>>()
