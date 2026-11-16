@@ -152,6 +152,20 @@ class FeedPlayer(
         private set
     private var licensed = false
     private var firstFrameRendered = false
+    var activeVideoDecoderCount by mutableStateOf(0)
+        private set
+    val activeVideoDecoderName: String? get() = decoder.takeIf { activeVideoDecoderCount > 0 && it.isNotBlank() }
+    val hasRenderedFirstFrame: Boolean get() = firstFrameRendered
+    val activeVideoDecoderHardware: String get() = runCatching {
+        val name = activeVideoDecoderName ?: return@runCatching "hardware UNVERIFIED"
+        val info = android.media.MediaCodecList(android.media.MediaCodecList.ALL_CODECS).codecInfos
+            .firstOrNull { it.name == name || it.name == name.removeSuffix(".secure") }
+        when (info?.isHardwareAccelerated) {
+            true -> "hardware YES"
+            false -> "hardware NO"
+            null -> "hardware UNVERIFIED"
+        }
+    }.getOrDefault("hardware UNVERIFIED")
     private var speed = 1f
     private var lastDropped = 0
     private var dropsPerSecond = 0
@@ -366,11 +380,18 @@ class FeedPlayer(
                 initializationDurationMs: Long,
             ) {
                 decoder = decoderName
+                activeVideoDecoderCount++
                 if (stream.allowHevcProfileProbe) {
                     HevcFeedProfileCapture.updateVideoDecoder(
                         stream.profileGroup, stream.profileLabel, decoderName
                     )
                 }
+                refresh()
+            }
+
+            override fun onVideoDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
+                activeVideoDecoderCount = (activeVideoDecoderCount - 1).coerceAtLeast(0)
+                if (activeVideoDecoderCount == 0) decoder = ""
                 refresh()
             }
 
@@ -426,7 +447,11 @@ class FeedPlayer(
             }
         })
 
-        val isHls = stream.url.substringBefore('?').endsWith(".m3u8") || "HLS" in stream.streamType
+        val isHls = when (ManifestProtocol.fromUrl(stream.url)) {
+            ManifestProtocol.HLS -> true
+            ManifestProtocol.DASH -> false
+            ManifestProtocol.UNKNOWN -> stream.streamType.contains("HLS", ignoreCase = true)
+        }
         val item = MediaItem.Builder()
             .setUri(stream.url)
             .setMimeType(if (isHls) MimeTypes.APPLICATION_M3U8 else MimeTypes.APPLICATION_MPD)
@@ -493,6 +518,9 @@ class FeedPlayer(
         widevinePssh: ByteArray?
     ) {
         val nextSource = ProtectedHevcLiveDashSource()
+        firstFrameRendered = false
+        error = null
+        problem = null
         try {
             nextSource.publish(window, widevinePssh)
             val mediaItem = MediaItem.Builder()

@@ -264,6 +264,10 @@ internal object ProtectedHevcLiveComposition {
         }
     } ?: "PROTECTED_COMPOSITION_NOT_SELECTED"
 
+    /** Typed access for preflight, so callers do not parse the diagnostic status string. */
+    @Synchronized
+    fun rejectionReason(group: String): String? = sessions[group]?.lastFailure
+
     /** Returns the latest output for diagnostics and one-fragment playback. */
     @Synchronized
     fun latestOutput(group: String): OutputSegment? {

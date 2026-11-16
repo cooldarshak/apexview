@@ -1455,6 +1455,9 @@ private fun LayoutSheet(app: AppState) {
                 .padding(horizontal = 20.dp).padding(bottom = 24.dp)
         ) {
             Text("Layout", style = Type.title2)
+            app.singleDecoderDiagnostic?.let { diagnostic ->
+                Text(diagnostic, style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
+            }
             val n = app.tiles.size
             val hasSaved = app.savedLayout(n) != null
             val modes = LayoutMode.entries.filter { it != LayoutMode.CUSTOM || hasSaved }
@@ -1469,7 +1472,7 @@ private fun LayoutSheet(app: AppState) {
                     app.layoutMode == LayoutMode.TILE_TEST ->
                         "Choose exactly two feeds from the same F1 session. The feed picker opens so you can select them manually. The app compares their HEVC tile parameters and reports whether the current 2×1 test assembler accepts them. Normal playback remains unchanged."
                     app.layoutMode == LayoutMode.SINGLE_DECODER_TEST ->
-                        "Choose Layout → Single-decoder test while 2–4 feeds from the same archive are playing. ApexView stops their individual video decoders, then plays the protected composed grid through one video decoder. The selected audio feed continues playing."
+                        "Run Single-decoder test while 2–4 feeds from the same archive are playing. ApexView validates the actual manifests, HEVC, DRM and aligned CMAF output before releasing source video decoders. Reopen Layout to see the result. A failed preflight keeps normal playback running."
                     hasSaved ->
                         "My layout is the one you saved for $n feed${if (n == 1) "" else "s"} with the phone ${app.wayUp}."
                     else ->

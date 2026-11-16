@@ -32,6 +32,7 @@ import java.util.Calendar
 import kotlin.math.abs
 import app.apexview.tiled.ProtectedHevcLiveComposition
 import app.apexview.tiled.F1DashFeedCapture
+import app.apexview.tiled.ArchiveCompositionStartup
 
 /** A feed's window on the canvas. Positions and sizes are in pixels. */
 class Tile(val id: Int, val contentId: Long, channel: Channel, feed: FeedPlayer) {
@@ -308,6 +309,8 @@ class AppState(
 ) {
     private var api = F1TvApi(userAgent, chromeMajor)
     private var f1DashCaptureJob: Job? = null
+    var singleDecoderDiagnostic by mutableStateOf<String?>(null)
+        private set
     private var f1DashCapture: F1DashFeedCapture? = null
     private var protectedCompositionHost: Tile? = null
     private var protectedCompositionAudioMaster: Tile? = null
@@ -1398,20 +1401,15 @@ class AppState(
         browsing = false
     }
 
-    /**
-     * Archive-only phone test. Keep every feed's authorised audio player alive, release every
-     * source video decoder, then feed time-aligned protected replay fragments to one existing
-     * Media3 player/Surface. The archive clock comes from the audible feed, not wall-clock time.
-     */
+    /** Validate authorised archive media completely before changing any source decoder. */
     private fun startArchiveSingleDecoderComposition(contentId: Long) {
         val selectedTiles = tiles.filter { it.contentId == contentId }
+        val previousLayout = layoutMode
         if (selectedTiles.size !in 2..4) {
             message = "Single-decoder test needs between two and four archive feeds."
             return
         }
-        val labels = selectedTiles.map { tile ->
-            tile.channel.channelId?.let { "channel-$it" } ?: "default-channel"
-        }
+        val labels = selectedTiles.map { it.feed.sourceStream.profileLabel }
         if (labels.distinct().size != labels.size) {
             message = "Single-decoder test needs different feeds from the same archive."
             return
@@ -1419,169 +1417,162 @@ class AppState(
         val feeds = selectedTiles.zip(labels).map { (tile, label) ->
             F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url)
         }
-
-        f1DashCaptureJob?.cancel()
-        f1DashCapture?.reset()
-        val capture = F1DashFeedCapture(
-            userAgent = userAgent,
-            ascendon = api.ascendon.orEmpty(),
-            entitlement = api.entitlement.orEmpty(),
-        )
-        f1DashCapture = capture
-
-        val group = "archive-content-$contentId"
-        ProtectedHevcLiveComposition.selectFeeds(group, labels)
         val host = selectedTiles.firstOrNull { !it.audible } ?: selectedTiles.first()
         val audioMaster = selectedTiles.firstOrNull { it !== host && it.audible }
-            ?: selectedTiles.firstOrNull { it !== host }
-        if (audioMaster == null) {
-            message = "A second feed is needed to keep archive audio playing while the composed picture uses one player."
-            capture.reset()
-            f1DashCapture = null
-            return
-        }
-        if (host.audible) setAudio(audioMaster)
+            ?: selectedTiles.first { it !== host }
+        val group = "archive-content-$contentId"
+        f1DashCaptureJob?.cancel()
+        val capture = F1DashFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
+        f1DashCapture = capture
+        ProtectedHevcLiveComposition.selectFeeds(group, labels)
+        val startup = ArchiveCompositionStartup()
+        var lastSnapshot: F1DashFeedCapture.Snapshot? = null
+        var releasedCount = 0
+        var playback = "PREFLIGHT"
+        var terminalReason: String? = null
+        var restored = false
+        var preflightPassed = false
+        var composedFirstFrameSeen = false
+        var composedCodec: String? = null
 
-        android.util.Log.i(
-            "ApexviewSingleDecoder",
-            "START archive content=$contentId feeds=${labels.joinToString()} host=" +
-                (host.channel.channelId?.let { "channel-$it" } ?: "default-channel") +
-                " audioMaster=" +
-                (audioMaster.channel.channelId?.let { "channel-$it" } ?: "default-channel")
-        )
+        fun diagnostics() {
+            val snapshot = lastSnapshot
+            singleDecoderDiagnostic = buildString {
+                append("Source: F1 Archive · Selected feeds: ${selectedTiles.size}\n")
+                append("Requested platform: " + selectedTiles.map { it.feed.sourceStream.requestedPlatform }.distinct().joinToString() + "\n")
+                append("Player: " + selectedTiles.map { it.feed.sourceStream.playerType }.distinct().joinToString() + "\n")
+                labels.forEach { label ->
+                    append("$label manifest: ${snapshot?.actualManifests?.get(label)?.name ?: "UNVERIFIED"}\n")
+                }
+                append("HEVC/CMAF preflight: " + if (preflightPassed) "PASS\n" else "${snapshot?.detail ?: "VALIDATING"}\n")
+                append("Source decoders released: $releasedCount\n")
+                append("Composed decoder: ${composedCodec ?: "NOT OBSERVED"}\n")
+                append("Active video decoders (app callbacks): ${tiles.sumOf { it.feed.activeVideoDecoderCount }}\n")
+                append("First composed frame: ${if (composedFirstFrameSeen) "YES" else "NO"}\n")
+                append("Playback: $playback")
+                terminalReason?.let { append("\n$it") }
+            }
+        }
+        fun restore(replacedHost: Boolean) {
+            if (restored) return
+            restored = true
+            if (protectedCompositionHost != null) {
+                stopProtectedCompositionPresentation()
+            } else if (startup.sourceDecodersTouched) {
+                if (replacedHost) host.feed.stopProtectedComposedPlayback(audioMaster.feed.player.currentPosition)
+                selectedTiles.forEach { it.feed.clearProtectedCompositionVideoRole() }
+                applyVideoBudget()
+            }
+            layoutMode = previousLayout
+            layoutRequest++
+        }
+        selectedTiles.forEach { android.util.Log.i("ApexviewPlaybackOffer", it.feed.sourceStream.offerDiagnostic) }
+        diagnostics()
+        message = "Single-decoder archive preflight. Normal playback continues..."
         f1DashCaptureJob = scope.launch {
             try {
-                // Disable source video first. Do not prepare the composed player until Android
-                // confirms that every original video decoder has actually been released.
-                selectedTiles.forEach { tile ->
-                    tile.feed.setProtectedCompositionVideoRole(
-                        enabled = false,
-                        width = (tile.w * context.resources.displayMetrics.density).toInt().coerceAtLeast(1),
-                        height = (tile.h * context.resources.displayMetrics.density).toInt().coerceAtLeast(1)
-                    )
-                }
-                android.util.Log.i(
-                    "ApexviewSingleDecoder",
-                    "Source video disabled for all ${selectedTiles.size} archive players; waiting for decoder release."
-                )
-                val releaseResults = coroutineScope {
-                    selectedTiles.map { tile ->
-                        async { tile.feed.awaitVideoDecoderRelease(3_000L) }
-                    }.awaitAll()
-                }
-                val unreleased = selectedTiles.zip(releaseResults)
-                    .filterNot { (_, released) -> released }
-                    .map { (tile, _) -> tile.channel.title }
-                if (unreleased.isNotEmpty()) {
-                    throw IOException(
-                        "Android did not release archive video decoders for: ${unreleased.joinToString()}"
-                    )
-                }
-                android.util.Log.i(
-                    "ApexviewSingleDecoder",
-                    "All ${selectedTiles.size} source video decoders released. Starting protected composed capture."
-                )
-
-                val firstOutputDeadline = android.os.SystemClock.elapsedRealtime() + 15_000L
-                var composedPlaybackStarted = false
-                var lastMessage: String? = null
-                while (true) {
-                    val archivePositionMs = audioMaster.feed.player.currentPosition.coerceAtLeast(0L)
-                    val snapshot = capture.captureAtPosition(group, feeds, archivePositionMs)
-                    val outputWindow = ProtectedHevcLiveComposition.outputWindow(group)
-                    if (outputWindow != null && (snapshot.capturedFeeds > 0 || !composedPlaybackStarted)) {
-                        val pssh = capture.widevinePssh()
-                        try {
-                            if (!composedPlaybackStarted) {
-                                val composedSize = outputWindow.fragments.lastOrNull()
-                                    ?.let { "${it.width}x${it.height}" } ?: "unknown"
-                                android.util.Log.i(
-                                    "ApexviewSingleDecoder",
-                                    "Starting composed archive video: $composedSize, " +
-                                        "fragments=${outputWindow.fragments.size}, psshPresent=${pssh != null}."
-                                )
-                                host.feed.startProtectedComposedPlayback(outputWindow, pssh)
-                                showProtectedCompositionPresentation(host, selectedTiles, audioMaster)
-                                composedPlaybackStarted = true
-                                android.util.Log.i(
-                                    "ApexviewSingleDecoder",
-                                    "COMPOSED archive playback started on existing host player; " +
-                                        "videoDecoderCount=1 target, audioMaster=${audioMaster.channel.title}."
-                                )
-                            } else {
-                                host.feed.publishProtectedComposedOutput(outputWindow, pssh)
+                startup.start(
+                    preflight = {
+                        val deadline = android.os.SystemClock.elapsedRealtime() + 15_000L
+                        var prepared: ProtectedHevcLiveComposition.OutputWindow? = null
+                        while (prepared == null) {
+                            val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
+                            lastSnapshot = snapshot
+                            diagnostics()
+                            snapshot.failure?.takeUnless { it.retryable }?.let { throw IOException(it.reason) }
+                            prepared = ProtectedHevcLiveComposition.outputWindow(group)
+                            if (prepared == null) {
+                                if (android.os.SystemClock.elapsedRealtime() >= deadline) {
+                                    throw IOException("Archive preflight timed out: ${snapshot.detail ?: snapshot.compositionStatus}")
+                                }
+                                kotlinx.coroutines.delay(250L)
                             }
-                        } catch (error: Throwable) {
-                            outputWindow.zero()
-                            pssh?.fill(0)
-                            throw error
                         }
-                    }
-
-                    val nextMessage = when {
-                        snapshot.detail != null ->
-                            "Single-decoder archive capture: ${snapshot.detail}"
-                        composedPlaybackStarted ->
-                            "Single-decoder archive playback running. ${snapshot.compositionStatus}"
-                        else ->
-                            "Single-decoder archive test: aligning protected replay segments at ${archivePositionMs / 1_000}s."
-                    }
-                    if (nextMessage != lastMessage) {
-                        if (snapshot.detail != null) {
-                            android.util.Log.w("ApexviewSingleDecoder", nextMessage)
-                        } else {
-                            android.util.Log.i("ApexviewSingleDecoder", nextMessage)
+                        prepared.also { window ->
+                            val licenses = selectedTiles.map { it.feed.sourceStream.licenseUrl }.distinct()
+                            if (licenses.size != 1 || licenses.single().isNullOrBlank()) {
+                                window.zero()
+                                throw IOException("DRM/session incompatibility: composed playback needs one shared authorised Widevine licence endpoint.")
+                            }
+                            val pssh = capture.widevinePssh()
+                            try {
+                                app.apexview.tiled.ProtectedHevcComposedDashPackageBuilder.build(
+                                    window, pssh, window.fragments.first().baseDecodeTimeTicks,
+                                    System.currentTimeMillis()
+                                ).zero()
+                                preflightPassed = true
+                            } catch (error: Exception) {
+                                window.zero()
+                                throw IOException("Composed source initialization failed: ${error.message}")
+                            } finally { pssh?.fill(0) }
                         }
-                        message = nextMessage
-                        lastMessage = nextMessage
+                    },
+                    releaseSources = {
+                        selectedTiles.forEach { tile ->
+                            tile.feed.setProtectedCompositionVideoRole(false,
+                                (tile.w * context.resources.displayMetrics.density).toInt().coerceAtLeast(1),
+                                (tile.h * context.resources.displayMetrics.density).toInt().coerceAtLeast(1))
+                        }
+                        val releaseResults = coroutineScope {
+                            selectedTiles.map { tile -> async { tile.feed.awaitVideoDecoderRelease(3_000L) } }.awaitAll()
+                        }
+                        releasedCount = releaseResults.count { it }
+                        if (releaseResults.any { !it }) throw IOException("Decoder release failed for ${selectedTiles.size - releasedCount} source players")
+                        android.util.Log.i("ApexviewSingleDecoder", "Preflight PASS. All $releasedCount source video decoders released.")
+                    },
+                    replaceHost = { window ->
+                        if (host.audible) setAudio(audioMaster)
+                        host.feed.startProtectedComposedPlayback(window, capture.widevinePssh())
+                        layoutMode = LayoutMode.SINGLE_DECODER_TEST
+                        showProtectedCompositionPresentation(host, selectedTiles, audioMaster)
+                    },
+                    restoreSources = ::restore,
+                    dispose = { it.zero() },
+                )
+                val firstFrameDeadline = android.os.SystemClock.elapsedRealtime() + 15_000L
+                while (true) {
+                    host.feed.problem?.let { throw IOException("Composed decoder/DRM playback failed: $it") }
+                    if (!host.feed.hasRenderedFirstFrame && android.os.SystemClock.elapsedRealtime() >= firstFrameDeadline) {
+                        throw IOException("Composed decoder did not render a first frame within 15 seconds")
                     }
-
-                    if (!composedPlaybackStarted &&
-                        android.os.SystemClock.elapsedRealtime() >= firstOutputDeadline) {
-                        throw IOException("No aligned protected archive fragments were available within 15 seconds.")
+                    composedFirstFrameSeen = host.feed.hasRenderedFirstFrame
+                    host.feed.activeVideoDecoderName?.let { composedCodec = "$it (${host.feed.activeVideoDecoderHardware})" }
+                    playback = if (composedFirstFrameSeen) "ACTIVE" else "WAITING FOR FIRST FRAME"
+                    val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
+                    lastSnapshot = snapshot
+                    snapshot.failure?.takeUnless { it.retryable }?.let { throw IOException(it.reason) }
+                    if (snapshot.capturedFeeds > 0) ProtectedHevcLiveComposition.outputWindow(group)?.let {
+                        host.feed.publishProtectedComposedOutput(it, capture.widevinePssh())
                     }
-                    if (audioMaster.feed.player.playbackState == androidx.media3.common.Player.STATE_ENDED) {
-                        android.util.Log.i("ApexviewSingleDecoder", "Archive audio master reached STATE_ENDED.")
+                    diagnostics()
+                    if (audioMaster.feed.player.playbackState == Player.STATE_ENDED) {
+                        playback = "ENDED"
+                        restore(true)
+                        diagnostics()
                         break
                     }
-                    // Poll faster than the archive segment duration. The selector only accepts
-                    // new contiguous fragments close to the archive player's current position.
                     kotlinx.coroutines.delay(250L)
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                android.util.Log.i("ApexviewSingleDecoder", "Archive single-decoder test cancelled.")
+                if (startup.sourceDecodersTouched) restore(startup.hostReplaced)
+                playback = "CANCELLED"
+                diagnostics()
                 throw cancelled
             } catch (error: Exception) {
-                android.util.Log.e(
-                    "ApexviewSingleDecoder",
-                    "Archive single-decoder test failed; restoring the original archive players.",
-                    error
-                )
-                if (protectedCompositionHost != null) {
-                    // If the composed player has already taken over, restore the host's original
-                    // feed at the audio master's current archive position and unhide the sources.
-                    runCatching { stopProtectedCompositionPresentation() }
-                        .onFailure { restoreError ->
-                            android.util.Log.e(
-                                "ApexviewSingleDecoder",
-                                "Failed to restore the original archive presentation.",
-                                restoreError
-                            )
-                        }
-                } else {
-                    selectedTiles.forEach { it.feed.clearProtectedCompositionVideoRole() }
-                    ProtectedHevcLiveComposition.clearSelection(group)
-                    applyVideoBudget()
-                }
-                if (layoutMode == LayoutMode.SINGLE_DECODER_TEST) {
-                    layoutMode = LayoutMode.GRID
-                    layoutRequest++
-                }
-                message = "Single-decoder archive test failed: ${error.message ?: error.javaClass.simpleName}"
+                // Do not log raw network exceptions or their signed URLs.
+                terminalReason = (error.message ?: error.javaClass.simpleName)
+                    .replace(Regex("https?://\\S+"), "[redacted URL]").take(400)
+                if (startup.sourceDecodersTouched) restore(startup.hostReplaced)
+                playback = "FAILED"
+                diagnostics()
+                android.util.Log.w("ApexviewSingleDecoder", "Archive composition failed: $terminalReason")
+                message = "Single-decoder archive test failed: $terminalReason"
             } finally {
                 if (f1DashCapture === capture) {
                     capture.reset()
                     f1DashCapture = null
+                    f1DashCaptureJob = null
+                    ProtectedHevcLiveComposition.clearSelection(group)
                 }
             }
         }
@@ -1882,7 +1873,7 @@ class AppState(
                 failures += "Multiview session refused, using one session per feed: ${e.message}"
             }
         }
-        val session = sessions[contentId] ?: return api.contentPlay(contentId, channel.channelId)
+        val session = sessions[contentId] ?: return api.contentPlay(contentId, channel.channelId, fallback = true)
 
         val url = if (channel.channelId == null) session.feeds.values.firstOrNull()
         else session.feeds[channel.channelId]
@@ -2386,9 +2377,6 @@ class AppState(
                 showChrome()
                 return
             }
-            layoutMode = LayoutMode.SINGLE_DECODER_TEST
-            handPlaced = false
-            layoutRequest++
             layoutSheetOpen = false
             showChrome()
             startArchiveSingleDecoderComposition(leader.contentId)

@@ -1,6 +1,9 @@
 package app.apexview.tiled
 
 import android.net.Uri
+import app.apexview.ManifestProtocol
+import androidx.media3.exoplayer.dash.manifest.DashManifestParser
+import java.io.ByteArrayInputStream
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.Format
@@ -43,6 +46,7 @@ internal class F1DashFeedCapture(
     entitlement: String,
     private val maximumVideoHeight: Int = 2160,
     private val segmentTimeToleranceUs: Long = 250_000L,
+    dataSourceFactory: DataSource.Factory? = null,
 ) {
     data class Feed(
         val label: String,
@@ -57,6 +61,8 @@ internal class F1DashFeedCapture(
         val capturedFeeds: Int,
         val compositionStatus: String,
         val detail: String? = null,
+        val failure: CaptureFailure? = null,
+        val actualManifests: Map<String, ManifestProtocol> = emptyMap(),
     )
 
     private data class LoadedFeed(
@@ -81,7 +87,7 @@ internal class F1DashFeedCapture(
         val report: CmafBoxInspector.Report,
     )
 
-    private val httpFactory = DefaultHttpDataSource.Factory()
+    private val httpFactory: DataSource.Factory = dataSourceFactory ?: DefaultHttpDataSource.Factory()
         .setUserAgent(userAgent)
         .setAllowCrossProtocolRedirects(true)
         .setDefaultRequestProperties(
@@ -91,7 +97,8 @@ internal class F1DashFeedCapture(
             )
         )
 
-    private val initializationByLabel = linkedMapOf<String, InitState>()
+    private val actualProtocols = java.util.concurrent.ConcurrentHashMap<String, ManifestProtocol>()
+    private val initializationByLabel = java.util.concurrent.ConcurrentHashMap<String, InitState>()
     @Volatile private var latestWidevinePssh: ByteArray? = null
     private var lastCapturedSegmentStartUs: Long? = null
 
@@ -128,7 +135,7 @@ internal class F1DashFeedCapture(
                 feeds.map { feed -> async { loadFeed(feed) } }.awaitAll()
             }
             val chosenSize = chooseCommonHevcSize(loaded)
-                ?: throw IOException("F1 feeds do not expose a common HEVC rendition at or below ${maximumVideoHeight}p")
+                ?: throw PermanentCaptureException("F1 feeds do not expose a common HEVC rendition at or below ${maximumVideoHeight}p")
             val selected = loaded.map { item ->
                 item.copy(
                     representation = item.representationFor(chosenSize.first, chosenSize.second)
@@ -136,11 +143,11 @@ internal class F1DashFeedCapture(
             }
             val selectedWithIndexes = selected.map { item ->
                 val index = item.representation.index
-                    ?: throw IOException("${item.feed.label}: DASH representation has no in-manifest segment index")
+                    ?: throw PermanentCaptureException("${item.feed.label}: DASH representation has no in-manifest segment index")
                 val init = item.representation.initializationUri
-                    ?: throw IOException("${item.feed.label}: DASH representation has no initialization segment")
+                    ?: throw PermanentCaptureException("${item.feed.label}: DASH representation has no initialization segment")
                 val base = item.representation.baseUrls.firstOrNull()?.url
-                    ?: throw IOException("${item.feed.label}: DASH representation has no BaseURL")
+                    ?: throw PermanentCaptureException("${item.feed.label}: DASH representation has no BaseURL")
                 item.copy(index = index, initializationUri = init, baseUrl = base)
             }
             selectedWithIndexes.forEach { rememberWidevinePssh(it.representation.format) }
@@ -160,7 +167,7 @@ internal class F1DashFeedCapture(
                             try {
                                 val report = CmafBoxInspector.inspect(bytes)
                                 if (report.errors.isNotEmpty() || !report.initializationSegmentPresent) {
-                                    throw IOException(
+                                    throw PermanentCaptureException(
                                         "${item.feed.label}: invalid F1 CMAF initialization: " +
                                             report.errors.joinToString("; ").take(180)
                                     )
@@ -189,6 +196,7 @@ internal class F1DashFeedCapture(
                     alignedSegmentTimeUs = aligned.first().absoluteStartUs,
                     capturedFeeds = 0,
                     compositionStatus = ProtectedHevcLiveComposition.status(group),
+                    actualManifests = actualProtocols.toMap(),
                     detail = "Waiting for the next F1 segment",
                 )
             }
@@ -203,12 +211,12 @@ internal class F1DashFeedCapture(
                             "media fragment"
                         )
                         val init = initializationByLabel[item.feed.label]
-                            ?: throw IOException("${item.feed.label}: source initialization was not captured")
+                            ?: throw PermanentCaptureException("${item.feed.label}: source initialization was not captured")
                         try {
                             val report = CmafBoxInspector.inspect(bytes, init.report)
                             if (report.errors.isNotEmpty() || report.initializationSegmentPresent ||
                                 report.fragments.none { it.trackId == init.report.tracks.singleOrNull { t -> t.handler == "vide" }?.trackId }) {
-                                throw IOException(
+                                throw PermanentCaptureException(
                                     "${item.feed.label}: invalid F1 video fragment: " +
                                         report.errors.joinToString("; ").take(180)
                                 )
@@ -236,6 +244,7 @@ internal class F1DashFeedCapture(
                 alignedSegmentTimeUs = aligned.first().absoluteStartUs,
                 capturedFeeds = media.size,
                 compositionStatus = ProtectedHevcLiveComposition.status(group),
+                actualManifests = actualProtocols.toMap(),
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -247,9 +256,9 @@ internal class F1DashFeedCapture(
                 alignedSegmentTimeUs = null,
                 capturedFeeds = 0,
                 compositionStatus = ProtectedHevcLiveComposition.status(group),
-                detail = (error.message ?: error.javaClass.simpleName)
-                    .replace(Regex("https?://\\S+"), "[feed URL]")
-                    .take(240),
+                actualManifests = actualProtocols.toMap(),
+                detail = CaptureFailure.from(error).reason.take(240),
+                failure = CaptureFailure.from(error),
             )
         }
     }
@@ -276,18 +285,18 @@ internal class F1DashFeedCapture(
 
         try {
             val loaded = coroutineScope {
-                feeds.map { feed -> async { loadFeed(feed) } }.awaitAll()
+                feeds.map { feed -> async { loadFeed(feed, playbackPositionMs) } }.awaitAll()
             }
             val chosenSize = chooseCommonHevcSize(loaded)
-                ?: throw IOException("Archive feeds do not expose a common HEVC rendition at or below ${maximumVideoHeight}p")
+                ?: throw PermanentCaptureException("Archive feeds do not expose a common HEVC rendition at or below ${maximumVideoHeight}p")
             val selectedWithIndexes = loaded.map { item ->
                 val representation = item.representationFor(chosenSize.first, chosenSize.second)
                 val index = representation.index
-                    ?: throw IOException("${item.feed.label}: archive DASH representation has no in-manifest segment index")
+                    ?: throw PermanentCaptureException("${item.feed.label}: archive DASH representation has no in-manifest segment index")
                 val init = representation.initializationUri
-                    ?: throw IOException("${item.feed.label}: archive DASH representation has no initialization segment")
+                    ?: throw PermanentCaptureException("${item.feed.label}: archive DASH representation has no initialization segment")
                 val base = representation.baseUrls.firstOrNull()?.url
-                    ?: throw IOException("${item.feed.label}: archive DASH representation has no BaseURL")
+                    ?: throw PermanentCaptureException("${item.feed.label}: archive DASH representation has no BaseURL")
                 item.copy(
                     representation = representation,
                     index = index,
@@ -311,7 +320,7 @@ internal class F1DashFeedCapture(
                             try {
                                 val report = CmafBoxInspector.inspect(bytes)
                                 if (report.errors.isNotEmpty() || !report.initializationSegmentPresent) {
-                                    throw IOException(
+                                    throw PermanentCaptureException(
                                         "${item.feed.label}: invalid archive CMAF initialization: " +
                                             report.errors.joinToString("; ").take(180)
                                     )
@@ -347,11 +356,10 @@ internal class F1DashFeedCapture(
                     alignedSegmentTimeUs = null,
                     capturedFeeds = 0,
                     compositionStatus = ProtectedHevcLiveComposition.status(group),
-                    detail = if (previous == null) {
-                        "Waiting for a common archive segment at the current playback position"
-                    } else {
-                        "Waiting for the next contiguous archive segment"
-                    },
+                    actualManifests = actualProtocols.toMap(),
+                    detail = if (previous == null) "Fragment alignment failure at the current archive position"
+                        else "Waiting for the next contiguous archive segment",
+                    failure = if (previous == null) CaptureFailure("Fragment alignment failure at the current archive position", false) else null,
                 )
 
             val media = coroutineScope {
@@ -364,14 +372,14 @@ internal class F1DashFeedCapture(
                             "archive media fragment"
                         )
                         val init = initializationByLabel[item.feed.label]
-                            ?: throw IOException("${item.feed.label}: archive initialization was not captured")
+                            ?: throw PermanentCaptureException("${item.feed.label}: archive initialization was not captured")
                         try {
                             val report = CmafBoxInspector.inspect(bytes, init.report)
                             if (report.errors.isNotEmpty() || report.initializationSegmentPresent ||
                                 report.fragments.none {
                                     it.trackId == init.report.tracks.singleOrNull { track -> track.handler == "vide" }?.trackId
                                 }) {
-                                throw IOException(
+                                throw PermanentCaptureException(
                                     "${item.feed.label}: invalid archive HEVC fragment: " +
                                         report.errors.joinToString("; ").take(180)
                                 )
@@ -389,6 +397,9 @@ internal class F1DashFeedCapture(
                 }.awaitAll()
             }
             media.forEach { (_, bytes) -> bytes.fill(0) }
+            ProtectedHevcLiveComposition.rejectionReason(group)?.let {
+                throw PermanentCaptureException("HEVC/CMAF composition rejected: $it")
+            }
             lastCapturedSegmentStartUs = aligned.first().absoluteStartUs
 
             Snapshot(
@@ -398,6 +409,7 @@ internal class F1DashFeedCapture(
                 alignedSegmentTimeUs = aligned.first().absoluteStartUs,
                 capturedFeeds = media.size,
                 compositionStatus = ProtectedHevcLiveComposition.status(group),
+                actualManifests = actualProtocols.toMap(),
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -409,9 +421,9 @@ internal class F1DashFeedCapture(
                 alignedSegmentTimeUs = null,
                 capturedFeeds = 0,
                 compositionStatus = ProtectedHevcLiveComposition.status(group),
-                detail = (error.message ?: error.javaClass.simpleName)
-                    .replace(Regex("https?://\\S+"), "[feed URL]")
-                    .take(240),
+                actualManifests = actualProtocols.toMap(),
+                detail = CaptureFailure.from(error).reason.take(240),
+                failure = CaptureFailure.from(error),
             )
         }
     }
@@ -422,12 +434,12 @@ internal class F1DashFeedCapture(
     ): List<SegmentCandidate> {
         val durationUs = feed.periodDurationUs
         if (durationUs <= 0L || durationUs == C.TIME_UNSET) {
-            throw IOException("${feed.feed.label}: archive DASH Period has no finite duration")
+            throw PermanentCaptureException("${feed.feed.label}: archive DASH Period has no finite duration")
         }
         val index = feed.index
         val count = index.getSegmentCount(durationUs)
         if (count <= 0L || count == DashSegmentIndex.INDEX_UNBOUNDED.toLong()) {
-            throw IOException("${feed.feed.label}: archive DASH index is not a finite VOD index")
+            throw PermanentCaptureException("${feed.feed.label}: archive DASH index is not a finite VOD index")
         }
         val first = index.firstSegmentNum
         val last = Math.addExact(first, count - 1L)
@@ -435,7 +447,7 @@ internal class F1DashFeedCapture(
         val absolutePositionUs = Math.multiplyExact(playbackPositionMs, 1_000L)
         val positionInPeriodUs = absolutePositionUs - periodStartUs
         if (positionInPeriodUs < 0L || positionInPeriodUs >= durationUs) {
-            throw IOException(
+            throw PermanentCaptureException(
                 "${feed.feed.label}: current playback position is outside the final DASH Period"
             )
         }
@@ -469,26 +481,36 @@ internal class F1DashFeedCapture(
 
     fun reset() {
         initializationByLabel.clear()
+        actualProtocols.clear()
         lastCapturedSegmentStartUs = null
         latestWidevinePssh?.fill(0)
         latestWidevinePssh = null
     }
 
-    private suspend fun loadFeed(feed: Feed): LoadedFeed = withContext(Dispatchers.IO) {
-        val lowerUrl = feed.manifestUrl.substringBefore('?').lowercase()
-        if (lowerUrl.endsWith(".m3u8") || "HLS" in lowerUrl) {
-            throw IOException("${feed.label}: this capture path requires F1 DASH offers, not HLS")
+    private suspend fun loadFeed(feed: Feed, playbackPositionMs: Long? = null): LoadedFeed = withContext(Dispatchers.IO) {
+        var manifestUri = Uri.parse(feed.manifestUrl)
+        val bytes = readDataSpec(DataSpec(manifestUri), MAX_MANIFEST_BYTES, "${feed.label} manifest") {
+            manifestUri = it
         }
-        val dataSource = httpFactory.createDataSource()
+        val protocol = ManifestProtocol.fromBody(bytes)
+        actualProtocols[feed.label] = protocol
+        android.util.Log.i("ApexviewPlaybackOffer", "${feed.label}: actualManifest=$protocol")
         val manifest = try {
-            DashUtil.loadManifest(dataSource, Uri.parse(feed.manifestUrl))
-        } finally {
-            runCatching { dataSource.close() }
-        }
+            when (protocol) {
+                ManifestProtocol.HLS -> throw PermanentCaptureException(
+                    "${feed.label}: actual manifest is HLS; DASH source unavailable in this PLAY session"
+                )
+                ManifestProtocol.UNKNOWN -> throw PermanentCaptureException("${feed.label}: response is not a DASH manifest")
+                ManifestProtocol.DASH -> DashManifestParser().parse(manifestUri, ByteArrayInputStream(bytes))
+            }
+        } finally { bytes.fill(0) }
         if (manifest.getPeriodCount() == 0) {
-            throw IOException("${feed.label}: F1 DASH manifest contains no Period")
+            throw PermanentCaptureException("${feed.label}: F1 DASH manifest contains no Period")
         }
-        val periodIndex = manifest.getPeriodCount() - 1
+        val periodIndex = if (playbackPositionMs == null) manifest.getPeriodCount() - 1 else {
+            (0 until manifest.getPeriodCount()).lastOrNull { manifest.getPeriod(it).startMs <= playbackPositionMs }
+                ?: throw PermanentCaptureException("${feed.label}: archive position precedes the DASH Period")
+        }
         val period = manifest.getPeriod(periodIndex)
         val candidates = period.adaptationSets
             .filter { it.type == C.TRACK_TYPE_VIDEO || it.representations.any(::isHevc) }
@@ -496,19 +518,19 @@ internal class F1DashFeedCapture(
             .filter(::isHevc)
             .filter { it.format.width > 0 && it.format.height in 1..maximumVideoHeight }
         if (candidates.isEmpty()) {
-            throw IOException("${feed.label}: F1 DASH manifest has no supported HEVC video representation")
+            throw PermanentCaptureException("${feed.label}: F1 DASH manifest has no supported HEVC video representation")
         }
         val preferred = candidates.maxWithOrNull(
             compareBy<Representation> { it.format.height }
                 .thenBy { it.format.width }
                 .thenBy { it.format.bitrate }
-        ) ?: throw IOException("${feed.label}: no usable HEVC representation")
+        ) ?: throw PermanentCaptureException("${feed.label}: no usable HEVC representation")
         val index = preferred.index
-            ?: throw IOException("${feed.label}: HEVC representation uses an unsupported external index")
+            ?: throw PermanentCaptureException("${feed.label}: HEVC representation uses an unsupported external index")
         val init = preferred.initializationUri
-            ?: throw IOException("${feed.label}: HEVC representation has no initialization segment")
+            ?: throw PermanentCaptureException("${feed.label}: HEVC representation has no initialization segment")
         val base = preferred.baseUrls.firstOrNull()?.url
-            ?: throw IOException("${feed.label}: HEVC representation has no BaseURL")
+            ?: throw PermanentCaptureException("${feed.label}: HEVC representation has no BaseURL")
         LoadedFeed(
             feed = feed,
             manifest = manifest,
@@ -542,7 +564,7 @@ internal class F1DashFeedCapture(
             .filter(::isHevc)
             .filter { it.format.width == width && it.format.height == height }
             .maxByOrNull { it.format.bitrate }
-            ?: throw IOException("${feed.label}: common HEVC rendition disappeared during selection")
+            ?: throw PermanentCaptureException("${feed.label}: common HEVC rendition disappeared during selection")
     }
 
     private fun isHevc(representation: Representation): Boolean {
@@ -618,12 +640,15 @@ internal class F1DashFeedCapture(
         readDataSpec(dataSpec, maximumBytes, "${feed.feed.label} $kind")
     }
 
-    private fun readDataSpec(dataSpec: DataSpec, maximumBytes: Int, context: String): ByteArray {
+    private fun readDataSpec(
+        dataSpec: DataSpec, maximumBytes: Int, context: String, onOpened: (Uri) -> Unit = {}
+    ): ByteArray {
         val dataSource: DataSource = httpFactory.createDataSource()
         try {
             val length = dataSource.open(dataSpec)
+            dataSource.uri?.let(onOpened)
             if (length > maximumBytes.toLong()) {
-                throw IOException("$context exceeds the ${maximumBytes / (1024 * 1024)} MB capture limit")
+                throw PermanentCaptureException("$context exceeds the ${maximumBytes / (1024 * 1024)} MB capture limit")
             }
             val output = ByteArrayOutputStream(if (length in 1..maximumBytes.toLong()) length.toInt() else 64 * 1024)
             val buffer = ByteArray(32 * 1024)
@@ -634,11 +659,11 @@ internal class F1DashFeedCapture(
                 if (count <= 0) continue
                 total = Math.addExact(total, count)
                 if (total > maximumBytes) {
-                    throw IOException("$context exceeds the configured capture limit")
+                    throw PermanentCaptureException("$context exceeds the configured capture limit")
                 }
                 output.write(buffer, 0, count)
             }
-            if (total < 8) throw IOException("$context is too small to contain a CMAF box")
+            if (total < 8) throw PermanentCaptureException("$context is too small to contain a CMAF box")
             return output.toByteArray()
         } finally {
             runCatching { dataSource.close() }
@@ -648,6 +673,7 @@ internal class F1DashFeedCapture(
     private companion object {
         const val RECENT_SEGMENT_WINDOW = 6L
         const val ARCHIVE_LOOKAHEAD_SEGMENTS = 3L
+        const val MAX_MANIFEST_BYTES = 2 * 1024 * 1024
         const val MAX_INITIALIZATION_BYTES = 2 * 1024 * 1024
         const val MAX_MEDIA_FRAGMENT_BYTES = 8 * 1024 * 1024
     }
