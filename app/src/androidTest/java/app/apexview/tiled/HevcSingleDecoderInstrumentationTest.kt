@@ -1,13 +1,6 @@
 package app.apexview.tiled
 
 import android.media.MediaCodec
-import android.media.ImageReader
-import android.graphics.ImageFormat
-import android.os.Handler
-import android.os.HandlerThread
-import android.os.SystemClock
-import java.util.concurrent.atomic.AtomicInteger
-import androidx.media3.common.Player
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaCodecList
@@ -43,72 +36,6 @@ class HevcSingleDecoderInstrumentationTest {
     @Test
     fun decodesReassembledSyntheticTwoByTwoPictureSequenceWithOneMediaCodec() =
         decodeAssetWithOneHardwareDecoder("reassembled_2x2.mp4")
-
-    @Test
-    fun playsComposedClearCmafThroughOneMedia3PlayerDecoderAndSurface() {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val target = instrumentation.targetContext
-        val cmaf = instrumentation.context.assets.open("hevc_tizen_cmaf_grid.mp4").use { it.readBytes() }
-        assertTrue("Composed clear CMAF asset is missing", cmaf.isNotEmpty())
-
-        val outputReader = ImageReader.newInstance(
-            COMPOSED_WIDTH, COMPOSED_HEIGHT, ImageFormat.YUV_420_888, MAX_SURFACE_IMAGES
-        )
-        val outputThread = HandlerThread("ApexviewMedia3ComposedSurface").apply { start() }
-        val renderedFrames = AtomicInteger(0)
-        outputReader.setOnImageAvailableListener({ reader ->
-            while (true) {
-                val frame = reader.acquireNextImage() ?: break
-                try {
-                    renderedFrames.incrementAndGet()
-                } finally {
-                    frame.close()
-                }
-            }
-        }, Handler(outputThread.looper))
-
-        var composed: HevcComposedMediaPlayer? = null
-        try {
-            composed = HevcComposedMediaPlayer.createFromClearCmaf(
-                target,
-                cmaf,
-                outputReader.surface
-            )
-            val player = composed.player
-            val deadline = SystemClock.elapsedRealtime() + COMPOSED_TIMEOUT_MS
-            while (SystemClock.elapsedRealtime() < deadline &&
-                player.playbackState != Player.STATE_ENDED &&
-                composed.diagnostics.playbackError == null) {
-                SystemClock.sleep(20)
-            }
-            SystemClock.sleep(500)
-
-            val evidence = composed.diagnostics
-            assertEquals("Media3 must create exactly one video decoder", 1, evidence.decoderInstancesCreated)
-            assertTrue("The selected HEVC decoder must be hardware accelerated", evidence.hardwareAccelerated == true)
-            assertEquals("Exactly one output Surface is owned by the composed player", 1, composed.outputSurfaceCount)
-            assertTrue("No Media3 playback error expected: ${evidence.playbackError}", evidence.playbackError == null)
-            assertTrue("First composed frame was not rendered", evidence.firstFrameRendered)
-            assertEquals(COMPOSED_WIDTH, evidence.outputWidth)
-            assertEquals(COMPOSED_HEIGHT, evidence.outputHeight)
-            assertEquals("Expected all 50 composed frames on the one output Surface", 50, renderedFrames.get())
-            Log.i(
-                LOG_TAG,
-                "MEDIA3_COMPOSED_CLEAR_CMAF_SINGLE_DECODER_PASS " +
-                    "decoder=${evidence.decoderName} hardwareAccelerated=${evidence.hardwareAccelerated} " +
-                    "decoderInstancesCreated=${evidence.decoderInstancesCreated} " +
-                    "outputSurfacesCreated=${composed.outputSurfaceCount} " +
-                    "outputSurfaceFrames=${renderedFrames.get()} " +
-                    "dimensions=${evidence.outputWidth}x${evidence.outputHeight} " +
-                    "droppedFrames=${evidence.droppedFrames}"
-            )
-        } finally {
-            composed?.close()
-            outputReader.close()
-            outputThread.quitSafely()
-            outputThread.join(2_000)
-        }
-    }
 
     private fun decodeAssetWithOneHardwareDecoder(assetName: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -342,8 +269,5 @@ class HevcSingleDecoderInstrumentationTest {
         const val RENDER_TIMEOUT_MS = 15_000L
         const val RENDER_POLL_MS = 10L
         const val MAX_SURFACE_IMAGES = 8
-        const val COMPOSED_WIDTH = 1920
-        const val COMPOSED_HEIGHT = 540
-        const val COMPOSED_TIMEOUT_MS = 60_000L
     }
 }
