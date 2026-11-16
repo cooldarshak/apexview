@@ -40,7 +40,11 @@ internal object CmafBoxInspector {
         val pps: List<HevcParameterSets.PpsMetadata>,
         val parameterSetErrors: List<String>,
         /** Sorted SHA-256 fingerprints of raw VPS/SPS/PPS NALs; never sample or DRM bytes. */
-        val parameterSetFingerprints: List<String> = emptyList()
+        val parameterSetFingerprints: List<String> = emptyList(),
+        /** Clear parameter-set NALs from the paired active hvcC, retained for syntax-aware output generation. */
+        val rawVpsNals: List<ByteArray> = emptyList(),
+        val rawSpsNals: List<ByteArray> = emptyList(),
+        val rawPpsNals: List<ByteArray> = emptyList()
     )
     data class TrackEncryptionMetadata(
         val version: Int,
@@ -1365,7 +1369,10 @@ internal object CmafBoxInspector {
             (lumaDepthField and 0x07) + 8, (chromaDepthField and 0x07) + 8,
             averageFrameRate, constantFrameRate, temporalLayers, temporalIdNested, nalLengthSize,
             vpsNals.size, spsNals.size, ppsNals.size, vps, sps, pps, parameterErrors,
-            parameterSetFingerprints
+            parameterSetFingerprints,
+            vpsNals.map { it.copyOf() },
+            spsNals.map { it.copyOf() },
+            ppsNals.map { it.copyOf() }
         )
     }
 
