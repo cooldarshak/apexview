@@ -299,6 +299,14 @@ internal object ProtectedHevcLiveComposition {
     }
 
     @Synchronized
+    fun latestOutputStartUs(group: String): Long? = sessions[group]?.outputHistory?.lastOrNull()?.let {
+        CmafWindowTiming.ticksToUs(it.baseDecodeTimeTicks, it.timescale)
+    }
+
+    @Synchronized
+    fun outputTiming(group: String): CmafWindowTiming? = sessions[group]?.let { CmafWindowTiming.from(it.outputHistory) }
+
+    @Synchronized
     fun hasOutput(group: String): Boolean =
         sessions[group]?.let {
             it.outputInitializationSegment != null && it.outputHistory.isNotEmpty()

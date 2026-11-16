@@ -63,11 +63,13 @@ internal class ClearCmafArchiveComposition {
                 stored += feed.mediaFragments.map { it.copyOf() }
             }
             sequence += newFragments.size
-            while (history.size > 3) history.removeAt(0).zero()
+            while (history.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) history.removeAt(0).zero()
             status = "CLEAR_HEVC_CMAF_COMPOSED_NOT_YET_PLAYED; layout=${columns}x${rows}"
         } catch (error: Throwable) { newFragments.forEach { it.zero() }; throw error
         } finally { output.initializationSegment.fill(0) }
     }
+
+    fun outputTiming(): CmafWindowTiming? = CmafWindowTiming.from(history)
 
     fun hasOutput(): Boolean = initialization != null && history.isNotEmpty()
 

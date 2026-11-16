@@ -519,6 +519,7 @@ class FeedPlayer(
         widevinePssh: ByteArray?,
         clearOutput: Boolean = false,
         startPositionMs: Long? = null,
+        playWhenReady: Boolean = true,
     ) {
         val nextSource = ProtectedHevcLiveDashSource(clearOutput)
         firstFrameRendered = false
@@ -544,7 +545,7 @@ class FeedPlayer(
             if (startPositionMs == null) player.setMediaSource(mediaSource)
             else player.setMediaSource(mediaSource, startPositionMs)
             previous?.release()
-            player.playWhenReady = true
+            player.playWhenReady = playWhenReady
             player.prepare()
         } catch (error: Throwable) {
             nextSource.release()

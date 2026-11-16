@@ -5,7 +5,7 @@ import kotlin.math.abs
 /**
  * Picks time-aligned VOD segments without jumping to the end of a finite DASH presentation.
  * After the first segment, only the next segment after [previousStartUs] is eligible. The
- * maximum lead keeps capture close to the archive player's clock instead of downloading ahead.
+ * caller's maximum lead bounds prefetch. Startup always selects a segment at/before the clock.
  */
 internal object ArchiveDashSegmentSelector {
     data class Candidate(val number: Long, val absoluteStartUs: Long)
@@ -20,7 +20,8 @@ internal object ArchiveDashSegmentSelector {
         if (candidateWindows.size < 2 || candidateWindows.any { it.isEmpty() }) return null
         require(toleranceUs >= 0L && maximumLeadUs >= 0L)
 
-        val latestAllowedStartUs = Math.addExact(targetTimeUs, maximumLeadUs)
+        val latestAllowedStartUs = if (previousStartUs == null) targetTimeUs
+            else Math.addExact(targetTimeUs, maximumLeadUs)
         val masterCandidates = candidateWindows.first()
             .asSequence()
             .filter { it.absoluteStartUs <= latestAllowedStartUs }

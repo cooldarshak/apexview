@@ -31,6 +31,14 @@ internal class F1ArchiveFeedCapture(
             usingHls = true
             return hls.captureAtPosition(group, feeds, playbackPositionMs)
         }
+        if (snapshot.alignedSegmentTimeUs != null) {
+            val timing = ProtectedHevcLiveComposition.outputTiming(group)
+            val latestStartUs = ProtectedHevcLiveComposition.latestOutputStartUs(group)
+            if (timing != null && latestStartUs != null) {
+                val offsetUs = snapshot.alignedSegmentTimeUs - latestStartUs
+                return snapshot.copy(outputTiming = timing.shifted(offsetUs))
+            }
+        }
         return snapshot
     }
 

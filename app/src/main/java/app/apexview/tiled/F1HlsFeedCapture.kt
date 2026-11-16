@@ -32,12 +32,14 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     private val actual = java.util.concurrent.ConcurrentHashMap<String, ManifestProtocol>()
     private val clearComposition = ClearCmafArchiveComposition()
     private var previousStartUs: Long? = null
+    private var mediaToArchiveOffsetUs: Long? = null
     private var pssh: ByteArray? = null
     var clearOutput: Boolean? = null
         private set
 
     suspend fun captureAtPosition(group: String, feeds: List<F1DashFeedCapture.Feed>, positionMs: Long): F1DashFeedCapture.Snapshot = withContext(Dispatchers.IO) {
         var format: Format? = null
+        val startedMs = android.os.SystemClock.elapsedRealtime()
         try {
             require(feeds.size in 2..4 && feeds.map { it.label }.distinct().size == feeds.size)
             val perFeed = feeds.map { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }
@@ -53,7 +55,9 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                         if (useProgramTime) playlist.startTimeUs - masterStartUs else 0L)
                 }
             }
-            val aligned = ArchiveDashSegmentSelector.selectAligned(windows, Math.multiplyExact(positionMs, 1000), previousStartUs, 250_000)
+            val targetUs = Math.multiplyExact(positionMs, 1000)
+            val aligned = ArchiveDashSegmentSelector.selectAligned(windows, targetUs, previousStartUs, 250_000,
+                maximumLeadUs = ArchiveBufferPolicy.maximumLeadUs(windows.first(), targetUs))
                 ?: return@withContext snapshot(group, format, null, 0,
                     if (previousStartUs == null) CaptureFailure("HLS fragment alignment failure at the archive position", false) else null,
                     "Waiting for the next aligned HLS archive segment")
@@ -83,12 +87,23 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 ProtectedHevcLiveComposition.recordCmafResponse(group, offer.feed.label, init.bytes, init.report)
             }
             val media = mutableListOf<ByteArray>()
+            val fetchStartedMs = android.os.SystemClock.elapsedRealtime()
+            var fetchMs = 0L
+            var composeMs = 0L
             try {
                 // Serial, bounded segment reads reduce the peak memory load on Android TVs.
                 selected.zip(segments).forEach { (offer, segment) ->
                     coroutineContext.ensureActive()
                     media += reader.read(UriUtil.resolveToUri(playlists[selected.indexOf(offer)].baseUri, segment.url),
                         MAX_MEDIA_BYTES, segment.byteRangeOffset, segment.byteRangeLength).bytes
+                }
+                fetchMs = android.os.SystemClock.elapsedRealtime() - fetchStartedMs
+                val composeStartedMs = android.os.SystemClock.elapsedRealtime()
+                if (mediaToArchiveOffsetUs == null) {
+                    val firstFragment = CmafBoxInspector.inspect(media.first(), inits.first().report).fragments
+                        .first { it.trackId == tracks.first().trackId }
+                    mediaToArchiveOffsetUs = aligned.first().absoluteStartUs - CmafWindowTiming.ticksToUs(
+                        requireNotNull(firstFragment.baseDecodeTimeTicks), requireNotNull(tracks.first().timescale))
                 }
                 if (clear) {
                     clearComposition.compose(selected.mapIndexed { index, offer ->
@@ -102,9 +117,10 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                     }
                     ProtectedHevcLiveComposition.rejectionReason(group)?.let { throw PermanentCaptureException("HLS HEVC/CMAF composition rejected: $it") }
                 }
+                composeMs = android.os.SystemClock.elapsedRealtime() - composeStartedMs
             } finally { media.forEach { it.fill(0) } }
             previousStartUs = aligned.first().absoluteStartUs
-            android.util.Log.i("ApexviewSingleDecoder", "HLS_CMAF_CAPTURE feeds=${feeds.size} protection=${if (clear) "CLEAR" else "CBCS"} aligned=PASS composed=${if (clear) clearComposition.hasOutput() else ProtectedHevcLiveComposition.hasOutput(group)}")
+            android.util.Log.i("ApexviewSingleDecoder", "HLS_CMAF_CAPTURE feeds=${feeds.size} protection=${if (clear) "CLEAR" else "CBCS"} aligned=PASS composed=${if (clear) clearComposition.hasOutput() else ProtectedHevcLiveComposition.hasOutput(group)} fetchMs=$fetchMs composeMs=$composeMs totalMs=${android.os.SystemClock.elapsedRealtime() - startedMs} archiveClockMs=$positionMs segmentStartUs=${aligned.first().absoluteStartUs}")
             snapshot(group, format, aligned.first().absoluteStartUs, feeds.size)
         } catch (cancelled: CancellationException) { throw cancelled
         } catch (error: Exception) {
@@ -121,14 +137,17 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
 
     fun reset() {
         initializations.values.forEach { it.bytes.fill(0) }; initializations.clear()
-        offers.clear(); vodPlaylists.clear(); actual.clear(); previousStartUs = null
+        offers.clear(); vodPlaylists.clear(); actual.clear(); previousStartUs = null; mediaToArchiveOffsetUs = null
         pssh?.fill(0); pssh = null; clearOutput = null; clearComposition.reset()
     }
 
     private fun snapshot(group: String, format: Format?, startUs: Long?, count: Int, failure: CaptureFailure? = null, detail: String? = null) =
         F1DashFeedCapture.Snapshot(format?.width, format?.height, format?.codecs, startUs, count,
             if (clearOutput == true) clearComposition.status else ProtectedHevcLiveComposition.status(group),
-            failure?.reason ?: detail, failure, actual.toMap())
+            failure?.reason ?: detail, failure, actual.toMap(),
+            mediaToArchiveOffsetUs?.let { offset ->
+                (if (clearOutput == true) clearComposition.outputTiming() else ProtectedHevcLiveComposition.outputTiming(group))?.shifted(offset)
+            })
 
     private fun parse(uri: Uri, master: HlsMultivariantPlaylist? = null): HlsPlaylist {
         val response = reader.read(uri, MAX_MANIFEST_BYTES)

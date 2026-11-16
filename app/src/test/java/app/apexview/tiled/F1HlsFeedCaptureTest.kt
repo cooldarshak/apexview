@@ -84,6 +84,41 @@ class F1HlsFeedCaptureTest {
         output.zero(); capture.reset()
     }
 
+    @Test fun pausedArchiveCanPrefetchBeforeTheNextSegmentBoundary() = runBlocking {
+        val capture = F1ArchiveFeedCapture("test", "auth", "entitled", network(2).factory)
+        val first = capture.captureAtPosition("hls-prefetch", feeds(2), 100)
+        val next = capture.captureAtPosition("hls-prefetch", feeds(2), 100)
+        assertNull(first.detail, first.failure)
+        assertNull(next.detail, next.failure)
+        assertEquals(2, next.capturedFeeds)
+        assertEquals(CmafWindowTiming(0, 2_000_000), next.outputTiming)
+        assertTrue(ArchiveBufferPolicy.ready(next.outputTiming, 100_000, 2_000_000))
+        capture.reset()
+    }
+
+    @Test fun epochDecodeTimesAndPrefetchDoNotMoveTheArchiveTimelineOrigin() = runBlocking {
+        val epochTicks = 1_700_000_000L * 90_000L
+        val capture = F1ArchiveFeedCapture("test", "auth", "entitled", network(2, epochTicks).factory)
+        val first = capture.captureAtPosition("hls-epoch", feeds(2), 100)
+        val next = capture.captureAtPosition("hls-epoch", feeds(2), 100)
+        assertNull(first.detail, first.failure)
+        assertNull(next.detail, next.failure)
+        assertEquals(CmafWindowTiming(0, 1_000_000), first.outputTiming)
+        assertEquals(CmafWindowTiming(0, 2_000_000), next.outputTiming)
+        assertEquals(1_000_000L, next.alignedSegmentTimeUs)
+        capture.reset()
+    }
+
+    @Test fun startupSelectsTheCurrentSegmentInsteadOfTheCloserFutureSegment() = runBlocking {
+        val network = network(2)
+        val capture = F1ArchiveFeedCapture("test", "auth", "entitled", network.factory)
+        val snapshot = capture.captureAtPosition("hls-no-future-start", feeds(2), 900)
+        assertNull(snapshot.detail, snapshot.failure)
+        assertEquals(0L, snapshot.alignedSegmentTimeUs)
+        assertTrue(network.requested.none { it.endsWith("s1.m4s") })
+        capture.reset()
+    }
+
     @Test fun extensionlessOffersRouteFromBodyDetectionIntoNativeHls() = runBlocking {
         val original = network(2)
         val files = original.files.toMutableMap()
@@ -220,7 +255,7 @@ seg.m4s
 
     private fun feeds(count: Int) = (0 until count).map { F1DashFeedCapture.Feed("channel-$it", "https://media.test/f$it/master.m3u8") }
 
-    private fun network(count: Int): Network {
+    private fun network(count: Int, decodeOffsetTicks: Long = 0): Network {
         val dir = System.getenv("APEXVIEW_HEVC_FIXTURE_DIR")?.let(::File)
         assumeTrue("Independent HEVC source fixtures are not configured", dir != null)
         val files = mutableMapOf<String, ByteArray>()
@@ -244,7 +279,7 @@ seg.m4s
             files["https://media.test/f$i/init.mp4"] = init
             samples.chunked(25).forEachIndexed { index, chunk ->
                 files["https://media.test/f$i/s$index.m4s"] = HevcClearCmafFragmentWriter.write(i + 1L,
-                    index + 1L, index * 90_000L, chunk, false, false)
+                    index + 1L, decodeOffsetTicks + index * 90_000L, chunk, false, false)
             }
         }
         return Network(files)

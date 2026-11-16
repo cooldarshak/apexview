@@ -35,6 +35,7 @@ import app.apexview.tiled.F1DashFeedCapture
 import app.apexview.tiled.ArchiveCompositionStartup
 import app.apexview.tiled.F1ArchiveFeedCapture
 import app.apexview.tiled.CmafCaptureLifecycle
+import app.apexview.tiled.ArchiveBufferPolicy
 
 /** A feed's window on the canvas. Positions and sizes are in pixels. */
 class Tile(val id: Int, val contentId: Long, channel: Channel, feed: FeedPlayer) {
@@ -318,6 +319,7 @@ class AppState(
     private var protectedCompositionHost: Tile? = null
     private var protectedCompositionAudioMaster: Tile? = null
     private var composedArchiveOriginMs: Long? = null
+    private var composedArchiveFillingBuffer = false
     private var protectedCompositionBounds: Map<Tile, ProtectedTileBounds> = emptyMap()
     private data class ProtectedTileBounds(val x: Float, val y: Float, val w: Float, val h: Float, val z: Float)
     private val prefs = context.getSharedPreferences("f1mv", Context.MODE_PRIVATE)
@@ -1452,6 +1454,11 @@ class AppState(
                 append("HEVC/CMAF preflight: " + if (preflightPassed) "PASS\n" else "${snapshot?.detail ?: "VALIDATING"}\n")
                 append("Media protection: ${capture.protection}\n")
                 append("Composition: ${snapshot?.compositionStatus ?: "VALIDATING"}\n")
+                snapshot?.outputTiming?.let { timing ->
+                    val aheadMs = (timing.endUs / 1000L - audioMaster.feed.player.currentPosition).coerceAtLeast(0L)
+                    append("Prepared video ahead: ${aheadMs}ms\n")
+                }
+                if (startup.hostReplaced) append("Player buffered: ${host.feed.player.totalBufferedDuration}ms\n")
                 append("Source decoders released (callbacks): $releasedCount\n")
                 append("Composed decoder: ${composedCodec ?: "NOT OBSERVED"}\n")
                 append("First composed frame: ${if (composedFirstFrameSeen) "YES" else "NO"}\n")
@@ -1471,6 +1478,7 @@ class AppState(
                 applyVideoBudget()
             }
             composedArchiveOriginMs = null
+            composedArchiveFillingBuffer = false
             layoutMode = previousLayout
             layoutRequest++
         }
@@ -1481,19 +1489,23 @@ class AppState(
             try {
                 startup.start(
                     preflight = {
-                        val deadline = android.os.SystemClock.elapsedRealtime() + 15_000L
+                        val deadline = android.os.SystemClock.elapsedRealtime() + 30_000L
                         var prepared: ProtectedHevcLiveComposition.OutputWindow? = null
                         while (prepared == null) {
                             val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
                             lastSnapshot = snapshot
                             diagnostics()
                             snapshot.failure?.takeUnless { it.retryable }?.let { throw IOException(it.reason) }
-                            prepared = capture.outputWindow(group)
+                            val clockUs = Math.multiplyExact(audioMaster.feed.player.currentPosition.coerceAtLeast(0L), 1000L)
+                            val durationUs = audioMaster.feed.player.duration.takeIf { it > 0L }?.let { Math.multiplyExact(it, 1000L) }
+                            if (ArchiveBufferPolicy.ready(snapshot.outputTiming, clockUs, durationUs, minimumLeadUs = 0L)) {
+                                prepared = capture.outputWindow(group)
+                            }
                             if (prepared == null) {
                                 if (android.os.SystemClock.elapsedRealtime() >= deadline) {
-                                    throw IOException("Archive preflight timed out: ${snapshot.detail ?: snapshot.compositionStatus}")
+                                    throw IOException("Archive preflight timed out: ${snapshot.detail ?: "prepared video has insufficient lead over the archive clock"}")
                                 }
-                                kotlinx.coroutines.delay(250L)
+                                if (snapshot.capturedFeeds == 0) kotlinx.coroutines.delay(250L)
                             }
                         }
                         prepared.also { window ->
@@ -1531,10 +1543,15 @@ class AppState(
                     },
                     replaceHost = { window ->
                         if (host.audible) setAudio(audioMaster)
-                        composedArchiveOriginMs = (lastSnapshot?.alignedSegmentTimeUs ?: 0L) / 1000L
+                        composedArchiveOriginMs = requireNotNull(lastSnapshot?.outputTiming).startUs / 1000L
+                        composedArchiveFillingBuffer = true
+                        // The validated picture covers this position. Hold the audio clock while
+                        // actual queued media fills the initial buffer, then resume both together.
+                        selectedTiles.forEach { it.feed.player.playWhenReady = false }
                         host.feed.startProtectedComposedPlayback(window, capture.widevinePssh(),
                             clearOutput = capture.clearOutput,
-                            startPositionMs = (audioMaster.feed.player.currentPosition - requireNotNull(composedArchiveOriginMs)).coerceAtLeast(0L))
+                            startPositionMs = (audioMaster.feed.player.currentPosition - requireNotNull(composedArchiveOriginMs)).coerceAtLeast(0L),
+                            playWhenReady = false)
                         layoutMode = LayoutMode.SINGLE_DECODER_TEST
                         showProtectedCompositionPresentation(host, selectedTiles, audioMaster)
                     },
@@ -1549,12 +1566,21 @@ class AppState(
                     }
                     composedFirstFrameSeen = host.feed.hasRenderedFirstFrame
                     host.feed.activeVideoDecoderName?.let { composedCodec = "$it (${host.feed.activeVideoDecoderHardware})" }
-                    playback = if (composedFirstFrameSeen) "ACTIVE" else "WAITING FOR FIRST FRAME"
+                    playback = when {
+                        composedArchiveFillingBuffer || host.feed.buffering -> "BUFFERING"
+                        composedFirstFrameSeen -> "ACTIVE"
+                        else -> "WAITING FOR FIRST FRAME"
+                    }
                     val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
                     lastSnapshot = snapshot
                     snapshot.failure?.takeUnless { it.retryable }?.let { throw IOException(it.reason) }
                     if (snapshot.capturedFeeds > 0) capture.outputWindow(group)?.let {
                         host.feed.publishProtectedComposedOutput(it, capture.widevinePssh())
+                    }
+                    if (composedArchiveFillingBuffer && ArchiveBufferPolicy.ready(snapshot.outputTiming,
+                            Math.multiplyExact(audioMaster.feed.player.currentPosition.coerceAtLeast(0L), 1000L),
+                            audioMaster.feed.player.duration.takeIf { it > 0 }?.let { Math.multiplyExact(it, 1000L) })) {
+                        composedArchiveFillingBuffer = false
                     }
                     diagnostics()
                     if (audioMaster.feed.player.playbackState == Player.STATE_ENDED) {
@@ -1563,7 +1589,7 @@ class AppState(
                         diagnostics()
                         break
                     }
-                    kotlinx.coroutines.delay(250L)
+                    if (snapshot.capturedFeeds == 0) kotlinx.coroutines.delay(250L)
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 if (startup.sourceDecodersTouched) restore(startup.hostReplaced)
@@ -1733,6 +1759,7 @@ class AppState(
         if (restorePlayer) protectedCompositionHost?.feed?.stopProtectedComposedPlayback(resumePositionMs)
         protectedCompositionAudioMaster = null
         composedArchiveOriginMs = null
+        composedArchiveFillingBuffer = false
         tiles.forEach { tile ->
             tile.protectedCompositionHidden = false
             tile.feed.clearProtectedCompositionVideoRole()
@@ -2505,8 +2532,9 @@ class AppState(
         // Clear a previous screen orientation's reservation before any early-return layout.
         // The combined plan is rebuilt below only when its two feed-clearance switches apply.
         combinedOverlayPlan = null
-        val ordered = bigFirst()
-        bigTileId = ordered.firstOrNull()?.id
+        val composed = protectedCompositionHost
+        val ordered = composed?.let { listOf(it) } ?: bigFirst()
+        if (composed == null) bigTileId = ordered.firstOrNull()?.id
 
         // Laptop mode: the main feed fills the screen above the hinge; the rest wait off screen,
         // still playing. Timing and the map take the half below.
@@ -2526,7 +2554,7 @@ class AppState(
         val tvLayoutActive = layoutMode == LayoutMode.TV && !laptopActive
         val combinedReservationsActive =
             tvLayoutActive || (mapMode.inWindow && mapReserve && towerOpen && towerReserve && timing != null && !laptopActive)
-        tiles.firstOrNull { it.id == focusTileId }?.takeIf { compactCanvas && !combinedReservationsActive }?.let { focus ->
+        tiles.firstOrNull { it.id == focusTileId }?.takeIf { composed == null && compactCanvas && !combinedReservationsActive }?.let { focus ->
             focus.place(Layouts.place(LayoutMode.GRID, 1, width, height).first())
             raise(focus)
             tiles.filter { it !== focus }.forEach { it.place(Slot(width * 2, 0f, it.w)) }
@@ -2539,7 +2567,7 @@ class AppState(
             resumeLayout = null
         }
         // Coming back to a session puts its feeds back where they were.
-        resumeLayout?.let { (boxes, layout) ->
+        if (composed == null) resumeLayout?.let { (boxes, layout) ->
             resumeLayout = null
             if (layout.fits(width, height) && ordered.all { it.channel.key() in boxes }) {
                 ordered.forEach { tile ->
@@ -2560,6 +2588,11 @@ class AppState(
         // prevents startup latency from collapsing the TV layout back into a feed-only grid.
         val keepMapClear = tvLayoutActive || (mapMode.inWindow && mapReserve && timing != null)
         val keepTowerClear = towerOpen && (tvLayoutActive || towerReserve && timing != null) && !laptopActive
+        if (composed != null && !keepMapClear && !keepTowerClear) {
+            placeComposedViewport(composed, Area(0f, 0f, width, height))
+            placeMapIfNeeded(width, height)
+            return
+        }
         if (keepMapClear && keepTowerClear) {
             val panelLayoutMode = if (tvLayoutActive) LayoutMode.TV else layoutMode
             val panelOverlayMode = if (tvLayoutActive) OverlayLayoutMode.DOCKED else overlayLayoutMode
@@ -2594,7 +2627,8 @@ class AppState(
                 }
             }
             handPlaced = false
-            plan.slots.zip(ordered).forEach { (slot, tile) -> settle(tile, slot) }
+            if (composed != null) placeComposedViewport(composed, plan.feeds)
+            else plan.slots.zip(ordered).forEach { (slot, tile) -> settle(tile, slot) }
             return
         } else {
             combinedOverlayPlan = null
@@ -2661,6 +2695,15 @@ class AppState(
         }
         slots.zip(ordered).forEach { (slot, tile) -> settle(tile, slot) }
         placeMapIfNeeded(width, height)
+    }
+
+    private fun placeComposedViewport(host: Tile, area: Area) {
+        // A composed representation has its own aspect ratio. PlayerView FIT preserves all cells.
+        // Do not pass it through Tile.resize(), which forces every source tile back to 16:9.
+        host.x = area.x
+        host.y = area.y
+        host.w = area.w
+        host.h = area.h
     }
 
     /** Restores and clamps the tower to the workspace shared with the map. */
@@ -3857,6 +3900,15 @@ class AppState(
     fun syncTick() {
         val leaderTile = leaderTile() ?: return
         val leader = leaderTile.feed
+        composedArchiveOriginMs?.let {
+            protectedCompositionHost?.let { host ->
+                val sourcesMayPlay = ArchiveBufferPolicy.audioMayPlay(playing,
+                    host.feed.player.playbackState == Player.STATE_READY, composedArchiveFillingBuffer)
+                tiles.filter { it !== host && it.contentId == leaderTile.contentId }
+                    .forEach { it.feed.player.playWhenReady = sourcesMayPlay }
+                host.feed.player.playWhenReady = playing && leader.player.playbackState == Player.STATE_READY && !composedArchiveFillingBuffer
+            }
+        }
         leader.driftMs = null
         leader.setSpeed(1f)
         positionMs = leader.player.currentPosition
@@ -3873,7 +3925,7 @@ class AppState(
         watchStrain()
 
         composedArchiveOriginMs?.let { origin ->
-            protectedCompositionHost?.feed?.syncComposedArchivePosition(leader.player.currentPosition - origin, playing)
+            protectedCompositionHost?.feed?.syncComposedArchivePosition(leader.player.currentPosition - origin, playing && !composedArchiveFillingBuffer)
         }
         val leaderClock = leader.wallClockMs()
         tiles.filter { it !== leaderTile && it !== protectedCompositionHost }.forEach { tile ->

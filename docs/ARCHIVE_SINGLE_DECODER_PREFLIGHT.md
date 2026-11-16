@@ -38,3 +38,16 @@ logcat -d -v threadtime -s ApexviewPlaybackOffer:I ApexviewSingleDecoder:I
 ```
 
 Native HLS regression tests cover the WEB_DASH/player_tm response profile, 2/3/4-feed clear composition, contiguous segments, cached playlists, body detection, program-date-time rejection, byte ranges, and encryption rejection before decoder release. CI independently decodes the HLS-acquired composed output and compares every frame with the source hstack. These are synthetic fixtures, not device proof. Do not treat a green build, successful package creation, or target decoder count as proof of real-device composition.
+
+## Build #465 phone milestone and subsequent buffering/layout fixes
+
+The next uploaded phone log (named apexview-463-phone.log but containing native HLS capture events on 17 November) shows three source c2.qti.hevc.decoder instances released at 00:29:56, followed by one c2.qti.hevc.decoder instance at 00:29:57 for a 2880x536 composed representation. The recording shows all three real archive cells. That establishes a real phone decoding handoff during the active interval, not TV stability or smooth sustained playback. Another decoder appears during the subsequent exit/restore.
+
+Two integration defects remained: the standard three-tile solver shrank the only visible composed host, and the 750 ms capture horizon was too short to hide network/composition work. The audible source kept advancing during video stalls, causing repeated hard resynchronisation seeks and codec flushes.
+
+- The composed host alone participates in layout. With no reserved panels it gets the full canvas, using PlayerView FIT to preserve every cell. Reserved map/tower workspace remains respected. A horizontal three-feed stream naturally has a wider aspect ratio than the screen.
+- HLS acquisition retains the current segment and prefetches up to two following segments. The producer stops before evicting the segment containing the audible archive clock.
+- A media-to-archive timestamp mapping makes the first retained output fragment the playback origin, even when several fragments were prefetched or tfdt contains epoch-based timestamps.
+- Preflight rejects already expired/future-only output. After a validated current picture takes over, startup holds the clock until actual queued data has three seconds of lead (or the archive ends sooner). This is a media readiness condition, not a timer.
+- During real video rebuffering, the audible archive clock waits and resumes with the video. User play/pause stays authoritative. Diagnostics distinguish BUFFERING from ACTIVE and show prepared and player buffer durations.
+- Per-batch logs report acquisition and composition times without URLs or tokens, so sustained producer throughput can be measured on phone and TV.

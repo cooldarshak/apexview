@@ -63,6 +63,7 @@ internal class F1DashFeedCapture(
         val detail: String? = null,
         val failure: CaptureFailure? = null,
         val actualManifests: Map<String, ManifestProtocol> = emptyMap(),
+        val outputTiming: CmafWindowTiming? = null,
     )
 
     private data class LoadedFeed(
