@@ -199,7 +199,10 @@ class HevcComposedPlaybackInstrumentationTest {
                 "Not enough surface timestamps to measure frame cadence",
                 timestamps.size == extractedSamples && averageFrameIntervalMs > 0.0
             )
-            val droppedFrames = player.videoDecoderCounters?.droppedBufferCount ?: 0
+            val droppedFrames = AtomicInteger(0)
+            instrumentation.runOnMainSync {
+                droppedFrames.set(playback?.player?.videoDecoderCounters?.droppedBufferCount ?: 0)
+            }
             Log.i(
                 LOG_TAG,
                 "MEDIA3_COMPOSED_CMAF_PASS decoder=$selectedDecoder hardwareAccelerated=true " +
@@ -207,7 +210,7 @@ class HevcComposedPlaybackInstrumentationTest {
                     "maxActiveVideoDecoders=${maxActiveDecoders.get()} outputSurfaces=1 " +
                     "samples=$extractedSamples renderedFrames=${renderedFrames.get()} " +
                     "dimensions=${width}x$height averageFrameIntervalMs=$averageFrameIntervalMs " +
-                    "droppedFrames=$droppedFrames fragments=${mediaFragments.size}"
+                    "droppedFrames=${droppedFrames.get()} fragments=${mediaFragments.size}"
             )
         } finally {
             instrumentation.runOnMainSync { playback?.release() }
