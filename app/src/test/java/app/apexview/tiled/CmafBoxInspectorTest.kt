@@ -378,7 +378,7 @@ class CmafBoxInspectorTest {
         )
 
         assertFalse(report.fragments.single().sampleGroupEncryptionStructureComplete)
-        assertTrue(report.errors.any { it.contains("Unsupported seig multi-key/reserved flags") })
+        assertTrue(report.errors.any { it.contains("seig sample-group descriptions could not be parsed") })
     }
 
     @Test fun rejectsVersionOneSencMultiIvRecordsUntilTheirSubsampleIndexesAreParsed() {
