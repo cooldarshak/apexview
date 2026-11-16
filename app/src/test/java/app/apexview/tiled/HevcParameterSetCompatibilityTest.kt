@@ -176,18 +176,17 @@ class HevcParameterSetCompatibilityTest {
         assertTrue(timingResult.reasons.any { it.contains("VUI or picture-timing") })
     }
 
-    @Test fun rejectsCroppedPicturesInvalidTileGeometryAndUnsupportedSliceSyntax() {
+    @Test fun acceptsDifferentSourceCropsButRejectsInvalidTileGeometryAndUnsupportedSliceSyntax() {
         val f = fixture(tilesEnabled = false)
 
-        val crop = f.sps.copy(
+        val cropped = f.sps.copy(
             conformanceWindowLeft = 1,
             displayWidth = f.sps.width - 2
         )
         val cropResult = HevcParameterSetCompatibility.compare(
-            f.vps, crop, f.pps, f.vps, crop, f.pps
+            f.vps, cropped, f.pps, f.vps, f.sps, f.pps
         )
-        assertFalse(cropResult.compatible)
-        assertTrue(cropResult.reasons.any { it.contains("Conformance-window crops") })
+        assertTrue(cropResult.reasons.toString(), cropResult.compatible)
 
         val malformedTiles = f.pps.copy(
             tilesEnabled = true,

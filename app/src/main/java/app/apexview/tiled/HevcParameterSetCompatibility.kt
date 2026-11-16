@@ -62,15 +62,12 @@ internal object HevcParameterSetCompatibility {
                 firstSps.scalingListDataPresent != secondSps.scalingListDataPresent ||
                 firstSps.ampEnabled != secondSps.ampEnabled || firstSps.pcmEnabled != secondSps.pcmEnabled ||
                 firstSps.strongIntraSmoothingEnabled != secondSps.strongIntraSmoothingEnabled) reasons += "Source SPS coding-tool constraints differ"
-            if (firstSps.vuiParametersPresent != secondSps.vuiParametersPresent ||
-                (firstSps.vuiParametersPresent && firstSps.vuiMetadata == null) ||
-                (secondSps.vuiParametersPresent && secondSps.vuiMetadata == null) ||
-                firstSps.vuiMetadata != secondSps.vuiMetadata) reasons += "Source VUI or picture-timing metadata differs or is incomplete"
-            if (firstSps.conformanceWindowLeft != secondSps.conformanceWindowLeft ||
-                firstSps.conformanceWindowRight != secondSps.conformanceWindowRight ||
-                firstSps.conformanceWindowTop != secondSps.conformanceWindowTop ||
-                firstSps.conformanceWindowBottom != secondSps.conformanceWindowBottom) {
-                reasons += "Source SPS conformance-window crops differ"
+            // VUI is source-track metadata, not coded-cell identity. Independent feeds can
+            // legitimately signal different SAR/colour/timing. Output uses the first selected
+            // cell's SPS template; exact sample timing is checked separately by WP4.
+            if ((firstSps.vuiParametersPresent && firstSps.vuiMetadata == null) ||
+                (secondSps.vuiParametersPresent && secondSps.vuiMetadata == null)) {
+                reasons += "Source VUI metadata is present but could not be parsed completely"
             }
             listOf("First" to firstSps, "Second" to secondSps).forEach { (label, sps) ->
                 if (sps.width <= 0 || sps.height <= 0 || sps.ctbSize <= 0 ||
