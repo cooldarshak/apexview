@@ -1493,9 +1493,11 @@ class AppState(
                         val pssh = capture.widevinePssh()
                         try {
                             if (!composedPlaybackStarted) {
+                                val composedSize = outputWindow.fragments.lastOrNull()
+                                    ?.let { "${it.width}x${it.height}" } ?: "unknown"
                                 android.util.Log.i(
                                     "ApexviewSingleDecoder",
-                                    "Starting composed archive video: ${outputWindow.width}x${outputWindow.height}, " +
+                                    "Starting composed archive video: $composedSize, " +
                                         "fragments=${outputWindow.fragments.size}, psshPresent=${pssh != null}."
                                 )
                                 host.feed.startProtectedComposedPlayback(outputWindow, pssh)
