@@ -31,6 +31,36 @@ internal object ProtectedHevcLiveComposition {
         }
     }
 
+    /** One live output fragment. The init is shared by the bounded window, not copied per segment. */
+    data class OutputFragment(
+        val sequenceNumber: Long,
+        val mediaFragment: ByteArray,
+        val timescale: Long,
+        val baseDecodeTimeTicks: Long,
+        val durationTicks: Long,
+        val sampleCount: Int,
+        val width: Int,
+        val height: Int,
+        val alignmentOffsetsMillis: Map<String, Long?>
+    ) {
+        fun zero() = mediaFragment.fill(0)
+
+        fun detached() = copy(
+            mediaFragment = mediaFragment.copyOf(),
+            alignmentOffsetsMillis = alignmentOffsetsMillis.toMap()
+        )
+    }
+
+    data class OutputWindow(
+        val initializationSegment: ByteArray,
+        val fragments: List<OutputFragment>
+    ) {
+        fun zero() {
+            initializationSegment.fill(0)
+            fragments.forEach(OutputFragment::zero)
+        }
+    }
+
     private data class BufferedPicture(
         val picture: HevcPictureSequenceAligner.PictureSample,
         val sampleBytes: ByteArray,
@@ -90,7 +120,7 @@ internal object ProtectedHevcLiveComposition {
         var outputRepresentationSignature: String? = null
         var outputSequenceNumber: Long = 1L
         var lastComposedMasterSequenceOrdinal: Long = -1L
-        var latestOutput: OutputSegment? = null
+        val outputHistory = mutableListOf<OutputFragment>()
         var composedFragments: Long = 0L
         var lastFailure: String? = null
 
@@ -99,8 +129,8 @@ internal object ProtectedHevcLiveComposition {
             outputInitializationSegment?.fill(0)
             outputInitializationSegment = null
             outputRepresentationSignature = null
-            latestOutput?.zero()
-            latestOutput = null
+            outputHistory.forEach(OutputFragment::zero)
+            outputHistory.clear()
             status = "CLEARED"
         }
     }
@@ -234,12 +264,14 @@ internal object ProtectedHevcLiveComposition {
         }
     } ?: "PROTECTED_COMPOSITION_NOT_SELECTED"
 
-    /** Returns a detached copy for the single composed-output Media3 data source. */
+    /** Returns the latest output for diagnostics and one-fragment playback. */
     @Synchronized
     fun latestOutput(group: String): OutputSegment? {
-        val output = sessions[group]?.latestOutput ?: return null
+        val session = sessions[group] ?: return null
+        val init = session.outputInitializationSegment ?: return null
+        val output = session.outputHistory.lastOrNull() ?: return null
         return OutputSegment(
-            initializationSegment = output.initializationSegment.copyOf(),
+            initializationSegment = init.copyOf(),
             mediaFragment = output.mediaFragment.copyOf(),
             timescale = output.timescale,
             baseDecodeTimeTicks = output.baseDecodeTimeTicks,
@@ -249,6 +281,24 @@ internal object ProtectedHevcLiveComposition {
             alignmentOffsetsMillis = output.alignmentOffsetsMillis.toMap()
         )
     }
+
+    /** A bounded rolling output window for the live DASH representation. */
+    @Synchronized
+    fun outputWindow(group: String): OutputWindow? {
+        val session = sessions[group] ?: return null
+        val init = session.outputInitializationSegment ?: return null
+        if (session.outputHistory.isEmpty()) return null
+        return OutputWindow(
+            initializationSegment = init.copyOf(),
+            fragments = session.outputHistory.map(OutputFragment::detached)
+        )
+    }
+
+    @Synchronized
+    fun hasOutput(group: String): Boolean =
+        sessions[group]?.let {
+            it.outputInitializationSegment != null && it.outputHistory.isNotEmpty()
+        } == true
 
     private fun cacheInitialization(
         group: String,
@@ -340,8 +390,8 @@ internal object ProtectedHevcLiveComposition {
             session.outputInitializationSegment = null
             session.outputRepresentationSignature = null
             session.lastComposedMasterSequenceOrdinal = -1L
-            session.latestOutput?.zero()
-            session.latestOutput = null
+            session.outputHistory.forEach(OutputFragment::zero)
+            session.outputHistory.clear()
         }
         state.initializationSegment?.fill(0)
         state.initializationSegment = bytes.copyOf()
@@ -735,18 +785,24 @@ internal object ProtectedHevcLiveComposition {
                 ),
                 context = "Live protected F1 composed fragment"
             )
-            val newOutput = OutputSegment(
-                initializationSegment = outputInit.copyOf(),
+            val durationTicks = composedSamples.fold(0L) { total, sample ->
+                Math.addExact(total, sample.durationTicks)
+            }
+            val newOutput = OutputFragment(
+                sequenceNumber = session.outputSequenceNumber,
                 mediaFragment = mediaFragment,
                 timescale = requireNotNull(firstTrack.timescale),
                 baseDecodeTimeTicks = firstComposedDts,
+                durationTicks = durationTicks,
                 sampleCount = composedSamples.size,
                 width = outputSps.displayWidth,
                 height = outputSps.displayHeight,
                 alignmentOffsetsMillis = proof.offsetsByFeed.mapValues { it.value.offsetMillis }
             )
-            session.latestOutput?.zero()
-            session.latestOutput = newOutput
+            session.outputHistory += newOutput
+            while (session.outputHistory.size > MAX_OUTPUT_HISTORY) {
+                session.outputHistory.removeAt(0).zero()
+            }
             session.outputSequenceNumber = Math.addExact(session.outputSequenceNumber, 1L)
             session.lastComposedMasterSequenceOrdinal =
                 newMatches.last().sampleEvidenceByFeed.getValue(masterFeedId).sequenceSampleOrdinal
@@ -795,4 +851,5 @@ internal object ProtectedHevcLiveComposition {
     private const val MAX_INIT_BYTES = 2 * 1024 * 1024
     private const val MAX_FRAGMENT_BYTES = 8 * 1024 * 1024
     private const val MAX_SESSIONS = 2
+    private const val MAX_OUTPUT_HISTORY = 3
 }
