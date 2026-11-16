@@ -9,6 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import app.apexview.tiled.HevcBitstream
+import app.apexview.tiled.CmafBoxInspector
 
 class HevcFeedProfileProbeTest {
     @Test
@@ -272,4 +273,70 @@ class HevcFeedProfileProbeTest {
         assertTrue(summary.contains("sps={unavailable}"))
         assertTrue(summary.contains("pps={unavailable}"))
     }
+    @Test
+    fun cmafInitSelectionNeverFallsBackToARepresentationWithDifferentMedia3Dimensions() {
+        fun format(label: String) = HevcFeedProfileProbe.inspect(
+            C.TRACK_TYPE_VIDEO,
+            Format.Builder()
+                .setSampleMimeType(MimeTypes.VIDEO_H265)
+                .setCodecs("hvc1")
+                .setWidth(1920)
+                .setHeight(1080)
+                .setFrameRate(50f)
+                .build(),
+            label,
+            "content-cmaf-representation-selection"
+        )
+
+        fun initReport(width: Int, height: Int): CmafBoxInspector.Report {
+            val track = CmafBoxInspector.TrackMetadata(
+                trackId = 1L,
+                handler = "vide",
+                timescale = 50_000L,
+                sampleEntry = "hvc1",
+                originalFormat = "hvc1",
+                protectionScheme = null,
+                encrypted = false,
+                width = width,
+                height = height,
+                hevcConfiguration = null,
+                trackEncryption = null,
+                sampleEncryptionBoxPresent = false,
+                sampleAuxiliarySizesPresent = false,
+                sampleAuxiliaryOffsetsPresent = false,
+                sampleGroupDescriptionPresent = false
+            )
+            return CmafBoxInspector.Report(
+                majorBrand = "iso6",
+                compatibleBrands = listOf("iso6", "cmfc"),
+                topLevelBoxes = listOf("ftyp", "moov"),
+                tracks = listOf(track),
+                fragments = emptyList(),
+                fragmented = true,
+                errors = emptyList(),
+                initializationSegmentPresent = true
+            )
+        }
+
+        val group = "content-cmaf-representation-selection"
+        HevcFeedProfileCapture.record(format("channel-1080"))
+        HevcFeedProfileCapture.record(format("channel-1080b"))
+        HevcFeedProfileCapture.selectTileTestFeeds(group, listOf("channel-1080", "channel-1080b"))
+
+        val wrongResolution = initReport(480, 270)
+        val correctResolution = initReport(1920, 1080)
+        HevcFeedProfileCapture.recordCmafReport(group, "channel-1080", wrongResolution)
+        HevcFeedProfileCapture.recordCmafReport(group, "channel-1080b", correctResolution)
+
+        assertTrue(
+            "A lone 480x270 init segment must not be reused for a 1920x1080 Media3 format",
+            HevcFeedProfileCapture.cmafInitializationReport(group, "channel-1080") == null
+        )
+        assertTrue(
+            "The exact 1920x1080 init segment should be selected",
+            HevcFeedProfileCapture.cmafInitializationReport(group, "channel-1080b") === correctResolution
+        )
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("CMAF_REPRESENTATION_NOT_FOUND"))
+    }
+
 }
