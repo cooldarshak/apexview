@@ -109,6 +109,21 @@ class HevcFragmentSequenceCompatibilityTest {
         assertTrue(result.reasons.any { it.contains("fragment 1 sample 0 random-access/dependency flags differ") })
     }
 
+
+    @Test
+    fun rejectsSamplePaddingFlagMismatch() {
+        val first = sequence(90_000, listOf(0, 6_000), 3_000, listOf(0, 1, 2, 3))
+        val second = sequence(
+            90_000, listOf(0, 6_000), 3_000, listOf(0, 1, 2, 3),
+            randomAccessFlags = mapOf(1 to (0x02000000L or 0x00020000L))
+        )
+
+        val result = HevcFragmentSequenceCompatibility.compare(first, second)
+
+        assertFalse(result.compatible)
+        assertTrue(result.reasons.any { it.contains("sample 1 random-access/dependency flags differ") })
+    }
+
     @Test
     fun rejectsInternallyNonContiguousSampleDecodeTimes() {
         val first = sequence(90_000, listOf(0, 6_000), 3_000, listOf(0, 1, 2, 3))

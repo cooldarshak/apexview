@@ -41,15 +41,18 @@ class HevcClearCmafGridComposerTest {
                     sampleFlags = if (firstType in 16..23) 0x02000000L else 0x01010000L
                 )
             }
-            val fragment = HevcClearCmafFragmentWriter.write(
-                trackId = index + 1L,
-                sequenceNumber = 1,
-                baseDecodeTimeTicks = 0,
-                samples = samples,
-                sourceTrackEncrypted = false,
-                sourceFragmentHasEncryptionMetadata = false
-            )
-            HevcClearCmafGridComposer.Feed(init, listOf(fragment), "synthetic-feed-$index")
+            val fragments = samples.chunked(25).mapIndexed { fragmentIndex, fragmentSamples ->
+                HevcClearCmafFragmentWriter.write(
+                    trackId = index + 1L,
+                    sequenceNumber = fragmentIndex.toLong() + 1L,
+                    baseDecodeTimeTicks = fragmentIndex.toLong() * 25L * 3_600L,
+                    samples = fragmentSamples,
+                    sourceTrackEncrypted = false,
+                    sourceFragmentHasEncryptionMetadata = false
+                )
+            }
+            assertEquals(2, fragments.size)
+            HevcClearCmafGridComposer.Feed(init, fragments, "synthetic-feed-$index")
         }
 
         val output = HevcClearCmafGridComposer.compose(
@@ -70,20 +73,23 @@ class HevcClearCmafGridComposerTest {
         assertEquals(1920, output.displayWidth)
         assertEquals(540, output.displayHeight)
         assertEquals(50, output.sampleCount)
-        assertEquals(1, output.fragmentCount)
+        assertEquals(2, output.fragmentCount)
         assertEquals(100, output.evidence.size)
 
-        val report = CmafBoxInspector.inspect(
-            output.initializationSegment + output.mediaFragments.single()
-        )
+        val composedBytes = output.mediaFragments.fold(output.initializationSegment) { acc, fragment ->
+            acc + fragment
+        }
+        val report = CmafBoxInspector.inspect(composedBytes)
         assertTrue(report.errors.toString(), report.errors.isEmpty())
         assertEquals(1, report.tracks.size)
         assertEquals(9L, report.tracks.single().trackId)
         assertEquals("hvc1", report.tracks.single().sampleEntry)
         assertFalse(report.tracks.single().encrypted)
-        assertEquals(50, report.fragments.single().sampleCount)
-        assertEquals(180_000L, report.fragments.single().totalDurationTicks)
-        assertTrue(report.fragments.single().timingComplete)
+        assertEquals(2, report.fragments.size)
+        assertEquals(listOf(0L, 90_000L), report.fragments.map { it.baseDecodeTimeTicks })
+        assertEquals(listOf(25, 25), report.fragments.map { it.sampleCount })
+        assertEquals(listOf(90_000L, 90_000L), report.fragments.map { it.totalDurationTicks })
+        assertTrue(report.fragments.all { it.timingComplete })
 
         val dashPackage = HevcComposedDashPackageBuilder.build(
             output.initializationSegment,
@@ -93,9 +99,11 @@ class HevcClearCmafGridComposerTest {
         assertEquals(540, dashPackage.height)
         assertEquals(50, dashPackage.sampleCount)
         assertEquals(output.fragmentCount, dashPackage.fragmentCount)
-        assertEquals(3, dashPackage.resources.size)
+        assertEquals(4, dashPackage.resources.size)
         assertEquals(1, Regex("<Representation ").findAll(dashPackage.manifest).count())
-        assertEquals(output.fragmentCount, Regex("<SegmentURL ").findAll(dashPackage.manifest).count())
+        assertEquals(2, Regex("<SegmentURL ").findAll(dashPackage.manifest).count())
+        assertTrue(dashPackage.resources.containsKey("segment-0.m4s"))
+        assertTrue(dashPackage.resources.containsKey("segment-1.m4s"))
         assertTrue(dashPackage.manifest.contains("codecs=\"hvc1\""))
         assertTrue("MPD duration must be valid ISO-8601 seconds",
             dashPackage.manifest.contains("mediaPresentationDuration=\"PT2S\""))
@@ -109,9 +117,7 @@ class HevcClearCmafGridComposerTest {
         assumeTrue("CI evidence directory is not configured", evidenceDirectory != null)
         assertTrue(evidenceDirectory!!.mkdirs() || evidenceDirectory.isDirectory)
         File(evidenceDirectory, "hevc_tizen_cmaf_grid.mpd").writeText(dashPackage.manifest)
-        File(evidenceDirectory, "hevc_tizen_cmaf_grid.mp4").writeBytes(
-            output.initializationSegment + output.mediaFragments.single()
-        )
+        File(evidenceDirectory, "hevc_tizen_cmaf_grid.mp4").writeBytes(composedBytes)
     }
 
     private fun splitPictures(nals: List<HevcBitstream.NalUnit>): List<List<ByteArray>> {

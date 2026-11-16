@@ -212,5 +212,5 @@ internal object HevcFragmentSequenceCompatibility {
         if (left != right) reasons += "$label differs"
     }
 
-    private const val RANDOM_ACCESS_DEPENDENCY_MASK = 0x0ff10000L
+    private const val RANDOM_ACCESS_DEPENDENCY_MASK = 0x0fff0000L
 }

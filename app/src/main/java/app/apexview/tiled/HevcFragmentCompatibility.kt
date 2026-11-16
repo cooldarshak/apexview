@@ -107,7 +107,7 @@ internal object HevcFragmentCompatibility {
                     if (firstFlags == null || secondFlags == null) {
                         reasons += "sample $index sync/random-access flags are unavailable"
                     } else {
-                        val randomAccessMask = 0x0ff10000L
+                        val randomAccessMask = 0x0fff0000L
                         if (((firstFlags xor secondFlags) and randomAccessMask) != 0L) {
                             reasons += "sample $index sync/random-access dependency flags differ"
                         }
