@@ -97,6 +97,10 @@ class HevcClearCmafGridComposerTest {
         assertEquals(1, Regex("<Representation ").findAll(dashPackage.manifest).count())
         assertEquals(output.fragmentCount, Regex("<SegmentURL ").findAll(dashPackage.manifest).count())
         assertTrue(dashPackage.manifest.contains("codecs=\"hvc1\""))
+        assertTrue("MPD duration must be valid ISO-8601 seconds",
+            dashPackage.manifest.contains("mediaPresentationDuration=\"PT2S\""))
+        assertTrue("Period duration must be valid ISO-8601 seconds",
+            dashPackage.manifest.contains("duration=\"PT2S\""))
         assertTrue(dashPackage.manifest.contains("sourceURL=\"init.mp4\""))
         assertFalse("Clear output must not advertise DRM protection", dashPackage.manifest.contains("ContentProtection"))
 

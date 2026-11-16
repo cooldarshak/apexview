@@ -135,7 +135,9 @@ internal object HevcComposedDashPackageBuilder {
             .coerceAtLeast(1L)
         val startsWithSap = segmentTimings.first().firstSampleFlags
             ?.let { (it and NON_SYNC_SAMPLE_FLAG) == 0L } ?: false
-        val durationText = isoDuration(presentationDuration, timescale)
+        // ISO-8601 durations need a unit designator. Without the trailing S, Media3 receives "PT2"
+        // and fails while parsing the MPD, before it ever requests init.mp4.
+        val durationText = "PT${isoDuration(presentationDuration, timescale)}S"
         val segmentTimeline = segmentTimings.joinToString(separator = "") {
             """<S t="${it.startTicks}" d="${it.durationTicks}"/>"""
         }
@@ -143,8 +145,8 @@ internal object HevcComposedDashPackageBuilder {
             """<SegmentURL media="segment-$index.m4s"/>"""
         }
         val manifest = """<?xml version="1.0" encoding="UTF-8"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" minBufferTime="PT0.2S" mediaPresentationDuration="PT$durationText">
-  <Period id="composed-hevc" start="PT0S" duration="PT$durationText">
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" minBufferTime="PT0.2S" mediaPresentationDuration="$durationText">
+  <Period id="composed-hevc" start="PT0S" duration="$durationText">
     <AdaptationSet id="1" contentType="video" mimeType="video/mp4" segmentAlignment="true" startWithSAP="${if (startsWithSap) 1 else 0}">
       <Representation id="hevc-grid" bandwidth="$bandwidth" codecs="${track.sampleEntry}" width="$width" height="$height">
         <SegmentList timescale="$timescale" presentationTimeOffset="$firstPresentationTime">
