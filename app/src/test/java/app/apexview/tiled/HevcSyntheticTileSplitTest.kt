@@ -173,6 +173,56 @@ class HevcSyntheticTileSplitTest {
         }
     }
 
+    @Test fun tizenGridComposerRewritesFourSourceTilesIntoOneTwoByTwoPicture() {
+        val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+        assumeTrue("Kvazaar 2x2 tile fixture directory is not configured", !fixturePath.isNullOrBlank())
+        val directory = File(fixturePath!!)
+        val source = File(directory, "source_tiled_2x2.hevc")
+        assumeTrue("Synthetic 2x2 source stream is missing", source.isFile)
+
+        val sourceBytes = source.readBytes()
+        val result = try {
+            HevcTizenGridComposer.composeAnnexBStreams(
+                feedStreams = listOf(sourceBytes, sourceBytes),
+                grid = HevcOutputGridDimensions(columns = 2, rows = 2),
+                cells = listOf(
+                    HevcTizenGridComposer.CellSelection(0, 0, 0, 0),
+                    HevcTizenGridComposer.CellSelection(0, 1, 1, 0),
+                    HevcTizenGridComposer.CellSelection(0, 2, 0, 1),
+                    HevcTizenGridComposer.CellSelection(0, 3, 1, 1)
+                ),
+                frameRateNumerator = 25,
+                outputNalLengthSize = 4
+            )
+        } catch (failure: IllegalArgumentException) {
+            throw AssertionError("HEVC_TIZEN_GRID_2X2_COMPOSITION_FAILURE: ${failure.message}", failure)
+        }
+
+        assertEquals(50, result.pictures.size)
+        assertEquals(200, result.pictures.sumOf { it.evidence.size })
+        assertEquals(256, result.codedWidth)
+        assertEquals(128, result.codedHeight)
+        assertEquals(2, result.tileColumnWidthsInCtbs.size)
+        assertEquals(2, result.tileRowHeightsInCtbs.size)
+        assertTrue("Output PPS must keep its 2x2 tile grid", result.outputLoopFilterAcrossTilesEnabled)
+        assertTrue(result.pictures.all { picture ->
+            picture.evidence.map { it.destinationCtbAddress } == listOf(0, 4, 16, 20)
+        })
+
+        assumeTrue("FFmpeg is not installed; skipped independent 2x2 decode check", ffmpegAvailable())
+        val composedFile = File.createTempFile("apexview-tizen-grid-2x2-", ".hevc", directory)
+        try {
+            composedFile.writeBytes(result.annexB)
+            assertEquals(
+                "Rewritten 2x2 output must decode to the original source pixels",
+                frameHashes(source),
+                frameHashes(composedFile)
+            )
+        } finally {
+            composedFile.delete()
+        }
+    }
+
     @Test fun fourTileAssemblerRejectsAFeedInTheWrongTilePosition() {
         val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
         assumeTrue("Kvazaar tile fixture directory is not configured", !fixturePath.isNullOrBlank())
