@@ -3376,6 +3376,7 @@ class AppState(
         // The rest close up to fill the space.
         handPlaced = false
         layoutRequest++
+        startTvLiveCompositionIfEligible(tile.contentId)
     }
 
     fun stopAll() {
