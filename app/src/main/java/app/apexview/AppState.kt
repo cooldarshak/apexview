@@ -49,6 +49,8 @@ class Tile(val id: Int, val contentId: Long, channel: Channel, feed: FeedPlayer)
     var heldForSpeed by mutableStateOf(false)
     /** TV decoder budget: audio and sync continue, but this tile has no video decoder slot. */
     var heldForDecoder by mutableStateOf(false)
+    /** Hidden source tile while its picture is represented inside the composed HEVC grid. */
+    var protectedCompositionHidden by mutableStateOf(false)
     /** When this tile last took a car picked on the map (or was added). Oldest goes first. */
     var mapPickedAt = System.currentTimeMillis()
 
@@ -305,6 +307,9 @@ class AppState(
     private var api = F1TvApi(userAgent, chromeMajor)
     private var f1DashCaptureJob: Job? = null
     private var f1DashCapture: F1DashFeedCapture? = null
+    private var protectedCompositionHost: Tile? = null
+    private var protectedCompositionBounds: Map<Tile, ProtectedTileBounds> = emptyMap()
+    private data class ProtectedTileBounds(val x: Float, val y: Float, val w: Float, val h: Float, val z: Float)
     private val prefs = context.getSharedPreferences("f1mv", Context.MODE_PRIVATE)
 
     // Video budget: only feeds you can see decode video, each at its tile's size, less as the phone heats up.
@@ -338,6 +343,7 @@ class AppState(
     }
 
     fun close() {
+        stopProtectedCompositionPresentation(restorePlayer = false)
         f1DashCaptureJob?.cancel()
         f1DashCaptureJob = null
         f1DashCapture = null
@@ -370,6 +376,7 @@ class AppState(
             else -> 1f
         }
         val visibleTiles = tiles.filter { tile ->
+            if (tile.protectedCompositionHidden) return@filter false
             when {
                 browsing -> false
                 inPip -> tile === shown
@@ -1415,12 +1422,55 @@ class AppState(
         )
         f1DashCapture = capture
         val group = "content-$contentId"
+        val selectedTiles = labels.mapNotNull { byLabel[it] }
+        val host = selectedTiles.firstOrNull { !it.audible } ?: selectedTiles.first()
+        val audioTile = selectedTiles.firstOrNull { it !== host && it.audible }
+        if (audioTile != null && host.audible) setAudio(audioTile)
+
         f1DashCaptureJob = scope.launch {
             var lastMessage: String? = null
+            var composedPlaybackStarted = false
             while (true) {
                 val snapshot = capture.captureNext(group, feeds)
+                val outputWindow = ProtectedHevcLiveComposition.outputWindow(group)
+                if (outputWindow != null) {
+                    val pssh = null
+                    try {
+                        if (!composedPlaybackStarted) {
+                            // Keep each source feed audio-only, then wait for its video decoder
+                            // to release before preparing the single composed video representation.
+                            selectedTiles.forEach { tile ->
+                                tile.feed.setProtectedCompositionVideoRole(
+                                    enabled = false,
+                                    width = (tile.w * context.resources.displayMetrics.density).toInt().coerceAtLeast(1),
+                                    height = (tile.h * context.resources.displayMetrics.density).toInt().coerceAtLeast(1)
+                                )
+                            }
+                            val released = selectedTiles.all {
+                                it.feed.awaitVideoDecoderRelease(2_500L)
+                            }
+                            if (!released) {
+                                outputWindow.zero()
+                                pssh?.fill(0)
+                                message = "Waiting for the source video decoder to release before starting the composed grid."
+                            } else {
+                                host.feed.startProtectedComposedPlayback(outputWindow, pssh)
+                                showProtectedCompositionPresentation(host, selectedTiles)
+                                composedPlaybackStarted = true
+                            }
+                        } else {
+                            host.feed.publishProtectedComposedOutput(outputWindow, pssh)
+                        }
+                    } catch (error: Exception) {
+                        outputWindow.zero()
+                        pssh?.fill(0)
+                        message = "Protected composed playback: ${error.message ?: error.javaClass.simpleName}"
+                    }
+                }
                 val nextMessage = when {
                     snapshot.detail != null -> "F1 feed capture: ${snapshot.detail}"
+                    composedPlaybackStarted ->
+                        "Single-decoder protected F1 grid playing. ${snapshot.compositionStatus}"
                     snapshot.capturedFeeds > 0 ->
                         "Real F1 CMAF captured from ${snapshot.capturedFeeds} feeds. ${snapshot.compositionStatus}"
                     else -> "F1 feed capture: ${snapshot.compositionStatus}"
@@ -1432,6 +1482,51 @@ class AppState(
                 kotlinx.coroutines.delay(1_000)
             }
         }
+    }
+
+    /**
+     * Present the composed video as one full-canvas tile. Other selected tiles are hidden visually,
+     * but their audio players keep running so the audible broadcast is preserved.
+     */
+    private fun showProtectedCompositionPresentation(host: Tile, selected: List<Tile>) {
+        if (protectedCompositionHost != null) return
+        protectedCompositionHost = host
+        protectedCompositionBounds = selected.associateWith { tile ->
+            ProtectedTileBounds(tile.x, tile.y, tile.w, tile.h, tile.z)
+        }
+        selected.forEach { it.protectedCompositionHidden = it !== host }
+        host.x = 0f
+        host.y = 0f
+        host.w = canvasW.takeIf { it > 0f } ?: host.w
+        host.h = canvasH.takeIf { it > 0f } ?: host.h
+        topZ += 1f
+        host.z = topZ
+        layoutRequest++
+    }
+
+    /** Stop protected capture and restore the original tile arrangement and feed player. */
+    fun stopProtectedCompositionPresentation(restorePlayer: Boolean = true) {
+        f1DashCaptureJob?.cancel()
+        f1DashCaptureJob = null
+        f1DashCapture?.reset()
+        f1DashCapture = null
+        if (restorePlayer) protectedCompositionHost?.feed?.stopProtectedComposedPlayback()
+        tiles.forEach { tile ->
+            tile.protectedCompositionHidden = false
+            tile.feed.clearProtectedCompositionVideoRole()
+            protectedCompositionBounds[tile]?.let { bounds ->
+                tile.x = bounds.x
+                tile.y = bounds.y
+                tile.w = bounds.w
+                tile.h = bounds.h
+                tile.z = bounds.z
+            }
+        }
+        protectedCompositionBounds = emptyMap()
+        protectedCompositionHost = null
+        ProtectedHevcLiveComposition.clearAll()
+        HevcFeedProfileCapture.clearTileTestSelection()
+        layoutRequest++
     }
 
     /** Room for more feeds; past four the phone's decoders start to freeze. */
@@ -3236,6 +3331,7 @@ class AppState(
     }
 
     fun remove(tile: Tile) {
+        if (protectedCompositionHost != null) stopProtectedCompositionPresentation()
         if (audioHint === tile) audioHint = null
         if (targetTile === tile) targetTile = null
         tileMenu = null
@@ -3254,6 +3350,7 @@ class AppState(
     }
 
     fun stopAll() {
+        stopProtectedCompositionPresentation(restorePlayer = false)
         // Closing the viewer keeps the spot, so Continue watching can bring it back.
         saveWatch()
         votePromptOpen = false

@@ -336,7 +336,9 @@ fun ViewerScreen(app: AppState) {
             // surface, so its decoder carries on rather than restarting from the next keyframe.
             val popped = if (app.inPip) app.pipTile() else null
             app.tiles.forEach { tile ->
-                if (popped == null || tile === popped) key(tile.id) { TileView(app, tile) }
+                if (!tile.protectedCompositionHidden && (popped == null || tile === popped)) {
+                    key(tile.id) { TileView(app, tile) }
+                }
             }
             if (app.inPip) return@Box
 
@@ -369,7 +371,9 @@ fun ViewerScreen(app: AppState) {
             }
             // The feeds' headers, above the map so its cars never cover a speaker or a menu.
             Box(Modifier.fillMaxSize().zIndex(1.5e9f)) {
-                app.tiles.forEach { tile -> key(tile.id) { TileHeader(app, tile) } }
+                app.tiles.filterNot { it.protectedCompositionHidden }.forEach { tile ->
+                    key(tile.id) { TileHeader(app, tile) }
+                }
             }
             // Tile-test diagnostics belong to the whole test surface, not the first feed.
             // This keeps both selected feed reports readable in side-by-side layouts.

@@ -1,6 +1,7 @@
 package app.apexview
 
 import android.content.Context
+import android.net.Uri
 import android.media.MediaCodecInfo as PlatformMediaCodecInfo
 import android.media.MediaCodecList
 import android.util.Log
@@ -21,6 +22,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
@@ -35,6 +37,7 @@ import androidx.media3.exoplayer.source.MediaLoadData
 import app.apexview.tiled.CmafBoxInspector
 import app.apexview.tiled.CmafMetadataInspectingDataSource
 import app.apexview.tiled.ProtectedHevcLiveComposition
+import app.apexview.tiled.ProtectedHevcLiveDashSource
 
 /**
  * F1's current video renditions use HEVC. Querying AVC here under-counts the secure decoder pool
@@ -134,6 +137,12 @@ class FeedPlayer(
     var driftMs: Long? = null
 
     private val createdAt = android.os.SystemClock.elapsedRealtime()
+    private val initialVideoEnabled = startWithVideo
+    private val initialStartPositionMs = startMs
+    private lateinit var originalMediaItem: MediaItem
+    private lateinit var drmManager: DefaultDrmSessionManager
+    private var protectedLiveDashSource: ProtectedHevcLiveDashSource? = null
+    private var videoSuppressedByProtectedComposition = false
 
     private var state = "Starting"
     private var size = ""
@@ -202,7 +211,7 @@ class FeedPlayer(
             }
         }
 
-        val drmManager = DefaultDrmSessionManager.Builder()
+        drmManager = DefaultDrmSessionManager.Builder()
             .setUuidAndExoMediaDrmProvider(C.WIDEVINE_UUID, drmProvider)
             .build(licenseCallback)
 
@@ -422,6 +431,7 @@ class FeedPlayer(
             .setUri(stream.url)
             .setMimeType(if (isHls) MimeTypes.APPLICATION_M3U8 else MimeTypes.APPLICATION_MPD)
             .build()
+        originalMediaItem = item
         if (startMs == C.TIME_UNSET) player.setMediaItem(item) else player.setMediaItem(item, startMs)
         player.playWhenReady = true
         player.prepare()
@@ -456,10 +466,11 @@ class FeedPlayer(
         viewH = h
         fit.width = w
         fit.height = h
-        if (on == videoOn) return
-        videoOn = on
+        val enabled = on && !videoSuppressedByProtectedComposition
+        if (enabled == videoOn) return
+        videoOn = enabled
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !on)
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enabled)
             .build()
     }
 
@@ -469,6 +480,113 @@ class FeedPlayer(
     /** This feed's part of the connection among those showing a picture. */
     fun setBandwidthShare(share: Float) {
         fit.share = share
+    }
+
+    /**
+     * Replaces this tile's existing media source with the composed CBCS HEVC grid.
+     *
+     * Reuses this FeedPlayer's ExoPlayer, renderer, output Surface, DRM manager and F1-token-bearing
+     * license callback. Other selected FeedPlayers remain audio-only.
+     */
+    fun startProtectedComposedPlayback(
+        window: ProtectedHevcLiveComposition.OutputWindow,
+        widevinePssh: ByteArray?
+    ) {
+        val nextSource = ProtectedHevcLiveDashSource()
+        try {
+            nextSource.publish(window, widevinePssh)
+            val mediaItem = MediaItem.Builder()
+                .setUri(Uri.parse(PROTECTED_COMPOSED_MANIFEST_URI))
+                .setMimeType(MimeTypes.APPLICATION_MPD)
+                .build()
+            val mediaSource = DashMediaSource.Factory(nextSource.dataSourceFactory())
+                .setDrmSessionManagerProvider { drmManager }
+                .createMediaSource(mediaItem)
+
+            val previous = protectedLiveDashSource
+            protectedLiveDashSource = nextSource
+            videoSuppressedByProtectedComposition = false
+            videoOn = true
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
+                .build()
+            player.setMediaSource(mediaSource)
+            previous?.release()
+            player.playWhenReady = true
+            player.prepare()
+        } catch (error: Throwable) {
+            nextSource.release()
+            throw error
+        } finally {
+            widevinePssh?.fill(0)
+        }
+    }
+
+    /** Publishes a newer live CMAF window without rebuilding the player or DRM session. */
+    fun publishProtectedComposedOutput(
+        window: ProtectedHevcLiveComposition.OutputWindow,
+        widevinePssh: ByteArray?
+    ) {
+        val source = protectedLiveDashSource
+        if (source == null) {
+            window.zero()
+            widevinePssh?.fill(0)
+            return
+        }
+        try {
+            source.publish(window, widevinePssh)
+        } finally {
+            widevinePssh?.fill(0)
+        }
+    }
+
+    /**
+     * Waits until this source player's video decoder has actually been released. Audio continues.
+     * The composed host is not prepared until every other selected source reports zero active
+     * video decoders, avoiding even a short overlap on TVs with one secure HEVC slot.
+     */
+    suspend fun awaitVideoDecoderRelease(timeoutMs: Long): Boolean =
+        kotlinx.coroutines.withTimeoutOrNull(timeoutMs.coerceAtLeast(1L)) {
+            while (true) {
+                val counters = player.videoDecoderCounters
+                counters?.ensureUpdated()
+                if (counters == null || counters.decoderReleaseCount >= counters.decoderInitCount) {
+                    return@withTimeoutOrNull true
+                }
+                kotlinx.coroutines.delay(25L)
+            }
+            @Suppress("UNREACHABLE_CODE")
+            false
+        } ?: false
+
+    /** Prevents a source tile from allocating a video decoder while the host plays the grid. */
+    fun setProtectedCompositionVideoRole(enabled: Boolean, width: Int, height: Int) {
+        videoSuppressedByProtectedComposition = !enabled
+        setVideo(enabled, width, height)
+    }
+
+    /** Restores this player's original feed and releases its bounded composed-media window. */
+    fun stopProtectedComposedPlayback() {
+        protectedLiveDashSource?.release()
+        protectedLiveDashSource = null
+        videoSuppressedByProtectedComposition = false
+        if (initialStartPositionMs == C.TIME_UNSET) {
+            player.setMediaItem(originalMediaItem)
+        } else {
+            player.setMediaItem(originalMediaItem, initialStartPositionMs)
+        }
+        videoOn = initialVideoEnabled
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !initialVideoEnabled)
+            .build()
+        player.playWhenReady = true
+        player.prepare()
+    }
+
+    /** Clears only the source-tile video lock, keeping the TV's normal video budget in charge. */
+    fun clearProtectedCompositionVideoRole() {
+        videoSuppressedByProtectedComposition = false
+        setVideo(initialVideoEnabled, viewW.coerceAtLeast(1), viewH.coerceAtLeast(1))
     }
 
     /**
@@ -551,7 +669,11 @@ class FeedPlayer(
         ).joinToString(" · ")
     }
 
-    fun release() = player.release()
+    fun release() {
+        protectedLiveDashSource?.release()
+        protectedLiveDashSource = null
+        player.release()
+    }
 
     /**
      * What a playback error means for the viewer. F1 refusing the licence or the stream is almost
@@ -576,6 +698,9 @@ class FeedPlayer(
     }
 
     companion object {
+        private const val PROTECTED_COMPOSED_MANIFEST_URI =
+            "https://apexview.invalid/protected-grid/manifest.mpd"
+
         /** How long a new feed has been taking to start playing (ms), learned as feeds start. */
         @Volatile var typicalStartMs = 2_000L
         /** How long the streams' video chunks run (ms), learned from loading; 0 until known. */
