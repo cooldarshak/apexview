@@ -66,7 +66,7 @@ internal object ProtectedHevcCmafSampleExtractor {
         context: String = "Protected F1 CMAF extraction"
     ): ExtractedFragment {
         val retained = ArrayList<ExtractedSample>(sampleIndices.size)
-        val info = visitSamples(initializationSegment, mediaFragment, sampleIndices, context) { sample ->
+        val info = visitSamples(initializationSegment, mediaFragment, sampleIndices, context) { _, sample ->
             retained += ExtractedSample(
                 sample.sampleIndex,
                 sample.sampleBytes.copyOf(),
@@ -87,7 +87,7 @@ internal object ProtectedHevcCmafSampleExtractor {
         mediaFragment: ByteArray,
         sampleIndices: Set<Int>,
         context: String = "Protected F1 CMAF extraction",
-        onSample: (ExtractedSample) -> Unit
+        onSample: (ExtractedFragmentInfo, ExtractedSample) -> Unit
     ): ExtractedFragmentInfo = visitSamples(
         initializationSegment, mediaFragment, sampleIndices, context, onSample
     )
@@ -97,7 +97,7 @@ internal object ProtectedHevcCmafSampleExtractor {
         mediaFragment: ByteArray,
         sampleIndices: Set<Int>,
         context: String,
-        onSample: (ExtractedSample) -> Unit
+        onSample: (ExtractedFragmentInfo, ExtractedSample) -> Unit
     ): ExtractedFragmentInfo {
         require(initializationSegment.isNotEmpty()) { "$context: active init segment is empty" }
         require(mediaFragment.isNotEmpty()) { "$context: active media fragment is empty" }
@@ -248,13 +248,14 @@ internal object ProtectedHevcCmafSampleExtractor {
             fragment, sampleIndices, context
         )
 
+        val info = ExtractedFragmentInfo(track, fragment, timescale, baseDecodeTime)
         try {
             sampleIndices.sorted().forEach { index ->
                 val range = ranges[index]
                 val sampleBytes = mediaFragment.copyOfRange(range.offset, range.offset + range.size)
                 val temporary = ExtractedSample(index, sampleBytes, selectedIvs.remove(index))
                 try {
-                    onSample(temporary)
+                    onSample(info, temporary)
                 } finally {
                     temporary.close()
                 }
@@ -262,7 +263,7 @@ internal object ProtectedHevcCmafSampleExtractor {
         } finally {
             selectedIvs.values.forEach { it.fill(0) }
         }
-        return ExtractedFragmentInfo(track, fragment, timescale, baseDecodeTime)
+        return info
     }
 
     private fun parseTfhd(data: ByteArray, box: Box, context: String): Long {
