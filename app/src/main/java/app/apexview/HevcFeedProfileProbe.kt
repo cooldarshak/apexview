@@ -657,6 +657,10 @@ internal object HevcFeedProfileCapture {
             first.width == second.width && first.height == second.height &&
             first.timescale == second.timescale && first.sampleEntry == second.sampleEntry &&
             first.originalFormat == second.originalFormat &&
+            first.trackEncryption == second.trackEncryption &&
+            first.seigSampleGroupDescription == second.seigSampleGroupDescription &&
+            first.seigSampleGroupDescriptionStructureComplete ==
+                second.seigSampleGroupDescriptionStructureComplete &&
             first.hevcConfiguration?.parameterSetFingerprints ==
                 second.hevcConfiguration?.parameterSetFingerprints
         fun fragmentsFor(
@@ -699,7 +703,7 @@ internal object HevcFeedProfileCapture {
                 lines += "$label: hvcC VPS/SPS/PPS=${config?.vps?.size ?: 0}/${config?.sps?.size ?: 0}/${config?.pps?.size ?: 0}; tileGrid=${pps?.numTileColumns ?: "unknown"}x${pps?.numTileRows ?: "unknown"}; tileColumnsCTB=${pps?.tileColumnWidthsInCtbs ?: "unknown"}"
                 val ivMode = when {
                     protection == null -> "NOT_SIGNALED"
-                    !protection.defaultIsProtected -> "CLEAR"
+                    !protection.defaultIsProtected -> "DEFAULT_CLEAR"
                     protection.perSampleIvSize > 0 -> "PER_SAMPLE"
                     protection.constantIvSize != null -> "CONSTANT"
                     else -> "UNRESOLVED"

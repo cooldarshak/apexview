@@ -7,8 +7,10 @@ import java.security.MessageDigest
 /**
  * Bounded, read-only ISO-BMFF/CMAF metadata inspector.
  *
- * Input must be an init segment or a clear metadata-only fragment supplied by the caller.
- * This class never returns box payloads, sample bytes, URLs, KIDs, IVs, or DRM material.
+ * The inspector does not decrypt media or retain sample payloads, URLs, raw KIDs or raw IVs.
+ * Clear CENC metadata fields are consumed only long enough to derive process-local keyed
+ * fingerprints for equality checks. Temporary copies of those fields are zeroed immediately.
+ * Fingerprints are never persisted or exposed in diagnostics.
  */
 internal object CmafBoxInspector {
     data class Box(val type: String, val start: Int, val size: Int, val headerSize: Int, val children: List<Box>)
@@ -46,7 +48,9 @@ internal object CmafBoxInspector {
         val perSampleIvSize: Int,
         val cryptByteBlock: Int,
         val skipByteBlock: Int,
-        val constantIvSize: Int?
+        val constantIvSize: Int?,
+        val defaultKidIdentity: ProtectedValueFingerprint? = null,
+        val constantIvIdentity: ProtectedValueFingerprint? = null
     )
     data class SampleTiming(
         val decodeTimeTicks: Long?,
@@ -63,7 +67,8 @@ internal object CmafBoxInspector {
     )
     data class SampleEncryptionMetadata(
         val ivSize: Int,
-        val subsampleRanges: List<SubsampleEncryptionRange>?
+        val subsampleRanges: List<SubsampleEncryptionRange>?,
+        val ivIdentity: ProtectedValueFingerprint? = null
     )
     /** Structural auxiliary-info shape only; encrypted bytes and IV/KID values are never retained. */
     data class SampleAuxiliaryMetadata(
@@ -80,7 +85,9 @@ internal object CmafBoxInspector {
         val perSampleIvSize: Int,
         val cryptByteBlock: Int,
         val skipByteBlock: Int,
-        val constantIvSize: Int?
+        val constantIvSize: Int?,
+        val kidIdentity: ProtectedValueFingerprint? = null,
+        val constantIvIdentity: ProtectedValueFingerprint? = null
     )
     data class SampleGroupDescriptionMetadata(
         val version: Int,
@@ -126,7 +133,8 @@ internal object CmafBoxInspector {
         val sampleGroupEncryptionStructureComplete: Boolean = true,
         val sampleGroupEncryptionMetadata: SampleGroupEncryptionMetadata? = null,
         /** Effective 1-based stsd entry selected by tfhd or trex, when known. */
-        val sampleDescriptionIndex: Long? = null
+        val sampleDescriptionIndex: Long? = null,
+        val sencOverrideKidIdentity: ProtectedValueFingerprint? = null
     )
     data class TrackMetadata(
         val trackId: Long?,
@@ -595,7 +603,8 @@ internal object CmafBoxInspector {
             timingComplete = !tfhd.durationIsEmpty && baseDecodeTime != null && samples.isNotEmpty() &&
                 samples.all { it.decodeTimeTicks != null && it.durationTicks != null },
             sampleEncryptionBoxPresent = sencBox != null,
-            subsampleEncryptionSignalled = senc?.subsampleEncryption,
+            subsampleEncryptionSignalled = senc?.subsampleEncryption ?: externalAuxiliary?.samples
+                ?.map { it.subsampleRanges != null }?.distinct()?.singleOrNull(),
             sampleEncryptionCount = senc?.sampleCount,
             sampleAuxiliarySizesPresent = traf.children.any { it.type == "saiz" },
             sampleAuxiliaryOffsetsPresent = traf.children.any { it.type == "saio" },
@@ -606,6 +615,7 @@ internal object CmafBoxInspector {
                 externalAuxiliary?.structureComplete == true,
             sampleEncryptionMetadata = senc?.samples ?: externalAuxiliary?.samples.orEmpty(),
             sencOverrideIvSize = senc?.overrideIvSize,
+            sencOverrideKidIdentity = senc?.overrideKidIdentity,
             sampleEncryptionRangesCoverSamples = sampleEncryptionRangesCoverSamples,
             sampleAuxiliaryInfoStructureComplete = sampleAuxiliaryInfoStructureComplete,
             sampleAuxiliaryPayloadStructureComplete =
@@ -689,7 +699,9 @@ internal object CmafBoxInspector {
                 "saiz record is shorter than its effective IV"
             }
             val record = ByteBuffer.wrap(data, start, size).slice().order(ByteOrder.BIG_ENDIAN)
-            record.position(ivSize) // Skip IV without retaining its value.
+            val ivIdentity = if (ivSize > 0) {
+                readProtectedFingerprint(record, ivSize, "iv")
+            } else null
             val subsamples = if (!record.hasRemaining()) {
                 null
             } else {
@@ -713,7 +725,7 @@ internal object CmafBoxInspector {
                     allSubsampleRangesCoverSamples = false
                 }
             }
-            parsed += SampleEncryptionMetadata(ivSize, subsamples)
+            parsed += SampleEncryptionMetadata(ivSize, subsamples, ivIdentity)
         }
         return ExternalAuxiliaryParseResult(true, parsed, allSubsampleRangesCoverSamples)
     }
@@ -1043,16 +1055,21 @@ internal object CmafBoxInspector {
                 val descriptionLength = u32(p)
                 require(descriptionLength in 20L..256L) { "Invalid seig description length" }
                 val bytes = ByteArray(descriptionLength.toInt())
-                p.get(bytes)
-                val entryBuffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
-                val entry = parseSeigEntry(entryBuffer, index + 1)
-                entry
+                try {
+                    p.get(bytes)
+                    parseSeigEntry(ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN), index + 1)
+                } finally {
+                    bytes.fill(0)
+                }
             } else if (version >= 1 && defaultLength > 0L) {
                 require(defaultLength in 20L..256L) { "Invalid default seig description length" }
                 val bytes = ByteArray(defaultLength.toInt())
-                p.get(bytes)
-                val entryBuffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
-                parseSeigEntry(entryBuffer, index + 1)
+                try {
+                    p.get(bytes)
+                    parseSeigEntry(ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN), index + 1)
+                } finally {
+                    bytes.fill(0)
+                }
             } else {
                 parseSeigEntry(p, index + 1)
             }
@@ -1073,13 +1090,14 @@ internal object CmafBoxInspector {
         require(protectedValue in 0..1) { "Invalid seig isProtected value" }
         val perSampleIvSize = u8(p)
         require(perSampleIvSize in setOf(0, 8, 16)) { "Unsupported seig per-sample IV size" }
-        skip(p, 16) // KID bytes are deliberately skipped and never retained.
+        val kidIdentity = readProtectedFingerprint(p, 16, "kid")
         val isProtected = protectedValue == 1
         var constantIvSize: Int? = null
+        var constantIvIdentity: ProtectedValueFingerprint? = null
         if (isProtected && perSampleIvSize == 0) {
             val size = u8(p)
             require(size == 8 || size == 16) { "Unsupported seig constant IV size" }
-            skip(p, size)
+            constantIvIdentity = readProtectedFingerprint(p, size, "iv")
             constantIvSize = size
         }
         if (!isProtected) {
@@ -1091,7 +1109,9 @@ internal object CmafBoxInspector {
             perSampleIvSize = perSampleIvSize,
             cryptByteBlock = cryptByteBlock,
             skipByteBlock = skipByteBlock,
-            constantIvSize = constantIvSize
+            constantIvSize = constantIvSize,
+            kidIdentity = kidIdentity,
+            constantIvIdentity = constantIvIdentity
         )
     }
 
@@ -1122,7 +1142,8 @@ internal object CmafBoxInspector {
         val subsampleEncryption: Boolean,
         val structureComplete: Boolean,
         val samples: List<SampleEncryptionMetadata>,
-        val overrideIvSize: Int?
+        val overrideIvSize: Int?,
+        val overrideKidIdentity: ProtectedValueFingerprint?
     )
 
     private fun parseSencSummary(
@@ -1138,13 +1159,14 @@ internal object CmafBoxInspector {
         val flags = (u8(p) shl 16) or (u8(p) shl 8) or u8(p)
         require((flags and 0xfffffc) == 0) { "Unsupported senc flags" }
         var overrideIvSize: Int? = null
+        var overrideKidIdentity: ProtectedValueFingerprint? = null
         if ((flags and 0x000001) != 0) {
             skip(p, 3) // algorithm_id: not needed for structural analysis
             overrideIvSize = u8(p)
             require(overrideIvSize == 0 || overrideIvSize == 8 || overrideIvSize == 16) {
                 "Unsupported senc override IV size"
             }
-            skip(p, 16) // Skip the KID. Never copy, compare, retain, or log its bytes.
+            overrideKidIdentity = readProtectedFingerprint(p, 16, "kid")
         }
         val sampleCount = u32(p)
         require(sampleCount <= MAX_FRAGMENT_SAMPLES.toLong()) {
@@ -1157,7 +1179,7 @@ internal object CmafBoxInspector {
         // per sample. Parse the combination only when the resolved per-sample widths all agree
         // with that single override width; otherwise the record boundaries are ambiguous.
         if (forceIncomplete) {
-            return SencSummary(sampleCount, subsampleEncryption, false, emptyList(), overrideIvSize)
+            return SencSummary(sampleCount, subsampleEncryption, false, emptyList(), overrideIvSize, overrideKidIdentity)
         }
         val overrideIvSizeValue = overrideIvSize
         if (hasSeigOverrides && overrideIvSizeValue != null) {
@@ -1166,14 +1188,13 @@ internal object CmafBoxInspector {
                 groupIvSizes.size != sampleCount.toInt() ||
                 groupIvSizes.any { it != overrideIvSizeValue }
             ) {
-                return SencSummary(sampleCount, subsampleEncryption, false, emptyList(), overrideIvSize)
+                return SencSummary(sampleCount, subsampleEncryption, false, emptyList(), overrideIvSize, overrideKidIdentity)
             }
         }
 
         // PIFF senc override supplies the single IV width for this record table. If a seig
         // mapping is also present, the equality check above proves that every mapped sample
-        // uses that same width. This is structural parsing only: AlgorithmID/KID are skipped
-        // and no encrypted compatibility decision is made from them.
+        // uses that same width. Only process-local keyed identities are retained for comparison.
         val ivSizes: List<Int> = when {
             overrideIvSizeValue != null -> List(sampleCount.toInt()) { overrideIvSizeValue }
             effectiveSampleIvSizes != null -> effectiveSampleIvSizes
@@ -1182,13 +1203,15 @@ internal object CmafBoxInspector {
                 val defaultSize = if (it.defaultIsProtected) it.perSampleIvSize else 0
                 List(sampleCount.toInt()) { defaultSize }
             }
-        } ?: return SencSummary(sampleCount, subsampleEncryption, false, emptyList(), overrideIvSize)
+        } ?: return SencSummary(sampleCount, subsampleEncryption, false, emptyList(), overrideIvSize, overrideKidIdentity)
 
         val samples = ArrayList<SampleEncryptionMetadata>(sampleCount.toInt())
         var totalSubsampleEntries = 0L
         repeat(sampleCount.toInt()) { sampleIndex ->
             val effectiveIvSize = ivSizes[sampleIndex]
-            if (effectiveIvSize > 0) skip(p, effectiveIvSize) // Skip IV bytes without retaining them.
+            val ivIdentity = if (effectiveIvSize > 0) {
+                readProtectedFingerprint(p, effectiveIvSize, "iv")
+            } else null
             val ranges: List<SubsampleEncryptionRange>? = if (subsampleEncryption) {
                 val count = u16(p)
                 totalSubsampleEntries = Math.addExact(totalSubsampleEntries, count.toLong())
@@ -1203,10 +1226,10 @@ internal object CmafBoxInspector {
                 }
                 entries
             } else null
-            samples += SampleEncryptionMetadata(effectiveIvSize, ranges)
+            samples += SampleEncryptionMetadata(effectiveIvSize, ranges, ivIdentity)
         }
         require(!p.hasRemaining()) { "Unexpected trailing bytes in senc box" }
-        return SencSummary(sampleCount, subsampleEncryption, true, samples, overrideIvSize)
+        return SencSummary(sampleCount, subsampleEncryption, true, samples, overrideIvSize, overrideKidIdentity)
     }
 
     private fun skip(p: ByteBuffer, count: Int) {
@@ -1332,8 +1355,8 @@ internal object CmafBoxInspector {
     }
 
     /**
-     * Reads only the track-level encryption shape. KIDs, constant IV bytes and all actual
-     * sample-encryption payloads are skipped and never returned or logged.
+     * Reads track-level encryption shape and derives process-local keyed identities for
+     * default_KID and constant-IV equality. Raw temporary value buffers are zeroed immediately.
      */
     private fun parseTrackEncryption(p: ByteBuffer): TrackEncryptionMetadata {
         require(p.remaining() >= 4 + 1 + 2 + 16) { "Truncated tenc box" }
@@ -1351,17 +1374,36 @@ internal object CmafBoxInspector {
         val ivSize = u8(p)
         require(isProtected in 0..1) { "Invalid tenc default_isProtected value" }
         require(ivSize == 0 || ivSize == 8 || ivSize == 16) { "Unsupported tenc per-sample IV size" }
-        p.position(p.position() + 16) // Skip default_KID without retaining it.
+        val defaultKidIdentity = readProtectedFingerprint(p, 16, "kid")
         var constantIvSize: Int? = null
+        var constantIvIdentity: ProtectedValueFingerprint? = null
         if (isProtected == 1 && ivSize == 0) {
             require(p.hasRemaining()) { "Missing tenc constant IV size" }
             constantIvSize = u8(p)
             require(constantIvSize == 8 || constantIvSize == 16) { "Unsupported tenc constant IV size" }
             require(p.remaining() >= constantIvSize) { "Truncated tenc constant IV" }
-            p.position(p.position() + constantIvSize) // Skip constant IV bytes.
+            constantIvIdentity = readProtectedFingerprint(p, constantIvSize, "iv")
         }
         require(!p.hasRemaining()) { "Unexpected trailing bytes in tenc box" }
-        return TrackEncryptionMetadata(version, isProtected == 1, ivSize, cryptBlocks, skipBlocks, constantIvSize)
+        return TrackEncryptionMetadata(
+            version, isProtected == 1, ivSize, cryptBlocks, skipBlocks, constantIvSize,
+            defaultKidIdentity, constantIvIdentity
+        )
+    }
+
+    private fun readProtectedFingerprint(
+        p: ByteBuffer,
+        size: Int,
+        domain: String
+    ): ProtectedValueFingerprint {
+        require(size > 0 && p.remaining() >= size) { "Truncated protected-value identity field" }
+        val raw = ByteArray(size)
+        return try {
+            p.get(raw)
+            ProtectedValueFingerprint.fromBytes(domain, raw)
+        } finally {
+            raw.fill(0)
+        }
     }
 
     private fun u8(p: ByteBuffer): Int {

@@ -5,9 +5,10 @@ import java.math.BigInteger
 /**
  * Compares the timing and protection metadata of two candidate fragments.
  *
- * This is a validator only. It does not merge NAL units or claim that a protected stream can
- * be stitched. Encrypted input is rejected until KID identity and the full per-sample
- * encryption/subsample map are verified without exposing key or IV material.
+ * This validator does not compose protected media. It accepts protected metadata only when
+ * track, sample-group, senc-override and per-sample KID/IV identities match through process-local
+ * keyed fingerprints, and each source's subsample map independently covers its sample.
+ * Raw key and IV values are never exposed.
  */
 internal object HevcFragmentCompatibility {
     private const val RESERVED_SAMPLE_FLAGS_MASK = 0xf0000000L
@@ -170,12 +171,44 @@ internal object HevcFragmentCompatibility {
             if (firstTrack.protectionScheme != secondTrack.protectionScheme) {
                 reasons += "Track protection schemes differ"
             }
-            if (firstTrack.trackEncryption == null || secondTrack.trackEncryption == null) {
+            val firstProtection = firstTrack.trackEncryption
+            val secondProtection = secondTrack.trackEncryption
+            if (firstProtection == null || secondProtection == null) {
                 reasons += "Track encryption defaults are unavailable"
-            } else if (firstTrack.trackEncryption != secondTrack.trackEncryption) {
-                reasons += "Track encryption defaults differ"
+            } else {
+                val firstShape = firstProtection.copy(defaultKidIdentity = null, constantIvIdentity = null)
+                val secondShape = secondProtection.copy(defaultKidIdentity = null, constantIvIdentity = null)
+                if (firstShape != secondShape) reasons += "Track encryption defaults or protection pattern differ"
+                if (firstProtection.defaultIsProtected || secondProtection.defaultIsProtected) {
+                    compareProtectedIdentity("Default KID",
+                        firstProtection.defaultKidIdentity, secondProtection.defaultKidIdentity, reasons)
+                }
+                val needsConstantIv =
+                    (firstProtection.defaultIsProtected && firstProtection.perSampleIvSize == 0) ||
+                    (secondProtection.defaultIsProtected && secondProtection.perSampleIvSize == 0)
+                if (needsConstantIv) {
+                    compareProtectedIdentity("Track constant IV",
+                        firstProtection.constantIvIdentity, secondProtection.constantIvIdentity, reasons)
+                }
             }
-            reasons += "Default KID identity has not been compared"
+        }
+
+        if (firstTrack.seigSampleGroupDescriptionStructureComplete !=
+            secondTrack.seigSampleGroupDescriptionStructureComplete) {
+            reasons += "Track-level seig protection-description completeness differs"
+        }
+        if (!firstTrack.seigSampleGroupDescriptionStructureComplete ||
+            !secondTrack.seigSampleGroupDescriptionStructureComplete) {
+            reasons += "Track-level seig protection descriptions are incomplete"
+        }
+        if (firstTrack.seigSampleGroupDescription != secondTrack.seigSampleGroupDescription) {
+            reasons += "Track-level seig protection metadata or identity differs"
+        }
+        firstTrack.seigSampleGroupDescription?.let {
+            validateSeigIdentities(it.entries, "Track-level seig", reasons)
+        }
+        secondTrack.seigSampleGroupDescription?.let {
+            validateSeigIdentities(it.entries, "Track-level seig", reasons)
         }
 
         val firstCrypto = firstFragment.sampleEncryptionBoxPresent ||
@@ -189,6 +222,13 @@ internal object HevcFragmentCompatibility {
             if (firstFragment.sampleEncryptionCount != firstFragment.sampleCount.toLong() ||
                 secondFragment.sampleEncryptionCount != secondFragment.sampleCount.toLong()) {
                 reasons += "senc sample count does not match fragment sample count"
+            }
+            if (firstFragment.sencOverrideIvSize != secondFragment.sencOverrideIvSize) {
+                reasons += "senc override IV sizes differ"
+            }
+            if (firstFragment.sencOverrideIvSize != null || secondFragment.sencOverrideIvSize != null) {
+                compareProtectedIdentity("senc override KID",
+                    firstFragment.sencOverrideKidIdentity, secondFragment.sencOverrideKidIdentity, reasons)
             }
             if (firstFragment.subsampleEncryptionSignalled != secondFragment.subsampleEncryptionSignalled) {
                 reasons += "Subsample encryption signalling differs"
@@ -224,9 +264,14 @@ internal object HevcFragmentCompatibility {
                     secondFragment.sampleEncryptionMetadata.any { it.subsampleRanges != null }) {
                     reasons += "Second fragment has unexpected subsample entries"
                 }
-                reasons += "IV byte values and KID identity are not retained or compared"
             }
         }
+
+        if (firstFragment.sampleEncryptionStructureComplete &&
+            secondFragment.sampleEncryptionStructureComplete) {
+            compareSampleIvIdentities(firstFragment, secondFragment, reasons)
+        }
+
         if (firstFragment.sampleAuxiliarySizesPresent || secondFragment.sampleAuxiliarySizesPresent ||
             firstFragment.sampleAuxiliaryOffsetsPresent || secondFragment.sampleAuxiliaryOffsetsPresent) {
             if (!firstFragment.sampleAuxiliaryInfoStructureComplete ||
@@ -241,9 +286,12 @@ internal object HevcFragmentCompatibility {
                     secondFragment.sampleAuxiliaryPayloadSampleCount != secondFragment.sampleCount) {
                     reasons += "Sample auxiliary payload record count does not match the fragment sample count"
                 }
-                if (firstFragment.sampleEncryptionMetadata != secondFragment.sampleEncryptionMetadata) {
-                    reasons += "Per-sample auxiliary IV-size/subsample-map structure differs"
+                if (firstFragment.sampleEncryptionMetadata.map { it.ivSize } !=
+                    secondFragment.sampleEncryptionMetadata.map { it.ivSize }) {
+                    reasons += "Per-sample auxiliary IV-size structure differs"
                 }
+                // Independently encoded tiles can have different payload sizes. Each source map
+                // is checked against its own sample length; cross-feed equality is not required.
                 if (!firstFragment.sampleEncryptionRangesCoverSamples ||
                     !secondFragment.sampleEncryptionRangesCoverSamples) {
                     reasons += "Sample auxiliary subsample ranges do not cover the declared sample sizes"
@@ -260,17 +308,85 @@ internal object HevcFragmentCompatibility {
             } else if (firstFragment.sampleGroupEncryptionMetadata != secondFragment.sampleGroupEncryptionMetadata) {
                 reasons += "seig sample-group encryption metadata differs"
             }
-            val firstHasProtectedGroup = firstFragment.sampleGroupEncryptionMetadata
-                ?.entries?.any { it.isProtected } == true
-            val secondHasProtectedGroup = secondFragment.sampleGroupEncryptionMetadata
-                ?.entries?.any { it.isProtected } == true
-            if (firstHasProtectedGroup || secondHasProtectedGroup) {
-                reasons += "seig KID identity has not been compared"
+            firstFragment.sampleGroupEncryptionMetadata?.let {
+                validateSeigIdentities(it.entries, "Fragment seig", reasons)
+            }
+            secondFragment.sampleGroupEncryptionMetadata?.let {
+                validateSeigIdentities(it.entries, "Fragment seig", reasons)
             }
         }
 
+        val protectedInput =
+            firstTrack.encrypted || secondTrack.encrypted ||
+                firstFragment.sampleGroupEncryptionPresent || secondFragment.sampleGroupEncryptionPresent
+        if (protectedInput &&
+            (firstFragment.subsampleEncryptionSignalled != true ||
+                secondFragment.subsampleEncryptionSignalled != true)) {
+            reasons += "Protected HEVC slice headers are not exposed through explicit clear/encrypted subsample maps"
+        }
+        if (requiresPerSampleIv(firstTrack, firstFragment) && !hasSampleEncryptionRecords(firstFragment)) {
+            reasons += "First protected fragment is missing per-sample IV records"
+        }
+        if (requiresPerSampleIv(secondTrack, secondFragment) && !hasSampleEncryptionRecords(secondFragment)) {
+            reasons += "Second protected fragment is missing per-sample IV records"
+        }
         return Result(reasons.isEmpty(), reasons.distinct())
     }
+
+    private fun compareProtectedIdentity(
+        label: String,
+        first: ProtectedValueFingerprint?,
+        second: ProtectedValueFingerprint?,
+        reasons: MutableList<String>
+    ) {
+        when {
+            first == null || second == null -> reasons += "$label identity is unavailable"
+            first != second -> reasons += "$label identities differ"
+        }
+    }
+
+    private fun compareSampleIvIdentities(
+        first: CmafBoxInspector.FragmentMetadata,
+        second: CmafBoxInspector.FragmentMetadata,
+        reasons: MutableList<String>
+    ) {
+        if (first.sampleEncryptionMetadata.size != second.sampleEncryptionMetadata.size) {
+            reasons += "Per-sample encryption record counts differ"
+            return
+        }
+        first.sampleEncryptionMetadata.zip(second.sampleEncryptionMetadata).forEachIndexed { index, pair ->
+            if (pair.first.ivSize != pair.second.ivSize) reasons += "Sample $index IV sizes differ"
+            if (pair.first.ivSize > 0 || pair.second.ivSize > 0) {
+                compareProtectedIdentity("Sample $index IV", pair.first.ivIdentity, pair.second.ivIdentity, reasons)
+            }
+        }
+    }
+
+    private fun validateSeigIdentities(
+        entries: List<CmafBoxInspector.SeigProtectionEntry>,
+        label: String,
+        reasons: MutableList<String>
+    ) {
+        entries.filter { it.isProtected }.forEachIndexed { index, entry ->
+            if (entry.kidIdentity == null) reasons += "$label protected entry $index KID identity is unavailable"
+            if (entry.perSampleIvSize == 0 && entry.constantIvIdentity == null) {
+                reasons += "$label protected entry $index constant IV identity is unavailable"
+            }
+        }
+    }
+
+    private fun requiresPerSampleIv(
+        track: CmafBoxInspector.TrackMetadata,
+        fragment: CmafBoxInspector.FragmentMetadata
+    ): Boolean =
+        (track.trackEncryption?.let { it.defaultIsProtected && it.perSampleIvSize > 0 } == true) ||
+            (track.seigSampleGroupDescription?.entries?.any { it.isProtected && it.perSampleIvSize > 0 } == true) ||
+            (fragment.sampleGroupEncryptionMetadata?.entries?.any { it.isProtected && it.perSampleIvSize > 0 } == true)
+
+    private fun hasSampleEncryptionRecords(fragment: CmafBoxInspector.FragmentMetadata): Boolean =
+        fragment.sampleEncryptionBoxPresent ||
+            (fragment.sampleAuxiliarySizesPresent && fragment.sampleAuxiliaryOffsetsPresent &&
+                fragment.sampleAuxiliaryPayloadStructureComplete)
 
     private fun compareTime(
         label: String,

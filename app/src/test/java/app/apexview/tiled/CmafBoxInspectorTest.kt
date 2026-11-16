@@ -382,6 +382,7 @@ class CmafBoxInspectorTest {
         assertEquals(8, group.entries.single().perSampleIvSize)
         assertEquals(1, group.entries.single().cryptByteBlock)
         assertEquals(9, group.entries.single().skipByteBlock)
+        assertNotNull(group.entries.single().kidIdentity)
         assertEquals(listOf(CmafBoxInspector.SampleGroupRun(2, 0x10001)), group.runs)
     }
 
@@ -587,7 +588,9 @@ class CmafBoxInspectorTest {
         assertTrue(fragment.sampleGroupEncryptionStructureComplete)
         assertTrue(fragment.sampleEncryptionStructureComplete)
         assertEquals(8, fragment.sencOverrideIvSize)
+        assertNotNull(fragment.sencOverrideKidIdentity)
         assertEquals(listOf(8, 8), fragment.sampleEncryptionMetadata.map { it.ivSize })
+        assertTrue(fragment.sampleEncryptionMetadata.all { it.ivIdentity != null })
     }
 
     @Test fun parsesSeigConstantIvSizeWithoutRetainingConstantIvBytes() {
@@ -608,6 +611,8 @@ class CmafBoxInspectorTest {
         val entryMetadata = fragment.sampleGroupEncryptionMetadata!!.entries.single()
         assertEquals(0, entryMetadata.perSampleIvSize)
         assertEquals(16, entryMetadata.constantIvSize)
+        assertNotNull(entryMetadata.kidIdentity)
+        assertNotNull(entryMetadata.constantIvIdentity)
         assertTrue(fragment.sampleEncryptionStructureComplete)
         assertEquals(listOf(0), fragment.sampleEncryptionMetadata.map { it.ivSize })
     }
@@ -740,6 +745,46 @@ class CmafBoxInspectorTest {
         assertTrue(config.parameterSetErrors.isEmpty())
     }
 
+    @Test fun fingerprintsKIDAndSampleIVWithoutRetainingRawValues() {
+        val kidA = ByteArray(16) { (it + 1).toByte() }
+        val kidB = ByteArray(16) { (it + 33).toByte() }
+        val ivA = ByteArray(16) { (it + 65).toByte() }
+        val ivB = ByteArray(16) { (it + 97).toByte() }
+
+        fun report(kid: ByteArray, iv: ByteArray): CmafBoxInspector.Report {
+            val init = fragmentedInitSegment(
+                trackId = 76, timescale = 90_000, includeEncryption = true, defaultKid = kid
+            )
+            val tfhd = box("tfhd", byteArrayOf(0,0,0,0) + int(76))
+            val tfdt = box("tfdt", byteArrayOf(0,0,0,0) + int(0))
+            val trun = box("trun", byteArrayOf(0,0,1,0) + int(1) + int(3000))
+            val senc = box("senc", byteArrayOf(0,0,0,0) + int(1) + iv)
+            return CmafBoxInspector.inspect(
+                init + box("moof", box("mfhd", ByteArray(8)) +
+                    box("traf", tfhd + tfdt + trun + senc))
+            )
+        }
+
+        val first = report(kidA, ivA)
+        val same = report(kidA, ivA)
+        val differentKid = report(kidB, ivA)
+        val differentIv = report(kidA, ivB)
+        val firstKid = first.tracks.single().trackEncryption!!.defaultKidIdentity!!
+        val firstIv = first.fragments.single().sampleEncryptionMetadata.single().ivIdentity!!
+
+        assertEquals(firstKid, same.tracks.single().trackEncryption!!.defaultKidIdentity)
+        assertNotEquals(firstKid, differentKid.tracks.single().trackEncryption!!.defaultKidIdentity)
+        assertEquals(firstIv, same.fragments.single().sampleEncryptionMetadata.single().ivIdentity)
+        assertNotEquals(firstIv, differentIv.fragments.single().sampleEncryptionMetadata.single().ivIdentity)
+
+        val kidHex = kidA.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val ivHex = ivA.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val rendered = first.toString()
+        assertFalse(rendered.contains(kidHex))
+        assertFalse(rendered.contains(ivHex))
+        assertTrue(rendered.contains("<redacted>"))
+    }
+
     @Test fun readsCbcsTrackEncryptionShapeWithoutReturningKidOrIv() {
         val tenc = byteArrayOf(1, 0, 0, 0, 0, 0x19, 1, 16) + ByteArray(16)
         val sinf = box("sinf",
@@ -757,6 +802,8 @@ class CmafBoxInspectorTest {
         assertEquals(1, protection.cryptByteBlock)
         assertEquals(9, protection.skipByteBlock)
         assertNull(protection.constantIvSize)
+        assertNotNull(protection.defaultKidIdentity)
+        assertTrue(protection.defaultKidIdentity.toString().contains("<redacted>"))
         assertFalse(metadata.sampleEncryptionBoxPresent)
         assertFalse(metadata.sampleAuxiliarySizesPresent)
         assertFalse(metadata.sampleAuxiliaryOffsetsPresent)
@@ -827,15 +874,17 @@ class CmafBoxInspectorTest {
         includeTrex: Boolean = true,
         includeEncryption: Boolean = false,
         trackSeig: ByteArray = ByteArray(0),
-        sampleDescriptionCopies: Int = 1
+        sampleDescriptionCopies: Int = 1,
+        defaultKid: ByteArray = ByteArray(16)
     ): ByteArray {
         val tkhd = box("tkhd", byteArrayOf(0,0,0,7) +
             int(0) + int(0) + int(trackId) + int(0) + ByteArray(60))
         val mdhd = box("mdhd", byteArrayOf(0,0,0,0) +
             int(0) + int(0) + int(timescale) + int(0) + short(0) + short(0))
         val hdlr = box("hdlr", byteArrayOf(0,0,0,0) + int(0) + ascii("vide") + ByteArray(12))
+        require(defaultKid.size == 16)
         val sampleEntry = if (includeEncryption) {
-            val tenc = box("tenc", byteArrayOf(1, 0, 0, 0, 0, 0x19, 1, 16) + ByteArray(16))
+            val tenc = box("tenc", byteArrayOf(1, 0, 0, 0, 0, 0x19, 1, 16) + defaultKid)
             val protection = box("sinf",
                 box("frma", ascii("hvc1")) +
                     box("schm", byteArrayOf(0,0,0,0) + ascii("cbcs") + int(0x00010000)) +

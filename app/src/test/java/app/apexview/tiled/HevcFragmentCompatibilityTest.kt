@@ -136,7 +136,7 @@ class HevcFragmentCompatibilityTest {
         val result = HevcFragmentCompatibility.compare(
             track(90000), protected, track(90000), protected.copy()
         )
-        assertTrue(result.reasons.any { it.contains("KID identity has not been compared") })
+        assertTrue(result.reasons.any { it.contains("Fragment seig protected entry 0 KID identity is unavailable") })
         assertFalse(result.compatible)
     }
 
@@ -160,8 +160,56 @@ class HevcFragmentCompatibilityTest {
         )
 
         assertTrue(result.reasons.any { it.contains("Fragment timing is incomplete") })
-        assertTrue(result.reasons.any { it.contains("Default KID identity has not been compared") })
+        assertTrue(result.reasons.any { it.contains("Track encryption defaults are unavailable") })
         assertTrue(result.reasons.any { it.contains("Per-sample IV/subsample encryption structure is incomplete") })
+    }
+
+    @Test fun comparesProtectedDefaultKidIdentityWithoutExposingIt() {
+        val kidA = ByteArray(16) { (it + 1).toByte() }
+        val kidB = ByteArray(16) { (it + 33).toByte() }
+        val firstTrack = protectedTrack(kidA)
+        val sameTrack = protectedTrack(kidA)
+        val differentTrack = protectedTrack(kidB)
+        val fragment = protectedFragment(ByteArray(16) { (it + 65).toByte() })
+
+        val matching = HevcFragmentCompatibility.compare(firstTrack, fragment, sameTrack, fragment.copy())
+        val mismatching = HevcFragmentCompatibility.compare(firstTrack, fragment, differentTrack, fragment.copy())
+
+        assertFalse(matching.reasons.any { it.contains("Default KID identities differ") })
+        assertTrue(mismatching.reasons.any { it.contains("Default KID identities differ") })
+        assertFalse(firstTrack.trackEncryption.toString().contains("010203"))
+    }
+
+    @Test fun comparesPerSampleIvIdentityWithoutExposingTheIv() {
+        val track = protectedTrack(ByteArray(16) { (it + 1).toByte() })
+        val ivA = ByteArray(16) { (it + 65).toByte() }
+        val ivB = ByteArray(16) { (it + 97).toByte() }
+        val first = protectedFragment(ivA)
+        val same = protectedFragment(ivA)
+        val different = protectedFragment(ivB)
+
+        val matching = HevcFragmentCompatibility.compare(track, first, track.copy(), same)
+        val mismatching = HevcFragmentCompatibility.compare(track, first, track.copy(), different)
+
+        assertFalse(matching.reasons.any { it.contains("Sample 0 IV identities differ") })
+        assertTrue(mismatching.reasons.any { it.contains("Sample 0 IV identities differ") })
+        assertFalse(first.sampleEncryptionMetadata.single().ivIdentity.toString().contains("414243"))
+    }
+
+    @Test fun comparesConstantIvIdentityWhenTrackUsesConstantIvProtection() {
+        val kid = ByteArray(16) { (it + 1).toByte() }
+        val ivA = ByteArray(16) { 5 }
+        val ivB = ByteArray(16) { 6 }
+        val firstTrack = protectedTrack(kid, perSampleIvSize = 0, constantIv = ivA)
+        val sameTrack = protectedTrack(kid, perSampleIvSize = 0, constantIv = ivA)
+        val differentTrack = protectedTrack(kid, perSampleIvSize = 0, constantIv = ivB)
+        val fragment = protectedFragment(ByteArray(0), ivSize = 0)
+
+        val matching = HevcFragmentCompatibility.compare(firstTrack, fragment, sameTrack, fragment.copy())
+        val mismatching = HevcFragmentCompatibility.compare(firstTrack, fragment, differentTrack, fragment.copy())
+
+        assertFalse(matching.reasons.any { it.contains("Track constant IV identities differ") })
+        assertTrue(mismatching.reasons.any { it.contains("Track constant IV identities differ") })
     }
 
     @Test fun rejectsSampleSyncAndRandomAccessDependencyFlagMismatch() {
@@ -202,6 +250,43 @@ class HevcFragmentCompatibilityTest {
         )
         assertTrue(result.reasons.any { it.contains("sync/random-access flags are unavailable") })
     }
+
+    private fun protectedTrack(
+        kid: ByteArray,
+        perSampleIvSize: Int = 16,
+        constantIv: ByteArray? = null
+    ): CmafBoxInspector.TrackMetadata {
+        val protection = CmafBoxInspector.TrackEncryptionMetadata(
+            version = 1,
+            defaultIsProtected = true,
+            perSampleIvSize = perSampleIvSize,
+            cryptByteBlock = 1,
+            skipByteBlock = 9,
+            constantIvSize = constantIv?.size,
+            defaultKidIdentity = ProtectedValueFingerprint.fromBytes("kid", kid),
+            constantIvIdentity = constantIv?.let { ProtectedValueFingerprint.fromBytes("iv", it) }
+        )
+        return track(90_000, encrypted = true).copy(trackEncryption = protection)
+    }
+
+    private fun protectedFragment(iv: ByteArray, ivSize: Int = 16) =
+        fragment(
+            90_000, 0,
+            listOf(CmafBoxInspector.SampleTiming(0, 0, 3_000, 0, 3, 0)),
+            encrypted = true
+        ).copy(
+            sampleEncryptionCount = 1,
+            subsampleEncryptionSignalled = true,
+            sampleEncryptionStructureComplete = true,
+            sampleEncryptionMetadata = listOf(
+                CmafBoxInspector.SampleEncryptionMetadata(
+                    ivSize = ivSize,
+                    subsampleRanges = listOf(CmafBoxInspector.SubsampleEncryptionRange(1, 2)),
+                    ivIdentity = if (ivSize > 0) ProtectedValueFingerprint.fromBytes("iv", iv) else null
+                )
+            ),
+            sampleEncryptionRangesCoverSamples = true
+        )
 
     private fun config(parameterSetFingerprints: List<String>) =
         CmafBoxInspector.HevcConfiguration(
