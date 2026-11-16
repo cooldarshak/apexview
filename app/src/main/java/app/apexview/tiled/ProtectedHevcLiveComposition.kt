@@ -105,6 +105,15 @@ internal object ProtectedHevcLiveComposition {
         }
     }
 
+    private data class PendingInitialization(
+        val bytes: ByteArray,
+        val report: CmafBoxInspector.Report
+    ) {
+        fun zero() = bytes.fill(0)
+    }
+
+    private val pendingInitializations =
+        linkedMapOf<String, LinkedHashMap<String, PendingInitialization>>()
     private val sessions = linkedMapOf<String, Session>()
 
     @Synchronized
@@ -123,7 +132,21 @@ internal object ProtectedHevcLiveComposition {
             "One non-negative source tile index is required per selected feed"
         }
         sessions.remove(group)?.clear()
-        sessions[group] = Session(group, selected, sourceTileIndices)
+        val session = Session(group, selected, sourceTileIndices)
+        sessions[group] = session
+        // Media3 may already have fetched the active init before the user selects feeds.
+        // Reuse only the bounded, paired init snapshot; media fragments are captured after selection.
+        pendingInitializations[group]?.let { pending ->
+            selected.forEach { label ->
+                val cached = pending[label] ?: return@forEach
+                runCatching {
+                    captureInitialization(session, session.feeds.getValue(label), cached.bytes, cached.report)
+                }.onFailure { error ->
+                    stateFailure(session, label + ": cached init rejected: " +
+                        (error.message ?: error.javaClass.simpleName).take(160))
+                }
+            }
+        }
         while (sessions.size > MAX_SESSIONS) {
             val oldest = sessions.keys.first()
             sessions.remove(oldest)?.clear()
@@ -139,6 +162,8 @@ internal object ProtectedHevcLiveComposition {
     fun clearAll() {
         sessions.values.forEach(Session::clear)
         sessions.clear()
+        pendingInitializations.values.flatMap { it.values }.forEach(PendingInitialization::zero)
+        pendingInitializations.clear()
     }
 
     /**
@@ -152,26 +177,34 @@ internal object ProtectedHevcLiveComposition {
         bytes: ByteArray,
         report: CmafBoxInspector.Report
     ) {
-        val session = sessions[group] ?: return
-        val state = session.feeds[label] ?: return
+        val session = sessions[group]
         try {
             if (report.errors.isNotEmpty()) {
-                stateFailure(session, "$label: active CMAF response did not parse cleanly")
+                if (session != null) stateFailure(
+                    session, "$label: active CMAF response did not parse cleanly"
+                )
                 return
             }
             if (report.initializationSegmentPresent) {
-                captureInitialization(session, state, bytes, report)
-            } else if (label in session.labels) {
+                cacheInitialization(group, label, bytes, report)
+                val state = session?.feeds?.get(label)
+                if (session != null && state != null) {
+                    captureInitialization(session, state, bytes, report)
+                }
+            } else if (session != null) {
+                val state = session.feeds[label] ?: return
                 captureMediaFragment(session, state, bytes, report)
                 tryCompose(session)
             }
         } catch (error: Exception) {
-            stateFailure(
-                session,
-                label + ": " + (error.message ?: error.javaClass.simpleName)
-                    .filter { it.isLetterOrDigit() || it in " .,:;_-/()" }
-                    .take(220)
-            )
+            if (session != null) {
+                stateFailure(
+                    session,
+                    label + ": " + (error.message ?: error.javaClass.simpleName)
+                        .filter { it.isLetterOrDigit() || it in " .,:;_-/()" }
+                        .take(220)
+                )
+            }
         }
     }
 
@@ -204,6 +237,31 @@ internal object ProtectedHevcLiveComposition {
             height = output.height,
             alignmentOffsetsMillis = output.alignmentOffsetsMillis.toMap()
         )
+    }
+
+    private fun cacheInitialization(
+        group: String,
+        label: String,
+        bytes: ByteArray,
+        report: CmafBoxInspector.Report
+    ) {
+        require(bytes.isNotEmpty() && bytes.size <= MAX_INIT_BYTES) {
+            "active CMAF initialization segment exceeds its memory bound"
+        }
+        require(report.initializationSegmentPresent) {
+            "only complete initialization responses can be cached"
+        }
+        val groupCache = pendingInitializations.getOrPut(group) { linkedMapOf() }
+        groupCache.remove(label)?.zero()
+        groupCache[label] = PendingInitialization(bytes.copyOf(), report)
+        while (groupCache.size > MAX_PENDING_FEEDS_PER_GROUP) {
+            val oldest = groupCache.keys.first()
+            groupCache.remove(oldest)?.zero()
+        }
+        while (pendingInitializations.size > MAX_PENDING_GROUPS) {
+            val oldestGroup = pendingInitializations.keys.first()
+            pendingInitializations.remove(oldestGroup)?.values?.forEach(PendingInitialization::zero)
+        }
     }
 
     private fun captureInitialization(
@@ -713,6 +771,8 @@ internal object ProtectedHevcLiveComposition {
 
     private const val MIN_ALIGN_PICTURES = 5
     private const val MAX_FRAGMENT_SAMPLE_COUNT = 4096
+    private const val MAX_PENDING_GROUPS = 2
+    private const val MAX_PENDING_FEEDS_PER_GROUP = 4
     private const val MAX_INIT_BYTES = 2 * 1024 * 1024
     private const val MAX_FRAGMENT_BYTES = 8 * 1024 * 1024
     private const val MAX_SESSIONS = 2

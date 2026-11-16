@@ -34,6 +34,7 @@ import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
 import app.apexview.tiled.CmafBoxInspector
 import app.apexview.tiled.CmafMetadataInspectingDataSource
+import app.apexview.tiled.ProtectedHevcLiveComposition
 
 /**
  * F1's current video renditions use HEVC. Querying AVC here under-counts the secure decoder pool
@@ -224,6 +225,9 @@ class FeedPlayer(
                             HevcFeedProfileCapture.recordCmafParseFailure(stream.profileGroup, stream.profileLabel)
                         } else {
                             HevcFeedProfileCapture.recordCmafReport(stream.profileGroup, stream.profileLabel, report)
+                            ProtectedHevcLiveComposition.recordCmafResponse(
+                                stream.profileGroup, stream.profileLabel, bytes, report
+                            )
                         }
                     },
                     onCaptureSkipped = {

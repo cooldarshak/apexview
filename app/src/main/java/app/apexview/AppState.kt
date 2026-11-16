@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 import java.io.IOException
 import java.util.Calendar
 import kotlin.math.abs
+import app.apexview.tiled.ProtectedHevcLiveComposition
 
 /** A feed's window on the canvas. Positions and sizes are in pixels. */
 class Tile(val id: Int, val contentId: Long, channel: Channel, feed: FeedPlayer) {
@@ -1350,7 +1351,9 @@ class AppState(
                 sheet.note = "Choose exactly two different feeds from the same F1 session."
                 return
             }
-            HevcFeedProfileCapture.selectTileTestFeeds("content-${sheet.contentId}", labels)
+            val compositionGroup = "content-${sheet.contentId}"
+            HevcFeedProfileCapture.selectTileTestFeeds(compositionGroup, labels)
+            ProtectedHevcLiveComposition.selectFeeds(compositionGroup, labels)
             if (sheet.selected.isEmpty() && sheet.removing.isEmpty()) {
                 picker = null
                 browsing = false
@@ -2005,6 +2008,7 @@ class AppState(
         }
         val enteringTvLayout = mode == LayoutMode.TV && layoutMode != LayoutMode.TV
         HevcFeedProfileCapture.clearTileTestSelection()
+        ProtectedHevcLiveComposition.clearAll()
         layoutMode = mode
         if (mode == LayoutMode.TV) {
             // TV is a complete preset, not a feed-only arrangement: turn on the track map and
