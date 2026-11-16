@@ -112,7 +112,9 @@ internal object ProtectedHevcSliceHeaderRewriter {
                 "$context: rewritten protection map contains a gap or overlap"
             }
             val previous = rebuiltRanges.lastOrNull()
-            if (previous != null && previous.isClear == isClear &&
+            // Keep adjacent encrypted ranges distinct. Each source CENC subsample boundary
+            // represents an independent CBCS chain and must survive the header rewrite.
+            if (isClear && previous != null && previous.isClear &&
                 previous.endExclusive == offset
             ) {
                 rebuiltRanges[rebuiltRanges.lastIndex] = previous.copy(

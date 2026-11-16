@@ -79,6 +79,57 @@ class ProtectedHevcAccessUnitInspectorTest {
         }
     }
 
+    @Test fun composesRewrittenProtectedTilesIntoOneSampleWithAnInspectableCencMap() {
+        val fixture = firstFourTilePicture()
+        val inputSample = lengthPrefixedSample(fixture.sliceNals, encryptedTailBytes = 1)
+        val inputLayout = ProtectedHevcSampleLayout.inspect(
+            inputSample.bytes, 4, inputSample.ranges
+        )
+        val inputAccessUnit = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(
+            inputSample.bytes, inputLayout, fixture.sps, fixture.pps,
+            context = "synthetic protected four-tile sample composition"
+        )
+        val destinations = listOf(0, 2, 4, 6)
+        val rewrittenSlices = inputAccessUnit.slices.mapIndexed { index, slice ->
+            ProtectedHevcSliceHeaderRewriter.rewrite(
+                sample = inputSample.bytes,
+                layout = inputLayout,
+                accessUnit = inputAccessUnit,
+                nalIndex = slice.nalIndex,
+                sourceSps = fixture.sps,
+                sourcePps = fixture.pps,
+                outputSps = fixture.sps,
+                outputPps = fixture.pps,
+                destinationAddress = destinations[index],
+                context = "synthetic protected output tile $index"
+            )
+        }
+
+        val composed = ProtectedHevcSampleComposer.compose(
+            slices = rewrittenSlices,
+            nalLengthSize = 4,
+            context = "synthetic 2x2 protected output sample"
+        )
+
+        assertEquals(4, composed.nalCount)
+        assertEquals(4L, composed.encryptedByteCount)
+        assertEquals(4, composed.subsampleRanges.count { it.encryptedBytes > 0L })
+        assertTrue(composed.subsampleRanges.all { it.encryptedBytes == 1L || it.encryptedBytes == 0L })
+
+        val outputLayout = ProtectedHevcSampleLayout.inspect(
+            composed.sampleBytes, composed.nalLengthSize, composed.subsampleRanges
+        )
+        assertEquals(4, outputLayout.nals.size)
+        assertEquals(4L, outputLayout.encryptedByteCount)
+        val outputAccessUnit = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(
+            composed.sampleBytes, outputLayout, fixture.sps, fixture.pps,
+            context = "re-inspected synthetic protected 2x2 output sample"
+        )
+        assertEquals(destinations, outputAccessUnit.slices.map { it.header.sliceSegmentAddress })
+        assertEquals(4, outputAccessUnit.sourceTileCount)
+        assertTrue(outputAccessUnit.slicesReadyForCurrentHeaderRewriter)
+    }
+
     @Test fun rejectsSliceHeaderWhenSubsampleMapExposesOnlyNalHeaderAndOnePayloadByte() {
         val fixture = firstFourTilePicture()
         val sample = lengthPrefixedSample(fixture.sliceNals, encryptedTailBytes = 0)

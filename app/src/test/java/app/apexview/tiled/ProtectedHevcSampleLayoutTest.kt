@@ -79,6 +79,34 @@ class ProtectedHevcSampleLayoutTest {
         )
     }
 
+    @Test fun preservesAdjacentEncryptedRegionsFromDistinctSubsampleEntries() {
+        val sample = byteArrayOf(
+            0, 0, 0, 4, 0x02, 0x01, 0x7e, 0x55
+        )
+        val report = ProtectedHevcSampleLayout.inspect(
+            sample, 4, listOf(
+                CmafBoxInspector.SubsampleEncryptionRange(6, 1),
+                CmafBoxInspector.SubsampleEncryptionRange(0, 1)
+            )
+        )
+        assertEquals(
+            listOf(
+                ProtectedHevcSampleLayout.ProtectionRange(0, 2, true),
+                ProtectedHevcSampleLayout.ProtectionRange(2, 1, false),
+                ProtectedHevcSampleLayout.ProtectionRange(3, 1, false)
+            ),
+            report.nals.single().protectionRanges
+        )
+        assertEquals(
+            listOf(
+                ProtectedHevcSampleLayout.ProtectionRange(0, 6, true),
+                ProtectedHevcSampleLayout.ProtectionRange(6, 1, false),
+                ProtectedHevcSampleLayout.ProtectionRange(7, 1, false)
+            ),
+            report.protectionRanges
+        )
+    }
+
     @Test fun rejectsNalLengthPrefixThatCrossesIntoEncryptedBytes() {
         val sample = byteArrayOf(0, 0, 0, 3, 0x02, 0x01, 0x7e)
         val error = assertThrows(IllegalArgumentException::class.java) {

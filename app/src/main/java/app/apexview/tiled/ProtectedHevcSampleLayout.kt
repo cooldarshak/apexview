@@ -68,7 +68,9 @@ internal object ProtectedHevcSampleLayout {
             val startInt = start.toInt()
             val lengthInt = length.toInt()
             val previous = sampleProtectionRanges.lastOrNull()
-            if (previous != null && previous.isClear == isClear &&
+            // Clear spans may be coalesced. Never merge adjacent encrypted spans: separate
+            // CENC subsample entries are separate CBCS chains, even when clearBytes is zero.
+            if (isClear && previous != null && previous.isClear &&
                 previous.endExclusive == startInt
             ) {
                 sampleProtectionRanges[sampleProtectionRanges.lastIndex] = previous.copy(
