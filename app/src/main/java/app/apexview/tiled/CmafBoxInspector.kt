@@ -526,12 +526,20 @@ internal object CmafBoxInspector {
                     expectedSize == saiz.sampleInfoSizes[index].toLong()
                 }
         } else true
+        val expectedProtectionScheme = trackMetadataById[tfhd.trackId]?.protectionScheme
+        val auxiliarySchemeMatches =
+            saiz?.auxiliaryInfoType == null ||
+                saiz.auxiliaryInfoType == expectedProtectionScheme
+        val auxiliaryParameterSupported =
+            (saiz?.auxiliaryInfoParameter == null || saiz.auxiliaryInfoParameter == 0L) &&
+                (saio?.auxiliaryInfoParameter == null || saio.auxiliaryInfoParameter == 0L)
         val sampleAuxiliaryInfoStructureComplete =
             saiz != null && saio != null &&
                 saiz.sampleCount == samples.size.toLong() &&
                 (saio.offsets.size == 1 || saio.offsets.size == samples.size) &&
                 saiz.auxiliaryInfoType == saio.auxiliaryInfoType &&
                 saiz.auxiliaryInfoParameter == saio.auxiliaryInfoParameter &&
+                auxiliarySchemeMatches && auxiliaryParameterSupported &&
                 sencAuxiliarySizesMatch
         if ((saizBox != null || saioBox != null) && !sampleAuxiliaryInfoStructureComplete) {
             errors += "saiz/saio structure is incomplete or inconsistent with the fragment sample/encryption metadata"
@@ -561,6 +569,18 @@ internal object CmafBoxInspector {
                 if (auxiliaryBaseOffset == null) {
                     throw IllegalArgumentException(
                         "saio payload base is ambiguous; tfhd must provide base_data_offset or default-base-is-moof"
+                    )
+                }
+                if ((saiz.auxiliaryInfoParameter ?: 0L) != 0L ||
+                    (saio.auxiliaryInfoParameter ?: 0L) != 0L) {
+                    throw IllegalArgumentException(
+                        "Unsupported CENC auxiliary-info parameter; multi-key/multi-IV layouts are not parsed"
+                    )
+                }
+                val expectedScheme = trackMetadataById[tfhd.trackId]?.protectionScheme
+                if (saiz.auxiliaryInfoType != null && saiz.auxiliaryInfoType != expectedScheme) {
+                    throw IllegalArgumentException(
+                        "CENC auxiliary-info type does not match the track protection scheme"
                     )
                 }
                 if (effectiveSampleIvSizes == null) {
@@ -1081,8 +1101,11 @@ internal object CmafBoxInspector {
 
     private fun parseSeigEntry(p: ByteBuffer, index: Int): SeigProtectionEntry {
         require(p.remaining() >= 20) { "Truncated seig sample-group entry" }
-        val reserved = u8(p)
-        require(reserved == 0) { "Unsupported seig multi-key/reserved flags" }
+        // ISO/IEC 23001-7:2023 assigns the high bit to multi_key_flag. This parser models a
+        // single KID per sample and intentionally rejects multi-key entries instead of
+        // treating their key_count and repeated KID/IV tuples as the legacy single-key layout.
+        val multiKeyAndReserved = u8(p)
+        require(multiKeyAndReserved == 0) { "Unsupported seig multi-key/reserved flags" }
         val pattern = u8(p)
         val cryptByteBlock = pattern ushr 4
         val skipByteBlock = pattern and 0x0f

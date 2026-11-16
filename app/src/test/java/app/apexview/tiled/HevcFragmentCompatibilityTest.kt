@@ -212,6 +212,55 @@ class HevcFragmentCompatibilityTest {
         assertTrue(mismatching.reasons.any { it.contains("Track constant IV identities differ") })
     }
 
+    @Test fun rejectsProtectedTileCompositionForNonCbcsSchemes() {
+        val kid = ByteArray(16) { (it + 1).toByte() }
+        val iv = ByteArray(16) { (it + 65).toByte() }
+        val fragment = protectedFragment(iv)
+        val cbcs = protectedTrack(kid)
+
+        val supported = HevcFragmentCompatibility.compare(cbcs, fragment, cbcs.copy(), fragment.copy())
+        assertFalse(supported.reasons.any { it.contains("requires the cbcs independent-subsample CBC scheme") })
+
+        listOf("cenc", "cens", "cbc1", null).forEach { scheme ->
+            val unsupported = HevcFragmentCompatibility.compare(
+                cbcs.copy(protectionScheme = scheme), fragment,
+                cbcs.copy(protectionScheme = scheme), fragment.copy()
+            )
+            assertTrue(
+                "Expected scheme $scheme to be rejected, got \${unsupported.reasons}",
+                unsupported.reasons.any { it.contains("requires the cbcs independent-subsample CBC scheme") }
+            )
+        }
+    }
+
+    @Test fun rejectsUnsupportedMultiKeyAuxiliaryInfoParameter() {
+        val track = protectedTrack(ByteArray(16) { (it + 1).toByte() })
+        val base = protectedFragment(ByteArray(16) { (it + 65).toByte() })
+        val multiKeyAuxiliary = base.copy(
+            sampleAuxiliarySizesPresent = true,
+            sampleAuxiliaryOffsetsPresent = true,
+            sampleAuxiliaryInfoStructureComplete = true,
+            sampleAuxiliaryPayloadStructureComplete = true,
+            sampleAuxiliaryPayloadSampleCount = 1,
+            sampleAuxiliaryMetadata = CmafBoxInspector.SampleAuxiliaryMetadata(
+                auxiliaryInfoType = "cbcs",
+                auxiliaryInfoParameter = 1L,
+                saizSampleCount = 1L,
+                defaultSampleInfoSize = 24,
+                sampleInfoSizes = listOf(24),
+                saioOffsets = listOf(0L)
+            )
+        )
+
+        val result = HevcFragmentCompatibility.compare(
+            track, multiKeyAuxiliary, track.copy(), multiKeyAuxiliary.copy()
+        )
+        assertTrue(result.reasons.any {
+            it.contains("multi-key/multi-IV layouts are not parsed")
+        })
+        assertFalse(result.compatible)
+    }
+
     @Test fun rejectsSampleSyncAndRandomAccessDependencyFlagMismatch() {
         val first = fragment(90000, 0, listOf(
             CmafBoxInspector.SampleTiming(0, 0, 3000, 0, sampleFlags = 0x02000000L)

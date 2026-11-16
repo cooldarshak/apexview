@@ -320,6 +320,14 @@ internal object HevcFragmentCompatibility {
             firstTrack.encrypted || secondTrack.encrypted ||
                 firstFragment.sampleGroupEncryptionPresent || secondFragment.sampleGroupEncryptionPresent
         if (protectedInput &&
+            (firstTrack.protectionScheme != "cbcs" || secondTrack.protectionScheme != "cbcs")) {
+            reasons += "Protected tile composition requires the cbcs independent-subsample CBC scheme"
+        }
+        if (protectedInput) {
+            validateProtectedAuxiliaryInfo(firstFragment, firstTrack.protectionScheme, "First", reasons)
+            validateProtectedAuxiliaryInfo(secondFragment, secondTrack.protectionScheme, "Second", reasons)
+        }
+        if (protectedInput &&
             (firstFragment.subsampleEncryptionSignalled != true ||
                 secondFragment.subsampleEncryptionSignalled != true)) {
             reasons += "Protected HEVC slice headers are not exposed through explicit clear/encrypted subsample maps"
@@ -331,6 +339,23 @@ internal object HevcFragmentCompatibility {
             reasons += "Second protected fragment is missing per-sample IV records"
         }
         return Result(reasons.isEmpty(), reasons.distinct())
+    }
+
+    private fun validateProtectedAuxiliaryInfo(
+        fragment: CmafBoxInspector.FragmentMetadata,
+        protectionScheme: String?,
+        label: String,
+        reasons: MutableList<String>
+    ) {
+        val auxiliary = fragment.sampleAuxiliaryMetadata ?: return
+        if (auxiliary.auxiliaryInfoType != null &&
+            auxiliary.auxiliaryInfoType != protectionScheme) {
+            reasons += "$label sample auxiliary-info type does not match the track protection scheme"
+        }
+        if (auxiliary.auxiliaryInfoParameter != null &&
+            auxiliary.auxiliaryInfoParameter != 0L) {
+            reasons += "$label sample auxiliary-info parameter is unsupported; multi-key/multi-IV layouts are not parsed"
+        }
     }
 
     private fun compareProtectedIdentity(
