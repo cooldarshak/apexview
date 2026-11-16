@@ -68,6 +68,7 @@ internal object HevcSliceHeaderParser {
         val betaOffsetDiv2: Int? = null,
         val tcOffsetDiv2: Int? = null,
         val loopFilterAcrossSlices: Boolean? = null,
+        val loopFilterAcrossSlicesFieldBit: Int? = null,
         val entryPointOffsets: List<Long> = emptyList(),
         val sliceHeaderExtensionLength: Int = 0,
         val sourceAddressEndBit: Int,
@@ -153,6 +154,7 @@ internal object HevcSliceHeaderParser {
         var betaOffset: Int? = null
         var tcOffset: Int? = null
         var loopFilterAcrossSlices: Boolean? = null
+        var loopFilterAcrossSlicesFieldBit: Int? = null
         var entryPointOffsets = emptyList<Long>()
         var entryPointFieldStartBit = bits.positionBits
         var entryPointFieldEndBit = bits.positionBits
@@ -318,6 +320,7 @@ internal object HevcSliceHeaderParser {
 
             if (pps.loopFilterAcrossSlicesEnabled &&
                 (saoLuma == true || saoChroma == true || deblockingDisabled == false)) {
+                loopFilterAcrossSlicesFieldBit = bits.positionBits
                 loopFilterAcrossSlices = bits.readBit() != 0
             }
 
@@ -383,6 +386,7 @@ internal object HevcSliceHeaderParser {
             betaOffsetDiv2 = betaOffset,
             tcOffsetDiv2 = tcOffset,
             loopFilterAcrossSlices = loopFilterAcrossSlices,
+            loopFilterAcrossSlicesFieldBit = loopFilterAcrossSlicesFieldBit,
             entryPointOffsets = entryPointOffsets,
             sliceHeaderExtensionLength = extensionLength,
             sourceAddressEndBit = sourceAddressEndBit,

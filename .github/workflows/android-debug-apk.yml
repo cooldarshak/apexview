@@ -118,6 +118,13 @@ jobs:
             --tile-dir "$RUNNER_TEMP/apexview-hevc-tile-fixtures" \
             --output-dir "$RUNNER_TEMP/apexview-hevc-output-parameters"
 
+
+      - name: Independently decode Tizen-style 2x1 composition and compare source pixels
+        run: |
+          python3 tools/validate_hevc_tizen_grid_composer.py \
+            --fixture-dir "$RUNNER_TEMP/apexview-hevc-fixtures" \
+            --output-dir "$RUNNER_TEMP/apexview-hevc-output-parameters"
+
       # This repository must sign every distributable APK with the same private key. Do not
       # fall back to the ephemeral debug.keystore on a hosted runner: Android will reject updates.
       - name: Configure persistent APK signing

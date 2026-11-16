@@ -155,11 +155,10 @@ internal object HevcSourceCellCompatibility {
             reasons += "$label CTB dimensions do not cover the coded picture"
         }
 
-        if (geometry.conformanceWindowLeft != 0 || geometry.conformanceWindowRight != 0 ||
-            geometry.conformanceWindowTop != 0 || geometry.conformanceWindowBottom != 0 ||
-            geometry.displayWidth != geometry.codedWidth ||
-            geometry.displayHeight != geometry.codedHeight) {
-            reasons += "$label conformance-window crop is not supported for source-cell mapping"
+        if (geometry.displayWidth <= 0 || geometry.displayHeight <= 0 ||
+            geometry.displayWidth > geometry.codedWidth ||
+            geometry.displayHeight > geometry.codedHeight) {
+            reasons += "$label SPS display dimensions are invalid for source-cell mapping"
         }
 
         val right = selection.leftCtb.toLong() + selection.widthInCtbs.toLong()

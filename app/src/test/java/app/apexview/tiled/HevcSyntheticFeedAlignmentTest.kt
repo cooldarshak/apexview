@@ -93,6 +93,64 @@ class HevcSyntheticFeedAlignmentTest {
         outputB.writeBytes(reidentified)
     }
 
+
+    @Test
+    fun composesTwoIndependentFullFrameFeedsWithDifferentPpsIdsIntoOneDecodableGridPicture() {
+        val fixtureDirectory = System.getenv("APEXVIEW_HEVC_FIXTURE_DIR")
+        assumeTrue("CI synthetic HEVC fixture directory is not configured", !fixtureDirectory.isNullOrBlank())
+        val directory = File(fixtureDirectory!!)
+        val feedA = File(directory, "feed_a.hevc")
+        val feedB = File(directory, "feed_b.hevc")
+        assumeTrue("Independent synthetic feeds are not present", feedA.isFile && feedB.isFile)
+
+        val feedABytes = feedA.readBytes()
+        val feedBBytes = feedB.readBytes()
+        val feedBSets = parseSourceParameterSets(feedBBytes)
+        val feedBWithDifferentPps = rewriteFeedPpsId(
+            feedBBytes, feedBSets.sps, feedBSets.pps, outputPpsId = 1
+        )
+        assertEquals(0, parseSourceParameterSets(feedABytes).pps.ppsId)
+        assertEquals(1, parseSourceParameterSets(feedBWithDifferentPps).pps.ppsId)
+
+        val composed = HevcTizenGridComposer.composeAnnexBStreams(
+            feedStreams = listOf(feedABytes, feedBWithDifferentPps),
+            grid = HevcOutputGridDimensions(columns = 2, rows = 1),
+            cells = listOf(
+                HevcTizenGridComposer.CellSelection(0, 0, 0, 0),
+                HevcTizenGridComposer.CellSelection(1, 0, 1, 0)
+            ),
+            frameRateNumerator = 25,
+            frameRateDenominator = 1
+        )
+        assertEquals(50, composed.pictures.size)
+        assertEquals(1920, composed.codedWidth)
+        assertEquals(544, composed.codedHeight)
+        assertEquals(1920, composed.displayWidth)
+        assertEquals(540, composed.displayHeight)
+        assertEquals(2, composed.tileColumnWidthsInCtbs.size)
+        assertEquals(1, composed.tileRowHeightsInCtbs.size)
+        assertEquals(2, composed.pictures.first().evidence.size)
+        assertEquals(0, composed.pictures.first().evidence[0].destinationCtbAddress)
+        assertTrue(composed.pictures.first().evidence[1].destinationCtbAddress > 0)
+        assertTrue(composed.pictures.all { it.sampleData.isNotEmpty() })
+
+        val outputDirectory = System.getenv("APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR")
+        assumeTrue("CI output evidence directory is not configured", !outputDirectory.isNullOrBlank())
+        val outputFile = File(outputDirectory!!, "tizen_grid_composed_2x1.hevc")
+        outputFile.parentFile?.mkdirs()
+        outputFile.writeBytes(composed.annexB)
+        File(outputDirectory, "tizen_grid_composer_manifest.txt").writeText(
+            "result=COMPOSED\n" +
+                "source_feeds=2\n" +
+                "source_pps_ids=0,1\n" +
+                "grid=2x1\n" +
+                "pictures=${composed.pictures.size}\n" +
+                "coded_dimensions=${composed.codedWidth}x${composed.codedHeight}\n" +
+                "display_dimensions=${composed.displayWidth}x${composed.displayHeight}\n" +
+                "loop_filter_across_tiles=${composed.outputLoopFilterAcrossTilesEnabled}\n"
+        )
+    }
+
     private data class ParameterSets(
         val vps: HevcParameterSets.VpsMetadata,
         val sps: HevcParameterSets.SpsMetadata,

@@ -66,8 +66,12 @@ internal object HevcParameterSetCompatibility {
                 (firstSps.vuiParametersPresent && firstSps.vuiMetadata == null) ||
                 (secondSps.vuiParametersPresent && secondSps.vuiMetadata == null) ||
                 firstSps.vuiMetadata != secondSps.vuiMetadata) reasons += "Source VUI or picture-timing metadata differs or is incomplete"
-            if (listOf(firstSps.conformanceWindowLeft, firstSps.conformanceWindowRight, firstSps.conformanceWindowTop, firstSps.conformanceWindowBottom).any { it != 0 } ||
-                listOf(secondSps.conformanceWindowLeft, secondSps.conformanceWindowRight, secondSps.conformanceWindowTop, secondSps.conformanceWindowBottom).any { it != 0 }) reasons += "Conformance-window crops are not supported by the source-cell composer"
+            if (firstSps.conformanceWindowLeft != secondSps.conformanceWindowLeft ||
+                firstSps.conformanceWindowRight != secondSps.conformanceWindowRight ||
+                firstSps.conformanceWindowTop != secondSps.conformanceWindowTop ||
+                firstSps.conformanceWindowBottom != secondSps.conformanceWindowBottom) {
+                reasons += "Source SPS conformance-window crops differ"
+            }
             listOf("First" to firstSps, "Second" to secondSps).forEach { (label, sps) ->
                 if (sps.width <= 0 || sps.height <= 0 || sps.ctbSize <= 0 ||
                     sps.picWidthInCtbs <= 0 || sps.picHeightInCtbs <= 0 ||

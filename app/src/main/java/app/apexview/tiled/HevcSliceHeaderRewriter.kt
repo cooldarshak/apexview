@@ -30,7 +30,8 @@ internal object HevcSliceHeaderRewriter {
         outputSps: HevcParameterSets.SpsMetadata,
         outputPps: HevcParameterSets.PpsMetadata,
         destinationAddress: Int,
-        clearNalBytes: Int = nal.size
+        clearNalBytes: Int = nal.size,
+        loopFilterAcrossSlicesOverride: Boolean? = null
     ): Result {
         val nalHeader = HevcBitstream.parseNalHeader(nal)
         require(nalHeader.type in 0..21) { "Unsupported VCL NAL type" }
@@ -67,6 +68,9 @@ internal object HevcSliceHeaderRewriter {
         require(!parsed.dependentSliceSegment) { "Dependent slice segments are not supported" }
         require(parsed.entryPointOffsets.isEmpty()) {
             "Non-zero tile/WPP entry-point offsets are not supported"
+        }
+        require(loopFilterAcrossSlicesOverride == null || parsed.loopFilterAcrossSlicesFieldBit != null) {
+            "A loop-filter override was requested but the source slice has no loop_filter_across_slices_enabled_flag"
         }
         require(destinationAddress >= 0) { "Destination CTB address must not be negative" }
         val outputPictureCtbs = Math.multiplyExact(outputSps.picWidthInCtbs, outputSps.picHeightInCtbs)
@@ -115,9 +119,20 @@ internal object HevcSliceHeaderRewriter {
             if (outputAddressBits > 0) writer.writeBits(destinationAddress, outputAddressBits)
         }
 
-        // Preserve every parsed coding field after the address, including POC/RPS, prediction,
-        // deblocking override and loop-filter syntax.
-        writer.copyBits(rbsp, parsed.sourceAddressEndBit, parsed.entryPointFieldStartBit)
+        // Preserve every parsed coding field after the address, including POC/RPS, prediction
+        // and deblocking syntax. The Tizen grid policy may override the per-slice loop-filter
+        // gate so independent feeds are never filtered across an output seam.
+        val loopFilterBit = parsed.loopFilterAcrossSlicesFieldBit
+        if (loopFilterAcrossSlicesOverride != null && loopFilterBit != null) {
+            require(loopFilterBit in parsed.sourceAddressEndBit until parsed.entryPointFieldStartBit) {
+                "Loop-filter flag bit is outside the slice-header coding syntax"
+            }
+            writer.copyBits(rbsp, parsed.sourceAddressEndBit, loopFilterBit)
+            writer.writeBit(if (loopFilterAcrossSlicesOverride) 1 else 0)
+            writer.copyBits(rbsp, loopFilterBit + 1, parsed.entryPointFieldStartBit)
+        } else {
+            writer.copyBits(rbsp, parsed.sourceAddressEndBit, parsed.entryPointFieldStartBit)
+        }
 
         // The output grid has one independently coded slice per cell, hence no entry-point
         // substreams inside a cell. Source entry-point syntax is replaced, not carried over.
