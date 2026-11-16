@@ -289,12 +289,18 @@ internal object HevcPictureSequenceAligner {
             val expectedSequenceOrdinal = previous?.let {
                 runCatching { Math.addExact(it.sequenceSampleOrdinal, 1L) }.getOrNull()
             }
+            val sameFragmentAsPrevious = previous != null &&
+                previous.fragmentBaseDecodeTimeTicks == sample.fragmentBaseDecodeTimeTicks
+            val fragmentLocalIndexIsContiguous = previous == null ||
+                !sameFragmentAsPrevious ||
+                sample.sampleIndex.toLong() == previous.sampleIndex.toLong() + 1L
             if (sample.sampleIndex < 0 || sample.sequenceSampleOrdinal < 0L ||
                 (previous != null && expectedSequenceOrdinal != sample.sequenceSampleOrdinal) ||
+                !fragmentLocalIndexIsContiguous ||
                 (sample.fragmentBaseDecodeTimeTicks != null &&
                     sample.fragmentBaseDecodeTimeTicks < 0L)) {
                 reasons += context + ": feed " + feed.feedId +
-                    " fragment-local index/global sequence ordinal or tfdt anchor is invalid"
+                    " sample ordinals are not contiguous or fragment tfdt anchor is invalid"
             }
             val timing = sample.timing
             if (timing.decodeTimeTicks == null || timing.presentationTimeTicks == null ||
