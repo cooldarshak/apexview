@@ -31,7 +31,7 @@ class ProtectedHevcSampleLayoutTest {
             listOf(
                 CmafBoxInspector.SubsampleEncryptionRange(7, 0),
                 CmafBoxInspector.SubsampleEncryptionRange(0, 0),
-                CmafBoxInspector.SubsampleEncryptionRange(7, 2)
+                CmafBoxInspector.SubsampleEncryptionRange(7, 1)
             )
         )
         assertEquals(2, report.nals.size)
@@ -65,7 +65,7 @@ class ProtectedHevcSampleLayoutTest {
         val sample = byteArrayOf(0, 0, 0, 3, 0x02, 0x01, 0x7e)
         val error = assertThrows(IllegalArgumentException::class.java) {
             ProtectedHevcSampleLayout.inspect(
-                sample, 4, listOf(CmafBoxInspector.SubsampleEncryptionRange(7, 0))
+                sample, 4, listOf(CmafBoxInspector.SubsampleEncryptionRange(6, 0))
             )
         }
         assertTrue(error.message!!.contains("subsample map covers"))
