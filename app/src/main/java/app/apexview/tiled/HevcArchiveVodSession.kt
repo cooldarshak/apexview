@@ -53,6 +53,13 @@ internal class HevcArchiveVodSession(
     private var warmNumber: Int? = null
     @Volatile private var warmTask: Future<*>? = null
     @Volatile private var closed = false
+    private val owners = java.util.concurrent.atomic.AtomicInteger(1)
+    private val baseReleased = java.util.concurrent.atomic.AtomicBoolean(false)
+    fun acquireLease(): AutoCloseable {
+        synchronized(cacheLock) { checkOpen(); owners.incrementAndGet() }
+        val released = java.util.concurrent.atomic.AtomicBoolean(false)
+        return AutoCloseable { if (released.compareAndSet(false, true)) releaseOwner() }
+    }
     private var initialization: ByteArray? = null
     private var presentationOffsetTicks: Long? = null
     private var timescale: Long = 0
@@ -76,7 +83,7 @@ internal class HevcArchiveVodSession(
 
     /** A fixed probe proves composition. It is never required to catch another player's clock. */
     fun prepare(positionMs: Long) {
-        require(inputs.size in 2..4)
+        require(inputs.size in 1..4)
         inputs.forEach { input ->
             val track = input.report.tracks.single { it.handler == "vide" }
             if (track.encrypted) throw ProtectedArchiveBackendRequired()
@@ -144,8 +151,10 @@ internal class HevcArchiveVodSession(
                 HevcTizenGridComposer.CellSelection(feed, row * columns + col, feed * columns + col, row)
             } } }
             val ownedInits = synchronized(cacheLock) { checkOpen(); inputs.map { it.initialization.copyOf() } }
-            val composed = try { HevcClearCmafGridComposer.compose(HevcClearCmafGridComposer.Request(
-                inputs.mapIndexed { i, input -> HevcClearCmafGridComposer.Feed(ownedInits[i], batches.map { it[i] }, input.label) },
+            val composingFeeds = inputs.mapIndexed { i, input -> HevcClearCmafGridComposer.Feed(ownedInits[i], batches.map { it[i] }, input.label) }
+            val composed = try { if (inputs.size == 1) HevcClearCmafGridComposer.passThrough(composingFeeds.single())
+                else HevcClearCmafGridComposer.compose(HevcClearCmafGridComposer.Request(
+                composingFeeds,
                 HevcOutputGridDimensions(columns * inputs.size, rows), cells,
                 firstOutputSequenceNumber = anchor + 1L,
                 frameRateNumerator = (trackScale / divisor).toInt(), frameRateDenominator = (step / divisor).toInt()))
@@ -158,7 +167,7 @@ internal class HevcArchiveVodSession(
                 val outputBytes = composed.mediaFragments.single()
                 val mdat = java.nio.ByteBuffer.wrap(outputBytes).int
                 val firstNal = mdat + 8 + config.nalLengthSize
-                require(((outputBytes[firstNal].toInt() ushr 1) and 63) in 16..21) {
+                require(inputs.size == 1 || ((outputBytes[firstNal].toInt() ushr 1) and 63) in 16..21) {
                     "Archive sync sample does not begin with a real HEVC IRAP picture"
                 }
                 val last = CmafBoxInspector.inspect(composed.mediaFragments.last(), report).fragments.single()
@@ -256,9 +265,43 @@ internal class HevcArchiveVodSession(
 </Representation></AdaptationSet></Period></MPD>""".toByteArray()
     }
 
+    fun hlsPlaylist(): String = buildString {
+        append("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n")
+        append("#EXT-X-TARGETDURATION:${kotlin.math.ceil(groups.maxOf { it.durationUs } / 1_000_000.0).toInt()}\n")
+        append("#EXT-X-MAP:URI=\"init.mp4\"\n")
+        archiveStartTimeMs?.let { append("#EXT-X-PROGRAM-DATE-TIME:${java.time.Instant.ofEpochMilli(it)}\n") }
+        groups.forEachIndexed { i, group -> append("#EXTINF:${java.math.BigDecimal.valueOf(group.durationUs, 6).toPlainString()},\ns-$i.m4s\n") }
+        append("#EXT-X-ENDLIST\n")
+    }
+
+    fun codecString(): String {
+        val bytes = initialization()
+        try {
+            val c = requireNotNull(CmafBoxInspector.inspect(bytes).tracks.single().hevcConfiguration)
+            val compatibility = java.lang.Integer.toHexString(java.lang.Integer.reverse(c.compatibilityFlags.toInt())).uppercase()
+            val space = listOf("", "A", "B", "C")[c.profileSpace]
+            val constraints = (0..5).map { ((c.constraintIndicatorFlags ushr ((5 - it) * 8)) and 255).toInt() }.toMutableList()
+            while (constraints.isNotEmpty() && constraints.last() == 0) constraints.removeAt(constraints.lastIndex)
+            return "hvc1.$space${c.profileIdc}.$compatibility.${if (c.tierFlag) "H" else "L"}${c.levelIdc}" +
+                constraints.joinToString("") { ".%02X".format(it) }
+        } finally { bytes.fill(0) }
+    }
+
     fun initialization(): ByteArray = synchronized(cacheLock) { checkOpen(); requireNotNull(initialization).copyOf() }
 
     override fun close() {
+        if (baseReleased.compareAndSet(false, true)) releaseOwner()
+    }
+
+    private fun releaseOwner() {
+        val last = synchronized(cacheLock) {
+            val remaining = owners.decrementAndGet()
+            if (remaining == 0) { closed = true; true } else false
+        }
+        if (last) shutdown()
+    }
+
+    private fun shutdown() {
         closed = true
         synchronized(warmLock) { warmTask?.cancel(true); warmer.shutdownNow() }
         fetchers.shutdownNow()

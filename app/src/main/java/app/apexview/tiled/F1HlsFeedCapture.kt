@@ -45,7 +45,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     ): HevcArchiveVodSession {
         var acquired: HevcArchiveVodSession? = null
         try { return withContext(Dispatchers.IO) {
-            require(feeds.size in 2..4 && feeds.map { it.label }.distinct().size == feeds.size)
+            require(feeds.size in 1..4 && feeds.map { it.label }.distinct().size == feeds.size)
             val selected = chooseCommon(feeds.map { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }, preferredHeight, feeds.size)
             val playlists = coroutineScope { selected.map { offer -> async { loadMedia(offer) } }.awaitAll() }
             require(playlists.all { it.hasEndTag && it.segments.isNotEmpty() }) { "Archive VOD requires complete HLS replay playlists" }

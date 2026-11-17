@@ -65,6 +65,18 @@ internal object HevcClearCmafGridComposer {
         val annexB: ByteArray
     )
 
+    /** A single clear source needs no stitching. Keep its bytes, after the same protection/syntax checks. */
+    fun passThrough(feed: Feed): Output {
+        val parsed = parseFeed(feed, 0)
+        val sps = parsed.config.sps.single()
+        require(HevcBitstream.splitAnnexB(parsed.annexB).first { it.type in 0..31 }.type in 16..21) {
+            "A standalone replay segment must begin with an IRAP picture"
+        }
+        return Output(feed.initializationSegment.copyOf(), feed.mediaFragments.map { it.copyOf() },
+            sps.width, sps.height, sps.displayWidth, sps.displayHeight,
+            parsed.fragments.sumOf { it.samples.size }, parsed.fragments.size, emptyList())
+    }
+
     fun compose(request: Request): Output {
         require(request.feeds.size >= 2) { "At least two clear CMAF feeds are required" }
         require(request.feeds.all { it.mediaFragments.isNotEmpty() }) {

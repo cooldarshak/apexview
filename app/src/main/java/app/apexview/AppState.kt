@@ -323,6 +323,90 @@ class AppState(
         private set
     val singleDecoderSceneActive: Boolean get() = nativeArchiveTiles.isNotEmpty()
     val singleDecoderScenePlayer: FeedPlayer? get() = if (singleDecoderSceneActive) protectedCompositionHost?.feed else null
+    var castSheetOpen by mutableStateOf(false)
+    var castBusy by mutableStateOf(false)
+        private set
+    var castStatus by mutableStateOf<String?>(null)
+        private set
+    private var castRelay by mutableStateOf<app.apexview.cast.SceneCastRelay?>(null)
+    val castingActive: Boolean get() = castRelay != null
+    val castReceiverUrl: String? get() = castRelay?.receiverUrl
+    val castPairingCode: String? get() = castRelay?.pairingCode
+    private var castRevision by mutableStateOf(0)
+    private var castAudioRevision by mutableStateOf(0)
+    fun startFullSceneCast() {
+        if (castingActive || castBusy) return
+        if (!singleDecoderSceneActive && tiles.size > 1) chooseDecoderMode(DecoderMode.SINGLE)
+        castBusy = true; castStatus = "Preparing the full-layout receiver…"
+        scope.launch {
+            var relay: app.apexview.cast.SceneCastRelay? = null
+            var ownedSession: app.apexview.tiled.HevcArchiveVodSession? = null
+            try {
+                val session = if (tiles.size == 1) {
+                    val tile = tiles.single()
+                    require(tile.contentId !in knownLiveContentIds && !tile.feed.player.isCurrentMediaItemLive) { "Receiver preview currently supports archives." }
+                    val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
+                    try {
+                        capture.prepareVod(listOf(F1DashFeedCapture.Feed(tile.feed.sourceStream.profileLabel, tile.feed.sourceStream.url)),
+                            tile.feed.player.currentPosition.coerceAtLeast(0), tile.feed.sourceStream.profileLabel, 720, settings.commentary)
+                            .also { ownedSession = it }
+                    } finally { capture.reset() }
+                } else {
+                    kotlinx.coroutines.withTimeout(45_000L) {
+                        while (!singleDecoderSceneActive) {
+                            if (f1DashCaptureJob == null) throw IOException("Start compatible archive feeds in Single decoder mode first.")
+                            kotlinx.coroutines.delay(100L)
+                        }
+                    }
+                    requireNotNull(singleDecoderScenePlayer?.archiveSessionForCast())
+                }
+                val manager = context.getSystemService(android.net.ConnectivityManager::class.java)
+                val network = manager.allNetworks.firstOrNull { network -> manager.getNetworkCapabilities(network)?.let {
+                    it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) || it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)
+                } == true } ?: throw IOException("Connect the phone and receiver to the same Wi-Fi or Ethernet network.")
+                val address = manager.getLinkProperties(network)?.linkAddresses?.map { it.address }
+                    ?.firstOrNull { it is java.net.Inet4Address && !it.isLoopbackAddress }?.hostAddress
+                    ?: throw IOException("No local IPv4 receiver address is available.")
+                val factory = androidx.media3.datasource.DefaultHttpDataSource.Factory().setUserAgent(userAgent)
+                    .setAllowCrossProtocolRedirects(true).setDefaultRequestProperties(mapOf(
+                        "ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    relay = app.apexview.cast.SceneCastRelay(context, session, app.apexview.tiled.CmafHttpReader(factory), address)
+                    relay!!.validateAudio()
+                }
+                castRelay = relay
+                castStatus = "Receiver ready. Open the link on a compatible TV browser and enter the pairing code. Keep ApexView open on this phone."
+                tiles.forEach { it.feed.setAudible(false) }
+            } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+                relay?.close(); castStatus = "Compatible clear-archive composition is unavailable for this receiver."
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { relay?.close(); throw cancelled
+            } catch (error: Exception) {
+                relay?.close()
+                castStatus = (error.message ?: "Unable to start the full-layout receiver").replace(Regex("https?://\\S+"), "[URL]").take(240)
+            } finally { ownedSession?.close(); castBusy = false }
+        }
+    }
+    fun stopFullSceneCast() {
+        castRelay?.close(); castRelay = null
+        castStatus = "Casting stopped."
+        if (singleDecoderSceneActive) singleDecoderScenePlayer?.setAudible(!mutedAll && !castingActive)
+        else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll && !castingActive) }
+    }
+    fun publishCastScene(width: Float, height: Float, scale: Float, offsetX: Float, offsetY: Float) {
+        val relay = castRelay ?: return
+        val labels = relay.session.sourceLabels
+        if (tiles.any { it.feed.sourceStream.profileLabel !in labels } || labels.size != tiles.size) {
+            stopFullSceneCast(); castStatus = "Feeds changed. Start casting again for the new selection."; return
+        }
+        val scene = app.apexview.scene.VideoScene(width, height, relay.session.width, relay.session.height, labels.size,
+            tiles.map { tile -> app.apexview.scene.VideoWindow(tile.id, labels.indexOf(tile.feed.sourceStream.profileLabel),
+                tile.x * scale + offsetX, tile.y * scale + offsetY, tile.w * scale, tile.h * scale, tile.z) })
+        val leader = leaderTile()?.feed?.player ?: return
+        relay.publish(scene, leader.currentPosition, playing, playbackSpeed, mutedAll, castRevision, castAudioRevision)
+    }
+    fun publishCastOverlay(positionMs: Long, png: ByteArray) { castRelay?.publishOverlay(positionMs, png) }
+    val castFramePositionMs: Long get() = leaderTile()?.feed?.player?.currentPosition ?: 0L
+
     private var sceneOutputSize by mutableStateOf(0 to 0)
     fun reportSceneOutputSize(width: Int, height: Int) { sceneOutputSize = width to height }
     fun failSingleDecoderScene(reason: String) {
@@ -335,10 +419,11 @@ class AppState(
         val labels = host.archiveSceneLabels
         if (labels.isEmpty() || width <= 0 || height <= 0) return null
         return app.apexview.scene.VideoScene(width, height, host.archiveSceneWidth, host.archiveSceneHeight, labels.size,
-            tiles.mapNotNull { tile ->
+            (if (inPip) listOfNotNull(pipTile()) else tiles).mapNotNull { tile ->
                 val source = labels.indexOf(tile.feed.sourceStream.profileLabel)
-                if (source < 0 || tile.w <= 0 || tile.h <= 0) null else app.apexview.scene.VideoWindow(tile.id, source,
-                    tile.x, tile.y, tile.w, tile.h, tile.z)
+                if (source < 0 || tile.w <= 0 || tile.h <= 0) null else if (inPip)
+                    app.apexview.scene.VideoWindow(tile.id, source, 0f, 0f, width, height, tile.z)
+                else app.apexview.scene.VideoWindow(tile.id, source, tile.x, tile.y, tile.w, tile.h, tile.z)
             })
     }
     fun chooseDecoderMode(mode: DecoderMode) {
@@ -396,6 +481,7 @@ class AppState(
     }
 
     fun close() {
+        stopFullSceneCast()
         stopProtectedCompositionPresentation(restorePlayer = false)
         f1DashCaptureJob?.cancel()
         f1DashCaptureJob = null
@@ -415,6 +501,7 @@ class AppState(
         if (singleDecoderSceneActive) {
             val owner = protectedCompositionHost
             tiles.forEach { tile ->
+                tile.coolingOff = false; tile.heldForDecoder = false; tile.heldForSpeed = false
                 tile.feed.setProtectedCompositionVideoRole(tile === owner && !browsing,
                     canvasW.toInt().coerceAtLeast(1), canvasH.toInt().coerceAtLeast(1))
             }
@@ -1554,7 +1641,7 @@ class AppState(
                         selected.forEach { it.feed.suspendForArchiveComposition(); it.feed.setAudible(false) }
                         host.feed.startArchiveVodPlayback(session, handoffPositionMs, playing)
                         transferred = true
-                        host.feed.setAudible(!mutedAll)
+                        host.feed.setAudible(!mutedAll && !castingActive)
                         decoderMode = DecoderMode.SINGLE
                         phase = "BUFFERING"
                     },
@@ -1605,7 +1692,9 @@ class AppState(
                 decoderMode = DecoderMode.MULTIPLE
                 // Preserve the failure evidence before restore cancels this capture's ownership.
                 diagnostic()
-                if (startup.sourceDecodersTouched || singleDecoderSceneActive) restore() else applyVideoBudget()
+                if (startup.sourceDecodersTouched || singleDecoderSceneActive) restore() else {
+                    selected.forEach { it.feed.clearProtectedCompositionVideoRole() }; applyVideoBudget()
+                }
                 message = "Single-decoder archive test failed: $failure"
                 android.util.Log.w("ApexviewSingleDecoder", "ARCHIVE_VOD_FAILED reason=$failure")
             } finally {
@@ -1962,7 +2051,7 @@ class AppState(
     }
 
     /** Stop protected capture and restore the original tile arrangement and feed player. */
-    fun stopProtectedCompositionPresentation(restorePlayer: Boolean = true) {
+    fun stopProtectedCompositionPresentation(restorePlayer: Boolean = true, keepSourceVideoDisabled: Boolean = false) {
         f1DashCaptureJob?.cancel()
         f1DashCaptureJob = null
         f1DashCapture?.reset()
@@ -1973,7 +2062,7 @@ class AppState(
         if (restorePlayer) {
             if (native.isNotEmpty()) native.forEach {
                 it.feed.stopProtectedComposedPlayback(resumePositionMs, playing, enableVideo = false)
-                it.feed.setAudible(it.audible && !mutedAll)
+                it.feed.setAudible(it.audible && !mutedAll && !castingActive)
             }
             else protectedCompositionHost?.feed?.stopProtectedComposedPlayback(resumePositionMs)
         }
@@ -1996,7 +2085,8 @@ class AppState(
         protectedCompositionHost = null
         ProtectedHevcLiveComposition.clearAll()
         HevcFeedProfileCapture.clearTileTestSelection()
-        applyVideoBudget()
+        if (keepSourceVideoDisabled) tiles.forEach { it.feed.setProtectedCompositionVideoRole(false, it.w.toInt().coerceAtLeast(1), it.h.toInt().coerceAtLeast(1)) }
+        else applyVideoBudget()
         layoutRequest++
     }
 
@@ -2004,6 +2094,7 @@ class AppState(
     val roomForFeeds get() = MAX_FEEDS - tiles.size
 
     private fun addFeeds(contentId: Long, requested: List<Channel>, fromStart: Boolean = false, added: (Tile) -> Unit = {}) {
+        if (singleDecoderSceneActive) stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
         if (roomForFeeds <= 0) {
             message = "4 feeds is the most this phone plays smoothly. Remove one or switch a feed instead."
             return
@@ -2047,6 +2138,8 @@ class AppState(
             focusTileId = null
             streams.forEach { (channel, stream) ->
                 val feed = newFeed(stream, startWithVideo = !isTv && (decoderMode != DecoderMode.SINGLE || tiles.isEmpty() && streams.size == 1))
+                if (decoderMode == DecoderMode.SINGLE && (tiles.isNotEmpty() || streams.size > 1))
+                    feed.setProtectedCompositionVideoRole(false, 1, 1)
                 // From the start: the first moment F1 keeps, so nothing after it is seen first.
                 if (fromStart && joinAt == null) feed.startFromBeginning()
                 joinAt?.let(feed.player::seekTo)
@@ -2580,8 +2673,8 @@ class AppState(
     fun switchFeed(tile: Tile, channel: Channel) {
         tileMenu = null
         if (channel == tile.channel) return
-        val restartComposition = isTv && f1DashCaptureJob != null
-        if (restartComposition) stopProtectedCompositionPresentation()
+        val restartComposition = decoderMode == DecoderMode.SINGLE || isTv && f1DashCaptureJob != null
+        if (restartComposition) stopProtectedCompositionPresentation(keepSourceVideoDisabled = decoderMode == DecoderMode.SINGLE)
         // The feed up top in laptop mode switched from its own menu: offer the way back too.
         if (laptopActive && tile.id == bigTileId) rememberBroadcast()
         task("Switching to ${channel.title}") {
@@ -2598,14 +2691,16 @@ class AppState(
                 val chunk = FeedPlayer.chunkMs
                 if (chunk > 0) target / chunk * chunk else target
             }
-            val feed = newFeed(stream, start)
-            feed.setAudible(tile.audible && !mutedAll)
+            val feed = newFeed(stream, start, startWithVideo = decoderMode != DecoderMode.SINGLE && !isTv)
+            if (decoderMode == DecoderMode.SINGLE && tiles.size > 1) feed.setProtectedCompositionVideoRole(false, 1, 1)
+            feed.setAudible(tile.audible && !mutedAll && !castingActive)
             feed.player.playWhenReady = playing
             tile.feed = feed
             tile.channel = channel
             old.release()
             if (failures.isNotEmpty()) message = failures.joinToString("\n")
-            if (restartComposition) startTvLiveCompositionIfEligible(tile.contentId)
+            if (restartComposition && decoderMode == DecoderMode.SINGLE && tiles.size >= 2) startArchiveSingleDecoderComposition(tile.contentId)
+            else { tiles.forEach { it.feed.clearProtectedCompositionVideoRole() }; applyVideoBudget() }
         }
     }
 
@@ -3380,7 +3475,7 @@ class AppState(
     fun stopRadio() {
         radioPlayer?.stop()
         radioPlaying = null
-        tiles.forEach { it.feed.setAudible(it.audible && !mutedAll) }
+        tiles.forEach { it.feed.setAudible(it.audible && !mutedAll && !castingActive) }
     }
 
     /** True while a finger holds the track map; the feeds under it stay put. */
@@ -3531,6 +3626,8 @@ class AppState(
 
     /** Moves the audio to [tile]. Choosing a feed to listen to also ends Mute all. */
     fun setAudio(tile: Tile, byUser: Boolean = false) {
+        castRelay?.selectAudio(tile.feed.sourceStream.profileLabel)
+        castAudioRevision++; castRevision++
         if (singleDecoderSceneActive) {
             val owner = protectedCompositionHost?.feed ?: return
             if (!owner.selectArchiveAudio(tile.feed.sourceStream.profileLabel)) {
@@ -3539,21 +3636,22 @@ class AppState(
             }
             if (byUser) mutedAll = false
             tiles.forEach { it.audible = it === tile; it.feed.setAudible(false) }
-            owner.setAudible(!mutedAll)
+            owner.setAudible(!mutedAll && !castingActive)
             return
         }
         if (byUser) mutedAll = false
         tiles.forEach {
             it.audible = it === tile
-            it.feed.setAudible(it.audible && !mutedAll)
+            it.feed.setAudible(it.audible && !mutedAll && !castingActive)
         }
     }
 
     /** Silences every feed, keeping track of which one had the audio for when it's turned back on. */
     fun toggleMuteAll() {
+        castRevision++
         mutedAll = !mutedAll
-        if (nativeArchiveTiles.isNotEmpty()) protectedCompositionHost?.feed?.setAudible(!mutedAll)
-        else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll) }
+        if (nativeArchiveTiles.isNotEmpty()) protectedCompositionHost?.feed?.setAudible(!mutedAll && !castingActive)
+        else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll && !castingActive) }
         showChrome()
     }
 
@@ -3844,7 +3942,7 @@ class AppState(
     }
 
     fun remove(tile: Tile) {
-        if (protectedCompositionHost != null) stopProtectedCompositionPresentation()
+        if (protectedCompositionHost != null) stopProtectedCompositionPresentation(keepSourceVideoDisabled = decoderMode == DecoderMode.SINGLE)
         if (audioHint === tile) audioHint = null
         if (targetTile === tile) targetTile = null
         tileMenu = null
@@ -3860,10 +3958,12 @@ class AppState(
         // The rest close up to fill the space.
         handPlaced = false
         layoutRequest++
-        startTvLiveCompositionIfEligible(tile.contentId)
+        if (decoderMode == DecoderMode.SINGLE && tiles.size >= 2) startArchiveSingleDecoderComposition(tile.contentId)
+        else { tiles.forEach { it.feed.clearProtectedCompositionVideoRole() }; applyVideoBudget() }
     }
 
     fun stopAll() {
+        stopFullSceneCast()
         // Closing the viewer keeps the spot, so Continue watching can bring it back.
         // Read the native host before clearing its ownership: stopped originals have no clock.
         saveWatch()
@@ -3974,6 +4074,7 @@ class AppState(
         else protectedCompositionAudioMaster ?: tiles.firstOrNull()
 
     fun togglePlay() {
+        castRevision++
         playing = !playing
         // In the pop-out, only the shown feed and the audio keep playing (see setPip).
         val shown = if (inPip) pipTile() else null
@@ -3999,6 +4100,7 @@ class AppState(
     }
 
     fun chooseSpeed(value: Float) {
+        castRevision++
         val slower = value < playbackSpeed
         playbackSpeed = value
         prefs.edit().putFloat(PREF_SPEED, value).apply()
@@ -4080,6 +4182,7 @@ class AppState(
     }
 
     fun seekTo(targetMs: Long) {
+        castRevision++
         if (composedArchiveOriginMs != null) {
             stopProtectedCompositionPresentation()
             layoutMode = LayoutMode.GRID

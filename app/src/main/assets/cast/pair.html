@@ -1,0 +1,5 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ApexView receiver</title>
+<style>body{background:#101014;color:white;font:28px system-ui;display:grid;place-content:center;height:90vh;text-align:center}input,button{font:inherit;padding:16px;margin:10px;border-radius:10px}p{max-width:700px}</style>
+<h1>ApexView</h1><p>Enter the six-digit code shown on the phone. Both devices must use the same local network.</p>
+<form id="pair"><input id="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="Pairing code" autofocus required><button>Connect</button></form><p id="status"></p>
+<script>document.querySelector('#pair').onsubmit=async e=>{e.preventDefault();const r=await fetch('pair',{method:'POST',body:document.querySelector('#code').value});const s=await r.text();if(r.ok)location.replace(s);else document.querySelector('#status').textContent=s;};</script>

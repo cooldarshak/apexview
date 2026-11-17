@@ -80,6 +80,11 @@ jobs:
           python3 tools/generate_hevc_tile_2x2_fixtures.py --output-dir "$TILE_FIXTURE_DIR"
           echo "APEXVIEW_HEVC_TILE_FIXTURE_DIR=$TILE_FIXTURE_DIR" >> "$GITHUB_ENV"
 
+      - name: Validate full-scene receiver protocol and JavaScript
+        run: |
+          node tools/test_cast_receiver.mjs
+          node --check app/src/main/assets/cast/receiver.mjs
+
       - name: Run unit tests, including Kotlin analysis of real synthetic feeds
         run: |
           set +e

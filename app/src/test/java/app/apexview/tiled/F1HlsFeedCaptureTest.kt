@@ -468,6 +468,94 @@ seg.m4s
         } finally { session.close(); capture.reset() }
     }
 
+    @Test fun castReceiverPairsBeforeServingOnlyTheAuthorizedSceneResources() = runBlocking {
+        val network = network(2)
+        val capture = F1HlsFeedCapture(network.factory)
+        val session = capture.prepareVod(feeds(2), 0, "channel-0")
+        val relay = app.apexview.cast.SceneCastRelay(org.robolectric.RuntimeEnvironment.getApplication(), session,
+            CmafHttpReader(network.factory), "127.0.0.1")
+        try {
+            assertEquals(404, relayRequest(relay.receiverUrl + "s/guessed/init.mp4").first)
+            val paired = relayRequest(relay.receiverUrl + "pair", relay.pairingCode)
+            assertEquals(200, paired.first)
+            val prefix = paired.second.toString(Charsets.UTF_8).removeSuffix("receiver.html")
+            relay.publish(app.apexview.scene.VideoScene(1920f, 1080f, session.width, session.height, 2,
+                listOf(app.apexview.scene.VideoWindow(1, 1, 50f, 80f, 960f, 540f, 3f))), 600, true, 1f, false, 1, 0)
+            val scene = relayRequest(relay.receiverUrl.removeSuffix("/") + prefix + "scene.json")
+            assertEquals(200, scene.first)
+            val json = org.json.JSONObject(scene.second.toString(Charsets.UTF_8))
+            assertEquals(1, json.getJSONArray("windows").getJSONObject(0).getInt("source"))
+            assertFalse(scene.second.toString(Charsets.UTF_8).contains("media.test"))
+            val init = relayRequest(relay.receiverUrl.removeSuffix("/") + prefix + "init.mp4")
+            assertArrayEquals(session.initialization(), init.second)
+            assertEquals(404, relayRequest(relay.receiverUrl.removeSuffix("/") + prefix + "http://unlisted.test/token").first)
+        } finally { relay.close(); session.close(); capture.reset() }
+    }
+
+    @Test fun castPairingLimitsIncorrectAttempts() = runBlocking {
+        val network = network(2)
+        val capture = F1HlsFeedCapture(network.factory)
+        val session = capture.prepareVod(feeds(2), 0, "channel-0")
+        val relay = app.apexview.cast.SceneCastRelay(org.robolectric.RuntimeEnvironment.getApplication(), session,
+            CmafHttpReader(network.factory), "127.0.0.1")
+        try {
+            repeat(5) { assertEquals(403, relayRequest(relay.receiverUrl + "pair", "000000").first) }
+            assertEquals(429, relayRequest(relay.receiverUrl + "pair", relay.pairingCode).first)
+        } finally { relay.close(); session.close(); capture.reset() }
+    }
+
+    @Test fun castLeaseKeepsTheEncodedSourceAliveUntilTheLastConsumerStops() = runBlocking {
+        val capture = F1HlsFeedCapture(network(2).factory)
+        val session = capture.prepareVod(feeds(2), 0, "channel-0")
+        val lease = session.acquireLease()
+        session.close(); session.close()
+        try { assertTrue(session.initialization().isNotEmpty()) }
+        finally { lease.close(); lease.close(); capture.reset() }
+        try { session.initialization(); fail("The final receiver release must close the source") }
+        catch (_: java.io.IOException) {}
+    }
+
+    @Test fun castHlsIndexIsFiniteAndItsCodecStringIsParsedByMedia3() = runBlocking {
+        val capture = F1HlsFeedCapture(network(2).factory)
+        val session = capture.prepareVod(feeds(2), 1100, "channel-0")
+        try {
+            val playlist = androidx.media3.exoplayer.hls.playlist.HlsPlaylistParser().parse(Uri.parse("http://receiver.test/video.m3u8"),
+                session.hlsPlaylist().byteInputStream()) as androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist
+            assertTrue(playlist.hasEndTag)
+            assertEquals(2, playlist.segments.size)
+            assertEquals(2_000_000L, playlist.durationUs)
+            val format = androidx.media3.common.Format.Builder().setSampleMimeType("video/hevc").setCodecs(session.codecString()).build()
+            assertNotNull(androidx.media3.exoplayer.mediacodec.MediaCodecUtil.getCodecProfileAndLevel(format))
+            assertFalse(session.hlsPlaylist().contains("media.test"))
+        } finally { session.close(); capture.reset() }
+    }
+
+    @Test fun oneCameraCastKeepsTheOriginalClearCmafBytesAndDoesNotInventAnotherFeed() = runBlocking {
+        val network = network(1)
+        val capture = F1HlsFeedCapture(network.factory)
+        val session = capture.prepareVod(feeds(1), 0, "channel-0")
+        try {
+            assertEquals(listOf("channel-0"), session.sourceLabels)
+            assertEquals(960, session.width)
+            assertArrayEquals(network.files.getValue("https://media.test/f0/s0.m4s"), session.segment(0))
+            assertArrayEquals(network.files.getValue("https://media.test/f0/init.mp4"), session.initialization())
+        } finally { session.close(); capture.reset() }
+    }
+
+    private fun relayRequest(address: String, body: String? = null): Pair<Int, ByteArray> {
+        val uri = java.net.URI(address)
+        return java.net.Socket(uri.host, uri.port).use { socket ->
+            socket.soTimeout = 10_000
+            val bytes = body?.toByteArray() ?: byteArrayOf()
+            socket.getOutputStream().write(((if (body == null) "GET" else "POST") + " ${uri.rawPath} HTTP/1.1\r\nHost: ${uri.host}\r\nContent-Length: ${bytes.size}\r\n\r\n").toByteArray() + bytes)
+            val response = socket.getInputStream().readBytes()
+            val separator = "\r\n\r\n".toByteArray()
+            val at = (0..response.size - separator.size).first { index -> separator.indices.all { response[index + it] == separator[it] } }
+            val code = response.copyOfRange(0, at).toString(Charsets.US_ASCII).lineSequence().first().split(' ')[1].toInt()
+            code to response.copyOfRange(at + 4, response.size)
+        }
+    }
+
     private fun compactFragment(bytes: ByteArray): ByteArray {
         fun children(parent: ByteArray): List<ByteArray> {
             val result = mutableListOf<ByteArray>()
