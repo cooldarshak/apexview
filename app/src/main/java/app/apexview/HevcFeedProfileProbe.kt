@@ -359,8 +359,13 @@ internal object HevcFeedProfileCapture {
         )
         profiles.remove(snapshot.label)
         profiles[snapshot.label] = enriched
-        while (profiles.size > 8) profiles.remove(profiles.keys.first())
-        while (feedProgress.size > 4) feedProgress.remove(feedProgress.keys.first())
+        // Diagnostics render a profile together with its progress. Evict both atomically;
+        // retaining eight profiles but only four progress entries crashed the fifth feed.
+        while (profiles.size > AppState.MAX_SINGLE_DECODER_FEEDS) {
+            val oldest = profiles.keys.first()
+            profiles.remove(oldest)
+            feedProgress.remove(oldest)
+        }
         diagnostic = buildDiagnostic()
     }
 

@@ -1313,6 +1313,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         val laps = mutableMapOf<String, Int>()
 
         stream.lineSequence().forEach { line ->
+            // Sector and gap updates cannot change lap state.
+            if (!line.contains("\"InPit\"") && !line.contains("\"PitOut\"") &&
+                !line.contains("\"NumberOfLaps\"") && !line.contains("\"KnockedOut\"")) return@forEach
             if (line.length <= streamPrefixLength(line)) return@forEach
             val lines = runCatching { JSONObject(line.substring(streamPrefixLength(line))).optJSONObject("Lines") }.getOrNull()
                 ?: return@forEach

@@ -12,6 +12,16 @@ import app.apexview.tiled.HevcBitstream
 import app.apexview.tiled.CmafBoxInspector
 
 class HevcFeedProfileProbeTest {
+    @Test fun recordingMoreThanFourFeedsKeepsDiagnosticProgressAvailable() {
+        val format = Format.Builder().setSampleMimeType(MimeTypes.VIDEO_H265)
+            .setWidth(256).setHeight(128).build()
+        HevcFeedProfileCapture.clearTileTestSelection()
+        repeat(8) { index ->
+            HevcFeedProfileCapture.record(HevcFeedProfileProbe.inspect(
+                C.TRACK_TYPE_VIDEO, format, "feed-$index", "many-feed-regression"))
+        }
+        assertTrue(HevcFeedProfileCapture.diagnostic.contains("feed-0"))
+    }
     @Test
     fun reportsOnlySanitisedParameterSetMetadataFromSyntheticCsd() {
         val fixturePath = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
