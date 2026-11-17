@@ -119,6 +119,19 @@ def main():
     (output / "native_vod_full_tiled_validation.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
 
+    five_output = output / "native_vod_five_tiled_feeds.mp4"
+    inputs = []
+    for _ in range(5):
+        inputs += ["-f", "hevc", "-i", str(tiled_source)]
+    wanted = hashes(inputs + ["-filter_complex", "[0:v][1:v][2:v][3:v][4:v]hstack=inputs=5[grid]"], map_stream="[grid]")
+    decoded = hashes(["-i", str(five_output)])
+    if len(decoded) != 50 or decoded != wanted:
+        raise SystemExit("Five-feed output differs from independently decoded full tiled sources")
+    result = {"result": "FIVE_TILED_NATIVE_VOD_PASS", "feeds": 5, "frames": len(decoded),
+              "full_feed_pixels_match_hstack": True}
+    (output / "native_vod_five_tiled_validation.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result, indent=2))
+
 
 if __name__ == "__main__":
     main()

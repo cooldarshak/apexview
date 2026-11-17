@@ -77,6 +77,7 @@ import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Replay10
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.VideoLibrary
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.VolumeUp
@@ -693,6 +694,7 @@ private fun TopChrome(app: AppState, cutout: Clearance) {
             modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
         )
         if (!app.isTv) Glyph(if (app.arranging) Icons.Rounded.LockOpen else Icons.Rounded.Lock, if (app.arranging) "Lock layout" else "Unlock to move and resize", modifier = Modifier.helpAnchor(app, "lock"), onClick = app::toggleArranging)
+        if (app.singleDecoderFailure != null) Glyph(Icons.Rounded.Refresh, "Retry single decoder", onClick = app::retrySingleDecoder)
         Glyph(Icons.Rounded.Add, "Add a feed", modifier = Modifier.helpAnchor(app, "add")) { app.openPickerForPlaying() }
         if (app.isTv || LocalConfiguration.current.screenWidthDp > LocalConfiguration.current.screenHeightDp) {
             Row(

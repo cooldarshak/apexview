@@ -48,7 +48,7 @@ internal class HevcArchiveVodSession(
     private val cacheLock = Any()
     private val composeLock = Any()
     // A seek needs one fragment from each camera. Run those independent I/O requests
-    // concurrently, bounded by the four-source composer and without adding decoders.
+    // concurrently, bounded to four requests even for larger selections.
     private val fetchers = Executors.newFixedThreadPool(inputs.size.coerceIn(1, 4)) { r -> Thread(r, "ApexviewVodFetch").apply { isDaemon = true } }
     private val warmer = Executors.newSingleThreadExecutor { r -> Thread(r, "ApexviewVodWarm").apply { isDaemon = true } }
     private val warmLock = Any()
@@ -85,7 +85,7 @@ internal class HevcArchiveVodSession(
 
     /** A fixed probe proves composition. It is never required to catch another player's clock. */
     fun prepare(positionMs: Long) {
-        require(inputs.size in 1..4)
+        require(inputs.size in 1..app.apexview.AppState.MAX_SINGLE_DECODER_FEEDS)
         inputs.forEach { input ->
             val track = input.report.tracks.single { it.handler == "vide" }
             if (track.encrypted) throw ProtectedArchiveBackendRequired()

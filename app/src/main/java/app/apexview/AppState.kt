@@ -323,6 +323,9 @@ class AppState(
     var decoderMode by mutableStateOf(settings.decoderMode)
         private set
     private var archiveCompositionStarting by mutableStateOf(false)
+    var singleDecoderFailure by mutableStateOf<String?>(null)
+        private set
+    private var singleDecoderRetryJob: Job? = null
     val singleDecoderSceneActive: Boolean get() = nativeArchiveTiles.isNotEmpty()
     val singleDecoderScenePlayer: FeedPlayer? get() = if (singleDecoderSceneActive) protectedCompositionHost?.feed else null
     var castSheetOpen by mutableStateOf(false)
@@ -420,7 +423,12 @@ class AppState(
     fun reportSceneOutputSize(width: Int, height: Int) { sceneOutputSize = width to height }
     fun failSingleDecoderScene(reason: String) {
         stopProtectedCompositionPresentation()
-        decoderMode = DecoderMode.MULTIPLE
+        decoderMode = settings.decoderMode
+        if (settings.decoderMode == DecoderMode.SINGLE) {
+            singleDecoderFailure = reason
+            tiles.forEach { it.feed.player.playWhenReady = false }
+            applyVideoBudget()
+        }
         message = reason
     }
     fun videoScene(width: Float, height: Float): app.apexview.scene.VideoScene? {
@@ -436,15 +444,35 @@ class AppState(
             })
     }
     fun setDecoderPreference(mode: DecoderMode) {
+        if (mode == DecoderMode.MULTIPLE && tiles.size > MAX_FEEDS) {
+            message = "Remove feeds until four remain before switching to Multiple decoders."
+            return
+        }
         settings.updateDecoderMode(mode)
+        if (mode == DecoderMode.MULTIPLE) {
+            singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
+            singleDecoderFailure = null
+        } else if (tiles.size > 1 && !singleDecoderSceneActive) {
+            tiles.forEach { it.feed.player.playWhenReady = false }
+            applyVideoBudget()
+        }
         if (mode == decoderMode && (mode == DecoderMode.MULTIPLE || singleDecoderSceneActive || tiles.size <= 1)) return
         chooseDecoderMode(mode)
+    }
+
+    fun retrySingleDecoder() {
+        if (settings.decoderMode != DecoderMode.SINGLE || archiveCompositionStarting) return
+        val leader = leaderTile() ?: return
+        singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
+        startArchiveSingleDecoderComposition(leader.contentId)
     }
 
     fun chooseDecoderMode(mode: DecoderMode) {
         if (mode == DecoderMode.MULTIPLE) {
             stopProtectedCompositionPresentation()
             decoderMode = mode
+            tiles.forEach { it.feed.clearProtectedCompositionVideoRole(); it.feed.player.playWhenReady = playing }
+            applyVideoBudget()
             layoutRequest++
             return
         }
@@ -452,7 +480,10 @@ class AppState(
         if (tiles.size == 1) { decoderMode = mode; return }
         if (tiles.any { it.contentId != leader.contentId } || leader.contentId in knownLiveContentIds ||
             tiles.any { it.feed.player.isCurrentMediaItemLive }) {
-            message = "Single decoder currently supports compatible archive feeds from one session."
+            decoderMode = mode
+            singleDecoderFailure = "Single decoder currently supports compatible archive feeds from one session."
+            message = singleDecoderFailure
+            applyVideoBudget()
             return
         }
         decoderMode = mode
@@ -496,6 +527,7 @@ class AppState(
     }
 
     fun close() {
+        singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
         stopFullSceneCast()
         stopProtectedCompositionPresentation(restorePlayer = false)
         f1DashCaptureJob?.cancel()
@@ -513,11 +545,11 @@ class AppState(
      * its limit shows video in the main feed only.
      */
     fun applyVideoBudget() {
-        if (singleDecoderSceneActive) {
+        if (singleDecoderVideoRole(settings.decoderMode, tiles.size, false, browsing) != null) {
             val owner = protectedCompositionHost
             tiles.forEach { tile ->
                 tile.coolingOff = false; tile.heldForDecoder = false; tile.heldForSpeed = false
-                tile.feed.setProtectedCompositionVideoRole(tile === owner && !browsing,
+                tile.feed.setProtectedCompositionVideoRole(singleDecoderVideoRole(settings.decoderMode, tiles.size, tile === owner, browsing) == true,
                     canvasW.toInt().coerceAtLeast(1), canvasH.toInt().coerceAtLeast(1))
             }
             return
@@ -1495,15 +1527,15 @@ class AppState(
      */
     fun togglePick(channel: Channel) {
         val sheet = picker ?: return
-        val selectionLimit = if (layoutMode == LayoutMode.TILE_TEST) 2 else MAX_FEEDS
+        val selectionLimit = if (layoutMode == LayoutMode.TILE_TEST) 2 else feedSelectionLimit
         val full = pickedCount(sheet) >= selectionLimit
         sheet.note = null
         when {
             isPlaying(sheet.contentId, channel) && channel in sheet.removing ->
-                if (full) sheet.note = FULL_NOTE else sheet.removing.remove(channel)
+                if (full) sheet.note = feedLimitNote(selectionLimit) else sheet.removing.remove(channel)
             isPlaying(sheet.contentId, channel) -> sheet.removing.add(channel)
             channel in sheet.selected -> sheet.selected.remove(channel)
-            full -> sheet.note = FULL_NOTE
+            full -> sheet.note = feedLimitNote(selectionLimit)
             else -> sheet.selected.add(channel)
         }
     }
@@ -1560,19 +1592,22 @@ class AppState(
     }
 
     /** Replay composition is a finite on-demand source, not a moving live capture window. */
-    private fun startArchiveSingleDecoderComposition(contentId: Long) {
+    private fun startArchiveSingleDecoderComposition(contentId: Long, attempt: Int = 0) {
+        singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
         if (protectedCompositionHost != null && !singleDecoderSceneActive) stopProtectedCompositionPresentation()
         val selected = tiles.filter { it.contentId == contentId }
-        if (selected.size !in 2..4 || selected.size != tiles.size ||
+        if (selected.size !in 2..MAX_SINGLE_DECODER_FEEDS || selected.size != tiles.size ||
             selected.map { it.feed.sourceStream.profileLabel }.distinct().size != selected.size) {
-            message = "Single-decoder test needs two to four different feeds from one archive."
+            singleDecoderFailure = "Single decoder needs different feeds from the same archive."
+            message = singleDecoderFailure
             if (!singleDecoderSceneActive) {
-                decoderMode = DecoderMode.MULTIPLE
-                tiles.forEach { it.feed.clearProtectedCompositionVideoRole(); it.feed.player.playWhenReady = playing }
+                decoderMode = settings.decoderMode
+                tiles.forEach { it.feed.player.playWhenReady = false }
                 applyVideoBudget()
             }
             return
         }
+        singleDecoderFailure = null
         val host = protectedCompositionHost?.takeIf { it in selected } ?: selected.firstOrNull { it.audible } ?: selected.first()
         val previousLayout = layoutMode
         val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
@@ -1585,6 +1620,7 @@ class AppState(
         var phase = "PREFLIGHT"
         var failure: String? = null
         var useExistingBackend = false
+        var retryableFailure = false
         fun diagnostic() {
             if (f1DashCapture != null && f1DashCapture !== capture) return
             singleDecoderDiagnostic = buildString {
@@ -1618,14 +1654,15 @@ class AppState(
                 selected.forEach { it.feed.clearProtectedCompositionVideoRole() }
                 applyVideoBudget()
             }
-            decoderMode = DecoderMode.MULTIPLE
+            decoderMode = settings.decoderMode
+            if (settings.decoderMode == DecoderMode.SINGLE) selected.forEach { it.feed.player.playWhenReady = false }
             layoutRequest++
         }
         val probePositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
         selected.forEach { android.util.Log.i("ApexviewPlaybackOffer", it.feed.sourceStream.offerDiagnostic) }
-        // Freeze the current clock immediately. Decoders remain intact until the CMAF
-        // preflight succeeds, but normal video/audio no longer plays during activation.
+        // Enforce the selected decoder budget immediately, including while validation runs.
         selected.forEach { it.feed.player.playWhenReady = false }
+        applyVideoBudget()
         archiveCompositionStarting = true
         message = SINGLE_DECODER_ACTIVATING
         diagnostic()
@@ -1637,7 +1674,8 @@ class AppState(
                         // independently advancing source clock or interrupt working playback.
                         val session = capture.prepareVod(selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel,
                             it.feed.sourceStream.url) }, probePositionMs, host.feed.sourceStream.profileLabel,
-                            minOf(settings.videoQuality.targetHeight.takeIf { it > 0 } ?: 720, if (selected.size > 2) 540 else 720),
+                            minOf(settings.videoQuality.targetHeight.takeIf { it > 0 } ?: 720,
+                                if (selected.size > 4) 270 else if (selected.size > 2) 540 else 720),
                             settings.commentary)
                         try {
                             host.feed.requireArchiveHardwareSupport(session.codedWidth, session.codedHeight, session.frameRate * playbackSpeed)
@@ -1718,41 +1756,59 @@ class AppState(
             } catch (error: Exception) {
                 failure = (error.message ?: error.javaClass.simpleName).replace(Regex("https?://\\S+"), "[URL]").take(400)
                 phase = "FAILED"
-                decoderMode = DecoderMode.MULTIPLE
+                retryableFailure = when (error) {
+                    is app.apexview.tiled.ArchiveVodMediaException -> error.retryable
+                    else -> app.apexview.tiled.CaptureFailure.from(error).retryable
+                }
+                decoderMode = settings.decoderMode
+                singleDecoderFailure = failure
                 // Preserve the failure evidence before restore cancels this capture's ownership.
                 diagnostic()
                 if (startup.sourceDecodersTouched || singleDecoderSceneActive) restore() else {
-                    selected.forEach { it.feed.clearProtectedCompositionVideoRole() }; applyVideoBudget()
+                    selected.forEach { it.feed.player.playWhenReady = false }; applyVideoBudget()
                 }
-                message = "Single-decoder archive test failed: $failure"
+                message = "Single decoder failed: $failure. Use Retry or select Multiple decoders in Settings."
                 android.util.Log.w("ApexviewSingleDecoder", "ARCHIVE_VOD_FAILED reason=$failure")
             } finally {
                 if (f1DashCapture === capture) {
                     archiveCompositionStarting = false
-                    if (!transferred && !useExistingBackend) selected.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
+                    if (!transferred && !useExistingBackend && settings.decoderMode == DecoderMode.MULTIPLE)
+                        selected.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
                     capture.reset(); f1DashCapture = null; f1DashCaptureJob = null
                 }
             }
-            if (useExistingBackend) startRollingArchiveSingleDecoderComposition(contentId)
+            if (useExistingBackend) startRollingArchiveSingleDecoderComposition(contentId, attempt)
+            else if (retryableFailure && attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
+                val originalIds = selected.map { it.id }
+                singleDecoderRetryJob = scope.launch {
+                    kotlinx.coroutines.delay(500L * (attempt + 1))
+                    if (settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && !singleDecoderSceneActive) {
+                        singleDecoderRetryJob = null
+                        startArchiveSingleDecoderComposition(contentId, attempt + 1)
+                    }
+                }
+            }
         }
     }
 
     /** Validate authorised archive media completely before changing any source decoder. */
-    private fun startRollingArchiveSingleDecoderComposition(contentId: Long) {
+    private fun startRollingArchiveSingleDecoderComposition(contentId: Long, attempt: Int = 0) {
         val selectedTiles = tiles.filter { it.contentId == contentId }
         val previousLayout = layoutMode
         if (selectedTiles.size !in 2..4 || selectedTiles.size != tiles.size) {
-            message = "Single decoder needs two to four feeds from one archive."
-            decoderMode = DecoderMode.MULTIPLE
-            tiles.forEach { it.feed.clearProtectedCompositionVideoRole(); it.feed.player.playWhenReady = playing }
+            singleDecoderFailure = "This protected archive backend needs two to four feeds from one archive."
+            message = singleDecoderFailure
+            decoderMode = settings.decoderMode
+            tiles.forEach { it.feed.player.playWhenReady = false }
             applyVideoBudget()
             return
         }
         val labels = selectedTiles.map { it.feed.sourceStream.profileLabel }
         if (labels.distinct().size != labels.size) {
-            message = "Single-decoder test needs different feeds from the same archive."
-            decoderMode = DecoderMode.MULTIPLE
-            tiles.forEach { it.feed.clearProtectedCompositionVideoRole(); it.feed.player.playWhenReady = playing }
+            singleDecoderFailure = "Single decoder needs different feeds from the same archive."
+            message = singleDecoderFailure
+            decoderMode = settings.decoderMode
+            tiles.forEach { it.feed.player.playWhenReady = false }
             applyVideoBudget()
             return
         }
@@ -1772,6 +1828,7 @@ class AppState(
         var releasedCount = 0
         var playback = "PREFLIGHT"
         var terminalReason: String? = null
+        var retryableFailure = false
         var restored = false
         var preflightPassed = false
         var composedFirstFrameSeen = false
@@ -1815,7 +1872,9 @@ class AppState(
             }
             composedArchiveOriginMs = null
             composedArchiveFillingBuffer = false
-            selectedTiles.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
+            selectedTiles.filter { it in tiles }.forEach {
+                it.feed.player.playWhenReady = settings.decoderMode == DecoderMode.MULTIPLE && playing
+            }
             layoutMode = previousLayout
             layoutRequest++
         }
@@ -1834,7 +1893,7 @@ class AppState(
                             val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
                             lastSnapshot = snapshot
                             diagnostics()
-                            snapshot.failure?.takeUnless { it.retryable }?.let { throw IOException(it.reason) }
+                            snapshot.failure?.takeUnless { it.retryable }?.let { throw app.apexview.tiled.PermanentCaptureException(it.reason) }
                             val clockUs = Math.multiplyExact(audioMaster.feed.player.currentPosition.coerceAtLeast(0L), 1000L)
                             val durationUs = audioMaster.feed.player.duration.takeIf { it > 0L }?.let { Math.multiplyExact(it, 1000L) }
                             if (ArchiveBufferPolicy.ready(snapshot.outputTiming, clockUs, durationUs, minimumLeadUs = 0L)) {
@@ -1943,23 +2002,38 @@ class AppState(
                 // Do not log raw network exceptions or their signed URLs.
                 terminalReason = (error.message ?: error.javaClass.simpleName)
                     .replace(Regex("https?://\\S+"), "[redacted URL]").take(400)
+                retryableFailure = app.apexview.tiled.CaptureFailure.from(error).retryable
                 if (startup.sourceDecodersTouched) restore(startup.hostReplaced) else {
                     selectedTiles.forEach { it.feed.clearProtectedCompositionVideoRole() }
                     applyVideoBudget()
                 }
-                decoderMode = DecoderMode.MULTIPLE
+                decoderMode = settings.decoderMode
+                singleDecoderFailure = terminalReason
+                selectedTiles.forEach { it.feed.player.playWhenReady = false }
+                applyVideoBudget()
                 playback = "FAILED"
                 diagnostics()
                 android.util.Log.w("ApexviewSingleDecoder", "Archive composition failed: $terminalReason")
-                message = "Single-decoder archive test failed: $terminalReason"
+                message = "Single decoder failed: $terminalReason. Use Retry or select Multiple decoders in Settings."
             } finally {
                 if (f1DashCapture === capture) {
                     archiveCompositionStarting = false
-                    if (!startup.sourceDecodersTouched) selectedTiles.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
+                    if (!startup.sourceDecodersTouched && settings.decoderMode == DecoderMode.MULTIPLE)
+                        selectedTiles.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
                     capture.reset()
                     f1DashCapture = null
                     f1DashCaptureJob = null
                     ProtectedHevcLiveComposition.clearSelection(group)
+                }
+            }
+            if (retryableFailure && attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
+                val originalIds = selectedTiles.map { it.id }
+                singleDecoderRetryJob = scope.launch {
+                    kotlinx.coroutines.delay(500L * (attempt + 1))
+                    if (settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && protectedCompositionHost == null) {
+                        singleDecoderRetryJob = null
+                        startArchiveSingleDecoderComposition(contentId, attempt + 1)
+                    }
                 }
             }
         }
@@ -2139,19 +2213,21 @@ class AppState(
         HevcFeedProfileCapture.clearTileTestSelection()
         if (keepSourceVideoDisabled) tiles.forEach { it.feed.setProtectedCompositionVideoRole(false, it.w.toInt().coerceAtLeast(1), it.h.toInt().coerceAtLeast(1)) }
         else applyVideoBudget()
-        if (restorePlayer && wasStarting && native.isEmpty() && !keepSourceVideoDisabled) {
+        if (restorePlayer && wasStarting && native.isEmpty() && !keepSourceVideoDisabled && settings.decoderMode == DecoderMode.MULTIPLE) {
             tiles.forEach { it.feed.player.playWhenReady = playing }
         }
         layoutRequest++
     }
 
-    /** Room for more feeds; past four the phone's decoders start to freeze. */
-    val roomForFeeds get() = MAX_FEEDS - tiles.size
+    /** Single-decoder selections are still checked against actual renditions and decoder capacity. */
+    private val feedSelectionLimit get() = if (settings.decoderMode == DecoderMode.SINGLE) MAX_SINGLE_DECODER_FEEDS else MAX_FEEDS
+    private fun feedLimitNote(limit: Int) = "Up to $limit feeds can be selected in this mode. Unpick one to make room."
+    val roomForFeeds get() = (feedSelectionLimit - tiles.size).coerceAtLeast(0)
 
     private fun addFeeds(contentId: Long, requested: List<Channel>, fromStart: Boolean = false, added: (Tile) -> Unit = {}) {
         if (requested.isEmpty()) return
         if (roomForFeeds <= 0) {
-            message = "4 feeds is the most this phone plays smoothly. Remove one or switch a feed instead."
+            message = feedLimitNote(feedSelectionLimit)
             return
         }
         if (settings.decoderMode == DecoderMode.SINGLE && tiles.any { it.contentId != contentId }) {
@@ -2242,7 +2318,7 @@ class AppState(
             handPlaced = false
             layoutRequest++
             showChrome()
-            if (dropped > 0) failures += "Left out $dropped feed(s): 4 is the most this phone plays smoothly"
+            if (dropped > 0) failures += "Left out $dropped feed(s): this mode allows up to $feedSelectionLimit selections"
             message = if (failures.isEmpty()) null else "Some feeds had problems:\n" + failures.joinToString("\n")
             leaderTile()?.let { leader ->
                 // A prior timing job can finish while retaining the same content ID. Restart it
@@ -4033,6 +4109,8 @@ class AppState(
     }
 
     fun stopAll() {
+        singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
+        singleDecoderFailure = null
         stopFullSceneCast()
         // Closing the viewer keeps the spot, so Continue watching can bring it back.
         // Read the native host before clearing its ownership: stopped originals have no clock.
@@ -4363,6 +4441,7 @@ class AppState(
 
     companion object {
         private const val SINGLE_DECODER_ACTIVATING = "Single decoder activation in progress."
+        private const val SINGLE_DECODER_AUTO_RETRIES = 2
         private const val SEEK_DRIFT_MS = 2000L
         private const val NUDGE_DRIFT_MS = 150L
         private const val NUDGE = 0.1f
@@ -4374,6 +4453,7 @@ class AppState(
         /** How long the same feeds have to have been playing before dropped frames count. */
         private const val STEADY_MS = 10_000L
         const val MAX_FEEDS = 4
+        const val MAX_SINGLE_DECODER_FEEDS = 24
         private const val MAX_RECENTS = 4
         /** F1 TV's race weekends start with 2018; before that, a season is a set of videos. */
         const val FIRST_WEEKEND_SEASON = 2018

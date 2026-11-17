@@ -45,7 +45,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     ): HevcArchiveVodSession {
         var acquired: HevcArchiveVodSession? = null
         try { return withContext(Dispatchers.IO) {
-            require(feeds.size in 1..4 && feeds.map { it.label }.distinct().size == feeds.size)
+            require(feeds.size in 1..app.apexview.AppState.MAX_SINGLE_DECODER_FEEDS && feeds.map { it.label }.distinct().size == feeds.size)
             val perFeed = coroutineScope { feeds.map { feed -> async { offers.getOrPut(feed.label) { loadOffers(feed) } } }.awaitAll() }
             val selected = chooseCommon(perFeed, preferredHeight, feeds.size)
             val playlists = coroutineScope { selected.map { offer -> async { loadMedia(offer) } }.awaitAll() }
@@ -70,13 +70,12 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 "HLS declares protection but the selected CMAF track is clear"
             }
             val audioUris = coroutineScope { selected.mapIndexed { index, offer -> async {
-                val audio = offer.master?.audios.orEmpty().filter { it.url != null &&
+                val separate = offer.master?.audios.orEmpty().filter { it.url != null &&
                     (offer.audioGroupId == null || it.groupId == offer.audioGroupId) }
                     .sortedWith(compareByDescending<HlsMultivariantPlaylist.Rendition> { it.format.language == commentary }
                         .thenByDescending { (it.format.selectionFlags and C.SELECTION_FLAG_DEFAULT) != 0 }).firstOrNull()?.url
-                if (commentary != null) {
-                    requireNotNull(audio) { "Selected archive offer has no separate native HLS audio rendition" }
-                    val audioPlaylist = parse(audio, offer.master) as? HlsMediaPlaylist
+                if (commentary != null && separate != null && offer.feed.label == clockLabel) {
+                    val audioPlaylist = parse(separate, offer.master) as? HlsMediaPlaylist
                         ?: throw PermanentCaptureException("Archive audio rendition is not a media playlist")
                     val clock = playlists[index]
                     require(audioPlaylist.hasEndTag && audioPlaylist.segments.isNotEmpty() &&
@@ -86,14 +85,28 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                         "Archive native audio and composed video timelines are incompatible"
                     }
                 }
+                // Silent video tiles need no audio rendition. Some HLS variants instead carry
+                // audio in the same playlist; pass those to Media3's audio-only source.
+                val muxed = offer.master?.muxedAudioFormat != null ||
+                    inits[index].report.tracks.any { it.handler == "soun" } ||
+                    offer.format?.codecs.orEmpty().split(',').any { it.trim().startsWith("mp4a") }
+                val audio = separate ?: if (muxed) offer.uri else null
+                android.util.Log.i("ApexviewPlaybackOffer", "${offer.feed.label}: audio=${if (separate != null) "SEPARATE" else if (muxed) "MUXED_ADVERTISED" else "NOT_ADVERTISED"}")
                 audio?.let { offer.feed.label to it }
             } }.awaitAll() }.filterNotNull().toMap()
-            val audio = audioUris[clockLabel]
+            val audio = audioUris[clockLabel] ?: if (commentary == null) null else {
+                // Let the ordinary authorized Media3 HLS path resolve the selected feed's
+                // audio when the selected variant doesn't advertise a separate rendition.
+                // This may have no audio; it must never reject otherwise compatible video.
+                android.util.Log.i("ApexviewPlaybackOffer", "$clockLabel: audio=ORIGINAL_OFFER_UNVERIFIED")
+                Uri.parse(selected.first { it.feed.label == clockLabel }.feed.manifestUrl)
+            }
+            val selectableAudioUris = if (audio == null) audioUris else audioUris + (clockLabel to audio)
             var session: HevcArchiveVodSession? = null
             val owned = selected.mapIndexed { i, offer -> HevcArchiveVodSession.Input(offer.feed.label, playlists[i], offer.format,
                 inits[i].bytes.copyOf(), inits[i].report) }
             try {
-                session = HevcArchiveVodSession(reader, owned, clockLabel, audioUri = audio, audioUris = audioUris)
+                session = HevcArchiveVodSession(reader, owned, clockLabel, audioUri = audio, audioUris = selectableAudioUris)
                 session.prepare(positionMs)
                 coroutineContext.ensureActive()
                 acquired = session
@@ -259,7 +272,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             legal.minByOrNull { it.second }?.let(::listOf).orEmpty()
         }
         val size = sizes.maxWithOrNull(compareBy<Pair<Int, Int>> { it.second }.thenBy { it.first })
-            ?: throw PermanentCaptureException("HLS feeds have no common HEVC rendition")
+            ?: throw PermanentCaptureException("No common HEVC rendition fits $feedCount feeds within the 4096-pixel composed width; choose fewer feeds or a lower source rendition")
         return perFeed.map { list -> list.filter { it.format == null || it.format.width == size.first && it.format.height == size.second }
             .maxByOrNull { it.format?.bitrate ?: 0 } ?: throw PermanentCaptureException("HLS common HEVC rendition unavailable") }
     }

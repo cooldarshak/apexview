@@ -410,19 +410,32 @@ seg.m4s
         } finally { session.close(); capture.reset() }
     }
 
-    @Test fun unavailableNativeAudioPreservesNormalPlayback() = runBlocking {
+    @Test fun missingSeparateAudioUsesTheSameAuthorizedOfferForMedia3Audio() = runBlocking {
         val network = network(2)
         val capture = F1HlsFeedCapture(network.factory)
-        var released = false
+        val session = capture.prepareVod(feeds(2), 0, "channel-0", commentary = "en")
         try {
-            ArchiveCompositionStartup().start(preflight = { capture.prepareVod(feeds(2), 0, "channel-0", commentary = "en") },
-                releaseSources = { released = true }, replaceHost = { fail("Missing audio") },
-                restoreSources = { fail("Sources must remain playing") }, dispose = { it.close() })
-            fail("Expected missing audio")
-        } catch (expected: IllegalArgumentException) { assertTrue(expected.message.orEmpty().contains("audio rendition")) }
-        finally { capture.reset() }
-        assertFalse(released)
-        assertTrue(network.requested.none { it.endsWith(".m4s") })
+            assertEquals("https://media.test/f0/master.m3u8", session.audioUri.toString())
+            assertEquals(session.audioUri, session.audioUris["channel-0"])
+            assertEquals(1920, session.width)
+            assertTrue(network.requested.none { it.contains("CONTENT/PLAY") || it.contains("license") })
+        } finally { session.close(); capture.reset() }
+    }
+
+    @Test fun silentSecondaryFeedDoesNotBlockTheSelectedFeedsAudio() = runBlocking {
+        val original = network(2)
+        val files = original.files.toMutableMap()
+        val first = "https://media.test/f0/master.m3u8"
+        files[first] = files.getValue(first).toString(Charsets.UTF_8).replace("#EXTM3U\n", "#EXTM3U\n" +
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"English\",LANGUAGE=\"en\",URI=\"en.m3u8\"\n")
+            .replace("BANDWIDTH=1000000,", "BANDWIDTH=1000000,AUDIO=\"audio\",").toByteArray()
+        files["https://media.test/f0/en.m3u8"] = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\na0.aac\n#EXTINF:1,\na1.aac\n#EXT-X-ENDLIST\n".toByteArray()
+        val capture = F1HlsFeedCapture(Network(files).factory)
+        val session = capture.prepareVod(feeds(2), 0, "channel-0", commentary = "en")
+        try {
+            assertEquals("https://media.test/f0/en.m3u8", session.audioUri.toString())
+            assertFalse(session.audioUris.containsKey("channel-1"))
+        } finally { session.close(); capture.reset() }
     }
 
     @Test fun nativeVodRejectsDeclaredProtectionOnClearTracksBeforeReadingMedia() = runBlocking {
@@ -526,6 +539,27 @@ seg.m4s
                     output.write(session.initialization())
                     for (number in 0 until session.segmentCount) output.write(session.segment(number))
                 }
+            }
+        } finally { session.close(); capture.reset() }
+    }
+
+    @Test fun fiveTiledSourcesProduceOneFiniteTrackWithoutDiscardingCameraTiles() = runBlocking {
+        val tileDir = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")?.let(::File)
+        assumeTrue("Tiled VOD fixture is not configured", tileDir != null)
+        val source = File(tileDir!!, "source_vod_tiled_2x2.hevc")
+        val capture = F1HlsFeedCapture(network(5, samplesPerFragment = 50, annexBFile = source).factory)
+        val session = capture.prepareVod(feeds(5), 0, "channel-0")
+        try {
+            val report = CmafBoxInspector.inspect(session.initialization())
+            val config = report.tracks.single().hevcConfiguration!!
+            assertEquals(10, config.pps.single().numTileColumns)
+            assertEquals(2, config.pps.single().numTileRows)
+            assertEquals(1280, session.width)
+            assertEquals(128, session.height)
+            val evidence = System.getenv("APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR")?.let(::File)
+            if (evidence != null) File(evidence, "native_vod_five_tiled_feeds.mp4").outputStream().use { output ->
+                output.write(session.initialization())
+                for (number in 0 until session.segmentCount) output.write(session.segment(number))
             }
         } finally { session.close(); capture.reset() }
     }
