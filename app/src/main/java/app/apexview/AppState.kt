@@ -4091,7 +4091,11 @@ class AppState(
     }
 
     fun remove(tile: Tile) {
-        if (protectedCompositionHost != null) stopProtectedCompositionPresentation(keepSourceVideoDisabled = decoderMode == DecoderMode.SINGLE)
+        singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
+        // A preflight also owns the selected set, before a composed host exists. Cancel it
+        // when a feed is removed so it cannot hand off a released player afterwards.
+        if (protectedCompositionHost != null || archiveCompositionStarting || f1DashCaptureJob != null)
+            stopProtectedCompositionPresentation(keepSourceVideoDisabled = settings.decoderMode == DecoderMode.SINGLE)
         if (audioHint === tile) audioHint = null
         if (targetTile === tile) targetTile = null
         tileMenu = null
@@ -4109,7 +4113,11 @@ class AppState(
         layoutRequest++
         if (settings.decoderMode == DecoderMode.SINGLE && tiles.all { it.contentId == tile.contentId }) decoderMode = DecoderMode.SINGLE
         if (decoderMode == DecoderMode.SINGLE && tiles.size >= 2) startArchiveSingleDecoderComposition(tile.contentId)
-        else { tiles.forEach { it.feed.clearProtectedCompositionVideoRole() }; applyVideoBudget() }
+        else {
+            singleDecoderFailure = null
+            tiles.forEach { it.feed.clearProtectedCompositionVideoRole(); it.feed.player.playWhenReady = playing }
+            applyVideoBudget()
+        }
     }
 
     fun stopAll() {

@@ -327,11 +327,13 @@ internal object HevcOutputGridValidator {
             )
         }
         val ordered = byPosition.values.toList()
-        for (firstIndex in ordered.indices) {
-            for (secondIndex in firstIndex + 1 until ordered.size) {
-                reasons += HevcSourceCellCompatibility.compare(
-                    ordered[firstIndex].sourceCell, ordered[secondIndex].sourceCell
-                ).reasons
+        // Compatibility compares equal-valued coding parameters and cell metrics; those
+        // equalities are transitive. Each placement was independently validated above, so
+        // comparing every cell with one anchor avoids quadratic work for large grids.
+        if (ordered.isNotEmpty()) {
+            val anchor = ordered.first().sourceCell
+            ordered.drop(1).forEach { placement ->
+                reasons += HevcSourceCellCompatibility.compare(anchor, placement.sourceCell).reasons
             }
         }
         if (reasons.isNotEmpty()) return Result(false, reasons.distinct(), null)

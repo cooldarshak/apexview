@@ -373,7 +373,7 @@ seg.m4s
     @Test fun unavailableLegalRenditionFailsBeforeSourceDecoderRelease() = runBlocking {
         val original = network(4)
         val files = original.files.mapValues { (uri, bytes) -> if (uri.endsWith("master.m3u8"))
-            bytes.toString(Charsets.UTF_8).replace("960x540", "1920x1080").toByteArray() else bytes }
+            bytes.toString(Charsets.UTF_8).replace("960x540", "3840x2160").toByteArray() else bytes }
         val network = Network(files)
         var released = false
         val capture = F1HlsFeedCapture(network.factory)

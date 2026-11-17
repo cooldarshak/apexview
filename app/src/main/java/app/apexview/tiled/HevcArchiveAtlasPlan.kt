@@ -13,7 +13,8 @@ internal data class HevcArchiveAtlasPlan(val columns: Int, val rows: Int) {
                 val rows = (feeds + columns - 1) / columns
                 if (width.toLong() * columns > maxWidth || height.toLong() * rows > maxHeight) null
                 else HevcArchiveAtlasPlan(columns, rows)
-            }.minWithOrNull(compareBy<HevcArchiveAtlasPlan> { it.columns * it.rows - feeds }
+            }.minWithOrNull(compareBy<HevcArchiveAtlasPlan> { if (it.columns == 1 || it.rows == 1) 1 else 0 }
+                .thenBy { it.columns * it.rows - feeds }
                 .thenBy { abs(ln((width.toDouble() * it.columns / (height.toDouble() * it.rows)) / (16.0 / 9.0))) })
         }
     }
