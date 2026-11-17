@@ -642,6 +642,19 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 radioBase = BASE + path,
             )
         )
+        // Serialize partial updates on Main so whichever independent topic finishes first can
+        // publish without erasing the other topic when it completes later.
+        var partialTracks: Map<String, DriverTrack> = emptyMap()
+        var partialOutline = FloatArray(0)
+        var partialHistory = DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
+        suspend fun publishTopics() {
+            onPartial(SessionTiming(
+                type = type, drivers = drivers, tracks = partialTracks,
+                states = partialHistory.states.states, outline = partialOutline,
+                hasStartFinish = false, corners = emptyList(), startUtcMs = initialStart,
+                circuitKey = ref.circuitKey, laps = partialHistory.laps, radioBase = BASE + path,
+            ))
+        }
         val positionsTask = async(Dispatchers.IO) { fetchOptionalStage(path + "Position.z.jsonStream") }
         val historyTask = async(Dispatchers.IO) {
             val timingTask = async { fetchOptionalStage(path + "TimingData.jsonStream") }
@@ -667,6 +680,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
                 }
             }
+            withContext(Dispatchers.Main) {
+                partialHistory = history
+                publishTopics()
+            }
             Triple(timingStream, timingF1Stream, history)
         }
         // Download and parse the map while the single bounded timing-history parser runs. The
@@ -691,39 +708,14 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         progress("Building the track map while timing tower finishes · cars=${tracks.size}")
         val built = withContext(Dispatchers.Default) { tracks.mapValues { it.value.build() } }
         val traced = withContext(Dispatchers.Default) { traceOutline(tracks.values.toList()) }
-        publish(
-            SessionTiming(
-                type = type,
-                drivers = drivers,
-                tracks = built,
-                states = emptyMap(),
-                outline = traced,
-                hasStartFinish = false,
-                corners = emptyList(),
-                startUtcMs = initialStart,
-                circuitKey = ref.circuitKey,
-                laps = emptyMap(),
-                radioBase = BASE + path,
-            )
-        )
-        progress("Track map available · waiting for timing tower history…")
+        withContext(Dispatchers.Main) {
+            partialTracks = built
+            partialOutline = traced
+            publishTopics()
+        }
+        progress(if (tracks.isEmpty()) "Track positions unavailable; loading timing history…" else "Track map available · loading timing history…")
 
         val (timingStream, timingF1Stream, initialHistory) = historyTask.await()
-        publish(
-            SessionTiming(
-                type = type,
-                drivers = drivers,
-                tracks = built,
-                states = initialHistory.states.states,
-                outline = traced,
-                hasStartFinish = false,
-                corners = emptyList(),
-                startUtcMs = initialStart,
-                circuitKey = ref.circuitKey,
-                laps = initialHistory.laps,
-                radioBase = BASE + path,
-            )
-        )
         // Heartbeat anchors the stream clock. Some sessions have bad offsets; the cars' own
         // timestamps win when they disagree with it by more than a minute.
         val streamStart = if (positions.isEmpty()) initialStart else streamStart(heartbeat, positions)

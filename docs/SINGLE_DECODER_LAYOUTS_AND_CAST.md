@@ -8,6 +8,6 @@ The protected five-feed layout uses five columns and one row so every output cel
 
 The standard Google Cast picker and Default Media Receiver are wired for compatible clear archive video. The relay sends the encoded atlas and selected audio, not the phone's GLES geometry or timing/map overlays. Receiver compatibility, pairing UI, playback, seeking and session lifecycle require device tests. Live or protected casting is not implemented: it needs an appropriately registered and hosted receiver and legitimate Widevine licensing. No DRM is bypassed.
 
-The timing archive loads position and timing data concurrently, and parsing is moved off the main thread. Map publication no longer waits for timing history downloads. Missing position data no longer stops timing processing. Slow positions can still delay publishing the tower; this remains to be addressed and tested on the TCL TV.
+The timing archive loads position and timing data concurrently, and parsing is moved off the main thread. Map publication no longer waits for timing history downloads. Missing position data no longer stops timing processing. Each topic publishes independently without erasing the other. This behavior still needs testing on the TCL TV.
 
 Remaining validation: full Gradle and CI tests; signed update install; TV secure-decoder corruption and single-decoder count; phone five-plus-feed stability and cancellation/seeking; independent tower/map loading; all layouts and remote focus; and real Cast receiver behavior including synchronization and error recovery.
