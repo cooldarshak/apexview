@@ -67,6 +67,8 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var destroyed = false
     private var listeningJob: kotlinx.coroutines.Job? = null
     private var decoderCount = 0
+    private var controlsVisible by mutableStateOf(true)
+    private var controlsJob: kotlinx.coroutines.Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -103,7 +105,9 @@ class PitwallReceiverActivity : ComponentActivity() {
                 }
                 while (!listening.isClosed) {
                     val socket = listening.accept()
-                    withContext(Dispatchers.Main) { accept(socket) }
+                    var delivered = false
+                    try { withContext(Dispatchers.Main) { accept(socket); delivered = true } }
+                    finally { if (!delivered) runCatching { socket.close() } }
                 }
             } catch (error: Exception) {
                 withContext(Dispatchers.Main) { if (!destroyed && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) status = "Receiver stopped: ${error.javaClass.simpleName}. Reopen to retry." }
@@ -248,7 +252,11 @@ class PitwallReceiverActivity : ComponentActivity() {
                 val model = scene ?: return
                 if (size.width != model.atlasWidth || size.height != model.atlasHeight) fail("Video dimensions do not match the phone layout")
             }
-            override fun onPlaybackStateChanged(state: Int) { if (player === next) sendPlayback() }
+            override fun onPlaybackStateChanged(state: Int) {
+                if (player !== next) return
+                sendPlayback()
+                if (state == Player.STATE_ENDED) stopPlayback()
+            }
             override fun onIsPlayingChanged(isPlaying: Boolean) { if (player === next) sendPlayback() }
         })
         next.trackSelectionParameters = next.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
@@ -266,20 +274,27 @@ class PitwallReceiverActivity : ComponentActivity() {
     private fun reportRendering() {
         if (!active || renderingReported) return
         renderingReported = true
+        showReceiverControls()
         status = if (scene == null) "Playing on this TV" else "Playing ${scene!!.sources} feeds in the phone layout"
         Log.i("PitwallReceiver", "SCENE_RENDERING_CONFIRMED sources=${scene?.sources ?: 1} videoDecoders=$decoderCount")
         if (pitwallPeer) connection?.send(FcastProtocol.RENDERING, JSONObject().put("sources", scene?.sources ?: 1)
             .put("playbackId", playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId").orEmpty()))
     }
+    private fun showReceiverControls() {
+        controlsVisible = true
+        controlsJob?.cancel()
+        controlsJob = lifecycleScope.launch { delay(4_000); controlsVisible = false }
+    }
     private fun sendPlayback() {
         if (!approved) return
         val current = player
         connection?.send(FcastProtocol.PLAYBACK_UPDATE, JSONObject().put("generationTime", System.currentTimeMillis())
-            .put("state", if (!active) 0 else if (current?.playWhenReady == true) 1 else 2)
+            .put("state", if (!active || current?.playbackState == Player.STATE_ENDED) 0 else if (current?.playWhenReady == true) 1 else 2)
             .put("time", (current?.currentPosition ?: 0L) / 1000.0)
             .put("duration", (current?.duration ?: 0L).coerceAtLeast(0L) / 1000.0)
             .put("speed", current?.playbackParameters?.speed ?: 1f)
-            .put("buffering", current?.playbackState == Player.STATE_BUFFERING))
+            .put("buffering", current?.playbackState == Player.STATE_BUFFERING)
+            .put("finished", current?.playbackState == Player.STATE_ENDED))
         connection?.send(FcastProtocol.VOLUME_UPDATE, JSONObject().put("generationTime", System.currentTimeMillis()).put("volume", current?.volume ?: 1f))
     }
     private fun stopPlayback() {
@@ -325,7 +340,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                 SecondaryButton("Exit receiver") { finish() }
             }
             if (active && !renderingReported) Text(status, style = Type.subhead, modifier = Modifier.align(Alignment.BottomCenter).background(Ink.surface).padding(12.dp))
-            if (active) Text("OK: play/pause   ←/→: seek   Back: disconnect", style = Type.caption,
+            if (active && renderingReported && controlsVisible) Text("OK: play/pause   ←/→: seek   Back: disconnect", style = Type.caption,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp))
         }
         pending?.let { request -> AlertDialog(onDismissRequest = { deny() }, title = { Text("Play from $senderName?") },
@@ -336,12 +351,15 @@ class PitwallReceiverActivity : ComponentActivity() {
     private fun deny() { pending = null; connection?.close() }
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         val current = player
-        if (active && pending == null && current != null) when (keyCode) {
+        if (active && pending == null && current != null) {
+            showReceiverControls()
+            when (keyCode) {
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { if (event.repeatCount == 0) { if (current.playWhenReady) current.pause() else current.play() }; return true }
             KeyEvent.KEYCODE_MEDIA_PLAY -> { current.play(); return true }
             KeyEvent.KEYCODE_MEDIA_PAUSE -> { current.pause(); return true }
             KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_REWIND -> { current.seekTo((current.currentPosition - 10_000).coerceAtLeast(0)); return true }
             KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { current.seekTo((current.currentPosition + 10_000).coerceAtMost(current.duration.coerceAtLeast(0))); return true }
+        }
         }
         return super.onKeyDown(keyCode, event)
     }

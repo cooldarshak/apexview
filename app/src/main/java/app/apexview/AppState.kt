@@ -372,7 +372,9 @@ class AppState(
             if (!castPlaybackHandedOff || localChosen || googleLoading) return
             val remote = googleCastRemoteClient ?: return
             if (remote.isPlaying || remote.isPaused) googleHasPlayed = true
-            if (googleHasPlayed && remote.isIdle) {
+            if (googleHasPlayed && remote.mediaStatus?.playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
+                remoteCastClock.update(remote.approximateStreamPosition, false, playbackSpeed, remote.streamDuration)
+                if (remote.mediaStatus?.idleReason == com.google.android.gms.cast.MediaStatus.IDLE_REASON_FINISHED) playing = false
                 releaseCastRelay()
                 castStatus = "TV playback ended. Playback returned to this device."
                 return
@@ -485,6 +487,8 @@ class AppState(
                     val speed = body.optDouble("speed", playbackSpeed.toDouble())
                     require(time.isFinite() && duration.isFinite() && time in 0.0..604800.0 && duration in 0.0..604800.0 && speed.isFinite() && speed in 0.25..4.0)
                     if (state == 0 && castPlaybackHandedOff) {
+                        remoteCastClock.update((time * 1000).toLong(), false, speed.toFloat(), (duration * 1000).toLong())
+                        if (body.optBoolean("finished")) playing = false
                         releaseCastRelay(); castStatus = "TV playback stopped. Playback returned to this device."
                     } else if (state in 1..2) {
                         castRemoteBuffering = body.optBoolean("buffering")
@@ -4570,6 +4574,7 @@ class AppState(
     fun stopAll() {
         singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
         singleDecoderFailure = null
+        saveWatch()
         stopCasting(false)
         // Closing the viewer keeps the spot, so Continue watching can bring it back.
         // Read the native host before clearing its ownership: stopped originals have no clock.
