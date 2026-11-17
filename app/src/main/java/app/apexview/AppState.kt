@@ -1727,7 +1727,7 @@ class AppState(
             } finally {
                 if (f1DashCapture === capture) {
                     archiveCompositionStarting = false
-                    if (!transferred) selected.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
+                    if (!transferred && !useExistingBackend) selected.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
                     capture.reset(); f1DashCapture = null; f1DashCaptureJob = null
                 }
             }
@@ -1739,13 +1739,19 @@ class AppState(
     private fun startRollingArchiveSingleDecoderComposition(contentId: Long) {
         val selectedTiles = tiles.filter { it.contentId == contentId }
         val previousLayout = layoutMode
-        if (selectedTiles.size !in 2..4) {
-            message = "Single-decoder test needs between two and four archive feeds."
+        if (selectedTiles.size !in 2..4 || selectedTiles.size != tiles.size) {
+            message = "Single decoder needs two to four feeds from one archive."
+            decoderMode = DecoderMode.MULTIPLE
+            tiles.forEach { it.feed.clearProtectedCompositionVideoRole(); it.feed.player.playWhenReady = playing }
+            applyVideoBudget()
             return
         }
         val labels = selectedTiles.map { it.feed.sourceStream.profileLabel }
         if (labels.distinct().size != labels.size) {
             message = "Single-decoder test needs different feeds from the same archive."
+            decoderMode = DecoderMode.MULTIPLE
+            tiles.forEach { it.feed.clearProtectedCompositionVideoRole(); it.feed.player.playWhenReady = playing }
+            applyVideoBudget()
             return
         }
         val feeds = selectedTiles.zip(labels).map { (tile, label) ->
@@ -1807,12 +1813,15 @@ class AppState(
             }
             composedArchiveOriginMs = null
             composedArchiveFillingBuffer = false
+            selectedTiles.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
             layoutMode = previousLayout
             layoutRequest++
         }
         selectedTiles.forEach { android.util.Log.i("ApexviewPlaybackOffer", it.feed.sourceStream.offerDiagnostic) }
+        selectedTiles.forEach { it.feed.player.playWhenReady = false }
+        archiveCompositionStarting = true
         diagnostics()
-        message = "Single-decoder archive preflight. Normal playback continues..."
+        message = SINGLE_DECODER_ACTIVATING
         f1DashCaptureJob = scope.launch {
             try {
                 startup.start(
@@ -1880,18 +1889,21 @@ class AppState(
                             clearOutput = capture.clearOutput,
                             startPositionMs = (audioMaster.feed.player.currentPosition - requireNotNull(composedArchiveOriginMs)).coerceAtLeast(0L),
                             playWhenReady = false)
+                        archiveCompositionStarting = false
                         layoutMode = LayoutMode.SINGLE_DECODER_TEST
                         showProtectedCompositionPresentation(host, selectedTiles, audioMaster)
                     },
                     restoreSources = ::restore,
                     dispose = { it.zero() },
                 )
-                val firstFrameDeadline = android.os.SystemClock.elapsedRealtime() + 15_000L
+                var waitingSince: Long? = null
                 while (true) {
                     host.feed.problem?.let { throw IOException("Composed decoder/DRM playback failed: $it") }
-                    if (!host.feed.hasRenderedFirstFrame && android.os.SystemClock.elapsedRealtime() >= firstFrameDeadline) {
-                        throw IOException("Composed decoder did not render a first frame within 15 seconds")
-                    }
+                    if (!browsing && !host.feed.hasRenderedFirstFrame) {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (waitingSince == null) waitingSince = now
+                        if (now - requireNotNull(waitingSince) >= 15_000L) throw IOException("Composed decoder did not render a first frame within 15 seconds")
+                    } else waitingSince = null
                     composedFirstFrameSeen = host.feed.hasRenderedFirstFrame
                     host.feed.activeVideoDecoderName?.let { composedCodec = "$it (${host.feed.activeVideoDecoderHardware})" }
                     playback = when {
@@ -1899,6 +1911,7 @@ class AppState(
                         composedFirstFrameSeen -> "ACTIVE"
                         else -> "WAITING FOR FIRST FRAME"
                     }
+                    if (playback == "ACTIVE" && message == SINGLE_DECODER_ACTIVATING) message = null
                     val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
                     lastSnapshot = snapshot
                     snapshot.failure?.takeUnless { it.retryable }?.let { throw IOException(it.reason) }
@@ -1928,13 +1941,19 @@ class AppState(
                 // Do not log raw network exceptions or their signed URLs.
                 terminalReason = (error.message ?: error.javaClass.simpleName)
                     .replace(Regex("https?://\\S+"), "[redacted URL]").take(400)
-                if (startup.sourceDecodersTouched) restore(startup.hostReplaced)
+                if (startup.sourceDecodersTouched) restore(startup.hostReplaced) else {
+                    selectedTiles.forEach { it.feed.clearProtectedCompositionVideoRole() }
+                    applyVideoBudget()
+                }
+                decoderMode = DecoderMode.MULTIPLE
                 playback = "FAILED"
                 diagnostics()
                 android.util.Log.w("ApexviewSingleDecoder", "Archive composition failed: $terminalReason")
                 message = "Single-decoder archive test failed: $terminalReason"
             } finally {
                 if (f1DashCapture === capture) {
+                    archiveCompositionStarting = false
+                    if (!startup.sourceDecodersTouched) selectedTiles.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
                     capture.reset()
                     f1DashCapture = null
                     f1DashCaptureJob = null
@@ -4233,11 +4252,11 @@ class AppState(
 
     fun seekTo(targetMs: Long) {
         castRevision++
+        val restartRollingComposition = composedArchiveOriginMs != null && decoderMode == DecoderMode.SINGLE
         if (composedArchiveOriginMs != null) {
             stopProtectedCompositionPresentation()
             layoutMode = LayoutMode.GRID
             singleDecoderDiagnostic = singleDecoderDiagnostic?.replace("Playback: ACTIVE", "Playback: STOPPED FOR SEEK")
-            message = "Archive seek restored normal playback. Run Single-decoder test again at the new position."
         }
         val leader = leaderTile() ?: return
         // A live stream's length can be unknown; then only the start bounds the seek (the player
@@ -4249,6 +4268,7 @@ class AppState(
         // Every tile moves by the same amount, so their offsets from each other survive the seek.
         tiles.filter { nativeArchiveTiles.isEmpty() || it === protectedCompositionHost }.forEach { it.feed.player.seekTo((it.feed.player.currentPosition + shift).coerceAtLeast(0L)) }
         positionMs = target
+        if (restartRollingComposition) startArchiveSingleDecoderComposition(leader.contentId)
         showChrome()
     }
 

@@ -338,9 +338,9 @@ seg.m4s
         } finally { session.close(); capture.reset() }
     }
 
-    @Test fun sourceReadsRunInParallelWithABoundedTwoRequestLimit() = runBlocking {
+    @Test fun sourceReadsRunInParallelWithABoundedFourRequestLimit() = runBlocking {
         val network = network(4)
-        val latch = java.util.concurrent.CountDownLatch(2)
+        val latch = java.util.concurrent.CountDownLatch(4)
         val inFlight = java.util.concurrent.atomic.AtomicInteger()
         val peak = java.util.concurrent.atomic.AtomicInteger()
         network.beforeOpen = { spec ->
@@ -348,13 +348,13 @@ seg.m4s
                 val current = inFlight.incrementAndGet()
                 peak.updateAndGet { maxOf(it, current) }
                 latch.countDown()
-                try { assertTrue("Two source reads must overlap", latch.await(4, java.util.concurrent.TimeUnit.SECONDS)) }
+                try { assertTrue("Four source reads must overlap", latch.await(8, java.util.concurrent.TimeUnit.SECONDS)) }
                 finally { inFlight.decrementAndGet() }
             }
         }
         val capture = F1HlsFeedCapture(network.factory)
         val session = capture.prepareVod(feeds(4), 0, "channel-0")
-        try { assertEquals(2, peak.get()); assertEquals(4, network.requested.count { it.endsWith(".m4s") }) }
+        try { assertEquals(4, peak.get()); assertEquals(4, network.requested.count { it.endsWith(".m4s") }) }
         finally { session.close(); capture.reset() }
     }
 
