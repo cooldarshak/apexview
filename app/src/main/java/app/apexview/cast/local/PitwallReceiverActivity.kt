@@ -30,7 +30,6 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
-import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import app.apexview.*
@@ -192,7 +191,9 @@ class PitwallReceiverActivity : ComponentActivity() {
         require((body.optJSONObject("headers")?.length() ?: 0) == 0) { "Authorization headers must stay on the phone" }
         require(body.optString("content").isBlank()) { "Inline manifests are not supported" }
         require(body.getString("container").lowercase() in setOf("application/x-mpegurl", "application/vnd.apple.mpegurl", "application/dash+xml", "video/mp4")) { "Unsupported media type" }
-        body.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallScene")?.let {
+        val requestedScene = body.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallScene")
+        if (pitwallPeer) require(requestedScene != null) { "Phone layout is required; raw-atlas fallback is disabled" }
+        requestedScene?.let {
             require(pitwallPeer) { "Pitwall layout support was not negotiated" }
             CastSceneProtocol.decode(it)
         }
@@ -219,10 +220,8 @@ class PitwallReceiverActivity : ComponentActivity() {
             }
         }
         val nextScene = body.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallScene")?.let(CastSceneProtocol::decode)
-        val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(false).setMediaCodecSelector { mime, secure, tunnel ->
-            // One hardware codec only. An unsupported atlas fails visibly; no software/per-feed fallback.
-            MediaCodecSelector.DEFAULT.getDecoderInfos(mime, secure, tunnel).filter { it.hardwareAccelerated }
-        }
+        val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(false)
+            .setMediaCodecSelector(ReceiverCodecSelector())
         val next = ExoPlayer.Builder(this, renderers)
             .setMediaSourceFactory(DefaultMediaSourceFactory(data))
             .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(5_000, 15_000, 1_000, 2_000).build())
@@ -337,6 +336,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                 Text(receiverName, style = Type.title1)
                 Text(status, style = Type.body)
                 Text("Keep this screen open. On your phone, open a replay, tap Cast and choose this TV. No account or code is needed.", style = Type.subhead)
+                if (connection != null) SecondaryButton("Disconnect phone") { connection?.close() }
                 SecondaryButton("Exit receiver") { finish() }
             }
             if (active && !renderingReported) Text(status, style = Type.subhead, modifier = Modifier.align(Alignment.BottomCenter).background(Ink.surface).padding(12.dp))

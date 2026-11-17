@@ -4574,11 +4574,9 @@ class AppState(
     fun stopAll() {
         singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
         singleDecoderFailure = null
+        // Save the receiver clock before the casting/local-host ownership is cleared.
         saveWatch()
         stopCasting(false)
-        // Closing the viewer keeps the spot, so Continue watching can bring it back.
-        // Read the native host before clearing its ownership: stopped originals have no clock.
-        saveWatch()
         stopProtectedCompositionPresentation(restorePlayer = false)
         votePromptOpen = false
         nextLive = null
