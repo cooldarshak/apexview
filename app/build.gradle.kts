@@ -126,7 +126,11 @@ dependencies {
     // The app uses the Android Cast sender UI and Default Media Receiver for the composed
     // archive HEVC stream. Scene/layout customization remains receiver-side.
     implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("androidx.mediarouter:mediarouter:1.7.0")
+    // Cast transitive ranges can otherwise resolve prerelease libraries that require
+    // a newer Android Gradle plugin and SDK than this project supports.
+    implementation("androidx.mediarouter:mediarouter") { version { strictly("1.7.0") } }
+    implementation("androidx.core:core") { version { strictly("1.15.0") } }
+    implementation("androidx.core:core-ktx") { version { strictly("1.15.0") } }
     implementation("com.google.android.gms:play-services-cast-framework:23.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
