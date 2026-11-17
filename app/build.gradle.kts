@@ -131,7 +131,7 @@ dependencies {
     implementation("androidx.mediarouter:mediarouter") { version { strictly("1.7.0") } }
     implementation("androidx.core:core") { version { strictly("1.15.0") } }
     implementation("androidx.core:core-ktx") { version { strictly("1.15.0") } }
-    implementation("com.google.android.gms:play-services-cast-framework:23.0.0")
+    implementation("com.google.android.gms:play-services-cast-framework:22.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     implementation("androidx.media3:media3-exoplayer:$media3")
