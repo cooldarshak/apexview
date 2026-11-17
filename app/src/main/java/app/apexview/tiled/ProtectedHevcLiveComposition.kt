@@ -641,15 +641,15 @@ internal object ProtectedHevcLiveComposition {
             "active F1 source tile geometry is invalid"
         }
 
-        val gridColumns = when (session.labels.size) {
-            2 -> 2
-            3 -> 3
-            4 -> 2
-            5 -> if (session.fullPictures) 3 else 5
-            6 -> 3
+        val atlas = if (session.fullPictures) requireNotNull(HevcArchiveAtlasPlan.choose(session.labels.size,
+            spsMetadata.picWidthInCtbs * ctbSize, spsMetadata.picHeightInCtbs * ctbSize, 4096, 2160)) {
+            "Complete source pictures exceed the supported TV atlas dimensions; choose a lower HD rendition or fewer feeds"
+        } else null
+        val gridColumns = atlas?.columns ?: when (session.labels.size) {
+            2 -> 2; 3 -> 3; 4 -> 2; 5 -> 5; 6 -> 3
             else -> throw IllegalArgumentException("unsupported live composition feed count")
         }
-        val gridRows = (session.labels.size + gridColumns - 1) / gridColumns
+        val gridRows = atlas?.rows ?: (session.labels.size + gridColumns - 1) / gridColumns
         val sourceColumns = ppsMetadata.tileColumnWidthsInCtbs
         val sourceRows = ppsMetadata.tileRowHeightsInCtbs
         val outputColumns = if (session.fullPictures) List(gridColumns) { sourceColumns }.flatten() else List(gridColumns) { tileWidthInCtbs }

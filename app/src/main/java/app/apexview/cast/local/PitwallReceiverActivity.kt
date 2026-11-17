@@ -23,6 +23,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
+import androidx.media3.common.Timeline
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -37,6 +38,7 @@ import app.apexview.cast.CastSceneProtocol
 import app.apexview.cast.CastTimingReceiver
 import app.apexview.cast.CastTimingLayer
 import app.apexview.scene.SingleDecoderSceneView
+import app.apexview.scene.ProtectedDecoderSceneView
 import app.apexview.scene.VideoScene
 import java.net.ServerSocket
 import java.net.Socket
@@ -58,6 +60,15 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var generation by mutableIntStateOf(0)
     private var player: ExoPlayer? by mutableStateOf(null)
     private var sceneView: SingleDecoderSceneView? = null
+    private var protectedSceneView: ProtectedDecoderSceneView? = null
+    private var widevine: ReceiverWidevine? = null
+    private var secureOutput by mutableStateOf(false)
+    private var loadingJob: kotlinx.coroutines.Job? = null
+    private var loadEpoch = 0L
+    private var loadingRequested = false
+    private var desiredPlaying = true
+    private var desiredSpeed = 1f
+    private var desiredVolume = 1f
     private var standardView: PlayerView? = null
     private val httpDelegate = lazy { OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).build() }
     private val receiverHttp by httpDelegate
@@ -153,7 +164,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                     require(body != null && body.getInt("version") >= 2) { "FCast version 2 or 3 is required" }
                     versionReceived = true
                     connection?.send(FcastProtocol.INITIAL, JSONObject().put("displayName", receiverName)
-                        .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1).put("pitwallOverlays", 1))
+                        .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1).put("pitwallOverlays", 1).put("pitwallWidevine", 1))
                 }
                 FcastProtocol.PING -> connection?.send(FcastProtocol.PONG)
                 FcastProtocol.PONG -> Unit
@@ -171,12 +182,12 @@ class PitwallReceiverActivity : ComponentActivity() {
                 else -> {
                     if (!approved) return
                     when (packet.opcode) {
-                        FcastProtocol.PAUSE -> player?.pause()
-                        FcastProtocol.RESUME -> player?.play()
+                        FcastProtocol.PAUSE -> { desiredPlaying = false; player?.pause() }
+                        FcastProtocol.RESUME -> { desiredPlaying = true; player?.play() }
                         FcastProtocol.STOP -> stopPlayback()
                         FcastProtocol.SEEK -> player?.seekTo((number(body, "time", 0.0, 604800.0) * 1000).toLong())
-                        FcastProtocol.SET_SPEED -> player?.setPlaybackSpeed(number(body, "speed", 0.25, 4.0).toFloat())
-                        FcastProtocol.SET_VOLUME -> player?.volume = number(body, "volume", 0.0, 1.0).toFloat()
+                        FcastProtocol.SET_SPEED -> { desiredSpeed = number(body, "speed", 0.25, 4.0).toFloat(); player?.setPlaybackSpeed(desiredSpeed) }
+                        FcastProtocol.SET_VOLUME -> { desiredVolume = number(body, "volume", 0.0, 1.0).toFloat(); player?.volume = desiredVolume }
                         FcastProtocol.TIMING -> if (timingPeer && body != null) {
                             try { timingState.accept(body, playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId").orEmpty()) }
                             catch (error: Exception) { Log.w("PitwallReceiver", "Timing display message rejected: ${error.javaClass.simpleName}") }
@@ -219,6 +230,28 @@ class PitwallReceiverActivity : ComponentActivity() {
     private fun play(body: JSONObject) {
         validatePlay(body)
         stopPlayback()
+        val epoch = loadEpoch
+        playData = body; loadingRequested = true
+        desiredPlaying = true; desiredSpeed = body.optDouble("speed", 1.0).toFloat(); desiredVolume = body.optDouble("volume", 1.0).toFloat()
+        val license = body.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallLicense")
+        if (license == null) { startPlayer(body); return }
+        require(pitwallPeer) { "Protected playback needs Pitwall negotiation" }
+        val request = ReceiverLicenseRequest.decode(license)
+        status = "Authorizing protected feeds with this TV's F1 subscription…"
+        loadingJob = lifecycleScope.launch {
+            var owned: ReceiverWidevine? = null
+            try {
+                owned = ReceiverWidevine.authorize(this@PitwallReceiverActivity, request)
+                if (epoch != loadEpoch || !approved || destroyed) return@launch
+                widevine = owned; secureOutput = owned.secureOutput; owned = null
+                if (secureOutput) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                startPlayer(body)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (error: Exception) { if (epoch == loadEpoch) fail(error.message ?: "TV Widevine authorization failed") }
+            finally { owned?.close(); if (epoch == loadEpoch) loadingJob = null }
+        }
+    }
+    private fun startPlayer(body: JSONObject) {
         val peer = requireNotNull(connection).socket.inetAddress
         val origin = ReceiverMediaPolicy.validate(body.getString("url"), peer)
         val upstream = OkHttpDataSource.Factory(receiverHttp)
@@ -236,7 +269,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(false)
             .setMediaCodecSelector(ReceiverCodecSelector())
         val next = ExoPlayer.Builder(this, renderers)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(data))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(data).apply { widevine?.let { key -> setDrmSessionManagerProvider { key.sessions } } })
             .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(5_000, 15_000, 1_000, 2_000).build())
             .build()
         scene = nextScene; player = next; active = true; generation++; renderingReported = false; decoderCount = 0
@@ -272,10 +305,13 @@ class PitwallReceiverActivity : ComponentActivity() {
             override fun onIsPlayingChanged(isPlaying: Boolean) { if (player === next) sendPlayback() }
         })
         next.trackSelectionParameters = next.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
-        next.setMediaItem(MediaItem.Builder().setUri(body.getString("url")).setMimeType(body.getString("container")).build(), (body.optDouble("time", 0.0) * 1000).toLong())
-        next.setPlaybackSpeed(body.optDouble("speed", 1.0).toFloat())
-        next.volume = body.optDouble("volume", 1.0).toFloat()
-        next.playWhenReady = true
+        val originMs = body.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallStream")?.optLong("originMs") ?: 0L
+        next.setMediaItem(MediaItem.Builder().setUri(body.getString("url")).setMimeType(body.getString("container")).build(),
+            ((body.optDouble("time", 0.0) * 1000).toLong() - originMs).coerceAtLeast(0))
+        next.setPlaybackSpeed(desiredSpeed)
+        next.volume = desiredVolume
+        next.playWhenReady = desiredPlaying
+        loadingRequested = false
         next.prepare()
         playData = body
         status = "Loading ${nextScene?.sources ?: 1} feed${if (nextScene?.sources == 1) "" else "s"}…"
@@ -297,25 +333,43 @@ class PitwallReceiverActivity : ComponentActivity() {
         controlsJob?.cancel()
         controlsJob = lifecycleScope.launch { delay(4_000); controlsVisible = false }
     }
+    private fun streamMetadata() = playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallStream")
+    private fun controllerPosition(): Long {
+        val current = player ?: return 0
+        val info = streamMetadata() ?: return current.currentPosition
+        val offset = if (current.currentTimeline.isEmpty) 0L else current.currentTimeline.getWindow(current.currentMediaItemIndex, Timeline.Window()).positionInFirstPeriodUs / 1000
+        return info.getLong("originMs") + offset + current.currentPosition
+    }
+    private fun controllerSeek(targetMs: Long) {
+        if (streamMetadata() != null) connection?.send(FcastProtocol.UI_CONTROL, JSONObject().put("action", "seek").put("time", targetMs / 1000.0))
+        else player?.seekTo(targetMs.coerceAtLeast(0))
+    }
     private fun sendPlayback() {
         if (!approved) return
         val current = player
         connection?.send(FcastProtocol.PLAYBACK_UPDATE, JSONObject().put("generationTime", System.currentTimeMillis())
-            .put("state", if (!active || current?.playbackState == Player.STATE_ENDED) 0 else if (current?.playWhenReady == true) 1 else 2)
-            .put("time", (current?.currentPosition ?: 0L) / 1000.0)
-            .put("duration", (current?.duration ?: 0L).coerceAtLeast(0L) / 1000.0)
+            .put("playbackId", playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId").orEmpty())
+            .put("state", if (loadingRequested) if (desiredPlaying) 1 else 2 else if (!active || current?.playbackState == Player.STATE_ENDED) 0 else if (current?.playWhenReady == true) 1 else 2)
+            .put("time", if (loadingRequested) playData?.optDouble("time", 0.0) ?: 0.0 else controllerPosition() / 1000.0)
+            .put("duration", (streamMetadata()?.optLong("durationMs") ?: current?.duration ?: 0L).coerceAtLeast(0L) / 1000.0)
             .put("speed", current?.playbackParameters?.speed ?: 1f)
-            .put("buffering", current?.playbackState == Player.STATE_BUFFERING)
+            .put("buffering", loadingRequested || current?.playbackState == Player.STATE_BUFFERING)
             .put("finished", current?.playbackState == Player.STATE_ENDED))
         connection?.send(FcastProtocol.VOLUME_UPDATE, JSONObject().put("generationTime", System.currentTimeMillis()).put("volume", current?.volume ?: 1f))
     }
     private fun stopPlayback() {
+        ++loadEpoch
+        loadingRequested = false
+        loadingJob?.cancel(); loadingJob = null
         active = false
         timingState.clear(); timingReported = false
         sceneView?.release(); sceneView = null
+        protectedSceneView?.release(); protectedSceneView = null
         standardView?.player = null; standardView = null
         val previous = player; player = null
         previous?.release()
+        widevine?.close(); widevine = null; secureOutput = false
+        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         scene = null; playData = null; renderingReported = false
         status = "Ready. Choose this TV from Cast on your phone."
     }
@@ -340,7 +394,16 @@ class PitwallReceiverActivity : ComponentActivity() {
                             val modifier = if (maxWidth / maxHeight > ratio) Modifier.fillMaxHeight().aspectRatio(ratio)
                                 else Modifier.fillMaxWidth().aspectRatio(ratio)
                             Box(modifier) {
-                            AndroidView(factory = { SingleDecoderSceneView(it).apply {
+                            if (secureOutput) AndroidView(factory = { ProtectedDecoderSceneView(it).apply {
+                                protectedSceneView = this
+                                onFailure = { reason -> if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) fail(reason) }
+                                onFirstFrame = { if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) reportRendering() }
+                                bind(current, model)
+                            } }, update = { it.bind(current, model) }, onRelease = {
+                                if (protectedSceneView === it) protectedSceneView = null
+                                it.release()
+                            }, modifier = Modifier.fillMaxSize())
+                            else AndroidView(factory = { SingleDecoderSceneView(it).apply {
                                 sceneView = this
                                 onFailure = { reason -> if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) fail(reason) }
                                 onFirstFrame = { if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) reportRendering() }
@@ -349,7 +412,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                                 if (sceneView === it) sceneView = null
                                 it.release()
                             }, modifier = Modifier.fillMaxSize())
-                            CastTimingLayer(timingState, model.width, model.height, { current.currentPosition }, { number, pit ->
+                            CastTimingLayer(timingState, model.width, model.height, { controllerPosition() }, { number, pit ->
                                 connection?.send(FcastProtocol.UI_CONTROL, JSONObject().put("action", if (pit) "pitDriver" else "driver").put("number", number))
                             }, { rows, cars ->
                                 if (!timingReported && (rows > 0 || cars > 0)) {
@@ -392,8 +455,8 @@ class PitwallReceiverActivity : ComponentActivity() {
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { if (event.repeatCount == 0) { if (current.playWhenReady) current.pause() else current.play() }; return true }
             KeyEvent.KEYCODE_MEDIA_PLAY -> { current.play(); return true }
             KeyEvent.KEYCODE_MEDIA_PAUSE -> { current.pause(); return true }
-            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_REWIND -> { current.seekTo((current.currentPosition - 10_000).coerceAtLeast(0)); return true }
-            KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { current.seekTo((current.currentPosition + 10_000).coerceAtMost(current.duration.coerceAtLeast(0))); return true }
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_REWIND -> { controllerSeek((controllerPosition() - 10_000).coerceAtLeast(0)); return true }
+            KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { controllerSeek(controllerPosition() + 10_000); return true }
         }
         }
         return super.onKeyDown(keyCode, event)

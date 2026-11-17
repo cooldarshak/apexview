@@ -1,7 +1,8 @@
 package app.apexview.tiled
 
 /** Runtime adapter for genuinely clear HEVC CMAF. Protected tracks remain rejected by the composer. */
-internal class ClearCmafArchiveComposition {
+internal class ClearCmafArchiveComposition(private val fullPictures: Boolean = false) {
+    private var geometry: ProtectedHevcLiveComposition.SourceGeometry? = null
     private var initialization: ByteArray? = null
     private val history = mutableListOf<ProtectedHevcLiveComposition.OutputFragment>()
     private var sequence = 1L
@@ -25,8 +26,15 @@ internal class ClearCmafArchiveComposition {
         } else sps.height
         // A partial bottom CTB cannot become an interior row without changing CABAC data.
         // Keep those feeds in one row; genuinely full source tiles can use the 2x2 grid.
-        val columns = if (feeds.size == 4 && sourceCellHeight % sps.ctbSize == 0) 2 else feeds.size
-        val rows = feeds.size / columns
+        val atlas = if (fullPictures) requireNotNull(HevcArchiveAtlasPlan.choose(feeds.size, sps.width, sps.height, 4096, 2160)) {
+            "Complete clear source pictures exceed the HD TV atlas limit"
+        } else null
+        val sourceColumns = if (pps.tilesEnabled) pps.numTileColumns else 1
+        val sourceRows = if (pps.tilesEnabled) pps.numTileRows else 1
+        val columns = atlas?.columns ?: if (feeds.size == 4 && sourceCellHeight % sps.ctbSize == 0) 2 else feeds.size
+        val rows = atlas?.rows ?: feeds.size / columns
+        geometry = if (fullPictures) ProtectedHevcLiveComposition.SourceGeometry(sps.width, sps.height,
+            sps.displayWidth, sps.displayHeight, columns, rows) else null
         val independentlyDecodable = fragment.sampleTimings.first().sampleFlags?.let { (it and 0x00010000L) == 0L } == true
         val previous = if (independentlyDecodable) 0 else sourceHistory[feeds.first().label]?.size ?: 0
         require(previous < 3) { "Clear HLS archive did not provide a random-access picture within the bounded source window" }
@@ -34,8 +42,13 @@ internal class ClearCmafArchiveComposition {
             feed.copy(mediaFragments = (if (independentlyDecodable) emptyList() else sourceHistory[feed.label].orEmpty()) + feed.mediaFragments)
         }
         val output = HevcClearCmafGridComposer.compose(HevcClearCmafGridComposer.Request(
-            composingFeeds, HevcOutputGridDimensions(columns, rows),
-            feeds.indices.map { HevcTizenGridComposer.CellSelection(it, 0, it % columns, it / columns) },
+            composingFeeds, HevcOutputGridDimensions(columns * (if (fullPictures) sourceColumns else 1), rows * (if (fullPictures) sourceRows else 1)),
+            if (fullPictures) (0 until columns * rows).flatMap { slot ->
+                (0 until sourceRows).flatMap { y -> (0 until sourceColumns).map { x ->
+                    HevcTizenGridComposer.CellSelection(minOf(slot, feeds.lastIndex), y * sourceColumns + x,
+                        (slot % columns) * sourceColumns + x, (slot / columns) * sourceRows + y)
+                } }
+            } else feeds.indices.map { HevcTizenGridComposer.CellSelection(it, 0, it % columns, it / columns) },
             firstOutputSequenceNumber = sequence - previous,
             frameRateNumerator = (timescale / divisor).toInt(), frameRateDenominator = (sampleDuration / divisor).toInt()
         ))
@@ -74,11 +87,11 @@ internal class ClearCmafArchiveComposition {
     fun hasOutput(): Boolean = initialization != null && history.isNotEmpty()
 
     fun outputWindow(): ProtectedHevcLiveComposition.OutputWindow? = initialization?.let {
-        ProtectedHevcLiveComposition.OutputWindow(it.copyOf(), history.map { fragment -> fragment.detached() })
+        ProtectedHevcLiveComposition.OutputWindow(it.copyOf(), history.map { fragment -> fragment.detached() }, geometry)
     }
 
     fun reset() {
-        initialization?.fill(0); initialization = null
+        initialization?.fill(0); initialization = null; geometry = null
         history.forEach { it.zero() }; history.clear()
         sourceHistory.values.flatten().forEach { it.fill(0) }; sourceHistory.clear(); sequence = 1L; status = "WAITING_FOR_CLEAR_CMAF"
     }

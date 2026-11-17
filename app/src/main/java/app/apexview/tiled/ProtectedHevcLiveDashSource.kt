@@ -91,13 +91,7 @@ internal object ProtectedHevcComposedDashPackageBuilder {
             require(tenc.defaultKidIdentity != null && tenc.perSampleIvSize in setOf(0, 8, 16)) {
                 "Protected composed CBCS defaults are incomplete"
             }
-            val defaultKid = readDefaultKid(init)
-            val pssh = findWidevinePssh(init) ?: normalizeWidevinePssh(widevinePssh)
-            requireNotNull(pssh) { "Widevine PSSH is missing from both the composed init and source manifest" }
-            val encoded = Base64.getEncoder().encodeToString(pssh)
-            pssh.fill(0)
-            """<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cbcs" cenc:default_KID="$defaultKid"/>
-      <ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" value="Widevine"><cenc:pssh>$encoded</cenc:pssh></ContentProtection>"""
+            protectionXml(init, widevinePssh)
         }
 
         var previousSequence = 0L
@@ -229,6 +223,18 @@ internal object ProtectedHevcComposedDashPackageBuilder {
             presentationTimeOffsetTicks = presentationTimeOffsetTicks,
             availabilityStartTimeMs = availabilityStartTimeMs
         )
+    }
+
+    /** Shared by the untouched CMAF audio representation in the local receiver manifest. */
+    internal fun protectionXml(init: ByteArray, widevinePssh: ByteArray?, scheme: String = "cbcs"): String {
+        require(scheme in setOf("cenc", "cbcs"))
+        val defaultKid = readDefaultKid(init)
+        val pssh = findWidevinePssh(init) ?: normalizeWidevinePssh(widevinePssh)
+        requireNotNull(pssh) { "Widevine PSSH is missing from the source initialization" }
+        val encoded = Base64.getEncoder().encodeToString(pssh)
+        pssh.fill(0)
+        return """<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="$scheme" cenc:default_KID="$defaultKid"/>
+      <ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" value="Widevine"><cenc:pssh>$encoded</cenc:pssh></ContentProtection>"""
     }
 
     private fun readDefaultKid(init: ByteArray): String {

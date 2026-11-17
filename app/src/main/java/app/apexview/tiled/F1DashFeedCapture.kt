@@ -47,6 +47,7 @@ internal class F1DashFeedCapture(
     private val maximumVideoHeight: Int = 2160,
     private val segmentTimeToleranceUs: Long = 250_000L,
     dataSourceFactory: DataSource.Factory? = null,
+    private val minimumVideoHeight: Int = 0,
 ) : CmafCaptureLifecycle {
     data class Feed(
         val label: String,
@@ -186,7 +187,7 @@ internal class F1DashFeedCapture(
             }
 
             val candidateWindows = selectedWithIndexes.map { item -> recentSegments(item) }
-            val aligned = findNewestAligned(candidates = candidateWindows)
+            val aligned = findNewestAligned(candidates = candidateWindows, afterUs = lastCapturedSegmentStartUs)
                 ?: throw IOException("Waiting for a common published F1 HEVC segment across selected feeds")
             val previous = lastCapturedSegmentStartUs
             if (previous != null && aligned.first().absoluteStartUs <= previous) {
@@ -508,7 +509,7 @@ internal class F1DashFeedCapture(
             .filter { it.type == C.TRACK_TYPE_VIDEO || it.representations.any(::isHevc) }
             .flatMap { it.representations }
             .filter(::isHevc)
-            .filter { it.format.width > 0 && it.format.height in 1..maximumVideoHeight }
+            .filter { it.format.width > 0 && it.format.height in maxOf(1, minimumVideoHeight)..maximumVideoHeight }
         if (candidates.isEmpty()) {
             throw PermanentCaptureException("${feed.label}: F1 DASH manifest has no supported HEVC video representation")
         }
@@ -543,10 +544,12 @@ internal class F1DashFeedCapture(
                 .flatMap { it.representations }
                 .filter(::isHevc)
                 .map { it.format.width to it.format.height }
-                .filter { (width, height) -> width > 0 && height in 1..maximumVideoHeight }
+                .filter { (width, height) -> width > 0 && height in maxOf(1, minimumVideoHeight)..maximumVideoHeight }
                 .toSet()
         }.reduce { left, right -> left intersect right }
-        return common.maxWithOrNull(compareBy<Pair<Int, Int>> { it.second }.thenBy { it.first })
+        return if (minimumVideoHeight > 0) HevcArchiveRenditionPlan.choose(common.filter { (w, h) ->
+            HevcArchiveAtlasPlan.choose(feeds.size, ((w + 63) / 64) * 64, ((h + 63) / 64) * 64, 4096, 2160) != null
+        }.toSet(), maximumVideoHeight, minimumVideoHeight, feeds.size, 4096) else common.maxWithOrNull(compareBy<Pair<Int, Int>> { it.second }.thenBy { it.first })
     }
 
     private fun LoadedFeed.representationFor(width: Int, height: Int): Representation {
@@ -601,10 +604,10 @@ internal class F1DashFeedCapture(
     }
 
     private fun findNewestAligned(
-        candidates: List<List<SegmentCandidate>>
+        candidates: List<List<SegmentCandidate>>, afterUs: Long? = null,
     ): List<SegmentCandidate>? {
         if (candidates.size < 2 || candidates.any { it.isEmpty() }) return null
-        val master = candidates.first().asReversed()
+        val master = if (afterUs == null) candidates.first().asReversed() else candidates.first().filter { it.absoluteStartUs > afterUs }
         for (candidate in master) {
             val match = candidates.drop(1).map { window ->
                 window.minByOrNull { abs(it.absoluteStartUs - candidate.absoluteStartUs) }

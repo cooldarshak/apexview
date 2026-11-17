@@ -35,7 +35,7 @@ private suspend fun <T, R> mapArchiveFeedsBounded(
 
 /** Reads the HLS/CMAF actually supplied by player_tm, without another PLAY or media player. */
 internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximumHeight: Int = 2160,
-                                private val maximumOutputWidth: Int = 4096) {
+                                private val maximumOutputWidth: Int = 4096, private val minimumCaptureHeight: Int = 0) {
     private data class Offer(val feed: F1DashFeedCapture.Feed, val uri: Uri, val format: Format?, val master: HlsMultivariantPlaylist?, val audioGroupId: String? = null)
     private class Init(val uri: Uri, val offset: Long, val length: Long, val bytes: ByteArray, val report: CmafBoxInspector.Report)
     private val reader = CmafHttpReader(factory)
@@ -43,7 +43,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     private val vodPlaylists = java.util.concurrent.ConcurrentHashMap<String, HlsMediaPlaylist>()
     private val initializations = java.util.concurrent.ConcurrentHashMap<String, Init>()
     private val actual = java.util.concurrent.ConcurrentHashMap<String, ManifestProtocol>()
-    private val clearComposition = ClearCmafArchiveComposition()
+    private val clearComposition = ClearCmafArchiveComposition(fullPictures = minimumCaptureHeight > 0)
     private var previousStartUs: Long? = null
     private var mediaToArchiveOffsetUs: Long? = null
     private var pssh: ByteArray? = null
@@ -143,25 +143,25 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         }
     }
 
-    suspend fun captureAtPosition(group: String, feeds: List<F1DashFeedCapture.Feed>, positionMs: Long): F1DashFeedCapture.Snapshot = withContext(Dispatchers.IO) {
+    suspend fun captureAtPosition(group: String, feeds: List<F1DashFeedCapture.Feed>, positionMs: Long, live: Boolean = false): F1DashFeedCapture.Snapshot = withContext(Dispatchers.IO) {
         var format: Format? = null
         val startedMs = android.os.SystemClock.elapsedRealtime()
         try {
             require(feeds.size in 2..6 && feeds.map { it.label }.distinct().size == feeds.size)
             val perFeed = feeds.map { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }
-            val selected = chooseCommon(perFeed)
+            val selected = chooseCommon(perFeed, minimumHeight = minimumCaptureHeight)
             format = selected.first().format
             val playlists = coroutineScope { selected.map { offer -> async { loadMedia(offer) } }.awaitAll() }
-            if (playlists.any { !it.hasEndTag }) throw PermanentCaptureException("HLS single-decoder archive capture requires complete replay playlists")
+            if (!live && playlists.any { !it.hasEndTag }) throw PermanentCaptureException("HLS single-decoder archive capture requires complete replay playlists")
             val useProgramTime = playlists.all { it.hasProgramDateTime }
             val masterStartUs = playlists.first().startTimeUs
             val windows = playlists.map { playlist ->
                 playlist.segments.mapIndexed { index, segment ->
                     ArchiveDashSegmentSelector.Candidate(index.toLong(), segment.relativeStartTimeUs +
-                        if (useProgramTime) playlist.startTimeUs - masterStartUs else 0L)
+                        if (useProgramTime) playlist.startTimeUs - (if (live) 0L else masterStartUs) else if (live) throw PermanentCaptureException("Live HLS needs program date time for cross-feed synchronization") else 0L)
                 }
             }
-            val targetUs = Math.multiplyExact(positionMs, 1000)
+            val targetUs = if (live) windows.minOf { it.lastOrNull()?.absoluteStartUs ?: 0L } else Math.multiplyExact(positionMs, 1000)
             val aligned = ArchiveDashSegmentSelector.selectAligned(windows, targetUs, previousStartUs, 250_000,
                 maximumLeadUs = ArchiveBufferPolicy.maximumLeadUs(windows.first(), targetUs))
                 ?: return@withContext snapshot(group, format, null, 0,
@@ -178,6 +178,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             val tracks = inits.map { it.report.tracks.singleOrNull { track -> track.handler == "vide" }
                 ?: throw PermanentCaptureException("HLS CMAF initialization must contain exactly one video track") }
             if (tracks.any { it.hevcConfiguration == null }) throw PermanentCaptureException("HLS CMAF has no supported HEVC video configuration")
+            require(tracks.all { it.hevcConfiguration!!.sps.single().displayHeight >= minimumCaptureHeight }) { "Actual source feed is below the required HD resolution" }
             val clear = tracks.all { !it.encrypted }
             if (!clear && tracks.any { !it.encrypted || it.protectionScheme != "cbcs" }) {
                 throw PermanentCaptureException("HLS composition needs all-clear HEVC or compatible CBCS HEVC; mixed protection is unsupported")

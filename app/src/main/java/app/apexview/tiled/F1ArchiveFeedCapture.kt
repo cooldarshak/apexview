@@ -10,12 +10,13 @@ internal interface CmafCaptureLifecycle { fun reset() }
 internal class F1ArchiveFeedCapture(
     userAgent: String, ascendon: String, entitlement: String,
     dataSourceFactory: DataSource.Factory? = null,
+    private val minimumHeight: Int = 0, private val maximumHeight: Int = 2160,
 ) : CmafCaptureLifecycle {
     private val factory = dataSourceFactory ?: DefaultHttpDataSource.Factory().setUserAgent(userAgent)
         .setAllowCrossProtocolRedirects(true)
         .setDefaultRequestProperties(mapOf("ascendontoken" to ascendon, "entitlementtoken" to entitlement))
-    private val dash = F1DashFeedCapture(userAgent, ascendon, entitlement, dataSourceFactory = factory)
-    private val hls = F1HlsFeedCapture(factory)
+    private val dash = F1DashFeedCapture(userAgent, ascendon, entitlement, dataSourceFactory = factory, maximumVideoHeight = maximumHeight, minimumVideoHeight = minimumHeight)
+    private val hls = F1HlsFeedCapture(factory, maximumHeight, minimumCaptureHeight = minimumHeight)
     private var usingHls = false
     val clearOutput get() = usingHls && hls.clearOutput == true
     val protection get() = if (usingHls) when (hls.clearOutput) { true -> "CLEAR"; false -> "CBCS"; null -> "UNVERIFIED" } else "CBCS"
@@ -26,6 +27,17 @@ internal class F1ArchiveFeedCapture(
         val worker = F1HlsFeedCapture(factory)
         return try { worker.prepareVod(feeds, positionMs, clockLabel, preferredHeight, commentary, minimumHeight) }
         finally { worker.reset() }
+    }
+
+    suspend fun captureNext(group: String, feeds: List<F1DashFeedCapture.Feed>): F1DashFeedCapture.Snapshot {
+        if (feeds.all { ManifestProtocol.fromUrl(it.manifestUrl) == ManifestProtocol.HLS }) usingHls = true
+        if (usingHls) return hls.captureAtPosition(group, feeds, 0, live = true)
+        val snapshot = dash.captureNext(group, feeds)
+        if (snapshot.failure != null && snapshot.actualManifests.values.any { it == ManifestProtocol.HLS } &&
+            snapshot.actualManifests.values.none { it == ManifestProtocol.DASH }) {
+            usingHls = true; return hls.captureAtPosition(group, feeds, 0, live = true)
+        }
+        return snapshot
     }
 
     suspend fun captureAtPosition(group: String, feeds: List<F1DashFeedCapture.Feed>, playbackPositionMs: Long): F1DashFeedCapture.Snapshot {

@@ -268,7 +268,7 @@ class FeedPlayer(
                                 Log.w("ApexviewDRM", "Device refused L3; retaining its security level", failure)
                             }
                     }
-                    drmLevel = runCatching { drm.getPropertyString("securityLevel") }.getOrDefault("?")
+                    drmLevel = runCatching { drm.getPropertyString("securityLevel") }.getOrNull()?.takeIf { it.isNotBlank() } ?: "?"
                     if (stream.allowHevcProfileProbe) {
                         HevcFeedProfileCapture.updateDrm(stream.profileGroup, stream.profileLabel, drmLevel, keysLoaded = false)
                     }
