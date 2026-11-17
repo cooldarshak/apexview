@@ -375,12 +375,14 @@ class AppState(
             if (googleHasPlayed && remote.mediaStatus?.playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
                 remoteCastClock.update(remote.approximateStreamPosition, false, playbackSpeed, remote.streamDuration)
                 if (remote.mediaStatus?.idleReason == com.google.android.gms.cast.MediaStatus.IDLE_REASON_FINISHED) playing = false
+                googleCastSelected = false
                 releaseCastRelay()
                 castStatus = "TV playback ended. Playback returned to this device."
                 return
             }
             playing = remote.isPlaying || remote.isBuffering
             castRemoteBuffering = remote.isBuffering
+            if (remote.streamDuration > 0) durationMs = remote.streamDuration
             remoteCastClock.update(remote.approximateStreamPosition, remote.isPlaying, playbackSpeed, remote.streamDuration)
         }
     }
@@ -491,6 +493,7 @@ class AppState(
                         if (body.optBoolean("finished")) playing = false
                         releaseCastRelay(); castStatus = "TV playback stopped. Playback returned to this device."
                     } else if (state in 1..2) {
+                        if (duration > 0) durationMs = (duration * 1000).toLong()
                         castRemoteBuffering = body.optBoolean("buffering")
                         remoteCastClock.update((time * 1000).toLong(), state == 1 && !castRemoteBuffering, speed.toFloat(), (duration * 1000).toLong())
                         if (castPlaybackHandedOff) { playing = state == 1; positionMs = remoteCastClock.positionMs() }

@@ -178,6 +178,7 @@ class FeedPlayer(
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
             player.volume = 0f
         } else {
+            videoOn = false // The visibility budget must explicitly re-enable the actual video track.
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, remoteTextWasDisabled).build()
         }
@@ -606,7 +607,7 @@ class FeedPlayer(
             val previous = protectedLiveDashSource
             protectedLiveDashSource = nextSource
             videoSuppressedByProtectedComposition = false
-            videoOn = true
+            videoOn = !remotePlaybackSuspended
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, remotePlaybackSuspended)
                 .build()
@@ -635,7 +636,7 @@ class FeedPlayer(
         if (archiveVodSession !== session) archiveVodSession?.close()
         archiveVodSession = session
         videoSuppressedByProtectedComposition = false
-        videoOn = true
+        videoOn = !remotePlaybackSuspended
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE).setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, remotePlaybackSuspended).build()
         player.setMediaSource(MergingMediaSource(true, true, video, audio), positionMs.coerceAtLeast(0))
@@ -746,7 +747,7 @@ class FeedPlayer(
         } else {
             player.setMediaItem(originalMediaItem, restorePositionMs)
         }
-        videoOn = enableVideo
+        videoOn = enableVideo && !remotePlaybackSuspended
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setMaxVideoSize(selectedVideoQuality.maxWidth, selectedVideoQuality.maxHeight)
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enableVideo || remotePlaybackSuspended)
