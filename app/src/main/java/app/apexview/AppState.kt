@@ -318,6 +318,7 @@ class AppState(
     private var f1DashCapture: CmafCaptureLifecycle? = null
     private var protectedCompositionHost: Tile? = null
     private var protectedCompositionAudioMaster: Tile? = null
+    private var nativeArchiveTiles: List<Tile> = emptyList()
     private var composedArchiveOriginMs: Long? = null
     private var composedArchiveFillingBuffer = false
     private var protectedCompositionBounds: Map<Tile, ProtectedTileBounds> = emptyMap()
@@ -1407,8 +1408,159 @@ class AppState(
         browsing = false
     }
 
-    /** Validate authorised archive media completely before changing any source decoder. */
+    /** Replay composition is a finite on-demand source, not a moving live capture window. */
     private fun startArchiveSingleDecoderComposition(contentId: Long) {
+        val selected = tiles.filter { it.contentId == contentId }
+        if (selected.size !in 2..4 || selected.size != tiles.size ||
+            selected.map { it.feed.sourceStream.profileLabel }.distinct().size != selected.size) {
+            message = "Single-decoder test needs two to four different feeds from one archive."
+            return
+        }
+        val host = selected.firstOrNull { it.audible } ?: selected.first()
+        val previousLayout = layoutMode
+        val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
+        f1DashCaptureJob?.cancel()
+        f1DashCapture = capture
+        val startup = ArchiveCompositionStartup()
+        var transferred = false
+        var released = 0
+        var prepared: app.apexview.tiled.HevcArchiveVodSession? = null
+        var phase = "PREFLIGHT"
+        var failure: String? = null
+        var useExistingBackend = false
+        fun diagnostic() {
+            if (f1DashCapture != null && f1DashCapture !== capture) return
+            singleDecoderDiagnostic = buildString {
+                append("Source: F1 Archive · Selected feeds: ${selected.size}\n")
+                append("Requested platform: ${selected.map { it.feed.sourceStream.requestedPlatform }.distinct().joinToString()}\n")
+                append("Actual manifest: ${if (prepared != null) "HLS → static composed DASH" else "VALIDATING RESPONSE"}\n")
+                append("HEVC compatibility / CMAF alignment: ${if (prepared != null) "PASS" else "VALIDATING"}\n")
+                prepared?.let { session ->
+                    append("Video protection: CLEAR (verified CMAF). Widevine video keys: not required\n")
+                    append("Source: ${session.selectedHeight ?: "verified in CMAF"}p · Full feeds: YES\n")
+                    append("Composed picture: ${session.width}x${session.height} at ${session.frameRate}fps\n")
+                    append("Archive timeline: finite VOD · native audio/video clock\n")
+                }
+                append("Source decoders released (callbacks): $released\n")
+                append("Composed decoder: ${if (transferred) host.feed.activeVideoDecoderName ?: "NOT OBSERVED" else "NOT STARTED"}\n")
+                if (transferred) {
+                    append("${host.feed.activeVideoDecoderHardware} · Active video decoders (callbacks): $observedActiveVideoDecoders\n")
+                    append("Selected video tracks: ${host.feed.selectedVideoTrackCount}\n")
+                    append("Output surface (callback): ${host.feed.composedSurfaceWidth}x${host.feed.composedSurfaceHeight}\n")
+                    append("First frame: ${if (host.feed.hasRenderedFirstFrame) "YES" else "NO"} · Rendered frames: ${host.feed.renderedVideoFrames}\n")
+                    append("Player buffered: ${host.feed.player.totalBufferedDuration}ms\n")
+                }
+                append("Playback: $phase")
+                failure?.let { append("\n$it") }
+            }
+        }
+        fun restore() {
+            if (f1DashCapture !== capture) return
+            if (nativeArchiveTiles.isNotEmpty()) stopProtectedCompositionPresentation()
+            else {
+                selected.forEach { it.feed.clearProtectedCompositionVideoRole() }
+                applyVideoBudget()
+            }
+            layoutMode = previousLayout
+            layoutRequest++
+        }
+        val probePositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
+        selected.forEach { android.util.Log.i("ApexviewPlaybackOffer", it.feed.sourceStream.offerDiagnostic) }
+        message = "Validating archive composition. Normal playback continues..."
+        diagnostic()
+        f1DashCaptureJob = scope.launch {
+            try {
+                startup.start(
+                    preflight = {
+                        // Capture the selected position once. Slow preparation must not chase an
+                        // independently advancing source clock or interrupt working playback.
+                        val session = capture.prepareVod(selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel,
+                            it.feed.sourceStream.url) }, probePositionMs, host.feed.sourceStream.profileLabel,
+                            minOf(settings.videoQuality.targetHeight.takeIf { it > 0 } ?: 720, if (selected.size > 2) 540 else 720),
+                            settings.commentary)
+                        try {
+                            host.feed.requireArchiveHardwareSupport(session.codedWidth, session.codedHeight, session.frameRate * playbackSpeed)
+                            prepared = session
+                            diagnostic()
+                            session
+                        } catch (error: Throwable) { session.close(); throw error }
+                    },
+                    releaseSources = {
+                        val before = selected.sumOf { it.feed.activeVideoDecoderCount }
+                        selected.forEach { tile -> tile.feed.setProtectedCompositionVideoRole(false,
+                            tile.w.toInt().coerceAtLeast(1), tile.h.toInt().coerceAtLeast(1)) }
+                        val results = coroutineScope { selected.map { async { it.feed.awaitVideoDecoderRelease(3_000L) } }.awaitAll() }
+                        released = (before - selected.sumOf { it.feed.activeVideoDecoderCount }).coerceAtLeast(0)
+                        if (results.any { !it } || observedActiveVideoDecoders != 0) throw IOException("Source video decoder release was not confirmed")
+                        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_HANDOFF preflight=PASS observedReleases=$released activeVideoDecoders=0")
+                    },
+                    replaceHost = { session ->
+                        val handoffPositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
+                        nativeArchiveTiles = selected
+                        showProtectedCompositionPresentation(host, selected)
+                        // One Media3 player now loads both the composed video and selected audio.
+                        // Stopped originals perform no downloads and cannot move its clock.
+                        selected.forEach { it.feed.suspendForArchiveComposition(); it.feed.setAudible(false) }
+                        host.feed.startArchiveVodPlayback(session, handoffPositionMs, playing)
+                        transferred = true
+                        host.feed.setAudible(!mutedAll)
+                        layoutMode = LayoutMode.SINGLE_DECODER_TEST
+                        phase = "BUFFERING"
+                    },
+                    restoreSources = { restore() },
+                    dispose = { if (!transferred) it.close() },
+                )
+                var previousLog = ""
+                var readySince: Long? = null
+                while (true) {
+                    host.feed.problem?.let { throw IOException("Composed playback failed: $it") }
+                    if (host.feed.hasRenderedFirstFrame && observedActiveVideoDecoders != 1) throw IOException("Expected one active video decoder; callbacks report $observedActiveVideoDecoders")
+                    if (host.feed.hasRenderedFirstFrame && host.feed.activeVideoDecoderHardware == "hardware NO") throw IOException("Composed video selected a software decoder")
+                    phase = when {
+                        host.feed.player.playbackState == Player.STATE_ENDED -> "ENDED"
+                        host.feed.buffering -> "BUFFERING"
+                        !host.feed.hasRenderedFirstFrame -> "WAITING FOR FIRST FRAME"
+                        !playing -> "PAUSED"
+                        else -> "ACTIVE"
+                    }
+                    if (host.feed.player.playbackState == Player.STATE_READY && !host.feed.hasRenderedFirstFrame) {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (readySince == null) readySince = now
+                        if (now - requireNotNull(readySince) > 15_000L) throw IOException("Decoder was ready but did not render a first frame")
+                    } else readySince = null
+                    diagnostic()
+                    val log = "$phase decoder=${host.feed.activeVideoDecoderName} activeVideoDecoders=$observedActiveVideoDecoders firstFrame=${host.feed.hasRenderedFirstFrame}"
+                    if (log != previousLog) {
+                        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_PLAYBACK $log")
+                        previousLog = log
+                    }
+                    kotlinx.coroutines.delay(500L)
+                }
+            } catch (backend: app.apexview.tiled.ArchiveVodBackendRequired) {
+                useExistingBackend = true
+                android.util.Log.i("ApexviewSingleDecoder", "Archive requires existing DASH/protected composition backend; sources unchanged")
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                if (startup.sourceDecodersTouched) restore()
+                throw cancelled
+            } catch (error: Exception) {
+                failure = (error.message ?: error.javaClass.simpleName).replace(Regex("https?://\\S+"), "[URL]").take(400)
+                phase = "FAILED"
+                // Preserve the failure evidence before restore cancels this capture's ownership.
+                diagnostic()
+                if (startup.sourceDecodersTouched) restore()
+                message = "Single-decoder archive test failed: $failure"
+                android.util.Log.w("ApexviewSingleDecoder", "ARCHIVE_VOD_FAILED reason=$failure")
+            } finally {
+                if (f1DashCapture === capture) {
+                    capture.reset(); f1DashCapture = null; f1DashCaptureJob = null
+                }
+            }
+            if (useExistingBackend) startRollingArchiveSingleDecoderComposition(contentId)
+        }
+    }
+
+    /** Validate authorised archive media completely before changing any source decoder. */
+    private fun startRollingArchiveSingleDecoderComposition(contentId: Long) {
         val selectedTiles = tiles.filter { it.contentId == contentId }
         val previousLayout = layoutMode
         if (selectedTiles.size !in 2..4) {
@@ -1755,8 +1907,14 @@ class AppState(
         f1DashCaptureJob = null
         f1DashCapture?.reset()
         f1DashCapture = null
-        val resumePositionMs = protectedCompositionAudioMaster?.feed?.player?.currentPosition
-        if (restorePlayer) protectedCompositionHost?.feed?.stopProtectedComposedPlayback(resumePositionMs)
+        val native = nativeArchiveTiles
+        val resumePositionMs = if (native.isNotEmpty()) protectedCompositionHost?.feed?.player?.currentPosition
+            else protectedCompositionAudioMaster?.feed?.player?.currentPosition
+        if (restorePlayer) {
+            if (native.isNotEmpty()) native.forEach { it.feed.stopProtectedComposedPlayback(resumePositionMs, playing, enableVideo = false) }
+            else protectedCompositionHost?.feed?.stopProtectedComposedPlayback(resumePositionMs)
+        }
+        nativeArchiveTiles = emptyList()
         protectedCompositionAudioMaster = null
         composedArchiveOriginMs = null
         composedArchiveFillingBuffer = false
@@ -3334,6 +3492,11 @@ class AppState(
 
     /** Moves the audio to [tile]. Choosing a feed to listen to also ends Mute all. */
     fun setAudio(tile: Tile, byUser: Boolean = false) {
+        if (nativeArchiveTiles.isNotEmpty() && tile !== protectedCompositionHost) {
+            stopProtectedCompositionPresentation()
+            layoutMode = LayoutMode.GRID
+            message = "Normal playback restored for the selected audio feed."
+        }
         if (byUser) mutedAll = false
         tiles.forEach {
             it.audible = it === tile
@@ -3344,7 +3507,8 @@ class AppState(
     /** Silences every feed, keeping track of which one had the audio for when it's turned back on. */
     fun toggleMuteAll() {
         mutedAll = !mutedAll
-        tiles.forEach { it.feed.setAudible(it.audible && !mutedAll) }
+        if (nativeArchiveTiles.isNotEmpty()) protectedCompositionHost?.feed?.setAudible(!mutedAll)
+        else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll) }
         showChrome()
     }
 
@@ -3760,13 +3924,14 @@ class AppState(
 
     // Shared playback. The first tile leads; the others follow it.
 
-    private fun leaderTile() = protectedCompositionAudioMaster ?: tiles.firstOrNull()
+    private fun leaderTile() = if (nativeArchiveTiles.isNotEmpty()) protectedCompositionHost
+        else protectedCompositionAudioMaster ?: tiles.firstOrNull()
 
     fun togglePlay() {
         playing = !playing
         // In the pop-out, only the shown feed and the audio keep playing (see setPip).
         val shown = if (inPip) pipTile() else null
-        tiles.forEach { it.feed.player.playWhenReady = playing && (!inPip || it === shown || it.audible) }
+        tiles.filter { nativeArchiveTiles.isEmpty() || it === protectedCompositionHost }.forEach { it.feed.player.playWhenReady = playing && (!inPip || it === shown || it.audible) }
         showChrome()
     }
 
@@ -3882,7 +4047,7 @@ class AppState(
         val target = if (duration != null) targetMs.coerceIn(0L, duration) else targetMs.coerceAtLeast(0L)
         val shift = target - leader.feed.player.currentPosition
         // Every tile moves by the same amount, so their offsets from each other survive the seek.
-        tiles.forEach { it.feed.player.seekTo((it.feed.player.currentPosition + shift).coerceAtLeast(0L)) }
+        tiles.filter { nativeArchiveTiles.isEmpty() || it === protectedCompositionHost }.forEach { it.feed.player.seekTo((it.feed.player.currentPosition + shift).coerceAtLeast(0L)) }
         positionMs = target
         showChrome()
     }
@@ -3928,7 +4093,7 @@ class AppState(
             protectedCompositionHost?.feed?.syncComposedArchivePosition(leader.player.currentPosition - origin, playing && !composedArchiveFillingBuffer)
         }
         val leaderClock = leader.wallClockMs()
-        tiles.filter { it !== leaderTile && it !== protectedCompositionHost }.forEach { tile ->
+        tiles.filter { it !== leaderTile && it !== protectedCompositionHost && it !in nativeArchiveTiles }.forEach { tile ->
             val feed = tile.feed
             if (tile.contentId != leaderTile.contentId || feed.player.playbackState != Player.STATE_READY) {
                 feed.driftMs = null

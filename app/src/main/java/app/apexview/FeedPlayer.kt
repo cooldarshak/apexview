@@ -34,6 +34,9 @@ import androidx.media3.exoplayer.drm.UnsupportedDrmException
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
+import androidx.media3.exoplayer.source.FilteringMediaSource
+import androidx.media3.exoplayer.source.MergingMediaSource
+import app.apexview.tiled.HevcArchiveVodSession
 import app.apexview.tiled.CmafBoxInspector
 import app.apexview.tiled.CmafMetadataInspectingDataSource
 import app.apexview.tiled.ProtectedHevcLiveComposition
@@ -142,6 +145,13 @@ class FeedPlayer(
     private lateinit var originalMediaItem: MediaItem
     private lateinit var drmManager: DefaultDrmSessionManager
     private var protectedLiveDashSource: ProtectedHevcLiveDashSource? = null
+    private var archiveVodSession: HevcArchiveVodSession? = null
+    private lateinit var archiveAudioSources: DefaultMediaSourceFactory
+    internal val isArchiveVodPlayback: Boolean get() = archiveVodSession != null
+    internal var composedSurfaceWidth: Int = 0
+        private set
+    internal var composedSurfaceHeight: Int = 0
+        private set
     private var videoSuppressedByProtectedComposition = false
 
     private var state = "Starting"
@@ -157,15 +167,27 @@ class FeedPlayer(
         private set
     val activeVideoDecoderName: String? get() = decoder.takeIf { activeVideoDecoderCount > 0 && it.isNotBlank() }
     val hasRenderedFirstFrame: Boolean get() = firstFrameRendered
+    private var cachedHardwareDescription: Pair<String, String>? = null
+    internal val selectedVideoTrackCount: Int get() = player.currentTracks.groups.sumOf { group ->
+        if (group.type == C.TRACK_TYPE_VIDEO) (0 until group.mediaTrackGroup.length).count { group.isTrackSelected(it) } else 0
+    }
+    internal val renderedVideoFrames: Int get() {
+        val counters = player.videoDecoderCounters ?: return 0
+        counters.ensureUpdated()
+        return counters.renderedOutputBufferCount
+    }
     val activeVideoDecoderHardware: String get() = runCatching {
         val name = activeVideoDecoderName ?: return@runCatching "hardware UNVERIFIED"
+        cachedHardwareDescription?.takeIf { it.first == name }?.let { return@runCatching it.second }
         val info = android.media.MediaCodecList(android.media.MediaCodecList.ALL_CODECS).codecInfos
             .firstOrNull { it.name == name || it.name == name.removeSuffix(".secure") }
-        when (info?.isHardwareAccelerated) {
+        val description = when (info?.isHardwareAccelerated) {
             true -> "hardware YES"
             false -> "hardware NO"
             null -> "hardware UNVERIFIED"
         }
+        cachedHardwareDescription = name to description
+        description
     }.getOrDefault("hardware UNVERIFIED")
     private var speed = 1f
     private var lastDropped = 0
@@ -266,6 +288,7 @@ class FeedPlayer(
             http
         }
         val sources = DefaultMediaSourceFactory(mediaDataSourceFactory).setDrmSessionManagerProvider { drmManager }
+        archiveAudioSources = DefaultMediaSourceFactory(http).setDrmSessionManagerProvider { drmManager }
 
         // Starts once a second of picture is in rather than the default 2.5 (2 rather than 5 after
         // a stall): F1's chunks are almost 6 s each, so a feed starting mid-chunk otherwise waits
@@ -312,7 +335,9 @@ class FeedPlayer(
 
             override fun onPlayerError(e: PlaybackException) {
                 error = "${e.errorCodeName}: ${describe(e)}"
-                problem = explain(e)
+                val archiveFailure = generateSequence(e as Throwable) { it.cause }
+                    .filterIsInstance<app.apexview.tiled.ArchiveVodMediaException>().firstOrNull()
+                problem = archiveFailure?.reason ?: explain(e)
                 refresh()
             }
 
@@ -408,6 +433,12 @@ class FeedPlayer(
                     )
                 }
                 refresh()
+            }
+
+            override fun onSurfaceSizeChanged(eventTime: AnalyticsListener.EventTime, width: Int, height: Int) {
+                composedSurfaceWidth = width
+                composedSurfaceHeight = height
+                if (archiveVodSession != null) Log.i("ApexviewSingleDecoder", "ARCHIVE_SURFACE width=$width height=$height")
             }
 
             override fun onLoadCompleted(
@@ -555,6 +586,45 @@ class FeedPlayer(
         }
     }
 
+    /** One static composed video track plus native audio, on this same ExoPlayer and surface. */
+    internal fun startArchiveVodPlayback(session: HevcArchiveVodSession, positionMs: Long, playWhenReady: Boolean) {
+        val audioUri = requireNotNull(session.audioUri) { "Archive native audio was not validated" }
+        val video = DashMediaSource.Factory(session.dataSourceFactory()).setDrmSessionManagerProvider { drmManager }
+            .setLoadErrorHandlingPolicy(app.apexview.tiled.ArchiveVodLoadErrorPolicy())
+            .createMediaSource(MediaItem.Builder().setUri(HevcArchiveVodSession.MANIFEST_URI).setMimeType(MimeTypes.APPLICATION_MPD).build())
+        val audio = FilteringMediaSource(archiveAudioSources.createMediaSource(MediaItem.Builder().setUri(audioUri)
+            .setMimeType(MimeTypes.APPLICATION_M3U8).build()), C.TRACK_TYPE_AUDIO)
+        firstFrameRendered = false; error = null; problem = null
+        archiveVodSession?.close()
+        archiveVodSession = session
+        videoSuppressedByProtectedComposition = false
+        videoOn = true
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE).setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false).build()
+        player.setMediaSource(MergingMediaSource(true, true, video, audio), positionMs.coerceAtLeast(0))
+        player.playWhenReady = playWhenReady
+        player.prepare()
+    }
+
+    /** Drop the original loaders/audio as well as video once all source decoders are released. */
+    internal fun suspendForArchiveComposition() {
+        player.stop()
+        player.clearMediaItems()
+    }
+
+    /** Validate total picture size/rate, not the number of source feeds, before handoff. */
+    internal fun requireArchiveHardwareSupport(width: Int, height: Int, frameRate: Double): String {
+        val codec = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.firstOrNull { info ->
+            !info.isEncoder && info.isHardwareAccelerated && supportsF1VideoMimeType(info.supportedTypes) &&
+                runCatching {
+                    val caps = info.getCapabilitiesForType(F1_VIDEO_MIME_TYPE)
+                    !caps.isFeatureRequired(PlatformMediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback) &&
+                        caps.videoCapabilities.areSizeAndRateSupported(width, height, frameRate)
+                }.getOrDefault(false)
+        }
+        return requireNotNull(codec) { "No hardware HEVC decoder reports support for composed ${width}x$height at ${frameRate}fps" }.name
+    }
+
     /** The rolling composed window and the source archive do not share player positions. */
     internal fun syncComposedArchivePosition(relativeArchiveMs: Long, playing: Boolean) {
         if (protectedLiveDashSource == null || player.currentTimeline.isEmpty) return
@@ -598,7 +668,7 @@ class FeedPlayer(
             while (true) {
                 val counters = player.videoDecoderCounters
                 counters?.ensureUpdated()
-                if (counters == null || counters.decoderReleaseCount >= counters.decoderInitCount) {
+                if (activeVideoDecoderCount == 0 && (counters == null || counters.decoderReleaseCount >= counters.decoderInitCount)) {
                     return@withTimeoutOrNull true
                 }
                 kotlinx.coroutines.delay(25L)
@@ -614,9 +684,12 @@ class FeedPlayer(
     }
 
     /** Restores this player's original feed and releases its bounded composed-media window. */
-    fun stopProtectedComposedPlayback(positionMs: Long? = null) {
+    fun stopProtectedComposedPlayback(positionMs: Long? = null, playWhenReady: Boolean = true, enableVideo: Boolean = initialVideoEnabled) {
         protectedLiveDashSource?.release()
         protectedLiveDashSource = null
+        archiveVodSession?.close()
+        archiveVodSession = null
+        firstFrameRendered = false; error = null; problem = null
         videoSuppressedByProtectedComposition = false
         val restorePositionMs = positionMs?.coerceAtLeast(0L)
             ?: initialStartPositionMs.takeIf { it != C.TIME_UNSET }
@@ -625,11 +698,12 @@ class FeedPlayer(
         } else {
             player.setMediaItem(originalMediaItem, restorePositionMs)
         }
-        videoOn = initialVideoEnabled
+        videoOn = enableVideo
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !initialVideoEnabled)
+            .setMaxVideoSize(selectedVideoQuality.maxWidth, selectedVideoQuality.maxHeight)
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enableVideo)
             .build()
-        player.playWhenReady = true
+        player.playWhenReady = playWhenReady
         player.prepare()
     }
 
@@ -721,6 +795,8 @@ class FeedPlayer(
     }
 
     fun release() {
+        archiveVodSession?.close()
+        archiveVodSession = null
         protectedLiveDashSource?.release()
         protectedLiveDashSource = null
         player.release()

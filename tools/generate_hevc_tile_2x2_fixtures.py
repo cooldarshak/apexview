@@ -34,7 +34,7 @@ def main():
             "-frames:v", str(base.FRAME_COUNT), "-pix_fmt", "yuv420p",
             "-f", "rawvideo", str(source_yuv)
         ])
-        base.run([
+        encoder_args = [
             "kvazaar",
             "--input", str(source_yuv),
             "--input-res", f"{base.FRAME_WIDTH}x{base.FRAME_HEIGHT}",
@@ -46,7 +46,14 @@ def main():
             "--no-open-gop", "--tiles", "2x2", "--slices", "tiles",
             "--no-wpp", "--mv-constraint", "frametilemargin",
             "--threads", "1", "--no-info", "--no-psnr"
-        ])
+        ]
+        base.run(encoder_args)
+        # A separate full-picture, motion-constrained tiled source exercises the native VOD
+        # adapter without changing the existing protected/tile-splitting fixtures.
+        vod_args = list(encoder_args)
+        vod_args[vod_args.index("--output") + 1] = str(output / "source_vod_tiled_2x2.hevc")
+        vod_args += ["--no-tmvp"]
+        base.run(vod_args)
         nals = base.annexb_nals(source.read_bytes())
         parameter_sets, frames = base.split_into_picture_access_units(nals, expected_tile_slices=4)
 

@@ -23,7 +23,7 @@ import kotlin.coroutines.coroutineContext
 
 /** Reads the HLS/CMAF actually supplied by player_tm, without another PLAY or media player. */
 internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximumHeight: Int = 2160) {
-    private data class Offer(val feed: F1DashFeedCapture.Feed, val uri: Uri, val format: Format?, val master: HlsMultivariantPlaylist?)
+    private data class Offer(val feed: F1DashFeedCapture.Feed, val uri: Uri, val format: Format?, val master: HlsMultivariantPlaylist?, val audioGroupId: String? = null)
     private class Init(val uri: Uri, val offset: Long, val length: Long, val bytes: ByteArray, val report: CmafBoxInspector.Report)
     private val reader = CmafHttpReader(factory)
     private val offers = mutableMapOf<String, List<Offer>>()
@@ -36,6 +36,75 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     private var pssh: ByteArray? = null
     var clearOutput: Boolean? = null
         private set
+
+    /** Prepare one fixed replay segment and a full VOD timeline. No player/PLAY session is opened. */
+    suspend fun prepareVod(
+        feeds: List<F1DashFeedCapture.Feed>, positionMs: Long, clockLabel: String,
+        preferredHeight: Int = if (feeds.size > 2) 540 else 720,
+        commentary: String? = null,
+    ): HevcArchiveVodSession {
+        var acquired: HevcArchiveVodSession? = null
+        try { return withContext(Dispatchers.IO) {
+            require(feeds.size in 2..4 && feeds.map { it.label }.distinct().size == feeds.size)
+            val selected = chooseCommon(feeds.map { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }, preferredHeight, feeds.size)
+            val playlists = coroutineScope { selected.map { offer -> async { loadMedia(offer) } }.awaitAll() }
+            require(playlists.all { it.hasEndTag && it.segments.isNotEmpty() }) { "Archive VOD requires complete HLS replay playlists" }
+            playlists.forEach { playlist ->
+                require(playlist.segments.none { it.fullSegmentEncryptionKeyUri != null || it.initializationSegment?.fullSegmentEncryptionKeyUri != null }) {
+                    "HLS AES-128 full-segment encryption is unsupported; no key is requested"
+                }
+                val firstMap = requireNotNull(playlist.segments.first().initializationSegment) { "HLS archive has no CMAF initialization" }
+                require(playlist.segments.all { segment -> segment.initializationSegment?.let {
+                    it.url == firstMap.url && it.byteRangeOffset == firstMap.byteRangeOffset && it.byteRangeLength == firstMap.byteRangeLength
+                } == true && segment.relativeDiscontinuitySequence == 0 && !segment.hasGapTag }) {
+                    "Archive changes CMAF initialization, crosses a discontinuity or contains a gap"
+                }
+            }
+            val inits = selected.mapIndexed { i, offer -> loadInit(offer, playlists[i].segments.first()) }
+            val tracks = inits.map { it.report.tracks.singleOrNull { track -> track.handler == "vide" }
+                ?: throw PermanentCaptureException("HLS archive must contain one video track") }
+            if (tracks.any { it.encrypted }) throw ProtectedArchiveBackendRequired()
+            require(tracks.all { it.hevcConfiguration != null }) { "No compatible HEVC CMAF representation" }
+            require(playlists.none { it.tags.any { tag -> tag.startsWith("#EXT-X-KEY:") && !tag.contains("METHOD=NONE") } }) {
+                "HLS declares protection but the selected CMAF track is clear"
+            }
+            val audioIndex = selected.indexOfFirst { it.feed.label == clockLabel }.coerceAtLeast(0)
+            val audioOffer = selected[audioIndex]
+            val audio = audioOffer.master?.audios.orEmpty().filter { it.url != null &&
+                (audioOffer.audioGroupId == null || it.groupId == audioOffer.audioGroupId) }
+                .sortedWith(compareByDescending<HlsMultivariantPlaylist.Rendition> { it.format.language == commentary }
+                    .thenByDescending { (it.format.selectionFlags and C.SELECTION_FLAG_DEFAULT) != 0 }).firstOrNull()?.url
+            if (commentary != null) {
+                requireNotNull(audio) { "Selected archive offer has no separate native HLS audio rendition" }
+                val audioPlaylist = parse(audio, audioOffer.master) as? HlsMediaPlaylist
+                    ?: throw PermanentCaptureException("Archive audio rendition is not a media playlist")
+                val clock = playlists[audioIndex]
+                require(audioPlaylist.hasEndTag && audioPlaylist.segments.isNotEmpty() &&
+                    kotlin.math.abs(audioPlaylist.durationUs - clock.durationUs) <= clock.targetDurationUs &&
+                    (!audioPlaylist.hasProgramDateTime || !clock.hasProgramDateTime ||
+                        kotlin.math.abs(audioPlaylist.startTimeUs - clock.startTimeUs) <= 250_000L)) {
+                    "Archive native audio and composed video timelines are incompatible"
+                }
+            }
+            var session: HevcArchiveVodSession? = null
+            val owned = selected.mapIndexed { i, offer -> HevcArchiveVodSession.Input(offer.feed.label, playlists[i], offer.format,
+                inits[i].bytes.copyOf(), inits[i].report) }
+            try {
+                session = HevcArchiveVodSession(reader, owned, clockLabel, audioUri = audio)
+                session.prepare(positionMs)
+                coroutineContext.ensureActive()
+                acquired = session
+                session
+            } catch (error: Throwable) {
+                session?.close() ?: owned.forEach { it.initialization.fill(0) }
+                throw error
+            }
+        } } catch (error: Throwable) {
+            // withContext may cancel while dispatching the resource back to the caller.
+            acquired?.close()
+            throw error
+        }
+    }
 
     suspend fun captureAtPosition(group: String, feeds: List<F1DashFeedCapture.Feed>, positionMs: Long): F1DashFeedCapture.Snapshot = withContext(Dispatchers.IO) {
         var format: Format? = null
@@ -152,6 +221,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     private fun parse(uri: Uri, master: HlsMultivariantPlaylist? = null): HlsPlaylist {
         val response = reader.read(uri, MAX_MANIFEST_BYTES)
         try {
+            if (ManifestProtocol.fromBody(response.bytes) == ManifestProtocol.DASH) throw ArchiveVodBackendRequired("DASH offer uses the existing CMAF/Widevine backend")
             if (ManifestProtocol.fromBody(response.bytes) != ManifestProtocol.HLS) throw PermanentCaptureException("Expected a real HLS playlist response")
             return (if (master == null) HlsPlaylistParser() else HlsPlaylistParser(master, null))
                 .parse(response.uri, ByteArrayInputStream(response.bytes))
@@ -166,7 +236,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             is HlsMultivariantPlaylist -> playlist.variants.filter {
                 it.format.codecs?.split(',')?.any { codec -> codec.trim().startsWith("hvc1") || codec.trim().startsWith("hev1") } == true &&
                     it.format.height in 1..maximumHeight
-            }.map { Offer(feed, it.url, it.format, playlist) }.ifEmpty { throw PermanentCaptureException("${feed.label}: HLS offers no supported HEVC variant") }
+            }.map { Offer(feed, it.url, it.format, playlist, it.audioGroupId) }.ifEmpty { throw PermanentCaptureException("${feed.label}: HLS offers no supported HEVC variant") }
             is HlsMediaPlaylist -> {
                 if (playlist.hasEndTag) vodPlaylists[feed.label] = playlist
                 listOf(Offer(feed, Uri.parse(playlist.baseUri), null, null))
@@ -175,12 +245,17 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         }
     }
 
-    private fun chooseCommon(perFeed: List<List<Offer>>): List<Offer> {
+    private fun chooseCommon(perFeed: List<List<Offer>>, preferredHeight: Int? = null, feedCount: Int = perFeed.size): List<Offer> {
         // A direct media playlist has no rendition declarations; hvcC validates it later.
         val declared = perFeed.filter { list -> list.any { it.format != null } }
         if (declared.isEmpty()) return perFeed.map { it.first() }
         val common = declared.map { list -> list.map { it.format!!.width to it.format.height }.toSet() }.reduce { a, b -> a intersect b }
-        val size = common.maxWithOrNull(compareBy<Pair<Int, Int>> { it.second }.thenBy { it.first })
+        val legal = common.filter { preferredHeight == null || it.first.toLong() * feedCount <= 4096L }
+        val sizes = if (preferredHeight == null) legal else legal.filter { it.second <= preferredHeight }.ifEmpty {
+            // Use only representations actually offered by F1, including a larger minimum rung.
+            legal.minByOrNull { it.second }?.let(::listOf).orEmpty()
+        }
+        val size = sizes.maxWithOrNull(compareBy<Pair<Int, Int>> { it.second }.thenBy { it.first })
             ?: throw PermanentCaptureException("HLS feeds have no common HEVC rendition")
         return perFeed.map { list -> list.filter { it.format == null || it.format.width == size.first && it.format.height == size.second }
             .maxByOrNull { it.format?.bitrate ?: 0 } ?: throw PermanentCaptureException("HLS common HEVC rendition unavailable") }

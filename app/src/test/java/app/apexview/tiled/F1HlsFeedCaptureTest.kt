@@ -20,12 +20,14 @@ import java.nio.ByteBuffer
 class F1HlsFeedCaptureTest {
     private class Network(val files: Map<String, ByteArray>) {
         val requested = java.util.Collections.synchronizedList(mutableListOf<String>())
+        var beforeOpen: ((DataSpec) -> Unit)? = null
         val factory = DataSource.Factory {
             object : DataSource {
                 private var delegate: ByteArrayDataSource? = null
                 override fun addTransferListener(listener: TransferListener) {}
                 override fun open(spec: DataSpec): Long {
                     requested += spec.uri.toString()
+                    beforeOpen?.invoke(spec)
                     delegate = ByteArrayDataSource(files[spec.uri.toString()] ?: error("Unexpected media request"))
                     return delegate!!.open(spec)
                 }
@@ -188,7 +190,7 @@ seg.m4s
         val files = original.files.toMutableMap()
         for (i in 0..1) {
             val uri = "https://media.test/f$i/video.m3u8"
-            files[uri] = files.getValue(uri).toString(Charsets.UTF_8).replace("#EXTINF:1,",
+            files[uri] = files.getValue(uri).toString(Charsets.UTF_8).replace("#EXTINF:1.0,",
                 "#EXT-X-PROGRAM-DATE-TIME:2026-11-16T00:00:00.${if (i == 0) "000" else "300"}Z\n#EXTINF:1,")
                 .toByteArray()
         }
@@ -209,6 +211,225 @@ seg.m4s
         val output = capture.outputWindow("hls-defaults")!!
         assertEquals(25, output.fragments.single().sampleCount)
         output.zero(); capture.reset()
+    }
+
+    @Test fun nativeVodHasOneFiniteVideoTrackAndSupportsNonSequentialReads() = runBlocking {
+        val network = network(2, 1_700_000_000L * 90_000L)
+        val capture = F1HlsFeedCapture(network.factory)
+        val session = capture.prepareVod(feeds(2), 1100, "channel-0")
+        try {
+            val manifest = androidx.media3.exoplayer.dash.manifest.DashManifestParser().parse(
+                HevcArchiveVodSession.MANIFEST_URI, session.manifest().inputStream())
+            assertFalse(manifest.dynamic)
+            assertEquals(2000L, manifest.durationMs)
+            assertEquals(1, manifest.getPeriod(0).adaptationSets.size)
+            assertEquals(1, manifest.getPeriod(0).adaptationSets.single().representations.size)
+            assertEquals(2, session.segmentCount)
+            assertEquals(0, session.segmentAt(999_999))
+            assertEquals(1, session.segmentAt(1_000_000))
+            val init = session.initialization()
+            val report = CmafBoxInspector.inspect(init)
+            assertEquals(1, report.tracks.size)
+            assertFalse(report.tracks.single().encrypted)
+            for (number in listOf(1, 0, 1)) {
+                val bytes = session.segment(number)
+                val fragment = CmafBoxInspector.inspect(bytes, report).fragments.single()
+                assertEquals(25, fragment.sampleCount)
+                assertEquals(1_700_000_000L * 90_000L + number * 90_000L, fragment.baseDecodeTimeTicks)
+                bytes.fill(0)
+            }
+            assertFalse(session.manifest().toString(Charsets.UTF_8).contains("ContentProtection"))
+            init.fill(0)
+        } finally { session.close(); capture.reset() }
+        assertTrue(network.requested.none { it.contains("CONTENT/PLAY") || it.contains("license") || it.endsWith(".key") })
+    }
+
+    @Test fun fixedProbeDoesNotChaseAnAdvancingSourceClock() = runBlocking {
+        val network = network(3)
+        val clockMs = java.util.concurrent.atomic.AtomicLong(100)
+        network.beforeOpen = { spec -> if (spec.uri.toString().endsWith(".m4s")) clockMs.addAndGet(10_000) }
+        val capture = F1HlsFeedCapture(network.factory)
+        val session = capture.prepareVod(feeds(3), clockMs.get(), "channel-0")
+        try {
+            assertTrue(clockMs.get() > 2_000)
+            assertEquals(3, network.requested.count { it.endsWith("s0.m4s") })
+            assertTrue(network.requested.none { it.endsWith("s1.m4s") })
+            assertEquals(2880, session.width)
+            assertEquals(540, session.height)
+        } finally { session.close(); capture.reset() }
+    }
+
+    @Test fun sourceReadsRunInParallelWithABoundedTwoRequestLimit() = runBlocking {
+        val network = network(4)
+        val latch = java.util.concurrent.CountDownLatch(2)
+        val inFlight = java.util.concurrent.atomic.AtomicInteger()
+        val peak = java.util.concurrent.atomic.AtomicInteger()
+        network.beforeOpen = { spec ->
+            if (spec.uri.toString().endsWith(".m4s")) {
+                val current = inFlight.incrementAndGet()
+                peak.updateAndGet { maxOf(it, current) }
+                latch.countDown()
+                try { assertTrue("Two source reads must overlap", latch.await(4, java.util.concurrent.TimeUnit.SECONDS)) }
+                finally { inFlight.decrementAndGet() }
+            }
+        }
+        val capture = F1HlsFeedCapture(network.factory)
+        val session = capture.prepareVod(feeds(4), 0, "channel-0")
+        try { assertEquals(2, peak.get()); assertEquals(4, network.requested.count { it.endsWith(".m4s") }) }
+        finally { session.close(); capture.reset() }
+    }
+
+    @Test fun choosesCommon540RungInsteadOfHighestAvailable1080ForThreeFeeds() = runBlocking {
+        val original = network(3)
+        val files = original.files.mapValues { (uri, bytes) -> if (uri.endsWith("master.m3u8")) {
+            bytes.toString(Charsets.UTF_8).replace("#EXTM3U\n", "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"hvc1.1.6.L123.B0\",RESOLUTION=1920x1080\nhigh.m3u8\n").toByteArray()
+        } else bytes }
+        val network = Network(files)
+        val capture = F1HlsFeedCapture(network.factory)
+        val session = capture.prepareVod(feeds(3), 0, "channel-0")
+        try { assertEquals(540, session.selectedHeight); assertTrue(network.requested.none { it.contains("high.m3u8") }) }
+        finally { session.close(); capture.reset() }
+    }
+
+    @Test fun unavailableLegalRenditionFailsBeforeSourceDecoderRelease() = runBlocking {
+        val original = network(4)
+        val files = original.files.mapValues { (uri, bytes) -> if (uri.endsWith("master.m3u8"))
+            bytes.toString(Charsets.UTF_8).replace("960x540", "1920x1080").toByteArray() else bytes }
+        val network = Network(files)
+        var released = false
+        val capture = F1HlsFeedCapture(network.factory)
+        try {
+            ArchiveCompositionStartup().start(
+                preflight = { capture.prepareVod(feeds(4), 0, "channel-0") },
+                releaseSources = { released = true }, replaceHost = { fail("No legal rendition") },
+                restoreSources = { fail("Sources must be unchanged") }, dispose = { it.close() })
+            fail("Expected rendition rejection")
+        } catch (expected: PermanentCaptureException) {
+            assertTrue(expected.message.orEmpty().contains("common HEVC rendition"))
+        } finally { capture.reset() }
+        assertFalse(released)
+        assertTrue(network.requested.all { it.endsWith("master.m3u8") })
+    }
+
+    @Test fun nativeAudioIsSelectedFromTheSameAuthorizedOfferWithoutReadingVideoTwice() = runBlocking {
+        val original = network(2)
+        val files = original.files.toMutableMap()
+        for (i in 0..1) {
+            val uri = "https://media.test/f$i/master.m3u8"
+            files[uri] = files.getValue(uri).toString(Charsets.UTF_8).replace("#EXTM3U\n", "#EXTM3U\n" +
+                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"French\",LANGUAGE=\"fr\",URI=\"fr.m3u8\"\n" +
+                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"English\",LANGUAGE=\"en\",URI=\"en.m3u8\"\n")
+                .replace("BANDWIDTH=1000000,", "BANDWIDTH=1000000,AUDIO=\"audio\",").toByteArray()
+            files["https://media.test/f$i/en.m3u8"] = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\na0.aac\n#EXTINF:1,\na1.aac\n#EXT-X-ENDLIST\n".toByteArray()
+        }
+        val network = Network(files)
+        val capture = F1HlsFeedCapture(network.factory)
+        val session = capture.prepareVod(feeds(2), 0, "channel-1", commentary = "en")
+        try {
+            assertEquals("https://media.test/f1/en.m3u8", session.audioUri.toString())
+            assertTrue(network.requested.none { it.endsWith("fr.m3u8") || it.endsWith(".aac") || it.contains("CONTENT/PLAY") })
+        } finally { session.close(); capture.reset() }
+    }
+
+    @Test fun unavailableNativeAudioPreservesNormalPlayback() = runBlocking {
+        val network = network(2)
+        val capture = F1HlsFeedCapture(network.factory)
+        var released = false
+        try {
+            ArchiveCompositionStartup().start(preflight = { capture.prepareVod(feeds(2), 0, "channel-0", commentary = "en") },
+                releaseSources = { released = true }, replaceHost = { fail("Missing audio") },
+                restoreSources = { fail("Sources must remain playing") }, dispose = { it.close() })
+            fail("Expected missing audio")
+        } catch (expected: IllegalArgumentException) { assertTrue(expected.message.orEmpty().contains("audio rendition")) }
+        finally { capture.reset() }
+        assertFalse(released)
+        assertTrue(network.requested.none { it.endsWith(".m4s") })
+    }
+
+    @Test fun nativeVodRejectsDeclaredProtectionOnClearTracksBeforeReadingMedia() = runBlocking {
+        val original = network(2)
+        val files = original.files.mapValues { (uri, bytes) -> if (uri.endsWith("video.m3u8"))
+            bytes.toString(Charsets.UTF_8).replace("#EXT-X-MAP:", "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"skd://not-a-key-request\",KEYFORMAT=\"com.apple.streamingkeydelivery\"\n#EXT-X-MAP:").toByteArray() else bytes }
+        val network = Network(files)
+        val capture = F1HlsFeedCapture(network.factory)
+        try { capture.prepareVod(feeds(2), 0, "channel-0"); fail("Protection cannot be discarded") }
+        catch (expected: IllegalArgumentException) { assertTrue(expected.message.orEmpty().contains("declares protection")) }
+        finally { capture.reset() }
+        assertTrue(network.requested.none { it.endsWith(".m4s") || it.contains("not-a-key") })
+    }
+
+    @Test fun midGopProbeFailsBeforeReleaseInsteadOfAdvertisingAnUndecodableSeekPoint() = runBlocking {
+        val network = network(2, samplesPerFragment = 10)
+        val capture = F1HlsFeedCapture(network.factory)
+        var released = false
+        try {
+            ArchiveCompositionStartup().start(preflight = { capture.prepareVod(feeds(2), 600, "channel-0") },
+                releaseSources = { released = true }, replaceHost = { fail("Missing decoder reference pictures") },
+                restoreSources = { fail("Sources must remain playing") }, dispose = { it.close() })
+            fail("Expected random-access rejection")
+        } catch (expected: java.io.IOException) { assertTrue(expected.message.orEmpty().contains("mid-GOP")) }
+        finally { capture.reset() }
+        assertFalse(released)
+        assertEquals(2, network.requested.count { it.endsWith("s1.m4s") })
+    }
+
+    @Test fun nativeVodExposesFiniteResourcesAndCannotReadAfterClose() = runBlocking {
+        val capture = F1HlsFeedCapture(network(2).factory)
+        val session = capture.prepareVod(feeds(2), 0, "channel-0")
+        val manifest = session.manifest()
+        val source = session.dataSourceFactory().createDataSource()
+        try {
+            assertEquals(16L, source.open(DataSpec.Builder().setUri(HevcArchiveVodSession.MANIFEST_URI).setPosition(5).setLength(16).build()))
+            val bytes = ByteArray(16)
+            assertEquals(16, source.read(bytes, 0, bytes.size))
+            assertArrayEquals(manifest.copyOfRange(5, 21), bytes)
+            assertEquals(androidx.media3.common.C.RESULT_END_OF_INPUT, source.read(bytes, 0, bytes.size))
+        } finally { source.close(); session.close(); capture.reset() }
+        try { session.initialization(); fail("Closed session must not expose retained media") } catch (_: java.io.IOException) {}
+    }
+
+    @Test fun nativeVodOutputIsStagedForIndependentFfmpegPixelComparison() = runBlocking {
+        for (count in 2..4) {
+            val capture = F1HlsFeedCapture(network(count).factory)
+            val session = capture.prepareVod(feeds(count), 0, "channel-0")
+            try {
+                val evidence = System.getenv("APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR")?.let(::File)
+                if (evidence != null) {
+                    evidence.mkdirs()
+                    File(evidence, "native_vod_${count}_feeds.mp4").outputStream().use { output ->
+                        output.write(session.initialization())
+                        for (number in 0 until session.segmentCount) output.write(session.segment(number))
+                    }
+                    File(evidence, "native_vod_${count}_feeds.mpd").writeBytes(session.manifest())
+                }
+                assertEquals(960 * count, session.width)
+                assertEquals(540, session.height)
+            } finally { session.close(); capture.reset() }
+        }
+    }
+
+    @Test fun tiledSourcePreservesEveryTileOfBothFullFeeds() = runBlocking {
+        val tileDir = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")?.let(::File)
+        assumeTrue("Tiled VOD fixture is not configured", tileDir != null)
+        val source = File(tileDir!!, "source_vod_tiled_2x2.hevc")
+        assertTrue(source.isFile)
+        val capture = F1HlsFeedCapture(network(2, samplesPerFragment = 50, annexBFile = source).factory)
+        val session = capture.prepareVod(feeds(2), 0, "channel-0")
+        try {
+            val report = CmafBoxInspector.inspect(session.initialization())
+            val config = report.tracks.single().hevcConfiguration!!
+            assertEquals(4, config.pps.single().numTileColumns)
+            assertEquals(2, config.pps.single().numTileRows)
+            assertEquals(512, session.width)
+            assertEquals(128, session.height)
+            val evidence = System.getenv("APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR")?.let(::File)
+            if (evidence != null) {
+                File(evidence, "native_vod_full_tiled_feeds.mp4").outputStream().use { output ->
+                    output.write(session.initialization())
+                    for (number in 0 until session.segmentCount) output.write(session.segment(number))
+                }
+            }
+        } finally { session.close(); capture.reset() }
     }
 
     private fun compactFragment(bytes: ByteArray): ByteArray {
@@ -255,12 +476,12 @@ seg.m4s
 
     private fun feeds(count: Int) = (0 until count).map { F1DashFeedCapture.Feed("channel-$it", "https://media.test/f$it/master.m3u8") }
 
-    private fun network(count: Int, decodeOffsetTicks: Long = 0): Network {
+    private fun network(count: Int, decodeOffsetTicks: Long = 0, samplesPerFragment: Int = 25, annexBFile: File? = null): Network {
         val dir = System.getenv("APEXVIEW_HEVC_FIXTURE_DIR")?.let(::File)
         assumeTrue("Independent HEVC source fixtures are not configured", dir != null)
         val files = mutableMapOf<String, ByteArray>()
         for (i in 0 until count) {
-            val nals = HevcBitstream.splitAnnexB(File(dir!!, if (i % 2 == 0) "feed_a.hevc" else "feed_b.hevc").readBytes())
+            val nals = HevcBitstream.splitAnnexB((annexBFile ?: File(dir!!, if (i % 2 == 0) "feed_a.hevc" else "feed_b.hevc")).readBytes())
             val init = HevcClearCmafInitSegmentWriter.writeSource(i + 1L, 90_000,
                 nals.first { it.type == 32 }.bytes, nals.first { it.type == 33 }.bytes, nals.first { it.type == 34 }.bytes)
             val pictures = mutableListOf<MutableList<ByteArray>>()
@@ -274,12 +495,15 @@ seg.m4s
                 HevcClearCmafFragmentWriter.Sample(bytes.toByteArray(), 3600, 0,
                     if (HevcBitstream.parseNalHeader(picture.first()).type in 16..23) 0x02000000L else 0x01010000L)
             }
-            files["https://media.test/f$i/master.m3u8"] = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"hvc1.1.6.L93.B0\",RESOLUTION=960x540\nvideo.m3u8\n".toByteArray()
-            files["https://media.test/f$i/video.m3u8"] = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\ns0.m4s\n#EXTINF:1,\ns1.m4s\n#EXT-X-ENDLIST\n".toByteArray()
+            val sourceSps = HevcParameterSets.parseSps(nals.first { it.type == 33 }.bytes)
+            files["https://media.test/f$i/master.m3u8"] = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"hvc1.1.6.L93.B0\",RESOLUTION=${sourceSps.displayWidth}x${sourceSps.displayHeight}\nvideo.m3u8\n".toByteArray()
+            val chunks = samples.chunked(samplesPerFragment)
+            files["https://media.test/f$i/video.m3u8"] = ("#EXTM3U\n#EXT-X-TARGETDURATION:${kotlin.math.ceil(samplesPerFragment * 0.04).toInt()}\n#EXT-X-MAP:URI=\"init.mp4\"\n" +
+                chunks.mapIndexed { index, chunk -> "#EXTINF:${chunk.size * 0.04},\ns$index.m4s\n" }.joinToString("") + "#EXT-X-ENDLIST\n").toByteArray()
             files["https://media.test/f$i/init.mp4"] = init
-            samples.chunked(25).forEachIndexed { index, chunk ->
+            chunks.forEachIndexed { index, chunk ->
                 files["https://media.test/f$i/s$index.m4s"] = HevcClearCmafFragmentWriter.write(i + 1L,
-                    index + 1L, decodeOffsetTicks + index * 90_000L, chunk, false, false)
+                    index + 1L, decodeOffsetTicks + index * samplesPerFragment * 3600L, chunk, false, false)
             }
         }
         return Network(files)

@@ -901,7 +901,7 @@ private fun TileView(app: AppState, tile: Tile) {
         // A single L3 feed uses SurfaceView so Android can compose video independently of
         // the timing/map overlays. Multiple L3 feeds retain TextureView for correct tile overlap
         // and z-order. L1 always uses SurfaceView for secure output.
-        val textureView = useTextureViewForFeed(tile.feed.usesSoftwareDrm, app.tiles.size)
+        val textureView = useTextureViewForFeed(tile.feed.usesSoftwareDrm, app.tiles.count { !it.protectedCompositionHidden })
         key(tile.id, textureView) {
             AndroidView(
                 factory = { context ->
