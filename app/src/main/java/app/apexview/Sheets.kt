@@ -342,6 +342,12 @@ fun SettingsScreen(app: AppState) {
             }
         }
         item {
+            Group("Diagnostics", footer = "Records app and playback logs to Download/Pitwall while the app runs. Files rotate at 5 MB. Full system logs require ADB. Logs stay on this device.") {
+                SwitchRow("Enable diagnostic logs", s.diagnosticLogging, s::updateDiagnosticLogging)
+                SettingRow("Log status", DiagnosticLogs.status)
+            }
+        }
+        item {
             Group("Updates", footer = "Apexview checks for a new version each time it opens.") {
                 SettingRow("Check for updates", onClick = app.updater::checkNow)
             }

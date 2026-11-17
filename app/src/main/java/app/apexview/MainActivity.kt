@@ -71,6 +71,7 @@ class MainActivity : FragmentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        DiagnosticLogs.startIfEnabled(applicationContext)
         CrashReports.install(applicationContext)
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)

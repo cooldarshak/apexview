@@ -30,7 +30,16 @@ internal fun isTvDevice(context: Context): Boolean =
 
 /** Choices that live one level down, in Settings, and survive restarts. */
 class Settings(context: Context) {
+    private val appContext = context.applicationContext
     private val prefs = context.getSharedPreferences("f1mv", Context.MODE_PRIVATE)
+
+    var diagnosticLogging by mutableStateOf(DiagnosticLogs.isEnabled(appContext))
+        private set
+
+    fun updateDiagnosticLogging(value: Boolean) {
+        diagnosticLogging = value
+        DiagnosticLogs.setEnabled(appContext, value)
+    }
 
     /** Which F1 TV player the app asks streams for. The web one is the tested default. */
     var platform by mutableStateOf(prefs.getString("platform", "WEB_DASH") ?: "WEB_DASH")
