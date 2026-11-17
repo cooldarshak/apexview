@@ -417,6 +417,7 @@ class AppState(
         private set
     internal var stopExternalDisplay: () -> Unit = {}
     private var externalRequestDeadline = 0L
+    internal fun reportExternalDisplayStatus(text: String) { message = text }
     internal fun setExternalDisplay(active: Boolean, name: String = externalDisplayName) {
         externalDisplayActive = active; externalDisplayName = name
     }

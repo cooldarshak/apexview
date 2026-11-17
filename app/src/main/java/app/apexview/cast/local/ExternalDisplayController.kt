@@ -71,16 +71,16 @@ internal class ExternalDisplayController(private val activity: FragmentActivity,
             Log.i("PitwallMiracast", "EXTERNAL_DISPLAY id=${display.displayId} name=${display.name} size=${display.mode.physicalWidth}x${display.mode.physicalHeight} flags=${display.flags}")
         }
         if (min(display.mode.physicalWidth, display.mode.physicalHeight) < 720) {
-            app.message = "The wireless display exposes less than 720p. Choose an HD display mode in Smart View or use the Pitwall TV receiver."
+            app.reportExternalDisplayStatus("The wireless display exposes less than 720p. Choose an HD display mode in Smart View or use the Pitwall TV receiver.")
             return
         }
         val protectedVideo = app.tiles.any { it.feed.sourceStream.licenseUrl != null && !it.feed.usesSoftwareDrm }
         if (protectedVideo && !supportsProtectedDisplay(display.flags)) {
-            app.message = "This wireless display does not advertise protected video support. Use the signed-in Pitwall TV receiver."
+            app.reportExternalDisplayStatus("This wireless display does not advertise protected video support. Use the signed-in Pitwall TV receiver.")
             return
         }
         if (!app.externalDisplayQualityReady()) {
-            app.message = "Preparing at least 720p source feeds for the wireless display…"
+            app.reportExternalDisplayStatus("Preparing at least 720p source feeds for the wireless display…")
             return
         }
         // Remove phone video views before attaching those same players to the Presentation.
@@ -90,10 +90,10 @@ internal class ExternalDisplayController(private val activity: FragmentActivity,
             presentation = next
             next.setOnDismissListener { if (presentation === next) { presentation = null; app.setExternalDisplay(false) } }
             next.show()
-            app.message = "Video moved to ${display.name}. This phone controls playback. Miracast encoding quality is negotiated by the devices."
+            app.reportExternalDisplayStatus("Video moved to ${display.name}. This phone controls playback. Miracast encoding quality is negotiated by the devices.")
         } catch (error: WindowManager.InvalidDisplayException) {
             presentation = null; app.setExternalDisplay(false)
-            app.message = "Android could not open a separate wireless display. Use normal screen mirroring or the Pitwall TV receiver."
+            app.reportExternalDisplayStatus("Android could not open a separate wireless display. Use normal screen mirroring or the Pitwall TV receiver.")
             Log.w("PitwallMiracast", "PRESENTATION_REJECTED ${error.javaClass.simpleName}")
         }
     }
