@@ -54,6 +54,18 @@ def main():
         vod_args[vod_args.index("--output") + 1] = str(output / "source_vod_tiled_2x2.hevc")
         vod_args += ["--no-tmvp"]
         base.run(vod_args)
+        # A different full-picture source with the same coding settings lets the multi-row
+        # verification detect accidentally swapped feeds, not just duplicated pixels.
+        alternate_yuv = Path(temporary) / "alternate.yuv"
+        base.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+            f"testsrc=size={base.FRAME_WIDTH}x{base.FRAME_HEIGHT}:rate={base.FRAME_RATE}",
+            "-frames:v", str(base.FRAME_COUNT), "-pix_fmt", "yuv420p", "-f", "rawvideo", str(alternate_yuv)
+        ])
+        alternate_args = list(vod_args)
+        alternate_args[alternate_args.index("--input") + 1] = str(alternate_yuv)
+        alternate_args[alternate_args.index("--output") + 1] = str(output / "source_vod_alt_tiled_2x2.hevc")
+        base.run(alternate_args)
         nals = base.annexb_nals(source.read_bytes())
         parameter_sets, frames = base.split_into_picture_access_units(nals, expected_tile_slices=4)
 

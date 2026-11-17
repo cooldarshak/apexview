@@ -134,8 +134,9 @@ def main():
 
     rows_output = output / "native_vod_five_tiled_rows.mp4"
     inputs = []
-    for _ in range(6):
-        inputs += ["-f", "hevc", "-i", str(tiled_source)]
+    alternate_tiled_source = Path(args.tile_dir) / "source_vod_alt_tiled_2x2.hevc"
+    for index in (0, 1, 0, 1, 0, 0):
+        inputs += ["-f", "hevc", "-i", str(alternate_tiled_source if index else tiled_source)]
     layout = "[0:v][1:v][2:v][3:v][4:v][5:v]xstack=inputs=6:layout=0_0|256_0|0_128|256_128|0_256|256_256[grid]"
     wanted = hashes(inputs + ["-filter_complex", layout], map_stream="[grid]")
     decoded = hashes(["-i", str(rows_output)])

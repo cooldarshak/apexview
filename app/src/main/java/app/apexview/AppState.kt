@@ -468,6 +468,7 @@ class AppState(
         if (settings.decoderMode != DecoderMode.SINGLE || archiveCompositionStarting) return
         val leader = leaderTile() ?: return
         singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
+        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_RETRY requested=USER")
         startArchiveSingleDecoderComposition(leader.contentId)
     }
 
@@ -1784,6 +1785,7 @@ class AppState(
             if (useExistingBackend) startRollingArchiveSingleDecoderComposition(contentId, attempt)
             else if (retryableFailure && attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
                 val originalIds = selected.map { it.id }
+                android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_RETRY requested=AUTO attempt=${attempt + 1} delayMs=${500L * (attempt + 1)}")
                 singleDecoderRetryJob = scope.launch {
                     kotlinx.coroutines.delay(500L * (attempt + 1))
                     if (settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && !singleDecoderSceneActive) {
@@ -2032,6 +2034,7 @@ class AppState(
             }
             if (retryableFailure && attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
                 val originalIds = selectedTiles.map { it.id }
+                android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_RETRY requested=AUTO attempt=${attempt + 1} delayMs=${500L * (attempt + 1)} backend=PROTECTED")
                 singleDecoderRetryJob = scope.launch {
                     kotlinx.coroutines.delay(500L * (attempt + 1))
                     if (settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && protectedCompositionHost == null) {

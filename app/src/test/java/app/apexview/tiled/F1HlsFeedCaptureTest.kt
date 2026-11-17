@@ -568,7 +568,9 @@ seg.m4s
         val tileDir = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")?.let(::File)
         assumeTrue("Tiled VOD fixture is not configured", tileDir != null)
         val source = File(tileDir!!, "source_vod_tiled_2x2.hevc")
-        val capture = F1HlsFeedCapture(network(5, samplesPerFragment = 50, annexBFile = source).factory,
+        val alternate = File(tileDir, "source_vod_alt_tiled_2x2.hevc")
+        val capture = F1HlsFeedCapture(network(5, samplesPerFragment = 50, annexBFile = source,
+            alternateAnnexBFile = alternate).factory,
             maximumOutputWidth = 1024)
         val session = capture.prepareVod(feeds(5), 0, "channel-0")
         try {
@@ -720,12 +722,15 @@ seg.m4s
 
     private fun feeds(count: Int) = (0 until count).map { F1DashFeedCapture.Feed("channel-$it", "https://media.test/f$it/master.m3u8") }
 
-    private fun network(count: Int, decodeOffsetTicks: Long = 0, samplesPerFragment: Int = 25, annexBFile: File? = null, forceSyncFlags: Boolean = false): Network {
+    private fun network(count: Int, decodeOffsetTicks: Long = 0, samplesPerFragment: Int = 25, annexBFile: File? = null,
+                        forceSyncFlags: Boolean = false, alternateAnnexBFile: File? = null): Network {
         val dir = System.getenv("APEXVIEW_HEVC_FIXTURE_DIR")?.let(::File)
         assumeTrue("Independent HEVC source fixtures are not configured", dir != null)
         val files = mutableMapOf<String, ByteArray>()
         for (i in 0 until count) {
-            val nals = HevcBitstream.splitAnnexB((annexBFile ?: File(dir!!, if (i % 2 == 0) "feed_a.hevc" else "feed_b.hevc")).readBytes())
+            val input = if (i % 2 == 1 && alternateAnnexBFile != null) alternateAnnexBFile
+                else annexBFile ?: File(dir!!, if (i % 2 == 0) "feed_a.hevc" else "feed_b.hevc")
+            val nals = HevcBitstream.splitAnnexB(input.readBytes())
             val init = HevcClearCmafInitSegmentWriter.writeSource(i + 1L, 90_000,
                 nals.first { it.type == 32 }.bytes, nals.first { it.type == 33 }.bytes, nals.first { it.type == 34 }.bytes)
             val pictures = mutableListOf<MutableList<ByteArray>>()
