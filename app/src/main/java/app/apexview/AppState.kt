@@ -412,7 +412,9 @@ class AppState(
                 if (inPip) app.apexview.scene.VideoWindow(tile.id, labels.indexOf(tile.feed.sourceStream.profileLabel),
                     0f, 0f, width, height, tile.z)
                 else app.apexview.scene.VideoWindow(tile.id, labels.indexOf(tile.feed.sourceStream.profileLabel),
-                    tile.x * scale + offsetX, tile.y * scale + offsetY, tile.w * scale, tile.h * scale, tile.z) })
+                    tile.x * scale + offsetX, tile.y * scale + offsetY, tile.w * scale, tile.h * scale, tile.z) },
+            relay.session.atlasColumns, relay.session.sourceCodedWidth, relay.session.sourceCodedHeight,
+            relay.session.sourceDisplayWidth, relay.session.sourceDisplayHeight)
         val leader = leaderTile()?.feed?.player ?: return
         relay.publish(scene, leader.currentPosition, playing, playbackSpeed, mutedAll, castRevision, castAudioRevision)
     }
@@ -433,6 +435,7 @@ class AppState(
     }
     fun videoScene(width: Float, height: Float): app.apexview.scene.VideoScene? {
         val host = singleDecoderScenePlayer ?: return null
+        val session = host.archiveSceneSession ?: return null
         val labels = host.archiveSceneLabels
         if (labels.isEmpty() || width <= 0 || height <= 0) return null
         return app.apexview.scene.VideoScene(width, height, host.archiveSceneWidth, host.archiveSceneHeight, labels.size,
@@ -441,7 +444,8 @@ class AppState(
                 if (source < 0 || tile.w <= 0 || tile.h <= 0) null else if (inPip)
                     app.apexview.scene.VideoWindow(tile.id, source, 0f, 0f, width, height, tile.z)
                 else app.apexview.scene.VideoWindow(tile.id, source, tile.x, tile.y, tile.w, tile.h, tile.z)
-            })
+            }, session.atlasColumns, session.sourceCodedWidth, session.sourceCodedHeight,
+            session.sourceDisplayWidth, session.sourceDisplayHeight)
     }
     fun setDecoderPreference(mode: DecoderMode) {
         if (mode == DecoderMode.MULTIPLE && tiles.size > MAX_FEEDS) {

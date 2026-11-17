@@ -22,7 +22,8 @@ import java.io.ByteArrayInputStream
 import kotlin.coroutines.coroutineContext
 
 /** Reads the HLS/CMAF actually supplied by player_tm, without another PLAY or media player. */
-internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximumHeight: Int = 2160) {
+internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximumHeight: Int = 2160,
+                                private val maximumOutputWidth: Int = 4096) {
     private data class Offer(val feed: F1DashFeedCapture.Feed, val uri: Uri, val format: Format?, val master: HlsMultivariantPlaylist?, val audioGroupId: String? = null)
     private class Init(val uri: Uri, val offset: Long, val length: Long, val bytes: ByteArray, val report: CmafBoxInspector.Report)
     private val reader = CmafHttpReader(factory)
@@ -106,7 +107,8 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             val owned = selected.mapIndexed { i, offer -> HevcArchiveVodSession.Input(offer.feed.label, playlists[i], offer.format,
                 inits[i].bytes.copyOf(), inits[i].report) }
             try {
-                session = HevcArchiveVodSession(reader, owned, clockLabel, audioUri = audio, audioUris = selectableAudioUris)
+                session = HevcArchiveVodSession(reader, owned, clockLabel, maximumOutputWidth = maximumOutputWidth,
+                    audioUri = audio, audioUris = selectableAudioUris)
                 session.prepare(positionMs)
                 coroutineContext.ensureActive()
                 acquired = session
@@ -266,13 +268,15 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         val declared = perFeed.filter { list -> list.any { it.format != null } }
         if (declared.isEmpty()) return perFeed.map { it.first() }
         val common = declared.map { list -> list.map { it.format!!.width to it.format.height }.toSet() }.reduce { a, b -> a intersect b }
-        val legal = common.filter { preferredHeight == null || it.first.toLong() * feedCount <= 4096L }
+        val legal = common.filter { preferredHeight == null ||
+            (it.first > 0 && it.second > 0 && HevcArchiveAtlasPlan.choose(feedCount, it.first, it.second,
+                maximumOutputWidth, 2160) != null) }
         val sizes = if (preferredHeight == null) legal else legal.filter { it.second <= preferredHeight }.ifEmpty {
             // Use only representations actually offered by F1, including a larger minimum rung.
             legal.minByOrNull { it.second }?.let(::listOf).orEmpty()
         }
         val size = sizes.maxWithOrNull(compareBy<Pair<Int, Int>> { it.second }.thenBy { it.first })
-            ?: throw PermanentCaptureException("No common HEVC rendition fits $feedCount feeds within the 4096-pixel composed width; choose fewer feeds or a lower source rendition")
+            ?: throw PermanentCaptureException("No common HEVC rendition fits $feedCount feeds in the composed picture; choose fewer feeds or a lower source rendition")
         return perFeed.map { list -> list.filter { it.format == null || it.format.width == size.first && it.format.height == size.second }
             .maxByOrNull { it.format?.bitrate ?: 0 } ?: throw PermanentCaptureException("HLS common HEVC rendition unavailable") }
     }

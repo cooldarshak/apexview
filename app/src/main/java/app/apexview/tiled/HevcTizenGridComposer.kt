@@ -149,9 +149,14 @@ internal object HevcTizenGridComposer {
         }
 
         val selectedByFrame = feeds.first().pictures.indices.map { frameIndex ->
+            // A source picture can contribute several source tiles (and may fill an
+            // unused atlas cell). Parse its slices once per frame, not once per cell.
+            val locatedByFeed = mutableMapOf<Int, List<LocatedSlice>>()
             orderedSelections.map { selection ->
                 val feed = feeds[selection.feedIndex]
-                val tiles = locatePictureTiles(feed, feed.pictures[frameIndex])
+                val tiles = locatedByFeed.getOrPut(selection.feedIndex) {
+                    locatePictureTiles(feed, feed.pictures[frameIndex])
+                }
                 val selected = tiles.singleOrNull { it.tileIndex == selection.sourceTileIndex }
                     ?: throw IllegalArgumentException(
                         "Frame $frameIndex feed ${selection.feedIndex} must have exactly one independent slice for tile ${selection.sourceTileIndex}"

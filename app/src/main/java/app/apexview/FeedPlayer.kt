@@ -151,6 +151,7 @@ class FeedPlayer(
     internal val archiveSceneLabels: List<String> get() = archiveVodSession?.sourceLabels.orEmpty()
     internal val archiveSceneWidth: Int get() = archiveVodSession?.width ?: 0
     internal val archiveSceneHeight: Int get() = archiveVodSession?.height ?: 0
+    internal val archiveSceneSession: HevcArchiveVodSession? get() = archiveVodSession
     internal fun archiveSessionForCast(): HevcArchiveVodSession? = archiveVodSession
 
     internal var composedSurfaceWidth: Int = 0

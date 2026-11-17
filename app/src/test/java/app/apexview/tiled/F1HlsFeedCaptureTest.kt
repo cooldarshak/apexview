@@ -564,6 +564,30 @@ seg.m4s
         } finally { session.close(); capture.reset() }
     }
 
+    @Test fun fiveTiledSourcesCanComposeAcrossMultipleEncodedRows() = runBlocking {
+        val tileDir = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")?.let(::File)
+        assumeTrue("Tiled VOD fixture is not configured", tileDir != null)
+        val source = File(tileDir!!, "source_vod_tiled_2x2.hevc")
+        val capture = F1HlsFeedCapture(network(5, samplesPerFragment = 50, annexBFile = source).factory,
+            maximumOutputWidth = 1024)
+        val session = capture.prepareVod(feeds(5), 0, "channel-0")
+        try {
+            assertEquals(2, session.atlasColumns)
+            assertEquals(3, session.atlasRows)
+            assertEquals(512, session.width)
+            assertEquals(384, session.height)
+            val report = CmafBoxInspector.inspect(session.initialization())
+            assertEquals(1, report.tracks.size)
+            assertEquals(4, report.tracks.single().hevcConfiguration!!.pps.single().numTileColumns)
+            assertEquals(6, report.tracks.single().hevcConfiguration!!.pps.single().numTileRows)
+            val evidence = System.getenv("APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR")?.let(::File)
+            if (evidence != null) File(evidence, "native_vod_five_tiled_rows.mp4").outputStream().use { output ->
+                output.write(session.initialization())
+                for (number in 0 until session.segmentCount) output.write(session.segment(number))
+            }
+        } finally { session.close(); capture.reset() }
+    }
+
     @Test fun castReceiverPairsBeforeServingOnlyTheAuthorizedSceneResources() = runBlocking {
         val network = network(2)
         val capture = F1HlsFeedCapture(network.factory)

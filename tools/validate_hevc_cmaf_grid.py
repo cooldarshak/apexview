@@ -132,6 +132,20 @@ def main():
     (output / "native_vod_five_tiled_validation.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
 
+    rows_output = output / "native_vod_five_tiled_rows.mp4"
+    inputs = []
+    for _ in range(6):
+        inputs += ["-f", "hevc", "-i", str(tiled_source)]
+    layout = "[0:v][1:v][2:v][3:v][4:v][5:v]xstack=inputs=6:layout=0_0|256_0|0_128|256_128|0_256|256_256[grid]"
+    wanted = hashes(inputs + ["-filter_complex", layout], map_stream="[grid]")
+    decoded = hashes(["-i", str(rows_output)])
+    if len(decoded) != 50 or decoded != wanted:
+        raise SystemExit("Multi-row output differs from independently decoded full tiled sources")
+    result = {"result": "MULTIROW_TILED_NATIVE_VOD_PASS", "feeds": 5, "frames": len(decoded),
+              "full_feed_pixels_match_xstack": True}
+    (output / "native_vod_five_tiled_rows_validation.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result, indent=2))
+
 
 if __name__ == "__main__":
     main()

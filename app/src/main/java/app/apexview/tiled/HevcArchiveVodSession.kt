@@ -75,6 +75,18 @@ internal class HevcArchiveVodSession(
         private set
     var codedHeight: Int = 0
         private set
+    var atlasColumns: Int = 0
+        private set
+    var atlasRows: Int = 0
+        private set
+    var sourceCodedWidth: Int = 0
+        private set
+    var sourceCodedHeight: Int = 0
+        private set
+    var sourceDisplayWidth: Int = 0
+        private set
+    var sourceDisplayHeight: Int = 0
+        private set
     val durationUs: Long get() = groups.last().let { it.startUs + it.durationUs }
     val sourceLabels: List<String> get() = inputs.map { it.label }
     val segmentCount: Int get() = groups.size
@@ -150,22 +162,24 @@ internal class HevcArchiveVodSession(
             val sourcePps = config.pps.single()
             val columns = if (sourcePps.tilesEnabled) sourcePps.numTileColumns else 1
             val rows = if (sourcePps.tilesEnabled) sourcePps.numTileRows else 1
-            require(sourceSps.displayWidth.toLong() * inputs.size <= maximumOutputWidth) {
-                "Full archive feeds exceed decoder width; choose a lower common HEVC rendition"
-            }
+            val atlas = requireNotNull(HevcArchiveAtlasPlan.choose(inputs.size, sourceSps.width, sourceSps.height,
+                maximumOutputWidth, 2160)) { "Full archive feeds exceed composed picture size; choose fewer feeds or a lower common HEVC rendition" }
             val trackScale = requireNotNull(firstTrack.timescale)
             val firstFragment = CmafBoxInspector.inspect(batches.first().first(), inputs.first().report).fragments.single()
             val step = firstFragment.sampleTimings.map { requireNotNull(it.durationTicks) }.distinct().single()
             val divisor = java.math.BigInteger.valueOf(trackScale).gcd(java.math.BigInteger.valueOf(step)).longValueExact()
-            val cells = inputs.indices.flatMap { feed -> (0 until rows).flatMap { row -> (0 until columns).map { col ->
-                HevcTizenGridComposer.CellSelection(feed, row * columns + col, feed * columns + col, row)
+            val cells = (0 until atlas.columns * atlas.rows).flatMap { slot ->
+                val feed = slot.coerceAtMost(inputs.lastIndex)
+                (0 until rows).flatMap { row -> (0 until columns).map { col ->
+                HevcTizenGridComposer.CellSelection(feed, row * columns + col,
+                    (slot % atlas.columns) * columns + col, (slot / atlas.columns) * rows + row)
             } } }
             val ownedInits = synchronized(cacheLock) { checkOpen(); inputs.map { it.initialization.copyOf() } }
             val composingFeeds = inputs.mapIndexed { i, input -> HevcClearCmafGridComposer.Feed(ownedInits[i], batches.map { it[i] }, input.label) }
             val composed = try { if (inputs.size == 1) HevcClearCmafGridComposer.passThrough(composingFeeds.single())
                 else HevcClearCmafGridComposer.compose(HevcClearCmafGridComposer.Request(
                 composingFeeds,
-                HevcOutputGridDimensions(columns * inputs.size, rows), cells,
+                HevcOutputGridDimensions(columns * atlas.columns, rows * atlas.rows), cells,
                 firstOutputSequenceNumber = anchor + 1L,
                 frameRateNumerator = (trackScale / divisor).toInt(), frameRateDenominator = (step / divisor).toInt()))
             } finally { ownedInits.forEach { it.fill(0) } }
@@ -193,6 +207,11 @@ internal class HevcArchiveVodSession(
                         frameRate = trackScale.toDouble() / step
                         codedWidth = composed.codedWidth
                         codedHeight = composed.codedHeight
+                        atlasColumns = atlas.columns; atlasRows = atlas.rows
+                        sourceCodedWidth = sourceSps.width; sourceCodedHeight = sourceSps.height
+                        sourceDisplayWidth = sourceSps.displayWidth; sourceDisplayHeight = sourceSps.displayHeight
+                        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_ATLAS feeds=${inputs.size} cells=${atlas.columns}x${atlas.rows} " +
+                            "sourceCoded=${sourceSps.width}x${sourceSps.height} sourceDisplay=${sourceSps.displayWidth}x${sourceSps.displayHeight} ctb=${sourceSps.ctbSize}")
                     } else {
                         require(initialization!!.contentEquals(composed.initializationSegment)) { "Archive representation changed its initialization" }
                         require(abs(requireNotNull(presentationOffsetTicks) - offset) <= 1L) { "Archive decode timestamps differ from the VOD timeline" }

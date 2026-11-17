@@ -62,6 +62,9 @@ internal class SceneCastRelay(private val context: Context, val session: HevcArc
         scene.quads() // Validate before anything is sent to the receiver.
         sceneJson = JSONObject().put("version", 1).put("width", scene.width).put("height", scene.height)
             .put("atlasWidth", scene.atlasWidth).put("atlasHeight", scene.atlasHeight).put("sources", scene.sources)
+            .put("atlasColumns", scene.atlasColumns).put("sourceCodedWidth", scene.sourceCodedWidth)
+            .put("sourceCodedHeight", scene.sourceCodedHeight).put("sourceDisplayWidth", scene.sourceDisplayWidth)
+            .put("sourceDisplayHeight", scene.sourceDisplayHeight)
             .put("codec", session.codecString()).put("positionMs", positionMs).put("playing", playing)
             .put("speed", speed).put("muted", muted).put("revision", revision).put("audioRevision", audioRevision)
             .put("windows", JSONArray(scene.windows.map { w -> JSONObject().put("id", w.id).put("source", w.source)

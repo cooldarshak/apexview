@@ -58,4 +58,19 @@ class VideoSceneTest {
             catch (_: IllegalArgumentException) {}
         }
     }
+
+    @Test fun twoDimensionalAtlasUsesCodedStridesAndCropsPaddingForEveryWindow() {
+        // Each source is coded 480x272 with a 480x270 visible picture. The final
+        // decoder output has its own bottom crop, so row boundaries are not halves.
+        val scene = VideoScene(1920f, 1080f, 960, 542, 4,
+            (0..3).map { VideoWindow(it, it, 0f, 0f, 100f, 100f, it.toFloat()) },
+            atlasColumns = 2, sourceCodedWidth = 480, sourceCodedHeight = 272,
+            sourceDisplayWidth = 480, sourceDisplayHeight = 270)
+        val quad = scene.quads()
+        assertEquals(1f - 270f / 542f + .5f / 542f, quad[0].texture[1], .0001f)
+        assertEquals(.5f / 542f, quad[2].texture[1], .0001f)
+        assertEquals(1f - 272f / 542f - .5f / 542f, quad[2].texture[5], .0001f)
+        assertEquals(.5f + .5f / 960f, quad[3].texture[0], .0001f)
+        assertTrue(quad[0].texture[1] > quad[2].texture[5])
+    }
 }

@@ -14,4 +14,11 @@ assert.throws(()=>validateScene({...base,windows:[base.windows[0],base.windows[0
 assert.throws(()=>validateScene({...base,windows:[{...base.windows[0],source:3}]}));
 const six={...base,sources:6,atlasWidth:3840,windows:Array.from({length:6},(_,i)=>({id:i,source:i,x:(i%3)*640,y:Math.floor(i/3)*360,width:640,height:360,z:i}))};
 assert.equal(quads(six).length,6); // Protocol capacity, not a claim of six-feed device decoding.
-console.log('CAST_SCENE_PROTOCOL_PASS: layout, crop boundaries, overlap, portrait, validation and six-window protocol');
+const rows={...base,atlasWidth:960,atlasHeight:542,sources:4,atlasColumns:2,sourceCodedWidth:480,
+ sourceCodedHeight:272,sourceDisplayWidth:480,sourceDisplayHeight:270,
+ windows:Array.from({length:4},(_,i)=>({id:i,source:i,x:0,y:0,width:100,height:100,z:i}))};
+const rowQuads=quads(rows);
+assert(rowQuads[0].texture[1]>rowQuads[2].texture[5]); // each row excludes the coded padding
+assert(Math.abs(rowQuads[2].texture[1]-.5/542)<1e-9);
+assert(rowQuads[3].texture[0]>.5);
+console.log('CAST_SCENE_PROTOCOL_PASS: layout, crop boundaries, overlap, portrait and multi-row geometry');
