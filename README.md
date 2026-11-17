@@ -13,9 +13,10 @@ Made for the Pixel Fold's inner screen, and works on other Android phones and ta
 
 ## What it does
 
-- **Multiview, your way.** Up to four feeds (broadcast, F1 Live, onboards, data and tracker
-  channels), with F1 TV Premium. Main + strip, grid, or drag and resize freely with magnetic snapping. Save a layout
-  as your default.
+- **Multiview, your way.** Multiple-decoder mode supports up to four feeds. Single-decoder
+  archive mode can select up to 24, subject to compatible source feeds and the device's HEVC
+  output size limits. Protected composition currently supports up to six. Main + strip, grid, or
+  drag and resize freely with magnetic snapping. Save a layout as your default.
 - **Track map.** Every car on track, as a map you can move, turn and resize, or as a ribbon
   round the edge of the screen. Turn numbers, start and finish lines. Works on replays and live.
 - **Flags on the map:** yellow sectors, safety car and VSC, red flags, and a countdown to an
@@ -40,6 +41,9 @@ Made for the Pixel Fold's inner screen, and works on other Android phones and ta
 - **Android TV remote:** arrows and select move through everything. While watching, left and right
   skip 10 seconds, the other arrows and select bring up the controls, and Back hides them. Feeds
   can't be dragged by hand on a TV; pick a layout instead.
+- **Google Cast:** the player offers the standard Cast device picker. Compatible clear archive
+  feeds are composed into one video stream; timing and map overlays remain on the phone. Protected
+  playback needs a registered custom receiver and is not advertised as supported yet.
 - **Season calendar** in your local time, with optional reminders before each session.
 
 Tap the **?** in the viewer's top bar for a guide to every gesture.

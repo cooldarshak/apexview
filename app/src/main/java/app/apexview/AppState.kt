@@ -328,46 +328,90 @@ class AppState(
     private var singleDecoderRetryJob: Job? = null
     val singleDecoderSceneActive: Boolean get() = nativeArchiveTiles.isNotEmpty()
     val singleDecoderScenePlayer: FeedPlayer? get() = if (singleDecoderSceneActive) protectedCompositionHost?.feed else null
-    var castSheetOpen by mutableStateOf(false)
     var castBusy by mutableStateOf(false)
+        private set
+    var googleCastAvailable by mutableStateOf(false)
         private set
     var castStatus by mutableStateOf<String?>(null)
         private set
     private var castRelay by mutableStateOf<app.apexview.cast.SceneCastRelay?>(null)
+    private var googleCastRemoteClient: com.google.android.gms.cast.framework.media.RemoteMediaClient? = null
+    private var googleCastLoadedUrl: String? = null
+    private var castPreparationJob: Job? = null
     val castingActive: Boolean get() = castRelay != null
-    val castReceiverUrl: String? get() = castRelay?.receiverUrl
-    val castPairingCode: String? get() = castRelay?.pairingCode
-    private var castRevision by mutableStateOf(0)
-    private var castAudioRevision by mutableStateOf(0)
     fun showGoogleCastStatus() {
-        layoutSheetOpen = false
-        message = "Google Cast for the full layout is not available in this build yet."
+        message = if (googleCastAvailable) {
+            "Choose a Google Cast device from the Cast button in the player."
+        } else {
+            "Google Cast is unavailable here. Check that Google Play services is installed and updated."
+        }
+    }
+    fun setGoogleCastAvailable(available: Boolean) {
+        googleCastAvailable = available
+        if (!available) googleCastRemoteClient = null
+    }
+    fun onGoogleCastSessionAvailable(client: com.google.android.gms.cast.framework.media.RemoteMediaClient?) {
+        googleCastRemoteClient = client
+        if (client == null) return
+        val relay = castRelay
+        if (relay != null) loadGoogleCastMedia(relay) else startFullSceneCast()
+    }
+    fun onGoogleCastSessionEnded() {
+        googleCastRemoteClient = null
+        castPreparationJob?.cancel(); castPreparationJob = null
+        releaseCastRelay()
+        castBusy = false
+        castStatus = "Google Cast disconnected."
+    }
+    fun onGoogleCastStartFailed(reason: String) {
+        castStatus = reason.take(220)
+        message = castStatus
     }
     fun startFullSceneCast() {
         if (castingActive || castBusy) return
-        if (!singleDecoderSceneActive && tiles.size > 1) chooseDecoderMode(DecoderMode.SINGLE)
-        castBusy = true; castStatus = "Preparing the full-layout receiver…"
-        scope.launch {
+        if (tiles.isEmpty()) {
+            castStatus = "Open an authorized archive session before connecting Google Cast."
+            message = castStatus
+            return
+        }
+        val castTiles = tiles.toList()
+        if (castTiles.map { it.contentId }.distinct().size != 1) {
+            castStatus = "Google Cast needs feeds from one archive session so they can be composed on one shared timeline."
+            message = castStatus
+            return
+        }
+        if (castTiles.any { it.contentId in knownLiveContentIds || it.feed.player.isCurrentMediaItemLive }) {
+            castStatus = "This Google Cast path supports archive replays. Live and protected receiver playback need a Cast receiver with F1 Widevine support."
+            message = castStatus
+            return
+        }
+        val clockTile = castTiles.firstOrNull { it.id == bigTileId }
+            ?: castTiles.firstOrNull { it.audible }
+            ?: castTiles.first()
+        castBusy = true; castStatus = "Preparing ${castTiles.size} feed${if (castTiles.size == 1) "" else "s"} for Google Cast…"
+        message = castStatus
+        castPreparationJob = scope.launch {
             var relay: app.apexview.cast.SceneCastRelay? = null
             var ownedSession: app.apexview.tiled.HevcArchiveVodSession? = null
             try {
-                val session = if (tiles.size == 1) {
-                    val tile = tiles.single()
-                    require(tile.contentId !in knownLiveContentIds && !tile.feed.player.isCurrentMediaItemLive) { "Receiver preview currently supports archives." }
+                val expectedLabels = castTiles.map { it.feed.sourceStream.profileLabel }.toSet()
+                val activeComposition = singleDecoderScenePlayer?.archiveSessionForCast()
+                    ?.takeIf { it.sourceLabels.toSet() == expectedLabels && it.sourceLabels.size == expectedLabels.size }
+                val session = activeComposition ?: run {
                     val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
                     try {
-                        capture.prepareVod(listOf(F1DashFeedCapture.Feed(tile.feed.sourceStream.profileLabel, tile.feed.sourceStream.url)),
-                            tile.feed.player.currentPosition.coerceAtLeast(0), tile.feed.sourceStream.profileLabel, 720, settings.commentary)
-                            .also { ownedSession = it }
+                        capture.prepareVod(
+                            castTiles.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel, it.feed.sourceStream.url) },
+                            clockTile.feed.player.currentPosition.coerceAtLeast(0),
+                            clockTile.feed.sourceStream.profileLabel,
+                            preferredHeight = when {
+                                castTiles.size > 4 -> 270
+                                castTiles.size > 2 -> 540
+                                else -> 720
+                            },
+                            commentary = settings.commentary,
+                        ).also { ownedSession = it }
                     } finally { capture.reset() }
-                } else {
-                    kotlinx.coroutines.withTimeout(45_000L) {
-                        while (!singleDecoderSceneActive) {
-                            if (f1DashCaptureJob == null) throw IOException("Start compatible archive feeds in Single decoder mode first.")
-                            kotlinx.coroutines.delay(100L)
-                        }
-                    }
-                    requireNotNull(singleDecoderScenePlayer?.archiveSessionForCast())
                 }
                 val manager = context.getSystemService(android.net.ConnectivityManager::class.java)
                 val network = manager.allNetworks.firstOrNull { network -> manager.getNetworkCapabilities(network)?.let {
@@ -380,45 +424,78 @@ class AppState(
                     .setAllowCrossProtocolRedirects(true).setDefaultRequestProperties(mapOf(
                         "ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    relay = app.apexview.cast.SceneCastRelay(context, session, app.apexview.tiled.CmafHttpReader(factory), address)
+                    relay = app.apexview.cast.SceneCastRelay(session, app.apexview.tiled.CmafHttpReader(factory), address)
+                    (castTiles.firstOrNull { it.audible } ?: clockTile).let {
+                        relay!!.selectAudio(it.feed.sourceStream.profileLabel)
+                    }
                     relay!!.validateAudio()
                 }
+                if (googleCastRemoteClient == null) throw kotlinx.coroutines.CancellationException("Google Cast session ended during setup")
                 castRelay = relay
-                castStatus = "Receiver ready. Open the link on a compatible TV browser and enter the pairing code. Keep ApexView open on this phone."
-                tiles.forEach { it.feed.setAudible(false) }
+                castStatus = "Sending ${session.sourceLabels.size} feed${if (session.sourceLabels.size == 1) "" else "s"} as one composed video to Google Cast. Timing and map overlays stay on the phone."
+                message = castStatus
+                castTiles.forEach { it.feed.setAudible(false) }
+                loadGoogleCastMedia(relay!!)
             } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
-                relay?.close(); castStatus = "Compatible clear-archive composition is unavailable for this receiver."
-            } catch (cancelled: kotlinx.coroutines.CancellationException) { relay?.close(); throw cancelled
+                relay?.close(); castStatus = "The selected feeds could not be composed for Google Cast in time."; message = castStatus
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                relay?.close()
+                if (cancelled.message != "Google Cast session ended during setup") throw cancelled
             } catch (error: Exception) {
                 relay?.close()
-                castStatus = (error.message ?: "Unable to start the full-layout receiver").replace(Regex("https?://\\S+"), "[URL]").take(240)
-            } finally { ownedSession?.close(); castBusy = false }
+                castStatus = (error.message ?: "Unable to prepare the selected feeds for Google Cast").replace(Regex("https?://\\S+"), "[URL]").take(240)
+                message = castStatus
+            } finally { ownedSession?.close(); castBusy = false; castPreparationJob = null }
         }
+    }
+    private fun loadGoogleCastMedia(relay: app.apexview.cast.SceneCastRelay) {
+        val client = googleCastRemoteClient ?: return
+        val url = relay.googleCastMediaUrl
+        if (googleCastLoadedUrl == url) return
+        val metadata = com.google.android.gms.cast.MediaMetadata(
+            com.google.android.gms.cast.MediaMetadata.MEDIA_TYPE_MOVIE
+        ).apply {
+            putString(com.google.android.gms.cast.MediaMetadata.KEY_TITLE, "ApexView MultiView")
+            putString(com.google.android.gms.cast.MediaMetadata.KEY_SUBTITLE, "${relay.session.sourceLabels.size} F1 feeds · one HEVC stream")
+        }
+        val media = com.google.android.gms.cast.MediaInfo.Builder(url)
+            .setContentType("application/x-mpegURL")
+            .setStreamType(com.google.android.gms.cast.MediaInfo.STREAM_TYPE_BUFFERED)
+            .setMetadata(metadata)
+            .build()
+        googleCastLoadedUrl = url
+        runCatching {
+            client.load(media, true, castFramePositionMs.coerceAtLeast(0L)).setResultCallback { result ->
+                if (result.status.isSuccess) {
+                    castStatus = "Google Cast is playing ${relay.session.sourceLabels.size} feed${if (relay.session.sourceLabels.size == 1) "" else "s"} in one video. Timing and map overlays stay on the phone."
+                    message = castStatus
+                } else {
+                    failGoogleCastLoad("Google Cast could not load the composed stream (status ${result.status.statusCode}).")
+                }
+            }
+        }.onFailure { error ->
+            failGoogleCastLoad("Google Cast load failed: ${(error.message ?: error.javaClass.simpleName).take(160)}")
+        }
+    }
+    private fun failGoogleCastLoad(reason: String) {
+        runCatching { googleCastRemoteClient?.stop() }
+        releaseCastRelay()
+        castBusy = false
+        castStatus = reason
+        message = reason
+    }
+    private fun releaseCastRelay() {
+        googleCastLoadedUrl = null
+        castRelay?.close(); castRelay = null
+        if (singleDecoderSceneActive) singleDecoderScenePlayer?.setAudible(!mutedAll)
+        else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll) }
     }
     fun stopFullSceneCast() {
-        castRelay?.close(); castRelay = null
+        castPreparationJob?.cancel(); castPreparationJob = null
+        runCatching { googleCastRemoteClient?.stop() }
+        releaseCastRelay()
         castStatus = "Casting stopped."
-        if (singleDecoderSceneActive) singleDecoderScenePlayer?.setAudible(!mutedAll && !castingActive)
-        else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll && !castingActive) }
     }
-    fun publishCastScene(width: Float, height: Float, scale: Float, offsetX: Float, offsetY: Float) {
-        val relay = castRelay ?: return
-        val labels = relay.session.sourceLabels
-        if (tiles.any { it.feed.sourceStream.profileLabel !in labels } || labels.size != tiles.size) {
-            stopFullSceneCast(); castStatus = "Feeds changed. Start casting again for the new selection."; return
-        }
-        val scene = app.apexview.scene.VideoScene(width, height, relay.session.width, relay.session.height, labels.size,
-            (if (inPip) listOfNotNull(pipTile()) else tiles).map { tile ->
-                if (inPip) app.apexview.scene.VideoWindow(tile.id, labels.indexOf(tile.feed.sourceStream.profileLabel),
-                    0f, 0f, width, height, tile.z)
-                else app.apexview.scene.VideoWindow(tile.id, labels.indexOf(tile.feed.sourceStream.profileLabel),
-                    tile.x * scale + offsetX, tile.y * scale + offsetY, tile.w * scale, tile.h * scale, tile.z) },
-            relay.session.atlasColumns, relay.session.sourceCodedWidth, relay.session.sourceCodedHeight,
-            relay.session.sourceDisplayWidth, relay.session.sourceDisplayHeight)
-        val leader = leaderTile()?.feed?.player ?: return
-        relay.publish(scene, leader.currentPosition, playing, playbackSpeed, mutedAll, castRevision, castAudioRevision)
-    }
-    fun publishCastOverlay(positionMs: Long, png: ByteArray) { castRelay?.publishOverlay(positionMs, png) }
     val castFramePositionMs: Long get() = leaderTile()?.feed?.player?.currentPosition ?: 0L
 
     private var sceneOutputSize by mutableStateOf(0 to 0)
@@ -1801,8 +1878,8 @@ class AppState(
     private fun startRollingArchiveSingleDecoderComposition(contentId: Long, attempt: Int = 0) {
         val selectedTiles = tiles.filter { it.contentId == contentId }
         val previousLayout = layoutMode
-        if (selectedTiles.size !in 2..4 || selectedTiles.size != tiles.size) {
-            singleDecoderFailure = "This protected archive backend needs two to four feeds from one archive."
+        if (selectedTiles.size !in 2..6 || selectedTiles.size != tiles.size) {
+            singleDecoderFailure = "This protected archive backend supports two to six feeds from one archive. Clear archives can use up to 24 when their composed picture fits the decoder."
             message = singleDecoderFailure
             decoderMode = settings.decoderMode
             tiles.forEach { it.feed.player.playWhenReady = false }
@@ -2059,7 +2136,14 @@ class AppState(
         val isKnownLive = contentId in knownLiveContentIds || liveNow.any { it.contentId == contentId }
         if (!isKnownLive) return
         val sessionTiles = tiles.filter { it.contentId == contentId }
-        if (sessionTiles.size !in 2..4) return
+        if (sessionTiles.size !in 2..6) {
+            if (sessionTiles.size > 6) {
+                message = "This protected live composition supports up to six feeds on this playback path. Clear archive compositions can use up to 24 when the combined picture fits the decoder."
+                sessionTiles.forEach { it.feed.player.playWhenReady = false }
+                applyVideoBudget()
+            }
+            return
+        }
         val labels = sessionTiles.map { tile ->
             tile.channel.channelId?.let { "channel-$it" } ?: "default-channel"
         }
@@ -2083,7 +2167,7 @@ class AppState(
                 F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url)
             }
         }
-        if (feeds.size != labels.size || feeds.size !in setOf(2, 3, 4, 6)) {
+        if (feeds.size != labels.size || feeds.size !in 2..6) {
             message = "Could not start F1 tile capture: selected feed URLs are not all available."
             return
         }
@@ -2231,7 +2315,7 @@ class AppState(
     }
 
     /** Single-decoder selections are still checked against actual renditions and decoder capacity. */
-    private val feedSelectionLimit get() = if (settings.decoderMode == DecoderMode.SINGLE) MAX_SINGLE_DECODER_FEEDS else MAX_FEEDS
+    val feedSelectionLimit get() = if (settings.decoderMode == DecoderMode.SINGLE) MAX_SINGLE_DECODER_FEEDS else MAX_FEEDS
     private fun feedLimitNote(limit: Int) = "Up to $limit feeds can be selected in this mode. Unpick one to make room."
     val roomForFeeds get() = (feedSelectionLimit - tiles.size).coerceAtLeast(0)
 
@@ -3783,7 +3867,10 @@ class AppState(
     /** Moves the audio to [tile]. Choosing a feed to listen to also ends Mute all. */
     fun setAudio(tile: Tile, byUser: Boolean = false) {
         castRelay?.selectAudio(tile.feed.sourceStream.profileLabel)
-        castAudioRevision++; castRevision++
+        castRelay?.let { relay ->
+            googleCastLoadedUrl = null
+            loadGoogleCastMedia(relay)
+        }
         if (singleDecoderSceneActive) {
             val owner = protectedCompositionHost?.feed ?: return
             if (!owner.selectArchiveAudio(tile.feed.sourceStream.profileLabel)) {
@@ -3804,7 +3891,6 @@ class AppState(
 
     /** Silences every feed, keeping track of which one had the audio for when it's turned back on. */
     fun toggleMuteAll() {
-        castRevision++
         mutedAll = !mutedAll
         if (nativeArchiveTiles.isNotEmpty()) protectedCompositionHost?.feed?.setAudible(!mutedAll && !castingActive)
         else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll && !castingActive) }
@@ -4242,8 +4328,8 @@ class AppState(
         else protectedCompositionAudioMaster ?: tiles.firstOrNull()
 
     fun togglePlay() {
-        castRevision++
         playing = !playing
+        googleCastRemoteClient?.let { remote -> if (playing) remote.play() else remote.pause() }
         if (archiveCompositionStarting) { showChrome(); return }
         // In the pop-out, only the shown feed and the audio keep playing (see setPip).
         val shown = if (inPip) pipTile() else null
@@ -4271,7 +4357,6 @@ class AppState(
     }
 
     fun chooseSpeed(value: Float) {
-        castRevision++
         val slower = value < playbackSpeed
         playbackSpeed = value
         prefs.edit().putFloat(PREF_SPEED, value).apply()
@@ -4353,7 +4438,7 @@ class AppState(
     }
 
     fun seekTo(targetMs: Long) {
-        castRevision++
+        if (castingActive) googleCastRemoteClient?.seek(targetMs.coerceAtLeast(0L))
         val restartRollingComposition = composedArchiveOriginMs != null && decoderMode == DecoderMode.SINGLE
         if (composedArchiveOriginMs != null) {
             stopProtectedCompositionPresentation()
@@ -4563,6 +4648,5 @@ class AppState(
         private const val VOTE_REQUEST = 4057
         /** F1 names its Driver of the Day soon after the flag; past this the vote is long shut. */
         private const val VOTE_OPEN_AFTER_MS = 15 * 60_000L
-        private const val FULL_NOTE = "4 feeds is the most this phone plays smoothly. Unpick one that's playing to make room."
     }
 }

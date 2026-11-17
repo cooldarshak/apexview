@@ -590,39 +590,21 @@ seg.m4s
         } finally { session.close(); capture.reset() }
     }
 
-    @Test fun castReceiverPairsBeforeServingOnlyTheAuthorizedSceneResources() = runBlocking {
+    @Test fun castRelayServesOnlyCapabilityScopedVideoResources() = runBlocking {
         val network = network(2)
         val capture = F1HlsFeedCapture(network.factory)
         val session = capture.prepareVod(feeds(2), 0, "channel-0")
-        val relay = app.apexview.cast.SceneCastRelay(org.robolectric.RuntimeEnvironment.getApplication(), session,
-            CmafHttpReader(network.factory), "127.0.0.1")
+        val relay = app.apexview.cast.SceneCastRelay(session, CmafHttpReader(network.factory), "127.0.0.1")
         try {
-            assertEquals(404, relayRequest(relay.receiverUrl + "s/guessed/init.mp4").first)
-            val paired = relayRequest(relay.receiverUrl + "pair", relay.pairingCode)
-            assertEquals(200, paired.first)
-            val prefix = paired.second.toString(Charsets.UTF_8).removeSuffix("receiver.html")
-            relay.publish(app.apexview.scene.VideoScene(1920f, 1080f, session.width, session.height, 2,
-                listOf(app.apexview.scene.VideoWindow(1, 1, 50f, 80f, 960f, 540f, 3f))), 600, true, 1f, false, 1, 0)
-            val scene = relayRequest(relay.receiverUrl.removeSuffix("/") + prefix + "scene.json")
-            assertEquals(200, scene.first)
-            val json = org.json.JSONObject(scene.second.toString(Charsets.UTF_8))
-            assertEquals(1, json.getJSONArray("windows").getJSONObject(0).getInt("source"))
-            assertFalse(scene.second.toString(Charsets.UTF_8).contains("media.test"))
-            val init = relayRequest(relay.receiverUrl.removeSuffix("/") + prefix + "init.mp4")
+            val base = relay.googleCastMediaUrl.substringBeforeLast('/') + "/"
+            assertEquals(404, relayRequest(base.replace(Regex("/s/[^/]+/"), "/s/guessed/") + "init.mp4").first)
+            val manifest = relayRequest(base + "video.m3u8")
+            assertEquals(200, manifest.first)
+            assertFalse(manifest.second.toString(Charsets.UTF_8).contains("media.test"))
+            val init = relayRequest(base + "init.mp4")
+            assertEquals(200, init.first)
             assertArrayEquals(session.initialization(), init.second)
-            assertEquals(404, relayRequest(relay.receiverUrl.removeSuffix("/") + prefix + "http://unlisted.test/token").first)
-        } finally { relay.close(); session.close(); capture.reset() }
-    }
-
-    @Test fun castPairingLimitsIncorrectAttempts() = runBlocking {
-        val network = network(2)
-        val capture = F1HlsFeedCapture(network.factory)
-        val session = capture.prepareVod(feeds(2), 0, "channel-0")
-        val relay = app.apexview.cast.SceneCastRelay(org.robolectric.RuntimeEnvironment.getApplication(), session,
-            CmafHttpReader(network.factory), "127.0.0.1")
-        try {
-            repeat(5) { assertEquals(403, relayRequest(relay.receiverUrl + "pair", "000000").first) }
-            assertEquals(429, relayRequest(relay.receiverUrl + "pair", relay.pairingCode).first)
+            assertEquals(404, relayRequest(base + "http://unlisted.test/token").first)
         } finally { relay.close(); session.close(); capture.reset() }
     }
 

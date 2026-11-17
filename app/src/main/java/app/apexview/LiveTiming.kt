@@ -5,6 +5,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -483,6 +485,53 @@ class SessionClock(private val marks: List<Mark>, private val parts: List<Pair<L
 /** Lap states per driver, plus every moment a car crossed the line (to locate it). */
 class StateParse(val states: Map<String, StateLog>, val crossings: List<Pair<String, Long>>)
 
+/** Keeps the tower and lap-state histories from one JSON parse of the large TimingData stream. */
+internal class StateHistoryAccumulator {
+    private val crossings = mutableListOf<Pair<String, Long>>()
+    private val times = mutableMapOf<String, MutableList<Long>>()
+    private val values = mutableMapOf<String, MutableList<LapState>>()
+    private val current = mutableMapOf<String, LapState>()
+    private val laps = mutableMapOf<String, Int>()
+
+    fun accept(lines: JSONObject, time: Long) {
+        lines.keys().forEach { number ->
+            val driver = lines.optJSONObject(number) ?: return@forEach
+            if (!driver.has("InPit") && !driver.has("PitOut") && !driver.has("NumberOfLaps") && !driver.has("KnockedOut")) return@forEach
+            var state = current[number] ?: LapState.UNKNOWN
+            if (driver.optBoolean("InPit")) state = LapState.PIT
+            if (driver.optBoolean("PitOut") || (driver.has("InPit") && !driver.optBoolean("InPit") && state == LapState.PIT)) {
+                state = LapState.OUT_LAP
+            }
+            if (driver.has("NumberOfLaps")) {
+                val count = driver.optInt("NumberOfLaps")
+                val previous = laps[number]
+                laps[number] = count
+                if (previous != null && count > previous) {
+                    crossings += number to time
+                    state = when (state) {
+                        LapState.OUT_LAP, LapState.COOL_DOWN -> LapState.PUSH
+                        LapState.PUSH -> LapState.COOL_DOWN
+                        else -> state
+                    }
+                }
+            }
+            if (driver.optBoolean("KnockedOut")) state = LapState.KNOCKED_OUT
+            if (state != current[number]) {
+                current[number] = state
+                times.getOrPut(number) { mutableListOf() }.add(time)
+                values.getOrPut(number) { mutableListOf() }.add(state)
+            }
+        }
+    }
+
+    fun finish() = StateParse(
+        states = times.mapValues { (number, t) -> StateLog(t.toLongArray(), values.getValue(number).toTypedArray()) },
+        crossings = crossings.toList(),
+    )
+}
+
+internal data class DriverTimingParse(val laps: Map<String, DriverLaps>, val states: StateParse)
+
 /**
  * Reads a past session from F1's live timing archive (livetiming.formula1.com/static). The archive
  * now needs the F1 TV subscription token as a Bearer header, the way FastF1 sends it.
@@ -573,62 +622,61 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         progress("Archive session resolved: $path · type=$type")
         val drivers = parseDrivers(JSONObject(fetchStage(path + "DriverList.json")))
         val heartbeat = fetchStage(path + "Heartbeat.jsonStream")
-        val timingStream = fetchOptionalStage(path + "TimingData.jsonStream")
-        val timingF1Stream = fetchOptionalStage(path + "TimingDataF1.jsonStream").orEmpty()
-
-        // Publish the tower as soon as its core data is ready. Track positions can be a much larger
-        // archive download on Android TV, and must not keep the timing tower blank while they load.
         val initialStart = parseStreamStart(heartbeat)
-        val initialStates = if (timingStream == null) {
-            progress("SKIP TimingData.jsonStream · file unavailable; tower will have no lap-state history")
-            StateParse(emptyMap(), emptyList())
-        } else {
-            progress("PARSING TimingData state history · ${timingStream.length} chars")
-            val started = android.os.SystemClock.elapsedRealtime()
-            try {
-                parseStates(timingStream, initialStart).also {
-                    progress("PARSED TimingData · drivers=${it.states.size} crossings=${it.crossings.size} · ${android.os.SystemClock.elapsedRealtime() - started}ms")
-                }
-            } catch (e: Exception) {
-                progress("PARSE FAIL TimingData · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
-                StateParse(emptyMap(), emptyList())
-            }
-        }
-        val initialLaps = if (timingStream == null) {
-            emptyMap()
-        } else {
-            progress("PARSING timing tower snapshots · TimingData=${timingStream.length} chars, TimingDataF1=${timingF1Stream.length} chars")
-            val started = android.os.SystemClock.elapsedRealtime()
-            try {
-                DriverTimingParser.parse(timingStream, initialStart, timingF1Stream).also {
-                    progress("PARSED timing tower · drivers=${it.size} · ${android.os.SystemClock.elapsedRealtime() - started}ms")
-                }
-            } catch (e: Exception) {
-                progress("PARSE FAIL timing tower · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
-                emptyMap()
-            }
-        }
+        // Start the three independent archive downloads together. On Android TV the sequential
+        // TimingData + TimingDataF1 fetch used to hold the map request behind two multi-megabyte
+        // responses, so both map and tower stayed behind the same spinner even though neither
+        // stream depends on the other.
         publish(
             SessionTiming(
                 type = type,
                 drivers = drivers,
                 tracks = emptyMap(),
-                states = initialStates.states,
+                states = emptyMap(),
                 outline = FloatArray(0),
                 hasStartFinish = false,
                 corners = emptyList(),
                 startUtcMs = initialStart,
                 circuitKey = ref.circuitKey,
-                laps = initialLaps,
+                laps = emptyMap(),
                 radioBase = BASE + path,
             )
         )
-
-        progress("Loading track positions…")
-        val positions = fetchStage(path + "Position.z.jsonStream")
+        val positionsTask = async(Dispatchers.IO) { fetchOptionalStage(path + "Position.z.jsonStream") }
+        val historyTask = async(Dispatchers.IO) {
+            val timingTask = async { fetchOptionalStage(path + "TimingData.jsonStream") }
+            val timingF1Task = async { fetchOptionalStage(path + "TimingDataF1.jsonStream").orEmpty() }
+            val timingStream = timingTask.await()
+            val timingF1Stream = timingF1Task.await()
+            val history = if (timingStream == null) {
+                progress("TimingData unavailable; timing tower history could not be loaded")
+                DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
+            } else withContext(Dispatchers.Default) {
+                progress("PARSING timing tower and lap history · ${timingStream.length} chars")
+                val started = android.os.SystemClock.elapsedRealtime()
+                try {
+                    val accumulator = StateHistoryAccumulator()
+                    val laps = DriverTimingParser.parse(timingStream, initialStart, timingF1Stream, accumulator)
+                    DriverTimingParse(laps, accumulator.finish()).also {
+                        progress("PARSED timing history · towerDrivers=${it.laps.size} stateDrivers=${it.states.states.size} · ${android.os.SystemClock.elapsedRealtime() - started}ms")
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    progress("PARSE FAIL timing history · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                    DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
+                }
+            }
+            Triple(timingStream, timingF1Stream, history)
+        }
+        // Download and parse the map while the single bounded timing-history parser runs. The
+        // tower and lap-state histories share each decoded JSON object, avoiding two concurrent
+        // full passes over this multi-megabyte stream on lower-memory Android TV devices.
+        progress("Loading track positions while timing history parses…")
+        val positions = positionsTask.await().orEmpty()
         progress("PARSING Position.z.jsonStream · ${positions.length} chars")
         val positionParseStarted = android.os.SystemClock.elapsedRealtime()
-        val positionReport = parsePositionsDetailed(positions)
+        val positionReport = withContext(Dispatchers.Default) { parsePositionsDetailed(positions) }
         val tracks = positionReport.tracks
         progress(
             "PARSED positions · records=${positionReport.decodedRecords}/${positionReport.inputRecords}, " +
@@ -636,48 +684,74 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 "${android.os.SystemClock.elapsedRealtime() - positionParseStarted}ms"
         )
         if (tracks.isEmpty()) {
-            throw IOException(
-                "No usable car positions (records=${positionReport.inputRecords}, " +
-                    "decoded=${positionReport.decodedRecords}, malformed=${positionReport.malformedRecords})"
-            )
+            progress("Track positions unavailable; continuing to load timing tower")
         }
 
+        val geometryStarted = android.os.SystemClock.elapsedRealtime()
+        progress("Building the track map while timing tower finishes · cars=${tracks.size}")
+        val built = withContext(Dispatchers.Default) { tracks.mapValues { it.value.build() } }
+        val traced = withContext(Dispatchers.Default) { traceOutline(tracks.values.toList()) }
+        publish(
+            SessionTiming(
+                type = type,
+                drivers = drivers,
+                tracks = built,
+                states = emptyMap(),
+                outline = traced,
+                hasStartFinish = false,
+                corners = emptyList(),
+                startUtcMs = initialStart,
+                circuitKey = ref.circuitKey,
+                laps = emptyMap(),
+                radioBase = BASE + path,
+            )
+        )
+        progress("Track map available · waiting for timing tower history…")
+
+        val (timingStream, timingF1Stream, initialHistory) = historyTask.await()
+        publish(
+            SessionTiming(
+                type = type,
+                drivers = drivers,
+                tracks = built,
+                states = initialHistory.states.states,
+                outline = traced,
+                hasStartFinish = false,
+                corners = emptyList(),
+                startUtcMs = initialStart,
+                circuitKey = ref.circuitKey,
+                laps = initialHistory.laps,
+                radioBase = BASE + path,
+            )
+        )
         // Heartbeat anchors the stream clock. Some sessions have bad offsets; the cars' own
         // timestamps win when they disagree with it by more than a minute.
-        val streamStart = streamStart(heartbeat, positions)
+        val streamStart = if (positions.isEmpty()) initialStart else streamStart(heartbeat, positions)
         val corrected = streamStart != initialStart
         val parsedAndLaps = if (!corrected || timingStream == null) {
             progress("Timing clock ${if (corrected) "has no TimingData source" else "unchanged"} · reusing early timing parse")
-            initialStates to initialLaps
+            initialHistory.states to initialHistory.laps
         } else {
             progress("Timing clock corrected by ${streamStart - initialStart}ms · reparsing timing once")
-            val stateStarted = android.os.SystemClock.elapsedRealtime()
-            val parsed = try {
-                parseStates(timingStream, streamStart).also {
-                    progress("REPARSED TimingData · drivers=${it.states.size} crossings=${it.crossings.size} · ${android.os.SystemClock.elapsedRealtime() - stateStarted}ms")
+            async(Dispatchers.Default) {
+                val stateStarted = android.os.SystemClock.elapsedRealtime()
+                try {
+                    val history = StateHistoryAccumulator()
+                    val laps = DriverTimingParser.parse(timingStream, streamStart, timingF1Stream, history)
+                    DriverTimingParse(laps, history.finish()).also {
+                        progress("REPARSED timing history · towerDrivers=${it.laps.size} stateDrivers=${it.states.states.size} crossings=${it.states.crossings.size} · ${android.os.SystemClock.elapsedRealtime() - stateStarted}ms")
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    progress("PARSE FAIL corrected timing history · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                    DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
                 }
-            } catch (e: Exception) {
-                progress("PARSE FAIL corrected TimingData · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
-                StateParse(emptyMap(), emptyList())
-            }
-            val lapStarted = android.os.SystemClock.elapsedRealtime()
-            val laps = try {
-                DriverTimingParser.parse(timingStream, streamStart, timingF1Stream).also {
-                    progress("REPARSED timing tower · drivers=${it.size} · ${android.os.SystemClock.elapsedRealtime() - lapStarted}ms")
-                }
-            } catch (e: Exception) {
-                progress("PARSE FAIL corrected timing tower · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
-                emptyMap()
-            }
-            parsed to laps
+            }.await().let { it.states to it.laps }
         }
         val parsed = parsedAndLaps.first
         val laps = parsedAndLaps.second
 
-        val geometryStarted = android.os.SystemClock.elapsedRealtime()
-        progress("Building track geometry · cars=${tracks.size}")
-        val built = tracks.mapValues { it.value.build() }
-        val traced = traceOutline(tracks.values.toList())
         progress(
             "TRACK GEOMETRY · samples=${tracks.values.sumOf { it.size }}, outlinePoints=${traced.size / 2} · " +
                 "${android.os.SystemClock.elapsedRealtime() - geometryStarted}ms"

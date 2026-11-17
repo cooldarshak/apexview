@@ -18,8 +18,20 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.io.ByteArrayInputStream
 import kotlin.coroutines.coroutineContext
+
+/** Keep archive probing bounded on lower-memory TVs while retaining useful I/O concurrency. */
+private suspend fun <T, R> mapArchiveFeedsBounded(
+    items: List<T>,
+    concurrency: Int = 4,
+    block: suspend (T) -> R,
+): List<R> = coroutineScope {
+    val permits = Semaphore(concurrency.coerceAtLeast(1))
+    items.map { item -> async { permits.withPermit { block(item) } } }.awaitAll()
+}
 
 /** Reads the HLS/CMAF actually supplied by player_tm, without another PLAY or media player. */
 internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximumHeight: Int = 2160,
@@ -47,9 +59,9 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         var acquired: HevcArchiveVodSession? = null
         try { return withContext(Dispatchers.IO) {
             require(feeds.size in 1..app.apexview.AppState.MAX_SINGLE_DECODER_FEEDS && feeds.map { it.label }.distinct().size == feeds.size)
-            val perFeed = coroutineScope { feeds.map { feed -> async { offers.getOrPut(feed.label) { loadOffers(feed) } } }.awaitAll() }
+            val perFeed = mapArchiveFeedsBounded(feeds) { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }
             val selected = chooseCommon(perFeed, preferredHeight, feeds.size)
-            val playlists = coroutineScope { selected.map { offer -> async { loadMedia(offer) } }.awaitAll() }
+            val playlists = mapArchiveFeedsBounded(selected, block = ::loadMedia)
             require(playlists.all { it.hasEndTag && it.segments.isNotEmpty() }) { "Archive VOD requires complete HLS replay playlists" }
             playlists.forEach { playlist ->
                 require(playlist.segments.none { it.fullSegmentEncryptionKeyUri != null || it.initializationSegment?.fullSegmentEncryptionKeyUri != null }) {
@@ -62,7 +74,10 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                     "Archive changes CMAF initialization, crosses a discontinuity or contains a gap"
                 }
             }
-            val inits = coroutineScope { selected.mapIndexed { i, offer -> async { loadInit(offer, playlists[i].segments.first()) } }.awaitAll() }
+            val indexedOffers = selected.mapIndexed { index, offer -> index to offer }
+            val inits = mapArchiveFeedsBounded(indexedOffers) { (index, offer) ->
+                loadInit(offer, playlists[index].segments.first())
+            }
             val tracks = inits.map { it.report.tracks.singleOrNull { track -> track.handler == "vide" }
                 ?: throw PermanentCaptureException("HLS archive must contain one video track") }
             if (tracks.any { it.encrypted }) throw ProtectedArchiveBackendRequired()
@@ -70,7 +85,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             require(playlists.none { it.tags.any { tag -> tag.startsWith("#EXT-X-KEY:") && !tag.contains("METHOD=NONE") } }) {
                 "HLS declares protection but the selected CMAF track is clear"
             }
-            val audioUris = coroutineScope { selected.mapIndexed { index, offer -> async {
+            val audioUris = mapArchiveFeedsBounded(indexedOffers) { (index, offer) ->
                 val separate = offer.master?.audios.orEmpty().filter { it.url != null &&
                     (offer.audioGroupId == null || it.groupId == offer.audioGroupId) }
                     .sortedWith(compareByDescending<HlsMultivariantPlaylist.Rendition> { it.format.language == commentary }
@@ -94,7 +109,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 val audio = separate ?: if (muxed) offer.uri else null
                 android.util.Log.i("ApexviewPlaybackOffer", "${offer.feed.label}: audio=${if (separate != null) "SEPARATE" else if (muxed) "MUXED_ADVERTISED" else "NOT_ADVERTISED"}")
                 audio?.let { offer.feed.label to it }
-            } }.awaitAll() }.filterNotNull().toMap()
+            }.filterNotNull().toMap()
             val audio = audioUris[clockLabel] ?: if (commentary == null) null else {
                 // Let the ordinary authorized Media3 HLS path resolve the selected feed's
                 // audio when the selected variant doesn't advertise a separate rendition.
@@ -128,7 +143,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         var format: Format? = null
         val startedMs = android.os.SystemClock.elapsedRealtime()
         try {
-            require(feeds.size in 2..4 && feeds.map { it.label }.distinct().size == feeds.size)
+            require(feeds.size in 2..6 && feeds.map { it.label }.distinct().size == feeds.size)
             val perFeed = feeds.map { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }
             val selected = chooseCommon(perFeed)
             format = selected.first().format

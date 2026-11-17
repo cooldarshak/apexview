@@ -37,6 +37,10 @@
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules">
 
+        <meta-data
+            android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+            android:value="app.apexview.cast.CastOptionsProvider" />
+
         <!-- configChanges keeps the players alive when the phone folds or unfolds. -->
         <activity
             android:name=".MainActivity"

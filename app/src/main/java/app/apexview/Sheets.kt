@@ -86,7 +86,7 @@ fun FeedPickerSheet(app: AppState, picker: FeedPicker) {
                         app.layoutMode == LayoutMode.TILE_TEST ->
                             "Tile testing: select exactly two feeds from this session. Existing feeds are already selected. Unselect extras or add a second feed, then confirm."
                         app.singleFeedPlan -> "Your F1 TV plan may only play one feed at a time. Watching several at once needs F1 TV Premium."
-                        app.tiles.isEmpty() -> "Pick up to 4. You can switch any of them while watching."
+                        app.tiles.isEmpty() -> "Pick up to ${app.feedSelectionLimit} feeds in ${app.settings.decoderMode.label.lowercase()} mode. You can switch feeds while watching."
                         else -> "Feeds on screen are already picked. Unpick one to make room for another."
                     },
                     style = Type.footnote.copy(color = if (picker.note != null || app.singleFeedPlan) Ink.primary else Ink.secondary),
@@ -276,7 +276,7 @@ fun SettingsScreen(app: AppState) {
             }
         }
         item {
-            Group("Video decoder", footer = "Your choice is remembered. Single decoder currently supports compatible archive feeds from one session; incompatible streams return to normal playback.") {
+            Group("Video decoder", footer = "Your choice is remembered. Single decoder needs compatible archive feeds from one session. If activation fails, source video playback stays stopped until you retry or switch modes.") {
                 DecoderMode.entries.forEach { mode ->
                     ChoiceRow(mode.label, s.decoderMode == mode) { app.setDecoderPreference(mode) }
                 }

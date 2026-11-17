@@ -242,12 +242,22 @@ object DriverTimingParser {
         return true
     }
 
-    fun parse(stream: String, streamStart: Long, timingF1: String = ""): Map<String, DriverLaps> {
+    fun parse(stream: String, streamStart: Long, timingF1: String = ""): Map<String, DriverLaps> =
+        parse(stream, streamStart, timingF1, null)
+
+    internal fun parse(
+        stream: String,
+        streamStart: Long,
+        timingF1: String,
+        stateHistory: StateHistoryAccumulator?,
+    ): Map<String, DriverLaps> {
         val drivers = mutableMapOf<String, Live>()
 
         fun consume(event: TimedLine) {
             val prefix = streamPrefixLength(event.line)
-            val lines = runCatching { JSONObject(event.line.substring(prefix)).optJSONObject("Lines") }.getOrNull() ?: return
+            val json = runCatching { JSONObject(event.line.substring(prefix)) }.getOrNull() ?: return
+            val lines = json.optJSONObject("Lines") ?: return
+            if (event.source == 0) stateHistory?.accept(lines, event.time)
             lines.keys().forEach { number ->
                 val d = lines.optJSONObject(number) ?: return@forEach
                 val live = drivers.getOrPut(number) { Live() }

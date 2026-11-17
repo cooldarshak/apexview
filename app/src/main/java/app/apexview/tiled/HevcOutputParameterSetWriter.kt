@@ -39,23 +39,26 @@ internal object HevcOutputParameterSetWriter {
     private data class LevelLimit(
         val levelIdc: Int,
         val maxLumaPictureSamples: Long,
-        val maxLumaSamplesPerSecond: Long
+        val maxLumaSamplesPerSecond: Long,
+        val maxSliceSegmentsPerPicture: Int,
+        val maxTileRows: Int,
+        val maxTileColumns: Int
     )
 
     private val levelLimits = listOf(
-        LevelLimit(30, 36_864, 552_960),
-        LevelLimit(60, 122_880, 3_686_400),
-        LevelLimit(63, 245_760, 7_372_800),
-        LevelLimit(90, 552_960, 16_588_800),
-        LevelLimit(93, 983_040, 33_177_600),
-        LevelLimit(120, 2_228_224, 66_846_720),
-        LevelLimit(123, 2_228_224, 133_693_440),
-        LevelLimit(150, 8_912_896, 267_386_880),
-        LevelLimit(153, 8_912_896, 534_773_760),
-        LevelLimit(156, 8_912_896, 1_069_547_520),
-        LevelLimit(180, 35_651_584, 1_069_547_520),
-        LevelLimit(183, 35_651_584, 2_139_095_040),
-        LevelLimit(186, 35_651_584, 4_278_190_080)
+        LevelLimit(30, 36_864, 552_960, 16, 1, 1),
+        LevelLimit(60, 122_880, 3_686_400, 16, 1, 1),
+        LevelLimit(63, 245_760, 7_372_800, 20, 1, 1),
+        LevelLimit(90, 552_960, 16_588_800, 30, 2, 2),
+        LevelLimit(93, 983_040, 33_177_600, 40, 3, 3),
+        LevelLimit(120, 2_228_224, 66_846_720, 75, 5, 5),
+        LevelLimit(123, 2_228_224, 133_693_440, 75, 5, 5),
+        LevelLimit(150, 8_912_896, 267_386_880, 200, 11, 10),
+        LevelLimit(153, 8_912_896, 534_773_760, 200, 11, 10),
+        LevelLimit(156, 8_912_896, 1_069_547_520, 200, 11, 10),
+        LevelLimit(180, 35_651_584, 1_069_547_520, 600, 22, 20),
+        LevelLimit(183, 35_651_584, 2_139_095_040, 600, 22, 20),
+        LevelLimit(186, 35_651_584, 4_278_190_080, 600, 22, 20)
     )
 
     fun generate(
@@ -110,7 +113,10 @@ internal object HevcOutputParameterSetWriter {
         val requiredLevel = requiredLevel(
             request.codedWidth.toLong() * request.codedHeight.toLong(),
             request.frameRateNumerator,
-            request.frameRateDenominator
+            request.frameRateDenominator,
+            request.tileColumnWidthsInCtbs.size,
+            request.tileRowHeightsInCtbs.size,
+            Math.multiplyExact(request.tileColumnWidthsInCtbs.size, request.tileRowHeightsInCtbs.size)
         )
         val outputLevel = maxOf(
             requiredLevel,
@@ -305,12 +311,27 @@ internal object HevcOutputParameterSetWriter {
         }
     }
 
-    private fun requiredLevel(pictureSamples: Long, fpsNumerator: Int, fpsDenominator: Int): Int {
+    internal fun requiredLevel(
+        pictureSamples: Long,
+        fpsNumerator: Int,
+        fpsDenominator: Int,
+        tileColumns: Int,
+        tileRows: Int,
+        sliceSegments: Int
+    ): Int {
+        require(pictureSamples > 0 && fpsNumerator > 0 && fpsDenominator > 0 &&
+            tileColumns > 0 && tileRows > 0 && sliceSegments > 0) {
+            "Output picture, rate, and tile geometry must be positive"
+        }
         val rateNumerator = Math.multiplyExact(pictureSamples, fpsNumerator.toLong())
         return levelLimits.firstOrNull { limit ->
             pictureSamples <= limit.maxLumaPictureSamples &&
-                rateNumerator <= limit.maxLumaSamplesPerSecond * fpsDenominator.toLong()
-        }?.levelIdc ?: throw IllegalArgumentException("Output picture size or frame rate exceeds HEVC level 6.2")
+                rateNumerator <= limit.maxLumaSamplesPerSecond * fpsDenominator.toLong() &&
+                tileColumns <= limit.maxTileColumns && tileRows <= limit.maxTileRows &&
+                sliceSegments <= limit.maxSliceSegmentsPerPicture
+        }?.levelIdc ?: throw IllegalArgumentException(
+            "Output picture, frame rate, tile grid, or slice count exceeds HEVC level 6.2 limits"
+        )
     }
 
     private fun ceilDiv(value: Int, divisor: Int): Int =

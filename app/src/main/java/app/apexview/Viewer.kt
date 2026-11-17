@@ -3,9 +3,6 @@ package app.apexview
 import android.app.Activity
 import app.apexview.scene.SingleDecoderSceneView
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.graphics.rememberGraphicsLayer
-import androidx.compose.ui.graphics.layer.drawLayer
-import androidx.compose.ui.graphics.asAndroidBitmap
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.os.Build
@@ -124,6 +121,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import app.apexview.cast.GoogleCastPlayerButton
 import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -318,26 +316,6 @@ fun ViewerScreen(app: AppState) {
             }
         }
 
-        val castUi = rememberGraphicsLayer()
-        LaunchedEffect(app.castingActive, width, height) {
-            while (app.castingActive) {
-                val k = if (app.isTv) 1f else 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
-                val scale = if (app.inPip || app.isTv) 1f else 1f - lift * band / height
-                app.publishCastScene(width, height, k * scale, k * width * (1f - scale) / 2,
-                    k * height * (1f - scale) + height * (1f - k) / 2 - if (app.isTv) 0f else k * sheetShift)
-                try {
-                    val position = app.castFramePositionMs
-                    val bitmap = castUi.toImageBitmap().asAndroidBitmap()
-                    try { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-                        val bytes = java.io.ByteArrayOutputStream()
-                        bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, bytes)
-                        app.publishCastOverlay(position, bytes.toByteArray())
-                    } } finally { bitmap.recycle() }
-                } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled
-                } catch (_: Exception) { /* The UI layer may not have its first draw yet. */ }
-                delay(500L)
-            }
-        }
         val atlasScene = app.videoScene(width, height)
         val atlasPlayer = app.singleDecoderScenePlayer
         Box(Modifier.fillMaxSize()
@@ -364,12 +342,7 @@ fun ViewerScreen(app: AppState) {
             }
         }
 
-        Box(Modifier.fillMaxSize().drawWithContent {
-            if (app.castingActive) {
-                castUi.record { this@drawWithContent.drawContent() }
-                drawLayer(castUi)
-            } else drawContent()
-        }) uiLayer@ {
+        Box(Modifier.fillMaxSize()) uiLayer@ {
         // Feeds and map, shrinking toward the bottom while the controls are up so nothing sits
         // under the top bar. Touches inside are in the unshrunk canvas's pixels.
         Box(
@@ -586,7 +559,6 @@ fun ViewerScreen(app: AppState) {
     app.tileMenu?.let { TileMenuSheet(app, it) }
     if (app.mapSheetOpen) MapSheet(app)
     if (app.layoutSheetOpen) LayoutSheet(app)
-    if (app.castSheetOpen) FullSceneCastSheet(app)
     if (app.speedSheetOpen) SpeedSheet(app)
     if (app.qualitySheetOpen) VideoQualitySheet(app)
     LaptopPrompt(app)
@@ -693,6 +665,7 @@ private fun TopChrome(app: AppState, cutout: Clearance) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
         )
+        GoogleCastPlayerButton(app)
         if (!app.isTv) Glyph(if (app.arranging) Icons.Rounded.LockOpen else Icons.Rounded.Lock, if (app.arranging) "Lock layout" else "Unlock to move and resize", modifier = Modifier.helpAnchor(app, "lock"), onClick = app::toggleArranging)
         if (app.singleDecoderFailure != null) Glyph(Icons.Rounded.Refresh, "Retry single decoder", onClick = app::retrySingleDecoder)
         Glyph(Icons.Rounded.Add, "Add a feed", modifier = Modifier.helpAnchor(app, "add")) { app.openPickerForPlaying() }
@@ -1519,37 +1492,6 @@ private fun VideoQualitySheet(app: AppState) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun FullSceneCastSheet(app: AppState) {
-    val context = LocalContext.current
-    ModalBottomSheet(onDismissRequest = { app.castSheetOpen = false },
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = Ink.surface) {
-        KeepSystemBarsHidden()
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).navigationBarsPadding().padding(20.dp)) {
-            Text("Cast entire layout", style = Type.title2)
-            Text("Send the feeds, timing tower and driver map together. The receiver plays the composed video and draws your layout. No screen recording is used.",
-                style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
-            Text("This receiver-link preview needs a TV browser with HEVC, Media Source Extensions and WebGL, on the same local network. Keep ApexView open on the phone. Protected footage is not supported by this receiver.",
-                style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
-            app.castStatus?.let { Text(it, style = Type.footnote, modifier = Modifier.padding(top = 12.dp)) }
-            if (app.castingActive) {
-                Text(app.castReceiverUrl.orEmpty(), style = Type.headline, modifier = Modifier.padding(top = 16.dp))
-                Text("Pairing code: ${app.castPairingCode}", style = Type.title2, modifier = Modifier.padding(top = 12.dp))
-                Row(Modifier.padding(top = 12.dp)) { SecondaryButton("Copy receiver link") {
-                    (context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                        .setPrimaryClip(ClipData.newPlainText("ApexView receiver", app.castReceiverUrl))
-                } }
-                Row(Modifier.padding(top = 12.dp)) { SecondaryButton("Stop casting") { app.stopFullSceneCast() } }
-            } else Row(Modifier.padding(top = 16.dp)) {
-                SecondaryButton(if (app.castBusy) "Preparing receiver…" else "Start receiver link") { if (!app.castBusy) app.startFullSceneCast() }
-            }
-            Text("Google Cast device discovery needs a registered custom receiver. The standard media receiver cannot include the timing tower and map.",
-                style = Type.footnote, modifier = Modifier.padding(top = 16.dp))
-        }
-    }
-}
-
 /** Built-in layouts, the saved one, saving the current arrangement, and Snap or Free arranging. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1571,9 +1513,6 @@ private fun LayoutSheet(app: AppState) {
             app.singleDecoderDiagnostic?.let { diagnostic ->
                 Text(diagnostic, style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
                 Text("Active video decoders (app callbacks): ${app.observedActiveVideoDecoders}", style = Type.footnote)
-            }
-            Row(Modifier.padding(top = 12.dp)) {
-                SecondaryButton("Google Cast") { app.showGoogleCastStatus() }
             }
             val n = app.tiles.size
             val hasSaved = app.savedLayout(n) != null

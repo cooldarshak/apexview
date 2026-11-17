@@ -10,6 +10,58 @@ import org.junit.Test
 
 class HevcOutputParameterSetWriterTest {
     @Test
+    fun outputLevelAccountsForTileAndSliceLimitsInAdditionToPixelRate() {
+        // The picture itself is small enough for a low level, but a 6-column tile grid
+        // requires at least level 5.0 (level 4.1 permits only five tile columns).
+        assertEquals(
+            150,
+            HevcOutputParameterSetWriter.requiredLevel(
+                pictureSamples = 100_000,
+                fpsNumerator = 25,
+                fpsDenominator = 1,
+                tileColumns = 6,
+                tileRows = 2,
+                sliceSegments = 12,
+            )
+        )
+        // Eleven columns exceed level 5.2's ten-column cap, so level 6.0 is required.
+        assertEquals(
+            180,
+            HevcOutputParameterSetWriter.requiredLevel(
+                pictureSamples = 100_000,
+                fpsNumerator = 25,
+                fpsDenominator = 1,
+                tileColumns = 11,
+                tileRows = 2,
+                sliceSegments = 22,
+            )
+        )
+    }
+
+    @Test
+    fun outputLevelRejectsTileGridOrSliceCountAboveLevel62() {
+        listOf(
+            Triple(21, 1, 21),
+            Triple(1, 23, 23),
+            Triple(20, 20, 601),
+        ).forEach { (columns, rows, slices) ->
+            try {
+                HevcOutputParameterSetWriter.requiredLevel(
+                    pictureSamples = 100_000,
+                    fpsNumerator = 25,
+                    fpsDenominator = 1,
+                    tileColumns = columns,
+                    tileRows = rows,
+                    sliceSegments = slices,
+                )
+                throw AssertionError("Unrepresentable HEVC grid must be rejected")
+            } catch (expected: IllegalArgumentException) {
+                assertTrue(expected.message!!.contains("level 6.2 limits"))
+            }
+        }
+    }
+
+    @Test
     fun buildsFreshTwoByOneOutputGridFromIndependentNonTiledSourceParameters() {
         val directory = fixtureDirectory()
         assumeTrue("Synthetic HEVC source fixture directory is not configured", directory != null)

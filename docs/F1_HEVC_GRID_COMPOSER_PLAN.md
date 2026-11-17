@@ -8,13 +8,20 @@ minute. This is real clear-archive evidence, not proof of Widevine-protected
 composition, OS-wide decoder counts, visible pixels in every layout, audio sync or
 Android TV playback. The original milestones below are retained as project history.
 
-Still open: genuine protected F1 output through a supported Widevine session;
-device validation of every layout, free overlap and recent seek changes; live
-sessions and six feeds; long-running/thermal tests on phone and TV; and proper
-Google Cast of the complete layout. The encoded composer still supports up to four
-compatible archive feeds. The native GLES scene uses a codec-to-texture Surface and
-a separate visible output Surface; it is not a claim that only one Surface object
-exists in the process.
+The latest phone log also records six clear archive feeds composed as one
+2400×814 HEVC output. That confirms the clear archive path is no longer capped at
+four feeds on that phone. The largest selectable count is 24, but actual playback
+still depends on a compatible common rendition and an output picture that fits the
+codec's size, tile and level limits. The protected composition path remains capped
+at six feeds. Device validation of protected playback, TV output, every layout,
+free overlap, seeking and sustained playback remains open. Google Cast now has a
+standard player route picker and a relay for compatible clear archive composition;
+the Cast receiver shows video only, while timing and map overlays stay on the
+phone. Protected/live casting and a full custom-layout receiver remain open.
+
+The native GLES scene uses a codec-to-texture Surface and a separate visible
+output Surface; it is not a claim that only one Surface object exists in the
+process.
 
 ## Objective
 

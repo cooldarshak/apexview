@@ -10,8 +10,8 @@ import java.util.LinkedHashMap
  * selected feed. Sample bytes and IVs are zeroed when a window is replaced or the selection clears.
  * No media is decrypted, no DRM key is requested, and no independent-feed output is generated.
  *
- * The current runtime entry point is deliberately limited to the exact 2/3/4/6-feed layouts
- * supported by the output grid. Source tile zero is selected for each feed until the UI exposes
+ * The current protected runtime entry point supports two through six feeds. Source tile zero is
+ * selected for each feed until the UI exposes
  * per-cell source tile selection.
  */
 internal object ProtectedHevcLiveComposition {
@@ -154,8 +154,8 @@ internal object ProtectedHevcLiveComposition {
     ) {
         require(group.isNotBlank()) { "Protected composition group is required" }
         val selected = labels.distinct()
-        require(selected.size in setOf(2, 3, 4, 6) && selected.all(String::isNotBlank)) {
-            "Protected composition supports exactly 2, 3, 4 or 6 distinct feeds"
+        require(selected.size in 2..6 && selected.all(String::isNotBlank)) {
+            "Protected composition supports two to six distinct feeds"
         }
         require(sourceTileIndices.size == selected.size &&
             sourceTileIndices.all { it >= 0 }) {
@@ -638,6 +638,7 @@ internal object ProtectedHevcLiveComposition {
             2 -> 2
             3 -> 3
             4 -> 2
+            5 -> 5
             6 -> 3
             else -> throw IllegalArgumentException("unsupported live composition feed count")
         }

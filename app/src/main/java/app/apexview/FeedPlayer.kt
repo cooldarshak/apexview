@@ -208,6 +208,7 @@ class FeedPlayer(
 
     private val fit = TileFit().apply { qualityHeight = videoQuality.targetHeight }
     private var selectedVideoQuality = videoQuality
+    private var audioTrackEnabled = false
 
     // Written on the playback thread when the DRM session opens.
     @Volatile private var drmLevel = ""
@@ -308,6 +309,10 @@ class FeedPlayer(
             .setTrackSelector(androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context, TileFitSelectionFactory(fit)))
             .build()
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            // Only the currently audible tile needs an audio decoder. Setting volume to zero
+            // still makes Media3 open an AAC decoder for every muted tile, which wastes codec
+            // threads and buffers on phones and Android TV during multiview playback.
+            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !subtitles)
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !startWithVideo)
             .setPreferredAudioLanguage(commentary)
@@ -753,6 +758,12 @@ class FeedPlayer(
     }
 
     fun setAudible(audible: Boolean) {
+        if (audioTrackEnabled != audible) {
+            audioTrackEnabled = audible
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, !audible)
+                .build()
+        }
         player.volume = if (audible) 1f else 0f
     }
 

@@ -17,7 +17,7 @@ import android.view.LayoutInflater
 import android.os.Bundle
 import android.webkit.WebSettings
 import android.webkit.WebView
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -43,10 +43,29 @@ import androidx.media3.ui.PlayerView
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.google.android.gms.cast.framework.CastContext
+import com.google.android.gms.cast.framework.CastSession
+import com.google.android.gms.cast.framework.SessionManagerListener
 import kotlinx.coroutines.launch
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private lateinit var app: AppState
+    private var castContext: CastContext? = null
+    private val castSessionListener = object : SessionManagerListener<CastSession> {
+        override fun onSessionStarting(session: CastSession) = Unit
+        override fun onSessionStarted(session: CastSession, sessionId: String) =
+            app.onGoogleCastSessionAvailable(session.remoteMediaClient)
+        override fun onSessionStartFailed(session: CastSession, error: Int) =
+            app.onGoogleCastStartFailed("Google Cast could not start (error $error). Check the receiver connection and try again.")
+        override fun onSessionEnding(session: CastSession) = Unit
+        override fun onSessionEnded(session: CastSession, error: Int) = app.onGoogleCastSessionEnded()
+        override fun onSessionResuming(session: CastSession, sessionId: String) = Unit
+        override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) =
+            app.onGoogleCastSessionAvailable(session.remoteMediaClient)
+        override fun onSessionResumeFailed(session: CastSession, error: Int) =
+            app.onGoogleCastStartFailed("Google Cast could not reconnect (error $error). Choose the device again.")
+        override fun onSessionSuspended(session: CastSession, reason: Int) = Unit
+    }
     private val login = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         app.onLoginFinished()
     }
@@ -60,6 +79,7 @@ class MainActivity : ComponentActivity() {
         app = AppState(this, lifecycleScope, userAgent, chromeMajor) {
             login.launch(Intent(this, LoginActivity::class.java))
         }
+        bindGoogleCast()
         setContent { AppTheme { Root(app) } }
         app.restore()
         app.updater.checkOnLaunch()
@@ -129,13 +149,23 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         app.onResumed()
+        castContext?.sessionManager?.currentCastSession?.remoteMediaClient?.let(app::onGoogleCastSessionAvailable)
     }
 
     override fun onDestroy() {
+        castContext?.sessionManager?.removeSessionManagerListener(castSessionListener, CastSession::class.java)
+        castContext = null
         unregisterReceiver(pipControls)
         app.stopAll()
         app.close()
         super.onDestroy()
+    }
+
+    private fun bindGoogleCast() {
+        val instance = runCatching { CastContext.getSharedInstance(applicationContext) }.getOrNull()
+        castContext = instance
+        app.setGoogleCastAvailable(instance != null)
+        instance?.sessionManager?.addSessionManagerListener(castSessionListener, CastSession::class.java)
     }
 }
 
