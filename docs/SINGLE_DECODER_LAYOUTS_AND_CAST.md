@@ -10,8 +10,11 @@ clear archive footage, not proof of protected Widevine or TV playback.
 
 ## Playback mode and layout are separate
 
-Layout now offers **Multiple decoders** and **Single decoder** independently of
+Settings offers **Multiple decoders** and **Single decoder** independently of
 Main + strip, Grid, TV, My layout, Snap/Free, drag/resize, overlap and z order.
+The preference survives app restarts; a particular incompatible stream can still
+fall back safely without changing the saved preference. The source players are
+paused during activation and released only after preflight succeeds.
 The existing solvers and tile controls are reused. The atlas's camera/source order
 stays fixed; changing the main window or dragging a tile only changes its sampled
 region and destination rectangle. It does not start additional video players.
@@ -35,9 +38,9 @@ claimed. Existing app feed limits remain unchanged.
 
 ## Implemented casting preview
 
-**Layout > Cast entire layout > Start receiver link** creates a paired LAN receiver.
-Open the shown local address in a TV browser supporting HEVC MSE/HLS and WebGL,
-then enter the six-digit code shown on the phone. Keep ApexView open on the phone.
+The earlier paired-LAN browser receiver remains in the source as an experimental
+component, but its browser/address/code workflow is no longer exposed in the UI.
+It is not the Google Cast experience requested for production.
 
 The TV pulls one composed HEVC stream and selected native audio into one HTML video
 player. A WebGL scene places its camera regions using the phone's window geometry.
@@ -59,7 +62,7 @@ the viewer releases the receiver. Source leases allow decoder-mode changes witho
 zeroing a still-active receiver's stream. Changing the selected feeds stops the
 old receiver so it cannot silently show a different selection.
 
-This is a functional receiver-link preview, not finished Google Cast discovery or
+This is an experimental receiver-link preview, not finished Google Cast discovery or
 background casting. Browser codec/GPU support and actual A/V/UI behavior must be
 verified on a real receiving device. Phone UI capture currently requires the app
 to remain open. Cast-specific hardware decoder counts cannot be inferred from an
@@ -72,6 +75,16 @@ Receiver must be hosted over HTTPS and registered to get a receiver application 
 That user-owned configuration is not present in this repository. No default
 receiver is substituted for full-layout casting and no unregistered ID is invented.
 Google Cast discovery/launch and a platform-native TV receiver remain outstanding.
+The Google Cast entry in the layout menu reports that it is unavailable until a
+real registered full-layout receiver and sender have been integrated and tested.
+
+## Startup and seeking
+
+Offer, initialization and audio-manifest requests for separate cameras run in
+parallel, and the fragment reader uses at most four concurrent I/O workers. A
+seek cancels an unrelated warm-ahead request so it cannot keep processing the old
+position. Actual time to first frame still depends on network, GOP and decoder.
+Device measurements are needed; instant playback at every random seek is not claimed.
 
 Primary references:
 - https://developers.google.com/cast/docs/registration

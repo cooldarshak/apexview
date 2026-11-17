@@ -1571,9 +1571,7 @@ private fun LayoutSheet(app: AppState) {
                 Text("Active video decoders (app callbacks): ${app.observedActiveVideoDecoders}", style = Type.footnote)
             }
             Row(Modifier.padding(top = 12.dp)) {
-                SecondaryButton(if (app.castingActive) "Casting full layout" else "Cast entire layout") {
-                    app.layoutSheetOpen = false; app.castSheetOpen = true
-                }
+                SecondaryButton("Google Cast") { app.showGoogleCastStatus() }
             }
             val n = app.tiles.size
             val hasSaved = app.savedLayout(n) != null

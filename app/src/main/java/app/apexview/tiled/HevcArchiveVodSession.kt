@@ -105,6 +105,14 @@ internal class HevcArchiveVodSession(
 
     fun segmentAt(positionUs: Long): Int = groups.indexOfLast { it.startUs <= positionUs }.coerceAtLeast(0)
 
+    /** Stop stale warm-ahead work as soon as a user seeks to a different fragment. */
+    fun prioritizeSeek(positionMs: Long) {
+        val target = segmentAt(positionMs.coerceAtLeast(0) * 1000L)
+        synchronized(warmLock) {
+            if (warmNumber != target && warmTask?.isDone == false) warmTask?.cancel(true)
+        }
+    }
+
     fun segment(number: Int): ByteArray {
         synchronized(warmLock) {
             if (warmNumber != number && warmTask?.isDone == false) warmTask?.cancel(true)

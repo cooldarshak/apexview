@@ -195,6 +195,44 @@ seg.m4s
         assertArrayEquals(byteArrayOf(3, 4, 5), result.bytes)
     }
 
+    @Test fun cancelledCmafReadStopsBeforeConsumingResponseBytes() {
+        val network = Network(mapOf("https://media.test/file" to byteArrayOf(1, 2, 3)))
+        val alreadyInterrupted = Thread.interrupted()
+        try {
+            Thread.currentThread().interrupt()
+            try {
+                CmafHttpReader(network.factory).read(Uri.parse("https://media.test/file"), 8)
+                fail("An interrupted warm-up must not keep reading")
+            } catch (_: java.io.InterruptedIOException) { }
+        } finally {
+            Thread.interrupted()
+            if (alreadyInterrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    @Test fun seekCancelsAnUnrelatedFragmentWarmup() = runBlocking {
+        val network = network(2)
+        val capture = F1HlsFeedCapture(network.factory)
+        val session = capture.prepareVod(feeds(2), 0, "channel-0")
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val cancelled = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        network.beforeOpen = { spec ->
+            if (spec.uri.toString().endsWith("s1.m4s")) {
+                entered.countDown()
+                try { release.await() } catch (error: InterruptedException) { cancelled.countDown(); throw error }
+            }
+        }
+        try {
+            session.segment(0).fill(0) // schedules segment 1 on the warm-ahead worker
+            assertTrue("Warm-ahead did not start", entered.await(8, java.util.concurrent.TimeUnit.SECONDS))
+            session.prioritizeSeek(0)
+            assertTrue("Stale download was not cancelled", cancelled.await(8, java.util.concurrent.TimeUnit.SECONDS))
+        } finally {
+            release.countDown(); session.close(); capture.reset()
+        }
+    }
+
     @Test fun protectedPackageModeRejectsAClearInitialization() {
         // The existing protected writers/composer tests cover ciphertext preservation. The
         // clear adapter must keep its own independent metadata guard enabled as well.

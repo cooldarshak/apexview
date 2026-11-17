@@ -336,6 +336,10 @@ class AppState(
     val castPairingCode: String? get() = castRelay?.pairingCode
     private var castRevision by mutableStateOf(0)
     private var castAudioRevision by mutableStateOf(0)
+    fun showGoogleCastStatus() {
+        layoutSheetOpen = false
+        message = "Google Cast for the full layout is not available in this build yet."
+    }
     fun startFullSceneCast() {
         if (castingActive || castBusy) return
         if (!singleDecoderSceneActive && tiles.size > 1) chooseDecoderMode(DecoderMode.SINGLE)
@@ -4240,6 +4244,7 @@ class AppState(
         // stops at the live edge itself). Clamping to an unknown length sent skips back to 0.
         val duration = leader.feed.player.duration.takeIf { it > 0 } ?: durationMs.takeIf { it > 0 }
         val target = if (duration != null) targetMs.coerceIn(0L, duration) else targetMs.coerceAtLeast(0L)
+        if (singleDecoderSceneActive) protectedCompositionHost?.feed?.prioritizeArchiveSeek(target)
         val shift = target - leader.feed.player.currentPosition
         // Every tile moves by the same amount, so their offsets from each other survive the seek.
         tiles.filter { nativeArchiveTiles.isEmpty() || it === protectedCompositionHost }.forEach { it.feed.player.seekTo((it.feed.player.currentPosition + shift).coerceAtLeast(0L)) }

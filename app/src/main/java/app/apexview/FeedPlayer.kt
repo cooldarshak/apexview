@@ -621,6 +621,8 @@ class FeedPlayer(
 
     internal fun releaseArchiveOwnership() { archiveVodSession?.close(); archiveVodSession = null }
 
+    internal fun prioritizeArchiveSeek(positionMs: Long) { archiveVodSession?.prioritizeSeek(positionMs) }
+
     /** Drop the original loaders/audio as well as video once all source decoders are released. */
     internal fun suspendForArchiveComposition() {
         player.stop()

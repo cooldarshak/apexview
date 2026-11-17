@@ -21,6 +21,7 @@ internal class CmafHttpReader(private val factory: DataSource.Factory) {
             val output = ByteArrayOutputStream()
             val buffer = ByteArray(32 * 1024)
             while (true) {
+                if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("CMAF read cancelled")
                 val count = source.read(buffer, 0, minOf(buffer.size, limit - output.size() + 1))
                 if (count == C.RESULT_END_OF_INPUT) break
                 if (count <= 0) continue
