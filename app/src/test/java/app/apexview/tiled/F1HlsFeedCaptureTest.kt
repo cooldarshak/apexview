@@ -373,6 +373,25 @@ seg.m4s
         assertEquals(2, network.requested.count { it.endsWith("s1.m4s") })
     }
 
+    @Test fun containerSyncFlagCannotTurnAPictureWithReferencesIntoAnIrap() = runBlocking {
+        val capture = F1HlsFeedCapture(network(2, samplesPerFragment = 10, forceSyncFlags = true).factory)
+        try { capture.prepareVod(feeds(2), 600, "channel-0"); fail("An IRAP NAL must be verified") }
+        catch (expected: ArchiveVodMediaException) {
+            assertFalse(expected.retryable)
+            assertTrue(expected.reason, expected.reason.contains("IRAP"))
+        } finally { capture.reset() }
+    }
+
+    @Test fun permanentCompositionFailureIsNotRetriedButTransientReadFailureIs() {
+        val policy = ArchiveVodLoadErrorPolicy()
+        fun info(retryable: Boolean) = androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy.LoadErrorInfo(
+            androidx.media3.exoplayer.source.LoadEventInfo(1, DataSpec(Uri.parse("apexview-archive:///s-0.m4s")), 0),
+            androidx.media3.exoplayer.source.MediaLoadData(androidx.media3.common.C.DATA_TYPE_MEDIA),
+            ArchiveVodMediaException("Safe diagnostic", retryable), 2)
+        assertEquals(androidx.media3.common.C.TIME_UNSET, policy.getRetryDelayMsFor(info(false)))
+        assertTrue(policy.getRetryDelayMsFor(info(true)) >= 0)
+    }
+
     @Test fun nativeVodExposesFiniteResourcesAndCannotReadAfterClose() = runBlocking {
         val capture = F1HlsFeedCapture(network(2).factory)
         val session = capture.prepareVod(feeds(2), 0, "channel-0")
@@ -476,7 +495,7 @@ seg.m4s
 
     private fun feeds(count: Int) = (0 until count).map { F1DashFeedCapture.Feed("channel-$it", "https://media.test/f$it/master.m3u8") }
 
-    private fun network(count: Int, decodeOffsetTicks: Long = 0, samplesPerFragment: Int = 25, annexBFile: File? = null): Network {
+    private fun network(count: Int, decodeOffsetTicks: Long = 0, samplesPerFragment: Int = 25, annexBFile: File? = null, forceSyncFlags: Boolean = false): Network {
         val dir = System.getenv("APEXVIEW_HEVC_FIXTURE_DIR")?.let(::File)
         assumeTrue("Independent HEVC source fixtures are not configured", dir != null)
         val files = mutableMapOf<String, ByteArray>()
@@ -493,7 +512,7 @@ seg.m4s
                 val bytes = ByteArrayOutputStream()
                 picture.forEach { nal -> bytes.write(ByteBuffer.allocate(4).putInt(nal.size).array()); bytes.write(nal) }
                 HevcClearCmafFragmentWriter.Sample(bytes.toByteArray(), 3600, 0,
-                    if (HevcBitstream.parseNalHeader(picture.first()).type in 16..23) 0x02000000L else 0x01010000L)
+                    if (forceSyncFlags || HevcBitstream.parseNalHeader(picture.first()).type in 16..23) 0x02000000L else 0x01010000L)
             }
             val sourceSps = HevcParameterSets.parseSps(nals.first { it.type == 33 }.bytes)
             files["https://media.test/f$i/master.m3u8"] = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"hvc1.1.6.L93.B0\",RESOLUTION=${sourceSps.displayWidth}x${sourceSps.displayHeight}\nvideo.m3u8\n".toByteArray()

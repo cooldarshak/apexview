@@ -382,7 +382,7 @@ class AppState(
             message = "Only the main feed's picture plays at ${speedLabel(playbackSpeed)} on this device, to keep it smooth. Back to 1× brings the rest back."
         }
         val shown = if (inPip) pipTile() else null
-        val main = tiles.firstOrNull { it.id == bigTileId } ?: tiles.firstOrNull { it.audible } ?: tiles.maxByOrNull { it.w }
+        val main = protectedCompositionHost ?: tiles.firstOrNull { it.id == bigTileId } ?: tiles.firstOrNull { it.audible } ?: tiles.maxByOrNull { it.w }
         val scale = when {
             thermal >= android.os.PowerManager.THERMAL_STATUS_SEVERE -> 0.5f
             thermal >= android.os.PowerManager.THERMAL_STATUS_MODERATE -> 0.75f
@@ -1410,6 +1410,7 @@ class AppState(
 
     /** Replay composition is a finite on-demand source, not a moving live capture window. */
     private fun startArchiveSingleDecoderComposition(contentId: Long) {
+        if (protectedCompositionHost != null) stopProtectedCompositionPresentation()
         val selected = tiles.filter { it.contentId == contentId }
         if (selected.size !in 2..4 || selected.size != tiles.size ||
             selected.map { it.feed.sourceStream.profileLabel }.distinct().size != selected.size) {
@@ -1911,7 +1912,10 @@ class AppState(
         val resumePositionMs = if (native.isNotEmpty()) protectedCompositionHost?.feed?.player?.currentPosition
             else protectedCompositionAudioMaster?.feed?.player?.currentPosition
         if (restorePlayer) {
-            if (native.isNotEmpty()) native.forEach { it.feed.stopProtectedComposedPlayback(resumePositionMs, playing, enableVideo = false) }
+            if (native.isNotEmpty()) native.forEach {
+                it.feed.stopProtectedComposedPlayback(resumePositionMs, playing, enableVideo = false)
+                it.feed.setAudible(it.audible && !mutedAll)
+            }
             else protectedCompositionHost?.feed?.stopProtectedComposedPlayback(resumePositionMs)
         }
         nativeArchiveTiles = emptyList()

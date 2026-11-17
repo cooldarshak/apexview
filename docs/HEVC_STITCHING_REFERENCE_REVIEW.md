@@ -48,4 +48,9 @@ Kvazaar is the synthetic encoder used by this POC. The --tiles, --slices tiles, 
 
 ## ApexView implementation boundary
 
-The current Kotlin assembler only reorders original tile-slice NALs for a narrow synthetic same-picture test. It is not yet the F1 compositor described above: it does not combine a selected tile from each of several independent camera feeds, rewrite output parameter sets/slice headers, or rewrite encrypted CMAF sample/subsample metadata. The production playback graph remains unchanged until those stages are independently validated.
+The branch now has both clear and protected CMAF writers/composers and an archive
+playback handoff. The early complementary-slice proof is no longer its full scope.
+See [ARCHIVE_NATIVE_VOD_HANDOFF.md](ARCHIVE_NATIVE_VOD_HANDOFF.md) for the current
+Tizen/GPAC/Intel/Eyevinn review, finite native clear-HLS replay path, strict
+protection boundary and remaining real-device acceptance. Synthetic frame hashes
+and phone callback evidence do not establish stable protected/TV playback.

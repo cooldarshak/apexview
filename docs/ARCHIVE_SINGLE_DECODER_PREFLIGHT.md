@@ -2,6 +2,10 @@
 
 Branch: `feature/hevc-stitching-poc`. Baseline: `d92bb405c07775bc2432431784231da0bad84eed` (CI #460).
 
+Current native clear-HLS VOD delivery and the build 466 clock failure are documented in
+[ARCHIVE_NATIVE_VOD_HANDOFF.md](ARCHIVE_NATIVE_VOD_HANDOFF.md). The separate-clock
+rolling path below remains the existing DASH/protected backend.
+
 ## Confirmed blocker and scope
 
 The supplied device evidence says `player_tm` feeds were HLS while WEB_DASH was selected. The old parser used each `tme.feeds[].url` verbatim and copied the response's global streamType to every channel. FeedPlayer accepted HLS, but archive capture rejected it **after** source video was disabled. Its error was retried until a generic 15-second timeout.

@@ -148,6 +148,14 @@ internal class HevcArchiveVodSession(
             try {
                 val report = CmafBoxInspector.inspect(composed.initializationSegment)
                 val outputTrack = report.tracks.single()
+                // Container sync flags are insufficient proof of random access. The clear
+                // writer emits moof + mdat containing length-prefixed VCL NALs only.
+                val outputBytes = composed.mediaFragments.single()
+                val mdat = java.nio.ByteBuffer.wrap(outputBytes).int
+                val firstNal = mdat + 8 + config.nalLengthSize
+                require(((outputBytes[firstNal].toInt() ushr 1) and 63) in 16..21) {
+                    "Archive sync sample does not begin with a real HEVC IRAP picture"
+                }
                 val last = CmafBoxInspector.inspect(composed.mediaFragments.last(), report).fragments.single()
                 val offset = requireNotNull(last.baseDecodeTimeTicks) - scaleUs(groups[number].startUs, trackScale)
                 synchronized(cacheLock) {
@@ -234,7 +242,7 @@ internal class HevcArchiveVodSession(
         val duration = java.math.BigDecimal.valueOf(durationUs, 6).stripTrailingZeros().toPlainString()
         """<?xml version="1.0" encoding="UTF-8"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" minBufferTime="PT1S" mediaPresentationDuration="PT${duration}S">
-<Period id="archive-grid" start="PT0S" duration="PT${duration}S"><AdaptationSet contentType="video" mimeType="video/mp4" segmentAlignment="true" startWithSAP="1">
+<Period id="archive-grid" start="PT0S" duration="PT${duration}S"><AdaptationSet contentType="video" mimeType="video/mp4" segmentAlignment="true">
 <Representation id="archive-grid" codecs="hvc1" width="$width" height="$height" bandwidth="${inputs.sumOf { it.format?.bitrate?.coerceAtLeast(0) ?: 0 }.coerceAtLeast(1)}">
 <SegmentList timescale="$timescale" presentationTimeOffset="$pto" startNumber="0"><Initialization sourceURL="init.mp4"/><SegmentTimeline>$timeline</SegmentTimeline>$urls</SegmentList>
 </Representation></AdaptationSet></Period></MPD>""".toByteArray()
