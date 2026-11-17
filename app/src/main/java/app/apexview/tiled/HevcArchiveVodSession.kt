@@ -68,6 +68,9 @@ internal class HevcArchiveVodSession(
     val durationUs: Long get() = groups.last().let { it.startUs + it.durationUs }
     val segmentCount: Int get() = groups.size
     val selectedHeight: Int? get() = inputs.first().format?.height
+    val archiveStartTimeMs: Long? get() = inputs.firstOrNull { it.label == clockLabel }?.playlist?.let {
+        if (it.hasProgramDateTime) it.startTimeUs / 1000L else null
+    }
 
     /** A fixed probe proves composition. It is never required to catch another player's clock. */
     fun prepare(positionMs: Long) {
@@ -177,7 +180,7 @@ internal class HevcArchiveVodSession(
                     cache.put(number, output)?.fill(0)
                     while (cache.size > 3) cache.remove(cache.keys.first())?.fill(0)
                     android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs " +
-                        "composeMs=${(System.nanoTime() - started) / 1_000_000L - fetchMs} clock=PLAYER_REQUEST cache=${cache.size}")
+                        "composeMs=${(System.nanoTime() - started) / 1_000_000L - fetchMs} durationMs=${groups[number].durationUs / 1000L} clock=PLAYER_REQUEST cache=${cache.size}")
                     output.copyOf()
                 }
             } finally {
@@ -240,8 +243,11 @@ internal class HevcArchiveVodSession(
         val timeline = groups.joinToString("") { "<S t=\"${pto + scaleUs(it.startUs, timescale)}\" d=\"${scaleUs(it.durationUs, timescale)}\"/>" }
         val urls = groups.indices.joinToString("") { "<SegmentURL media=\"s-$it.m4s\"/>" }
         val duration = java.math.BigDecimal.valueOf(durationUs, 6).stripTrailingZeros().toPlainString()
+        // Preserve the verified HLS epoch as presentation metadata. Media3 intentionally leaves
+        // static DASH windowStartTimeMs unset; FeedPlayer uses archiveStartTimeMs for overlays.
+        val epoch = archiveStartTimeMs?.let { " availabilityStartTime=\"${java.time.Instant.ofEpochMilli(it)}\"" }.orEmpty()
         """<?xml version="1.0" encoding="UTF-8"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" minBufferTime="PT1S" mediaPresentationDuration="PT${duration}S">
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" minBufferTime="PT1S" mediaPresentationDuration="PT${duration}S"$epoch>
 <Period id="archive-grid" start="PT0S" duration="PT${duration}S"><AdaptationSet contentType="video" mimeType="video/mp4" segmentAlignment="true">
 <Representation id="archive-grid" codecs="hvc1" width="$width" height="$height" bandwidth="${inputs.sumOf { it.format?.bitrate?.coerceAtLeast(0) ?: 0 }.coerceAtLeast(1)}">
 <SegmentList timescale="$timescale" presentationTimeOffset="$pto" startNumber="0"><Initialization sourceURL="init.mp4"/><SegmentTimeline>$timeline</SegmentTimeline>$urls</SegmentList>

@@ -1240,7 +1240,9 @@ class AppState(
         }
         val session = tiles.filter { it.contentId == leader.contentId }
         val big = session.firstOrNull { it.id == bigTileId } ?: session.first()
-        val layout = if (canvasW > 0f) SavedLayout.of(session.map { Slot(it.x, it.y, it.w) }, canvasW, canvasH) else null
+        val layout = if (canvasW > 0f) SavedLayout.of(session.map { tile ->
+            protectedCompositionBounds[tile]?.let { Slot(it.x, it.y, it.w) } ?: Slot(tile.x, tile.y, tile.w)
+        }, canvasW, canvasH) else null
         val saved = SavedWatch(
             contentId = leader.contentId,
             title = titles[leader.contentId] ?: "",
@@ -1512,6 +1514,7 @@ class AppState(
                     dispose = { if (!transferred) it.close() },
                 )
                 var previousLog = ""
+                var lastEvidenceAt = 0L
                 var readySince: Long? = null
                 while (true) {
                     host.feed.problem?.let { throw IOException("Composed playback failed: $it") }
@@ -1531,9 +1534,12 @@ class AppState(
                     } else readySince = null
                     diagnostic()
                     val log = "$phase decoder=${host.feed.activeVideoDecoderName} activeVideoDecoders=$observedActiveVideoDecoders firstFrame=${host.feed.hasRenderedFirstFrame}"
-                    if (log != previousLog) {
-                        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_PLAYBACK $log")
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (log != previousLog || now - lastEvidenceAt >= 5_000L) {
+                        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_PLAYBACK $log renderedFrames=${host.feed.renderedVideoFrames} " +
+                            "selectedVideoTracks=${host.feed.selectedVideoTrackCount} surface=${host.feed.composedSurfaceWidth}x${host.feed.composedSurfaceHeight} bufferedMs=${host.feed.player.totalBufferedDuration}")
                         previousLog = log
+                        lastEvidenceAt = now
                     }
                     kotlinx.coroutines.delay(500L)
                 }
@@ -3823,9 +3829,10 @@ class AppState(
     }
 
     fun stopAll() {
-        stopProtectedCompositionPresentation(restorePlayer = false)
         // Closing the viewer keeps the spot, so Continue watching can bring it back.
+        // Read the native host before clearing its ownership: stopped originals have no clock.
         saveWatch()
+        stopProtectedCompositionPresentation(restorePlayer = false)
         votePromptOpen = false
         nextLive = null
         liveAtStart = null

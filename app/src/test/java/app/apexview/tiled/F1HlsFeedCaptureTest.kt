@@ -244,6 +244,23 @@ seg.m4s
         assertTrue(network.requested.none { it.contains("CONTENT/PLAY") || it.contains("license") || it.endsWith(".key") })
     }
 
+    @Test fun nativeVodPreservesVerifiedHlsEpochForTimingAndMapReplay() = runBlocking {
+        val original = network(2)
+        val files = original.files.mapValues { (uri, bytes) -> if (uri.endsWith("video.m3u8"))
+            bytes.toString(Charsets.UTF_8).replace("#EXT-X-MAP:", "#EXT-X-PROGRAM-DATE-TIME:2026-11-16T14:00:00.000Z\n#EXT-X-MAP:").toByteArray() else bytes }
+        val capture = F1HlsFeedCapture(Network(files).factory)
+        val session = capture.prepareVod(feeds(2), 1100, "channel-0")
+        try {
+            val expected = java.time.Instant.parse("2026-11-16T14:00:00Z").toEpochMilli()
+            assertEquals(expected, session.archiveStartTimeMs)
+            val manifest = androidx.media3.exoplayer.dash.manifest.DashManifestParser().parse(
+                HevcArchiveVodSession.MANIFEST_URI, session.manifest().inputStream())
+            assertEquals(expected, manifest.availabilityStartTimeMs)
+            assertFalse(manifest.dynamic)
+            assertEquals(2000L, manifest.durationMs)
+        } finally { session.close(); capture.reset() }
+    }
+
     @Test fun fixedProbeDoesNotChaseAnAdvancingSourceClock() = runBlocking {
         val network = network(3)
         val clockMs = java.util.concurrent.atomic.AtomicLong(100)

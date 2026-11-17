@@ -27,7 +27,9 @@ composed DASH video plus the selected native HLS audio rendition, using Media3's
 `FilteringMediaSource` and `MergingMediaSource`. Native buffering pauses both.
 No extra PLAY request, independent source clock or rolling archive publication
 loop drives this path. Pause, speed and seek operate on the host's finite archive
-position. Exit/failure restores all original feeds there, under the normal decoder
+position. A verified HLS program-date-time epoch is carried into the static DASH
+timeline so timing/map overlays retain their replay clock. Continue Watching saves
+the native host position and original tile bounds. Exit/failure restores all original feeds there, under the normal decoder
 budget, and preserves pause/mute state and saved tile bounds.
 
 The composed PlayerView occupies the available video canvas. Hidden source feeds

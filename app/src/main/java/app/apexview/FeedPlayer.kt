@@ -765,6 +765,7 @@ class FeedPlayer(
 
     /** The wall-clock time (epoch ms) of position zero, when the stream carries a clock. */
     fun windowStartMs(): Long? {
+        archiveVodSession?.let { return it.archiveStartTimeMs }
         val timeline = player.currentTimeline
         if (timeline.isEmpty) return null
         val window = timeline.getWindow(player.currentMediaItemIndex, Timeline.Window())
