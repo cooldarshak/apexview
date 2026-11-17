@@ -1,5 +1,6 @@
 package app.apexview
 
+import app.apexview.cast.PitwallCastSheet
 import android.app.Activity
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
@@ -247,6 +248,7 @@ private fun Root(app: AppState) {
                 }
             }
         }
+        if (!app.inPip && app.castPickerOpen) PitwallCastSheet(app)
         if (!app.inPip) app.picker?.let { FeedPickerSheet(app, it) }
         // Offered while browsing, never over a stream being watched.
         if (!app.inPip && !watching) UpdatePrompt(app.updater)

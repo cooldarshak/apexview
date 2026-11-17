@@ -143,6 +143,7 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-dash:$media3")
     implementation("androidx.media3:media3-exoplayer-hls:$media3")
     implementation("androidx.media3:media3-ui:$media3")
+    implementation("androidx.media3:media3-datasource-okhttp:$media3")
     // WebSocket for F1's live timing feed (SignalR Core).
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // Fold posture (half-open like a laptop) for laptop mode.

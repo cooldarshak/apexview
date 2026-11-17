@@ -581,6 +581,7 @@ fun SignInScreen(app: AppState) {
             Text("Every feed of every session, arranged the way you want. Sign in with your F1 TV account.", style = Type.subhead)
             Spacer(Modifier.height(8.dp))
             PrimaryButton("Sign in", modifier = Modifier.fillMaxWidth(), enabled = !app.busy, onClick = app::startLogin)
+            SecondaryButton("Receive from phone", Modifier.fillMaxWidth(), onClick = app::openTvReceiver)
             if (useToken) {
                 OutlinedTextField(
                     value = app.pastedToken,

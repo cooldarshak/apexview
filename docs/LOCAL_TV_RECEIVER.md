@@ -1,0 +1,43 @@
+# Free local Pitwall TV receiver
+
+Install the same signed Pitwall TV APK on phone and Android/Google TV. Open **Settings → TV casting → Receive from phone** on the TV. A receiver button is also available before sign-in: clear media is authorized and prepared by the signed-in phone, without copying its account tokens to the TV. Keep the receiver screen open.
+
+On the phone, open compatible archive feeds, choose the desired layout, tap the player **Cast** button and choose the discovered **Pitwall TV** device. Accept **Allow** on the TV. No paid developer account, hosted receiver, IP entry or pairing code is required. Both devices must be on a LAN permitting multicast discovery and device-to-device traffic. Guest-network isolation can prevent discovery/playback.
+
+## Playback and quality
+
+The phone packages all selected clear HEVC sources as one HLS atlas and relays the selected audio. It requests at least 720p and verifies actual source display dimensions. A 540p phone composition is rebuilt rather than reused. Single and Multiple decoder preferences both use this shared casting preparation. 1080p is preferred when requested and compatible; the source/combined stream and TV codec must support the resulting dimensions and rate. Failure reports an error, without silent 540p fallback. Small TV windows naturally occupy fewer display pixels than their source resolution.
+
+The TV has exactly one ExoPlayer with one hardware video renderer, not one player per window. `SingleDecoderSceneView` samples regions of that single decoded HEVC picture. The sender transmits the canvas, fixed source mapping, coded/display dimensions, x/y/width/height and z order. This supports main-left/three-right, Grid, saved positions, movement, resize and overlap. The complete phone video canvas is fitted to the TV without changing its proportions. Moving a window updates geometry without another decoder or re-encoding.
+
+After the TV renders its first GLES frame, phone video/audio tracks are disabled and local players paused. Phone controls follow the receiver clock instead of a still-running phone player. The phone remains the media relay and needs to stay alive/on the local network. Pause, resume, seek, speed, selected audio and mute target the TV. Back/exit/disconnect releases receiver playback and returns phone playback to the latest TV position, under the saved decoder mode. TV D-pad OK pauses/resumes; left/right seek ten seconds. Feed selection changes prepare a replacement relay while retaining the previous relay and keeping phone tracks stopped; failed preparation can be retried.
+
+The Google Cast path shares the local-track handoff, quality floor and phone controller clock. Default Media Receiver still shows the encoded atlas. Optional registered Google layout receiver remains supported, but the free native receiver needs no Google registration. Google Cast acknowledges media loading rather than providing the native GLES frame acknowledgement.
+
+Separate Compose timing tower, map and driver-card overlays are not sent by this protocol version. Video timing/data/map channels selected as feeds are included like other video sources. Live/protected casting is not implemented by this clear relay: no Widevine secrets, F1 headers, licenses or decrypted samples are exported. A protected receiver path must keep legitimate receiver-side licensing and secure output. Local protected playback retains its existing implementation and constraints.
+
+## FCast interoperability
+
+This is an independent implementation of the documented **FCast v3 JSON/TCP core**, not a bundled stock FCast app or a claim of full v4 conformance. It advertises `_fcast._tcp.` through Android NSD, with TXT `version=3` and `pitwallScene=1`. TCP normally uses 46899; a free port is advertised if occupied. Phone discovery resolves sequentially for older Android implementations and selects IPv4, matching the phone relay's address family.
+
+Frames use a four-byte little-endian size including the one-byte opcode, followed by optional UTF-8 JSON; lengths outside 1..32000 are rejected before allocation. Implemented core messages: Version, Initial, Play, Pause, Resume, Stop, Seek, PlaybackUpdate, VolumeUpdate, SetVolume, PlaybackError, SetSpeed, Ping, Pong and PlayUpdate. Playlist/event subscriptions, mirroring/WebRTC, TLS/FlatBuffers v4, and general internet-URL receiver use are not implemented. Stock FCast senders may use this receiver's limited LAN media playback core; stock receivers cannot interpret Pitwall layouts and are not offered as layout destinations.
+
+Initial messages from both Pitwall peers contain `pitwallScene: 1`. Standard `Play.metadata.custom.pitwallScene` carries scene version 1; `playbackId` identifies the specific media load. Only after negotiation are private opcode 128 (scene update JSON) and 129 (rendered scene acknowledgement with playbackId/sources) exchanged. Unknown optional opcodes are ignored, never treated as controls. A stale first-frame acknowledgement cannot hand off a newer load.
+
+The TV requires Allow for each connection before executing media controls. Only one sender is accepted. Packet size, write queues, receive timeout and media buffer lengths are bounded. Media/subresources must use the connected phone's numeric local address, same scheme and port; redirects, remote authorization headers and inline manifests are rejected. HTTP cleartext is enabled for this local clear-media relay; F1 HTTPS authorization stays on the phone. This v3 LAN transport is not encrypted and is intended for a trusted local network. Closing/backgrounding the receiver stops advertising, sockets and playback.
+
+Protocol reference: https://docs.fcast.org/protocol/v3/ . FCast project and licensing: https://github.com/futo-org/fcast (MIT). No FCast implementation code was copied or dependency added. NSD: https://developer.android.com/develop/connectivity/wifi/use-nsd .
+
+## Miracast / Samsung Smart View
+
+The Cast picker and Settings provide **Screen mirroring / Smart View**, which opens Android's public `ACTION_CAST_SETTINGS` when available and otherwise explains Samsung's Quick Settings → Smart View entry. This is a handoff to the manufacturer's wireless-display software. It is not a Miracast source/sink stack implemented in the APK and does not create TV firmware capabilities.
+
+Miracast mirrors the phone's visible rendering, so phone video must remain active for a TV picture. Its negotiated resolution cannot be forced to 720p by this app. Protected video may be blank or blocked by the device/content protection policy; nothing bypasses that policy. For independent TV playback, the same layout, stopped phone video and the verified source-quality floor, use the native Pitwall TV receiver.
+
+References: https://developer.android.com/reference/android/provider/Settings#ACTION_CAST_SETTINGS and https://www.samsung.com/us/support/troubleshoot/TSG10001542/ .
+
+## Verification and remaining device work
+
+JVM regression coverage includes real socket control framing/order/close, oversized/truncated packet rejection, media-origin restrictions, main-plus-three scene round trips and overlap, coded padding, below-720 rejection, a remote clock independent of phone playback, and actual Media3 track disabling/restoration in a FeedPlayer. Existing independent HEVC decode/pixel comparisons and receiver JavaScript tests remain in CI. These checks do not prove TV hardware playback.
+
+Install the signed update on S22 Ultra and TCL 55C655. Enable diagnostic logs, open receiver on TV, select four archive feeds on phone and connect. Confirm each feed's identity/main-plus-three arrangement, then move/resize/overlap windows. Confirm phone picture/audio stop and play/pause/seek/speed/audio/mute still operate the TV. Confirm disconnect restores the latest position without reviving extra decoders in Single mode. Confirm discovery, permission refusal, reconnect, changing feeds, background/exit, receiver 720p/1080p limits and sustained playback. Look for `CAST_SOURCE_QUALITY`, `PitwallReceiver VIDEO_DECODER_INIT active=1`, `SCENE_RENDERING_CONFIRMED`, `LOCAL_PLAYBACK_STOPPED` and scene frame counters in Download/Pitwall. Device results remain pending until those runs are observed.

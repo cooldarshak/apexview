@@ -31,6 +31,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     @Volatile private var released = false
     @Volatile private var input: Surface? = null
     var onFailure: (String) -> Unit = {}
+    var onFirstFrame: () -> Unit = {}
+    private var firstFrameReported = false
     var onOutputSize: (Int, Int) -> Unit = { _, _ -> }
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var contextGl: EGLContext = EGL14.EGL_NO_CONTEXT
@@ -164,6 +166,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             }
         }
         check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" }
+        if (hasFrame && !firstFrameReported) {
+            firstFrameReported = true
+            post { if (!released) onFirstFrame() }
+        }
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
             Log.i("ApexviewSingleDecoder", "SINGLE_DECODER_SCENE output=${outputWidth}x$outputHeight inputTextures=1 outputViews=1 sources=${model.sources} windows=${model.windows.size} frames=$rendered")

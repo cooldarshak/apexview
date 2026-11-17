@@ -158,6 +158,31 @@ class FeedPlayer(
         private set
     internal var composedSurfaceHeight: Int = 0
         private set
+    private var remotePlaybackSuspended = false
+    private var remoteTextWasDisabled = true
+    /** A remote renderer owns playback. Disable tracks as well as pausing to release codec slots. */
+    internal fun suspendForRemotePlayback(suspended: Boolean) {
+        if (remotePlaybackSuspended == suspended) {
+            if (suspended) player.playWhenReady = false
+            return
+        }
+        remotePlaybackSuspended = suspended
+        if (suspended) {
+            remoteTextWasDisabled = C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes
+            player.playWhenReady = false
+            videoOn = false
+            audioTrackEnabled = false
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+            player.volume = 0f
+        } else {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, remoteTextWasDisabled).build()
+        }
+        // AppState restores visibility/audio under the existing single/multiple decoder budget.
+    }
     private var videoSuppressedByProtectedComposition = false
 
     private var state = "Starting"
@@ -535,7 +560,7 @@ class FeedPlayer(
         viewH = h
         fit.width = w
         fit.height = h
-        val enabled = on && !videoSuppressedByProtectedComposition
+        val enabled = on && !videoSuppressedByProtectedComposition && !remotePlaybackSuspended
         if (enabled == videoOn) return
         videoOn = enabled
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
@@ -583,12 +608,12 @@ class FeedPlayer(
             videoSuppressedByProtectedComposition = false
             videoOn = true
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
+                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, remotePlaybackSuspended)
                 .build()
             if (startPositionMs == null) player.setMediaSource(mediaSource)
             else player.setMediaSource(mediaSource, startPositionMs)
             previous?.release()
-            player.playWhenReady = playWhenReady
+            player.playWhenReady = playWhenReady && !remotePlaybackSuspended
             player.prepare()
         } catch (error: Throwable) {
             nextSource.release()
@@ -612,9 +637,9 @@ class FeedPlayer(
         videoSuppressedByProtectedComposition = false
         videoOn = true
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE).setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false).build()
+            .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE).setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, remotePlaybackSuspended).build()
         player.setMediaSource(MergingMediaSource(true, true, video, audio), positionMs.coerceAtLeast(0))
-        player.playWhenReady = playWhenReady
+        player.playWhenReady = playWhenReady && !remotePlaybackSuspended
         player.prepare()
     }
 
@@ -724,9 +749,9 @@ class FeedPlayer(
         videoOn = enableVideo
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setMaxVideoSize(selectedVideoQuality.maxWidth, selectedVideoQuality.maxHeight)
-            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enableVideo)
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enableVideo || remotePlaybackSuspended)
             .build()
-        player.playWhenReady = playWhenReady
+        player.playWhenReady = playWhenReady && !remotePlaybackSuspended
         player.prepare()
     }
 
@@ -758,6 +783,7 @@ class FeedPlayer(
     }
 
     fun setAudible(audible: Boolean) {
+        val audible = audible && !remotePlaybackSuspended
         if (audioTrackEnabled != audible) {
             audioTrackEnabled = audible
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()

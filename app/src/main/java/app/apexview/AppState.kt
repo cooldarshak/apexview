@@ -26,6 +26,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.util.Calendar
@@ -342,7 +343,209 @@ class AppState(
     private val usesLayoutCastReceiver get() = BuildConfig.CAST_RECEIVER_APP_ID.isNotEmpty()
     private var googleCastLoadedUrl: String? = null
     private var castPreparationJob: Job? = null
+    private var castPreparationGeneration = 0L
+    private var castRetryAfter = 0L
+    private val retiredCastRelays = mutableListOf<app.apexview.cast.SceneCastRelay>()
     val castingActive: Boolean get() = castRelay != null
+    var castPickerOpen by mutableStateOf(false)
+    internal var localCastDevices by mutableStateOf<List<app.apexview.cast.local.PitwallDevice>>(emptyList())
+        private set
+    var localCastDiscoveryStatus by mutableStateOf("Looking for Pitwall TVs…")
+        private set
+    private var localDiscovery: app.apexview.cast.local.PitwallDiscovery? = null
+    private var localConnection: app.apexview.cast.local.FcastConnection? = null
+    private var localConnectionJob: Job? = null
+    private var localReady = false
+    private var localLoadId = ""
+    private var localChosen = false
+    var castDeviceName by mutableStateOf("TV")
+        private set
+    var castPlaybackHandedOff by mutableStateOf(false)
+        private set
+    private val remoteCastClock = app.apexview.cast.local.RemotePlaybackClock { android.os.SystemClock.elapsedRealtime() }
+    private var castRemoteBuffering = false
+    private var googleHasPlayed = false
+    private var googleLoading = false
+    private var googleCastSelected = true
+    private val googleRemoteCallback = object : com.google.android.gms.cast.framework.media.RemoteMediaClient.Callback() {
+        override fun onStatusUpdated() {
+            if (!castPlaybackHandedOff || localChosen || googleLoading) return
+            val remote = googleCastRemoteClient ?: return
+            if (remote.isPlaying || remote.isPaused) googleHasPlayed = true
+            if (googleHasPlayed && remote.isIdle) {
+                releaseCastRelay()
+                castStatus = "TV playback ended. Playback returned to this device."
+                return
+            }
+            playing = remote.isPlaying || remote.isBuffering
+            castRemoteBuffering = remote.isBuffering
+            remoteCastClock.update(remote.approximateStreamPosition, remote.isPlaying, playbackSpeed, remote.streamDuration)
+        }
+    }
+
+    fun openCastPicker() { castPickerOpen = true }
+    internal fun startLocalDiscovery() {
+        localDiscovery?.close()
+        localCastDevices = emptyList(); localCastDiscoveryStatus = "Looking for Pitwall TVs…"
+        localDiscovery = app.apexview.cast.local.PitwallDiscovery(context, { devices ->
+            localCastDevices = devices
+            localCastDiscoveryStatus = if (devices.isEmpty()) "Open Settings → Receive from phone on the TV. Both devices need the same local network."
+                else "Choose a TV. Allow the connection on its screen."
+        }, { error -> localCastDiscoveryStatus = error }).also { it.start() }
+    }
+    internal fun stopLocalDiscovery() { localDiscovery?.close(); localDiscovery = null }
+    fun openTvReceiver() {
+        stopAll()
+        context.startActivity(Intent(context, app.apexview.cast.local.PitwallReceiverActivity::class.java))
+    }
+    fun openMiracast() {
+        castPickerOpen = false
+        stopFullSceneCast()
+        message = if (app.apexview.cast.local.Miracast.open(context)) {
+            "Choose your TV in the phone's wireless display controls. Mirroring keeps video on the phone and may block protected video."
+        } else {
+            "On Samsung, open Quick Settings → Smart View and choose the TV. Miracast requires TV firmware support and keeps the phone video running."
+        }
+    }
+    /** Called immediately before opening Google's standard route dialog. */
+    internal fun chooseGoogleCast() {
+        stopFullSceneCast()
+        localChosen = false
+        googleCastSelected = true
+        castPickerOpen = false
+    }
+    internal fun connectLocalCast(device: app.apexview.cast.local.PitwallDevice) {
+        stopFullSceneCast()
+        localChosen = true; localReady = false; castDeviceName = device.name
+        castPickerOpen = false; castBusy = true
+        castStatus = "Connecting to ${device.name}…"; message = castStatus
+        localConnectionJob = scope.launch {
+            val socket = java.net.Socket()
+            var assigned = false
+            try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    socket.connect(java.net.InetSocketAddress(device.address, device.port), 6_000)
+                }
+                lateinit var next: app.apexview.cast.local.FcastConnection
+                next = app.apexview.cast.local.FcastConnection(scope, socket, { packet ->
+                    if (localConnection === next) receiveLocalCast(packet)
+                }, { reason ->
+                    if (localConnection === next) {
+                        localConnection = null; localReady = false
+                        castPreparationJob?.cancel(); castPreparationJob = null
+                        releaseCastRelay(); castBusy = false
+                        castStatus = "TV disconnected ($reason). Choose the TV again to reconnect."; message = castStatus
+                    }
+                })
+                localConnection = next; assigned = true; next.start()
+                next.send(app.apexview.cast.local.FcastProtocol.VERSION, JSONObject().put("version", 3))
+                kotlinx.coroutines.delay(8_000)
+                if (!localReady && localConnection === next) {
+                    next.close()
+                    castStatus = "The TV did not confirm Pitwall layout support. Reopen Receive from phone on the TV."; message = castStatus
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (error: Exception) {
+                castBusy = false; castStatus = "Unable to connect to the TV: ${error.javaClass.simpleName}"; message = castStatus
+            } finally {
+                if (!assigned) runCatching { socket.close() }
+                localConnectionJob = null
+            }
+        }
+    }
+    private fun receiveLocalCast(packet: app.apexview.cast.local.FcastProtocol.Packet) {
+        val body = packet.body
+        val protocol = app.apexview.cast.local.FcastProtocol
+        try {
+            when (packet.opcode) {
+                protocol.VERSION -> {
+                    require(body != null && body.getInt("version") >= 3) { "Receiver does not support the Pitwall FCast connection" }
+                    localConnection?.send(protocol.INITIAL, JSONObject().put("displayName", android.os.Build.MODEL)
+                        .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1))
+                }
+                protocol.INITIAL -> {
+                    require(body?.optInt("pitwallScene") == 1) { "This receiver cannot arrange Pitwall video windows" }
+                    if (!localReady) {
+                        localReady = true; castBusy = false
+                        startFullSceneCast()
+                    }
+                }
+                protocol.PING -> localConnection?.send(protocol.PONG)
+                protocol.RENDERING -> {
+                    if (body?.optString("playbackId") != localLoadId || castRelay == null) return
+                    castSceneConfirmed = true
+                    handOffCastPlayback()
+                    castStatus = "Playing on $castDeviceName in the phone video layout. ${castRelay?.session?.sourceDisplayHeight ?: 720}p sources."
+                    message = castStatus
+                }
+                protocol.PLAYBACK_UPDATE -> if (localReady && body != null) {
+                    val state = body.optInt("state")
+                    val time = body.optDouble("time", 0.0)
+                    val duration = body.optDouble("duration", 0.0)
+                    val speed = body.optDouble("speed", playbackSpeed.toDouble())
+                    require(time.isFinite() && duration.isFinite() && time in 0.0..604800.0 && duration in 0.0..604800.0 && speed.isFinite() && speed in 0.25..4.0)
+                    if (state == 0 && castPlaybackHandedOff) {
+                        releaseCastRelay(); castStatus = "TV playback stopped. Playback returned to this device."
+                    } else if (state in 1..2) {
+                        castRemoteBuffering = body.optBoolean("buffering")
+                        remoteCastClock.update((time * 1000).toLong(), state == 1 && !castRemoteBuffering, speed.toFloat(), (duration * 1000).toLong())
+                        if (castPlaybackHandedOff) { playing = state == 1; positionMs = remoteCastClock.positionMs() }
+                    }
+                }
+                protocol.ERROR -> {
+                    castPreparationJob?.cancel(); castPreparationJob = null
+                    releaseCastRelay(); castBusy = false
+                    castStatus = DiagnosticRedaction.redact(body?.optString("message") ?: "TV playback failed").take(220)
+                    message = castStatus
+                }
+            }
+        } catch (error: Exception) {
+            castStatus = DiagnosticRedaction.redact(error.message.orEmpty()).take(220); message = castStatus
+            localConnection?.close()
+        }
+    }
+    private fun loadLocalCastMedia(relay: app.apexview.cast.SceneCastRelay) {
+        val link = localConnection ?: throw IOException("TV disconnected during preparation")
+        val scene = castVideoScene(relay.session) ?: throw IOException("The phone layout is not ready. Keep the player open and retry casting.")
+        val time = castFramePositionMs.coerceAtLeast(0L)
+        localLoadId = java.util.UUID.randomUUID().toString()
+        remoteCastClock.update(time, playing, playbackSpeed, relay.session.durationUs / 1000)
+        link.send(app.apexview.cast.local.FcastProtocol.PLAY, JSONObject()
+            .put("container", "application/x-mpegURL").put("url", relay.googleCastMediaUrl)
+            .put("time", time / 1000.0).put("speed", playbackSpeed).put("volume", if (mutedAll) 0 else 1)
+            .put("metadata", JSONObject().put("type", 0).put("title", "Pitwall TV")
+                .put("custom", JSONObject().put("pitwallScene", scene).put("playbackId", localLoadId))))
+        if (!playing) link.send(app.apexview.cast.local.FcastProtocol.PAUSE)
+        castStatus = "Allow playback on the TV. Waiting for its first rendered frame…"; message = castStatus
+        startCastSceneUpdates(relay)
+    }
+    private fun handOffCastPlayback() {
+        retiredCastRelays.forEach { it.close() }; retiredCastRelays.clear()
+        if (castPlaybackHandedOff || castRelay == null) return
+        if (!localChosen) remoteCastClock.update(castFramePositionMs, playing, playbackSpeed, castRelay!!.session.durationUs / 1000)
+        castPlaybackHandedOff = true
+        tiles.forEach { it.feed.suspendForRemotePlayback(true) }
+        radioPlayer?.pause()
+        android.util.Log.i("PitwallCast", "LOCAL_PLAYBACK_STOPPED transport=${if (localChosen) "FCast" else "GoogleCast"} feeds=${tiles.size}")
+    }
+    private fun returnCastPlayback() {
+        if (!castPlaybackHandedOff) return
+        val target = remoteCastClock.positionMs()
+        castPlaybackHandedOff = false
+        tiles.forEach {
+            it.feed.suspendForRemotePlayback(false)
+            it.feed.player.seekTo(target)
+            it.feed.player.playWhenReady = playing && (!singleDecoderSceneActive || it === protectedCompositionHost)
+        }
+        applyVideoBudget()
+        if (singleDecoderSceneActive) {
+            tiles.firstOrNull { it.audible }?.let { singleDecoderScenePlayer?.selectArchiveAudio(it.feed.sourceStream.profileLabel) }
+            singleDecoderScenePlayer?.setAudible(!mutedAll)
+        } else if (settings.decoderMode == DecoderMode.SINGLE && tiles.size >= 2) {
+            tiles.firstOrNull()?.let { startArchiveSingleDecoderComposition(it.contentId) }
+        } else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll) }
+    }
+
     fun showGoogleCastStatus() {
         message = if (googleCastAvailable) {
             "Choose a Google Cast device from the Cast button in the player."
@@ -355,8 +558,12 @@ class AppState(
         if (!available) googleCastRemoteClient = null
     }
     fun onGoogleCastSessionAvailable(session: com.google.android.gms.cast.framework.CastSession) {
+        if (localChosen || !googleCastSelected) return
         googleCastSession = session
+        googleCastRemoteClient?.unregisterCallback(googleRemoteCallback)
         googleCastRemoteClient = session.remoteMediaClient
+        googleCastRemoteClient?.registerCallback(googleRemoteCallback)
+        castDeviceName = session.castDevice?.friendlyName ?: "Google Cast TV"
         if (googleCastRemoteClient == null) return
         if (usesLayoutCastReceiver) runCatching {
             session.setMessageReceivedCallbacks(app.apexview.cast.CastSceneProtocol.NAMESPACE) { _, _, text ->
@@ -379,8 +586,10 @@ class AppState(
         if (relay != null) loadGoogleCastMedia(relay) else startFullSceneCast()
     }
     fun onGoogleCastSessionEnded() {
+        googleCastRemoteClient?.unregisterCallback(googleRemoteCallback)
         googleCastSession = null
         googleCastRemoteClient = null
+        if (localChosen) return
         castPreparationJob?.cancel(); castPreparationJob = null
         releaseCastRelay()
         castBusy = false
@@ -390,29 +599,35 @@ class AppState(
         castStatus = reason.take(220)
         message = castStatus
     }
-    fun startFullSceneCast() {
-        if (castingActive || castBusy) return
+    fun startFullSceneCast() = prepareFullSceneCast(false)
+    fun retryFullSceneCast() = prepareFullSceneCast(castingActive)
+    private fun prepareFullSceneCast(replace: Boolean) {
+        if ((castingActive && !replace) || castBusy) return
+        if (localChosen && !localReady) { message = "Choose the TV again to reconnect."; return }
+        if (!localChosen && googleCastRemoteClient == null) { message = "Choose a Cast device first."; return }
         if (tiles.isEmpty()) {
-            castStatus = "Open an authorized archive session before connecting Google Cast."
+            castStatus = "Open an authorized archive session before casting."
             message = castStatus
             return
         }
         val castTiles = tiles.toList()
         if (castTiles.map { it.contentId }.distinct().size != 1) {
-            castStatus = "Google Cast needs feeds from one archive session so they can be composed on one shared timeline."
+            castStatus = "Casting needs feeds from one archive session so they can be composed on one shared timeline."
             message = castStatus
             return
         }
         if (castTiles.any { it.contentId in knownLiveContentIds || it.feed.player.isCurrentMediaItemLive }) {
-            castStatus = "This Google Cast path supports archive replays. Live and protected receiver playback need a Cast receiver with F1 Widevine support."
+            castStatus = "Direct casting currently supports clear archive replays. Protected/live feeds need legitimate receiver-side Widevine support."
             message = castStatus
             return
         }
         val clockTile = castTiles.firstOrNull { it.id == bigTileId }
             ?: castTiles.firstOrNull { it.audible }
             ?: castTiles.first()
-        castBusy = true; castStatus = "Preparing ${castTiles.size} feed${if (castTiles.size == 1) "" else "s"} for Google Cast…"
+        castBusy = true; castStatus = "Preparing ${castTiles.size} feed${if (castTiles.size == 1) "" else "s"} for the TV…"
         message = castStatus
+        val generation = ++castPreparationGeneration
+        castRetryAfter = android.os.SystemClock.elapsedRealtime() + 5_000L
         castPreparationJob = scope.launch {
             var relay: app.apexview.cast.SceneCastRelay? = null
             var ownedSession: app.apexview.tiled.HevcArchiveVodSession? = null
@@ -425,7 +640,7 @@ class AppState(
                     try {
                         capture.prepareVod(
                             castTiles.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel, it.feed.sourceStream.url) },
-                            clockTile.feed.player.currentPosition.coerceAtLeast(0),
+                            castFramePositionMs.coerceAtLeast(0),
                             clockTile.feed.sourceStream.profileLabel,
                             preferredHeight = if (settings.videoQuality == VideoQuality.P1080) 1080 else 720,
                             commentary = settings.commentary,
@@ -439,7 +654,8 @@ class AppState(
                 val network = manager.allNetworks.firstOrNull { network -> manager.getNetworkCapabilities(network)?.let {
                     it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) || it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)
                 } == true } ?: throw IOException("Connect the phone and receiver to the same Wi-Fi or Ethernet network.")
-                val address = manager.getLinkProperties(network)?.linkAddresses?.map { it.address }
+                val address = (if (localChosen) localConnection?.socket?.localAddress?.takeIf { it is java.net.Inet4Address }?.hostAddress else null)
+                    ?: manager.getLinkProperties(network)?.linkAddresses?.map { it.address }
                     ?.firstOrNull { it is java.net.Inet4Address && !it.isLoopbackAddress }?.hostAddress
                     ?: throw IOException("No local IPv4 receiver address is available.")
                 val factory = androidx.media3.datasource.DefaultHttpDataSource.Factory().setUserAgent(userAgent)
@@ -452,24 +668,35 @@ class AppState(
                     }
                     relay!!.validateAudio()
                 }
-                if (googleCastRemoteClient == null) throw kotlinx.coroutines.CancellationException("Google Cast session ended during setup")
+                if ((localChosen && (!localReady || localConnection == null)) || (!localChosen && googleCastRemoteClient == null))
+                    throw kotlinx.coroutines.CancellationException("Cast session ended during setup")
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                if (generation != castPreparationGeneration) throw kotlinx.coroutines.CancellationException("Stale cast preparation")
+                require(tiles.map { it.id to it.feed.sourceStream.profileLabel } == castTiles.map { it.id to it.feed.sourceStream.profileLabel }) { "Feed selection changed during preparation; retry casting" }
+                castRelay?.takeIf { it !== relay }?.let { retiredCastRelays += it }
                 castRelay = relay
-                castStatus = if (usesLayoutCastReceiver) "Sending at least 720p sources and the phone video layout to the TV…"
+                castStatus = if (localChosen || usesLayoutCastReceiver) "Sending at least 720p sources and the phone video layout to the TV…"
                     else "Casting ${session.sourceDisplayHeight}p sources. This build uses the standard receiver, which shows the encoded grid; the phone layout needs the registered Pitwall receiver."
                 message = castStatus
                 castTiles.forEach { it.feed.setAudible(false) }
-                loadGoogleCastMedia(relay!!)
+                if (localChosen) loadLocalCastMedia(relay!!) else loadGoogleCastMedia(relay!!)
             } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
-                relay?.close(); castStatus = "The selected feeds could not be composed for Google Cast in time."; message = castStatus
+                if (castRelay === relay) releaseCastRelay()
+                relay?.close(); castStatus = "The selected feeds could not be composed for the TV in time."; message = castStatus
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 relay?.close()
-                if (cancelled.message != "Google Cast session ended during setup") throw cancelled
+                if (cancelled.message != "Cast session ended during setup") throw cancelled
             } catch (error: Exception) {
+                if (castRelay === relay) releaseCastRelay()
                 relay?.close()
                 android.util.Log.w("PitwallCast", DiagnosticRedaction.redact(error.stackTraceToString()))
-                castStatus = (error.message ?: "Unable to prepare the selected feeds for Google Cast").replace(Regex("https?://\\S+"), "[URL]").take(240)
+                castStatus = (error.message ?: "Unable to prepare the selected feeds for casting").replace(Regex("https?://\\S+"), "[URL]").take(240)
                 message = castStatus
-            } finally { ownedSession?.close(); castBusy = false; castPreparationJob = null }
+            } finally {
+                ownedSession?.close()
+                if (generation == castPreparationGeneration) { castBusy = false; castPreparationJob = null }
+                if (relay != null && castRelay !== relay) relay?.close()
+            }
         }
     }
     private fun loadGoogleCastMedia(relay: app.apexview.cast.SceneCastRelay) {
@@ -496,11 +723,19 @@ class AppState(
             })
             .build()
         googleCastLoadedUrl = url
+        googleLoading = true; googleHasPlayed = false
+        val startPosition = castFramePositionMs.coerceAtLeast(0L)
+        remoteCastClock.update(startPosition, playing, playbackSpeed, relay.session.durationUs / 1000)
         runCatching {
-            client.load(media, playing, castFramePositionMs.coerceAtLeast(0L)).setResultCallback { result ->
+            client.load(media, playing, startPosition).setResultCallback { result ->
                 if (castRelay !== relay) return@setResultCallback
+                googleLoading = false
                 if (result.status.isSuccess) {
-                    if (usesLayoutCastReceiver) startCastSceneUpdates(relay)
+                    handOffCastPlayback()
+                    if (playbackSpeed != 1f) client.setPlaybackRate(playbackSpeed.toDouble())
+                    client.setStreamMute(mutedAll)
+                    if (!usesLayoutCastReceiver) castSceneConfirmed = true
+                    startCastSceneUpdates(relay)
                     castStatus = if (usesLayoutCastReceiver) "TV accepted the stream; waiting for layout rendering confirmation…"
                         else "Google Cast is playing ${relay.session.sourceLabels.size} feeds with ${relay.session.sourceDisplayHeight}p sources. The standard receiver shows the encoded grid."
                     message = castStatus
@@ -519,18 +754,30 @@ class AppState(
         castStatus = reason
         message = reason
     }
-    private fun releaseCastRelay() {
+    private fun releaseCastRelay(resumeLocal: Boolean = true) {
+        ++castPreparationGeneration
+        googleLoading = false; googleHasPlayed = false
+        castBusy = false
+        retiredCastRelays.forEach { it.close() }; retiredCastRelays.clear()
         castSceneJob?.cancel(); castSceneJob = null
         castSceneConfirmed = false
         googleCastLoadedUrl = null
         castRelay?.close(); castRelay = null
-        if (singleDecoderSceneActive) singleDecoderScenePlayer?.setAudible(!mutedAll)
-        else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll) }
+        if (resumeLocal) {
+            returnCastPlayback()
+            if (singleDecoderSceneActive) singleDecoderScenePlayer?.setAudible(!mutedAll)
+            else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll) }
+        } else castPlaybackHandedOff = false
     }
-    fun stopFullSceneCast() {
+    fun stopFullSceneCast() = stopCasting(true)
+    private fun stopCasting(resumeLocal: Boolean) {
         castPreparationJob?.cancel(); castPreparationJob = null
-        runCatching { googleCastRemoteClient?.stop() }
-        releaseCastRelay()
+        if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.STOP)
+        else runCatching { googleCastRemoteClient?.stop() }
+        localConnectionJob?.cancel(); localConnectionJob = null
+        val previous = localConnection; localConnection = null; previous?.close()
+        localReady = false; localChosen = false; googleCastSelected = false
+        releaseCastRelay(resumeLocal); castBusy = false
         castStatus = "Casting stopped."
     }
     private fun castVideoScene(session: app.apexview.tiled.HevcArchiveVodSession): JSONObject? {
@@ -556,25 +803,25 @@ class AppState(
             var loops = 0
             while (castRelay === relay) {
                 if (tiles.map { it.feed.sourceStream.profileLabel }.toSet() != relay.session.sourceLabels.toSet()) {
-                    // Rebuild the full selected set; a stale scene must not mislabel a camera.
-                    castSceneJob = null
-                    releaseCastRelay()
-                    startFullSceneCast()
-                    return@launch
+                    // Keep the old relay alive and the phone stopped until replacement is ready.
+                    if (!castBusy && android.os.SystemClock.elapsedRealtime() >= castRetryAfter) prepareFullSceneCast(true)
+                    kotlinx.coroutines.delay(500L)
+                    continue
                 }
                 val scene = castVideoScene(relay.session)
                 if (scene != null) {
                     val text = scene.toString()
                     if (text != last || loops % 10 == 0) {
                         runCatching {
-                            googleCastSession?.sendMessage(app.apexview.cast.CastSceneProtocol.NAMESPACE,
+                            if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.SCENE, scene)
+                            else if (usesLayoutCastReceiver) googleCastSession?.sendMessage(app.apexview.cast.CastSceneProtocol.NAMESPACE,
                                 JSONObject().put("type", "scene").put("scene", scene).toString())
                         }.onFailure { android.util.Log.w("PitwallCast", "Scene send failed: ${it.javaClass.simpleName}") }
                         last = text
                     }
                 }
                 if (++loops == 30 && !castSceneConfirmed) {
-                    castStatus = "TV has not confirmed layout rendering. Check that the registered receiver is the Pitwall layout receiver."
+                    castStatus = "TV has not confirmed layout rendering. Check the TV receiver screen and retry casting."
                     message = castStatus
                 }
                 kotlinx.coroutines.delay(500L)
@@ -582,7 +829,7 @@ class AppState(
         }
     }
 
-    val castFramePositionMs: Long get() = leaderTile()?.feed?.player?.currentPosition ?: 0L
+    val castFramePositionMs: Long get() = if (castPlaybackHandedOff) remoteCastClock.positionMs() else leaderTile()?.feed?.player?.currentPosition ?: 0L
 
     private var sceneOutputSize by mutableStateOf(0 to 0)
     fun reportSceneOutputSize(width: Int, height: Int) { sceneOutputSize = width to height }
@@ -696,7 +943,9 @@ class AppState(
 
     fun close() {
         singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
-        stopFullSceneCast()
+        stopCasting(false)
+        stopLocalDiscovery()
+        googleCastRemoteClient?.unregisterCallback(googleRemoteCallback)
         stopProtectedCompositionPresentation(restorePlayer = false)
         f1DashCaptureJob?.cancel()
         f1DashCaptureJob = null
@@ -713,6 +962,10 @@ class AppState(
      * its limit shows video in the main feed only.
      */
     fun applyVideoBudget() {
+        if (castPlaybackHandedOff) {
+            tiles.forEach { it.feed.suspendForRemotePlayback(true) }
+            return
+        }
         if (singleDecoderVideoRole(settings.decoderMode, tiles.size, false, browsing) != null) {
             val owner = protectedCompositionHost
             tiles.forEach { tile ->
@@ -1580,8 +1833,8 @@ class AppState(
         val leader = leaderTile() ?: return
         val player = leader.feed.player
         val live = leader.contentId in knownLiveContentIds || player.isCurrentMediaItemLive
-        val duration = player.duration.takeIf { it > 0 } ?: 0L
-        val position = player.currentPosition
+        val duration = if (castPlaybackHandedOff) durationMs else player.duration.takeIf { it > 0 } ?: 0L
+        val position = if (castPlaybackHandedOff) castFramePositionMs else player.currentPosition
         noteSeen(leader.contentId, position, duration, live)
         if (!live && duration > 0 && position > duration - 60_000) {
             clearSavedWatch()
@@ -1761,6 +2014,7 @@ class AppState(
 
     /** Replay composition is a finite on-demand source, not a moving live capture window. */
     private fun startArchiveSingleDecoderComposition(contentId: Long, attempt: Int = 0) {
+        if (castPlaybackHandedOff) { applyVideoBudget(); return }
         singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
         if (protectedCompositionHost != null && !singleDecoderSceneActive) stopProtectedCompositionPresentation()
         val selected = tiles.filter { it.contentId == contentId }
@@ -2530,10 +2784,10 @@ class AppState(
         forceL3 = settings.softwareDrm,
         subtitles = settings.subtitles,
         commentary = settings.commentary,
-        startWithVideo = startWithVideo,
+        startWithVideo = startWithVideo && !castPlaybackHandedOff,
         videoQuality = settings.videoQuality,
         startMs = startMs,
-    )
+    ).also { if (castPlaybackHandedOff) it.suspendForRemotePlayback(true) }
 
     /**
      * A second PLAY request can end the first session, so every feed of a content comes from one
@@ -2836,7 +3090,9 @@ class AppState(
         val leader = leaderTile()?.feed ?: return null
         val clock = leader.wallClockMs()
         mapClockEstimated = clock == null
-        val base = clock ?: ((timing?.startUtcMs ?: return null) + leader.player.currentPosition)
+        val position = if (castPlaybackHandedOff) castFramePositionMs else leader.player.currentPosition
+        val base = if (clock != null) clock + position - leader.player.currentPosition
+            else (timing?.startUtcMs ?: return null) + position
         return base + mapOffsetMs
     }
 
@@ -3952,10 +4208,16 @@ class AppState(
 
     /** Moves the audio to [tile]. Choosing a feed to listen to also ends Mute all. */
     fun setAudio(tile: Tile, byUser: Boolean = false) {
+        if (byUser) mutedAll = false
         castRelay?.selectAudio(tile.feed.sourceStream.profileLabel)
         castRelay?.let { relay ->
             googleCastLoadedUrl = null
-            loadGoogleCastMedia(relay)
+            if (localChosen) loadLocalCastMedia(relay) else loadGoogleCastMedia(relay)
+        }
+        if (castPlaybackHandedOff) {
+            if (byUser) mutedAll = false
+            tiles.forEach { it.audible = it === tile }
+            return
         }
         if (singleDecoderSceneActive) {
             val owner = protectedCompositionHost?.feed ?: return
@@ -3978,6 +4240,10 @@ class AppState(
     /** Silences every feed, keeping track of which one had the audio for when it's turned back on. */
     fun toggleMuteAll() {
         mutedAll = !mutedAll
+        if (castingActive) {
+            if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.SET_VOLUME, JSONObject().put("volume", if (mutedAll) 0 else 1))
+            else googleCastRemoteClient?.setStreamMute(mutedAll)
+        }
         if (nativeArchiveTiles.isNotEmpty()) protectedCompositionHost?.feed?.setAudible(!mutedAll && !castingActive)
         else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll && !castingActive) }
         showChrome()
@@ -4229,7 +4495,7 @@ class AppState(
         private set
 
     /** Pop out only from the viewer itself, not from browsing or an open sheet. */
-    val canPip get() = tiles.isNotEmpty() && !browsing && picker == null
+    val canPip get() = !castPlaybackHandedOff && tiles.isNotEmpty() && !browsing && picker == null
 
     /** The feed the pop-out shows: the big tile in main + strip, else the top-left one. */
     fun pipTile(): Tile? =
@@ -4242,6 +4508,7 @@ class AppState(
      */
     fun setPip(on: Boolean) {
         inPip = on
+        if (castPlaybackHandedOff) return
         val shown = pipTile()
         tiles.filter { !singleDecoderSceneActive || it === protectedCompositionHost }.forEach { tile ->
             tile.feed.player.playWhenReady = playing && (singleDecoderSceneActive || !on || tile === shown || tile.audible)
@@ -4251,6 +4518,7 @@ class AppState(
 
     /** Leaving the app without a pop-out (or closing the pop-out) pauses everything. */
     fun pauseForBackground() {
+        if (castPlaybackHandedOff) { saveWatch(); return }
         saveWatch()
         if (tiles.isNotEmpty() && playing) togglePlay()
     }
@@ -4302,7 +4570,7 @@ class AppState(
     fun stopAll() {
         singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
         singleDecoderFailure = null
-        stopFullSceneCast()
+        stopCasting(false)
         // Closing the viewer keeps the spot, so Continue watching can bring it back.
         // Read the native host before clearing its ownership: stopped originals have no clock.
         saveWatch()
@@ -4415,7 +4683,12 @@ class AppState(
 
     fun togglePlay() {
         playing = !playing
-        googleCastRemoteClient?.let { remote -> if (playing) remote.play() else remote.pause() }
+        if (castingActive) {
+            remoteCastClock.update(castFramePositionMs, playing, playbackSpeed, durationMs)
+            if (localChosen) localConnection?.send(if (playing) app.apexview.cast.local.FcastProtocol.RESUME else app.apexview.cast.local.FcastProtocol.PAUSE)
+            else googleCastRemoteClient?.let { remote -> if (playing) remote.play() else remote.pause() }
+            if (castPlaybackHandedOff) { showChrome(); return }
+        }
         if (archiveCompositionStarting) { showChrome(); return }
         // In the pop-out, only the shown feed and the audio keep playing (see setPip).
         val shown = if (inPip) pipTile() else null
@@ -4443,6 +4716,11 @@ class AppState(
     }
 
     fun chooseSpeed(value: Float) {
+        if (castingActive) {
+            remoteCastClock.update(castFramePositionMs, playing && !castRemoteBuffering, value, durationMs)
+            if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.SET_SPEED, JSONObject().put("speed", value))
+            else googleCastRemoteClient?.setPlaybackRate(value.toDouble())
+        }
         val slower = value < playbackSpeed
         playbackSpeed = value
         prefs.edit().putFloat(PREF_SPEED, value).apply()
@@ -4520,11 +4798,17 @@ class AppState(
 
     fun skip(deltaMs: Long) {
         val leader = leaderTile() ?: return
-        seekTo(leader.feed.player.currentPosition + deltaMs)
+        seekTo((if (castPlaybackHandedOff) castFramePositionMs else leader.feed.player.currentPosition) + deltaMs)
     }
 
     fun seekTo(targetMs: Long) {
-        if (castingActive) googleCastRemoteClient?.seek(targetMs.coerceAtLeast(0L))
+        if (castingActive) {
+            val target = if (durationMs > 0) targetMs.coerceIn(0L, durationMs) else targetMs.coerceAtLeast(0L)
+            remoteCastClock.update(target, playing, playbackSpeed, durationMs)
+            if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.SEEK, JSONObject().put("time", target / 1000.0))
+            else googleCastRemoteClient?.seek(target)
+            if (castPlaybackHandedOff) { positionMs = target; showChrome(); return }
+        }
         val restartRollingComposition = composedArchiveOriginMs != null && decoderMode == DecoderMode.SINGLE
         if (composedArchiveOriginMs != null) {
             stopProtectedCompositionPresentation()
@@ -4556,6 +4840,12 @@ class AppState(
      * faster or slower until caught up, the way eXViewer does.
      */
     fun syncTick() {
+        if (castPlaybackHandedOff) {
+            positionMs = remoteCastClock.positionMs()
+            tiles.forEach { it.feed.suspendForRemotePlayback(true) }
+            if (++saveTicks % 10 == 0) saveWatch()
+            return
+        }
         val leaderTile = leaderTile() ?: return
         val leader = leaderTile.feed
         composedArchiveOriginMs?.let {

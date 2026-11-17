@@ -113,3 +113,8 @@ only sent if you submit it.
 ## License
 
 MIT; see [LICENSE](LICENSE). Fork it, change it, share it.
+
+
+### Free local TV receiver
+
+Open **Settings → TV casting → Receive from phone** on the TV, then tap **Cast** in the phone player and choose the discovered Pitwall TV. The receiver uses one hardware video decoder plus the phone's video-window geometry, with sources verified at least 720p. Phone video/audio stop after the TV renders and the phone remains its controller/relay. No paid Cast registration, IP entry or pairing code is needed. [Setup, FCast extension, Miracast limits and device checklist](docs/LOCAL_TV_RECEIVER.md). Hardware playback on the target TV remains a device validation requirement.

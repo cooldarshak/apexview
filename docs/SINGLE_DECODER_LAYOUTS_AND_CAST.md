@@ -1,4 +1,4 @@
-# Single-decoder layouts and Google Cast status
+# Single-decoder layouts and TV casting status
 
 The Settings decoder preference persists. Multiple mode is capped at four feeds. Single mode allows selection of up to 24 clear archive feeds subject to the source, picture geometry and decoder limits; the protected backend accepts two through six. These are implementation limits, not device validation claims. Single-mode failures must keep source videos stopped and offer retry; they must not silently resume independent video decoders.
 
@@ -12,10 +12,17 @@ A registered custom Cast Web Receiver now receives the actual phone video window
 
 The timing archive loads position and timing data concurrently, and parsing is moved off the main thread. Map publication no longer waits for timing history downloads. Missing position data no longer stops timing processing. Each topic publishes independently without erasing the other. This behavior still needs testing on the TCL TV.
 
-Remaining validation: full Gradle and CI tests; signed update install; TV secure-decoder corruption and single-decoder count; phone five-plus-feed stability and cancellation/seeking; independent tower/map loading; all layouts and remote focus; and real Cast receiver behavior including synchronization and error recovery.
+Remaining validation: CI for the newest native-receiver changes; signed update install; TV secure-decoder corruption and single-decoder count; phone five-plus-feed stability and cancellation/seeking; independent tower/map loading; all layouts and remote focus; and real Cast receiver behavior including synchronization and error recovery.
 
 
-## One-time layout receiver setup
+## Free local TV casting
+
+The APK now includes a native Pitwall TV receiver and FCast v3 core control with a negotiated Pitwall scene extension. It discovers receivers through Android NSD, transfers the combined clear HEVC stream and applies phone video layout in the TV's single-decoder GLES renderer. It requires no Google developer registration. Phone video/audio tracks stop after the receiver renders; the phone becomes a controller/relay. Google Cast now shares track disabling and remote position handling. Miracast is a system mirroring handoff and requires the phone picture to stay active. See [LOCAL_TV_RECEIVER.md](LOCAL_TV_RECEIVER.md) for setup, protocol, restrictions and pending device tests.
+
+## Optional Google layout receiver setup (registration required)
+
+This alternative has Google's developer-registration fee. It is not needed for the free native Pitwall receiver.
+
 
 1. Host the bundle produced by `python3 tools/package_cast_receiver.py --output-dir _site` on HTTPS. The `Publish Cast layout receiver` workflow deploys it to the repository's GitHub Pages site; the Android workflow also uploads the bundle as `pitwall-cast-layout-receiver`.
 2. In https://cast.google.com/publish/, register a **Custom Receiver** with the deployed HTTPS page as its receiver URL. Register the TV/Cast device for testing if the receiver is unpublished. This step belongs to the developer's Google account and cannot be replaced with an arbitrary public receiver app ID.

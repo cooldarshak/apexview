@@ -21,25 +21,29 @@ import com.google.android.gms.cast.framework.CastButtonFactory
 /** The Cast route picker stays in the player chrome instead of being buried in Layout settings. */
 @Composable
 internal fun GoogleCastPlayerButton(app: AppState) {
-    if (!app.googleCastAvailable) {
-        Box(
-            Modifier.size(44.dp).focusable().pressable(onClick = app::showGoogleCastStatus),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(Icons.Rounded.Cast, contentDescription = "Cast video feeds", tint = Ink.primary)
-        }
-        return
+    Box(Modifier.size(44.dp).focusable().pressable(onClick = app::openCastPicker), contentAlignment = Alignment.Center) {
+        Icon(Icons.Rounded.Cast, contentDescription = "Cast video feeds", tint = Ink.primary)
     }
+}
 
+/** Standard Google route chooser remains available inside the transport picker. */
+@Composable
+internal fun GoogleRoutePickerButton(app: AppState) {
+    if (!app.googleCastAvailable) return
     AndroidView(
         factory = { viewContext ->
             val themed = ContextThemeWrapper(viewContext, androidx.appcompat.R.style.Theme_AppCompat)
-            MediaRouteButton(themed).apply {
-                contentDescription = "Cast video feeds"
+            object : MediaRouteButton(themed) {
+                override fun performClick(): Boolean {
+                    app.chooseGoogleCast()
+                    return super.performClick()
+                }
+            }.apply {
+                contentDescription = "Choose a Google Cast device"
                 isFocusable = true
                 CastButtonFactory.setUpMediaRouteButton(themed, this)
             }
         },
-        modifier = Modifier.size(44.dp).focusable(),
+        modifier = Modifier.size(48.dp).focusable(),
     )
 }

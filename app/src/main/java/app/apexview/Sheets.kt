@@ -342,6 +342,13 @@ fun SettingsScreen(app: AppState) {
             }
         }
         item {
+            Group("TV casting", footer = "Pitwall TV connects over your local network with no developer account or subscription. Clear replay video uses the phone layout and one TV video decoder. Miracast is handled by your device's wireless display software.") {
+                SettingRow("Receive from phone", onClick = app::openTvReceiver)
+                SettingRow("Find a TV", onClick = app::openCastPicker)
+                SettingRow("Screen mirroring / Smart View", onClick = app::openMiracast)
+            }
+        }
+        item {
             Group("Diagnostics", footer = "Records app and playback logs to Download/Pitwall while the app runs. Files rotate at 5 MB. Full system logs require ADB. Logs stay on this device.") {
                 SwitchRow("Enable diagnostic logs", s.diagnosticLogging, s::updateDiagnosticLogging)
                 SettingRow("Log status", DiagnosticLogs.status)

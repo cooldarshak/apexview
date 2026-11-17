@@ -328,7 +328,14 @@ fun ViewerScreen(app: AppState) {
                 scaleX = scale; scaleY = scale; transformOrigin = TransformOrigin(0.5f, 1f)
                 translationY = if (app.isTv) 0f else -sheetShift
             }) {
-            if (atlasScene != null && atlasPlayer != null) {
+            if (app.castPlaybackHandedOff) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Playing on ${app.castDeviceName}", style = Type.title2)
+                        Text("Use this phone to control playback and arrange the TV video windows.", style = Type.subhead)
+                    }
+                }
+            } else if (atlasScene != null && atlasPlayer != null) {
                 AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
                     onFailure = app::failSingleDecoderScene
                     onOutputSize = app::reportSceneOutputSize
