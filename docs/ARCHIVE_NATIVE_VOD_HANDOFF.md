@@ -12,9 +12,9 @@ passes. A longer timeout cannot fix a producer that consistently falls behind.
 
 ## Replacement for compatible clear HLS archives
 
-`HevcArchiveVodSession` prepares a fixed position while normal feeds keep playing.
+`HevcArchiveVodSession` prepares a fixed position while the original feeds are paused.
 It publishes a finite DASH timeline with one video representation and generates
-numbered composed CMAF chunks when Media3 requests them. There are at most two
+numbered composed CMAF chunks when Media3 requests them. There are at most four
 source fetches concurrently, one warm-ahead job and three cached output chunks.
 The default common source cap is 720p for two feeds, 540p for three/four, subject
 to actual offered renditions, total width and the device's HEVC size/rate support.
@@ -32,10 +32,11 @@ timeline so timing/map overlays retain their replay clock. Continue Watching sav
 the native host position and original tile bounds. Exit/failure restores all original feeds there, under the normal decoder
 budget, and preserves pause/mute state and saved tile bounds.
 
-The composed PlayerView occupies the available video canvas. Hidden source feeds
-are excluded from the surface selection and playback/synchronization loops. FIT
-preserves the encoded picture's aspect ratio; a horizontal encoded row can have
-letterboxing. A large-main/small-side encoded layout remains separate work.
+The GLES scene samples camera regions from the one decoded horizontal atlas and
+places them in the existing movable, overlapping layout windows. Hidden source
+feeds are excluded from playback/synchronization loops. The codec input texture
+and visible output have separate Surface objects; there is one video decoder and
+one composed video view. Device validation of each layout remains necessary.
 
 ## Protection and compatibility boundary
 
@@ -102,8 +103,9 @@ OS-wide decoder inventory. Protected footage requires its own keys-loaded proof.
 
 ## Phone-only capture (aShell)
 
-Start logging before opening the archive and running Layout > Single Encoder
-Testing with two feeds first. Keep testing active when taking the codec dump.
+Choose Settings > Video decoder > Single decoder, then open an archive with two
+feeds first. Open Layout to inspect the decoder and output diagnostics. Keep
+playback active when taking the codec dump.
 
 ```sh
 logcat -c

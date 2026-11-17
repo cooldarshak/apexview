@@ -1,6 +1,12 @@
 # HEVC stitching proof of concept
 
-Status: The synthetic software reconstruction proof and physical Android single-hardware-decoder proof are complete for the narrow 256x128, 50-picture, 2x1 tile fixture. Inline senc and the currently supported external saio auxiliary records are structurally parsed using effective per-sample IV sizes from tenc/seig. The legacy senc IV-size override is parsed alongside active seig only when every effective sample IV size equals the override width; conflicting widths remain incomplete. Phase 1 is still open pending sanitised metadata from two actual authorised F1 feeds and DRM/secure-surface feasibility. Encrypted feed compatibility remains rejected.
+Current evidence: build 473 logs show four authorised, clear F1 archive feeds
+producing one composed track and one observed hardware HEVC decoder on the user's
+phone. Protected F1 composition and secure-surface feasibility remain unproven.
+Inline senc and supported external saio records are structurally parsed; conflicting
+IV sizes remain incomplete and encrypted compatibility must still fail closed.
+The original phase descriptions and checkboxes below are historical, with their
+protected-media exit conditions still open.
 
 ## Goal
 

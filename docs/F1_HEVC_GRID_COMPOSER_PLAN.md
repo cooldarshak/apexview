@@ -1,6 +1,20 @@
 # F1 HEVC Grid Composer: implementation plan
 
-Status: WP0-WP5 have a green synthetic clear-CMAF composition path. WP6 now has an isolated Media3 single-player DASH adapter and a physical-device instrumentation harness in progress; its exact-commit CI and device validation are still pending. The protected F1 CBCS packaging path and actual F1 feed playback remain open. This plan is not evidence that real F1 streams have already been composed or decoded.
+Current evidence (build 473): the user's phone log records four real, clear F1 archive
+feeds composed into one 3840×540 video track, four source decoder release callbacks,
+then one Qualcomm HEVC video decoder with one visible 2316×1080 scene output. The
+decoder and scene callbacks report approximately 50 frames per second for over a
+minute. This is real clear-archive evidence, not proof of Widevine-protected
+composition, OS-wide decoder counts, visible pixels in every layout, audio sync or
+Android TV playback. The original milestones below are retained as project history.
+
+Still open: genuine protected F1 output through a supported Widevine session;
+device validation of every layout, free overlap and recent seek changes; live
+sessions and six feeds; long-running/thermal tests on phone and TV; and proper
+Google Cast of the complete layout. The encoded composer still supports up to four
+compatible archive feeds. The native GLES scene uses a codec-to-texture Surface and
+a separate visible output Surface; it is not a claim that only one Surface object
+exists in the process.
 
 ## Objective
 
@@ -167,7 +181,7 @@ Only after two-feed success:
 
 Acceptance: stable playback with measured frame cadence and no additional video decoder instances.
 
-## Proposed immediate next coding milestone
+## Original next coding milestone (historical)
 
 1. Add the new source-cell/output-grid data model and tests.
 2. Change the compatibility gate to validate source cells independently from the output grid. Do not yet enable production composition.

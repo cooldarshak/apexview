@@ -2,11 +2,13 @@
 
 ## Phone evidence retained
 
-Build 470 was confirmed working by the user on the Galaxy S22 Ultra. Its log shows
-three original HEVC decoders released, then one `c2.qti.hevc.decoder` rendering the
-2880x540 archive composition at approximately 50 fps. The buffer reached 52.3 s.
-Two short buffering periods coincided with large replay-position jumps. This is
-clear archive footage, not proof of protected Widevine or TV playback.
+Build 470 was confirmed working by the user on the Galaxy S22 Ultra. Build 473's
+subsequent phone log shows four source decoder releases, then one
+`c2.qti.hevc.decoder`, a 3840×540 composed track and a 2316×1080 visible scene.
+Frame counters advanced at approximately 50 fps for over a minute and the buffer
+reached about 55 seconds. These are app-observed callbacks for clear archive media.
+They do not independently establish all visible tiles, long-seek responsiveness,
+audio sync, protected Widevine playback, an OS-wide decoder count or TV playback.
 
 ## Playback mode and layout are separate
 
@@ -28,8 +30,8 @@ visible output queue are distinct; this is one hardware decoder and one composed
 video view, not a claim that Android allocates only one Surface object in total.
 Timing/map/UI remain Compose overlays. GLES uses a per-frame texture update and
 cached geometry; layout changes do not re-encode or rewrite video samples.
-This new scene renderer still needs real-phone and TV validation. The measured
-build-470 decoder result does not validate the new GLES output automatically.
+The scene renderer has the build-473 phone callback evidence above; each layout,
+overlap, source change, long seek and the Android TV still need device validation.
 
 Only verified clear archive CMAF takes this renderer. Protected streams retain the
 existing guarded playback backend. No protected texture is read into an unprotected
