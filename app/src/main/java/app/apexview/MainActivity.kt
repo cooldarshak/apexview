@@ -54,14 +54,14 @@ class MainActivity : FragmentActivity() {
     private val castSessionListener = object : SessionManagerListener<CastSession> {
         override fun onSessionStarting(session: CastSession) = Unit
         override fun onSessionStarted(session: CastSession, sessionId: String) =
-            app.onGoogleCastSessionAvailable(session.remoteMediaClient)
+            app.onGoogleCastSessionAvailable(session)
         override fun onSessionStartFailed(session: CastSession, error: Int) =
             app.onGoogleCastStartFailed("Google Cast could not start (error $error). Check the receiver connection and try again.")
         override fun onSessionEnding(session: CastSession) = Unit
         override fun onSessionEnded(session: CastSession, error: Int) = app.onGoogleCastSessionEnded()
         override fun onSessionResuming(session: CastSession, sessionId: String) = Unit
         override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) =
-            app.onGoogleCastSessionAvailable(session.remoteMediaClient)
+            app.onGoogleCastSessionAvailable(session)
         override fun onSessionResumeFailed(session: CastSession, error: Int) =
             app.onGoogleCastStartFailed("Google Cast could not reconnect (error $error). Choose the device again.")
         override fun onSessionSuspended(session: CastSession, reason: Int) = Unit
@@ -150,7 +150,7 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         app.onResumed()
-        castContext?.sessionManager?.currentCastSession?.remoteMediaClient?.let(app::onGoogleCastSessionAvailable)
+        castContext?.sessionManager?.currentCastSession?.let(app::onGoogleCastSessionAvailable)
     }
 
     override fun onDestroy() {

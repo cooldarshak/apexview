@@ -336,6 +336,10 @@ class AppState(
         private set
     private var castRelay by mutableStateOf<app.apexview.cast.SceneCastRelay?>(null)
     private var googleCastRemoteClient: com.google.android.gms.cast.framework.media.RemoteMediaClient? = null
+    private var googleCastSession: com.google.android.gms.cast.framework.CastSession? = null
+    private var castSceneJob: Job? = null
+    private var castSceneConfirmed = false
+    private val usesLayoutCastReceiver get() = BuildConfig.CAST_RECEIVER_APP_ID.isNotEmpty()
     private var googleCastLoadedUrl: String? = null
     private var castPreparationJob: Job? = null
     val castingActive: Boolean get() = castRelay != null
@@ -350,13 +354,32 @@ class AppState(
         googleCastAvailable = available
         if (!available) googleCastRemoteClient = null
     }
-    fun onGoogleCastSessionAvailable(client: com.google.android.gms.cast.framework.media.RemoteMediaClient?) {
-        googleCastRemoteClient = client
-        if (client == null) return
+    fun onGoogleCastSessionAvailable(session: com.google.android.gms.cast.framework.CastSession) {
+        googleCastSession = session
+        googleCastRemoteClient = session.remoteMediaClient
+        if (googleCastRemoteClient == null) return
+        if (usesLayoutCastReceiver) runCatching {
+            session.setMessageReceivedCallbacks(app.apexview.cast.CastSceneProtocol.NAMESPACE) { _, _, text ->
+                val event = runCatching { JSONObject(text) }.getOrNull() ?: return@setMessageReceivedCallbacks
+                when (event.optString("type")) {
+                    "rendering" -> {
+                        castSceneConfirmed = true
+                        castStatus = "TV receiver is rendering the phone video layout. Sources are at least 720p."
+                        android.util.Log.i("PitwallCast", "SCENE_RENDERING_CONFIRMED sources=${event.optInt("sources")}")
+                    }
+                    "error" -> {
+                        castStatus = "TV layout receiver: " + event.optString("message").take(180)
+                        message = castStatus
+                        android.util.Log.w("PitwallCast", DiagnosticRedaction.redact(castStatus.orEmpty()))
+                    }
+                }
+            }
+        }.onFailure { android.util.Log.w("PitwallCast", "Scene channel registration failed: ${it.javaClass.simpleName}") }
         val relay = castRelay
         if (relay != null) loadGoogleCastMedia(relay) else startFullSceneCast()
     }
     fun onGoogleCastSessionEnded() {
+        googleCastSession = null
         googleCastRemoteClient = null
         castPreparationJob?.cancel(); castPreparationJob = null
         releaseCastRelay()
@@ -396,7 +419,7 @@ class AppState(
             try {
                 val expectedLabels = castTiles.map { it.feed.sourceStream.profileLabel }.toSet()
                 val activeComposition = singleDecoderScenePlayer?.archiveSessionForCast()
-                    ?.takeIf { it.sourceLabels.toSet() == expectedLabels && it.sourceLabels.size == expectedLabels.size }
+                    ?.takeIf { it.sourceLabels.toSet() == expectedLabels && it.sourceLabels.size == expectedLabels.size && it.sourceDisplayHeight >= 720 }
                 val session = activeComposition ?: run {
                     val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
                     try {
@@ -404,15 +427,14 @@ class AppState(
                             castTiles.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel, it.feed.sourceStream.url) },
                             clockTile.feed.player.currentPosition.coerceAtLeast(0),
                             clockTile.feed.sourceStream.profileLabel,
-                            preferredHeight = when {
-                                castTiles.size > 4 -> 270
-                                castTiles.size > 2 -> 540
-                                else -> 720
-                            },
+                            preferredHeight = if (settings.videoQuality == VideoQuality.P1080) 1080 else 720,
                             commentary = settings.commentary,
+                            minimumHeight = 720,
                         ).also { ownedSession = it }
                     } finally { capture.reset() }
                 }
+                require(session.sourceDisplayHeight >= 720) { "Cast source quality is below 720p. No lower-quality stream was sent." }
+                android.util.Log.i("PitwallCast", "CAST_SOURCE_QUALITY minimum=720 actual=${session.sourceDisplayWidth}x${session.sourceDisplayHeight} feeds=${session.sourceLabels.size} atlas=${session.width}x${session.height} decoderMode=$decoderMode layoutReceiver=$usesLayoutCastReceiver")
                 val manager = context.getSystemService(android.net.ConnectivityManager::class.java)
                 val network = manager.allNetworks.firstOrNull { network -> manager.getNetworkCapabilities(network)?.let {
                     it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) || it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)
@@ -432,7 +454,8 @@ class AppState(
                 }
                 if (googleCastRemoteClient == null) throw kotlinx.coroutines.CancellationException("Google Cast session ended during setup")
                 castRelay = relay
-                castStatus = "Sending ${session.sourceLabels.size} feed${if (session.sourceLabels.size == 1) "" else "s"} as one composed video to Google Cast. Timing and map overlays stay on the phone."
+                castStatus = if (usesLayoutCastReceiver) "Sending at least 720p sources and the phone video layout to the TV…"
+                    else "Casting ${session.sourceDisplayHeight}p sources. This build uses the standard receiver, which shows the encoded grid; the phone layout needs the registered Pitwall receiver."
                 message = castStatus
                 castTiles.forEach { it.feed.setAudible(false) }
                 loadGoogleCastMedia(relay!!)
@@ -443,6 +466,7 @@ class AppState(
                 if (cancelled.message != "Google Cast session ended during setup") throw cancelled
             } catch (error: Exception) {
                 relay?.close()
+                android.util.Log.w("PitwallCast", DiagnosticRedaction.redact(error.stackTraceToString()))
                 castStatus = (error.message ?: "Unable to prepare the selected feeds for Google Cast").replace(Regex("https?://\\S+"), "[URL]").take(240)
                 message = castStatus
             } finally { ownedSession?.close(); castBusy = false; castPreparationJob = null }
@@ -452,6 +476,11 @@ class AppState(
         val client = googleCastRemoteClient ?: return
         val url = relay.googleCastMediaUrl
         if (googleCastLoadedUrl == url) return
+        val layoutScene = if (usesLayoutCastReceiver) castVideoScene(relay.session) else null
+        if (usesLayoutCastReceiver && layoutScene == null) {
+            failGoogleCastLoad("The phone video layout is not ready. Keep the player open and reconnect Cast.")
+            return
+        }
         val metadata = com.google.android.gms.cast.MediaMetadata(
             com.google.android.gms.cast.MediaMetadata.MEDIA_TYPE_MOVIE
         ).apply {
@@ -462,12 +491,18 @@ class AppState(
             .setContentType("application/x-mpegURL")
             .setStreamType(com.google.android.gms.cast.MediaInfo.STREAM_TYPE_BUFFERED)
             .setMetadata(metadata)
+            .setCustomData(JSONObject().apply {
+                if (layoutScene != null) put("pitwallScene", layoutScene)
+            })
             .build()
         googleCastLoadedUrl = url
         runCatching {
-            client.load(media, true, castFramePositionMs.coerceAtLeast(0L)).setResultCallback { result ->
+            client.load(media, playing, castFramePositionMs.coerceAtLeast(0L)).setResultCallback { result ->
+                if (castRelay !== relay) return@setResultCallback
                 if (result.status.isSuccess) {
-                    castStatus = "Google Cast is playing ${relay.session.sourceLabels.size} feed${if (relay.session.sourceLabels.size == 1) "" else "s"} in one video. Timing and map overlays stay on the phone."
+                    if (usesLayoutCastReceiver) startCastSceneUpdates(relay)
+                    castStatus = if (usesLayoutCastReceiver) "TV accepted the stream; waiting for layout rendering confirmation…"
+                        else "Google Cast is playing ${relay.session.sourceLabels.size} feeds with ${relay.session.sourceDisplayHeight}p sources. The standard receiver shows the encoded grid."
                     message = castStatus
                 } else {
                     failGoogleCastLoad("Google Cast could not load the composed stream (status ${result.status.statusCode}).")
@@ -485,6 +520,8 @@ class AppState(
         message = reason
     }
     private fun releaseCastRelay() {
+        castSceneJob?.cancel(); castSceneJob = null
+        castSceneConfirmed = false
         googleCastLoadedUrl = null
         castRelay?.close(); castRelay = null
         if (singleDecoderSceneActive) singleDecoderScenePlayer?.setAudible(!mutedAll)
@@ -496,6 +533,55 @@ class AppState(
         releaseCastRelay()
         castStatus = "Casting stopped."
     }
+    private fun castVideoScene(session: app.apexview.tiled.HevcArchiveVodSession): JSONObject? {
+        if (canvasW <= 0 || canvasH <= 0) return null
+        val labels = session.sourceLabels
+        val windows = tiles.mapNotNull { tile ->
+            val source = labels.indexOf(tile.feed.sourceStream.profileLabel)
+            if (source < 0 || tile.w <= 0 || tile.h <= 0) null else
+                app.apexview.scene.VideoWindow(tile.id, source, tile.x, tile.y, tile.w, tile.h, tile.z)
+        }
+        if (windows.size != labels.size) return null
+        return app.apexview.cast.CastSceneProtocol.encode(app.apexview.scene.VideoScene(
+            canvasW, canvasH, session.width, session.height, labels.size, windows,
+            session.atlasColumns, session.sourceCodedWidth, session.sourceCodedHeight,
+            session.sourceDisplayWidth, session.sourceDisplayHeight,
+        ))
+    }
+
+    private fun startCastSceneUpdates(relay: app.apexview.cast.SceneCastRelay) {
+        castSceneJob?.cancel()
+        castSceneJob = scope.launch {
+            var last = ""
+            var loops = 0
+            while (castRelay === relay) {
+                if (tiles.map { it.feed.sourceStream.profileLabel }.toSet() != relay.session.sourceLabels.toSet()) {
+                    // Rebuild the full selected set; a stale scene must not mislabel a camera.
+                    castSceneJob = null
+                    releaseCastRelay()
+                    startFullSceneCast()
+                    return@launch
+                }
+                val scene = castVideoScene(relay.session)
+                if (scene != null) {
+                    val text = scene.toString()
+                    if (text != last || loops % 10 == 0) {
+                        runCatching {
+                            googleCastSession?.sendMessage(app.apexview.cast.CastSceneProtocol.NAMESPACE,
+                                JSONObject().put("type", "scene").put("scene", scene).toString())
+                        }.onFailure { android.util.Log.w("PitwallCast", "Scene send failed: ${it.javaClass.simpleName}") }
+                        last = text
+                    }
+                }
+                if (++loops == 30 && !castSceneConfirmed) {
+                    castStatus = "TV has not confirmed layout rendering. Check that the registered receiver is the Pitwall layout receiver."
+                    message = castStatus
+                }
+                kotlinx.coroutines.delay(500L)
+            }
+        }
+    }
+
     val castFramePositionMs: Long get() = leaderTile()?.feed?.player?.currentPosition ?: 0L
 
     private var sceneOutputSize by mutableStateOf(0 to 0)

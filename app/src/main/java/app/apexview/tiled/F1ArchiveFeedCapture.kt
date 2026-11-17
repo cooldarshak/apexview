@@ -21,10 +21,10 @@ internal class F1ArchiveFeedCapture(
     val protection get() = if (usingHls) when (hls.clearOutput) { true -> "CLEAR"; false -> "CBCS"; null -> "UNVERIFIED" } else "CBCS"
 
     suspend fun prepareVod(feeds: List<F1DashFeedCapture.Feed>, positionMs: Long, clockLabel: String,
-                           preferredHeight: Int, commentary: String): HevcArchiveVodSession {
+                           preferredHeight: Int, commentary: String, minimumHeight: Int = 0): HevcArchiveVodSession {
         // A cancellation/reset of an older capture cannot zero an in-flight preparation's maps.
         val worker = F1HlsFeedCapture(factory)
-        return try { worker.prepareVod(feeds, positionMs, clockLabel, preferredHeight, commentary) }
+        return try { worker.prepareVod(feeds, positionMs, clockLabel, preferredHeight, commentary, minimumHeight) }
         finally { worker.reset() }
     }
 

@@ -70,7 +70,7 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
             output.write(("HTTP/1.1 $status $phrase\r\nContent-Type: $mime\r\nContent-Length: ${body.size}\r\n" +
                 "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n" +
                 "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n" +
-                "Access-Control-Allow-Headers: Range, Content-Type, Accept\r\n" +
+                "Access-Control-Allow-Headers: Range, Content-Type, Accept\r\nAccess-Control-Allow-Private-Network: true\r\n" +
                 "Access-Control-Expose-Headers: Accept-Ranges, Content-Length, Content-Range\r\n" +
                 "Connection: close\r\n$extra\r\n").toByteArray())
             output.write(body); output.flush()

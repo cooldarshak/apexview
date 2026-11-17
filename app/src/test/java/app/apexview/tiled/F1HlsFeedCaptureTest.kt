@@ -702,6 +702,22 @@ seg.m4s
         return styp + moof(provisional.size + 8) + bytes.copyOfRange(moofSize, bytes.size)
     }
 
+    @Test fun castFloorRejectsMisadvertised720BeforeMediaComposition() = runBlocking {
+        val original = network(4)
+        val network = Network(original.files.mapValues { (uri, bytes) ->
+            if (uri.endsWith("master.m3u8")) bytes.toString(Charsets.UTF_8)
+                .replace(Regex("RESOLUTION=\\d+x\\d+"), "RESOLUTION=1280x720").toByteArray() else bytes
+        })
+        val capture = F1HlsFeedCapture(network.factory)
+        try {
+            capture.prepareVod(feeds(4), 0, "channel-0", preferredHeight = 720, minimumHeight = 720)
+            fail("Actual 540p pictures must not pass a 720p manifest declaration")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("actual HEVC pictures"))
+        } finally { capture.reset() }
+        assertTrue(network.requested.none { it.endsWith(".m4s") })
+    }
+
     private fun feeds(count: Int) = (0 until count).map { F1DashFeedCapture.Feed("channel-$it", "https://media.test/f$it/master.m3u8") }
 
     private fun network(count: Int, decodeOffsetTicks: Long = 0, samplesPerFragment: Int = 25, annexBFile: File? = null,

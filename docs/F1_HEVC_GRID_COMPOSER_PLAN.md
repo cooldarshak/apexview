@@ -17,7 +17,7 @@ at six feeds. Device validation of protected playback, TV output, every layout,
 free overlap, seeking and sustained playback remains open. Google Cast now has a
 standard player route picker and a relay for compatible clear archive composition;
 the Cast receiver shows video only, while timing and map overlays stay on the
-phone. Protected/live casting and a full custom-layout receiver remain open.
+phone. A custom CAF layout receiver and sender scene updates are implemented but require Google app registration and TV validation. Cast now enforces at least 720p per source. Protected/live casting and separate UI overlay capture remain open.
 
 The native GLES scene uses a codec-to-texture Surface and a separate visible
 output Surface; it is not a claim that only one Surface object exists in the

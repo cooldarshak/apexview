@@ -17,6 +17,8 @@ jobs:
   build:
     name: Test and build debug APK
     runs-on: ubuntu-latest
+    env:
+      PITWALL_CAST_RECEIVER_ID: ${{ vars.PITWALL_CAST_RECEIVER_ID }}
     timeout-minutes: 45
     steps:
       - name: Check out source
@@ -83,6 +85,9 @@ jobs:
       - name: Validate full-scene receiver protocol and JavaScript
         run: |
           node tools/test_cast_receiver.mjs
+          node tools/test_cast_layout_receiver.mjs
+          node --check web/cast/receiver.mjs
+          python3 tools/package_cast_receiver.py --output-dir "$RUNNER_TEMP/pitwall-cast-receiver"
           node --check app/src/main/assets/cast/receiver.mjs
 
       - name: Run unit tests, including Kotlin analysis of real synthetic feeds
@@ -224,6 +229,15 @@ jobs:
           name: apexview-hevc-output-parameter-validation
           path: |
             ${{ runner.temp }}/apexview-hevc-output-parameters/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Cast layout receiver for HTTPS hosting
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pitwall-cast-layout-receiver
+          path: ${{ runner.temp }}/pitwall-cast-receiver/**
           if-no-files-found: warn
           retention-days: 14
 

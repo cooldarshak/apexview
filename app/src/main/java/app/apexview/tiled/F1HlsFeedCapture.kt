@@ -55,12 +55,13 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         feeds: List<F1DashFeedCapture.Feed>, positionMs: Long, clockLabel: String,
         preferredHeight: Int = if (feeds.size > 2) 540 else 720,
         commentary: String? = null,
+        minimumHeight: Int = 0,
     ): HevcArchiveVodSession {
         var acquired: HevcArchiveVodSession? = null
         try { return withContext(Dispatchers.IO) {
             require(feeds.size in 1..app.apexview.AppState.MAX_SINGLE_DECODER_FEEDS && feeds.map { it.label }.distinct().size == feeds.size)
             val perFeed = mapArchiveFeedsBounded(feeds) { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }
-            val selected = chooseCommon(perFeed, preferredHeight, feeds.size)
+            val selected = chooseCommon(perFeed, preferredHeight, feeds.size, minimumHeight)
             val playlists = mapArchiveFeedsBounded(selected, block = ::loadMedia)
             require(playlists.all { it.hasEndTag && it.segments.isNotEmpty() }) { "Archive VOD requires complete HLS replay playlists" }
             playlists.forEach { playlist ->
@@ -82,6 +83,9 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 ?: throw PermanentCaptureException("HLS archive must contain one video track") }
             if (tracks.any { it.encrypted }) throw ProtectedArchiveBackendRequired()
             require(tracks.all { it.hevcConfiguration != null }) { "No compatible HEVC CMAF representation" }
+            require(tracks.all { track -> track.hevcConfiguration!!.sps.single().displayHeight >= minimumHeight }) {
+                "Cast needs at least ${minimumHeight}p per source; the actual HEVC pictures are smaller. No lower-quality stream was sent."
+            }
             require(playlists.none { it.tags.any { tag -> tag.startsWith("#EXT-X-KEY:") && !tag.contains("METHOD=NONE") } }) {
                 "HLS declares protection but the selected CMAF track is clear"
             }
@@ -278,20 +282,15 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         }
     }
 
-    private fun chooseCommon(perFeed: List<List<Offer>>, preferredHeight: Int? = null, feedCount: Int = perFeed.size): List<Offer> {
+    private fun chooseCommon(perFeed: List<List<Offer>>, preferredHeight: Int? = null, feedCount: Int = perFeed.size, minimumHeight: Int = 0): List<Offer> {
         // A direct media playlist has no rendition declarations; hvcC validates it later.
         val declared = perFeed.filter { list -> list.any { it.format != null } }
         if (declared.isEmpty()) return perFeed.map { it.first() }
         val common = declared.map { list -> list.map { it.format!!.width to it.format.height }.toSet() }.reduce { a, b -> a intersect b }
-        val legal = common.filter { preferredHeight == null ||
-            (it.first > 0 && it.second > 0 && HevcArchiveAtlasPlan.choose(feedCount, it.first, it.second,
-                maximumOutputWidth, 2160) != null) }
-        val sizes = if (preferredHeight == null) legal else legal.filter { it.second <= preferredHeight }.ifEmpty {
-            // Use only representations actually offered by F1, including a larger minimum rung.
-            legal.minByOrNull { it.second }?.let(::listOf).orEmpty()
-        }
-        val size = sizes.maxWithOrNull(compareBy<Pair<Int, Int>> { it.second }.thenBy { it.first })
-            ?: throw PermanentCaptureException("No common HEVC rendition fits $feedCount feeds in the composed picture; choose fewer feeds or a lower source rendition")
+        val size = HevcArchiveRenditionPlan.choose(common, preferredHeight, minimumHeight, feedCount, maximumOutputWidth)
+            ?: throw PermanentCaptureException(if (minimumHeight > 0)
+                "No common HEVC rendition of at least ${minimumHeight}p fits $feedCount feeds. Use fewer feeds; casting will not silently drop below ${minimumHeight}p."
+                else "No common HEVC rendition fits $feedCount feeds in the composed picture; choose fewer feeds or a lower source rendition")
         return perFeed.map { list -> list.filter { it.format == null || it.format.width == size.first && it.format.height == size.second }
             .maxByOrNull { it.format?.bitrate ?: 0 } ?: throw PermanentCaptureException("HLS common HEVC rendition unavailable") }
     }

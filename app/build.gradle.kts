@@ -38,6 +38,11 @@ android {
         versionName = "1.0.$ciRun"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         val builtAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("MMM d, HH:mm"))
+        val castReceiverId = System.getenv("PITWALL_CAST_RECEIVER_ID").orEmpty().trim().uppercase()
+        require(castReceiverId.isEmpty() || castReceiverId.matches(Regex("[0-9A-F]{8}"))) {
+            "PITWALL_CAST_RECEIVER_ID must be the eight-character app ID from the Google Cast Console"
+        }
+        buildConfigField("String", "CAST_RECEIVER_APP_ID", "\"$castReceiverId\"")
         buildConfigField("String", "BUILT_AT", "\"$builtAt\"")
         // Where updates come from (owner/repo on GitHub). A fork points this at its own releases.
         buildConfigField("String", "UPDATE_REPO", "\"mikeyyy0/apexview\"")
