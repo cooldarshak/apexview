@@ -355,6 +355,7 @@ class AppState(
     private var localDiscovery: app.apexview.cast.local.PitwallDiscovery? = null
     private var localConnection: app.apexview.cast.local.FcastConnection? = null
     private var localConnectionJob: Job? = null
+    private var localConnectionGeneration = 0L
     private var localReady = false
     private var localLoadId = ""
     private var localChosen = false
@@ -420,6 +421,7 @@ class AppState(
     }
     internal fun connectLocalCast(device: app.apexview.cast.local.PitwallDevice) {
         stopFullSceneCast()
+        val attempt = ++localConnectionGeneration
         localChosen = true; localReady = false; castDeviceName = device.name
         castPickerOpen = false; castBusy = true
         castStatus = "Connecting to ${device.name}…"; message = castStatus
@@ -430,6 +432,8 @@ class AppState(
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     socket.connect(java.net.InetSocketAddress(device.address, device.port), 6_000)
                 }
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                if (attempt != localConnectionGeneration || !localChosen) return@launch
                 lateinit var next: app.apexview.cast.local.FcastConnection
                 next = app.apexview.cast.local.FcastConnection(scope, socket, { packet ->
                     if (localConnection === next) receiveLocalCast(packet)
@@ -450,10 +454,12 @@ class AppState(
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (error: Exception) {
-                castBusy = false; castStatus = "Unable to connect to the TV: ${error.javaClass.simpleName}"; message = castStatus
+                if (attempt == localConnectionGeneration) {
+                    castBusy = false; castStatus = "Unable to connect to the TV: ${error.javaClass.simpleName}"; message = castStatus
+                }
             } finally {
                 if (!assigned) runCatching { socket.close() }
-                localConnectionJob = null
+                if (attempt == localConnectionGeneration) localConnectionJob = null
             }
         }
     }
@@ -778,6 +784,7 @@ class AppState(
     }
     fun stopFullSceneCast() = stopCasting(true)
     private fun stopCasting(resumeLocal: Boolean) {
+        ++localConnectionGeneration
         castPreparationJob?.cancel(); castPreparationJob = null
         if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.STOP)
         else runCatching { googleCastRemoteClient?.stop() }
