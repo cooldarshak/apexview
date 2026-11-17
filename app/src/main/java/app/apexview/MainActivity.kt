@@ -164,7 +164,7 @@ class MainActivity : FragmentActivity() {
     private fun bindGoogleCast() {
         val instance = runCatching { CastContext.getSharedInstance(applicationContext) }.getOrNull()
         castContext = instance
-        app.setGoogleCastAvailable(instance != null)
+        app.updateGoogleCastAvailability(instance != null)
         instance?.sessionManager?.addSessionManagerListener(castSessionListener, CastSession::class.java)
     }
 }

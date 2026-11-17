@@ -346,7 +346,7 @@ class AppState(
             "Google Cast is unavailable here. Check that Google Play services is installed and updated."
         }
     }
-    fun setGoogleCastAvailable(available: Boolean) {
+    fun updateGoogleCastAvailability(available: Boolean) {
         googleCastAvailable = available
         if (!available) googleCastRemoteClient = null
     }
