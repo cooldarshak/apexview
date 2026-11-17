@@ -318,7 +318,47 @@ class AppState(
     private var f1DashCapture: CmafCaptureLifecycle? = null
     private var protectedCompositionHost: Tile? = null
     private var protectedCompositionAudioMaster: Tile? = null
-    private var nativeArchiveTiles: List<Tile> = emptyList()
+    private var nativeArchiveTiles by mutableStateOf<List<Tile>>(emptyList())
+    var decoderMode by mutableStateOf(DecoderMode.MULTIPLE)
+        private set
+    val singleDecoderSceneActive: Boolean get() = nativeArchiveTiles.isNotEmpty()
+    val singleDecoderScenePlayer: FeedPlayer? get() = if (singleDecoderSceneActive) protectedCompositionHost?.feed else null
+    private var sceneOutputSize by mutableStateOf(0 to 0)
+    fun reportSceneOutputSize(width: Int, height: Int) { sceneOutputSize = width to height }
+    fun failSingleDecoderScene(reason: String) {
+        stopProtectedCompositionPresentation()
+        decoderMode = DecoderMode.MULTIPLE
+        message = reason
+    }
+    fun videoScene(width: Float, height: Float): app.apexview.scene.VideoScene? {
+        val host = singleDecoderScenePlayer ?: return null
+        val labels = host.archiveSceneLabels
+        if (labels.isEmpty() || width <= 0 || height <= 0) return null
+        return app.apexview.scene.VideoScene(width, height, host.archiveSceneWidth, host.archiveSceneHeight, labels.size,
+            tiles.mapNotNull { tile ->
+                val source = labels.indexOf(tile.feed.sourceStream.profileLabel)
+                if (source < 0 || tile.w <= 0 || tile.h <= 0) null else app.apexview.scene.VideoWindow(tile.id, source,
+                    tile.x, tile.y, tile.w, tile.h, tile.z)
+            })
+    }
+    fun chooseDecoderMode(mode: DecoderMode) {
+        if (mode == DecoderMode.MULTIPLE) {
+            stopProtectedCompositionPresentation()
+            decoderMode = mode
+            layoutRequest++
+            return
+        }
+        val leader = leaderTile() ?: run { message = "Open an archive first."; return }
+        if (tiles.size == 1) { decoderMode = mode; return }
+        if (tiles.any { it.contentId != leader.contentId } || leader.contentId in knownLiveContentIds ||
+            tiles.any { it.feed.player.isCurrentMediaItemLive }) {
+            message = "Single decoder currently supports compatible archive feeds from one session."
+            return
+        }
+        decoderMode = mode
+        startArchiveSingleDecoderComposition(leader.contentId)
+    }
+
     private var composedArchiveOriginMs: Long? = null
     private var composedArchiveFillingBuffer = false
     private var protectedCompositionBounds: Map<Tile, ProtectedTileBounds> = emptyMap()
@@ -372,6 +412,14 @@ class AppState(
      * its limit shows video in the main feed only.
      */
     fun applyVideoBudget() {
+        if (singleDecoderSceneActive) {
+            val owner = protectedCompositionHost
+            tiles.forEach { tile ->
+                tile.feed.setProtectedCompositionVideoRole(tile === owner && !browsing,
+                    canvasW.toInt().coerceAtLeast(1), canvasH.toInt().coerceAtLeast(1))
+            }
+            return
+        }
         if (tiles.isEmpty()) {
             speedHeld = false
             return
@@ -1412,14 +1460,14 @@ class AppState(
 
     /** Replay composition is a finite on-demand source, not a moving live capture window. */
     private fun startArchiveSingleDecoderComposition(contentId: Long) {
-        if (protectedCompositionHost != null) stopProtectedCompositionPresentation()
+        if (protectedCompositionHost != null && !singleDecoderSceneActive) stopProtectedCompositionPresentation()
         val selected = tiles.filter { it.contentId == contentId }
         if (selected.size !in 2..4 || selected.size != tiles.size ||
             selected.map { it.feed.sourceStream.profileLabel }.distinct().size != selected.size) {
             message = "Single-decoder test needs two to four different feeds from one archive."
             return
         }
-        val host = selected.firstOrNull { it.audible } ?: selected.first()
+        val host = protectedCompositionHost?.takeIf { it in selected } ?: selected.firstOrNull { it.audible } ?: selected.first()
         val previousLayout = layoutMode
         val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
         f1DashCaptureJob?.cancel()
@@ -1449,7 +1497,7 @@ class AppState(
                 if (transferred) {
                     append("${host.feed.activeVideoDecoderHardware} · Active video decoders (callbacks): $observedActiveVideoDecoders\n")
                     append("Selected video tracks: ${host.feed.selectedVideoTrackCount}\n")
-                    append("Output surface (callback): ${host.feed.composedSurfaceWidth}x${host.feed.composedSurfaceHeight}\n")
+                    append("Scene output: ${sceneOutputSize.first}x${sceneOutputSize.second} · decoder texture: 1\n")
                     append("First frame: ${if (host.feed.hasRenderedFirstFrame) "YES" else "NO"} · Rendered frames: ${host.feed.renderedVideoFrames}\n")
                     append("Player buffered: ${host.feed.player.totalBufferedDuration}ms\n")
                 }
@@ -1464,7 +1512,7 @@ class AppState(
                 selected.forEach { it.feed.clearProtectedCompositionVideoRole() }
                 applyVideoBudget()
             }
-            layoutMode = previousLayout
+            decoderMode = DecoderMode.MULTIPLE
             layoutRequest++
         }
         val probePositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
@@ -1500,14 +1548,14 @@ class AppState(
                     replaceHost = { session ->
                         val handoffPositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
                         nativeArchiveTiles = selected
-                        showProtectedCompositionPresentation(host, selected)
+                        showProtectedCompositionPresentation(host, selected, sceneLayout = true)
                         // One Media3 player now loads both the composed video and selected audio.
                         // Stopped originals perform no downloads and cannot move its clock.
                         selected.forEach { it.feed.suspendForArchiveComposition(); it.feed.setAudible(false) }
                         host.feed.startArchiveVodPlayback(session, handoffPositionMs, playing)
                         transferred = true
                         host.feed.setAudible(!mutedAll)
-                        layoutMode = LayoutMode.SINGLE_DECODER_TEST
+                        decoderMode = DecoderMode.SINGLE
                         phase = "BUFFERING"
                     },
                     restoreSources = { restore() },
@@ -1518,7 +1566,7 @@ class AppState(
                 var readySince: Long? = null
                 while (true) {
                     host.feed.problem?.let { throw IOException("Composed playback failed: $it") }
-                    if (host.feed.hasRenderedFirstFrame && observedActiveVideoDecoders != 1) throw IOException("Expected one active video decoder; callbacks report $observedActiveVideoDecoders")
+                    if (host.feed.hasRenderedFirstFrame && observedActiveVideoDecoders > 1) throw IOException("Expected one active video decoder; callbacks report $observedActiveVideoDecoders")
                     if (host.feed.hasRenderedFirstFrame && host.feed.activeVideoDecoderHardware == "hardware NO") throw IOException("Composed video selected a software decoder")
                     phase = when {
                         host.feed.player.playbackState == Player.STATE_ENDED -> "ENDED"
@@ -1554,9 +1602,10 @@ class AppState(
             } catch (error: Exception) {
                 failure = (error.message ?: error.javaClass.simpleName).replace(Regex("https?://\\S+"), "[URL]").take(400)
                 phase = "FAILED"
+                decoderMode = DecoderMode.MULTIPLE
                 // Preserve the failure evidence before restore cancels this capture's ownership.
                 diagnostic()
-                if (startup.sourceDecodersTouched) restore()
+                if (startup.sourceDecodersTouched || singleDecoderSceneActive) restore() else applyVideoBudget()
                 message = "Single-decoder archive test failed: $failure"
                 android.util.Log.w("ApexviewSingleDecoder", "ARCHIVE_VOD_FAILED reason=$failure")
             } finally {
@@ -1779,7 +1828,7 @@ class AppState(
 
     /** Start the protected one-decoder path for a normal Android TV live multiview session. */
     private fun startTvLiveCompositionIfEligible(contentId: Long) {
-        if (!isTv || layoutMode == LayoutMode.TILE_TEST || layoutMode == LayoutMode.SINGLE_DECODER_TEST) return
+        if (decoderMode == DecoderMode.MULTIPLE || !isTv || layoutMode == LayoutMode.TILE_TEST || layoutMode == LayoutMode.SINGLE_DECODER_TEST) return
         // A feed was added to an already composed session. Restore the source players and layout
         // before rebuilding the selected-feed set, otherwise the old grid host remains detached.
         if (protectedCompositionHost != null) stopProtectedCompositionPresentation()
@@ -1892,15 +1941,17 @@ class AppState(
     private fun showProtectedCompositionPresentation(
         host: Tile,
         selected: List<Tile>,
-        audioMaster: Tile? = null
+        audioMaster: Tile? = null,
+        sceneLayout: Boolean = false,
     ) {
         if (protectedCompositionHost != null) return
         protectedCompositionHost = host
         protectedCompositionAudioMaster = audioMaster
-        protectedCompositionBounds = selected.associateWith { tile ->
+        protectedCompositionBounds = if (sceneLayout) emptyMap() else selected.associateWith { tile ->
             ProtectedTileBounds(tile.x, tile.y, tile.w, tile.h, tile.z)
         }
-        selected.forEach { it.protectedCompositionHidden = it !== host }
+        selected.forEach { it.protectedCompositionHidden = !sceneLayout && it !== host }
+        if (sceneLayout) { layoutRequest++; return }
         host.x = 0f
         host.y = 0f
         host.w = canvasW.takeIf { it > 0f } ?: host.w
@@ -1995,7 +2046,7 @@ class AppState(
             // A feed added while one fills the screen brings the whole layout back.
             focusTileId = null
             streams.forEach { (channel, stream) ->
-                val feed = newFeed(stream)
+                val feed = newFeed(stream, startWithVideo = !isTv && (decoderMode != DecoderMode.SINGLE || tiles.isEmpty() && streams.size == 1))
                 // From the start: the first moment F1 keeps, so nothing after it is seen first.
                 if (fromStart && joinAt == null) feed.startFromBeginning()
                 joinAt?.let(feed.player::seekTo)
@@ -2044,7 +2095,8 @@ class AppState(
             }
             // Normal Android TV live multiview also uses the composed representation. This is
             // not limited to the two-feed diagnostic tile-test workflow.
-            startTvLiveCompositionIfEligible(contentId)
+            if (decoderMode == DecoderMode.SINGLE && tiles.size >= 2) startArchiveSingleDecoderComposition(contentId)
+            else startTvLiveCompositionIfEligible(contentId)
         }
     }
 
@@ -2560,39 +2612,12 @@ class AppState(
     /** Lays the feeds out afresh in [mode]. */
     fun chooseLayout(mode: LayoutMode) {
         mapGrabbed = false
-        if (mode != layoutMode && (protectedCompositionHost != null || f1DashCaptureJob != null)) {
+        if (mode != layoutMode && !singleDecoderSceneActive && (protectedCompositionHost != null || f1DashCaptureJob != null)) {
             stopProtectedCompositionPresentation()
         }
-        if (mode == LayoutMode.SINGLE_DECODER_TEST) {
-            val leader = leaderTile()
-            if (leader == null) {
-                message = "Start an F1 archive with at least two feeds before choosing Single-decoder test."
-                showChrome()
-                return
-            }
-            val selectedTiles = tiles.filter { it.contentId == leader.contentId }
-            if (tiles.any { it.contentId != leader.contentId } || selectedTiles.size !in 2..4) {
-                message = "Single-decoder test needs 2–4 feeds from one F1 archive. Close feeds from other sessions first."
-                showChrome()
-                return
-            }
-            if (leader.contentId in knownLiveContentIds ||
-                selectedTiles.any { it.feed.player.isCurrentMediaItemLive }) {
-                message = "Single-decoder test currently uses archive replays. Choose an archived session, not a live stream."
-                showChrome()
-                return
-            }
-            if (selectedTiles.any { it.feed.player.duration <= 0L }) {
-                message = "Wait until all archive feeds have loaded their playback timelines, then start the single-decoder test."
-                showChrome()
-                return
-            }
-            layoutSheetOpen = false
-            showChrome()
-            startArchiveSingleDecoderComposition(leader.contentId)
-            return
-        }
+        if (mode == LayoutMode.SINGLE_DECODER_TEST) { chooseDecoderMode(DecoderMode.SINGLE); return }
         if (mode == LayoutMode.TILE_TEST) {
+            if (singleDecoderSceneActive) chooseDecoderMode(DecoderMode.MULTIPLE)
             val leader = leaderTile()
             if (leader == null) {
                 message = "Start an F1 session first, then choose Tile testing."
@@ -2618,11 +2643,13 @@ class AppState(
             return
         }
         val enteringTvLayout = mode == LayoutMode.TV && layoutMode != LayoutMode.TV
-        f1DashCaptureJob?.cancel()
-        f1DashCaptureJob = null
-        f1DashCapture = null
-        HevcFeedProfileCapture.clearTileTestSelection()
-        ProtectedHevcLiveComposition.clearAll()
+        if (!singleDecoderSceneActive) {
+            f1DashCaptureJob?.cancel()
+            f1DashCaptureJob = null
+            f1DashCapture = null
+            HevcFeedProfileCapture.clearTileTestSelection()
+            ProtectedHevcLiveComposition.clearAll()
+        }
         layoutMode = mode
         if (mode == LayoutMode.TV) {
             // TV is a complete preset, not a feed-only arrangement: turn on the track map and
@@ -2702,7 +2729,7 @@ class AppState(
         // Clear a previous screen orientation's reservation before any early-return layout.
         // The combined plan is rebuilt below only when its two feed-clearance switches apply.
         combinedOverlayPlan = null
-        val composed = protectedCompositionHost
+        val composed = protectedCompositionHost.takeUnless { singleDecoderSceneActive }
         val ordered = composed?.let { listOf(it) } ?: bigFirst()
         if (composed == null) bigTileId = ordered.firstOrNull()?.id
 
@@ -3504,10 +3531,16 @@ class AppState(
 
     /** Moves the audio to [tile]. Choosing a feed to listen to also ends Mute all. */
     fun setAudio(tile: Tile, byUser: Boolean = false) {
-        if (nativeArchiveTiles.isNotEmpty() && tile !== protectedCompositionHost) {
-            stopProtectedCompositionPresentation()
-            layoutMode = LayoutMode.GRID
-            message = "Normal playback restored for the selected audio feed."
+        if (singleDecoderSceneActive) {
+            val owner = protectedCompositionHost?.feed ?: return
+            if (!owner.selectArchiveAudio(tile.feed.sourceStream.profileLabel)) {
+                message = "This audio feed is unavailable in the current composition."
+                return
+            }
+            if (byUser) mutedAll = false
+            tiles.forEach { it.audible = it === tile; it.feed.setAudible(false) }
+            owner.setAudible(!mutedAll)
+            return
         }
         if (byUser) mutedAll = false
         tiles.forEach {

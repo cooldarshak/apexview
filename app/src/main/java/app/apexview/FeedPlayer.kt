@@ -148,6 +148,11 @@ class FeedPlayer(
     private var archiveVodSession: HevcArchiveVodSession? = null
     private lateinit var archiveAudioSources: DefaultMediaSourceFactory
     internal val isArchiveVodPlayback: Boolean get() = archiveVodSession != null
+    internal val archiveSceneLabels: List<String> get() = archiveVodSession?.sourceLabels.orEmpty()
+    internal val archiveSceneWidth: Int get() = archiveVodSession?.width ?: 0
+    internal val archiveSceneHeight: Int get() = archiveVodSession?.height ?: 0
+    internal fun archiveSessionForCast(): HevcArchiveVodSession? = archiveVodSession
+
     internal var composedSurfaceWidth: Int = 0
         private set
     internal var composedSurfaceHeight: Int = 0
@@ -406,6 +411,7 @@ class FeedPlayer(
                 initializationDurationMs: Long,
             ) {
                 decoder = decoderName
+                if (archiveVodSession != null) firstFrameRendered = false
                 activeVideoDecoderCount++
                 if (stream.allowHevcProfileProbe) {
                     HevcFeedProfileCapture.updateVideoDecoder(
@@ -587,15 +593,15 @@ class FeedPlayer(
     }
 
     /** One static composed video track plus native audio, on this same ExoPlayer and surface. */
-    internal fun startArchiveVodPlayback(session: HevcArchiveVodSession, positionMs: Long, playWhenReady: Boolean) {
-        val audioUri = requireNotNull(session.audioUri) { "Archive native audio was not validated" }
+    internal fun startArchiveVodPlayback(session: HevcArchiveVodSession, positionMs: Long, playWhenReady: Boolean, audioOverride: Uri? = null) {
+        val audioUri = requireNotNull(audioOverride ?: session.audioUri) { "Archive native audio was not validated" }
         val video = DashMediaSource.Factory(session.dataSourceFactory()).setDrmSessionManagerProvider { drmManager }
             .setLoadErrorHandlingPolicy(app.apexview.tiled.ArchiveVodLoadErrorPolicy())
             .createMediaSource(MediaItem.Builder().setUri(HevcArchiveVodSession.MANIFEST_URI).setMimeType(MimeTypes.APPLICATION_MPD).build())
         val audio = FilteringMediaSource(archiveAudioSources.createMediaSource(MediaItem.Builder().setUri(audioUri)
             .setMimeType(MimeTypes.APPLICATION_M3U8).build()), C.TRACK_TYPE_AUDIO)
         firstFrameRendered = false; error = null; problem = null
-        archiveVodSession?.close()
+        if (archiveVodSession !== session) archiveVodSession?.close()
         archiveVodSession = session
         videoSuppressedByProtectedComposition = false
         videoOn = true
@@ -605,6 +611,15 @@ class FeedPlayer(
         player.playWhenReady = playWhenReady
         player.prepare()
     }
+
+    internal fun selectArchiveAudio(label: String): Boolean {
+        val session = archiveVodSession ?: return false
+        val audio = session.audioUris[label] ?: return false
+        startArchiveVodPlayback(session, player.currentPosition, player.playWhenReady, audio)
+        return true
+    }
+
+    internal fun releaseArchiveOwnership() { archiveVodSession?.close(); archiveVodSession = null }
 
     /** Drop the original loaders/audio as well as video once all source decoders are released. */
     internal fun suspendForArchiveComposition() {

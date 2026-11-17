@@ -1,6 +1,7 @@
 package app.apexview
 
 import android.app.Activity
+import app.apexview.scene.SingleDecoderSceneView
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.os.Build
@@ -312,6 +313,32 @@ fun ViewerScreen(app: AppState) {
             }
         }
 
+        val atlasScene = app.videoScene(width, height)
+        val atlasPlayer = app.singleDecoderScenePlayer
+        Box(Modifier.fillMaxSize()
+            .graphicsLayer {
+                val k = if (app.isTv) 1f else 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
+                scaleX = k; scaleY = k; transformOrigin = TransformOrigin(0f, 0.5f)
+            }
+            .graphicsLayer {
+                val scale = if (app.inPip || app.isTv) 1f else 1f - lift * band / height
+                scaleX = scale; scaleY = scale; transformOrigin = TransformOrigin(0.5f, 1f)
+                translationY = if (app.isTv) 0f else -sheetShift
+            }) {
+            if (atlasScene != null && atlasPlayer != null) {
+                AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
+                    onFailure = app::failSingleDecoderScene
+                    onOutputSize = app::reportSceneOutputSize
+                } }, update = { it.bind(atlasPlayer.player, atlasScene) }, onRelease = { it.release() },
+                    modifier = Modifier.fillMaxSize())
+            } else {
+                val popped = if (app.inPip) app.pipTile() else null
+                app.tiles.filter { !it.protectedCompositionHidden && (popped == null || it === popped) }.forEach { tile ->
+                    key(tile.id) { TileView(app, tile, videoOnly = true) }
+                }
+            }
+        }
+
         // Feeds and map, shrinking toward the bottom while the controls are up so nothing sits
         // under the top bar. Touches inside are in the unshrunk canvas's pixels.
         Box(
@@ -337,7 +364,7 @@ fun ViewerScreen(app: AppState) {
             val popped = if (app.inPip) app.pipTile() else null
             app.tiles.forEach { tile ->
                 if (!tile.protectedCompositionHidden && (popped == null || tile === popped)) {
-                    key(tile.id) { TileView(app, tile) }
+                    key(tile.id) { TileView(app, tile, controlsOnly = true) }
                 }
             }
             if (app.inPip) return@Box
@@ -877,9 +904,9 @@ private val overlayShadow = androidx.compose.ui.graphics.Shadow(Color.Black, blu
  */
 @OptIn(UnstableApi::class)
 @Composable
-private fun TileView(app: AppState, tile: Tile) {
+private fun TileView(app: AppState, tile: Tile, videoOnly: Boolean = false, controlsOnly: Boolean = false) {
     val density = LocalDensity.current
-    LaunchedEffect(tile.id) {
+    if (!videoOnly) LaunchedEffect(tile.id) {
         while (true) {
             tile.feed.refresh()
             delay(1000)
@@ -896,11 +923,12 @@ private fun TileView(app: AppState, tile: Tile) {
             )
             .zIndex(tile.z)
             .helpAnchor(app, "tile:${tile.id}")
-            .background(Color.Black)
+            .then(if (controlsOnly) Modifier else Modifier.background(Color.Black))
     ) {
         // A single L3 feed uses SurfaceView so Android can compose video independently of
         // the timing/map overlays. Multiple L3 feeds retain TextureView for correct tile overlap
         // and z-order. L1 always uses SurfaceView for secure output.
+        if (!controlsOnly) {
         val textureView = useTextureViewForFeed(tile.feed.usesSoftwareDrm, app.tiles.count { !it.protectedCompositionHidden })
         key(tile.id, textureView) {
             AndroidView(
@@ -917,6 +945,8 @@ private fun TileView(app: AppState, tile: Tile) {
                 modifier = Modifier.fillMaxSize(),
             )
         }
+        }
+        if (videoOnly) return@Box
         if (app.inPip) return@Box
 
         Box(
@@ -1455,13 +1485,19 @@ private fun LayoutSheet(app: AppState) {
                 .padding(horizontal = 20.dp).padding(bottom = 24.dp)
         ) {
             Text("Layout", style = Type.title2)
+            Segments(DecoderMode.entries.toList(), app.decoderMode, { it.label },
+                Modifier.padding(top = 16.dp).fillMaxWidth()) { app.chooseDecoderMode(it) }
+            Text(if (app.decoderMode == DecoderMode.SINGLE)
+                "One composed stream. Layout, Snap and Free use the same window controls."
+                else "Each feed uses its own player and video decoder.",
+                style = Type.footnote, modifier = Modifier.padding(top = 8.dp))
             app.singleDecoderDiagnostic?.let { diagnostic ->
                 Text(diagnostic, style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
                 Text("Active video decoders (app callbacks): ${app.observedActiveVideoDecoders}", style = Type.footnote)
             }
             val n = app.tiles.size
             val hasSaved = app.savedLayout(n) != null
-            val modes = LayoutMode.entries.filter { it != LayoutMode.CUSTOM || hasSaved }
+            val modes = LayoutMode.entries.filter { it != LayoutMode.SINGLE_DECODER_TEST && (it != LayoutMode.CUSTOM || hasSaved) }
             Segments(
                 modes, app.layoutMode, { it.label },
                 Modifier.padding(top = 20.dp), selectedLayout,

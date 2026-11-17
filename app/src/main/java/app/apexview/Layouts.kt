@@ -8,6 +8,8 @@ data class Slot(val x: Float, val y: Float, val w: Float) {
     val h get() = w * 9f / 16f
 }
 
+enum class DecoderMode(val label: String) { MULTIPLE("Multiple decoders"), SINGLE("Single decoder") }
+
 enum class LayoutMode(val label: String) {
     FEATURED("Main + strip"),
     GRID("Grid"),

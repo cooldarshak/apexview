@@ -68,29 +68,31 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             require(playlists.none { it.tags.any { tag -> tag.startsWith("#EXT-X-KEY:") && !tag.contains("METHOD=NONE") } }) {
                 "HLS declares protection but the selected CMAF track is clear"
             }
-            val audioIndex = selected.indexOfFirst { it.feed.label == clockLabel }.coerceAtLeast(0)
-            val audioOffer = selected[audioIndex]
-            val audio = audioOffer.master?.audios.orEmpty().filter { it.url != null &&
-                (audioOffer.audioGroupId == null || it.groupId == audioOffer.audioGroupId) }
-                .sortedWith(compareByDescending<HlsMultivariantPlaylist.Rendition> { it.format.language == commentary }
-                    .thenByDescending { (it.format.selectionFlags and C.SELECTION_FLAG_DEFAULT) != 0 }).firstOrNull()?.url
-            if (commentary != null) {
-                requireNotNull(audio) { "Selected archive offer has no separate native HLS audio rendition" }
-                val audioPlaylist = parse(audio, audioOffer.master) as? HlsMediaPlaylist
-                    ?: throw PermanentCaptureException("Archive audio rendition is not a media playlist")
-                val clock = playlists[audioIndex]
-                require(audioPlaylist.hasEndTag && audioPlaylist.segments.isNotEmpty() &&
-                    kotlin.math.abs(audioPlaylist.durationUs - clock.durationUs) <= clock.targetDurationUs &&
-                    (!audioPlaylist.hasProgramDateTime || !clock.hasProgramDateTime ||
-                        kotlin.math.abs(audioPlaylist.startTimeUs - clock.startTimeUs) <= 250_000L)) {
-                    "Archive native audio and composed video timelines are incompatible"
+            val audioUris = selected.mapIndexedNotNull { index, offer ->
+                val audio = offer.master?.audios.orEmpty().filter { it.url != null &&
+                    (offer.audioGroupId == null || it.groupId == offer.audioGroupId) }
+                    .sortedWith(compareByDescending<HlsMultivariantPlaylist.Rendition> { it.format.language == commentary }
+                        .thenByDescending { (it.format.selectionFlags and C.SELECTION_FLAG_DEFAULT) != 0 }).firstOrNull()?.url
+                if (commentary != null) {
+                    requireNotNull(audio) { "Selected archive offer has no separate native HLS audio rendition" }
+                    val audioPlaylist = parse(audio, offer.master) as? HlsMediaPlaylist
+                        ?: throw PermanentCaptureException("Archive audio rendition is not a media playlist")
+                    val clock = playlists[index]
+                    require(audioPlaylist.hasEndTag && audioPlaylist.segments.isNotEmpty() &&
+                        kotlin.math.abs(audioPlaylist.durationUs - clock.durationUs) <= clock.targetDurationUs &&
+                        (!audioPlaylist.hasProgramDateTime || !clock.hasProgramDateTime ||
+                            kotlin.math.abs(audioPlaylist.startTimeUs - clock.startTimeUs) <= 250_000L)) {
+                        "Archive native audio and composed video timelines are incompatible"
+                    }
                 }
-            }
+                audio?.let { offer.feed.label to it }
+            }.toMap()
+            val audio = audioUris[clockLabel]
             var session: HevcArchiveVodSession? = null
             val owned = selected.mapIndexed { i, offer -> HevcArchiveVodSession.Input(offer.feed.label, playlists[i], offer.format,
                 inits[i].bytes.copyOf(), inits[i].report) }
             try {
-                session = HevcArchiveVodSession(reader, owned, clockLabel, audioUri = audio)
+                session = HevcArchiveVodSession(reader, owned, clockLabel, audioUri = audio, audioUris = audioUris)
                 session.prepare(positionMs)
                 coroutineContext.ensureActive()
                 acquired = session

@@ -38,6 +38,7 @@ internal class HevcArchiveVodSession(
     private val clockLabel: String,
     private val maximumOutputWidth: Int = 4096,
     val audioUri: Uri? = null,
+    val audioUris: Map<String, Uri> = emptyMap(),
 ) : AutoCloseable {
     class Input(val label: String, val playlist: HlsMediaPlaylist, val format: Format?,
                 val initialization: ByteArray, val report: CmafBoxInspector.Report)
@@ -66,6 +67,7 @@ internal class HevcArchiveVodSession(
     var codedHeight: Int = 0
         private set
     val durationUs: Long get() = groups.last().let { it.startUs + it.durationUs }
+    val sourceLabels: List<String> get() = inputs.map { it.label }
     val segmentCount: Int get() = groups.size
     val selectedHeight: Int? get() = inputs.first().format?.height
     val archiveStartTimeMs: Long? get() = inputs.firstOrNull { it.label == clockLabel }?.playlist?.let {

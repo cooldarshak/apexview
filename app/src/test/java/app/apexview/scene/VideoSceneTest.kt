@@ -1,0 +1,61 @@
+package app.apexview.scene
+
+import app.apexview.LayoutMode
+import app.apexview.Layouts
+import app.apexview.OverlayLayoutMode
+import org.junit.Assert.*
+import org.junit.Test
+
+class VideoSceneTest {
+    @Test fun mainGridAndTvReuseTheExistingLayoutGeometryWithoutChangingSourceOrder() {
+        for (mode in listOf(LayoutMode.FEATURED, LayoutMode.GRID, LayoutMode.TV)) {
+            val slots = if (mode == LayoutMode.TV) Layouts.withCombinedOverlays(mode, 3, 1920f, 1080f,
+                OverlayLayoutMode.DOCKED).slots else Layouts.place(mode, 3, 1920f, 1080f)
+            val scene = VideoScene(1920f, 1080f, 2880, 540, 3,
+                slots.mapIndexed { i, slot -> VideoWindow(100 + i, i, slot.x, slot.y, slot.w, slot.h, i.toFloat()) })
+            val quads = scene.quads()
+            assertEquals(3, quads.size)
+            for (i in quads.indices) {
+                assertEquals(slots[i].x / 960f - 1, quads[i].positions[0], 0.0001f)
+                assertEquals(i / 3f + 0.5f / 2880, quads[i].texture[0], 0.0001f)
+            }
+        }
+    }
+
+    @Test fun freeOverlapsFollowZOrderAndCameraSamplingStaysWithTheWindow() {
+        val windows = listOf(VideoWindow(10, 0, -200f, 80f, 900f, 506.25f, 9f),
+            VideoWindow(11, 1, 100f, 120f, 1200f, 675f, 2f))
+        val quads = VideoScene(1920f, 1080f, 1920, 540, 2, windows).quads()
+        assertEquals(listOf(11, 10), quads.map { it.id })
+        assertTrue(quads.last().positions[0] < -1) // GPU clips offscreen pixels, preserving source crop.
+        assertTrue(quads.first().texture[0] > 0.5f)
+        assertTrue(quads.last().texture[2] < 0.5f)
+    }
+
+    @Test fun sourceEdgesCannotSamplePixelsFromAnAdjacentCamera() {
+        val scene = VideoScene(1920f, 1080f, 2880, 540, 3,
+            (0..2).map { VideoWindow(it, it, 0f, 0f, 960f, 540f, it.toFloat()) })
+        for ((i, quad) in scene.quads().withIndex()) {
+            assertTrue(quad.texture[0] > i / 3f)
+            assertTrue(quad.texture[2] < (i + 1) / 3f)
+            assertTrue(quad.texture[1] > 0f)
+            assertTrue(quad.texture[5] < 1f)
+        }
+    }
+
+    @Test fun portraitAndLandscapeHaveIndependentCoordinatesForTheSameCamera() {
+        for ((w, h) in listOf(1080f to 1920f, 1920f to 1080f)) {
+            val slot = Layouts.place(LayoutMode.FEATURED, 3, w, h).first()
+            val q = VideoScene(w, h, 2880, 540, 3, listOf(VideoWindow(1, 2, slot.x, slot.y, slot.w, slot.h, 0f))).quads().single()
+            assertEquals(2 / 3f + 0.5f / 2880, q.texture[0], 0.0001f)
+            assertTrue(q.positions.all { it.isFinite() })
+        }
+    }
+
+    @Test fun invalidGeometryIsRejectedBeforeItReachesGles() {
+        for (bad in listOf(Float.NaN, Float.POSITIVE_INFINITY, -1f, 0f)) {
+            try { VideoScene(100f, 100f, 960, 540, 1, listOf(VideoWindow(1, 0, 0f, 0f, bad, 10f, 0f))).quads(); fail() }
+            catch (_: IllegalArgumentException) {}
+        }
+    }
+}
