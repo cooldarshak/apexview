@@ -46,7 +46,7 @@ object DiagnosticLogs {
         if (enabled) start(context.applicationContext) else stop()
     }
 
-    private fun setStatus(value: String) { main.post { status = value } }
+    private fun publishStatus(value: String) { main.post { status = value } }
 
     private fun start(context: Context) {
         val token: Int
@@ -55,7 +55,7 @@ object DiagnosticLogs {
             token = ++generation
             worker = Thread({ capture(context, token) }, "PitwallDiagnostics").apply { isDaemon = true; start() }
         }
-        setStatus("Starting logging…")
+        publishStatus("Starting logging…")
     }
 
     private fun capture(context: Context, token: Int) {
@@ -68,7 +68,7 @@ object DiagnosticLogs {
                 writeLocked(context, "App process logcat only; system-wide logs and dumpsys require external access.\n")
                 writer?.flush()
             }
-            setStatus("Recording to Download/Pitwall")
+            publishStatus("Recording to Download/Pitwall")
             // Capabilities describe what the device advertises; actual decoder use is logged by playback.
             runCatching {
                 MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.filter { !it.isEncoder }
@@ -95,11 +95,11 @@ object DiagnosticLogs {
                 if (token == generation) {
                     writeLocked(context, "Logcat capture ended unexpectedly. Re-enable logging to retry.\n")
                     writer?.flush()
-                    setStatus("Log capture stopped. Turn off and on to retry.")
+                    publishStatus("Log capture stopped. Turn off and on to retry.")
                 }
             }
         } catch (e: Exception) {
-            synchronized(lock) { if (token == generation) setStatus("Logging error: ${e.javaClass.simpleName}. Turn off and on to retry.") }
+            synchronized(lock) { if (token == generation) publishStatus("Logging error: ${e.javaClass.simpleName}. Turn off and on to retry.") }
             Log.e("PitwallDiagnostics", "Log capture failed", e)
         } finally {
             synchronized(lock) {
@@ -165,7 +165,7 @@ object DiagnosticLogs {
             process?.destroy(); process = null
             worker = null
         }
-        setStatus("Logging is off")
+        publishStatus("Logging is off")
     }
 
 }
