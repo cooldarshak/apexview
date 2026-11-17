@@ -1548,6 +1548,8 @@ class AppState(
                 android.util.Log.i("ApexviewSingleDecoder", "Archive requires existing DASH/protected composition backend; sources unchanged")
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 if (startup.sourceDecodersTouched) restore()
+                phase = "CANCELLED"
+                diagnostic()
                 throw cancelled
             } catch (error: Exception) {
                 failure = (error.message ?: error.javaClass.simpleName).replace(Regex("https?://\\S+"), "[URL]").take(400)
