@@ -55,6 +55,10 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var active by mutableStateOf(false)
     private var generation by mutableIntStateOf(0)
     private var player: ExoPlayer? by mutableStateOf(null)
+    private var sceneView: SingleDecoderSceneView? = null
+    private var standardView: PlayerView? = null
+    private val httpDelegate = lazy { OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).build() }
+    private val receiverHttp by httpDelegate
     private var server: ServerSocket? = null
     private var advertisement: PitwallAdvertisement? = null
     private var connection: FcastConnection? = null
@@ -207,8 +211,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         stopPlayback()
         val peer = requireNotNull(connection).socket.inetAddress
         val origin = ReceiverMediaPolicy.validate(body.getString("url"), peer)
-        val http = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).build()
-        val upstream = OkHttpDataSource.Factory(http)
+        val upstream = OkHttpDataSource.Factory(receiverHttp)
         val data = DataSource.Factory {
             val source = upstream.createDataSource()
             object : DataSource by source {
@@ -298,6 +301,8 @@ class PitwallReceiverActivity : ComponentActivity() {
     }
     private fun stopPlayback() {
         active = false
+        sceneView?.release(); sceneView = null
+        standardView?.player = null; standardView = null
         val previous = player; player = null
         previous?.release()
         scene = null; playData = null; renderingReported = false
@@ -324,13 +329,17 @@ class PitwallReceiverActivity : ComponentActivity() {
                             val modifier = if (maxWidth / maxHeight > ratio) Modifier.fillMaxHeight().aspectRatio(ratio)
                                 else Modifier.fillMaxWidth().aspectRatio(ratio)
                             AndroidView(factory = { SingleDecoderSceneView(it).apply {
+                                sceneView = this
                                 onFailure = { reason -> if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) fail(reason) }
                                 onFirstFrame = { if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) reportRendering() }
                                 bind(current, model)
-                            } }, update = { it.bind(current, model) }, onRelease = { it.release() }, modifier = modifier)
+                            } }, update = { it.bind(current, model) }, onRelease = {
+                                if (sceneView === it) sceneView = null
+                                it.release()
+                            }, modifier = modifier)
                         }
-                    } else AndroidView(factory = { PlayerView(it).apply { player = current; useController = true } },
-                        onRelease = { it.player = null }, modifier = Modifier.fillMaxSize())
+                    } else AndroidView(factory = { PlayerView(it).apply { standardView = this; player = current; useController = true } },
+                        onRelease = { if (standardView === it) standardView = null; it.player = null }, modifier = Modifier.fillMaxSize())
                 }
             } else Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(18.dp)) {
                 Text(receiverName, style = Type.title1)
@@ -375,6 +384,11 @@ class PitwallReceiverActivity : ComponentActivity() {
     override fun onDestroy() {
         destroyed = true; advertisement?.close(); runCatching { server?.close() }
         connection?.close(); connection = null; stopPlayback()
+        if (httpDelegate.isInitialized()) {
+            receiverHttp.dispatcher.cancelAll()
+            receiverHttp.connectionPool.evictAll()
+            receiverHttp.dispatcher.executorService.shutdown()
+        }
         super.onDestroy()
     }
 }
