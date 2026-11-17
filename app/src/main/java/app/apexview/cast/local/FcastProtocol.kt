@@ -28,6 +28,8 @@ internal object FcastProtocol {
     // Private opcodes, sent only after the peer advertises pitwallScene=1.
     const val SCENE = 128
     const val RENDERING = 129
+    const val TIMING = 130
+    const val UI_CONTROL = 131
 
     data class Packet(val opcode: Int, val body: JSONObject? = null)
 

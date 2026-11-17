@@ -560,6 +560,21 @@ private class LineMarks(timing: SessionTiming) {
 /** Circuit outline, start and finish, turn numbers and the cars, fitted into a w x h box. */
 @Composable
 private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, height: Float, turn: Float) {
+    val now = rememberMapRenderTime(app)
+    val cars = carsAt(timing, now)
+    val stop = pitStopNow(rememberPitBasis(app, timing, now), app.pitDriver,
+        cars.map { it.number to timing.geometry.progress(it.x, it.y) })
+    TrackDrawingContent(timing, width, height, turn, app.mapOpacity, app.mapDotSizeDp, app.mapLabelSizeSp,
+        now, cars, stop, timing.flags.at(now)) { targets -> CarTargets(app, targets) }
+}
+
+/** Pure current-state rendering, shared with the LAN receiver without replay-history parsing. */
+@Composable
+internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Float, turn: Float,
+    opacity: Float, dotSizeDp: Float, labelSizeSp: Float, now: Long, currentCars: List<Car>,
+    stop: PitStopNow?, flags: FlagPicture, leader: String? = null,
+    targets: @Composable (List<Pair<String, Offset>>) -> Unit = {},
+) {
     val density = LocalDensity.current
     val fit = remember(timing, width, height, turn) {
         MapFit.of(timing.outline, width, height, margin = mapMarginPx(density), turn = turn)
@@ -575,8 +590,8 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
         }
     }
     val measurer = rememberTextMeasurer()
-    val names = remember(timing, app.mapLabelSizeSp) {
-        timing.drivers.mapValues { measurer.label(it.value.tla, app.mapLabelSizeSp.sp) }
+    val names = remember(timing, labelSizeSp) {
+        timing.drivers.mapValues { measurer.label(it.value.tla, labelSizeSp.sp) }
     }
     val turns = remember(timing) { timing.corners.associate { it.number to measurer.label("${it.number}", 9.sp, bold = false) } }
     val marks = remember(timing, timing.startLine) { LineMarks(timing) }
@@ -585,20 +600,17 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
     fun lapPoint(f: Float) = timing.geometry.pointAt(f).let { g -> fit.map(g[0], g[1]) }
     val sectors = remember(fit) { sectorPaths(timing, ::lapPoint) }
     val scLabel = remember { measurer.label("SC", 8.sp) }
-    val now = rememberMapRenderTime(app)
-    val cars = carsAt(timing, now).map { it to fit.map(it.x, it.y) }
-    val stop = pitStopNow(rememberPitBasis(app, timing, now), app.pitDriver, cars.map { (car, _) -> car.number to timing.geometry.progress(car.x, car.y) })
+    val cars = currentCars.map { it to fit.map(it.x, it.y) }
     val pitLabel = remember { measurer.label("PIT", 8.sp) }
     val stopLine = stop?.let { pitStopLine(timing, it) } ?: noPositionsLine(timing, now)
     val stopText = remember(stopLine) { stopLine?.let { measurer.label(it, 13.sp) } }
-    val flags = timing.flags.at(now)
     val pulse = rememberPulse(flags.track.ending)
     val caption = rememberCaption(measurer, flags, now)
-    val safetyCar = if (!flags.track.safetyCar) null else leaderAt(timing, now)
+    val safetyCar = if (!flags.track.safetyCar) null else (leader ?: leaderAt(timing, now))
         ?.let { leader -> cars.firstOrNull { it.first.number == leader }?.first }
         ?.let { lapPoint(timing.geometry.progress(it.x, it.y) + SAFETY_CAR_AHEAD) }
 
-    Canvas(Modifier.fillMaxSize().graphicsLayer(alpha = app.mapOpacity)) {
+    Canvas(Modifier.fillMaxSize().graphicsLayer(alpha = opacity)) {
         drawPath(path, Color.Black.copy(alpha = 0.45f), style = Stroke(7.dp.toPx()))
         drawPath(path, Color.White.copy(alpha = 0.6f), style = Stroke(3.dp.toPx()))
         drawFlags(flags, path, sectors, 3.5.dp.toPx(), pulse)
@@ -635,14 +647,14 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
 
         stop?.let { drawPitStop(it, Color(timing.drivers[it.number]?.color ?: android.graphics.Color.WHITE), pitLabel) { f -> lapPoint(f) } }
         cars.forEach { (car, p) ->
-            val r = app.mapDotSizeDp.dp.toPx()
+            val r = dotSizeDp.dp.toPx()
             val alpha = drawCar(timing, car, p, r)
             if (car.number == stop?.number) drawCircle(Color.White, r + 4.dp.toPx(), p, style = Stroke(2.dp.toPx()))
             names[car.number]?.let { drawText(it, topLeft = Offset(p.x + r + 3.dp.toPx(), p.y - it.size.height / 2f), alpha = alpha) }
         }
         safetyCar?.let { drawSafetyCar(it, 10.dp.toPx(), scLabel) }
     }
-    CarTargets(app, cars.map { (car, p) -> car.number to p })
+    targets(cars.map { (car, p) -> car.number to p })
 }
 
 private val FlagYellow = Color(0xFFFFD60A)
@@ -843,6 +855,20 @@ internal class Ribbon(
 
 @Composable
 fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, inset: Float, screenCornerRadius: Float) {
+    val now = rememberMapRenderTime(app)
+    val cars = carsAt(timing, now)
+    val stop = pitStopNow(rememberPitBasis(app, timing, now), app.pitDriver,
+        cars.map { it.number to timing.geometry.progress(it.x, it.y) })
+    EdgeDrawingContent(timing, width, height, inset, screenCornerRadius, app.mapOpacity, now,
+        cars, stop, timing.flags.at(now)) { targets -> CarTargets(app, targets) }
+}
+
+@Composable
+internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Float, inset: Float,
+    screenCornerRadius: Float, opacity: Float, now: Long, currentCars: List<Car>,
+    stop: PitStopNow?, flags: FlagPicture, leader: String? = null,
+    targets: @Composable (List<Pair<String, Offset>>) -> Unit = {},
+) {
     val fallback = with(LocalDensity.current) { 24.dp.toPx() }
     // The screen's own corner radius. Up to 0.15 it was concentric (half the inset smaller),
     // which read as a tighter curve than the glass.
@@ -864,22 +890,17 @@ fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, i
     val startLabel = remember { measurer.label("START", 8.sp) }
     val sectors = remember(ribbon, timing) { sectorPaths(timing, ribbon::point) }
     val scLabel = remember { measurer.label("SC", 7.sp) }
-    val now = rememberMapRenderTime(app)
-    val cars = carsAt(timing, now)
-        .map { car -> car to timing.geometry.progress(car.x, car.y) }
-        .sortedBy { it.second }
-    val flags = timing.flags.at(now)
+    val cars = currentCars.map { car -> car to timing.geometry.progress(car.x, car.y) }.sortedBy { it.second }
     val pulse = rememberPulse(flags.track.ending)
     val caption = rememberCaption(measurer, flags, now)
-    val safetyCar = if (!flags.track.safetyCar) null else leaderAt(timing, now)
+    val safetyCar = if (!flags.track.safetyCar) null else (leader ?: leaderAt(timing, now))
         ?.let { leader -> cars.firstOrNull { it.first.number == leader }?.second }
         ?.let { it + SAFETY_CAR_AHEAD }
-    val stop = pitStopNow(rememberPitBasis(app, timing, now), app.pitDriver, cars.map { (car, f) -> car.number to f })
     val pitLabel = remember { measurer.label("PIT", 7.sp) }
     val stopLine = stop?.let { pitStopLine(timing, it) } ?: noPositionsLine(timing, now)
     val stopText = remember(stopLine) { stopLine?.let { measurer.label(it, 13.sp) } }
 
-    Canvas(Modifier.fillMaxSize().graphicsLayer(alpha = app.mapOpacity)) {
+    Canvas(Modifier.fillMaxSize().graphicsLayer(alpha = opacity)) {
         val line = ribbon.path()
         drawPath(line, Color.Black.copy(alpha = 0.5f), style = Stroke(6.dp.toPx()))
         drawPath(line, Color.White.copy(alpha = 0.5f), style = Stroke(2.dp.toPx()))
@@ -944,7 +965,7 @@ fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, i
         }
         safetyCar?.let { drawSafetyCar(ribbon.point(it), 7.5.dp.toPx(), scLabel) }
     }
-    CarTargets(app, cars.map { (car, f) -> car.number to ribbon.point(f) })
+    targets(cars.map { (car, f) -> car.number to ribbon.point(f) })
 }
 
 /**

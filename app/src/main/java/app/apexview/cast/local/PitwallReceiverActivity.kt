@@ -34,6 +34,8 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import app.apexview.*
 import app.apexview.cast.CastSceneProtocol
+import app.apexview.cast.CastTimingReceiver
+import app.apexview.cast.CastTimingLayer
 import app.apexview.scene.SingleDecoderSceneView
 import app.apexview.scene.VideoScene
 import java.net.ServerSocket
@@ -62,6 +64,9 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var server: ServerSocket? = null
     private var advertisement: PitwallAdvertisement? = null
     private var connection: FcastConnection? = null
+    private val timingState = CastTimingReceiver()
+    private var timingPeer = false
+    private var timingReported = false
     private var approved = false
     private var versionReceived = false
     private var pitwallPeer = false
@@ -148,7 +153,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                     require(body != null && body.getInt("version") >= 2) { "FCast version 2 or 3 is required" }
                     versionReceived = true
                     connection?.send(FcastProtocol.INITIAL, JSONObject().put("displayName", receiverName)
-                        .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1))
+                        .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1).put("pitwallOverlays", 1))
                 }
                 FcastProtocol.PING -> connection?.send(FcastProtocol.PONG)
                 FcastProtocol.PONG -> Unit
@@ -156,6 +161,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                     require(versionReceived)
                     senderName = body?.optString("displayName")?.take(80)?.ifBlank { "Phone" } ?: "Phone"
                     pitwallPeer = body?.optInt("pitwallScene") == 1
+                    timingPeer = body?.optInt("pitwallOverlays") == 1
                 }
                 FcastProtocol.PLAY -> {
                     require(versionReceived && body != null)
@@ -171,6 +177,10 @@ class PitwallReceiverActivity : ComponentActivity() {
                         FcastProtocol.SEEK -> player?.seekTo((number(body, "time", 0.0, 604800.0) * 1000).toLong())
                         FcastProtocol.SET_SPEED -> player?.setPlaybackSpeed(number(body, "speed", 0.25, 4.0).toFloat())
                         FcastProtocol.SET_VOLUME -> player?.volume = number(body, "volume", 0.0, 1.0).toFloat()
+                        FcastProtocol.TIMING -> if (timingPeer && body != null) {
+                            try { timingState.accept(body, playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId").orEmpty()) }
+                            catch (error: Exception) { Log.w("PitwallReceiver", "Timing display message rejected: ${error.javaClass.simpleName}") }
+                        }
                         FcastProtocol.SCENE -> {
                             require(pitwallPeer && scene != null && body != null)
                             val next = CastSceneProtocol.decode(body)
@@ -301,6 +311,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     }
     private fun stopPlayback() {
         active = false
+        timingState.clear(); timingReported = false
         sceneView?.release(); sceneView = null
         standardView?.player = null; standardView = null
         val previous = player; player = null
@@ -328,6 +339,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                             val ratio = model.width / model.height
                             val modifier = if (maxWidth / maxHeight > ratio) Modifier.fillMaxHeight().aspectRatio(ratio)
                                 else Modifier.fillMaxWidth().aspectRatio(ratio)
+                            Box(modifier) {
                             AndroidView(factory = { SingleDecoderSceneView(it).apply {
                                 sceneView = this
                                 onFailure = { reason -> if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) fail(reason) }
@@ -336,7 +348,21 @@ class PitwallReceiverActivity : ComponentActivity() {
                             } }, update = { it.bind(current, model) }, onRelease = {
                                 if (sceneView === it) sceneView = null
                                 it.release()
-                            }, modifier = modifier)
+                            }, modifier = Modifier.fillMaxSize())
+                            CastTimingLayer(timingState, model, { current.currentPosition }, { number, pit ->
+                                connection?.send(FcastProtocol.UI_CONTROL, JSONObject().put("action", if (pit) "pitDriver" else "driver").put("number", number))
+                            }, { rows, cars ->
+                                if (!timingReported && (rows > 0 || cars > 0)) {
+                                    timingReported = true
+                                    window.decorView.post {
+                                        if (active && timingPeer) connection?.send(FcastProtocol.TIMING, JSONObject().put("kind", "drawn")
+                                            .put("playbackId", playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId"))
+                                            .put("rows", rows).put("cars", cars))
+                                        Log.i("PitwallReceiver", "TIMING_UI_DRAWN rows=$rows cars=$cars")
+                                    }
+                                }
+                            })
+                            }
                         }
                     } else AndroidView(factory = { PlayerView(it).apply { standardView = this; player = current; useController = true } },
                         onRelease = { if (standardView === it) standardView = null; it.player = null }, modifier = Modifier.fillMaxSize())

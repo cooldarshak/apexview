@@ -136,15 +136,16 @@ internal fun pitStopNow(basis: PitBasis, number: String?, cars: List<Pair<String
 }
 
 /** One car on the circle: how far into the lap (in time) and through the race (in laps). */
-private class OnCircle(val car: Car, val at: Float, val distance: Float)
+internal class OnCircle(val car: Car, val at: Float, val distance: Float)
 
-@Composable
-private fun PitCircle(app: AppState, timing: SessionTiming, width: Float, height: Float) {
-    val density = LocalDensity.current
-    val measurer = rememberTextMeasurer()
-    val now = rememberMapTime(app)
+internal class PitCircleData(val referenceMs: Long, val ring: List<OnCircle>, val inLane: Map<String, Float>,
+    val gaps: Map<String, String>, val chosenNumber: String?, val ghost: Float?, val neighbour: Pair<String, Long>?,
+    val turn: Float, val laneStart: Float?, val laneSweep: Float?, val corners: List<Pair<Int, Float>>,
+    val lap: Int?, val greenCount: Int, val lossMs: Long, val laneStops: Int?, val hasSavedLoss: Boolean,
+    val gapsToLeader: Boolean, val condition: TrackCondition)
+
+internal fun pitCircleData(app: AppState, timing: SessionTiming, now: Long, basis: PitBasis): PitCircleData? {
     val flags = timing.flags.at(now)
-    val basis = rememberPitBasis(app, timing, now)
     val leader = basis.leader
     val leaderLaps = leader?.let { timing.laps[it] }
     val green = basis.green
@@ -154,12 +155,7 @@ private fun PitCircle(app: AppState, timing: SessionTiming, width: Float, height
     val saved = basis.saved
     val lossMs = basis.lossMs
 
-    if (referenceMs == null) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("The circle starts once the leader has finished a lap.", style = Type.footnote, textAlign = TextAlign.Center)
-        }
-        return
-    }
+    if (referenceMs == null) return null
 
     // Cars in the pit lane ride the inner arc; one there far longer than a stop has stopped.
     val inLane = mutableMapOf<String, Float>()
@@ -211,13 +207,51 @@ private fun PitCircle(app: AppState, timing: SessionTiming, width: Float, height
 
     // The way round matches the circuit's, unless flipped.
     val turn = if (timing.geometry.counterClockwise != app.pitCircleFlipped) -1f else 1f
-    val (centre, radius) = pitCircleFrame(app, with(density) { LABEL_ROOM.toPx() })
+    return PitCircleData(referenceMs, ring, inLane, gaps, chosen?.car?.number, ghost, near?.ahead,
+        turn, lane?.let { profile.timeFraction(it.entry) },
+        lane?.let { (profile.timeFraction(it.exit) - profile.timeFraction(it.entry)).mod(1f) },
+        timing.corners.map { it.number to profile.timeFraction(timing.geometry.progress(it.x, it.y)) },
+        leaderLaps?.lapAt(now), green.size, lossMs, lane?.stops, saved != null, app.pitGapsToLeader, flags.track)
+}
+
+@Composable
+private fun PitCircle(app: AppState, timing: SessionTiming, width: Float, height: Float) {
+    val now = rememberMapTime(app)
+    val data = pitCircleData(app, timing, now, rememberPitBasis(app, timing, now))
+    val (centre, radius) = pitCircleFrame(app, with(LocalDensity.current) { LABEL_ROOM.toPx() })
+    PitCircleDrawing(timing, data, width, height, centre, radius, app.mapOpacity) { targets ->
+        CarTargets(app, targets, onTap = { number -> app.pitDriver = if (app.pitDriver == number) null else number })
+    }
+}
+
+@Composable
+internal fun PitCircleDrawing(timing: SessionTiming, data: PitCircleData?, width: Float, height: Float,
+    centre: Offset, radius: Float, opacity: Float,
+    targets: @Composable (List<Pair<String, Offset>>) -> Unit = {},
+) {
+    if (data == null) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("The circle starts once the leader has finished a lap.", style = Type.footnote, textAlign = TextAlign.Center)
+        }
+        return
+    }
+    val density = LocalDensity.current
+    val measurer = rememberTextMeasurer()
+    val referenceMs = data.referenceMs
+    val ring = data.ring
+    val inLane = data.inLane
+    val gaps = data.gaps
+    val chosen = ring.firstOrNull { it.car.number == data.chosenNumber }
+    val ghost = data.ghost
+    val turn = data.turn
+    val laneStart = data.laneStart
+    val laneSweep = data.laneSweep
+    val lossMs = data.lossMs
+    fun tla(number: String) = timing.drivers[number]?.tla ?: number
     val laneRadius = radius * LANE_RADIUS
     fun degrees(f: Float) = -90f + turn * f * 360f
     fun direction(f: Float) = Math.toRadians(degrees(f).toDouble()).let { Offset(cos(it).toFloat(), sin(it).toFloat()) }
     fun point(f: Float, r: Float = radius) = centre + direction(f) * r
-    val laneStart = lane?.let { profile.timeFraction(it.entry) }
-    val laneSweep = lane?.let { (profile.timeFraction(it.exit) - profile.timeFraction(it.entry)).mod(1f) }
 
     val names = remember(timing) {
         timing.drivers.mapValues { (_, d) ->
@@ -225,11 +259,11 @@ private fun PitCircle(app: AppState, timing: SessionTiming, width: Float, height
             measurer.measure(d.tla, TextStyle(color = ink, fontSize = 11.sp, fontWeight = FontWeight.Bold))
         }
     }
-    val turns = remember(timing, profile) {
-        timing.corners.map { profile.timeFraction(timing.geometry.progress(it.x, it.y)) to measurer.label("${it.number}", 8.sp, bold = false) }
+    val turns = remember(data.corners) {
+        data.corners.map { (number, at) -> at to measurer.label("$number", 8.sp, bold = false) }
     }
 
-    Canvas(Modifier.fillMaxSize().graphicsLayer(alpha = app.mapOpacity)) {
+    Canvas(Modifier.fillMaxSize().graphicsLayer(alpha = opacity)) {
         // Dark inside the ring, so the centre reads over a bright picture.
         drawCircle(Color.Black.copy(alpha = 0.6f), radius, centre)
         val ringSize = Size(radius * 2, radius * 2)
@@ -307,9 +341,7 @@ private fun PitCircle(app: AppState, timing: SessionTiming, width: Float, height
         }
     }
     // On the circle a tap chooses the car, as holding does on the other maps.
-    CarTargets(app, ring.map { it.car.number to point(it.at) }, onTap = { number ->
-        app.pitDriver = if (app.pitDriver == number) null else number
-    })
+    targets(ring.map { it.car.number to point(it.at) })
 
     fun seconds(ms: Long) = "%.1f s".format(ms / 1000f)
     Box(
@@ -322,7 +354,7 @@ private fun PitCircle(app: AppState, timing: SessionTiming, width: Float, height
             Modifier.width(with(density) { (radius * 1.5f).toDp() }),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            val lap = leaderLaps?.lapAt(now)
+            val lap = data.lap
             Text(
                 when {
                     lap == null -> ""
@@ -331,10 +363,10 @@ private fun PitCircle(app: AppState, timing: SessionTiming, width: Float, height
                 },
                 style = Type.largeTitle,
             )
-            val (status, statusColor) = when (flags.track) {
+            val (status, statusColor) = when (data.condition) {
                 TrackCondition.CLEAR -> "Green" to GREEN
                 TrackCondition.RED -> "Red flag" to Ink.live
-                else -> (flags.track.label ?: "") to YELLOW
+                else -> (data.condition.label ?: "") to YELLOW
             }
             Text(
                 status,
@@ -347,27 +379,27 @@ private fun PitCircle(app: AppState, timing: SessionTiming, width: Float, height
                 modifier = Modifier.padding(top = 6.dp),
             )
             Text(
-                if (green.isEmpty()) "the leader's usual lap so far" else "avg. of last ${green.size} green lap" + if (green.size == 1) "" else "s",
+                if (data.greenCount == 0) "the leader's usual lap so far" else "avg. of last ${data.greenCount} green lap" + if (data.greenCount == 1) "" else "s",
                 style = Type.caption.copy(textAlign = TextAlign.Center),
             )
             Text(
                 when {
                     chosen != null -> "gap to ${tla(chosen.car.number)}"
-                    app.pitGapsToLeader -> "gap to the leader"
+                    data.gapsToLeader -> "gap to the leader"
                     else -> "gap to the car ahead"
                 },
                 style = Type.footnote.copy(color = Ink.primary, textAlign = TextAlign.Center),
                 modifier = Modifier.padding(top = 6.dp),
             )
             if (chosen != null) {
-                val out = near?.ahead?.let { (number, ms) -> "Stop now: out ${seconds(ms)} behind ${tla(number)}" } ?: "Stop now"
+                val out = data.neighbour?.let { (number, ms) -> "Stop now: out ${seconds(ms)} behind ${tla(number)}" } ?: "Stop now"
                 Text(out, style = Type.footnote.copy(color = Ink.primary, textAlign = TextAlign.Center), modifier = Modifier.padding(top = 6.dp))
                 Text(
                     "Pit loss ${seconds(lossMs)}, " + when {
-                        lane != null -> "measured from ${lane.stops} stop" + if (lane.stops == 1) "" else "s"
-                        saved != null -> "as measured last time here"
+                        data.laneStops != null -> "measured from ${data.laneStops} stop" + if (data.laneStops == 1) "" else "s"
+                        data.hasSavedLoss -> "as measured last time here"
                         else -> "a typical stop until someone pits"
-                    } + if (flags.track != TrackCondition.CLEAR) ". Less under a safety car." else "",
+                    } + if (data.condition != TrackCondition.CLEAR) ". Less under a safety car." else "",
                     style = Type.caption.copy(textAlign = TextAlign.Center),
                 )
             }

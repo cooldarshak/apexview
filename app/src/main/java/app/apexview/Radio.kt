@@ -287,6 +287,9 @@ internal fun FloatingPanel(
     } else panelHeight
     val shownWidthPx = with(density) { shownWidth.toPx() }
     val shownHeightPx = with(density) { shownHeight.toPx() }
+    if (spot === app.towerSpot) androidx.compose.runtime.SideEffect {
+        app.reportCastTowerBounds(spot.x, spot.y, shownWidthPx, shownHeightPx)
+    }
     if (spot.w > 0f) spot.w = shownWidthPx
     if (spot.h > 0f) spot.h = shownHeightPx
     val minX = bounds?.x ?: 0f

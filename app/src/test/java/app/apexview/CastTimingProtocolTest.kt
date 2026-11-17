@@ -1,0 +1,103 @@
+package app.apexview
+
+import app.apexview.cast.CastTimingProtocol
+import app.apexview.cast.CastTimingReceiver
+import app.apexview.cast.local.FcastProtocol
+import app.apexview.cast.local.TimingMessageChunks
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.Assert.*
+import org.junit.Test
+
+class CastTimingProtocolTest {
+    private fun timing() = SessionTiming("Race", mapOf("1" to DriverInfo("1", "VER", 0xFF0099CC.toInt())),
+        mapOf("1" to DriverTrack(longArrayOf(1000, 1200), floatArrayOf(0f, 20f), floatArrayOf(0f, 10f), 2)),
+        emptyMap(), floatArrayOf(0f, 0f, 100f, 0f, 100f, 100f, 0f, 100f), true,
+        listOf(Corner(1, 100f, 0f)), 1000, marshalSectors = listOf(Corner(1, 0f, 0f)))
+    private fun frame(id: String, mode: MapMode = MapMode.TRACK) = JSONObject().put("version", 1).put("kind", "frame")
+        .put("geometry", id).put("position", 5000).put("utc", 1000).put("density", 3).put("fontScale", 1)
+        .put("mapMode", mode.name).put("map", JSONArray(listOf(100, 50, 400, 300)))
+        .put("tower", JSONArray(listOf(900, 0, 350, 700))).put("rotation", 20).put("mapOpacity", .75)
+        .put("dot", 5).put("label", 8).put("towerOpacity", .9).put("towerFont", 1.2).put("towerHeader", 30)
+        .put("tv", true).put("speedUnit", Settings.KMH).put("onTop", "1").put("leader", "1")
+        .put("cars", JSONArray().put(JSONArray(listOf("1", 0, 0, 20, 10, LapState.PUSH.ordinal))))
+        .put("condition", TrackCondition.SAFETY_CAR.ordinal).put("yellow", JSONArray().put(JSONArray(listOf(1, 2))))
+        .put("stop", JSONArray(listOf("1", .5, .25, "44", 2100))).put("circle", JSONObject.NULL)
+        .put("rows", JSONArray().put(JSONArray().put("1").put(1).put(false).put(false).put(2)
+            .put(JSONArray(listOf("1:30.001", Pace.PURPLE.ordinal, JSONArray(), "")))
+            .put(JSONArray(listOf("1:29.001", Pace.GREEN.ordinal, JSONArray(), "")))
+            .put(JSONArray().put(JSONArray(listOf("28.001", Pace.GREEN.ordinal, JSONArray(listOf(2048, 2049)), "27.99"))).put(JSONObject.NULL).put(JSONObject.NULL))
+            .put("+1.0").put("+2.0").put("+1.0").put("SOFT").put(7).put(300).put(8)))
+        .put("header", JSONArray(listOf("RACE", "SAFETY CAR", -1, "L8/71", JSONArray(listOf("W 4.0 N", "T 36°", "A 28°", "H 70%", "P 1010", "DRY")))))
+        .put("message", JSONObject.NULL)
+    @Test fun sharedDisplayStatePreservesGeometryRowsFlagsAndInterpolatesAgainstTheTvClock() {
+        val source = timing()
+        val encoded = CastTimingProtocol.geometry(source)
+        val geometry = CastTimingProtocol.decodeGeometry(encoded)
+        assertArrayEquals(source.outline, geometry.timing.outline, 0f)
+        assertEquals("VER", geometry.timing.drivers.getValue("1").tla)
+        assertEquals(source.drivers.getValue("1").color, geometry.timing.drivers.getValue("1").color)
+        assertTrue(geometry.timing.tracks.isEmpty()) // Full position/timing histories never cross the LAN.
+        val json = frame(geometry.id)
+        val (decoded, cached) = CastTimingProtocol.decodeFrame(json)
+        assertEquals(10f, decoded.carsAt(5100).single().x, 0f)
+        assertEquals(0f, decoded.carsAt(5000).single().x, 0f)
+        assertTrue(decoded.carsAt(20000).isEmpty()) // A seek cannot draw stale car positions.
+        assertEquals(2, decoded.flags.yellow[1])
+        assertEquals(TrackCondition.SAFETY_CAR, decoded.flags.track)
+        assertEquals(2100, decoded.stop!!.outBehind!!.second.toInt())
+        assertEquals("SOFT", decoded.table.tyres.getValue("1")!!.compound)
+        assertEquals(listOf(2048, 2049), decoded.table.rows.single().second.sectors.first()!!.segments)
+        assertSame(decoded.table, CastTimingProtocol.decodeFrame(json, cached).first.table)
+        assertEquals(.75f, decoded.mapOpacity, 0f)
+        assertFalse(encoded.toString().contains("token", true))
+    }
+    @Test fun independentEmptyTopicsAndHideUpdatesDoNotEraseTheOtherPanel() {
+        val geo = CastTimingProtocol.geometry(timing())
+        val j = frame(geo.getString("id")).put("cars", JSONArray()).put("mapMode", "OFF").put("map", JSONObject.NULL)
+        val state = CastTimingProtocol.decodeFrame(j).first
+        assertEquals(1, state.table.rows.size)
+        assertNull(state.map)
+        val mapOnly = frame(geo.getString("id")).put("rows", JSONArray()).put("tower", JSONObject.NULL)
+        assertEquals(1, CastTimingProtocol.decodeFrame(mapOnly).first.cars.size)
+        assertTrue(CastTimingProtocol.decodeFrame(mapOnly).first.table.rows.isEmpty())
+    }
+    @Test fun largeCurrentTablesRoundTripInsideStandardFcastFramesAndAssemblerIsBounded() {
+        var time = 100L
+        val assembler = TimingMessageChunks.Assembler { time }
+        val original = JSONObject().put("kind", "table").put("rows", "VER".repeat(26000))
+        val packets = TimingMessageChunks.split(original)
+        assertTrue(packets.size > 1)
+        var complete: JSONObject? = null
+        packets.forEach { j ->
+            val bytes = ByteArrayOutputStream().apply { FcastProtocol.write(this, FcastProtocol.Packet(FcastProtocol.TIMING, j)) }.toByteArray()
+            assertTrue(bytes.size <= 32004)
+            complete = assembler.accept(FcastProtocol.read(ByteArrayInputStream(bytes))!!.body!!)
+        }
+        assertEquals(original.toString(), complete!!.toString())
+        assembler.accept(packets.first()); time += 6000
+        assertThrows(IllegalArgumentException::class.java) { assembler.accept(packets[1]) }
+        assertThrows(IllegalArgumentException::class.java) { TimingMessageChunks.split(JSONObject().put("rows", "x".repeat(128001))) }
+    }
+    @Test fun staleMediaLoadAndOutOfOrderTimingFramesCannotOverwriteTheCurrentUi() {
+        val receiver = CastTimingReceiver()
+        val geo = CastTimingProtocol.geometry(timing()).put("playbackId", "current")
+        receiver.accept(geo, "current")
+        val j = frame(geo.getString("id")).put("playbackId", "current").put("tableId", 1).put("sequence", 2)
+        receiver.accept(JSONObject().put("version", 1).put("kind", "table").put("id", 1).put("playbackId", "current").put("rows", j.getJSONArray("rows")), "current")
+        receiver.accept(j, "current")
+        val first = receiver.frame
+        receiver.accept(frame(geo.getString("id")).put("playbackId", "old").put("tableId", 1).put("sequence", 3), "current")
+        receiver.accept(frame(geo.getString("id")).put("playbackId", "current").put("tableId", 1).put("sequence", 1), "current")
+        assertSame(first, receiver.frame)
+        receiver.clear(); assertNull(receiver.frame); assertNull(receiver.geometry)
+    }
+    @Test fun malformedTelemetryIsRejectedBeforeRenderAllocation() {
+        val id = CastTimingProtocol.geometry(timing()).getString("id")
+        assertThrows(IllegalArgumentException::class.java) { CastTimingProtocol.decodeFrame(frame(id).put("density", 0)) }
+        assertThrows(IllegalArgumentException::class.java) { CastTimingProtocol.decodeFrame(frame(id).put("map", JSONArray(listOf(0, 0, -1, 600)))) }
+        assertThrows(IllegalArgumentException::class.java) { CastTimingProtocol.decodeGeometry(CastTimingProtocol.geometry(timing()).put("outline", "x".repeat(40000))) }
+    }
+}

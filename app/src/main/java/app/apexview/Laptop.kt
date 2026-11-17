@@ -180,6 +180,19 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
         .sortedBy { it.second.position ?: 99 }
     val onTop = app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString()
 
+    TimingTowerContents(timing, rows, towerSessionHeader(timing, now),
+        timing.tyres.mapValues { it.value.at(now) },
+        timing.speeds.mapValues { it.value.kmhAt(now) to it.value.gearAt(now) },
+        onTop, app.settings.speedUnit, app.layoutMode == LayoutMode.TV, app::showOnboard)
+}
+
+/** The phone and TV receiver use this same table; receiver data is already sampled on the phone. */
+@Composable
+internal fun TimingTowerContents(
+    timing: SessionTiming, rows: List<Pair<String, CardState>>, header: TowerSessionHeaderData,
+    tyres: Map<String, Tyre?>, speeds: Map<String, Pair<Int?, Int?>>, onTop: String?,
+    speedUnit: String, tvLayout: Boolean, onDriver: (String) -> Unit,
+) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         // The table is 361dp wide, plus its 18dp side padding. Scale its layout with the panel
         // so S1/S2/S3 and the tyre column remain inside the visible window when it is narrowed.
@@ -206,7 +219,7 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
                     }
                 }
             }
-            val minimumRowHeight = if (app.layoutMode == LayoutMode.TV) 16f else 20f
+            val minimumRowHeight = if (tvLayout) 16f else 20f
             val rowHeight = if (rows.isEmpty()) ROW_HEIGHT else {
                 // The TV preset uses a compact broadcast tower so more of the field is visible.
                 // On other layouts preserve the existing minimum for touch readability.
@@ -214,23 +227,23 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
                     .coerceIn(minimumRowHeight / contentScale, ROW_HEIGHT.value).dp
             }
             Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
-                TowerSessionHeader(timing, now)
+                TowerSessionHeader(header)
                 TowerHeader()
                 LazyColumn(Modifier.weight(1f), state = listState) {
                     items(rows, key = { it.first }) { (number, state) ->
-                        val kmh = timing.speeds[number]?.kmhAt(now)
-                        val gear = timing.speeds[number]?.gearAt(now)
+                        val kmh = speeds[number]?.first
+                        val gear = speeds[number]?.second
                         TowerRow(
                             timing = timing,
                             number = number,
                             state = state,
-                            tyre = timing.tyres[number]?.at(now),
+                            tyre = tyres[number],
                             kmh = kmh,
                             gear = gear,
-                            speedUnit = app.settings.speedUnit,
+                            speedUnit = speedUnit,
                             highlight = number == onTop,
                             rowHeight = rowHeight,
-                        ) { app.showOnboard(number) }
+                        ) { onDriver(number) }
                     }
                 }
                 if (rows.isNotEmpty()) {
@@ -248,8 +261,7 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
 }
 
 /** Compact session/track strip, like the header on the F1 timing screen. */
-@Composable
-private fun TowerSessionHeader(timing: SessionTiming, now: Long) {
+internal fun towerSessionHeader(timing: SessionTiming, now: Long): TowerSessionHeaderData {
     val flag = timing.flags.at(now)
     val trackLabel = flag.caption(now) ?: "Track clear"
     val trackColor = when {
@@ -285,25 +297,34 @@ private fun TowerSessionHeader(timing: SessionTiming, now: Long) {
         false -> "DRY"
         null -> "RAIN –"
     }
+    return TowerSessionHeaderData(timing.name.uppercase(), trackLabel.uppercase(), trackColor,
+        counter, listOf(wind, trackTemp, airTemp, humidity, pressure, rain))
+}
+
+internal data class TowerSessionHeaderData(val name: String, val track: String,
+    val color: Color, val counter: String, val weather: List<String>)
+
+@Composable
+internal fun TowerSessionHeader(header: TowerSessionHeaderData) {
     Column(Modifier.fillMaxWidth().height(36.dp)) {
         Row(
             Modifier.fillMaxWidth().height(18.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                timing.name.uppercase(),
+                header.name,
                 style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Ink.secondary),
                 maxLines = 1,
                 modifier = Modifier.weight(1f),
             )
             Text(
-                trackLabel.uppercase(),
-                style = cell.copy(fontSize = 8.sp, fontWeight = FontWeight.Bold, color = trackColor),
+                header.track,
+                style = cell.copy(fontSize = 8.sp, fontWeight = FontWeight.Bold, color = header.color),
                 maxLines = 1,
                 modifier = Modifier.padding(horizontal = 5.dp),
             )
             Text(
-                counter,
+                header.counter,
                 style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
                 textAlign = TextAlign.End,
                 maxLines = 1,
@@ -314,7 +335,7 @@ private fun TowerSessionHeader(timing: SessionTiming, now: Long) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            listOf(wind, trackTemp, airTemp, humidity, pressure, rain).forEach { value ->
+            header.weather.forEach { value ->
                 Text(
                     value,
                     style = cell.copy(fontSize = 7.sp, color = Ink.secondary),

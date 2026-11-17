@@ -357,6 +357,12 @@ class AppState(
     private var localConnectionJob: Job? = null
     private var localConnectionGeneration = 0L
     private var localReady = false
+    private var localTimingSupported = false
+    internal var castTowerBounds: app.apexview.cast.CastTimingProtocol.Panel? = null
+        private set
+    internal fun reportCastTowerBounds(x: Float, y: Float, width: Float, height: Float) {
+        castTowerBounds = app.apexview.cast.CastTimingProtocol.Panel(x, y, width, height)
+    }
     private var localLoadId = ""
     private var localChosen = false
     var castDeviceName by mutableStateOf("TV")
@@ -471,14 +477,27 @@ class AppState(
                 protocol.VERSION -> {
                     require(body != null && body.getInt("version") >= 3) { "Receiver does not support the Pitwall FCast connection" }
                     localConnection?.send(protocol.INITIAL, JSONObject().put("displayName", android.os.Build.MODEL)
-                        .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1))
+                        .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1).put("pitwallOverlays", 1))
                 }
                 protocol.INITIAL -> {
                     require(body?.optInt("pitwallScene") == 1) { "This receiver cannot arrange Pitwall video windows" }
                     if (!localReady) {
+                        localTimingSupported = body?.optInt("pitwallOverlays") == 1
                         localReady = true; castBusy = false
                         startFullSceneCast()
                     }
+                }
+                protocol.UI_CONTROL -> if (localTimingSupported && body != null) {
+                    val number = body.optString("number")
+                    require(number.matches(Regex("[0-9]{1,3}")))
+                    when (body.optString("action")) {
+                        "driver" -> showOnboard(number)
+                        "pitDriver" -> pitDriver = if (pitDriver == number) null else number
+                    }
+                }
+                protocol.TIMING -> if (localTimingSupported && body?.optString("kind") == "drawn" && body.optString("playbackId") == localLoadId) {
+                    android.util.Log.i("PitwallCast", "TIMING_UI_CONFIRMED rows=${body.optInt("rows")} cars=${body.optInt("cars")}")
+                    castStatus = "Playing on $castDeviceName with the phone video layout and timing/map UI."
                 }
                 protocol.PING -> localConnection?.send(protocol.PONG)
                 protocol.RENDERING -> {
@@ -790,7 +809,7 @@ class AppState(
         else runCatching { googleCastRemoteClient?.stop() }
         localConnectionJob?.cancel(); localConnectionJob = null
         val previous = localConnection; localConnection = null; previous?.close()
-        localReady = false; localChosen = false; googleCastSelected = false
+        localReady = false; localTimingSupported = false; localChosen = false; googleCastSelected = false
         releaseCastRelay(resumeLocal); castBusy = false
         castStatus = "Casting stopped."
     }
@@ -815,6 +834,7 @@ class AppState(
         castSceneJob = scope.launch {
             var last = ""
             var loops = 0
+            val timing = app.apexview.cast.CastTimingPublisher(context, this@AppState)
             while (castRelay === relay) {
                 if (tiles.map { it.feed.sourceStream.profileLabel }.toSet() != relay.session.sourceLabels.toSet()) {
                     // Keep the old relay alive and the phone stopped until replacement is ready.
@@ -825,7 +845,7 @@ class AppState(
                 val scene = castVideoScene(relay.session)
                 if (scene != null) {
                     val text = scene.toString()
-                    if (text != last || loops % 10 == 0) {
+                    if (text != last || loops % (if (localChosen && localTimingSupported) 50 else 10) == 0) {
                         runCatching {
                             if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.SCENE, scene)
                             else if (usesLayoutCastReceiver) googleCastSession?.sendMessage(app.apexview.cast.CastSceneProtocol.NAMESPACE,
@@ -834,11 +854,14 @@ class AppState(
                         last = text
                     }
                 }
-                if (++loops == 30 && !castSceneConfirmed) {
+                if (localChosen && localTimingSupported) runCatching {
+                    timing.messages(localLoadId).forEach { localConnection?.send(app.apexview.cast.local.FcastProtocol.TIMING, it) }
+                }.onFailure { android.util.Log.w("PitwallCast", "Timing display update failed: ${it.javaClass.simpleName}") }
+                if (++loops == (if (localChosen && localTimingSupported) 150 else 30) && !castSceneConfirmed) {
                     castStatus = "TV has not confirmed layout rendering. Check the TV receiver screen and retry casting."
                     message = castStatus
                 }
-                kotlinx.coroutines.delay(500L)
+                kotlinx.coroutines.delay(if (localChosen && localTimingSupported) 100L else 500L)
             }
         }
     }
