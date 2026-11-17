@@ -4216,10 +4216,23 @@ class AppState(
     /** Moves the audio to [tile]. Choosing a feed to listen to also ends Mute all. */
     fun setAudio(tile: Tile, byUser: Boolean = false) {
         if (byUser) mutedAll = false
-        castRelay?.selectAudio(tile.feed.sourceStream.profileLabel)
         castRelay?.let { relay ->
-            googleCastLoadedUrl = null
-            if (localChosen) loadLocalCastMedia(relay) else loadGoogleCastMedia(relay)
+            val selected = tiles.map { it.feed.sourceStream.profileLabel }
+            if (selected.size == relay.session.sourceLabels.size && selected.toSet() == relay.session.sourceLabels.toSet()) {
+                relay.selectAudio(tile.feed.sourceStream.profileLabel)
+                googleCastLoadedUrl = null
+                runCatching {
+                    if (localChosen) loadLocalCastMedia(relay) else loadGoogleCastMedia(relay)
+                }.onFailure { error ->
+                    android.util.Log.w("PitwallCast", DiagnosticRedaction.redact(error.stackTraceToString()))
+                    castStatus = "Unable to update TV audio. Use Retry casting or reconnect the TV."
+                    message = castStatus
+                }
+            } else {
+                // Removing the audible feed changes the selected set before its replacement relay
+                // is ready. The scene-update job rebuilds that set using the new audible tile below.
+                castStatus = "Updating selected feeds and audio on the TV…"
+            }
         }
         if (castPlaybackHandedOff) {
             if (byUser) mutedAll = false
