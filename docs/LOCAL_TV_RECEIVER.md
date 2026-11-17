@@ -30,11 +30,13 @@ Protocol reference: https://docs.fcast.org/protocol/v3/ . FCast project and lice
 
 ## Miracast / Samsung Smart View
 
-The Cast picker and Settings provide **Screen mirroring / Smart View**, which opens Android's public `ACTION_CAST_SETTINGS` when available and otherwise explains Samsung's Quick Settings → Smart View entry. This is a handoff to the manufacturer's wireless-display software. It is not a Miracast source/sink stack implemented in the APK and does not create TV firmware capabilities.
+The Cast picker and Settings provide **Screen mirroring / Smart View**, which opens Android's public `ACTION_CAST_SETTINGS` when available and otherwise explains Samsung's Quick Settings → Smart View entry. Miracast source/sink negotiation is provided by the phone and TV firmware, not an APK-level private API.
 
-Miracast mirrors the phone's visible rendering, so phone video must remain active for a TV picture. Its negotiated resolution cannot be forced to 720p by this app. Protected video may be blank or blocked by the device/content protection policy; nothing bypasses that policy. For independent TV playback, the same layout, stopped phone video and the verified source-quality floor, use the native Pitwall TV receiver.
+While this connection is requested, Pitwall listens to the selected `MediaRouter` live-video route. If Android exposes a distinct Presentation display, the app moves its existing player surfaces there and replaces the phone picture with a controller banner. It fits the same main-plus-three video canvas and native Track/Edge/Pit/tower overlays to the TV. It does not create a second set of players. Closing/disconnecting that display returns surfaces to the phone and restores the saved quality cap. Background/PiP handling preserves playback for this explicit external-display session.
 
-References: https://developer.android.com/reference/android/provider/Settings#ACTION_CAST_SETTINGS and https://www.samsung.com/us/support/troubleshoot/TSG10001542/ .
+The app requires real source renditions of at least 720p and checks the exposed display mode; a lower-resolution clear single-decoder session is rebuilt. L1 output requires both secure-display/protected-buffer flags and a secure window. Output denied by the OS or content policy stays denied. If the manufacturer only provides ordinary mirroring, phone video remains visible because it is the TV's source. Miracast still decodes on the phone and the OS negotiates the final wireless encoding resolution/bitrate. The app cannot guarantee that final encoding is 720p or force a TV firmware capability. Independent TV decoding and fully stopped phone media tracks use the native Pitwall receiver.
+
+References: https://developer.android.com/reference/android/app/Presentation , https://developer.android.com/reference/android/provider/Settings#ACTION_CAST_SETTINGS and https://www.samsung.com/us/support/troubleshoot/TSG10001542/ .
 
 ## Verification and remaining device work
 

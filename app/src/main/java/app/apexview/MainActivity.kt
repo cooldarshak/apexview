@@ -1,6 +1,7 @@
 package app.apexview
 
 import app.apexview.cast.PitwallCastSheet
+import app.apexview.cast.local.ExternalDisplayController
 import android.app.Activity
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
@@ -52,6 +53,7 @@ import kotlinx.coroutines.launch
 class MainActivity : FragmentActivity() {
     private lateinit var app: AppState
     private var castContext: CastContext? = null
+    private var externalDisplay: ExternalDisplayController? = null
     private val castSessionListener = object : SessionManagerListener<CastSession> {
         override fun onSessionStarting(session: CastSession) = Unit
         override fun onSessionStarted(session: CastSession, sessionId: String) =
@@ -81,6 +83,7 @@ class MainActivity : FragmentActivity() {
         app = AppState(this, lifecycleScope, userAgent, chromeMajor) {
             login.launch(Intent(this, LoginActivity::class.java))
         }
+        externalDisplay = ExternalDisplayController(this, app)
         bindGoogleCast()
         setContent { AppTheme { Root(app) } }
         app.restore()
@@ -151,10 +154,12 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         app.onResumed()
+        externalDisplay?.update()
         castContext?.sessionManager?.currentCastSession?.let(app::onGoogleCastSessionAvailable)
     }
 
     override fun onDestroy() {
+        externalDisplay?.close(); externalDisplay = null
         castContext?.sessionManager?.removeSessionManagerListener(castSessionListener, CastSession::class.java)
         castContext = null
         unregisterReceiver(pipControls)

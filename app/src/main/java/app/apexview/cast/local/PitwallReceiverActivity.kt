@@ -349,7 +349,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                                 if (sceneView === it) sceneView = null
                                 it.release()
                             }, modifier = Modifier.fillMaxSize())
-                            CastTimingLayer(timingState, model, { current.currentPosition }, { number, pit ->
+                            CastTimingLayer(timingState, model.width, model.height, { current.currentPosition }, { number, pit ->
                                 connection?.send(FcastProtocol.UI_CONTROL, JSONObject().put("action", if (pit) "pitDriver" else "driver").put("number", number))
                             }, { rows, cars ->
                                 if (!timingReported && (rows > 0 || cars > 0)) {

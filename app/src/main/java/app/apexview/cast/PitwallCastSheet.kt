@@ -37,7 +37,7 @@ internal fun PitwallCastSheet(app: AppState) {
             if (!app.castBusy && app.tiles.isNotEmpty()) SecondaryButton("Retry casting") { app.retryFullSceneCast() }
             app.castStatus?.let { Text(it, style = Type.footnote) }
             Text("Screen mirroring", style = Type.headline)
-            Text("Miracast mirrors the phone screen. On Samsung, use Quick Settings → Smart View. Video stays on the phone; quality and protected playback depend on the devices.", style = Type.footnote)
+            Text("On Samsung, connect through Quick Settings → Smart View. When Android exposes a separate TV display, Pitwall moves video there and leaves this phone as the controller. Otherwise the system mirrors the phone screen.", style = Type.footnote)
             SecondaryButton("Open wireless display controls") { app.openMiracast() }
             if (app.googleCastAvailable) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Column(Modifier.weight(1f)) {

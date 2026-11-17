@@ -409,13 +409,46 @@ class AppState(
         stopAll()
         context.startActivity(Intent(context, app.apexview.cast.local.PitwallReceiverActivity::class.java))
     }
+    internal var externalDisplayRequested by mutableStateOf(false)
+        private set
+    internal var externalDisplayActive by mutableStateOf(false)
+        private set
+    internal var externalDisplayName by mutableStateOf("Wireless display")
+        private set
+    internal var stopExternalDisplay: () -> Unit = {}
+    private var externalRequestDeadline = 0L
+    internal fun setExternalDisplay(active: Boolean, name: String = externalDisplayName) {
+        externalDisplayActive = active; externalDisplayName = name
+    }
+    internal fun clearExternalDisplayRequest() {
+        externalDisplayRequested = false; externalDisplayActive = false
+        tiles.forEach { it.feed.setExternalQualityFloor(false) }
+    }
+    internal fun externalDisplayQualityReady(): Boolean {
+        val native = singleDecoderScenePlayer?.archiveSceneSession
+        if (native != null) return native.sourceDisplayHeight >= 720
+        return tiles.isNotEmpty() && tiles.all { it.feed.player.videoFormat?.height?.let { h -> h >= 720 } == true }
+    }
+    internal fun requestExternalDisplayPlayback() {
+        if (tiles.isEmpty()) { message = "Open the feeds before connecting a wireless display."; return }
+        externalDisplayRequested = true
+        externalRequestDeadline = android.os.SystemClock.elapsedRealtime() + 120_000L
+        val native = singleDecoderScenePlayer?.archiveSceneSession
+        if (native == null) tiles.forEach { it.feed.setExternalQualityFloor(true) }
+        else if (native.sourceDisplayHeight < 720) tiles.firstOrNull()?.let { startArchiveSingleDecoderComposition(it.contentId) }
+        scope.launch {
+            kotlinx.coroutines.delay(120_000)
+            if (externalDisplayRequested && !externalDisplayActive && android.os.SystemClock.elapsedRealtime() >= externalRequestDeadline) clearExternalDisplayRequest()
+        }
+    }
     fun openMiracast() {
         castPickerOpen = false
         stopFullSceneCast()
+        requestExternalDisplayPlayback()
         message = if (app.apexview.cast.local.Miracast.open(context)) {
-            "Choose your TV in the phone's wireless display controls. Mirroring keeps video on the phone and may block protected video."
+            "Choose your TV in wireless display controls. If Android exposes a separate TV display, Pitwall moves the picture there and leaves this phone as the controller."
         } else {
-            "On Samsung, open Quick Settings → Smart View and choose the TV. Miracast requires TV firmware support and keeps the phone video running."
+            "Open Quick Settings → Smart View and choose the TV. Pitwall uses a separate TV display when Samsung exposes one; ordinary mirroring otherwise keeps the phone picture visible."
         }
     }
     /** Called immediately before opening Google's standard route dialog. */
@@ -801,7 +834,11 @@ class AppState(
             else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll) }
         } else castPlaybackHandedOff = false
     }
-    fun stopFullSceneCast() = stopCasting(true)
+    fun stopFullSceneCast() {
+        stopExternalDisplay()
+        clearExternalDisplayRequest()
+        stopCasting(true)
+    }
     private fun stopCasting(resumeLocal: Boolean) {
         ++localConnectionGeneration
         castPreparationJob?.cancel(); castPreparationJob = null
@@ -2133,9 +2170,10 @@ class AppState(
                         // independently advancing source clock or interrupt working playback.
                         val session = capture.prepareVod(selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel,
                             it.feed.sourceStream.url) }, probePositionMs, host.feed.sourceStream.profileLabel,
-                            minOf(settings.videoQuality.targetHeight.takeIf { it > 0 } ?: 720,
-                                if (selected.size > 4) 270 else if (selected.size > 2) 540 else 720),
-                            settings.commentary)
+                            if (externalDisplayRequested) maxOf(720, settings.videoQuality.targetHeight) else
+                                minOf(settings.videoQuality.targetHeight.takeIf { it > 0 } ?: 720,
+                                    if (selected.size > 4) 270 else if (selected.size > 2) 540 else 720),
+                            settings.commentary, minimumHeight = if (externalDisplayRequested) 720 else 0)
                         try {
                             host.feed.requireArchiveHardwareSupport(session.codedWidth, session.codedHeight, session.frameRate * playbackSpeed)
                             prepared = session
@@ -4545,7 +4583,7 @@ class AppState(
         private set
 
     /** Pop out only from the viewer itself, not from browsing or an open sheet. */
-    val canPip get() = !castPlaybackHandedOff && tiles.isNotEmpty() && !browsing && picker == null
+    val canPip get() = !castPlaybackHandedOff && !externalDisplayRequested && tiles.isNotEmpty() && !browsing && picker == null
 
     /** The feed the pop-out shows: the big tile in main + strip, else the top-left one. */
     fun pipTile(): Tile? =
@@ -4568,7 +4606,7 @@ class AppState(
 
     /** Leaving the app without a pop-out (or closing the pop-out) pauses everything. */
     fun pauseForBackground() {
-        if (castPlaybackHandedOff) { saveWatch(); return }
+        if (castPlaybackHandedOff || externalDisplayActive || externalDisplayRequested && android.os.SystemClock.elapsedRealtime() < externalRequestDeadline) { saveWatch(); return }
         saveWatch()
         if (tiles.isNotEmpty() && playing) togglePlay()
     }
@@ -4618,6 +4656,8 @@ class AppState(
     }
 
     fun stopAll() {
+        stopExternalDisplay()
+        clearExternalDisplayRequest()
         singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
         singleDecoderFailure = null
         // Save the receiver clock before the casting/local-host ownership is cleared.

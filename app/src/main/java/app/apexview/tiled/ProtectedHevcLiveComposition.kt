@@ -10,9 +10,8 @@ import java.util.LinkedHashMap
  * selected feed. Sample bytes and IVs are zeroed when a window is replaced or the selection clears.
  * No media is decrypted, no DRM key is requested, and no independent-feed output is generated.
  *
- * The current protected runtime entry point supports two through six feeds. Source tile zero is
- * selected for each feed until the UI exposes
- * per-cell source tile selection.
+ * The protected entry point supports two through six feeds. The original tile-selection POC
+ * remains available; fullPictures preserves all source tiles for layout-aware TV playback.
  */
 internal object ProtectedHevcLiveComposition {
     data class OutputSegment(
@@ -53,13 +52,17 @@ internal object ProtectedHevcLiveComposition {
 
     data class OutputWindow(
         val initializationSegment: ByteArray,
-        val fragments: List<OutputFragment>
+        val fragments: List<OutputFragment>,
+        val sourceGeometry: SourceGeometry? = null,
     ) {
         fun zero() {
             initializationSegment.fill(0)
             fragments.forEach(OutputFragment::zero)
         }
     }
+
+    data class SourceGeometry(val codedWidth: Int, val codedHeight: Int, val displayWidth: Int,
+                              val displayHeight: Int, val atlasColumns: Int, val atlasRows: Int)
 
     private data class BufferedPicture(
         val picture: HevcPictureSequenceAligner.PictureSample,
@@ -112,8 +115,10 @@ internal object ProtectedHevcLiveComposition {
     private class Session(
         val group: String,
         val labels: List<String>,
-        val sourceTileIndices: List<Int>
+        val sourceTileIndices: List<Int>,
+        val fullPictures: Boolean,
     ) {
+        var sourceGeometry: SourceGeometry? = null
         val feeds = labels.associateWith(::FeedState)
         var status: String = "WAITING_FOR_ACTIVE_PROTECTED_INIT_SEGMENTS"
         var outputInitializationSegment: ByteArray? = null
@@ -150,7 +155,8 @@ internal object ProtectedHevcLiveComposition {
     fun selectFeeds(
         group: String,
         labels: List<String>,
-        sourceTileIndices: List<Int> = List(labels.size) { 0 }
+        sourceTileIndices: List<Int> = List(labels.size) { 0 },
+        fullPictures: Boolean = false,
     ) {
         require(group.isNotBlank()) { "Protected composition group is required" }
         val selected = labels.distinct()
@@ -162,7 +168,7 @@ internal object ProtectedHevcLiveComposition {
             "One non-negative source tile index is required per selected feed"
         }
         sessions.remove(group)?.clear()
-        val session = Session(group, selected, sourceTileIndices)
+        val session = Session(group, selected, sourceTileIndices, fullPictures)
         sessions[group] = session
         // Media3 may already have fetched the active init before the user selects feeds.
         // Reuse only the bounded, paired init snapshot; media fragments are captured after selection.
@@ -294,7 +300,8 @@ internal object ProtectedHevcLiveComposition {
         if (session.outputHistory.isEmpty()) return null
         return OutputWindow(
             initializationSegment = init.copyOf(),
-            fragments = session.outputHistory.map(OutputFragment::detached)
+            fragments = session.outputHistory.map(OutputFragment::detached),
+            sourceGeometry = session.sourceGeometry,
         )
     }
 
@@ -638,19 +645,21 @@ internal object ProtectedHevcLiveComposition {
             2 -> 2
             3 -> 3
             4 -> 2
-            5 -> 5
+            5 -> if (session.fullPictures) 3 else 5
             6 -> 3
             else -> throw IllegalArgumentException("unsupported live composition feed count")
         }
-        val gridRows = session.labels.size / gridColumns
-        val outputColumns = List(gridColumns) { tileWidthInCtbs }
-        val outputRows = List(gridRows) { tileHeightInCtbs }
-        val outputWidth = Math.multiplyExact(
-            Math.multiplyExact(gridColumns, tileWidthInCtbs), ctbSize
-        )
-        val outputHeight = Math.multiplyExact(
-            Math.multiplyExact(gridRows, tileHeightInCtbs), ctbSize
-        )
+        val gridRows = (session.labels.size + gridColumns - 1) / gridColumns
+        val sourceColumns = ppsMetadata.tileColumnWidthsInCtbs
+        val sourceRows = ppsMetadata.tileRowHeightsInCtbs
+        val outputColumns = if (session.fullPictures) List(gridColumns) { sourceColumns }.flatten() else List(gridColumns) { tileWidthInCtbs }
+        val outputRows = if (session.fullPictures) List(gridRows) { sourceRows }.flatten() else List(gridRows) { tileHeightInCtbs }
+        val cellWidthInCtbs = if (session.fullPictures) spsMetadata.picWidthInCtbs else tileWidthInCtbs
+        val cellHeightInCtbs = if (session.fullPictures) spsMetadata.picHeightInCtbs else tileHeightInCtbs
+        val outputWidth = Math.multiplyExact(Math.multiplyExact(gridColumns, cellWidthInCtbs), ctbSize)
+        val outputHeight = Math.multiplyExact(Math.multiplyExact(gridRows, cellHeightInCtbs), ctbSize)
+        session.sourceGeometry = if (session.fullPictures) SourceGeometry(cellWidthInCtbs * ctbSize,
+            cellHeightInCtbs * ctbSize, spsMetadata.displayWidth, spsMetadata.displayHeight, gridColumns, gridRows) else null
         val frameRate = deriveFrameRate(firstHevc, spsMetadata)
         val outputParameters = HevcOutputParameterSetWriter.generate(
             sourceVpsNal = sourceVps,
@@ -676,6 +685,7 @@ internal object ProtectedHevcLiveComposition {
             firstState.representationSignature,
             session.labels.size,
             session.sourceTileIndices,
+            session.fullPictures,
             outputWidth,
             outputHeight,
             outputParameters.vps.contentHashCode(),
@@ -698,11 +708,11 @@ internal object ProtectedHevcLiveComposition {
         val outputTileStarts = buildList {
             repeat(gridRows) { row ->
                 repeat(gridColumns) { column ->
-                    add(row * outputSps.picWidthInCtbs + column * tileWidthInCtbs)
+                    add(row * cellHeightInCtbs * outputSps.picWidthInCtbs + column * cellWidthInCtbs)
                 }
             }
         }
-        require(outputTileStarts.size == session.labels.size) {
+        require(outputTileStarts.size >= session.labels.size) {
             "output grid does not contain one tile per selected F1 feed"
         }
 
@@ -746,7 +756,8 @@ internal object ProtectedHevcLiveComposition {
                     outputPps = outputPps,
                     outputNalLengthSize = 4,
                     context = "Live protected F1 picture POC " + match.fullPictureOrderCount,
-                    alignmentProof = proof
+                    alignmentProof = proof,
+                    fullPictureColumns = if (session.fullPictures) gridColumns else null,
                 )
                 outputBytesToClear += composed.sampleBytes
                 val masterBuffered = session.feeds.getValue(masterFeedId).picturesByOrdinal[

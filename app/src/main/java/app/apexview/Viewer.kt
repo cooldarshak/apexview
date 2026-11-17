@@ -316,8 +316,6 @@ fun ViewerScreen(app: AppState) {
             }
         }
 
-        val atlasScene = app.videoScene(width, height)
-        val atlasPlayer = app.singleDecoderScenePlayer
         Box(Modifier.fillMaxSize()
             .graphicsLayer {
                 val k = if (app.isTv) 1f else 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
@@ -328,25 +326,15 @@ fun ViewerScreen(app: AppState) {
                 scaleX = scale; scaleY = scale; transformOrigin = TransformOrigin(0.5f, 1f)
                 translationY = if (app.isTv) 0f else -sheetShift
             }) {
-            if (app.castPlaybackHandedOff) {
+            if (app.castPlaybackHandedOff || app.externalDisplayActive) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Playing on ${app.castDeviceName}", style = Type.title2)
+                        Text("Playing on ${if (app.externalDisplayActive) app.externalDisplayName else app.castDeviceName}", style = Type.title2)
                         Text("Use this phone to control playback and arrange the TV video windows.", style = Type.subhead)
                     }
                 }
-            } else if (atlasScene != null && atlasPlayer != null) {
-                AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
-                    onFailure = app::failSingleDecoderScene
-                    onOutputSize = app::reportSceneOutputSize
-                } }, update = { it.bind(atlasPlayer.player, atlasScene) }, onRelease = { it.release() },
-                    modifier = Modifier.fillMaxSize())
-            } else {
-                val popped = if (app.inPip) app.pipTile() else null
-                app.tiles.filter { !it.protectedCompositionHidden && (popped == null || it === popped) }.forEach { tile ->
-                    key(tile.id) { TileView(app, tile, videoOnly = true) }
-                }
-            }
+            } else PlaybackVideoCanvas(app, width, height)
+
         }
 
         Box(Modifier.fillMaxSize()) uiLayer@ {
@@ -901,6 +889,24 @@ private fun Messages(app: AppState, modifier: Modifier) {
             .pressable(onClick = app::dismissMessage)
             .padding(horizontal = 18.dp, vertical = 12.dp),
     )
+}
+
+/** Binds existing players on exactly one display. It never allocates another player. */
+@Composable
+internal fun PlaybackVideoCanvas(app: AppState, width: Float, height: Float) {
+    val scene = app.videoScene(width, height)
+    val host = app.singleDecoderScenePlayer
+    if (scene != null && host != null) {
+        AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
+            onFailure = app::failSingleDecoderScene
+            onOutputSize = app::reportSceneOutputSize
+        } }, update = { it.bind(host.player, scene) }, onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
+    } else {
+        val popped = if (app.inPip) app.pipTile() else null
+        app.tiles.filter { !it.protectedCompositionHidden && (popped == null || it === popped) }.forEach { tile ->
+            key(tile.id) { TileView(app, tile, videoOnly = true) }
+        }
+    }
 }
 
 private fun clock(ms: Long): String {

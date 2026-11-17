@@ -11,6 +11,30 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class CastHandoffTest {
+    @Test fun externalDisplayRequires720pAndRestoresTheSavedQualityCap() {
+        val feed = FeedPlayer(RuntimeEnvironment.getApplication(),
+            PlayInfo("https://127.0.0.1:1/unused.mpd", null, "DASH"), "", "", "Pitwall-test", false, true, "en",
+            videoQuality = VideoQuality.P720)
+        try {
+            feed.setExternalQualityFloor(true)
+            assertEquals(720, feed.player.trackSelectionParameters.minVideoHeight)
+            assertEquals(720, feed.player.trackSelectionParameters.maxVideoHeight)
+            feed.setVideoQuality(VideoQuality.P1080)
+            assertEquals(720, feed.player.trackSelectionParameters.minVideoHeight)
+            assertEquals(1080, feed.player.trackSelectionParameters.maxVideoHeight)
+            feed.setExternalQualityFloor(false)
+            assertEquals(0, feed.player.trackSelectionParameters.minVideoHeight)
+            assertEquals(1080, feed.player.trackSelectionParameters.maxVideoHeight)
+        } finally { feed.release() }
+    }
+    @Test fun protectedExternalOutputRequiresBothSecureAndProtectedBufferFlags() {
+        val secure = android.view.Display.FLAG_SECURE
+        val buffers = android.view.Display.FLAG_SUPPORTS_PROTECTED_BUFFERS
+        assertFalse(app.apexview.cast.local.ExternalDisplayController.supportsProtectedDisplay(0))
+        assertFalse(app.apexview.cast.local.ExternalDisplayController.supportsProtectedDisplay(secure))
+        assertFalse(app.apexview.cast.local.ExternalDisplayController.supportsProtectedDisplay(buffers))
+        assertTrue(app.apexview.cast.local.ExternalDisplayController.supportsProtectedDisplay(secure or buffers))
+    }
     @Test fun handoffDisablesActualMedia3TracksAndBudgetOrAudioChangesCannotReactivateThem() {
         val feed = FeedPlayer(RuntimeEnvironment.getApplication(),
             PlayInfo("https://127.0.0.1:1/unused.mpd", null, "DASH"), "", "", "Pitwall-test", false, true, "en")

@@ -117,6 +117,41 @@ class ProtectedHevcPictureComposerTest {
         assertTrue(error.message!!.contains("output PPS tile count must exactly match"))
     }
 
+    @Test fun completePicturesRetainAllSourceTilesAndTheirEncryptedPayloads() {
+        val f = fixture()
+        val file = File(System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")!!, "source_tiled_2x2.hevc")
+        val nals = HevcBitstream.splitAnnexB(file.readBytes())
+        val cols = requireNotNull(f.pps.tileColumnWidthsInCtbs)
+        val rows = requireNotNull(f.pps.tileRowHeightsInCtbs)
+        val output = HevcOutputParameterSetWriter.generate(nals.single { it.type == 32 }.bytes,
+            nals.single { it.type == 33 }.bytes, nals.single { it.type == 34 }.bytes,
+            HevcOutputParameterSetWriter.Request(f.vps.vpsId, f.sps.spsId, f.pps.ppsId,
+                f.sps.picWidthInCtbs * f.sps.ctbSize * 2, f.sps.picHeightInCtbs * f.sps.ctbSize * 2,
+                cols + cols, rows + rows, requireNotNull(f.pps.loopFilterAcrossTiles), 25))
+        val sps = HevcParameterSets.parseSps(output.sps)
+        val pps = HevcParameterSets.parsePps(output.pps, sps)
+        val iv = ByteArray(16) { 17 }
+        // Three complete feeds in a 2x2 atlas. The final cell repeats feed 3, while each
+        // original feed is validated once and owns an independent POC tracker.
+        val feeds = (0..2).map { feed(f, "f$it", it + 1L, 0, 0, 0, iv, 0) }
+        val result = ProtectedHevcPictureComposer.compose(feeds, sps, pps, fullPictureColumns = 2)
+        assertEquals(16, result.contributions.size)
+        assertEquals(16L, result.encryptedByteCount)
+        feeds.forEach { feed ->
+            assertEquals(setOf(0, 1, 2, 3), result.contributions.filter { it.feedId == feed.feedId }.map { it.sourceTileIndex }.toSet())
+            assertTrue(feed.pocTracker.hasIrapAnchor)
+        }
+        val layout = ProtectedHevcSampleLayout.inspect(result.sampleBytes, 4, result.subsampleRanges)
+        val au = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(result.sampleBytes, layout, sps, pps)
+        assertEquals(16, au.slices.size)
+        assertEquals(16, au.slices.map { it.tile.index }.distinct().size)
+        var offset = 0
+        result.subsampleRanges.forEach { range ->
+            offset += range.clearBytes
+            repeat(range.encryptedBytes.toInt()) { assertEquals(0xA5.toByte(), result.sampleBytes[offset++]) }
+        }
+    }
+
     private data class Fixture(
         val sample: ByteArray,
         val ranges: List<CmafBoxInspector.SubsampleEncryptionRange>,

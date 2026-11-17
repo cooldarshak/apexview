@@ -234,6 +234,8 @@ class FeedPlayer(
 
     private val fit = TileFit().apply { qualityHeight = videoQuality.targetHeight }
     private var selectedVideoQuality = videoQuality
+    private var externalQualityFloor = false
+    private val sourceTrackSelector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context, TileFitSelectionFactory(fit))
     private var audioTrackEnabled = false
 
     // Written on the playback thread when the DRM session opens.
@@ -332,7 +334,7 @@ class FeedPlayer(
         player = ExoPlayer.Builder(context, ThinningRenderersFactory(context))
             .setMediaSourceFactory(sources)
             .setLoadControl(loadControl)
-            .setTrackSelector(androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context, TileFitSelectionFactory(fit)))
+            .setTrackSelector(sourceTrackSelector)
             .build()
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             // Only the currently audible tile needs an audio decoder. Setting volume to zero
@@ -771,11 +773,25 @@ class FeedPlayer(
     fun setVideoQuality(value: VideoQuality) {
         if (selectedVideoQuality == value) return
         selectedVideoQuality = value
-        fit.qualityHeight = value.targetHeight
+        fit.qualityHeight = if (externalQualityFloor) maxOf(720, value.targetHeight) else value.targetHeight
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setMaxVideoSize(value.maxWidth, value.maxHeight)
+            .setMaxVideoSize(if (externalQualityFloor) maxOf(1280, value.maxWidth) else value.maxWidth, if (externalQualityFloor) maxOf(720, value.maxHeight) else value.maxHeight)
             .build()
         refresh()
+    }
+
+    /** External output requires a real HD rendition; never relabel an upscaled SD feed. */
+    internal fun setExternalQualityFloor(enabled: Boolean) {
+        if (enabled == externalQualityFloor) return
+        externalQualityFloor = enabled
+        val q = selectedVideoQuality
+        fit.qualityHeight = if (enabled) maxOf(720, q.targetHeight) else q.targetHeight
+        sourceTrackSelector.parameters = sourceTrackSelector.buildUponParameters()
+            .setMinVideoSize(1, if (enabled) 720 else 0)
+            .setMaxVideoSize(if (enabled) maxOf(1280, q.maxWidth) else q.maxWidth,
+                if (enabled) maxOf(720, q.maxHeight) else q.maxHeight)
+            .setExceedVideoConstraintsIfNecessary(!enabled)
+            .build()
     }
 
     /** Keeps the picture going at the size it already has, whatever size its window is now. */

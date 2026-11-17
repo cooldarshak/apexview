@@ -7,7 +7,7 @@ import java.math.BigInteger
  *
  * Inputs are individual protected CMAF samples. This validates each sample's cbcs defaults,
  * per-sample IV identity, subsample map, POC, picture identity and timestamps before rewriting
- * one selected source tile from each feed into a single length-prefixed sample.
+ * selected source tiles, or every tile of each complete source picture, into one sample.
  *
  * The output is sample bytes plus a CENC subsample map. It is not an encrypted CMAF fragment or
  * init segment. Raw KID/IV values are never exposed, and encrypted payload bytes are never read.
@@ -75,7 +75,9 @@ internal object ProtectedHevcPictureComposer {
         outputPps: HevcParameterSets.PpsMetadata,
         outputNalLengthSize: Int = 4,
         context: String = "Protected HEVC picture composition",
-        alignmentProof: HevcPictureSequenceAligner.Result? = null
+        alignmentProof: HevcPictureSequenceAligner.Result? = null,
+        /** Null retains the tile-selection POC. A value preserves every tile of each feed. */
+        fullPictureColumns: Int? = null,
     ): Result {
         require(feeds.size in MIN_FEEDS..MAX_FEEDS) {
             "$context: between $MIN_FEEDS and $MAX_FEEDS protected feeds are supported"
@@ -95,13 +97,16 @@ internal object ProtectedHevcPictureComposer {
             "$context: feed IDs must be non-empty and unique"
         }
         val expectedTileStarts = outputTileStarts(outputSps, outputPps)
-        require(expectedTileStarts != null && expectedTileStarts.size == feeds.size) {
-            "$context: output PPS tile count must exactly match the selected feed count"
-        }
-        require(feeds.map { it.destinationAddress }.distinct().size == feeds.size &&
-            feeds.map { it.destinationAddress }.toSet() == expectedTileStarts) {
-            "$context: each output tile must receive exactly one selected feed"
-        }
+        require(expectedTileStarts != null) { "$context: output PPS tile geometry is incomplete" }
+        if (fullPictureColumns == null) {
+            require(expectedTileStarts.size == feeds.size) {
+                "$context: output PPS tile count must exactly match the selected feed count"
+            }
+            require(feeds.map { it.destinationAddress }.distinct().size == feeds.size &&
+                feeds.map { it.destinationAddress }.toSet() == expectedTileStarts) {
+                "$context: each output tile must receive exactly one selected feed"
+            }
+        } else require(fullPictureColumns in 1..feeds.size) { "$context: invalid full-picture column count" }
 
         val prepared = feeds.mapIndexed { index, input ->
             prepareFeed(input, "feed $index (" + input.feedId + ")", context)
@@ -139,17 +144,50 @@ internal object ProtectedHevcPictureComposer {
             }
         }
 
-        val rewritten = prepared.map { feed ->
+        data class Placement(val feed: PreparedFeed, val slice: ProtectedHevcAccessUnitInspector.SliceRegion, val address: Int)
+        val placements = if (fullPictureColumns == null) prepared.map { Placement(it, it.selectedSlice, it.input.destinationAddress) }
+        else {
+            val columns = fullPictureColumns
+            val rows = (feeds.size + columns - 1) / columns
+            val sourceColumns = requireNotNull(first.pps.tileColumnWidthsInCtbs)
+            val sourceRows = requireNotNull(first.pps.tileRowHeightsInCtbs)
+            require(outputSps.picWidthInCtbs == columns * first.sps.picWidthInCtbs &&
+                outputSps.picHeightInCtbs == rows * first.sps.picHeightInCtbs &&
+                outputPps.tileColumnWidthsInCtbs == List(columns) { sourceColumns }.flatten() &&
+                outputPps.tileRowHeightsInCtbs == List(rows) { sourceRows }.flatten()) {
+                "$context: output PPS does not preserve complete source pictures"
+            }
+            buildList {
+                repeat(columns * rows) { slot ->
+                    // A partly filled final atlas row repeats the last source. UI only samples
+                    // the original feed count. Ciphertext and crypto metadata are unchanged.
+                    val feed = prepared[minOf(slot, prepared.lastIndex)]
+                    require(feed.accessUnit.slices.size == sourceColumns.size * sourceRows.size &&
+                        feed.accessUnit.slices.map { it.tile.index }.toSet() == (0 until sourceColumns.size * sourceRows.size).toSet() &&
+                        feed.accessUnit.slices.all { it.readyForCurrentHeaderRewriter }) {
+                        "$context: a complete source picture requires every independent clear-header tile"
+                    }
+                    feed.accessUnit.slices.forEach { slice ->
+                        val x = (slot % columns) * feed.sps.picWidthInCtbs + slice.tile.leftCtb
+                        val y = (slot / columns) * feed.sps.picHeightInCtbs + slice.tile.topCtb
+                        add(Placement(feed, slice, y * outputSps.picWidthInCtbs + x))
+                    }
+                }
+            }.sortedBy { it.address }
+        }
+        require(placements.map { it.address }.toSet() == expectedTileStarts &&
+            placements.size == expectedTileStarts.size) { "$context: every output tile must be covered once" }
+        val rewritten = placements.map { (feed, slice, address) ->
             ProtectedHevcSliceHeaderRewriter.rewrite(
                 sample = feed.input.sampleBytes,
                 layout = feed.layout,
                 accessUnit = feed.accessUnit,
-                nalIndex = feed.selectedSlice.nalIndex,
+                nalIndex = slice.nalIndex,
                 sourceSps = feed.sps,
                 sourcePps = feed.pps,
                 outputSps = outputSps,
                 outputPps = outputPps,
-                destinationAddress = feed.input.destinationAddress,
+                destinationAddress = address,
                 context = context + " (" + feed.input.feedId + ")"
             )
         }
@@ -175,11 +213,11 @@ internal object ProtectedHevcPictureComposer {
             timescale = first.timescale,
             sampleFlags = requireNotNull(timing.sampleFlags),
             fullPictureOrderCount = first.pictureIdentity.pictureOrderCount,
-            contributions = prepared.map { feed ->
+            contributions = placements.map { (feed, slice, address) ->
                 Contribution(
                     feedId = feed.input.feedId,
-                    sourceTileIndex = feed.input.sourceTileIndex,
-                    destinationAddress = feed.input.destinationAddress,
+                    sourceTileIndex = slice.tile.index,
+                    destinationAddress = address,
                     fullPictureOrderCount = feed.pictureIdentity.pictureOrderCount
                 )
             }
