@@ -280,6 +280,10 @@ fun SettingsScreen(app: AppState) {
                 DecoderMode.entries.forEach { mode ->
                     ChoiceRow(mode.label, s.decoderMode == mode) { app.setDecoderPreference(mode) }
                 }
+                if (s.decoderMode == DecoderMode.SINGLE && app.decoderMode == DecoderMode.MULTIPLE && app.tiles.isNotEmpty()) {
+                    Text("The current stream is using normal playback. The saved choice will be tried again for the next compatible selection.",
+                        style = Type.footnote, modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp))
+                }
             }
         }
         item {

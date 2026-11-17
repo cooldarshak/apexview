@@ -1568,7 +1568,7 @@ class AppState(
             message = "Single-decoder test needs two to four different feeds from one archive."
             if (!singleDecoderSceneActive) {
                 decoderMode = DecoderMode.MULTIPLE
-                tiles.forEach { it.feed.clearProtectedCompositionVideoRole() }
+                tiles.forEach { it.feed.clearProtectedCompositionVideoRole(); it.feed.player.playWhenReady = playing }
                 applyVideoBudget()
             }
             return
@@ -1657,6 +1657,7 @@ class AppState(
                     },
                     replaceHost = { session ->
                         val handoffPositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
+                        sceneOutputSize = 0 to 0
                         nativeArchiveTiles = selected
                         showProtectedCompositionPresentation(host, selected, sceneLayout = true)
                         // One Media3 player now loads both the composed video and selected audio.
@@ -1688,7 +1689,7 @@ class AppState(
                         !playing -> "PAUSED"
                         else -> "ACTIVE"
                     }
-                    if (phase == "ACTIVE" && message == SINGLE_DECODER_ACTIVATING) message = null
+                    if ((phase == "ACTIVE" || phase == "PAUSED") && message == SINGLE_DECODER_ACTIVATING) message = null
                     if (!browsing && host.feed.player.playbackState == Player.STATE_READY && !host.feed.hasRenderedFirstFrame) {
                         val now = android.os.SystemClock.elapsedRealtime()
                         if (readySince == null) readySince = now
@@ -1699,7 +1700,8 @@ class AppState(
                     val now = android.os.SystemClock.elapsedRealtime()
                     if (log != previousLog || now - lastEvidenceAt >= 5_000L) {
                         android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_PLAYBACK $log renderedFrames=${host.feed.renderedVideoFrames} " +
-                            "selectedVideoTracks=${host.feed.selectedVideoTrackCount} surface=${host.feed.composedSurfaceWidth}x${host.feed.composedSurfaceHeight} bufferedMs=${host.feed.player.totalBufferedDuration}")
+                            "selectedVideoTracks=${host.feed.selectedVideoTrackCount} sceneOutput=${sceneOutputSize.first}x${sceneOutputSize.second} " +
+                            "codecSurface=${host.feed.composedSurfaceWidth}x${host.feed.composedSurfaceHeight} bufferedMs=${host.feed.player.totalBufferedDuration}")
                         previousLog = log
                         lastEvidenceAt = now
                     }
@@ -2152,7 +2154,7 @@ class AppState(
             message = "4 feeds is the most this phone plays smoothly. Remove one or switch a feed instead."
             return
         }
-        if (decoderMode == DecoderMode.SINGLE && tiles.any { it.contentId != contentId }) {
+        if (settings.decoderMode == DecoderMode.SINGLE && tiles.any { it.contentId != contentId }) {
             message = "Single decoder needs feeds from one archive. Choose Multiple decoders to combine sessions."
             return
         }
@@ -2190,6 +2192,7 @@ class AppState(
             // A rejected offer leaves the working composition untouched. Change ownership only
             // after the service has supplied an actual replacement source and its join clock.
             if (singleDecoderSceneActive) stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
+            if (settings.decoderMode == DecoderMode.SINGLE) decoderMode = DecoderMode.SINGLE
             val first = tiles.isEmpty()
             val preparingSingle = decoderMode == DecoderMode.SINGLE && (tiles.isNotEmpty() || streams.size > 1)
             if (preparingSingle) tiles.forEach { it.feed.player.playWhenReady = false }
@@ -2736,7 +2739,7 @@ class AppState(
     fun switchFeed(tile: Tile, channel: Channel) {
         tileMenu = null
         if (channel == tile.channel) return
-        val restartComposition = decoderMode == DecoderMode.SINGLE || isTv && f1DashCaptureJob != null
+        val restartComposition = settings.decoderMode == DecoderMode.SINGLE || isTv && f1DashCaptureJob != null
         // The feed up top in laptop mode switched from its own menu: offer the way back too.
         if (laptopActive && tile.id == bigTileId) rememberBroadcast()
         task("Switching to ${channel.title}") {
@@ -2755,6 +2758,7 @@ class AppState(
                 val chunk = FeedPlayer.chunkMs
                 if (chunk > 0) target / chunk * chunk else target
             }
+            if (settings.decoderMode == DecoderMode.SINGLE) decoderMode = DecoderMode.SINGLE
             if (restartComposition) stopProtectedCompositionPresentation(keepSourceVideoDisabled = decoderMode == DecoderMode.SINGLE)
             val feed = newFeed(stream, start, startWithVideo = decoderMode != DecoderMode.SINGLE && !isTv)
             if (decoderMode == DecoderMode.SINGLE && tiles.size > 1) feed.setProtectedCompositionVideoRole(false, 1, 1)
@@ -2772,7 +2776,7 @@ class AppState(
     /** Lays the feeds out afresh in [mode]. */
     fun chooseLayout(mode: LayoutMode) {
         mapGrabbed = false
-        if (mode != layoutMode && !singleDecoderSceneActive && (protectedCompositionHost != null || f1DashCaptureJob != null)) {
+        if (mode != layoutMode && !singleDecoderSceneActive && !archiveCompositionStarting && (protectedCompositionHost != null || f1DashCaptureJob != null)) {
             stopProtectedCompositionPresentation()
         }
         if (mode == LayoutMode.SINGLE_DECODER_TEST) { chooseDecoderMode(DecoderMode.SINGLE); return }
@@ -4023,6 +4027,7 @@ class AppState(
         // The rest close up to fill the space.
         handPlaced = false
         layoutRequest++
+        if (settings.decoderMode == DecoderMode.SINGLE && tiles.all { it.contentId == tile.contentId }) decoderMode = DecoderMode.SINGLE
         if (decoderMode == DecoderMode.SINGLE && tiles.size >= 2) startArchiveSingleDecoderComposition(tile.contentId)
         else { tiles.forEach { it.feed.clearProtectedCompositionVideoRole() }; applyVideoBudget() }
     }
