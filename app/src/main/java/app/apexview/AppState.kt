@@ -399,8 +399,11 @@ class AppState(
             stopFullSceneCast(); castStatus = "Feeds changed. Start casting again for the new selection."; return
         }
         val scene = app.apexview.scene.VideoScene(width, height, relay.session.width, relay.session.height, labels.size,
-            tiles.map { tile -> app.apexview.scene.VideoWindow(tile.id, labels.indexOf(tile.feed.sourceStream.profileLabel),
-                tile.x * scale + offsetX, tile.y * scale + offsetY, tile.w * scale, tile.h * scale, tile.z) })
+            (if (inPip) listOfNotNull(pipTile()) else tiles).map { tile ->
+                if (inPip) app.apexview.scene.VideoWindow(tile.id, labels.indexOf(tile.feed.sourceStream.profileLabel),
+                    0f, 0f, width, height, tile.z)
+                else app.apexview.scene.VideoWindow(tile.id, labels.indexOf(tile.feed.sourceStream.profileLabel),
+                    tile.x * scale + offsetX, tile.y * scale + offsetY, tile.w * scale, tile.h * scale, tile.z) })
         val leader = leaderTile()?.feed?.player ?: return
         relay.publish(scene, leader.currentPosition, playing, playbackSpeed, mutedAll, castRevision, castAudioRevision)
     }
@@ -1552,6 +1555,11 @@ class AppState(
         if (selected.size !in 2..4 || selected.size != tiles.size ||
             selected.map { it.feed.sourceStream.profileLabel }.distinct().size != selected.size) {
             message = "Single-decoder test needs two to four different feeds from one archive."
+            if (!singleDecoderSceneActive) {
+                decoderMode = DecoderMode.MULTIPLE
+                tiles.forEach { it.feed.clearProtectedCompositionVideoRole() }
+                applyVideoBudget()
+            }
             return
         }
         val host = protectedCompositionHost?.takeIf { it in selected } ?: selected.firstOrNull { it.audible } ?: selected.first()
@@ -1657,12 +1665,14 @@ class AppState(
                     if (host.feed.hasRenderedFirstFrame && host.feed.activeVideoDecoderHardware == "hardware NO") throw IOException("Composed video selected a software decoder")
                     phase = when {
                         host.feed.player.playbackState == Player.STATE_ENDED -> "ENDED"
+                        browsing -> "VIDEO SUSPENDED WHILE BROWSING"
+                        observedActiveVideoDecoders == 0 -> "WAITING FOR VIDEO DECODER"
                         host.feed.buffering -> "BUFFERING"
                         !host.feed.hasRenderedFirstFrame -> "WAITING FOR FIRST FRAME"
                         !playing -> "PAUSED"
                         else -> "ACTIVE"
                     }
-                    if (host.feed.player.playbackState == Player.STATE_READY && !host.feed.hasRenderedFirstFrame) {
+                    if (!browsing && host.feed.player.playbackState == Player.STATE_READY && !host.feed.hasRenderedFirstFrame) {
                         val now = android.os.SystemClock.elapsedRealtime()
                         if (readySince == null) readySince = now
                         if (now - requireNotNull(readySince) > 15_000L) throw IOException("Decoder was ready but did not render a first frame")
@@ -2094,9 +2104,13 @@ class AppState(
     val roomForFeeds get() = MAX_FEEDS - tiles.size
 
     private fun addFeeds(contentId: Long, requested: List<Channel>, fromStart: Boolean = false, added: (Tile) -> Unit = {}) {
-        if (singleDecoderSceneActive) stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
+        if (requested.isEmpty()) return
         if (roomForFeeds <= 0) {
             message = "4 feeds is the most this phone plays smoothly. Remove one or switch a feed instead."
+            return
+        }
+        if (decoderMode == DecoderMode.SINGLE && tiles.any { it.contentId != contentId }) {
+            message = "Single decoder needs feeds from one archive. Choose Multiple decoders to combine sessions."
             return
         }
         val picks = requested.take(roomForFeeds)
@@ -2130,6 +2144,9 @@ class AppState(
             // waiting for the sync loop to jump them forward.
             val joinAt = leaderTile()?.takeIf { it.contentId == contentId && !it.feed.player.isCurrentMediaItemLive }
                 ?.feed?.player?.currentPosition
+            // A rejected offer leaves the working composition untouched. Change ownership only
+            // after the service has supplied an actual replacement source and its join clock.
+            if (singleDecoderSceneActive) stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
             val first = tiles.isEmpty()
             // A press conference or a show has no cars to follow: its map starts off, without
             // touching the style saved for sessions.
@@ -2674,12 +2691,12 @@ class AppState(
         tileMenu = null
         if (channel == tile.channel) return
         val restartComposition = decoderMode == DecoderMode.SINGLE || isTv && f1DashCaptureJob != null
-        if (restartComposition) stopProtectedCompositionPresentation(keepSourceVideoDisabled = decoderMode == DecoderMode.SINGLE)
         // The feed up top in laptop mode switched from its own menu: offer the way back too.
         if (laptopActive && tile.id == bigTileId) rememberBroadcast()
         task("Switching to ${channel.title}") {
             val failures = mutableListOf<String>()
             val stream = streamFor(tile.contentId, channel, failures)
+            if (tile !in tiles) return@task
             val old = tile.feed
             // Start where the tile was (switching the leader from the start once pulled every
             // other feed back with it), allowing for the time a feed takes to start while playing,
@@ -2687,10 +2704,12 @@ class AppState(
             // frame from the chunk's start first, measured at 3 to 4 s against under 1 s from its
             // start. The sync loop then brings it level in one short skip.
             val start = if (old.player.isCurrentMediaItemLive) C.TIME_UNSET else {
-                val target = old.player.currentPosition + if (playing) FeedPlayer.typicalStartMs else 0L
+                val clock = if (singleDecoderSceneActive) leaderTile()?.feed?.player ?: old.player else old.player
+                val target = clock.currentPosition + if (playing) FeedPlayer.typicalStartMs else 0L
                 val chunk = FeedPlayer.chunkMs
                 if (chunk > 0) target / chunk * chunk else target
             }
+            if (restartComposition) stopProtectedCompositionPresentation(keepSourceVideoDisabled = decoderMode == DecoderMode.SINGLE)
             val feed = newFeed(stream, start, startWithVideo = decoderMode != DecoderMode.SINGLE && !isTv)
             if (decoderMode == DecoderMode.SINGLE && tiles.size > 1) feed.setProtectedCompositionVideoRole(false, 1, 1)
             feed.setAudible(tile.audible && !mutedAll && !castingActive)
@@ -3915,8 +3934,8 @@ class AppState(
     fun setPip(on: Boolean) {
         inPip = on
         val shown = pipTile()
-        tiles.forEach { tile ->
-            tile.feed.player.playWhenReady = playing && (!on || tile === shown || tile.audible)
+        tiles.filter { !singleDecoderSceneActive || it === protectedCompositionHost }.forEach { tile ->
+            tile.feed.player.playWhenReady = playing && (singleDecoderSceneActive || !on || tile === shown || tile.audible)
         }
         if (!on) showChrome()
     }
@@ -4078,7 +4097,9 @@ class AppState(
         playing = !playing
         // In the pop-out, only the shown feed and the audio keep playing (see setPip).
         val shown = if (inPip) pipTile() else null
-        tiles.filter { nativeArchiveTiles.isEmpty() || it === protectedCompositionHost }.forEach { it.feed.player.playWhenReady = playing && (!inPip || it === shown || it.audible) }
+        tiles.filter { !singleDecoderSceneActive || it === protectedCompositionHost }.forEach {
+            it.feed.player.playWhenReady = playing && (singleDecoderSceneActive || !inPip || it === shown || it.audible)
+        }
         showChrome()
     }
 

@@ -6,8 +6,9 @@ function message(s){status.textContent=s;status.hidden=!s;}
 function shader(type,code){const s=gl.createShader(type);gl.shaderSource(s,code);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error('Receiver shader unavailable');return s;}
 if(!gl)message('This receiver has no WebGL support.');
 const program=gl?.createProgram();
-if(gl){gl.attachShader(program,shader(gl.VERTEX_SHADER,'attribute vec2 p;attribute vec2 uv;varying vec2 t;void main(){gl_Position=vec4(p,0.,1.);t=uv;}'));
- gl.attachShader(program,shader(gl.FRAGMENT_SHADER,'precision mediump float;uniform sampler2D frame;varying vec2 t;void main(){gl_FragColor=texture2D(frame,t);}'));
+if(gl){const precision=gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER,gl.HIGH_FLOAT)?.precision>0?'highp':'mediump';
+ gl.attachShader(program,shader(gl.VERTEX_SHADER,`attribute vec2 p;attribute vec2 uv;varying ${precision} vec2 t;void main(){gl_Position=vec4(p,0.,1.);t=uv;}`));
+ gl.attachShader(program,shader(gl.FRAGMENT_SHADER,`precision ${precision} float;uniform sampler2D frame;varying ${precision} vec2 t;void main(){gl_FragColor=texture2D(frame,t);}`));
  gl.linkProgram(program);gl.useProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error('Receiver program unavailable');}
 const texture=gl?.createTexture(),positions=gl?.createBuffer(),coordinates=gl?.createBuffer();
 if(gl){gl.bindTexture(gl.TEXTURE_2D,texture);for(const p of [gl.TEXTURE_MIN_FILTER,gl.TEXTURE_MAG_FILTER])gl.texParameteri(gl.TEXTURE_2D,p,gl.LINEAR);

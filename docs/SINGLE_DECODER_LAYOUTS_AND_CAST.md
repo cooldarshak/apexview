@@ -94,6 +94,22 @@ Robolectric/socket tests cover pairing, unauthorized resource rejection, bounded
 attempts, media-source lease lifetime and finite HLS/codec parsing by Media3.
 Existing FFmpeg pixel comparisons and single-decoder diagnostics remain enabled.
 
+The debug test APK now also contains `SingleDecoderSceneInstrumentationTest`. It
+plays the clear synthetic composed fixture through the actual GLES view, samples
+the output pixels, moves each camera to a different rectangle and overlaps them.
+It requires source pixels to follow the windows and the top window to win while
+exactly one hardware decoder initialization is observed. It is packaged by CI, but
+only running it on a device proves that device's renderer. From aShell on the phone,
+after installing the matching app and instrumentation APKs:
+
+```sh
+am instrument --user 0 -w -e class app.apexview.scene.SingleDecoderSceneInstrumentationTest app.apexview_custom.test/androidx.test.runner.AndroidJUnitRunner
+logcat -d -v time | grep -iE 'ApexviewSingleDecoder|MediaCodec|CCodec|ExoPlayer' > /sdcard/Download/apexview-scene.log
+```
+
+Synthetic pixel verification is separate from acceptance with genuine F1 footage,
+authorized protection, long-running playback and the receiving TV's decoder count.
+
 Phone acceptance: test 2, 3, 4 feeds in both decoder modes; Main + strip, Grid and
 TV; Snap/Free movement/resizing/overlap; audio; seeking/pause/speed; rotation/PiP;
 source add/remove/switch; mode changes and fallback. Require actual pictures in
