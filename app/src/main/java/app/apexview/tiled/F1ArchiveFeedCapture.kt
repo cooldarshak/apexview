@@ -40,6 +40,19 @@ internal class F1ArchiveFeedCapture(
         return snapshot
     }
 
+    suspend fun captureLiveAtPosition(group: String, feeds: List<F1DashFeedCapture.Feed>, dashPositionMs: Long,
+                                      hlsPositionMs: Long): F1DashFeedCapture.Snapshot {
+        if (feeds.all { ManifestProtocol.fromUrl(it.manifestUrl) == ManifestProtocol.HLS }) usingHls = true
+        if (usingHls) return hls.captureAtPosition(group, feeds, hlsPositionMs, live = true, followLiveEdge = false)
+        val snapshot = dash.captureAtPosition(group, feeds, dashPositionMs)
+        if (snapshot.failure != null && snapshot.actualManifests.values.any { it == ManifestProtocol.HLS } &&
+            snapshot.actualManifests.values.none { it == ManifestProtocol.DASH }) {
+            usingHls = true
+            return hls.captureAtPosition(group, feeds, hlsPositionMs, live = true, followLiveEdge = false)
+        }
+        return snapshot
+    }
+
     suspend fun captureAtPosition(group: String, feeds: List<F1DashFeedCapture.Feed>, playbackPositionMs: Long): F1DashFeedCapture.Snapshot {
         if (feeds.all { ManifestProtocol.fromUrl(it.manifestUrl) == ManifestProtocol.HLS }) usingHls = true
         if (usingHls) return hls.captureAtPosition(group, feeds, playbackPositionMs)

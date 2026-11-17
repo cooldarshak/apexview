@@ -6,6 +6,12 @@ import androidx.media3.datasource.DataSource
 import java.net.InetAddress
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
@@ -16,7 +22,7 @@ internal class NativeComposedCastSession(
     userAgent: String, ascendon: String, entitlement: String, factory: DataSource.Factory,
     address: String, peer: InetAddress, private val preferredHeight: Int, private val language: String,
     val live: Boolean, val durationMs: Long, private val dashClockOffsetMs: Long, private val hlsClockOffsetMs: Long,
-    val audioLabel: String,
+    val audioLabel: String, private val startAtLiveEdge: Boolean = false,
 ) : AutoCloseable {
     val sourceLabels = feeds.map { it.label }
     private val group = "cast-${UUID.randomUUID()}"
@@ -28,6 +34,8 @@ internal class NativeComposedCastSession(
     private var pto = 0L
     private val ast = System.currentTimeMillis() - 60_000L
     private var captured = false
+    private val gate = Mutex()
+    private val cleanup = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var closed = false
     var originMs = 0L
         private set
@@ -45,11 +53,13 @@ internal class NativeComposedCastSession(
         ProtectedHevcLiveComposition.selectFeeds(group, sourceLabels, fullPictures = true)
     }
     suspend fun update(phoneClockMs: Long): F1DashFeedCapture.Snapshot = withContext(Dispatchers.IO) {
+      gate.withLock {
         check(!closed)
-        val protocol = ManifestProtocol.fromUrl(feeds.first().manifestUrl)
-        val delta = if (live) if (protocol == ManifestProtocol.HLS) hlsClockOffsetMs else dashClockOffsetMs else 0L
-        val target = (phoneClockMs - delta + if (captured && !live) 12_000 else 0L).coerceAtLeast(0L)
-        val snapshot = if (live) capture.captureNext(group, feeds) else capture.captureAtPosition(group, feeds, target)
+        val ahead = if (captured) 12_000 else 0L
+        val snapshot = if (live && startAtLiveEdge && !captured) capture.captureNext(group, feeds)
+            else if (live) capture.captureLiveAtPosition(group, feeds,
+                (phoneClockMs - dashClockOffsetMs + ahead).coerceAtLeast(0), (phoneClockMs - hlsClockOffsetMs + ahead).coerceAtLeast(0))
+            else capture.captureAtPosition(group, feeds, (phoneClockMs + ahead).coerceAtLeast(0))
         coroutineContext.ensureActive(); check(!closed)
         snapshot.failure?.takeUnless { it.retryable }?.let { throw PermanentCaptureException(it.reason) }
         ProtectedHevcLiveComposition.rejectionReason(group)?.let { throw PermanentCaptureException(it) }
@@ -81,9 +91,14 @@ internal class NativeComposedCastSession(
             android.util.Log.i("PitwallCast", "PROTECTED_CMAF_RELAY sources=${feeds.size} source=${shape.displayWidth}x${shape.displayHeight} atlas=${width}x$height encrypted=$protectedOutput frames=${merged.sampleCount} fullPictures=true")
         } finally { packaged?.zero(); window.zero(); pssh?.fill(0) }
         snapshot
+      }
     }
     override fun close() {
         if (closed) return
-        closed = true; relay.close(); capture.reset(); audio.close(); ProtectedHevcLiveComposition.clearSelection(group)
+        closed = true; relay.close()
+        cleanup.launch {
+            try { gate.withLock { capture.reset(); audio.close(); ProtectedHevcLiveComposition.clearSelection(group) } }
+            finally { cleanup.cancel() }
+        }
     }
 }

@@ -91,7 +91,7 @@ internal class ExternalDisplayController(private val activity: FragmentActivity,
             next.setOnDismissListener { if (presentation === next) { presentation = null; app.setExternalDisplay(false) } }
             next.show()
             app.reportExternalDisplayStatus("Video moved to ${display.name}. This phone controls playback. Miracast encoding quality is negotiated by the devices.")
-        } catch (error: WindowManager.InvalidDisplayException) {
+        } catch (error: RuntimeException) {
             presentation = null; app.setExternalDisplay(false)
             app.reportExternalDisplayStatus("Android could not open a separate wireless display. Use normal screen mirroring or the Pitwall TV receiver.")
             Log.w("PitwallMiracast", "PRESENTATION_REJECTED ${error.javaClass.simpleName}")

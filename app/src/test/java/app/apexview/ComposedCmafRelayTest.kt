@@ -36,6 +36,20 @@ class ComposedCmafRelayTest {
             assertTrue(get(uri.path.substringBeforeLast('/') + "/../segment-1.m4s").first.startsWith("HTTP/1.1 404"))
         } finally { relay.close() }
     }
+    @Test fun directPlayCannotInjectAPhoneUrlAndSlidingWindowsKeepOneControllerClock() {
+        val request = ReceiverLicenseRequest(12, listOf(1033), 1033)
+        val body = JSONObject().put("metadata", JSONObject().put("custom", JSONObject()
+            .put("pitwallDirect", true).put("pitwallLicense", request.encode())))
+        assertEquals(request, ReceiverLicenseRequest.direct(body, true))
+        assertThrows(IllegalArgumentException::class.java) { ReceiverLicenseRequest.direct(body, false) }
+        assertThrows(IllegalArgumentException::class.java) {
+            ReceiverLicenseRequest.direct(body.put("url", "https://untrusted.invalid/video.mpd"), true)
+        }
+        assertEquals(app.apexview.cast.local.ReceiverTimeline.position(93_000, 6_000, 8_000),
+            app.apexview.cast.local.ReceiverTimeline.position(93_000, 12_000, 2_000))
+        assertEquals(100L, app.apexview.cast.local.ReceiverTimeline.seek(500, 100))
+        assertEquals(500L, app.apexview.cast.local.ReceiverTimeline.seek(500, -1))
+    }
     @Test fun receiverLicensingAcceptsContentIdentifiersAndRejectsCredentialInjection() {
         val request = ReceiverLicenseRequest(1234, listOf(1033, 1034, 1035), 1033)
         assertEquals(request, ReceiverLicenseRequest.decode(request.encode()))

@@ -164,7 +164,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                     require(body != null && body.getInt("version") >= 2) { "FCast version 2 or 3 is required" }
                     versionReceived = true
                     connection?.send(FcastProtocol.INITIAL, JSONObject().put("displayName", receiverName)
-                        .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1).put("pitwallOverlays", 1).put("pitwallWidevine", 1))
+                        .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1).put("pitwallOverlays", 1).put("pitwallWidevine", 1).put("pitwallDirect", 1))
                 }
                 FcastProtocol.PING -> connection?.send(FcastProtocol.PONG)
                 FcastProtocol.PONG -> Unit
@@ -194,8 +194,11 @@ class PitwallReceiverActivity : ComponentActivity() {
                         }
                         FcastProtocol.SCENE -> {
                             require(pitwallPeer && scene != null && body != null)
-                            val next = CastSceneProtocol.decode(body)
+                            val decoded = CastSceneProtocol.decode(body)
                             val old = scene!!
+                            val next = if (isDirectPlayback()) decoded.copy(atlasWidth = old.atlasWidth, atlasHeight = old.atlasHeight,
+                                atlasColumns = 1, sourceCodedWidth = old.sourceCodedWidth, sourceCodedHeight = old.sourceCodedHeight,
+                                sourceDisplayWidth = old.sourceDisplayWidth, sourceDisplayHeight = old.sourceDisplayHeight) else decoded
                             require(next.copy(windows = old.windows, width = old.width, height = old.height) == old) { "Stream geometry changed; reload the stream" }
                             scene = next
                         }
@@ -212,7 +215,7 @@ class PitwallReceiverActivity : ComponentActivity() {
 
     private fun validatePlay(body: JSONObject) {
         val peer = requireNotNull(connection).socket.inetAddress
-        ReceiverMediaPolicy.validate(body.getString("url"), peer)
+        if (ReceiverLicenseRequest.direct(body, pitwallPeer) == null) ReceiverMediaPolicy.validate(body.getString("url"), peer)
         require((body.optJSONObject("headers")?.length() ?: 0) == 0) { "Authorization headers must stay on the phone" }
         require(body.optString("content").isBlank()) { "Inline manifests are not supported" }
         require(body.getString("container").lowercase() in setOf("application/x-mpegurl", "application/vnd.apple.mpegurl", "application/dash+xml", "video/mp4")) { "Unsupported media type" }
@@ -252,6 +255,8 @@ class PitwallReceiverActivity : ComponentActivity() {
         }
     }
     private fun startPlayer(body: JSONObject) {
+        val direct = body.optJSONObject("metadata")?.optJSONObject("custom")?.optBoolean("pitwallDirect") == true
+        val data: DataSource.Factory = if (direct) requireNotNull(widevine).mediaHttp else {
         val peer = requireNotNull(connection).socket.inetAddress
         val origin = ReceiverMediaPolicy.validate(body.getString("url"), peer)
         val upstream = OkHttpDataSource.Factory(receiverHttp)
@@ -265,11 +270,16 @@ class PitwallReceiverActivity : ComponentActivity() {
                 }
             }
         }
+            data
+        }
         val nextScene = body.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallScene")?.let(CastSceneProtocol::decode)
         val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(false)
             .setMediaCodecSelector(ReceiverCodecSelector())
-        val next = ExoPlayer.Builder(this, renderers)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(data).apply { widevine?.let { key -> setDrmSessionManagerProvider { key.sessions } } })
+        val selector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this)
+        if (direct) selector.parameters = selector.buildUponParameters().setMinVideoSize(1, 720)
+            .setMaxVideoSize(1920, 1080).setExceedVideoConstraintsIfNecessary(false).build()
+        val next = ExoPlayer.Builder(this, renderers).setTrackSelector(selector)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(data).apply { widevine?.sessions?.let { key -> setDrmSessionManagerProvider { key } } })
             .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(5_000, 15_000, 1_000, 2_000).build())
             .build()
         scene = nextScene; player = next; active = true; generation++; renderingReported = false; decoderCount = 0
@@ -287,7 +297,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             }
             override fun onRenderedFirstFrame(eventTime: AnalyticsListener.EventTime, output: Any, renderTimeMs: Long) {
                 // For a scene, wait for the GLES output swap, not merely codec output to its texture.
-                if (player === next && scene == null) reportRendering()
+                if (player === next && (scene == null || direct)) reportRendering()
             }
         })
         next.addListener(object : Player.Listener {
@@ -295,7 +305,12 @@ class PitwallReceiverActivity : ComponentActivity() {
             override fun onVideoSizeChanged(size: VideoSize) {
                 if (player !== next) return
                 val model = scene ?: return
-                if (size.width != model.atlasWidth || size.height != model.atlasHeight) fail("Video dimensions do not match the phone layout")
+                if (direct) {
+                    if (size.height < 720) { fail("The TV's authorized source is below 720p"); return }
+                    scene = model.copy(atlasWidth = size.width, atlasHeight = size.height, atlasColumns = 1,
+                        sourceCodedWidth = size.width, sourceCodedHeight = size.height,
+                        sourceDisplayWidth = size.width, sourceDisplayHeight = size.height)
+                } else if (size.width != model.atlasWidth || size.height != model.atlasHeight) fail("Video dimensions do not match the phone layout")
             }
             override fun onPlaybackStateChanged(state: Int) {
                 if (player !== next) return
@@ -306,7 +321,10 @@ class PitwallReceiverActivity : ComponentActivity() {
         })
         next.trackSelectionParameters = next.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
         val originMs = body.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallStream")?.optLong("originMs") ?: 0L
-        next.setMediaItem(MediaItem.Builder().setUri(body.getString("url")).setMimeType(body.getString("container")).build(),
+        val ownSource = if (direct) requireNotNull(widevine).source else null
+        val mediaUri = ownSource?.url ?: body.getString("url")
+        val mime = if (ownSource == null) body.getString("container") else if (ManifestProtocol.fromUrl(mediaUri) == ManifestProtocol.HLS || ownSource.streamType.contains("HLS", true)) "application/x-mpegURL" else "application/dash+xml"
+        next.setMediaItem(MediaItem.Builder().setUri(mediaUri).setMimeType(mime).build(),
             ((body.optDouble("time", 0.0) * 1000).toLong() - originMs).coerceAtLeast(0))
         next.setPlaybackSpeed(desiredSpeed)
         next.volume = desiredVolume
@@ -333,16 +351,18 @@ class PitwallReceiverActivity : ComponentActivity() {
         controlsJob?.cancel()
         controlsJob = lifecycleScope.launch { delay(4_000); controlsVisible = false }
     }
+    private fun isDirectPlayback() = playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optBoolean("pitwallDirect") == true
     private fun streamMetadata() = playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallStream")
     private fun controllerPosition(): Long {
         val current = player ?: return 0
+        if (isDirectPlayback()) return current.currentPosition
         val info = streamMetadata() ?: return current.currentPosition
         val offset = if (current.currentTimeline.isEmpty) 0L else current.currentTimeline.getWindow(current.currentMediaItemIndex, Timeline.Window()).positionInFirstPeriodUs / 1000
-        return info.getLong("originMs") + offset + current.currentPosition
+        return ReceiverTimeline.position(info.getLong("originMs"), offset, current.currentPosition)
     }
     private fun controllerSeek(targetMs: Long) {
         if (streamMetadata() != null) connection?.send(FcastProtocol.UI_CONTROL, JSONObject().put("action", "seek").put("time", targetMs / 1000.0))
-        else player?.seekTo(targetMs.coerceAtLeast(0))
+        else player?.let { it.seekTo(ReceiverTimeline.seek(targetMs, it.duration)) }
     }
     private fun sendPlayback() {
         if (!approved) return
@@ -354,7 +374,12 @@ class PitwallReceiverActivity : ComponentActivity() {
             .put("duration", (streamMetadata()?.optLong("durationMs") ?: current?.duration ?: 0L).coerceAtLeast(0L) / 1000.0)
             .put("speed", current?.playbackParameters?.speed ?: 1f)
             .put("buffering", loadingRequested || current?.playbackState == Player.STATE_BUFFERING)
-            .put("finished", current?.playbackState == Player.STATE_ENDED))
+            .put("finished", current?.playbackState == Player.STATE_ENDED).apply {
+                if (isDirectPlayback() && current != null && !current.currentTimeline.isEmpty) {
+                    val start = current.currentTimeline.getWindow(current.currentMediaItemIndex, Timeline.Window()).windowStartTimeMs
+                    if (start != C.TIME_UNSET) put("wallClockMs", start + current.currentPosition)
+                }
+            })
         connection?.send(FcastProtocol.VOLUME_UPDATE, JSONObject().put("generationTime", System.currentTimeMillis()).put("volume", current?.volume ?: 1f))
     }
     private fun stopPlayback() {
@@ -394,7 +419,23 @@ class PitwallReceiverActivity : ComponentActivity() {
                             val modifier = if (maxWidth / maxHeight > ratio) Modifier.fillMaxHeight().aspectRatio(ratio)
                                 else Modifier.fillMaxWidth().aspectRatio(ratio)
                             Box(modifier) {
-                            if (secureOutput) AndroidView(factory = { ProtectedDecoderSceneView(it).apply {
+                            if (isDirectPlayback()) BoxWithConstraints(Modifier.fillMaxSize()) {
+                                val scale = constraints.maxWidth / model.width
+                                val density = androidx.compose.ui.platform.LocalDensity.current
+                                model.windows.singleOrNull()?.let { cell ->
+                                    AndroidView(factory = { context ->
+                                        (android.view.LayoutInflater.from(context).inflate(R.layout.player_surface, null) as PlayerView).apply {
+                                            standardView = this; player = current; useController = false
+                                            setEnableComposeSurfaceSyncWorkaround(true)
+                                            (videoSurfaceView as? android.view.SurfaceView)?.setSecure(secureOutput)
+                                        }
+                                    }, update = { it.player = current }, onRelease = {
+                                        if (standardView === it) standardView = null; it.player = null
+                                    }, modifier = Modifier.offset { androidx.compose.ui.unit.IntOffset((cell.x * scale).toInt(), (cell.y * scale).toInt()) }
+                                        .requiredSize(with(density) { (cell.width * scale).toDp() }, with(density) { (cell.height * scale).toDp() }))
+                                }
+                            }
+                            else if (secureOutput) AndroidView(factory = { ProtectedDecoderSceneView(it).apply {
                                 protectedSceneView = this
                                 onFailure = { reason -> if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) fail(reason) }
                                 onFirstFrame = { if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) reportRendering() }
@@ -433,7 +474,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             } else Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(18.dp)) {
                 Text(receiverName, style = Type.title1)
                 Text(status, style = Type.body)
-                Text("Keep this screen open. On your phone, open a replay, tap Cast and choose this TV. No account or code is needed.", style = Type.subhead)
+                Text("Keep this screen open. On the phone, tap Cast and choose this TV. No code or paid casting account is needed. Sign in on this TV for protected/live F1 feeds.", style = Type.subhead)
                 if (connection != null) SecondaryButton("Disconnect phone") { connection?.close() }
                 SecondaryButton("Exit receiver") { finish() }
             }
@@ -442,7 +483,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                 modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp))
         }
         pending?.let { request -> AlertDialog(onDismissRequest = { deny() }, title = { Text("Play from $senderName?") },
-            text = { Text("This device can control playback until it disconnects. Only media from this phone will be loaded.") },
+            text = { Text("This phone can control playback until it disconnects. Protected feeds use the F1 TV subscription signed in on this TV.") },
             confirmButton = { TextButton(onClick = { approved = true; pending = null; try { play(request) } catch (e: Exception) { fail(e.message ?: "Unable to play") } }) { Text("Allow") } },
             dismissButton = { TextButton(onClick = { deny() }) { Text("Deny") } }) }
     }

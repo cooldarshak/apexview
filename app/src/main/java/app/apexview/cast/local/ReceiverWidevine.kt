@@ -20,6 +20,14 @@ import org.json.JSONObject
 internal data class ReceiverLicenseRequest(val contentId: Long, val channels: List<Int>, val audioChannel: Int) {
     fun encode() = JSONObject().put("contentId", contentId).put("channels", JSONArray(channels)).put("audioChannel", audioChannel)
     companion object {
+        fun direct(body: JSONObject, negotiated: Boolean): ReceiverLicenseRequest? {
+            val custom = body.optJSONObject("metadata")?.optJSONObject("custom") ?: return null
+            if (!custom.optBoolean("pitwallDirect")) return null
+            require(negotiated && !body.has("url")) { "The TV resolves its own authorized direct-play URL" }
+            return decode(custom.getJSONObject("pitwallLicense")).also {
+                require(it.channels.size == 1) { "Direct playback requires one TV-authorized channel" }
+            }
+        }
         fun decode(j: JSONObject): ReceiverLicenseRequest {
             require(j.keys().asSequence().all { it in setOf("contentId", "channels", "audioChannel") }) { "Unexpected licence request fields" }
             val id = j.getLong("contentId"); require(id > 0)
@@ -32,9 +40,10 @@ internal data class ReceiverLicenseRequest(val contentId: Long, val channels: Li
     }
 }
 
-internal class ReceiverWidevine private constructor(private val drm: FrameworkMediaDrm,
-    val sessions: DefaultDrmSessionManager, val secureOutput: Boolean) : AutoCloseable {
-    override fun close() { drm.release() }
+internal class ReceiverWidevine private constructor(private val drm: FrameworkMediaDrm?,
+    val sessions: DefaultDrmSessionManager?, val secureOutput: Boolean,
+    val source: app.apexview.PlayInfo, val mediaHttp: DefaultHttpDataSource.Factory) : AutoCloseable {
+    override fun close() { drm?.release() }
     companion object {
         /** Executed after TV Allow. Uses this installation's saved subscription and entitlement. */
         suspend fun authorize(context: Context, request: ReceiverLicenseRequest): ReceiverWidevine {
@@ -44,9 +53,15 @@ internal class ReceiverWidevine private constructor(private val drm: FrameworkMe
             val settings = Settings(context)
             val api = F1TvApi(agent, chrome).also { it.platform = settings.platform }
             api.login(token)
-            val play = api.multiPlay(request.contentId, request.audioChannel)
-            require(request.channels.all { it in play.feeds }) { "The TV subscription did not authorize every selected channel" }
-            val urls = request.channels.map { channel -> play.streamsByChannel[channel]?.licenseUrl ?: play.licenseUrl }
+            val streams = if (request.channels.size == 1) listOf(api.contentPlay(request.contentId, request.audioChannel)) else {
+                val play = api.multiPlay(request.contentId, request.audioChannel)
+                require(request.channels.all { it in play.feeds }) { "The TV subscription did not authorize every selected channel" }
+                request.channels.map { requireNotNull(play.streamsByChannel[it]) }
+            }
+            val urls = streams.map { it.licenseUrl }
+            val media = DefaultHttpDataSource.Factory().setUserAgent(agent).setAllowCrossProtocolRedirects(true)
+                .setDefaultRequestProperties(mapOf("ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
+            if (urls.all { it.isNullOrBlank() }) return ReceiverWidevine(null, null, false, streams.first(), media)
             require(urls.all { !it.isNullOrBlank() } && urls.distinct().size == 1) { "Selected channels do not share the TV's authorized Widevine licence" }
             val http = DefaultHttpDataSource.Factory().setUserAgent(agent).setAllowCrossProtocolRedirects(true)
             val callback = HttpMediaDrmCallback(urls.first(), http).apply {
@@ -63,7 +78,7 @@ internal class ReceiverWidevine private constructor(private val drm: FrameworkMe
                 val sessions = DefaultDrmSessionManager.Builder().setUuidAndExoMediaDrmProvider(C.WIDEVINE_UUID, provider)
                     .setMultiSession(false).build(callback)
                 Log.i("PitwallReceiver", "TV_WIDEVINE_AUTHORIZED content=${request.contentId} channels=${request.channels.size} level=$level credentials=TV_OWNED")
-                return ReceiverWidevine(drm, sessions, !level.equals("L3", true))
+                return ReceiverWidevine(drm, sessions, !level.equals("L3", true), streams.first(), media)
             } catch (error: Throwable) { drm.release(); throw error }
         }
     }

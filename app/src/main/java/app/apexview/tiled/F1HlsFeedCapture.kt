@@ -143,7 +143,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         }
     }
 
-    suspend fun captureAtPosition(group: String, feeds: List<F1DashFeedCapture.Feed>, positionMs: Long, live: Boolean = false): F1DashFeedCapture.Snapshot = withContext(Dispatchers.IO) {
+    suspend fun captureAtPosition(group: String, feeds: List<F1DashFeedCapture.Feed>, positionMs: Long, live: Boolean = false, followLiveEdge: Boolean = true): F1DashFeedCapture.Snapshot = withContext(Dispatchers.IO) {
         var format: Format? = null
         val startedMs = android.os.SystemClock.elapsedRealtime()
         try {
@@ -161,7 +161,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                         if (useProgramTime) playlist.startTimeUs - (if (live) 0L else masterStartUs) else if (live) throw PermanentCaptureException("Live HLS needs program date time for cross-feed synchronization") else 0L)
                 }
             }
-            val targetUs = if (live) windows.minOf { it.lastOrNull()?.absoluteStartUs ?: 0L } else Math.multiplyExact(positionMs, 1000)
+            val targetUs = if (live && followLiveEdge) windows.minOf { it.lastOrNull()?.absoluteStartUs ?: 0L } else Math.multiplyExact(positionMs, 1000)
             val aligned = ArchiveDashSegmentSelector.selectAligned(windows, targetUs, previousStartUs, 250_000,
                 maximumLeadUs = ArchiveBufferPolicy.maximumLeadUs(windows.first(), targetUs))
                 ?: return@withContext snapshot(group, format, null, 0,

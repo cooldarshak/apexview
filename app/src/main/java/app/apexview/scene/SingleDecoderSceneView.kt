@@ -76,7 +76,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
         input?.let { player?.clearVideoSurface(it) }
-        input = null
+        // GL owns the Surface reference until queued destruction releases it. Clearing it
+        // here lost that reference before destroy() and leaked a codec output surface.
         gl.post { destroy(); surface.release() }
         return false
     }

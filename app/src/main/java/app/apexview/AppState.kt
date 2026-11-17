@@ -346,7 +346,7 @@ class AppState(
     private var castPreparationGeneration = 0L
     private var castRetryAfter = 0L
     private val retiredCastRelays = mutableListOf<app.apexview.cast.SceneCastRelay>()
-    val castingActive: Boolean get() = castRelay != null || nativeComposedCast != null
+    val castingActive: Boolean get() = castRelay != null || nativeComposedCast != null || directCast != null
     var castPickerOpen by mutableStateOf(false)
     internal var localCastDevices by mutableStateOf<List<app.apexview.cast.local.PitwallDevice>>(emptyList())
         private set
@@ -359,6 +359,10 @@ class AppState(
     private var localReady = false
     private var localTimingSupported = false
     private var localWidevineSupported = false
+    private var localDirectSupported = false
+    private data class DirectCast(val tileId: Int, val contentId: Long, val channel: Int, val label: String)
+    private var directCast by mutableStateOf<DirectCast?>(null)
+    private var remoteWallClockBaseMs: Long? = null
     private var nativeComposedCast by mutableStateOf<app.apexview.cast.NativeComposedCastSession?>(null)
     private var nativeCastPump: Job? = null
     private val retiredNativeCasts = mutableListOf<app.apexview.cast.NativeComposedCastSession>()
@@ -522,6 +526,7 @@ class AppState(
                     if (!localReady) {
                         localTimingSupported = body?.optInt("pitwallOverlays") == 1
                         localWidevineSupported = body?.optInt("pitwallWidevine") == 1
+                        localDirectSupported = body?.optInt("pitwallDirect") == 1
                         localReady = true; castBusy = false
                         startFullSceneCast()
                     }
@@ -554,6 +559,8 @@ class AppState(
                 }
                 protocol.PLAYBACK_UPDATE -> if (localReady && body != null) {
                     if (body.has("playbackId") && body.optString("playbackId") != localLoadId) return
+                    val wall = body.optLong("wallClockMs", 0)
+                    if (wall in 946684800000L..4102444800000L) remoteWallClockBaseMs = wall - (body.optDouble("time", 0.0) * 1000).toLong()
                     val state = body.optInt("state")
                     val time = body.optDouble("time", 0.0)
                     val duration = body.optDouble("duration", 0.0)
@@ -604,7 +611,7 @@ class AppState(
         if (!localChosen) remoteCastClock.update(castFramePositionMs, playing, playbackSpeed, castRelay!!.session.durationUs / 1000)
         castPlaybackHandedOff = true
         tiles.forEach { it.feed.suspendForRemotePlayback(true) }
-        if (nativeComposedCast != null && (protectedCompositionHost != null || f1DashCaptureJob != null)) {
+        if ((nativeComposedCast != null || directCast != null) && (protectedCompositionHost != null || f1DashCaptureJob != null)) {
             stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
             tiles.forEach { it.feed.suspendForRemotePlayback(true) }
         }
@@ -699,10 +706,13 @@ class AppState(
             message = castStatus
             return
         }
-        val nativeRequired = castTiles.any { it.feed.sourceStream.licenseUrl != null || it.contentId in knownLiveContentIds || it.feed.player.isCurrentMediaItemLive }
+        val verifiedClear = singleDecoderScenePlayer?.archiveSceneSession?.sourceLabels?.toSet() == castTiles.map { it.feed.sourceStream.profileLabel }.toSet()
+        val nativeRequired = castTiles.any { it.contentId in knownLiveContentIds || it.feed.player.isCurrentMediaItemLive ||
+            !verifiedClear && (it.feed.hasLoadedDrmKeys || it.feed.player.videoFormat?.drmInitData != null ||
+                it.feed.player.videoFormat == null && it.feed.sourceStream.licenseUrl != null) }
         if (localChosen && nativeRequired) {
             if (!localWidevineSupported) { message = "Update Pitwall TV on the receiver for protected/live playback."; return }
-            prepareNativeComposedCast(castTiles)
+            if (castTiles.size == 1) prepareDirectCast(castTiles.single()) else prepareNativeComposedCast(castTiles)
             return
         }
         if (castTiles.any { it.contentId in knownLiveContentIds || it.feed.player.isCurrentMediaItemLive }) {
@@ -764,6 +774,9 @@ class AppState(
                 require(tiles.map { it.id to it.feed.sourceStream.profileLabel } == castTiles.map { it.id to it.feed.sourceStream.profileLabel }) { "Feed selection changed during preparation; retry casting" }
                 castRelay?.takeIf { it !== relay }?.let { retiredCastRelays += it }
                 castRelay = relay
+                directCast = null
+                nativeCastPump?.cancel(); nativeCastPump = null
+                nativeComposedCast?.let { retiredNativeCasts += it }; nativeComposedCast = null
                 castStatus = if (localChosen || usesLayoutCastReceiver) "Sending at least 720p sources and the phone video layout to the TV…"
                     else "Casting ${session.sourceDisplayHeight}p sources. This build uses the standard receiver, which shows the encoded grid; the phone layout needs the registered Pitwall receiver."
                 message = castStatus
@@ -776,6 +789,11 @@ class AppState(
                 relay?.close()
                 if (cancelled.message != "Cast session ended during setup") throw cancelled
             } catch (error: Exception) {
+                if (error is app.apexview.tiled.ProtectedArchiveBackendRequired && localChosen && localWidevineSupported) {
+                    relay?.close(); castBusy = false
+                    if (castTiles.size == 1) prepareDirectCast(castTiles.single()) else prepareNativeComposedCast(castTiles)
+                    return@launch
+                }
                 if (castRelay === relay) releaseCastRelay()
                 relay?.close()
                 android.util.Log.w("PitwallCast", DiagnosticRedaction.redact(error.stackTraceToString()))
@@ -851,6 +869,7 @@ class AppState(
         castSceneJob?.cancel(); castSceneJob = null
         nativeCastPump?.cancel(); nativeCastPump = null
         nativeComposedCast?.close(); nativeComposedCast = null
+        directCast = null; remoteWallClockBaseMs = null
         retiredNativeCasts.forEach { it.close() }; retiredNativeCasts.clear()
         castSceneConfirmed = false
         googleCastLoadedUrl = null
@@ -873,11 +892,53 @@ class AppState(
         else runCatching { googleCastRemoteClient?.stop() }
         localConnectionJob?.cancel(); localConnectionJob = null
         val previous = localConnection; localConnection = null; previous?.close()
-        localReady = false; localTimingSupported = false; localWidevineSupported = false; localChosen = false; googleCastSelected = false
+        localReady = false; localTimingSupported = false; localWidevineSupported = false; localDirectSupported = false; localChosen = false; googleCastSelected = false
         releaseCastRelay(resumeLocal); castBusy = false
         castStatus = "Casting stopped."
     }
-    private fun prepareNativeComposedCast(selected: List<Tile>, targetMs: Long = castFramePositionMs) {
+    private fun prepareDirectCast(tile: Tile) {
+        if (!localDirectSupported) { message = "Update Pitwall TV on the receiver for single-channel handoff."; return }
+        val channel = tile.channel.channelId ?: run { message = "Choose an explicit F1 channel before direct TV playback."; return }
+        val state = DirectCast(tile.id, tile.contentId, channel, tile.feed.sourceStream.profileLabel)
+        val scene = directCastScene(state) ?: run { message = "Keep the phone player open until its layout is ready."; return }
+        val target = castFramePositionMs
+        nativeCastPump?.cancel(); nativeCastPump = null
+        nativeComposedCast?.let { retiredNativeCasts += it }; nativeComposedCast = null
+        castRelay?.let { retiredCastRelays += it }; castRelay = null
+        directCast = state; localLoadId = java.util.UUID.randomUUID().toString(); castSceneConfirmed = false
+        remoteCastClock.update(target, playing, playbackSpeed, durationMs)
+        val custom = JSONObject().put("pitwallDirect", true).put("pitwallScene", scene).put("playbackId", localLoadId)
+            .put("pitwallLicense", app.apexview.cast.local.ReceiverLicenseRequest(tile.contentId, listOf(channel), channel).encode())
+        localConnection?.send(app.apexview.cast.local.FcastProtocol.PLAY, JSONObject().put("container", "application/dash+xml")
+            .put("time", target / 1000.0).put("speed", playbackSpeed).put("volume", if (mutedAll) 0 else 1)
+            .put("metadata", JSONObject().put("type", 0).put("title", "Pitwall TV").put("custom", custom)))
+        if (!playing) localConnection?.send(app.apexview.cast.local.FcastProtocol.PAUSE)
+        castStatus = "The TV is opening its own authorized HD channel. Waiting for its first frame…"; message = castStatus
+        castSceneJob?.cancel()
+        castSceneJob = scope.launch {
+            val timing = app.apexview.cast.CastTimingPublisher(context, this@AppState)
+            var previous = ""
+            while (directCast === state) {
+                if (tiles.size != 1 || tiles.singleOrNull()?.feed?.sourceStream?.profileLabel != state.label) {
+                    if (!castBusy && android.os.SystemClock.elapsedRealtime() >= castRetryAfter) prepareFullSceneCast(true)
+                } else {
+                    directCastScene(state)?.let { model ->
+                        if (model.toString() != previous) { localConnection?.send(app.apexview.cast.local.FcastProtocol.SCENE, model); previous = model.toString() }
+                    }
+                    if (localTimingSupported) runCatching { timing.messages(localLoadId).forEach { localConnection?.send(app.apexview.cast.local.FcastProtocol.TIMING, it) } }
+                }
+                kotlinx.coroutines.delay(100)
+            }
+        }
+    }
+    private fun directCastScene(state: DirectCast): JSONObject? {
+        if (canvasW <= 0 || canvasH <= 0) return null
+        val tile = tiles.singleOrNull()?.takeIf { it.id == state.tileId } ?: return null
+        return app.apexview.cast.CastSceneProtocol.encode(app.apexview.scene.VideoScene(canvasW, canvasH, 1920, 1080, 1,
+            listOf(app.apexview.scene.VideoWindow(tile.id, 0, tile.x, tile.y, tile.w, tile.h, tile.z)), 1, 1920, 1080, 1920, 1080))
+    }
+
+    private fun prepareNativeComposedCast(selected: List<Tile>, targetMs: Long = castFramePositionMs, liveEdge: Boolean = false) {
         if (castBusy) return
         if (selected.size !in 2..6 || selected.any { it.channel.channelId == null }) {
             message = "Protected multiview casting needs two to six explicit F1 channels from one session."
@@ -905,7 +966,7 @@ class AppState(
                     socket.localAddress.hostAddress!!, socket.inetAddress,
                     if (settings.videoQuality == VideoQuality.P1080) 1080 else 720, settings.commentary,
                     live, if (live) 0L else clock.player.duration.takeIf { it > 0 } ?: durationMs,
-                    -windowOffset, hlsOffset, audio.feed.sourceStream.profileLabel)
+                    -windowOffset, hlsOffset, audio.feed.sourceStream.profileLabel, liveEdge)
                 val next = requireNotNull(owned)
                 kotlinx.coroutines.withTimeout(60_000) {
                     while (!next.ready) { next.update(targetMs); if (!next.ready) kotlinx.coroutines.delay(250) }
@@ -916,12 +977,12 @@ class AppState(
                 nativeCastPump?.cancel(); nativeCastPump = null
                 nativeComposedCast?.let { retiredNativeCasts += it }
                 castRelay?.let { retiredCastRelays += it }; castRelay = null
-                nativeComposedCast = next; owned = null
+                nativeComposedCast = next; directCast = null; owned = null
                 loadNativeComposedCast(next, selected, targetMs)
                 nativeCastPump = scope.launch {
                     try {
                         while (nativeComposedCast === next) {
-                            if (playing) next.update(castFramePositionMs)
+                            if (playing && (castSceneConfirmed || !next.live)) next.update(if (castSceneConfirmed) castFramePositionMs else targetMs)
                             kotlinx.coroutines.delay(500)
                         }
                     } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
@@ -933,6 +994,8 @@ class AppState(
                     }
                 }
                 startNativeCastSceneUpdates(next)
+            } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
+                if (generation == castPreparationGeneration) { castStatus = "HD protected feeds did not become ready in time. Retry casting."; message = castStatus }
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (error: Exception) {
                 if (generation == castPreparationGeneration) {
@@ -3310,7 +3373,8 @@ class AppState(
         val clock = leader.wallClockMs()
         mapClockEstimated = clock == null
         val position = if (castPlaybackHandedOff) castFramePositionMs else leader.player.currentPosition
-        val base = if (clock != null) clock + position - leader.player.currentPosition
+        val base = if (castPlaybackHandedOff && remoteWallClockBaseMs != null) requireNotNull(remoteWallClockBaseMs) + position
+            else if (clock != null) clock + position - leader.player.currentPosition
             else (timing?.startUtcMs ?: return null) + position
         return base + mapOffsetMs
     }
@@ -5042,8 +5106,6 @@ class AppState(
     fun seekTo(targetMs: Long) {
         nativeComposedCast?.let { session ->
             val target = if (session.durationMs > 0) targetMs.coerceIn(0, session.durationMs) else targetMs.coerceAtLeast(0)
-            if (session.live) { message = "Live casting follows the live window. Use Go Live to reconnect at the live edge."; return }
-            remoteCastClock.update(target, playing, playbackSpeed, session.durationMs)
             prepareNativeComposedCast(tiles.toList(), target)
             return
         }
@@ -5075,7 +5137,7 @@ class AppState(
     }
 
     fun goLive() {
-        if (nativeComposedCast != null) { prepareNativeComposedCast(tiles.toList()); return }
+        if (nativeComposedCast != null) { prepareNativeComposedCast(tiles.toList(), liveEdge = true); return }
         tiles.forEach { it.feed.player.seekToDefaultPosition() }
         showChrome()
     }

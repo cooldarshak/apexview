@@ -426,6 +426,12 @@ internal class F1DashFeedCapture(
         playbackPositionMs: Long
     ): List<SegmentCandidate> {
         val durationUs = feed.periodDurationUs
+        if (feed.manifest.dynamic) {
+            return LiveDashSegmentWindow.near(feed.index, durationUs, feed.period.startMs * 1000,
+                System.currentTimeMillis() * 1000, playbackPositionMs * 1000,
+                RECENT_SEGMENT_WINDOW.toLong(), ARCHIVE_LOOKAHEAD_SEGMENTS.toLong())
+                .map { SegmentCandidate(it.number, it.absoluteStartUs) }
+        }
         if (durationUs <= 0L || durationUs == C.TIME_UNSET) {
             throw PermanentCaptureException("${feed.feed.label}: archive DASH Period has no finite duration")
         }
