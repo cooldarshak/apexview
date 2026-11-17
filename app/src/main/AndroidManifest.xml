@@ -44,6 +44,7 @@
         <!-- configChanges keeps the players alive when the phone folds or unfolds. -->
         <activity
             android:name=".MainActivity"
+            android:theme="@style/Theme.Pitwall"
             android:exported="true"
             android:resizeableActivity="true"
             android:supportsPictureInPicture="true"
