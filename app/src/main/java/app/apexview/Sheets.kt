@@ -276,6 +276,13 @@ fun SettingsScreen(app: AppState) {
             }
         }
         item {
+            Group("Video decoder", footer = "Your choice is remembered. Single decoder currently supports compatible archive feeds from one session; incompatible streams return to normal playback.") {
+                DecoderMode.entries.forEach { mode ->
+                    ChoiceRow(mode.label, s.decoderMode == mode) { app.setDecoderPreference(mode) }
+                }
+            }
+        }
+        item {
             Group("Playback", footer = "Applies to feeds you start from now on.") {
                 Text("Commentary", style = Type.footnote, modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 2.dp))
                 Settings.COMMENTARY.forEach { (code, name) ->

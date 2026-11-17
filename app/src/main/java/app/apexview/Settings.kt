@@ -52,6 +52,12 @@ class Settings(context: Context) {
     var videoQuality by mutableStateOf(VideoQuality.fromPreference(prefs.getString("videoQuality", null)))
         private set
 
+    /** The requested mode is retained even when a particular stream needs a safe fallback. */
+    var decoderMode by mutableStateOf(
+        DecoderMode.entries.firstOrNull { it.name == prefs.getString("decoderMode", null) } ?: DecoderMode.MULTIPLE
+    )
+        private set
+
     /** The onboards' speed, in [MPH] or [KMH]. */
     var speedUnit by mutableStateOf(prefs.getString("speedUnit", MPH) ?: MPH)
         private set
@@ -60,6 +66,8 @@ class Settings(context: Context) {
         videoQuality = value
         prefs.edit().putString("videoQuality", value.name).apply()
     }
+
+    fun updateDecoderMode(value: DecoderMode) { decoderMode = value; prefs.edit().putString("decoderMode", value.name).apply() }
 
     fun updatePlatform(value: String) { platform = value; prefs.edit().putString("platform", value).apply() }
     fun updateSoftwareDrm(value: Boolean) { softwareDrm = value; prefs.edit().putBoolean("softwareDrm", value).apply() }

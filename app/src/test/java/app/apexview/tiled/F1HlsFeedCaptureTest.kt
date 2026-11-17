@@ -38,6 +38,30 @@ class F1HlsFeedCaptureTest {
         }
     }
 
+    @Test fun fourCameraVodPreparationFetchesIndependentOffersAndFragmentsConcurrently() = runBlocking {
+        val network = network(4)
+        val manifests = java.util.concurrent.CountDownLatch(4)
+        val fragments = java.util.concurrent.CountDownLatch(4)
+        network.beforeOpen = { spec ->
+            val barrier = when {
+                spec.uri.toString().endsWith("master.m3u8") -> manifests
+                spec.uri.toString().endsWith(".m4s") -> fragments
+                else -> null
+            }
+            if (barrier != null) {
+                barrier.countDown()
+                check(barrier.await(8, java.util.concurrent.TimeUnit.SECONDS)) { "Independent feeds were loaded serially" }
+            }
+        }
+        val capture = F1HlsFeedCapture(network.factory)
+        val session = capture.prepareVod(feeds(4), 100, "channel-0")
+        try {
+            assertEquals(0L, manifests.count)
+            assertEquals(0L, fragments.count)
+            assertEquals(3840, session.width)
+        } finally { session.close(); capture.reset() }
+    }
+
     @Test fun webDashPlayerTmHlsFeedsReachARealClearComposedOutput() = runBlocking {
         for (count in 2..4) {
             val network = network(count)

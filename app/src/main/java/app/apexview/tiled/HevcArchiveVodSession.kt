@@ -47,7 +47,9 @@ internal class HevcArchiveVodSession(
     private val cache = LinkedHashMap<Int, ByteArray>(4, 0.75f, true)
     private val cacheLock = Any()
     private val composeLock = Any()
-    private val fetchers = Executors.newFixedThreadPool(2) { r -> Thread(r, "ApexviewVodFetch").apply { isDaemon = true } }
+    // A seek needs one fragment from each camera. Run those independent I/O requests
+    // concurrently, bounded by the four-source composer and without adding decoders.
+    private val fetchers = Executors.newFixedThreadPool(inputs.size.coerceIn(1, 4)) { r -> Thread(r, "ApexviewVodFetch").apply { isDaemon = true } }
     private val warmer = Executors.newSingleThreadExecutor { r -> Thread(r, "ApexviewVodWarm").apply { isDaemon = true } }
     private val warmLock = Any()
     private var warmNumber: Int? = null

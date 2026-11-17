@@ -26,9 +26,9 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     private data class Offer(val feed: F1DashFeedCapture.Feed, val uri: Uri, val format: Format?, val master: HlsMultivariantPlaylist?, val audioGroupId: String? = null)
     private class Init(val uri: Uri, val offset: Long, val length: Long, val bytes: ByteArray, val report: CmafBoxInspector.Report)
     private val reader = CmafHttpReader(factory)
-    private val offers = mutableMapOf<String, List<Offer>>()
+    private val offers = java.util.concurrent.ConcurrentHashMap<String, List<Offer>>()
     private val vodPlaylists = java.util.concurrent.ConcurrentHashMap<String, HlsMediaPlaylist>()
-    private val initializations = mutableMapOf<String, Init>()
+    private val initializations = java.util.concurrent.ConcurrentHashMap<String, Init>()
     private val actual = java.util.concurrent.ConcurrentHashMap<String, ManifestProtocol>()
     private val clearComposition = ClearCmafArchiveComposition()
     private var previousStartUs: Long? = null
@@ -46,7 +46,8 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         var acquired: HevcArchiveVodSession? = null
         try { return withContext(Dispatchers.IO) {
             require(feeds.size in 1..4 && feeds.map { it.label }.distinct().size == feeds.size)
-            val selected = chooseCommon(feeds.map { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }, preferredHeight, feeds.size)
+            val perFeed = coroutineScope { feeds.map { feed -> async { offers.getOrPut(feed.label) { loadOffers(feed) } } }.awaitAll() }
+            val selected = chooseCommon(perFeed, preferredHeight, feeds.size)
             val playlists = coroutineScope { selected.map { offer -> async { loadMedia(offer) } }.awaitAll() }
             require(playlists.all { it.hasEndTag && it.segments.isNotEmpty() }) { "Archive VOD requires complete HLS replay playlists" }
             playlists.forEach { playlist ->
@@ -60,7 +61,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                     "Archive changes CMAF initialization, crosses a discontinuity or contains a gap"
                 }
             }
-            val inits = selected.mapIndexed { i, offer -> loadInit(offer, playlists[i].segments.first()) }
+            val inits = coroutineScope { selected.mapIndexed { i, offer -> async { loadInit(offer, playlists[i].segments.first()) } }.awaitAll() }
             val tracks = inits.map { it.report.tracks.singleOrNull { track -> track.handler == "vide" }
                 ?: throw PermanentCaptureException("HLS archive must contain one video track") }
             if (tracks.any { it.encrypted }) throw ProtectedArchiveBackendRequired()
@@ -68,7 +69,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             require(playlists.none { it.tags.any { tag -> tag.startsWith("#EXT-X-KEY:") && !tag.contains("METHOD=NONE") } }) {
                 "HLS declares protection but the selected CMAF track is clear"
             }
-            val audioUris = selected.mapIndexedNotNull { index, offer ->
+            val audioUris = coroutineScope { selected.mapIndexed { index, offer -> async {
                 val audio = offer.master?.audios.orEmpty().filter { it.url != null &&
                     (offer.audioGroupId == null || it.groupId == offer.audioGroupId) }
                     .sortedWith(compareByDescending<HlsMultivariantPlaylist.Rendition> { it.format.language == commentary }
@@ -86,7 +87,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                     }
                 }
                 audio?.let { offer.feed.label to it }
-            }.toMap()
+            } }.awaitAll() }.filterNotNull().toMap()
             val audio = audioUris[clockLabel]
             var session: HevcArchiveVodSession? = null
             val owned = selected.mapIndexed { i, offer -> HevcArchiveVodSession.Input(offer.feed.label, playlists[i], offer.format,

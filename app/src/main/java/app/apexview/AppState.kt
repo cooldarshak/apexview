@@ -319,8 +319,10 @@ class AppState(
     private var protectedCompositionHost: Tile? = null
     private var protectedCompositionAudioMaster: Tile? = null
     private var nativeArchiveTiles by mutableStateOf<List<Tile>>(emptyList())
-    var decoderMode by mutableStateOf(DecoderMode.MULTIPLE)
+    val settings = Settings(context)
+    var decoderMode by mutableStateOf(settings.decoderMode)
         private set
+    private var archiveCompositionStarting by mutableStateOf(false)
     val singleDecoderSceneActive: Boolean get() = nativeArchiveTiles.isNotEmpty()
     val singleDecoderScenePlayer: FeedPlayer? get() = if (singleDecoderSceneActive) protectedCompositionHost?.feed else null
     var castSheetOpen by mutableStateOf(false)
@@ -429,6 +431,12 @@ class AppState(
                 else app.apexview.scene.VideoWindow(tile.id, source, tile.x, tile.y, tile.w, tile.h, tile.z)
             })
     }
+    fun setDecoderPreference(mode: DecoderMode) {
+        settings.updateDecoderMode(mode)
+        if (mode == decoderMode && (mode == DecoderMode.MULTIPLE || singleDecoderSceneActive || tiles.size <= 1)) return
+        chooseDecoderMode(mode)
+    }
+
     fun chooseDecoderMode(mode: DecoderMode) {
         if (mode == DecoderMode.MULTIPLE) {
             stopProtectedCompositionPresentation()
@@ -436,7 +444,7 @@ class AppState(
             layoutRequest++
             return
         }
-        val leader = leaderTile() ?: run { message = "Open an archive first."; return }
+        val leader = leaderTile() ?: run { decoderMode = mode; return }
         if (tiles.size == 1) { decoderMode = mode; return }
         if (tiles.any { it.contentId != leader.contentId } || leader.contentId in knownLiveContentIds ||
             tiles.any { it.feed.player.isCurrentMediaItemLive }) {
@@ -586,7 +594,6 @@ class AppState(
 
     private fun covers(a: Tile, b: Tile) =
         a.x <= b.x && a.y <= b.y && a.x + a.w >= b.x + b.w && a.y + a.h >= b.y + b.h
-    val settings = Settings(context)
     val updater = Updater(context, scope)
     private var cachedDecoderDrmMode: Boolean? = null
     private var cachedDecoderBudget = 1
@@ -1612,7 +1619,11 @@ class AppState(
         }
         val probePositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
         selected.forEach { android.util.Log.i("ApexviewPlaybackOffer", it.feed.sourceStream.offerDiagnostic) }
-        message = "Validating archive composition. Normal playback continues..."
+        // Freeze the current clock immediately. Decoders remain intact until the CMAF
+        // preflight succeeds, but normal video/audio no longer plays during activation.
+        selected.forEach { it.feed.player.playWhenReady = false }
+        archiveCompositionStarting = true
+        message = SINGLE_DECODER_ACTIVATING
         diagnostic()
         f1DashCaptureJob = scope.launch {
             try {
@@ -1649,6 +1660,7 @@ class AppState(
                         selected.forEach { it.feed.suspendForArchiveComposition(); it.feed.setAudible(false) }
                         host.feed.startArchiveVodPlayback(session, handoffPositionMs, playing)
                         transferred = true
+                        archiveCompositionStarting = false
                         host.feed.setAudible(!mutedAll && !castingActive)
                         decoderMode = DecoderMode.SINGLE
                         phase = "BUFFERING"
@@ -1672,6 +1684,7 @@ class AppState(
                         !playing -> "PAUSED"
                         else -> "ACTIVE"
                     }
+                    if (phase == "ACTIVE" && message == SINGLE_DECODER_ACTIVATING) message = null
                     if (!browsing && host.feed.player.playbackState == Player.STATE_READY && !host.feed.hasRenderedFirstFrame) {
                         val now = android.os.SystemClock.elapsedRealtime()
                         if (readySince == null) readySince = now
@@ -1709,6 +1722,8 @@ class AppState(
                 android.util.Log.w("ApexviewSingleDecoder", "ARCHIVE_VOD_FAILED reason=$failure")
             } finally {
                 if (f1DashCapture === capture) {
+                    archiveCompositionStarting = false
+                    if (!transferred) selected.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
                     capture.reset(); f1DashCapture = null; f1DashCaptureJob = null
                 }
             }
@@ -2062,6 +2077,8 @@ class AppState(
 
     /** Stop protected capture and restore the original tile arrangement and feed player. */
     fun stopProtectedCompositionPresentation(restorePlayer: Boolean = true, keepSourceVideoDisabled: Boolean = false) {
+        val wasStarting = archiveCompositionStarting
+        archiveCompositionStarting = false
         f1DashCaptureJob?.cancel()
         f1DashCaptureJob = null
         f1DashCapture?.reset()
@@ -2097,6 +2114,9 @@ class AppState(
         HevcFeedProfileCapture.clearTileTestSelection()
         if (keepSourceVideoDisabled) tiles.forEach { it.feed.setProtectedCompositionVideoRole(false, it.w.toInt().coerceAtLeast(1), it.h.toInt().coerceAtLeast(1)) }
         else applyVideoBudget()
+        if (restorePlayer && wasStarting && native.isEmpty() && !keepSourceVideoDisabled) {
+            tiles.forEach { it.feed.player.playWhenReady = playing }
+        }
         layoutRequest++
     }
 
@@ -2148,6 +2168,8 @@ class AppState(
             // after the service has supplied an actual replacement source and its join clock.
             if (singleDecoderSceneActive) stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
             val first = tiles.isEmpty()
+            val preparingSingle = decoderMode == DecoderMode.SINGLE && (tiles.isNotEmpty() || streams.size > 1)
+            if (preparingSingle) tiles.forEach { it.feed.player.playWhenReady = false }
             // A press conference or a show has no cars to follow: its map starts off, without
             // touching the style saved for sessions.
             if (first && pendingResume?.contentId != contentId) mapMode = if (contentId in notSessions) MapMode.OFF else savedMapMode()
@@ -2155,6 +2177,7 @@ class AppState(
             focusTileId = null
             streams.forEach { (channel, stream) ->
                 val feed = newFeed(stream, startWithVideo = !isTv && (decoderMode != DecoderMode.SINGLE || tiles.isEmpty() && streams.size == 1))
+                if (preparingSingle) feed.player.playWhenReady = false
                 if (decoderMode == DecoderMode.SINGLE && (tiles.isNotEmpty() || streams.size > 1))
                     feed.setProtectedCompositionVideoRole(false, 1, 1)
                 // From the start: the first moment F1 keeps, so nothing after it is seen first.
@@ -3997,6 +4020,7 @@ class AppState(
         HevcFeedProfileCapture.clearTileTestSelection()
         tiles.forEach { it.feed.release() }
         tiles.clear()
+        decoderMode = settings.decoderMode
         sessions.clear()
         singleSessionOnly.clear()
         browsing = false
@@ -4095,6 +4119,7 @@ class AppState(
     fun togglePlay() {
         castRevision++
         playing = !playing
+        if (archiveCompositionStarting) { showChrome(); return }
         // In the pop-out, only the shown feed and the audio keep playing (see setPip).
         val shown = if (inPip) pipTile() else null
         tiles.filter { !singleDecoderSceneActive || it === protectedCompositionHost }.forEach {
@@ -4307,6 +4332,7 @@ class AppState(
     }
 
     companion object {
+        private const val SINGLE_DECODER_ACTIVATING = "Single decoder activation in progress."
         private const val SEEK_DRIFT_MS = 2000L
         private const val NUDGE_DRIFT_MS = 150L
         private const val NUDGE = 0.1f
