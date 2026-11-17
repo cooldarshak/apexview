@@ -27,4 +27,11 @@ class SingleDecoderPolicyTest {
         assertNull(singleDecoderVideoRole(DecoderMode.MULTIPLE, 4, isComposedHost = false, browsing = false))
         assertNull(singleDecoderVideoRole(DecoderMode.SINGLE, 1, isComposedHost = false, browsing = false))
     }
+
+    @Test fun protectedFeedsMustShareTheRealLicenseBeforeTheComposedPlayerRequestsKeys() {
+        assertEquals(true, protectedFeedsShareLicense(listOf("https://license.test", "https://license.test")))
+        assertEquals(false, protectedFeedsShareLicense(listOf("https://license.test", "https://other.test")))
+        assertEquals(false, protectedFeedsShareLicense(listOf(null, null)))
+        assertEquals(false, protectedFeedsShareLicense(emptyList()))
+    }
 }

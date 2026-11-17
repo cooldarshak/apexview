@@ -1913,11 +1913,15 @@ class AppState(
                             }
                         }
                         prepared.also { window ->
-                            val licenses = selectedTiles.map { it.feed.sourceStream.licenseUrl }.distinct()
-                            if (!capture.clearOutput && (licenses.size != 1 || !host.feed.hasLoadedDrmKeys)) {
+                            val licenses = selectedTiles.map { it.feed.sourceStream.licenseUrl }
+                            if (!capture.clearOutput && !protectedFeedsShareLicense(licenses)) {
                                 window.zero()
-                                throw IOException("DRM/session incompatibility: protected composed playback needs the existing authorised Widevine session and loaded keys.")
+                                throw app.apexview.tiled.PermanentCaptureException("Protected feeds need the same authorised Widevine license endpoint.")
                             }
+                            // Video tracks are disabled during preflight, so they may not yet
+                            // have requested a license. The composed Media3 source below uses
+                            // the host's existing F1 license callback and its preserved PSSH.
+                            if (!capture.clearOutput) android.util.Log.i("ApexviewSingleDecoder", "WIDEVINE_KEYS requestedBy=COMPOSED_PLAYER")
                             val pssh = capture.widevinePssh()
                             try {
                                 app.apexview.tiled.ProtectedHevcComposedDashPackageBuilder.build(
