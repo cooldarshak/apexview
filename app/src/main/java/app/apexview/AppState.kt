@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 74434)
-Total output lines: 5692
-
 package app.apexview
 
 import androidx.media3.common.C
@@ -1843,7 +1840,1741 @@ class AppState(
                 featuredWeekend()?.takeIf { it != latestWeekend() }?.let(::loadWeekend)
                 launch { runCatching { api.home() }.onSuccess { homePage = it } }
                 if (lastYearRaces.isEmpty()) launch { runCatching { api.raceReplays(season - 1) }.onSuccess { lastYearRaces.clear(); lastYearRaces.addAll(it) } }
-   …24434 tokens truncated…(key, it); kept = true }
+            } catch (e: Exception) {
+                homeError = "Couldn't load F1 TV: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * Keeps home current while the app stays open: a session going live or ending changes the
+     * carousel and the weekend's schedule. Not while watching, when nothing here is on screen.
+     * A failed check leaves things as they are.
+     */
+    suspend fun refreshLive() {
+        if (auth != AuthState.SIGNED_IN) return
+        val watching = tiles.isNotEmpty() && !browsing
+        // Watching a replay, there's nothing to offer.
+        if (watching && !isLive) return
+        val newLive = runCatching { api.prepare(); api.liveNow() }.getOrNull() ?: return
+        if (watching) {
+            offerNextLive(newLive)
+            return
+        }
+        if (newLive.map { it.contentId } == liveNow.map { it.contentId }) return
+        liveNow.clear()
+        liveNow.addAll(newLive)
+        latestWeekend()?.let(::loadWeekend)
+    }
+
+    // What's on next: the race after the pre-race show, the post-race show after the race.
+
+    /** Something else live to switch to, offered in a note while watching live. */
+    var nextLive by mutableStateOf<CatalogItem?>(null)
+        private set
+    /** What was live when the session on screen was opened, and for which content. */
+    private var liveAtStart: Pair<Long, Set<Long>>? = null
+    private val declinedLive = mutableSetOf<Long>()
+
+    /**
+     * Offers what's next, once: something that's gone live since this session was opened, or,
+     * when what's on screen has gone off air, whatever is live in its place.
+     */
+    internal fun offerNextLive(live: List<CatalogItem>) {
+        val watching = leaderTile()?.contentId ?: return
+        val ids = live.map { it.contentId }.toSet()
+        val atStart = liveAtStart?.takeIf { it.first == watching }?.second
+            ?: ids.also { liveAtStart = watching to it }
+        nextLive = pickNextLive(live, watching, atStart, tiles.map { it.contentId }.toSet(), declinedLive)
+            ?: nextLive?.takeIf { it.contentId in ids }
+    }
+
+    fun declineNextLive() {
+        nextLive?.let { declinedLive += it.contentId }
+        nextLive = null
+    }
+
+    /** Leaves what's on screen for what's next, starting on its main broadcast. */
+    fun switchToNextLive() {
+        val item = nextLive ?: return
+        nextLive = null
+        stopAll()
+        watch(item, start = true)
+    }
+
+    /** Fetched fresh each time, so sessions flip from upcoming to live to replay as the weekend runs. */
+    fun loadWeekend(weekend: WeekendInfo) {
+        scope.launch {
+            runCatching { api.weekend(weekend) }
+                .onSuccess {
+                    weekendContent[weekend.meetingKey] = it
+                    syncReminders()
+                }
+        }
+    }
+
+    // F1 TV's catalog beyond the weekends.
+
+    /** F1 TV's home page: what it features now, and its rows of shows, documentaries and archive races. */
+    var homePage by mutableStateOf<HomePage?>(null)
+        private set
+    /** Show and documentary pages, by F1 TV page ID, fetched when opened. */
+    val collections = mutableStateMapOf<Int, CollectionPage>()
+    /** Popular races from every season, fetched when the archive page opens. */
+    var archive by mutableStateOf<List<CatalogItem>?>(null)
+        private set
+    /** Last season's race replays, for "last year's race" before a weekend. */
+    private val lastYearRaces = mutableStateListOf<CatalogItem>()
+
+    fun loadCollection(pageId: Int) {
+        scope.launch { runCatching { api.collection(pageId) }.onSuccess { collections[pageId] = it } }
+    }
+
+    fun loadArchive() {
+        if (archive != null) return
+        scope.launch { runCatching { api.archiveRaces() }.onSuccess { archive = it } }
+    }
+
+    /** Plays a catalog item; a show or documentary series opens its page of episodes instead. */
+    fun watch(item: CatalogItem, start: Boolean = false) {
+        item.pageId?.let { open(Screen.Collection(it, item.title)); return }
+        item.startMs.takeIf { it > 0L }?.let { catalogStartTimes[item.contentId] = it }
+        // Sessions are titled by their weekend in the viewer ("Mexico City Grand Prix · Race").
+        val session = weekendContent.values.any { c -> c.sessions.any { it.contentId == item.contentId } }
+        val catalogReplay = item.kind.equals("REPLAY", ignoreCase = true) ||
+            (session && !item.live && !item.upcoming && item.startMs > 0L)
+        if (item.live) {
+            knownArchiveContentIds -= item.contentId
+        } else if (catalogReplay && !item.upcoming) {
+            // The catalog has already moved this session out of LIVE. Don't make TV wait for a
+            // HLS/DASH program clock to learn whether this is a replay.
+            knownArchiveContentIds += item.contentId
+            knownLiveContentIds -= item.contentId
+            completedLiveTimingContentIds -= item.contentId
+        }
+        // Live events carry their weekend's name as their subtitle.
+        val meeting = item.meeting.ifEmpty { if (item.live) item.subtitle.orEmpty() else "" }
+        openPicker(item.contentId, if ((session || item.live) && meeting.isNotEmpty()) "$meeting · ${item.title}" else item.title, item.image, start, item.live)
+    }
+
+    /** This season's weekend a video belongs to, for its Weekend button. */
+    fun weekendOf(item: CatalogItem): WeekendInfo? =
+        weekends.firstOrNull { it.name == item.meeting && (item.year == 0 || item.year == season) }
+
+    // Watch history, for the suggestions.
+
+    /** What's been watched, by content ID. Kept to the most recent few hundred. */
+    val history = mutableStateMapOf<Long, Seen>().apply { putAll(readHistory()) }
+
+    private fun readHistory(): Map<Long, Seen> = runCatching {
+        val json = JSONObject(prefs.getString(PREF_HISTORY, null) ?: return emptyMap())
+        json.keys().asSequence().associate { key ->
+            val a = json.getJSONArray(key)
+            key.toLong() to Seen(a.getLong(0), a.getLong(1), a.getBoolean(2))
+        }
+    }.getOrDefault(emptyMap())
+
+    /**
+     * Notes a few more seconds of [contentId] watched. A session counts as watched once the
+     * picture is past its chequered flag, live or replay: the stream runs on well after it (the
+     * podium, interviews), and few sit through that. Anything without timing counts at 90%. Live
+     * qualifying doesn't count by its flag: each part has one, and more of it may be to come.
+     */
+    private fun noteSeen(contentId: Long, positionMs: Long, durationMs: Long, live: Boolean) {
+        val now = System.currentTimeMillis()
+        val before = history[contentId]
+        // Saves come every few seconds while watching; a longer gap was time away.
+        val gap = before?.let { now - it.at }?.takeIf { it in 0..15_000 } ?: 0
+        val watched = (before?.watchedMs ?: 0) + gap
+        val flag = timing?.takeIf { timingContentId == contentId && !(live && it.showsPushLaps) }?.finishedUtc
+        val pastFlag = flag != null && (mapTimeMs() ?: 0L) >= flag
+        val finished = before?.finished == true || pastFlag ||
+            (!live && durationMs > 0 && positionMs >= durationMs * 9 / 10)
+        history[contentId] = Seen(now, watched, finished)
+        if (history.size > MAX_HISTORY) history.entries.sortedBy { it.value.at }.take(history.size - MAX_HISTORY).forEach { history.remove(it.key) }
+        val json = JSONObject()
+        history.forEach { (id, seen) -> json.put(id.toString(), JSONArray(listOf(seen.at, seen.watchedMs, seen.finished))) }
+        prefs.edit().putString(PREF_HISTORY, json.toString()).apply()
+    }
+
+    /**
+     * Home's carousel: the best things to watch next, in order. What's live; a session left
+     * part-way; after a session you watched, what follows it (the post-race show, the press
+     * conference, highlights), or the session itself if you haven't; what F1 TV features now;
+     * before the next weekend, its build-up and last year's race there, then its schedule; and
+     * one race from the archive. Anything watched to the end is left out.
+     */
+    fun suggestions(now: Long = System.currentTimeMillis()): List<Pick> {
+        val picks = mutableListOf<Pick>()
+        val used = mutableSetOf<Long>()
+        fun fresh(item: CatalogItem) = !item.upcoming && history[item.contentId]?.finished != true && item.pageId == null
+        fun add(reason: String, item: CatalogItem) {
+            if (item.contentId > 0 && fresh(item) && used.add(item.contentId)) picks += Pick(reason, item = item)
+        }
+
+        // Always, watched or not: it's still going.
+        liveNow.filter { it.contentId > 0 && used.add(it.contentId) }.forEach { picks += Pick("Live now", item = it) }
+
+        // F1 TV's own picks in its order, ahead of anything from your history.
+        homePage?.featured?.forEach { add("Featured on F1 TV", it) }
+
+        val latest = latestWeekend(now)
+        val content = latest?.let { weekendContent[it.meetingKey] }
+        val last = content?.sessions?.filter { !it.upcoming && !it.live }?.maxByOrNull { it.startMs }
+        if (latest != null && content != null && last != null) {
+            val stage = last.title.lowercase()
+            if (history[last.contentId] == null) {
+                add(if (now - last.startMs < 2 * DAY_MS) "In case you missed it" else "Catch up", last)
+            } else {
+                // What follows the session you watched: its show, its press conference, its highlights.
+                fun rank(v: CatalogItem): Int {
+                    val t = "${v.title} ${v.genre}".lowercase()
+                    return when {
+                        "post-$stage" in t && "show" in t -> 0
+                        "post-$stage" in t -> 1
+                        "$stage in 30" in t || "$stage highlights" in t -> 2
+                        else -> -1
+                    }
+                }
+                val after = if ("qualifying" in stage) "After $stage" else "After the $stage"
+                content.videos.filter { rank(it) >= 0 }.sortedBy(::rank).forEach { add(after, it) }
+            }
+        }
+
+        // The next weekend: during one, its next session; before one, its build-up.
+        val next = weekends.firstOrNull { it.isCurrent(now) && nextSession(it) != null }
+            ?: weekends.firstOrNull { it.startMs > now }
+        if (next != null) {
+            if (next.startMs - now < 7 * DAY_MS) {
+                weekendContent[next.meetingKey]?.videos?.forEach { add("Before the ${next.name}", it) }
+                lastYearRaces.firstOrNull { it.meeting == next.name }?.let { add("Last year in ${next.place}", it) }
+            }
+            val session = nextSession(next)
+            picks += Pick(
+                when {
+                    session != null && next.isCurrent(now) -> "Next: ${session.title} · ${session.subtitle}"
+                    else -> "Next race weekend · ${DAY.format(java.util.Date(next.startMs))} to ${DAY.format(java.util.Date(next.endMs))}"
+                },
+                weekend = next,
+            )
+        }
+
+        // Your own history comes after what F1 TV and the weekend put first.
+        recents.firstOrNull { r -> !r.live && history[r.contentId]?.let { now - it.at < 3 * DAY_MS } == true }?.let {
+            if (used.add(it.contentId)) picks += Pick("Pick up where you left off", resume = it)
+        }
+
+        // One race from the archive, a different one each day.
+        homePage?.rows?.firstOrNull { it.tag == CatalogRow.ARCHIVE }?.items?.filter(::fresh)?.takeIf { it.isNotEmpty() }?.let { races ->
+            add("From the archive", races[(now / DAY_MS % races.size).toInt()])
+        }
+        // The next weekend's schedule always makes it, even after a long build-up.
+        val schedule = picks.firstOrNull { it.weekend != null }
+        if (schedule != null && picks.indexOf(schedule) >= MAX_PICKS) return picks.take(MAX_PICKS - 1) + schedule
+        return picks.take(MAX_PICKS)
+    }
+
+    // Past seasons, for the calendar.
+
+    /** Seasons F1 TV has weekends for (2018 on) or archive videos for (1981 on), newest first. */
+    val archiveSeasons = (season downTo FIRST_ARCHIVE_SEASON).toList()
+    /** The season the calendar shows. */
+    var calendarSeason by mutableIntStateOf(season)
+        private set
+    /** Past seasons' weekends (2018 on), fetched when first shown. */
+    val pastWeekends = mutableStateMapOf<Int, List<WeekendInfo>>()
+    /** Seasons before F1 TV's weekends: their replays and other videos. */
+    val classicVideos = mutableStateMapOf<Int, List<CatalogItem>>()
+
+    fun chooseCalendarSeason(year: Int) {
+        calendarSeason = year
+        when {
+            year == season -> Unit
+            year >= FIRST_WEEKEND_SEASON && year !in pastWeekends -> scope.launch {
+                runCatching { api.calendar(year) }.onSuccess { pastWeekends[year] = it }
+            }
+            year < FIRST_WEEKEND_SEASON && year !in classicVideos -> scope.launch {
+                runCatching { api.seasonVideos(year) }.onSuccess { classicVideos[year] = it }
+            }
+        }
+    }
+
+    // Session reminders.
+
+    var remindersOn by mutableStateOf(Reminders.enabled(context))
+        private set
+    var remindersMainOnly by mutableStateOf(Reminders.mainOnly(context))
+        private set
+
+    fun chooseReminders(on: Boolean) {
+        remindersOn = on
+        Reminders.setEnabled(context, on)
+        syncReminders()
+    }
+
+    fun chooseRemindersMainOnly(only: Boolean) {
+        remindersMainOnly = only
+        Reminders.setMainOnly(context, only)
+        syncReminders()
+    }
+
+    /** Sets reminders for every upcoming session the app knows the time of (the weekends loaded). */
+    private fun syncReminders() {
+        val now = System.currentTimeMillis()
+        // A session under way still wants recording; the weekend's end can come before the race does.
+        val sessions = weekends.filter { now < it.endMs + 86_400_000L }.flatMap { w ->
+            weekendContent[w.meetingKey]?.sessions.orEmpty()
+                .filter { it.startMs > 0 }
+                .map { Reminders.Session(it.contentId, w.name, it.title, it.startMs) }
+        }
+        Reminders.sync(context, sessions.filter { it.startMs > now })
+        LiveRecording.sync(context, sessions)
+    }
+
+    var recordingOn by mutableStateOf(LiveRecording.enabled(context))
+        private set
+    var recordingAll by mutableStateOf(LiveRecording.allSessions(context))
+        private set
+
+    fun chooseRecording(on: Boolean) {
+        recordingOn = on
+        LiveRecording.setEnabled(context, on)
+        syncReminders()
+    }
+
+    fun chooseRecordingAll(all: Boolean) {
+        recordingAll = all
+        LiveRecording.setAllSessions(context, all)
+        syncReminders()
+    }
+
+    /** The next Formula 1 session of the featured weekend that hasn't started, if any. */
+    fun nextSession(weekend: WeekendInfo): CatalogItem? =
+        weekendContent[weekend.meetingKey]?.sessions?.firstOrNull { it.upcoming }
+
+    // Choosing feeds.
+
+    /** Opens the feed sheet for a session; feeds already on screen show as picked. */
+    /**
+     * [start]: begin on the main broadcast straight away rather than waiting for a choice.
+     * [live]: on air now (also known from what's live).
+     */
+    fun openPicker(contentId: Long, title: String, image: String? = null, start: Boolean = false, live: Boolean = false) {
+        if (auth != AuthState.SIGNED_IN) {
+            message = "Sign in to watch."
+            return
+        }
+        val isKnownLive = live || liveNow.any { it.contentId == contentId }
+        if (isKnownLive) {
+            knownLiveContentIds += contentId
+            knownArchiveContentIds -= contentId
+            completedLiveTimingContentIds -= contentId
+        }
+        val sheet = FeedPicker(contentId, title, isKnownLive)
+        titles[contentId] = title
+        if (image != null) images[contentId] = image
+        picker = sheet
+        scope.launch {
+            try {
+                val list = channelsOf(contentId)
+                sheet.channels = list
+                val playingThis = tiles.any { it.contentId == contentId }
+                if (list.size == 1 && !playingThis) {
+                    // Highlights and shows have one feed: no choice to make, just play it. Live,
+                    // there's still live or from the start to choose, so it waits for that.
+                    sheet.selected.add(list.first())
+                    if (start || !sheet.live) watchPicked()
+                } else if (!playingThis) {
+                    // Nothing playing yet: start with the main broadcast ticked.
+                    sheet.selected.add(list.firstOrNull { it.isDefault } ?: list.first())
+                    if (start) watchPicked()
+                }
+            } catch (e: Exception) {
+                sheet.error = "Couldn't load this session's feeds: ${e.message}"
+            }
+        }
+    }
+
+    /** A session's feeds, fetched once. */
+    private suspend fun channelsOf(contentId: Long): List<Channel> = channelsByContent[contentId] ?: run {
+        val video = api.contentVideo(contentId)
+        video.session?.let { ref ->
+            val catalogStart = catalogStartTimes[contentId]
+            sessionRefs[contentId] = if (ref.sessionStartUtcMs == null && catalogStart != null) {
+                ref.copy(sessionStartUtcMs = catalogStart)
+            } else ref
+        }
+        if (!video.isSession) notSessions += contentId
+        video.channels.ifEmpty { listOf(Channel("Main feed", null, isDefault = true)) }
+            .also { channelsByContent[contentId] = it }
+    }
+
+    // Saving and resuming.
+
+    private var replayPreviewContent: Long? = null
+    private var replayPreviewPosition: Long? = null
+    private var replayPreviewWrite: kotlinx.coroutines.Job? = null
+
+    private fun saveReplayPreview(contentId: Long, positionMs: Long) {
+        val archive = timing?.takeIf { timingContentId == contentId && !it.live && !it.archivePartial } ?: return
+        val playhead = replayPlayhead(contentId, positionMs)
+        val videoUtc = playhead.videoUtcMs ?: return
+        if (replayPreviewContent == contentId &&
+            replayPreviewPosition?.let { abs(positionMs - it) < 25_000L } == true
+        ) return
+        replayPreviewContent = contentId
+        replayPreviewPosition = positionMs
+        replayPreviewWrite?.cancel()
+        replayPreviewWrite = scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val job = coroutineContext
+            ReplayCoreCache(context.cacheDir, contentId).writePreview(archive, positionMs, videoUtc + playhead.offsetMs) {
+                job.ensureActive()
+            }
+        }
+    }
+
+    /**
+     * Records the leading session as it stands. Called every few seconds while watching, when
+     * the app goes to the background and when the viewer closes. A replay watched to its last
+     * minute is done, so the record is dropped.
+     */
+    fun saveWatch() {
+        val leader = leaderTile() ?: return
+        val player = leader.feed.player
+        val live = leader.contentId in knownLiveContentIds || player.isCurrentMediaItemLive
+        val duration = if (castPlaybackHandedOff) durationMs else player.duration.takeIf { it > 0 } ?: 0L
+        val position = if (castPlaybackHandedOff) castFramePositionMs else player.currentPosition
+        noteSeen(leader.contentId, position, duration, live)
+        if (!live && duration > 0 && position > duration - 60_000) {
+            clearSavedWatch()
+            return
+        }
+        val session = tiles.filter { it.contentId == leader.contentId }
+        val big = session.firstOrNull { it.id == bigTileId } ?: session.first()
+        val layout = if (canvasW > 0f) SavedLayout.of(session.map { tile ->
+            protectedCompositionBounds[tile]?.let { Slot(it.x, it.y, it.w) } ?: Slot(tile.x, tile.y, tile.w)
+        }, canvasW, canvasH) else null
+        val saved = SavedWatch(
+            contentId = leader.contentId,
+            title = titles[leader.contentId] ?: "",
+            image = images[leader.contentId],
+            positionMs = position,
+            durationMs = duration,
+            live = live,
+            channels = session.map { it.channel.key() },
+            bigChannel = big.channel.key(),
+            audioChannel = (session.firstOrNull { it.audible } ?: big).channel.key(),
+            layoutMode = (if (layoutMode in setOf(LayoutMode.TILE_TEST, LayoutMode.SINGLE_DECODER_TEST)) LayoutMode.GRID else layoutMode).name,
+            mapMode = mapMode.name,
+            layout = layout,
+        )
+        if (!live) saveReplayPreview(leader.contentId, position)
+        recents.removeAll { it.contentId == saved.contentId }
+        recents.add(0, saved)
+        while (recents.size > MAX_RECENTS) recents.removeAt(recents.lastIndex)
+        storeRecents()
+    }
+
+    private fun clearSavedWatch() {
+        val leader = leaderTile() ?: return
+        if (recents.removeAll { it.contentId == leader.contentId }) storeRecents()
+    }
+
+    fun removeContinueWatching(contentId: Long) {
+        if (!recents.removeAll { it.contentId == contentId }) return
+        storeRecents()
+        val pending = replayPreviewWrite.takeIf { replayPreviewContent == contentId }
+        if (pending != null) {
+            pending.cancel()
+            replayPreviewContent = null
+            replayPreviewPosition = null
+        }
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            pending?.join()
+            ReplayCoreCache(context.cacheDir, contentId).deletePreview()
+        }
+    }
+
+    private fun storeRecents() {
+        prefs.edit().putString(PREF_RECENTS, SavedWatch.listToJson(recents)).remove(PREF_SAVED_WATCH).apply()
+    }
+
+    /** Puts a saved session back: same feeds, layout, big tile, audio and moment. */
+    fun resumeWatching(saved: SavedWatch) {
+        if (auth != AuthState.SIGNED_IN) return
+        // Another session on screen gives way to the one being resumed.
+        if (tiles.isNotEmpty()) stopAll()
+        task("Picking up where you left off") {
+            val list = channelsOf(saved.contentId)
+            val feeds = saved.channels.mapNotNull { key -> list.firstOrNull { it.key() == key } }
+            if (feeds.isEmpty()) throw IOException("those feeds aren't available any more")
+            titles[saved.contentId] = saved.title
+            images[saved.contentId] = saved.image
+            if (saved.live) {
+                knownLiveContentIds += saved.contentId
+                knownArchiveContentIds -= saved.contentId
+                completedLiveTimingContentIds -= saved.contentId
+            } else if (sessionRefs.containsKey(saved.contentId)) {
+                // This is a saved replay of a session. Do not wait for the TV's player clock.
+                knownArchiveContentIds += saved.contentId
+                knownLiveContentIds -= saved.contentId
+            }
+            val restoredLayout = runCatching { LayoutMode.valueOf(saved.layoutMode) }.getOrNull()
+            if (restoredLayout != null) layoutMode = restoredLayout
+            runCatching { mapMode = MapMode.valueOf(saved.mapMode) }
+            if (restoredLayout == LayoutMode.TV) {
+                mapMode = MapMode.TRACK
+                towerOpen = true
+                overlayLayoutMode = OverlayLayoutMode.DOCKED
+                tvLayoutMapNeedsDefault = !mapPanel.placed && prefs.getString(PREF_MAP_PANEL, null).isNullOrBlank()
+                prefs.edit()
+                    .putString(PREF_MAP_MODE, MapMode.TRACK.name)
+                    .putBoolean(PREF_TOWER, true)
+                    .putString(PREF_OVERLAY_LAYOUT, OverlayLayoutMode.DOCKED.name)
+                    .apply()
+            }
+            // Feeds come back where they were, if the screen is the same shape.
+            resumeLayout = saved.layout?.let { layout -> saved.channels.zip(layout.boxes).toMap() to layout }
+            pendingResume = saved
+            browsing = false
+            addFeeds(saved.contentId, feeds)
+        }
+    }
+
+    /** Opens the F1 TV account site in the browser. */
+    fun openAccountPage() {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(ACCOUNT_URL)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+
+    /** Opens the feed sheet for whatever is playing, to add another of its feeds. */
+    fun openPickerForPlaying() {
+        val leader = leaderTile() ?: return
+        openPicker(
+            leader.contentId,
+            titles[leader.contentId] ?: "Add a feed",
+            live = leader.contentId in knownLiveContentIds || liveNow.any { it.contentId == leader.contentId },
+        )
+    }
+
+    fun closePicker() {
+        picker = null
+    }
+
+    fun isPlaying(contentId: Long, channel: Channel) = tiles.any { it.contentId == contentId && it.channel == channel }
+
+    /** Feeds there would be on screen if the sheet's picks were applied. */
+    fun pickedCount(sheet: FeedPicker) = tiles.size - sheet.removing.size + sheet.selected.size
+
+    /**
+     * Feeds already on screen start out picked; tapping one unpicks it to make room. New feeds
+     * can be picked until the screen would hold four.
+     */
+    fun togglePick(channel: Channel) {
+        val sheet = picker ?: return
+        val selectionLimit = if (layoutMode == LayoutMode.TILE_TEST) 2 else feedSelectionLimit
+        val full = pickedCount(sheet) >= selectionLimit
+        sheet.note = null
+        when {
+            isPlaying(sheet.contentId, channel) && channel in sheet.removing ->
+                if (full) sheet.note = feedLimitNote(selectionLimit) else sheet.removing.remove(channel)
+            isPlaying(sheet.contentId, channel) -> sheet.removing.add(channel)
+            channel in sheet.selected -> sheet.selected.remove(channel)
+            full -> sheet.note = feedLimitNote(selectionLimit)
+            else -> sheet.selected.add(channel)
+        }
+    }
+
+    /**
+     * Applies the sheet. A feed unpicked and another picked in its place take over the same tile,
+     * so the layout and the audio stay put; leftovers are removed or added.
+     */
+    /** [fromStart]: a live session from the beginning of what F1 keeps, rather than at the live edge. */
+    fun watchPicked(fromStart: Boolean = false) {
+        val sheet = picker ?: return
+        if (layoutMode == LayoutMode.TILE_TEST) {
+            val count = pickedCount(sheet)
+            if (count != 2) {
+                sheet.note = "Tile testing needs exactly two feeds from this session. You have $count selected."
+                return
+            }
+            val labels = (
+                tiles.filter { it.contentId == sheet.contentId && it.channel !in sheet.removing }.map { it.channel } +
+                    sheet.selected
+                ).map { channel -> channel.channelId?.let { "channel-$it" } ?: "default-channel" }
+            if (labels.size != 2) {
+                sheet.note = "Choose exactly two different feeds from the same F1 session."
+                return
+            }
+            val compositionGroup = "content-${sheet.contentId}"
+            HevcFeedProfileCapture.selectTileTestFeeds(compositionGroup, labels)
+            ProtectedHevcLiveComposition.selectFeeds(compositionGroup, labels)
+            if (sheet.selected.isEmpty() && sheet.removing.isEmpty()) {
+                if (isTv) startRealF1DashCapture(sheet.contentId, labels)
+                picker = null
+                browsing = false
+                handPlaced = false
+                layoutRequest++
+                message = if (isTv) {
+                    "Reading real F1 HEVC segments for one-decoder composition."
+                } else {
+                    "Tile test selected. Comparing the two chosen HEVC feeds."
+                }
+                showChrome()
+                return
+            }
+        }
+        if (sheet.selected.isEmpty() && sheet.removing.isEmpty()) return
+        // Silent tiles are swapped first, so the audio stays on the main broadcast.
+        val freed = tiles.filter { it.contentId == sheet.contentId && it.channel in sheet.removing }
+            .sortedBy { it.audible }.toMutableList()
+        val adds = sheet.selected.toMutableList()
+        while (freed.isNotEmpty() && adds.isNotEmpty()) switchFeed(freed.removeAt(0), adds.removeAt(0))
+        freed.forEach(::remove)
+        if (adds.isNotEmpty()) addFeeds(sheet.contentId, adds, fromStart)
+        picker = null
+        browsing = false
+    }
+
+    /** Replay composition is a finite on-demand source, not a moving live capture window. */
+    private fun startArchiveSingleDecoderComposition(contentId: Long, attempt: Int = 0) {
+        if (castPlaybackHandedOff) { applyVideoBudget(); return }
+        singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
+        if (protectedCompositionHost != null && !singleDecoderSceneActive) stopProtectedCompositionPresentation()
+        val selected = tiles.filter { it.contentId == contentId }
+        if (selected.size !in 2..MAX_SINGLE_DECODER_FEEDS || selected.size != tiles.size ||
+            selected.map { it.feed.sourceStream.profileLabel }.distinct().size != selected.size) {
+            singleDecoderFailure = "Single decoder needs different feeds from the same archive."
+            message = singleDecoderFailure
+            if (!singleDecoderSceneActive) {
+                decoderMode = settings.decoderMode
+                tiles.forEach { it.feed.player.playWhenReady = false }
+                applyVideoBudget()
+            }
+            return
+        }
+        singleDecoderFailure = null
+        val host = protectedCompositionHost?.takeIf { it in selected } ?: selected.firstOrNull { it.audible } ?: selected.first()
+        val previousLayout = layoutMode
+        val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
+        f1DashCaptureJob?.cancel()
+        f1DashCapture = capture
+        val startup = ArchiveCompositionStartup()
+        var transferred = false
+        var released = 0
+        var prepared: app.apexview.tiled.HevcArchiveVodSession? = null
+        var phase = "PREFLIGHT"
+        var failure: String? = null
+        var useExistingBackend = false
+        var retryableFailure = false
+        fun diagnostic() {
+            if (f1DashCapture != null && f1DashCapture !== capture) return
+            singleDecoderDiagnostic = buildString {
+                append("Source: F1 Archive · Selected feeds: ${selected.size}\n")
+                append("Requested platform: ${selected.map { it.feed.sourceStream.requestedPlatform }.distinct().joinToString()}\n")
+                append("Actual manifest: ${if (prepared != null) "HLS → static composed DASH" else "VALIDATING RESPONSE"}\n")
+                append("HEVC compatibility / CMAF alignment: ${if (prepared != null) "PASS" else "VALIDATING"}\n")
+                prepared?.let { session ->
+                    append("Video protection: CLEAR (verified CMAF). Widevine video keys: not required\n")
+                    append("Source: ${session.selectedHeight ?: "verified in CMAF"}p · Full feeds: YES\n")
+                    append("Composed picture: ${session.width}x${session.height} at ${session.frameRate}fps\n")
+                    append("Archive timeline: finite VOD · native audio/video clock\n")
+                }
+                append("Source decoders released (callbacks): $released\n")
+                append("Composed decoder: ${if (transferred) host.feed.activeVideoDecoderName ?: "NOT OBSERVED" else "NOT STARTED"}\n")
+                if (transferred) {
+                    append("${host.feed.activeVideoDecoderHardware} · Active video decoders (callbacks): $observedActiveVideoDecoders\n")
+                    append("Selected video tracks: ${host.feed.selectedVideoTrackCount}\n")
+                    append("Scene output: ${sceneOutputSize.first}x${sceneOutputSize.second} · decoder texture: 1\n")
+                    append("First frame: ${if (host.feed.hasRenderedFirstFrame) "YES" else "NO"} · Rendered frames: ${host.feed.renderedVideoFrames}\n")
+                    append("Player buffered: ${host.feed.player.totalBufferedDuration}ms\n")
+                }
+                append("Playback: $phase")
+                failure?.let { append("\n$it") }
+            }
+        }
+        fun restore() {
+            if (f1DashCapture !== capture) return
+            if (nativeArchiveTiles.isNotEmpty()) stopProtectedCompositionPresentation()
+            else {
+                selected.forEach { it.feed.clearProtectedCompositionVideoRole() }
+                applyVideoBudget()
+            }
+            decoderMode = settings.decoderMode
+            if (settings.decoderMode == DecoderMode.SINGLE) selected.forEach { it.feed.player.playWhenReady = false }
+            layoutRequest++
+        }
+        val probePositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
+        selected.forEach { android.util.Log.i("ApexviewPlaybackOffer", it.feed.sourceStream.offerDiagnostic) }
+        // Enforce the selected decoder budget immediately, including while validation runs.
+        selected.forEach { it.feed.player.playWhenReady = false }
+        applyVideoBudget()
+        archiveCompositionStarting = true
+        message = SINGLE_DECODER_ACTIVATING
+        diagnostic()
+        f1DashCaptureJob = scope.launch {
+            try {
+                startup.start(
+                    preflight = {
+                        // Capture the selected position once. Slow preparation must not chase an
+                        // independently advancing source clock or interrupt working playback.
+                        val session = capture.prepareVod(selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel,
+                            it.feed.sourceStream.url) }, probePositionMs, host.feed.sourceStream.profileLabel,
+                            minOf(settings.videoQuality.targetHeight.takeIf { it > 0 } ?: 720,
+                                    if (selected.size > 4) 270 else if (selected.size > 2) 540 else 720),
+                            settings.commentary)
+                        try {
+                            host.feed.requireArchiveHardwareSupport(session.codedWidth, session.codedHeight, session.frameRate * playbackSpeed)
+                            prepared = session
+                            diagnostic()
+                            session
+                        } catch (error: Throwable) { session.close(); throw error }
+                    },
+                    releaseSources = {
+                        val before = selected.sumOf { it.feed.activeVideoDecoderCount }
+                        selected.forEach { tile -> tile.feed.setProtectedCompositionVideoRole(false,
+                            tile.w.toInt().coerceAtLeast(1), tile.h.toInt().coerceAtLeast(1)) }
+                        val results = coroutineScope { selected.map { async { it.feed.awaitVideoDecoderRelease(3_000L) } }.awaitAll() }
+                        released = (before - selected.sumOf { it.feed.activeVideoDecoderCount }).coerceAtLeast(0)
+                        if (results.any { !it } || observedActiveVideoDecoders != 0) throw IOException("Source video decoder release was not confirmed")
+                        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_HANDOFF preflight=PASS observedReleases=$released activeVideoDecoders=0")
+                    },
+                    replaceHost = { session ->
+                        val handoffPositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
+                        sceneOutputSize = 0 to 0
+                        nativeArchiveTiles = selected
+                        showProtectedCompositionPresentation(host, selected, sceneLayout = true)
+                        // One Media3 player now loads both the composed video and selected audio.
+                        // Stopped originals perform no downloads and cannot move its clock.
+                        selected.forEach { it.feed.suspendForArchiveComposition(); it.feed.setAudible(false) }
+                        host.feed.startArchiveVodPlayback(session, handoffPositionMs, playing)
+                        transferred = true
+                        archiveCompositionStarting = false
+                        host.feed.setAudible(!mutedAll && !castingActive)
+                        decoderMode = DecoderMode.SINGLE
+                        phase = "BUFFERING"
+                    },
+                    restoreSources = { restore() },
+                    dispose = { if (!transferred) it.close() },
+                )
+                var previousLog = ""
+                var lastEvidenceAt = 0L
+                var readySince: Long? = null
+                while (true) {
+                    host.feed.problem?.let { throw IOException("Composed playback failed: $it") }
+                    if (host.feed.hasRenderedFirstFrame && observedActiveVideoDecoders > 1) throw IOException("Expected one active video decoder; callbacks report $observedActiveVideoDecoders")
+                    if (host.feed.hasRenderedFirstFrame && host.feed.activeVideoDecoderHardware == "hardware NO") throw IOException("Composed video selected a software decoder")
+                    phase = when {
+                        host.feed.player.playbackState == Player.STATE_ENDED -> "ENDED"
+                        browsing -> "VIDEO SUSPENDED WHILE BROWSING"
+                        observedActiveVideoDecoders == 0 -> "WAITING FOR VIDEO DECODER"
+                        host.feed.buffering -> "BUFFERING"
+                        !host.feed.hasRenderedFirstFrame -> "WAITING FOR FIRST FRAME"
+                        !playing -> "PAUSED"
+                        else -> "ACTIVE"
+                    }
+                    if ((phase == "ACTIVE" || phase == "PAUSED") && message == SINGLE_DECODER_ACTIVATING) message = null
+                    if (!browsing && host.feed.player.playbackState == Player.STATE_READY && !host.feed.hasRenderedFirstFrame) {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (readySince == null) readySince = now
+                        if (now - requireNotNull(readySince) > 15_000L) throw IOException("Decoder was ready but did not render a first frame")
+                    } else readySince = null
+                    diagnostic()
+                    val log = "$phase decoder=${host.feed.activeVideoDecoderName} activeVideoDecoders=$observedActiveVideoDecoders firstFrame=${host.feed.hasRenderedFirstFrame}"
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (log != previousLog || now - lastEvidenceAt >= 5_000L) {
+                        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_PLAYBACK $log renderedFrames=${host.feed.renderedVideoFrames} " +
+                            "selectedVideoTracks=${host.feed.selectedVideoTrackCount} sceneOutput=${sceneOutputSize.first}x${sceneOutputSize.second} " +
+                            "codecSurface=${host.feed.composedSurfaceWidth}x${host.feed.composedSurfaceHeight} bufferedMs=${host.feed.player.totalBufferedDuration}")
+                        previousLog = log
+                        lastEvidenceAt = now
+                    }
+                    kotlinx.coroutines.delay(500L)
+                }
+            } catch (backend: app.apexview.tiled.ArchiveVodBackendRequired) {
+                useExistingBackend = true
+                android.util.Log.i("ApexviewSingleDecoder", "Archive requires existing DASH/protected composition backend; sources unchanged")
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                if (startup.sourceDecodersTouched) restore()
+                phase = "CANCELLED"
+                diagnostic()
+                throw cancelled
+            } catch (error: Exception) {
+                failure = (error.message ?: error.javaClass.simpleName).replace(Regex("https?://\\S+"), "[URL]").take(400)
+                phase = "FAILED"
+                retryableFailure = when (error) {
+                    is app.apexview.tiled.ArchiveVodMediaException -> error.retryable
+                    else -> app.apexview.tiled.CaptureFailure.from(error).retryable
+                }
+                decoderMode = settings.decoderMode
+                singleDecoderFailure = failure
+                // Preserve the failure evidence before restore cancels this capture's ownership.
+                diagnostic()
+                if (startup.sourceDecodersTouched || singleDecoderSceneActive) restore() else {
+                    selected.forEach { it.feed.player.playWhenReady = false }; applyVideoBudget()
+                }
+                message = "Single decoder failed: $failure. Use Retry or select Multiple decoders in Settings."
+                android.util.Log.w("ApexviewSingleDecoder", "ARCHIVE_VOD_FAILED reason=$failure")
+            } finally {
+                if (f1DashCapture === capture) {
+                    archiveCompositionStarting = false
+                    if (!transferred && !useExistingBackend && settings.decoderMode == DecoderMode.MULTIPLE)
+                        selected.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
+                    capture.reset(); f1DashCapture = null; f1DashCaptureJob = null
+                }
+            }
+            if (useExistingBackend) startRollingArchiveSingleDecoderComposition(contentId, attempt)
+            else if (retryableFailure && attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
+                val originalIds = selected.map { it.id }
+                android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_RETRY requested=AUTO attempt=${attempt + 1} delayMs=${500L * (attempt + 1)}")
+                singleDecoderRetryJob = scope.launch {
+                    kotlinx.coroutines.delay(500L * (attempt + 1))
+                    if (settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && !singleDecoderSceneActive) {
+                        singleDecoderRetryJob = null
+                        startArchiveSingleDecoderComposition(contentId, attempt + 1)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Validate authorised archive media completely before changing any source decoder. */
+    private fun startRollingArchiveSingleDecoderComposition(contentId: Long, attempt: Int = 0) {
+        val selectedTiles = tiles.filter { it.contentId == contentId }
+        val previousLayout = layoutMode
+        if (selectedTiles.size !in 2..6 || selectedTiles.size != tiles.size) {
+            singleDecoderFailure = "This protected archive backend supports two to six feeds from one archive. Clear archives can use up to 24 when their composed picture fits the decoder."
+            message = singleDecoderFailure
+            decoderMode = settings.decoderMode
+            tiles.forEach { it.feed.player.playWhenReady = false }
+            applyVideoBudget()
+            return
+        }
+        val labels = selectedTiles.map { it.feed.sourceStream.profileLabel }
+        if (labels.distinct().size != labels.size) {
+            singleDecoderFailure = "Single decoder needs different feeds from the same archive."
+            message = singleDecoderFailure
+            decoderMode = settings.decoderMode
+            tiles.forEach { it.feed.player.playWhenReady = false }
+            applyVideoBudget()
+            return
+        }
+        val feeds = selectedTiles.zip(labels).map { (tile, label) ->
+            F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url)
+        }
+        val host = selectedTiles.firstOrNull { !it.audible } ?: selectedTiles.first()
+        val audioMaster = selectedTiles.firstOrNull { it !== host && it.audible }
+            ?: selectedTiles.first { it !== host }
+        val group = "archive-content-$contentId-${java.util.UUID.randomUUID()}"
+        f1DashCaptureJob?.cancel()
+        val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
+        f1DashCapture = capture
+        ProtectedHevcLiveComposition.selectFeeds(group, labels)
+        val startup = ArchiveCompositionStartup()
+        var lastSnapshot: F1DashFeedCapture.Snapshot? = null
+        var releasedCount = 0
+        var playback = "PREFLIGHT"
+        var terminalReason: String? = null
+        var retryableFailure = false
+        var restored = false
+        var preflightPassed = false
+        var composedFirstFrameSeen = false
+        var composedCodec: String? = null
+
+        fun diagnostics() {
+            if (f1DashCapture != null && f1DashCapture !== capture) return
+            val snapshot = lastSnapshot
+            singleDecoderDiagnostic = buildString {
+                append("Source: F1 Archive · Selected feeds: ${selectedTiles.size}\n")
+                append("Requested platform: " + selectedTiles.map { it.feed.sourceStream.requestedPlatform }.distinct().joinToString() + "\n")
+                append("Player: " + selectedTiles.map { it.feed.sourceStream.playerType }.distinct().joinToString() + "\n")
+                labels.forEach { label ->
+                    append("$label manifest: ${snapshot?.actualManifests?.get(label)?.name ?: "UNVERIFIED"}\n")
+                }
+                append("HEVC/CMAF preflight: " + if (preflightPassed) "PASS\n" else "${snapshot?.detail ?: "VALIDATING"}\n")
+                append("Media protection: ${capture.protection}\n")
+                append("Composition: ${snapshot?.compositionStatus ?: "VALIDATING"}\n")
+                snapshot?.outputTiming?.let { timing ->
+                    val aheadMs = (timing.endUs / 1000L - audioMaster.feed.player.currentPosition).coerceAtLeast(0L)
+                    append("Prepared video ahead: ${aheadMs}ms\n")
+                }
+                if (startup.hostReplaced) append("Player buffered: ${host.feed.player.totalBufferedDuration}ms\n")
+                append("Source decoders released (callbacks): $releasedCount\n")
+                append("Composed decoder: ${composedCodec ?: "NOT OBSERVED"}\n")
+                append("First composed frame: ${if (composedFirstFrameSeen) "YES" else "NO"}\n")
+                append("Playback: $playback")
+                terminalReason?.let { append("\n$it") }
+            }
+        }
+        fun restore(replacedHost: Boolean) {
+            // A newer layout/test may already own these players after cancelling this job.
+            if (restored || f1DashCapture !== capture) return
+            restored = true
+            if (protectedCompositionHost != null) {
+                stopProtectedCompositionPresentation()
+            } else if (startup.sourceDecodersTouched) {
+                if (replacedHost) host.feed.stopProtectedComposedPlayback(audioMaster.feed.player.currentPosition)
+                selectedTiles.forEach { it.feed.clearProtectedCompositionVideoRole() }
+                applyVideoBudget()
+            }
+            composedArchiveOriginMs = null
+            composedArchiveFillingBuffer = false
+            selectedTiles.filter { it in tiles }.forEach {
+                it.feed.player.playWhenReady = settings.decoderMode == DecoderMode.MULTIPLE && playing
+            }
+            layoutMode = previousLayout
+            layoutRequest++
+        }
+        selectedTiles.forEach { android.util.Log.i("ApexviewPlaybackOffer", it.feed.sourceStream.offerDiagnostic) }
+        selectedTiles.forEach { it.feed.player.playWhenReady = false }
+        archiveCompositionStarting = true
+        diagnostics()
+        message = SINGLE_DECODER_ACTIVATING
+        f1DashCaptureJob = scope.launch {
+            try {
+                startup.start(
+                    preflight = {
+                        val deadline = android.os.SystemClock.elapsedRealtime() + 30_000L
+                        var prepared: ProtectedHevcLiveComposition.OutputWindow? = null
+                        while (prepared == null) {
+                            val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
+                            lastSnapshot = snapshot
+                            diagnostics()
+                            snapshot.failure?.takeUnless { it.retryable }?.let { throw app.apexview.tiled.PermanentCaptureException(it.reason) }
+                            val clockUs = Math.multiplyExact(audioMaster.feed.player.currentPosition.coerceAtLeast(0L), 1000L)
+                            val durationUs = audioMaster.feed.player.duration.takeIf { it > 0L }?.let { Math.multiplyExact(it, 1000L) }
+                            if (ArchiveBufferPolicy.ready(snapshot.outputTiming, clockUs, durationUs, minimumLeadUs = 0L)) {
+                                prepared = capture.outputWindow(group)
+                            }
+                            if (prepared == null) {
+                                if (android.os.SystemClock.elapsedRealtime() >= deadline) {
+                                    throw IOException("Archive preflight timed out: ${snapshot.detail ?: "prepared video has insufficient lead over the archive clock"}")
+                                }
+                                if (snapshot.capturedFeeds == 0) kotlinx.coroutines.delay(250L)
+                            }
+                        }
+                        prepared.also { window ->
+                            val licenses = selectedTiles.map { it.feed.sourceStream.licenseUrl }
+                            if (!capture.clearOutput && !protectedFeedsShareLicense(licenses)) {
+                                window.zero()
+                                throw app.apexview.tiled.PermanentCaptureException("Protected feeds need the same authorised Widevine license endpoint.")
+                            }
+                            // Video tracks are disabled during preflight, so they may not yet
+                            // have requested a license. The composed Media3 source below uses
+                            // the host's existing F1 license callback and its preserved PSSH.
+                            if (!capture.clearOutput) android.util.Log.i("ApexviewSingleDecoder", "WIDEVINE_KEYS requestedBy=COMPOSED_PLAYER")
+                            val pssh = capture.widevinePssh()
+                            try {
+                                app.apexview.tiled.ProtectedHevcComposedDashPackageBuilder.build(
+                                    window, pssh, window.fragments.first().baseDecodeTimeTicks,
+                                    System.currentTimeMillis(), clearOutput = capture.clearOutput,
+                                ).zero()
+                                preflightPassed = true
+                            } catch (error: Exception) {
+                                window.zero()
+                                throw IOException("Composed source initialization failed: ${error.message}")
+                            } finally { pssh?.fill(0) }
+                        }
+                    },
+                    releaseSources = {
+                        val decodersBefore = selectedTiles.sumOf { it.feed.activeVideoDecoderCount }
+                        selectedTiles.forEach { tile ->
+                            tile.feed.setProtectedCompositionVideoRole(false,
+                                (tile.w * context.resources.displayMetrics.density).toInt().coerceAtLeast(1),
+                                (tile.h * context.resources.displayMetrics.density).toInt().coerceAtLeast(1))
+                        }
+                        val releaseResults = coroutineScope {
+                            selectedTiles.map { tile -> async { tile.feed.awaitVideoDecoderRelease(3_000L) } }.awaitAll()
+                        }
+                        releasedCount = (decodersBefore - selectedTiles.sumOf { it.feed.activeVideoDecoderCount }).coerceAtLeast(0)
+                        if (releaseResults.any { !it }) throw IOException("Decoder release failed for ${releaseResults.count { !it }} source players")
+                        android.util.Log.i("ApexviewSingleDecoder", "Preflight PASS. All source players decoder-free; observed releases=$releasedCount.")
+                    },
+                    replaceHost = { window ->
+                        if (host.audible) setAudio(audioMaster)
+                        composedArchiveOriginMs = requireNotNull(lastSnapshot?.outputTiming).startUs / 1000L
+                        composedArchiveFillingBuffer = true
+                        // The validated picture covers this position. Hold the audio clock while
+                        // actual queued media fills the initial buffer, then resume both together.
+                        selectedTiles.forEach { it.feed.player.playWhenReady = false }
+                        host.feed.startProtectedComposedPlayback(window, capture.widevinePssh(),
+                            clearOutput = capture.clearOutput,
+                            startPositionMs = (audioMaster.feed.player.currentPosition - requireNotNull(composedArchiveOriginMs)).coerceAtLeast(0L),
+                            playWhenReady = false)
+                        archiveCompositionStarting = false
+                        layoutMode = LayoutMode.SINGLE_DECODER_TEST
+                        showProtectedCompositionPresentation(host, selectedTiles, audioMaster)
+                    },
+                    restoreSources = ::restore,
+                    dispose = { it.zero() },
+                )
+                var waitingSince: Long? = null
+                while (true) {
+                    host.feed.problem?.let { throw IOException("Composed decoder/DRM playback failed: $it") }
+                    if (!browsing && !host.feed.hasRenderedFirstFrame) {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (waitingSince == null) waitingSince = now
+                        if (now - requireNotNull(waitingSince) >= 15_000L) throw IOException("Composed decoder did not render a first frame within 15 seconds")
+                    } else waitingSince = null
+                    composedFirstFrameSeen = host.feed.hasRenderedFirstFrame
+                    host.feed.activeVideoDecoderName?.let { composedCodec = "$it (${host.feed.activeVideoDecoderHardware})" }
+                    playback = when {
+                        composedArchiveFillingBuffer || host.feed.buffering -> "BUFFERING"
+                        composedFirstFrameSeen -> "ACTIVE"
+                        else -> "WAITING FOR FIRST FRAME"
+                    }
+                    if (playback == "ACTIVE" && message == SINGLE_DECODER_ACTIVATING) message = null
+                    val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
+                    lastSnapshot = snapshot
+                    snapshot.failure?.takeUnless { it.retryable }?.let { throw IOException(it.reason) }
+                    if (snapshot.capturedFeeds > 0) capture.outputWindow(group)?.let {
+                        host.feed.publishProtectedComposedOutput(it, capture.widevinePssh())
+                    }
+                    if (composedArchiveFillingBuffer && ArchiveBufferPolicy.ready(snapshot.outputTiming,
+                            Math.multiplyExact(audioMaster.feed.player.currentPosition.coerceAtLeast(0L), 1000L),
+                            audioMaster.feed.player.duration.takeIf { it > 0 }?.let { Math.multiplyExact(it, 1000L) })) {
+                        composedArchiveFillingBuffer = false
+                    }
+                    diagnostics()
+                    if (audioMaster.feed.player.playbackState == Player.STATE_ENDED) {
+                        playback = "ENDED"
+                        restore(true)
+                        diagnostics()
+                        break
+                    }
+                    if (snapshot.capturedFeeds == 0) kotlinx.coroutines.delay(250L)
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                if (startup.sourceDecodersTouched) restore(startup.hostReplaced)
+                playback = "CANCELLED"
+                diagnostics()
+                throw cancelled
+            } catch (error: Exception) {
+                // Do not log raw network exceptions or their signed URLs.
+                terminalReason = (error.message ?: error.javaClass.simpleName)
+                    .replace(Regex("https?://\\S+"), "[redacted URL]").take(400)
+                retryableFailure = app.apexview.tiled.CaptureFailure.from(error).retryable
+                if (startup.sourceDecodersTouched) restore(startup.hostReplaced) else {
+                    selectedTiles.forEach { it.feed.clearProtectedCompositionVideoRole() }
+                    applyVideoBudget()
+                }
+                decoderMode = settings.decoderMode
+                singleDecoderFailure = terminalReason
+                selectedTiles.forEach { it.feed.player.playWhenReady = false }
+                applyVideoBudget()
+                playback = "FAILED"
+                diagnostics()
+                android.util.Log.w("ApexviewSingleDecoder", "Archive composition failed: $terminalReason")
+                message = "Single decoder failed: $terminalReason. Use Retry or select Multiple decoders in Settings."
+            } finally {
+                if (f1DashCapture === capture) {
+                    archiveCompositionStarting = false
+                    if (!startup.sourceDecodersTouched && settings.decoderMode == DecoderMode.MULTIPLE)
+                        selectedTiles.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
+                    capture.reset()
+                    f1DashCapture = null
+                    f1DashCaptureJob = null
+                    ProtectedHevcLiveComposition.clearSelection(group)
+                }
+            }
+            if (retryableFailure && attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
+                val originalIds = selectedTiles.map { it.id }
+                android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_RETRY requested=AUTO attempt=${attempt + 1} delayMs=${500L * (attempt + 1)} backend=PROTECTED")
+                singleDecoderRetryJob = scope.launch {
+                    kotlinx.coroutines.delay(500L * (attempt + 1))
+                    if (settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && protectedCompositionHost == null) {
+                        singleDecoderRetryJob = null
+                        startArchiveSingleDecoderComposition(contentId, attempt + 1)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Start the protected one-decoder path for a normal Android TV live multiview session. */
+    private fun startTvLiveCompositionIfEligible(contentId: Long) {
+        if (decoderMode == DecoderMode.MULTIPLE || !isTv || layoutMode == LayoutMode.TILE_TEST || layoutMode == LayoutMode.SINGLE_DECODER_TEST) return
+        // A feed was added to an already composed session. Restore the source players and layout
+        // before rebuilding the selected-feed set, otherwise the old grid host remains detached.
+        if (protectedCompositionHost != null) stopProtectedCompositionPresentation()
+        val isKnownLive = contentId in knownLiveContentIds || liveNow.any { it.contentId == contentId }
+        if (!isKnownLive) return
+        val sessionTiles = tiles.filter { it.contentId == contentId }
+        if (sessionTiles.size !in 2..6) {
+            if (sessionTiles.size > 6) {
+                message = "This protected live composition supports up to six feeds on this playback path. Clear archive compositions can use up to 24 when the combined picture fits the decoder."
+                sessionTiles.forEach { it.feed.player.playWhenReady = false }
+                applyVideoBudget()
+            }
+            return
+        }
+        val labels = sessionTiles.map { tile ->
+            tile.channel.channelId?.let { "channel-$it" } ?: "default-channel"
+        }
+        if (labels.distinct().size != labels.size) return
+        val group = "content-$contentId"
+        ProtectedHevcLiveComposition.selectFeeds(group, labels)
+        startRealF1DashCapture(contentId, labels)
+    }
+
+    /**
+     * F1 Tizen's live grid fetches each feed's init and aligned media segments independently,
+     * then stitches them into one HEVC representation. This is the Android/Media3 equivalent
+     * acquisition stage: direct DASH DataSource requests only, never an extra player or decoder.
+     */
+    private fun startRealF1DashCapture(contentId: Long, labels: List<String>) {
+        val byLabel = tiles.filter { it.contentId == contentId }.associateBy {
+            it.channel.channelId?.let { id -> "channel-$id" } ?: "default-channel"
+        }
+        val feeds = labels.mapNotNull { label ->
+            byLabel[label]?.let { tile ->
+                F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url)
+            }
+        }
+        if (feeds.size != labels.size || feeds.size !in 2..6) {
+            message = "Could not start F1 tile capture: selected feed URLs are not all available."
+            return
+        }
+        f1DashCaptureJob?.cancel()
+        f1DashCapture?.reset()
+        val capture = F1DashFeedCapture(
+            userAgent = userAgent,
+            ascendon = api.ascendon.orEmpty(),
+            entitlement = api.entitlement.orEmpty(),
+        )
+        f1DashCapture = capture
+        val group = "content-$contentId"
+        val selectedTiles = labels.mapNotNull { byLabel[it] }
+        val host = selectedTiles.firstOrNull { !it.audible } ?: selectedTiles.first()
+        val audioTile = selectedTiles.firstOrNull { it !== host && it.audible }
+        if (audioTile != null && host.audible) setAudio(audioTile)
+
+        f1DashCaptureJob = scope.launch {
+            var lastMessage: String? = null
+            var composedPlaybackStarted = false
+            while (true) {
+                val snapshot = capture.captureNext(group, feeds)
+                val outputWindow = ProtectedHevcLiveComposition.outputWindow(group)
+                if (outputWindow != null) {
+                    val pssh = capture.widevinePssh()
+                    try {
+                        if (!composedPlaybackStarted) {
+                            // Keep each source feed audio-only, then wait for its video decoder
+                            // to release before preparing the single composed video representation.
+                            selectedTiles.forEach { tile ->
+                                tile.feed.setProtectedCompositionVideoRole(
+                                    enabled = false,
+                                    width = (tile.w * context.resources.displayMetrics.density).toInt().coerceAtLeast(1),
+                                    height = (tile.h * context.resources.displayMetrics.density).toInt().coerceAtLeast(1)
+                                )
+                            }
+                            val released = selectedTiles.all {
+                                it.feed.awaitVideoDecoderRelease(2_500L)
+                            }
+                            if (!released) {
+                                outputWindow.zero()
+                                pssh?.fill(0)
+                                message = "Waiting for the source video decoder to release before starting the composed grid."
+                            } else {
+                                host.feed.startProtectedComposedPlayback(outputWindow, pssh)
+                                showProtectedCompositionPresentation(host, selectedTiles, audioTile)
+                                composedPlaybackStarted = true
+                            }
+                        } else {
+                            host.feed.publishProtectedComposedOutput(outputWindow, pssh)
+                        }
+                    } catch (error: Exception) {
+                        outputWindow.zero()
+                        pssh?.fill(0)
+                        message = "Protected composed playback: ${error.message ?: error.javaClass.simpleName}"
+                    }
+                }
+                val nextMessage = when {
+                    snapshot.detail != null -> "F1 feed capture: ${snapshot.detail}"
+                    composedPlaybackStarted ->
+                        "Single-decoder protected F1 grid playing. ${snapshot.compositionStatus}"
+                    snapshot.capturedFeeds > 0 ->
+                        "Real F1 CMAF captured from ${snapshot.capturedFeeds} feeds. ${snapshot.compositionStatus}"
+                    else -> "F1 feed capture: ${snapshot.compositionStatus}"
+                }
+                if (nextMessage != lastMessage) {
+                    message = nextMessage
+                    lastMessage = nextMessage
+                }
+                kotlinx.coroutines.delay(1_000)
+            }
+        }
+    }
+
+    /**
+     * Present the composed video as one full-canvas tile. Other selected tiles are hidden visually,
+     * but their audio players keep running so the audible broadcast is preserved.
+     */
+    private fun showProtectedCompositionPresentation(
+        host: Tile,
+        selected: List<Tile>,
+        audioMaster: Tile? = null,
+        sceneLayout: Boolean = false,
+    ) {
+        if (protectedCompositionHost != null) return
+        protectedCompositionHost = host
+        protectedCompositionAudioMaster = audioMaster
+        protectedCompositionBounds = if (sceneLayout) emptyMap() else selected.associateWith { tile ->
+            ProtectedTileBounds(tile.x, tile.y, tile.w, tile.h, tile.z)
+        }
+        selected.forEach { it.protectedCompositionHidden = !sceneLayout && it !== host }
+        if (sceneLayout) { layoutRequest++; return }
+        host.x = 0f
+        host.y = 0f
+        host.w = canvasW.takeIf { it > 0f } ?: host.w
+        host.h = canvasH.takeIf { it > 0f } ?: host.h
+        topZ += 1f
+        host.z = topZ
+        layoutRequest++
+    }
+
+    private fun clearLocalHevcComposition() {
+        val retained = buildSet {
+            nativeComposedCast?.let { add(it.compositionGroup) }
+            preparingNativeCast?.let { add(it.compositionGroup) }
+            retiredNativeCasts.forEach { add(it.compositionGroup) }
+        }
+        ProtectedHevcLiveComposition.clearAll(retainGroups = retained)
+    }
+
+    /** Stop protected capture and restore the original tile arrangement and feed player. */
+    fun stopProtectedCompositionPresentation(restorePlayer: Boolean = true, keepSourceVideoDisabled: Boolean = false) {
+        val wasStarting = archiveCompositionStarting
+        archiveCompositionStarting = false
+        f1DashCaptureJob?.cancel()
+        f1DashCaptureJob = null
+        f1DashCapture?.reset()
+        f1DashCapture = null
+        val native = nativeArchiveTiles
+        val resumePositionMs = if (native.isNotEmpty()) protectedCompositionHost?.feed?.player?.currentPosition
+            else protectedCompositionAudioMaster?.feed?.player?.currentPosition
+        if (restorePlayer) {
+            if (native.isNotEmpty()) native.forEach {
+                it.feed.stopProtectedComposedPlayback(resumePositionMs, playing, enableVideo = false)
+                it.feed.setAudible(it.audible && !mutedAll && !castingActive)
+            }
+            else protectedCompositionHost?.feed?.stopProtectedComposedPlayback(resumePositionMs)
+        }
+        nativeArchiveTiles = emptyList()
+        protectedCompositionAudioMaster = null
+        composedArchiveOriginMs = null
+        composedArchiveFillingBuffer = false
+        tiles.forEach { tile ->
+            tile.protectedCompositionHidden = false
+            tile.feed.clearProtectedCompositionVideoRole()
+            protectedCompositionBounds[tile]?.let { bounds ->
+                tile.x = bounds.x
+                tile.y = bounds.y
+                tile.w = bounds.w
+                tile.h = bounds.h
+                tile.z = bounds.z
+            }
+        }
+        protectedCompositionBounds = emptyMap()
+        protectedCompositionHost = null
+        clearLocalHevcComposition()
+        HevcFeedProfileCapture.clearTileTestSelection()
+        if (keepSourceVideoDisabled) tiles.forEach { it.feed.setProtectedCompositionVideoRole(false, it.w.toInt().coerceAtLeast(1), it.h.toInt().coerceAtLeast(1)) }
+        else applyVideoBudget()
+        if (restorePlayer && wasStarting && native.isEmpty() && !keepSourceVideoDisabled && settings.decoderMode == DecoderMode.MULTIPLE) {
+            tiles.forEach { it.feed.player.playWhenReady = playing }
+        }
+        layoutRequest++
+    }
+
+    /** Single-decoder selections are still checked against actual renditions and decoder capacity. */
+    val feedSelectionLimit get() = if (settings.decoderMode == DecoderMode.SINGLE) MAX_SINGLE_DECODER_FEEDS else MAX_FEEDS
+    private fun feedLimitNote(limit: Int) = "Up to $limit feeds can be selected in this mode. Unpick one to make room."
+    val roomForFeeds get() = (feedSelectionLimit - tiles.size).coerceAtLeast(0)
+
+    private fun addFeeds(contentId: Long, requested: List<Channel>, fromStart: Boolean = false, added: (Tile) -> Unit = {}) {
+        if (requested.isEmpty()) return
+        if (roomForFeeds <= 0) {
+            message = feedLimitNote(feedSelectionLimit)
+            return
+        }
+        if (settings.decoderMode == DecoderMode.SINGLE && tiles.any { it.contentId != contentId }) {
+            message = "Single decoder needs feeds from one archive. Choose Multiple decoders to combine sessions."
+            return
+        }
+        val picks = requested.take(roomForFeeds)
+        val dropped = requested.size - picks.size
+        task("Starting feeds") {
+            val failures = mutableListOf<String>()
+            // The catalog already tells us whether this is live or a replay. Start timing
+            // immediately instead of waiting for every CONTENT/PLAY request and video prepare.
+            // For entries without a catalog classification, the timing job waits for the real
+            // Media3 timeline while feed creation proceeds in parallel.
+            if (timingContentId != contentId || (timing == null && liveFeed?.isActive != true)) {
+                loadTiming(contentId)
+            }
+            val offerStartedMs = android.os.SystemClock.elapsedRealtime()
+            val streams = picks.mapNotNull { channel ->
+                try {
+                    channel to streamFor(contentId, channel, failures)
+                } catch (e: Exception) {
+                    failures += "${channel.title}: ${e.message}"
+                    null
+                }
+            }
+            if (DiagnosticLogs.recording) android.util.Log.i(
+                "PitwallPlayback",
+                "event=offers content=$contentId count=${streams.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - offerStartedMs}",
+            )
+            if (streams.isEmpty()) {
+                if (!hasVideoPlan) {
+                    planPromptOpen = true
+                    message = null
+                } else message = "No feed would start.\n" + failures.joinToString("\n")
+                return@task
+            }
+
+            // New feeds join at the moment already playing, rather than starting at zero and
+            // waiting for the sync loop to jump them forward.
+            val joinAt = leaderTile()?.takeIf { it.contentId == contentId && !it.feed.player.isCurrentMediaItemLive }
+                ?.feed?.player?.currentPosition
+            // A rejected offer leaves the working composition untouched. Change ownership only
+            // after the service has supplied an actual replacement source and its join clock.
+            if (singleDecoderSceneActive) stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
+            if (settings.decoderMode == DecoderMode.SINGLE) decoderMode = DecoderMode.SINGLE
+            val first = tiles.isEmpty()
+            val preparingSingle = decoderMode == DecoderMode.SINGLE && (tiles.isNotEmpty() || streams.size > 1)
+            if (preparingSingle) tiles.forEach { it.feed.player.playWhenReady = false }
+            // A press conference or a show has no cars to follow: its map starts off, without
+            // touching the style saved for sessions.
+            if (first && pendingResume?.contentId != contentId) mapMode = if (contentId in notSessions) MapMode.OFF else savedMapMode()
+            // A feed added while one fills the screen brings the whole layout back.
+            focusTileId = null
+            val resumeAt = pendingResume?.takeIf { it.contentId == contentId && !it.live }?.positionMs
+            val startAt = resumeAt ?: joinAt
+            streams.forEach { (channel, stream) ->
+                val feed = newFeed(
+                    stream,
+                    startMs = startAt ?: C.TIME_UNSET,
+                    preferFastStart = contentId in knownArchiveContentIds,
+                    startWithVideo = !isTv && (decoderMode != DecoderMode.SINGLE || tiles.isEmpty() && streams.size == 1),
+                )
+                if (preparingSingle) feed.player.playWhenReady = false
+                if (decoderMode == DecoderMode.SINGLE && (tiles.isNotEmpty() || streams.size > 1))
+                    feed.setProtectedCompositionVideoRole(false, 1, 1)
+                // From the start: the first moment F1 keeps, so nothing after it is seen first.
+                if (fromStart && startAt == null) feed.startFromBeginning()
+                val tile = Tile(nextTileId++, contentId, channel, feed)
+                tiles.add(tile)
+                raise(tile)
+                added(tile)
+            }
+            // A fresh start uses the layout picked as default (Save layout makes it the custom one).
+            if (first && pendingResume?.contentId != contentId) {
+                layoutMode = defaultLayoutMode
+                if (layoutMode == LayoutMode.TV) {
+                    mapMode = MapMode.TRACK
+                    towerOpen = true
+                    overlayLayoutMode = OverlayLayoutMode.DOCKED
+                    tvLayoutMapNeedsDefault = !mapPanel.placed && prefs.getString(PREF_MAP_PANEL, null).isNullOrBlank()
+                    prefs.edit()
+                        .putString(PREF_MAP_MODE, MapMode.TRACK.name)
+                        .putBoolean(PREF_TOWER, true)
+                        .putString(PREF_OVERLAY_LAYOUT, OverlayLayoutMode.DOCKED.name)
+                        .apply()
+                }
+            }
+            // Keep the audio where it was; new feeds start muted. The default feed gets it first.
+            setAudio(tiles.firstOrNull { it.audible } ?: tiles.firstOrNull { it.channel.isDefault } ?: tiles.first())
+            pendingResume?.takeIf { it.contentId == contentId }?.let { saved ->
+                pendingResume = null
+                tiles.firstOrNull { it.channel.key() == saved.audioChannel }?.let(::setAudio)
+                tiles.firstOrNull { it.channel.key() == saved.bigChannel }?.let { bigTileId = it.id }
+            }
+            // A feed more means a fresh fit of the layout in use; the map stays where it is.
+            handPlaced = false
+            layoutRequest++
+            showChrome()
+            if (dropped > 0) failures += "Left out $dropped feed(s): this mode allows up to $feedSelectionLimit selections"
+            message = if (failures.isEmpty()) null else "Some feeds had problems:\n" + failures.joinToString("\n")
+            leaderTile()?.let { leader ->
+                // A prior timing job can finish while retaining the same content ID. Restart it
+                // instead of leaving the TV's map sheet permanently at its initial Loading text.
+                if (timingContentId != leader.contentId || (timing == null && liveFeed?.isActive != true)) {
+                    loadTiming(leader.contentId)
+                }
+                applyVideoBudget()
+            }
+            // Normal Android TV live multiview also uses the composed representation. This is
+            // not limited to the two-feed diagnostic tile-test workflow.
+            if (decoderMode == DecoderMode.SINGLE && tiles.size >= 2) startArchiveSingleDecoderComposition(contentId)
+            else startTvLiveCompositionIfEligible(contentId)
+        }
+    }
+
+    private fun newFeed(
+        stream: PlayInfo,
+        startMs: Long = C.TIME_UNSET,
+        startWithVideo: Boolean = !isTv,
+        preferFastStart: Boolean = false,
+    ) = makeFeed(stream, startMs, startWithVideo, preferFastStart).also { it.setBaseSpeed(playbackSpeed) }
+
+    private fun makeFeed(stream: PlayInfo, startMs: Long, startWithVideo: Boolean, preferFastStart: Boolean = false) = FeedPlayer(
+        context, stream,
+        ascendon = api.ascendon.orEmpty(),
+        entitlement = api.entitlement.orEmpty(),
+        userAgent = userAgent,
+        forceL3 = settings.softwareDrm,
+        subtitles = settings.subtitles,
+        commentary = settings.commentary,
+        startWithVideo = startWithVideo && !castPlaybackHandedOff,
+        videoQuality = settings.videoQuality,
+        startMs = startMs,
+        preferFastStart = preferFastStart,
+    ).also { if (castPlaybackHandedOff) it.suspendForRemotePlayback(true) }
+
+    /**
+     * A second PLAY request can end the first session, so every feed of a content comes from one
+     * multiview session, as in F1's web player and eXViewer. Falls back to one session per feed
+     * if F1 refuses the multiview session.
+     */
+    private suspend fun streamFor(contentId: Long, channel: Channel, failures: MutableList<String>): PlayInfo {
+        if (contentId !in singleSessionOnly && contentId !in sessions) {
+            val list = channelsByContent[contentId].orEmpty()
+            val default = list.firstOrNull { it.isDefault } ?: list.firstOrNull()
+            try {
+                sessions[contentId] = api.multiPlay(contentId, default?.channelId)
+            } catch (e: Exception) {
+                singleSessionOnly += contentId
+                failures += "Multiview session refused, using one session per feed: ${e.message}"
+            }
+        }
+        val session = sessions[contentId] ?: return api.contentPlay(contentId, channel.channelId, fallback = true)
+
+        val url = if (channel.channelId == null) session.feeds.values.firstOrNull()
+        else session.feeds[channel.channelId]
+        return session.stream(
+            url ?: throw IOException(
+                if (singleFeedPlan) "F1 didn't send this feed to your plan. Watching several at once needs F1 TV Premium."
+                else "F1 returned no stream for this channel"
+            ),
+            channel.channelId,
+            contentId
+        )
+    }
+
+    // Track map.
+
+    /**
+     * The map for the session on screen: live timing for a live stream, else the archive. Any
+     * failure (no login yet, a dropped download, F1 not answering) tries again after a pause
+     * rather than leaving the map empty for the rest of the session, until it loads or the
+     * viewer moves on.
+     */
+    private fun loadTiming(contentId: Long) {
+        timingContentId = contentId
+        replayClockKey = null
+        replayClockBaseMs = null
+        recordTimingDiagnostic("Starting timing load for content=$contentId", reset = true)
+        pitDriver = null
+        timing = null
+        speedsJob?.cancel()
+        speedsFor = null
+        archiveSpeeds = emptyMap()
+        mapStatus = "Resolving F1 session…"
+        liveFeed?.cancel()
+        liveFeed = scope.launch {
+            var attempt = 0
+            while (timingContentId == contentId) {
+                val ref = sessionRefs[contentId]
+                val token = api.ascendon
+                val problem = when {
+                    ref == null -> "F1 TV didn't say which session this is"
+                    token == null -> "not signed in to F1's timing yet"
+                    else -> null
+                }
+                recordTimingDiagnostic(
+                    "Session metadata: " + (ref?.let { "meeting=${it.meetingKey}, session=${it.sessionKey}, year=${it.year}" } ?: "missing") +
+                        "; timing token=" + if (token == null) "missing" else "present"
+                )
+                if (problem != null) recordTimingDiagnostic("BLOCKED: $problem")
+                if (problem == null) {
+                    // Prefer F1's catalog signal for a known-live session. Otherwise wait for a
+                    // real, non-placeholder player window before choosing live timing or archive.
+                    val live = catalogTimingSource(
+                        knownLive = contentId in knownLiveContentIds,
+                        knownArchive = contentId in knownArchiveContentIds,
+                        completedLive = contentId in completedLiveTimingContentIds,
+                    ) ?: isLiveStream(contentId)
+                    if (live == null) {
+                        mapStatus = "Waiting for the video stream to identify live timing or replay…"
+                        android.util.Log.i("ApexviewTiming", "content=$contentId: player timeline not ready; keeping timing source undecided")
+                        kotlinx.coroutines.delay(1_000)
+                        continue
+                    }
+                    recordTimingDiagnostic("Source selected: " + if (live) "LIVE" else "ARCHIVE")
+                    if (live) {
+                        // Show the transport stage immediately. A TV with no program clock used to
+                        // sit on the generic "Loading" label while the socket was still starting.
+                        mapStatus = "Connecting to F1 live timing…"
+                        android.util.Log.i(
+                            "ApexviewTiming",
+                            "content=$contentId live source; meeting=${ref!!.meetingKey}, session=${ref.sessionKey}, circuit=${ref.circuitKey}",
+                        )
+                        // Runs until the viewer moves on, reconnecting itself; back here only
+                        // if it failed outright or F1 ends this live timing session.
+                        followLive(contentId, ref, token!!)
+                        if (timingContentId != contentId) return@launch
+                        kotlinx.coroutines.delay(mapRetryDelayMs(attempt++))
+                        continue
+                    }
+                    mapStatus = "Loading F1 timing archive…"
+                    val trace = timingDiagnosticStartedAtMs
+                    try {
+                        // When the picture was broadcast: identifies the session if the title can't.
+                        val savedPosition = pendingResume?.takeIf { it.contentId == contentId && !it.live }?.positionMs
+                        val initial = replayPlayhead(contentId, savedPosition)
+                        val playhead = java.util.concurrent.atomic.AtomicReference(initial)
+                        recordTimingDiagnostic(
+                            "Archive lookup: videoClock=${initial.videoUtcMs ?: "unavailable"} positionMs=${initial.positionMs} " +
+                                "catalogStart=${ref!!.sessionStartUtcMs ?: "unavailable"} attempt=$attempt"
+                        )
+                        var towerReadyMs: Long? = null
+                        var mapReadyMs: Long? = null
+                        var lastClockBase: Long? = null
+                        var lastClockSource: String? = null
+                        var budgetReported = false
+                        var oneSecondReported = false
+                        var videoClockObserved = false
+                        fun inspectPlayback() {
+                            val sample = replayPlayhead(contentId, savedPosition)
+                            playhead.set(sample)
+                            val base = sample.videoUtcMs?.minus(sample.positionMs)
+                            val clockSource = when {
+                                base == null -> "archive-estimate"
+                                sample.cachedVideoClock -> "cached-video"
+                                else -> "video"
+                            }
+                            if (clockSource == "video") videoClockObserved = true
+                            if (clockSource != lastClockSource || base != lastClockBase) {
+                                lastClockSource = clockSource
+                                lastClockBase = base
+                                recordTimingDiagnostic("Replay clock source=$clockSource " +
+                                    "baseUtcMs=$base positionMs=${sample.positionMs} offsetMs=${sample.offsetMs}")
+                            }
+                            val session = timing
+                            val elapsed = android.os.SystemClock.elapsedRealtime() - trace
+                            val clock = session?.let { sample.utcAt(it.startUtcMs) }
+                            if (session != null && clock != null && leaderTile()?.contentId == contentId) {
+                                if (towerReadyMs == null) {
+                                    val rows = session.laps.count { it.value.at(clock)?.position != null }
+                                    if (rows > 0) {
+                                        towerReadyMs = elapsed
+                                        recordTimingDiagnostic("Replay tower ready utcMs=$clock rankedRows=$rows")
+                                    }
+                                }
+                                if (mapReadyMs == null && session.outline.size >= 8) {
+                                    val cars = session.tracks.count { it.value.at(clock) != null }
+                                    if (cars > 0) {
+                                        mapReadyMs = elapsed
+                                        recordTimingDiagnostic("Replay map ready utcMs=$clock positionedCars=$cars")
+                                    }
+                                }
+                            }
+                            val budget = when {
+                                !oneSecondReported && elapsed >= 1_000 -> 1
+                                !budgetReported && elapsed >= 5_000 -> 5
+                                else -> null
+                            }
+                            if (budget != null) {
+                                if (budget == 1) oneSecondReported = true else budgetReported = true
+                                val rows = if (session == null || clock == null) 0 else
+                                    session.laps.count { it.value.at(clock)?.position != null }
+                                val cars = if (session == null || clock == null || session.outline.size < 8) 0 else
+                                    session.tracks.count { it.value.at(clock) != null }
+                                recordTimingDiagnostic("Replay ${budget}s checkpoint towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs " +
+                                    "clockUtcMs=$clock positionMs=${sample.positionMs} rankedRows=$rows positionedCars=$cars " +
+                                    "trackFromUtcMs=${session?.firstTrackUtc} trackThroughUtcMs=${session?.lastTrackUtc}")
+                            }
+                        }
+                        var archiveComplete = false
+                        val clockJob = launch {
+                            do {
+                                inspectPlayback()
+                                kotlinx.coroutines.delay(if (oneSecondReported) 200 else 50)
+                            } while (!archiveComplete || towerReadyMs == null || mapReadyMs == null ||
+                                !budgetReported || !videoClockObserved)
+                        }
+                        try {
+                            val loaded = LiveTimingArchive(token!!, userAgent).load(
+                                ref = ref!!,
+                                watchedUtc = initial.videoUtcMs,
+                                replayPositionMs = initial.positionMs,
+                                positionScratchDir = context.cacheDir,
+                                replayCache = ReplayCoreCache(context.cacheDir, contentId),
+                                timingOffsetMs = initial.offsetMs,
+                                playhead = playhead::get,
+                                traceId = trace,
+                                onProgress = { status ->
+                                    if (timingContentId == contentId) {
+                                        val current = timing
+                                        if (current == null || current.outline.size < 8 ||
+                                            current.tracks.isEmpty() || current.laps.isEmpty()
+                                        ) {
+                                            mapStatus = status
+                                        }
+                                        recordTimingDiagnostic(status)
+                                    }
+                                },
+                                onPartial = { partial ->
+                                    if (timingContentId == contentId) {
+                                        showTiming(partial)
+                                        inspectPlayback()
+                                        recordTimingDiagnostic(
+                                            "Partial data: drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
+                                                "cars=${partial.tracks.size}, outlinePoints=${partial.outline.size / 2} " +
+                                                "trackFromUtcMs=${partial.firstTrackUtc} trackThroughUtcMs=${partial.lastTrackUtc}"
+                                        )
+                                        mapStatus = when {
+                                            partial.tracks.isEmpty() -> "Loading track positions…"
+                                            partial.outline.size < 8 -> "Track data loaded; waiting for a usable circuit outline…"
+                                            partial.laps.isEmpty() -> "Track map ready; loading timing tower…"
+                                            else -> null
+                                        }
+                                    }
+                                },
+                            )
+                            if (timingContentId != contentId) return@launch
+                            showTiming(loaded)
+                            saveReplayPreview(contentId, castFramePositionMs)
+                            archiveComplete = true
+                            inspectPlayback()
+                            recordTimingDiagnostic(
+                                "Archive complete: drivers=${loaded.drivers.size}, laps=${loaded.laps.size}, " +
+                                    "cars=${loaded.tracks.size}, outlinePoints=${loaded.outline.size / 2} " +
+                                    "towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs"
+                            )
+                            launch(kotlinx.coroutines.Dispatchers.IO) { rememberOutline(loaded) }
+                            mapStatus = if (loaded.outline.isEmpty()) "Couldn't trace the track; showing cars only" else null
+                            // The cached archive may finish before Media3 supplies the playhead.
+                            // Continue observing briefly so the first usable rows and dots still have a timestamp.
+                            if (towerReadyMs == null || mapReadyMs == null || !budgetReported || !videoClockObserved) {
+                                val observed = kotlinx.coroutines.withTimeoutOrNull(15_000) { clockJob.join(); true }
+                                if (observed == null) recordTimingDiagnostic(
+                                    "Replay readiness observation ended towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs"
+                                )
+                            }
+                            return@launch
+                        } finally {
+                            clockJob.cancel()
+                        }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        android.util.Log.i("ApexviewTiming", "Replay cancelled content=$contentId trace=$trace")
+                        throw e
+                    } catch (e: Exception) {
+                        if (timingContentId != contentId) return@launch
+                        recordTimingDiagnostic("ARCHIVE ERROR: ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                        mapStatus = "Archive failed: ${e.javaClass.simpleName}: ${e.message}. Retrying…"
+                    }
+                } else {
+                    mapStatus = "Map unavailable: $problem. Trying again…"
+                }
+                kotlinx.coroutines.delay(mapRetryDelayMs(attempt++))
+            }
+        }
+    }
+
+    private var speedsJob: kotlinx.coroutines.Job? = null
+    private var speedsFor: String? = null
+    private var archiveSpeeds: Map<String, SpeedLog> = emptyMap()
+
+    /** A replay's car speeds, fetched the first time an onboard wants them. Without them, no speed shows. */
+    fun loadSpeeds(session: SessionTiming) {
+        if (session.live || session.radioBase.isBlank() || session.archivePartial || speedsFor == session.radioBase) return
+        val token = api.ascendon ?: return
+        speedsFor = session.radioBase
+        speedsJob?.cancel()
+        speedsJob = scope.launch {
+            try {
+                val loaded = LiveTimingArchive(token, userAgent).loadSpeeds(session.radioBase)
+                if (speedsFor == session.radioBase) {
+                    archiveSpeeds = loaded
+                    timing?.takeIf { !it.live && it.radioBase == session.radioBase }?.speeds = loaded
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("ApexviewLive", "car data: ${e.message}")
+            }
+        }
+    }
+
+    /** The map's job for the session on screen: an archive load, or a live feed that runs on. */
+    private var liveFeed: kotlinx.coroutines.Job? = null
+
+    /**
+     * Whether the stream on screen is live. Known once the player has read the stream's playlist,
+     * well before it's ready to play; a slow start used to be taken for a replay after 15 s, and
+     * a live session then looked for its map in the archive, where it isn't yet.
+     */
+    private suspend fun isLiveStream(contentId: Long): Boolean? {
+        // FeedPlayer creates its ExoPlayer immediately; the asynchronous part is receiving a usable
+        // timeline. A placeholder window is not evidence of a replay and must never trigger an
+        // archive lookup for a live session.
+        repeat(LIVE_CHECK_TRIES) { attempt ->
+            if (timingContentId != contentId) return null
+            val player = leaderTile()
+                ?.takeIf { it.contentId == contentId }
+                ?.feed
+                ?.player
+            if (player != null) {
+                val timeline = player.currentTimeline
+                if (!timeline.isEmpty) {
+                    val index = player.currentMediaItemIndex.takeIf { it in 0 until timeline.windowCount } ?: 0
+                    val window = runCatching { timeline.getWindow(index, Timeline.Window()) }.getOrNull()
+                    if (window != null) {
+                        val source = liveTimingSourceFor(
+                            knownLive = false,
+                            hasTimeline = true,
+                            placeholder = window.isPlaceholder,
+                            playerReportsLive = player.isCurrentMediaItemLive,
+                        )
+                        if (source != null) {
+                            android.util.Log.i(
+                                "ApexviewTiming",
+                                "content=$contentId: window live=${player.isCurrentMediaItemLive}, placeholder=${window.isPlaceholder}, state=${player.playbackState}",
+                            )
+                            return source
+                        }
+                    }
+                }
+            }
+            if (attempt == 20 && timingContentId == contentId) {
+                mapStatus = "Waiting for the TV stream's video timeline…"
+                recordTimingDiagnostic("No usable player timeline after 5s; checking again")
+            }
+            kotlinx.coroutines.delay(250)
+        }
+        recordTimingDiagnostic("No usable video timeline after 10s; source remains undecided")
+        return null
+    }
+
+    /** Follows a live session through F1's live timing until the viewer closes or moves on. */
+    private suspend fun followLive(contentId: Long, ref: SessionRef, token: String) {
+        val key = ref.circuitKey
+        val known = key?.let { readOutline(it) }
+        val feed = LiveTimingFeed(context, token, userAgent, ref, known)
+        var kept = known != null
+        try {
+            feed.run(
+                onTiming = { live ->
+                    if (timingContentId == contentId) {
+                        rememberStartLine(live)
+                        showTiming(live)
+                        offerVote(contentId, live)
+                        // A track traced live is kept, for the replay and the next session there.
+                        if (!kept && key != null) feed.newOutline?.let { writeOutline(key, it); kept = true }
                     }
                 },
                 onStatus = { status ->
