@@ -186,11 +186,18 @@ internal const val MAP_RENDER_INTERVAL_MS = 33L
 internal fun rememberMapRenderTime(app: AppState): Long {
     var now by remember { mutableLongStateOf(0L) }
     LaunchedEffect(app) {
+        if (app.isTv) {
+            // Poll the video clock at the TV publication rate instead of waking on every vsync.
+            while (true) {
+                now = app.mapTimeMs() ?: 0L
+                delay(100L)
+            }
+        }
         var lastPublishedFrameMs = Long.MIN_VALUE
         while (true) {
             withFrameMillis { frameMs ->
                 if (lastPublishedFrameMs == Long.MIN_VALUE ||
-                    frameMs - lastPublishedFrameMs >= if (app.isTv) 100L else MAP_RENDER_INTERVAL_MS
+                    frameMs - lastPublishedFrameMs >= MAP_RENDER_INTERVAL_MS
                 ) {
                     now = app.mapTimeMs() ?: 0L
                     lastPublishedFrameMs = frameMs

@@ -7,10 +7,12 @@ import android.opengl.EGLConfig
 import android.opengl.EGLContext
 import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
+import android.opengl.EGLExt
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
@@ -19,13 +21,14 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * One codec output texture, one visible output view. No per-window players/decoders and no encoder.
+ * One codec output texture and one visible output view, with an optional clear scene encoder target.
  * Logical windows sample regions of the already composed frame, with the usual layout/z order.
  * This renderer is used only for verified CLEAR media. Protected video keeps its secure path.
  */
 internal class SingleDecoderSceneView(context: Context) : TextureView(context), TextureView.SurfaceTextureListener {
     private val thread = HandlerThread("ApexviewSingleScene").apply { start() }
     private val gl = Handler(thread.looper)
+    private val main = Handler(Looper.getMainLooper())
     private var player: ExoPlayer? = null
     @Volatile private var scene: VideoScene? = null
     @Volatile private var released = false
@@ -37,6 +40,20 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var contextGl: EGLContext = EGL14.EGL_NO_CONTEXT
     private var window: EGLSurface = EGL14.EGL_NO_SURFACE
+    private class EncoderTarget(
+        val surface: Surface,
+        val width: Int,
+        val height: Int,
+        val drawOverlays: (Long) -> Unit,
+        val onFailure: (String) -> Unit,
+        val releaseOverlays: () -> Unit,
+    )
+
+    private var recordableConfig: EGLConfig? = null
+    private var encoderTarget: EncoderTarget? = null
+    private var encoderWindow: EGLSurface = EGL14.EGL_NO_SURFACE
+    private var lastEncodedTimeNs = Long.MIN_VALUE
+
     private var decoderTexture: SurfaceTexture? = null
     private var texture = 0
     private var program = 0
@@ -61,6 +78,41 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             input?.let { nextPlayer.setVideoSurface(it) }
         }
         if (changed) gl.post { guarded { draw() } }
+    }
+
+    /**
+     * Attach a clear-scene encoding surface. Overlay drawing runs in the scene GL context
+     * after the video quads. The caller keeps ownership of the encoder Surface.
+     */
+    fun attachEncoderOutput(
+        surface: Surface,
+        width: Int,
+        height: Int,
+        drawOverlays: (Long) -> Unit,
+        onFailure: (String) -> Unit,
+        releaseOverlays: () -> Unit,
+    ) {
+        require(width > 0 && height > 0)
+        check(!released)
+        gl.post {
+            if (!released) {
+                destroyEncoderWindow()
+                encoderTarget = EncoderTarget(surface, width, height, drawOverlays, onFailure, releaseOverlays)
+            }
+        }
+    }
+
+    fun detachEncoderOutput(onDetached: () -> Unit) {
+        if (!gl.post {
+            try {
+                destroyEncoderWindow()
+            } finally {
+                encoderTarget = null
+                main.post { onDetached() }
+            }
+        }) {
+            main.post { onDetached() }
+        }
     }
 
     override fun onSurfaceTextureAvailable(output: SurfaceTexture, width: Int, height: Int) {
@@ -89,7 +141,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         player = null
         surfaceTextureListener = null
         val output = surfaceTexture
-        gl.post { destroy(); output?.release(); thread.quitSafely() }
+        gl.post { destroy(); encoderTarget = null; output?.release(); thread.quitSafely() }
     }
 
     private fun initialize(output: SurfaceTexture) {
@@ -98,9 +150,18 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         check(EGL14.eglInitialize(display, IntArray(2), 0, IntArray(2), 1)) { "EGL initialization failed" }
         val configs = arrayOfNulls<EGLConfig>(1)
         val count = IntArray(1)
-        check(EGL14.eglChooseConfig(display, intArrayOf(EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+        val baseAttributes = intArrayOf(
+            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT,
             EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
-            EGL14.EGL_ALPHA_SIZE, 8, EGL14.EGL_NONE), 0, configs, 0, 1, count, 0) && count[0] > 0) { "No GLES2 configuration" }
+            EGL14.EGL_ALPHA_SIZE, 8,
+        )
+        fun choose(attributes: IntArray): Boolean =
+            EGL14.eglChooseConfig(display, attributes, 0, configs, 0, 1, count, 0) && count[0] > 0
+
+        val recordable = choose(baseAttributes + intArrayOf(EGL_RECORDABLE_ANDROID, EGL14.EGL_TRUE, EGL14.EGL_NONE))
+        check(recordable || choose(baseAttributes + intArrayOf(EGL14.EGL_NONE))) { "No GLES2 configuration" }
+        recordableConfig = if (recordable) configs[0] else null
         contextGl = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT,
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
         window = EGL14.eglCreateWindowSurface(display, configs[0], output, intArrayOf(EGL14.EGL_NONE), 0)
@@ -146,7 +207,22 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private fun draw() {
         val model = scene ?: return
         if (window == EGL14.EGL_NO_SURFACE || !EGL14.eglMakeCurrent(display, window, window, contextGl)) return
-        GLES20.glViewport(0, 0, outputWidth, outputHeight)
+        renderVideo(model, outputWidth, outputHeight)
+        check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" }
+        if (hasFrame) drawEncoderOutput(model)
+        if (hasFrame && !firstFrameReported) {
+            firstFrameReported = true
+            post { if (!released) onFirstFrame() }
+        }
+        val now = System.nanoTime()
+        if (now - lastLogNs >= 5_000_000_000L) {
+            Log.i("ApexviewSingleDecoder", "SINGLE_DECODER_SCENE output=${outputWidth}x$outputHeight inputTextures=1 outputViews=1 sources=${model.sources} windows=${model.windows.size} frames=$rendered")
+            lastLogNs = now
+        }
+    }
+
+    private fun renderVideo(model: VideoScene, width: Int, height: Int) {
+        GLES20.glViewport(0, 0, width, height)
         GLES20.glClearColor(0f, 0f, 0f, 1f); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         if (hasFrame) {
             GLES20.glUseProgram(program)
@@ -166,16 +242,50 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             }
         }
-        check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" }
-        if (hasFrame && !firstFrameReported) {
-            firstFrameReported = true
-            post { if (!released) onFirstFrame() }
+    }
+
+    private fun drawEncoderOutput(model: VideoScene) {
+        val target = encoderTarget ?: return
+        val timestampNs = decoderTexture?.timestamp ?: return
+        if (timestampNs <= lastEncodedTimeNs) return
+        try {
+            if (encoderWindow == EGL14.EGL_NO_SURFACE) {
+                val config = checkNotNull(recordableConfig) { "No recordable EGL configuration" }
+                encoderWindow = EGL14.eglCreateWindowSurface(
+                    display, config, target.surface, intArrayOf(EGL14.EGL_NONE), 0,
+                )
+                check(encoderWindow != EGL14.EGL_NO_SURFACE) { "Unable to create the Cast encoder output" }
+            }
+            check(EGL14.eglMakeCurrent(display, encoderWindow, encoderWindow, contextGl)) {
+                "Unable to bind the Cast encoder output"
+            }
+            renderVideo(model, target.width, target.height)
+            target.drawOverlays(timestampNs)
+            check(EGLExt.eglPresentationTimeANDROID(display, encoderWindow, timestampNs)) {
+                "Unable to timestamp the Cast frame"
+            }
+            check(EGL14.eglSwapBuffers(display, encoderWindow)) { "Cast encoder output swap failed" }
+            lastEncodedTimeNs = timestampNs
+        } catch (error: Exception) {
+            destroyEncoderWindow()
+            encoderTarget = null
+            main.post { target.onFailure(error.message ?: "Cast encoder output failed") }
+        } finally {
+            check(EGL14.eglMakeCurrent(display, window, window, contextGl)) { "Unable to restore scene output" }
         }
-        val now = System.nanoTime()
-        if (now - lastLogNs >= 5_000_000_000L) {
-            Log.i("ApexviewSingleDecoder", "SINGLE_DECODER_SCENE output=${outputWidth}x$outputHeight inputTextures=1 outputViews=1 sources=${model.sources} windows=${model.windows.size} frames=$rendered")
-            lastLogNs = now
+    }
+
+    private fun destroyEncoderWindow() {
+        if (window != EGL14.EGL_NO_SURFACE &&
+            EGL14.eglMakeCurrent(display, window, window, contextGl)
+        ) {
+            encoderTarget?.releaseOverlays?.invoke()
         }
+        if (encoderWindow != EGL14.EGL_NO_SURFACE) {
+            EGL14.eglDestroySurface(display, encoderWindow)
+            encoderWindow = EGL14.EGL_NO_SURFACE
+        }
+        lastEncodedTimeNs = Long.MIN_VALUE
     }
 
     private fun guarded(action: () -> Unit) {
@@ -193,6 +303,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         input?.release(); input = null
         decoderTexture?.release(); decoderTexture = null; hasFrame = false
         if (display != EGL14.EGL_NO_DISPLAY) {
+            destroyEncoderWindow()
+            recordableConfig = null
             if (program != 0) GLES20.glDeleteProgram(program)
             if (texture != 0) GLES20.glDeleteTextures(1, intArrayOf(texture), 0)
             EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
@@ -202,5 +314,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
         display = EGL14.EGL_NO_DISPLAY; contextGl = EGL14.EGL_NO_CONTEXT; window = EGL14.EGL_NO_SURFACE
         texture = 0; program = 0
+    }
+
+    private companion object {
+        const val EGL_RECORDABLE_ANDROID = 0x3142
     }
 }

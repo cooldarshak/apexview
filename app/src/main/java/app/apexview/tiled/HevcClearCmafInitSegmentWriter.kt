@@ -197,15 +197,31 @@ internal object HevcClearCmafInitSegmentWriter {
         return box("hvcC", record.toByteArray())
     }
 
+    /** Builds the initialization for one clear, length-prefixed AVC video track. */
+    fun writeAvc(width: Int, height: Int, sps: ByteArray, pps: ByteArray): ByteArray {
+        require(width in 1..0xffff && height in 1..0xffff)
+        require(sps.size in 4..0xffff && (sps[0].toInt() and 31) == 7)
+        require(pps.size in 2..0xffff && (pps[0].toInt() and 31) == 8)
+        // Baseline and Main profiles use the fixed AVCDecoderConfigurationRecord fields.
+        require((sps[1].toInt() and 255) in setOf(66, 77))
+        val configuration = box("avcC", byteArrayOf(1, sps[1], sps[2], sps[3], -1, -31) +
+            uint16(sps.size) + sps + byteArrayOf(1) + uint16(pps.size) + pps)
+        return box("ftyp", ascii("iso6") + uint32(1) + ascii("iso6") + ascii("cmfc") + ascii("avc1")) +
+            box("moov", movieHeader(MOVIE_TIMESCALE, 2) +
+                trackBox(1, 1_000_000, width, height, configuration, "ApexView Cast", "avc1") +
+                box("mvex", trackExtends(1)))
+    }
+
     private fun trackBox(
         trackId: Long,
         timescale: Long,
         width: Int,
         height: Int,
         hvcC: ByteArray,
-        handlerName: String
+        handlerName: String,
+        sampleEntryType: String = "hvc1",
     ): ByteArray {
-        val sampleEntry = visualSampleEntry(width, height, hvcC, handlerName)
+        val sampleEntry = visualSampleEntry(width, height, hvcC, handlerName, sampleEntryType)
         val sampleTable = box(
             "stbl",
             fullBox("stsd", 0, 0, uint32(1) + sampleEntry) +
@@ -232,7 +248,7 @@ internal object HevcClearCmafInitSegmentWriter {
         return box("trak", trackHeader(trackId, width, height) + media)
     }
 
-    private fun visualSampleEntry(width: Int, height: Int, hvcC: ByteArray, name: String): ByteArray {
+    private fun visualSampleEntry(width: Int, height: Int, config: ByteArray, name: String, sampleEntryType: String): ByteArray {
         val label = name.toByteArray(Charsets.US_ASCII)
         val compressorName = uint8(label.size) + label + ByteArray(31 - label.size)
         val fields = ByteArray(6) + uint16(1) +
@@ -241,7 +257,7 @@ internal object HevcClearCmafInitSegmentWriter {
             uint32(0x00480000) + uint32(0x00480000) + uint32(0) +
             uint16(1) + compressorName + uint16(0x0018) + uint16(0xffff)
         require(fields.size == 78) { "Visual sample-entry header must be exactly 78 bytes" }
-        return box("hvc1", fields + hvcC)
+        return box(sampleEntryType, fields + config)
     }
 
     private fun movieHeader(timescale: Long, nextTrackId: Long): ByteArray {

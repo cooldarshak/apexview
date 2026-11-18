@@ -22,6 +22,10 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
     private val server = ServerSocket(0)
     /** Direct HLS URL loaded by Google's Default Media Receiver after the Cast session starts. */
     val googleCastMediaUrl get() = "http://$address:${server.localPort}/s/$token/master.m3u8"
+    /** Video-only rendition. Audio must be attached on the same clock before loading it in Cast. */
+    val finishedVideoUrl get() = "http://$address:${server.localPort}/s/$token/finished/video.m3u8"
+    @Volatile var finishedVideo: FinishedCastVideoPlaylist? = null
+
     private val workers = java.util.concurrent.ThreadPoolExecutor(4, 4, 0, java.util.concurrent.TimeUnit.SECONDS,
         java.util.concurrent.ArrayBlockingQueue(8))
     private val accepting = Executors.newSingleThreadExecutor()
@@ -73,7 +77,8 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
                 "Access-Control-Allow-Headers: Range, Content-Type, Accept\r\nAccess-Control-Allow-Private-Network: true\r\n" +
                 "Access-Control-Expose-Headers: Accept-Ranges, Content-Length, Content-Range\r\n" +
                 "Connection: close\r\n$extra\r\n").toByteArray())
-            output.write(body); output.flush()
+            if (request[0] != "HEAD") output.write(body)
+            output.flush()
         }
         val path = request[1].substringBefore('?')
         if (request[0] == "OPTIONS") {
@@ -81,12 +86,18 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
             else reply(404, "text/plain", ByteArray(0))
             return
         }
-        if (request[0] != "GET" || !path.startsWith("/s/$token/")) {
+        if (request[0] !in setOf("GET", "HEAD") || !path.startsWith("/s/$token/")) {
             reply(404, "text/plain", ByteArray(0)); return
         }
         val name = path.removePrefix("/s/$token/")
         try {
             when {
+                name.startsWith("finished/") -> {
+                    val resource = name.removePrefix("finished/")
+                    val bytes = finishedVideo?.resource(resource)
+                    if (bytes == null) reply(404, "text/plain", ByteArray(0))
+                    else reply(200, if (resource.endsWith(".m3u8")) HLS else "video/mp4", bytes)
+                }
                 name == "master.m3u8" -> reply(200, HLS, ("#EXTM3U\n#EXT-X-VERSION:7\n" +
                     "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Selected audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio.m3u8\"\n" +
                     "#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"${session.codecString()},mp4a.40.2\",RESOLUTION=${session.width}x${session.height},AUDIO=\"audio\"\nvideo.m3u8\n").toByteArray())
