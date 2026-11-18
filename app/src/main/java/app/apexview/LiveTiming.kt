@@ -649,6 +649,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 null
             }
 
+        val circuitTask = async { ref.circuitKey?.let { runCatching { fetchCircuit(it, ref.year) }.getOrNull() } }
         suspend fun loadCore(): ReplayCore = coroutineScope {
             val index = JSONObject(fetchStage("${ref.year}/Index.json"))
             progress("Matching meeting/session keys in F1 index…")
@@ -796,8 +797,13 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                             }
                                         }
                                         val initial = parsePositionLines(window, { job.ensureActive() })
-                                        val outline = traceOutline(initial.tracks.values.toList())
-                                        if (outline.isNotEmpty()) {
+                                        val traced = traceOutline(initial.tracks.values.toList())
+                                        val outline = when {
+                                            traced.isNotEmpty() -> traced
+                                            circuitTask.isCompleted -> circuitTask.await()?.outline ?: traced
+                                            else -> traced
+                                        }
+                                        if (outline.size >= 8 && initial.tracks.isNotEmpty()) {
                                             publishTracks(initial.tracks.mapValues { it.value.build() }, outline)
                                             windowPublished = true
                                         }
@@ -895,7 +901,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             }
             withContext(Dispatchers.Main) {
                 partialTracks = built
-                partialOutline = traced
+                if (traced.isNotEmpty()) partialOutline = traced
                 publishTopics()
             }
             progress(if (tracks.isEmpty()) "Track positions unavailable; loading timing history…" else "Track map available · loading timing history…")
@@ -923,10 +929,15 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     "${android.os.SystemClock.elapsedRealtime() - geometryStarted}ms"
             )
             val line = findStartFinish(traced, history.states.crossings, built)
+            val outline = when {
+                line != null -> startAt(traced, line)
+                traced.isNotEmpty() -> traced
+                circuitTask.isCompleted -> circuitTask.await()?.outline ?: traced
+                else -> traced
+            }
             ReplayCore(
                 path, type, drivers, built, history.states.states,
-                if (line != null) startAt(traced, line) else traced,
-                line != null, streamStart, history.laps, parseParts(timingStream.orEmpty(), streamStart),
+                outline, line != null, streamStart, history.laps, parseParts(timingStream.orEmpty(), streamStart),
             )
         }
 
@@ -937,7 +948,6 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             "Replay index ${if (cached == null) "miss" else "hit"} · " +
                 "${android.os.SystemClock.elapsedRealtime() - cacheStarted}ms"
         )
-        val circuitTask = async { ref.circuitKey?.let { runCatching { fetchCircuit(it, ref.year) }.getOrNull() } }
         val core = cached ?: loadCore()
         val path = core.path
         val type = core.type

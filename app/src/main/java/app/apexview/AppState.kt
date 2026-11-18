@@ -3196,16 +3196,20 @@ class AppState(
                     mapStatus = "Loading F1 timing archive…"
                     try {
                         // When the picture was broadcast: identifies the session if the title can't.
-                        val watched = leaderTile()?.takeIf { it.contentId == contentId }?.feed?.wallClockMs()
+                        val replayFeed = leaderTile()?.takeIf { it.contentId == contentId }?.feed
+                        val savedPosition = pendingResume?.takeIf { it.contentId == contentId && !it.live }?.positionMs
+                        val watched = replayFeed?.wallClockMs()
+                        val replayPosition = savedPosition ?: replayFeed?.player?.currentPosition ?: 0L
                         recordTimingDiagnostic(
-                            "Archive lookup: videoClock=${watched ?: "unavailable"}, catalogStart=${ref!!.sessionStartUtcMs ?: "unavailable"}"
+                            "Archive lookup: videoClock=${watched ?: "unavailable"}, replayPositionMs=$replayPosition, " +
+                                "catalogStart=${ref!!.sessionStartUtcMs ?: "unavailable"}"
                         )
                         var towerReady = false
                         var mapReady = false
                         val loaded = LiveTimingArchive(token!!, userAgent).load(
                             ref = ref!!,
                             watchedUtc = watched,
-                            replayPositionMs = leaderTile()?.feed?.player?.currentPosition ?: 0L,
+                            replayPositionMs = replayPosition,
                             positionScratchDir = context.cacheDir,
                             replayCache = ReplayCoreCache(context.cacheDir, contentId),
                             timingOffsetMs = mapOffsetMs,
