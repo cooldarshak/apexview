@@ -59,6 +59,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -88,6 +89,7 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -320,6 +322,7 @@ internal fun Modifier.underTopBar(requester: FocusRequester) = focusRequester(re
  * links the artwork to the card it was opened from, so one grows into the other.
  */
 @Composable
+@OptIn(ExperimentalComposeUiApi::class)
 internal fun ArtPage(
     image: String?,
     artKey: String?,
@@ -331,6 +334,7 @@ internal fun ArtPage(
     backdrop: (@Composable () -> Unit)? = null,
     /** In place of [hero]'s column: the whole hero area, for content that fills it. */
     heroBox: (@Composable BoxScope.() -> Unit)? = null,
+    tvHeaderFocus: FocusRequester? = null,
     hero: @Composable ColumnScope.() -> Unit = {},
     rows: LazyListScope.() -> Unit,
 ) {
@@ -387,7 +391,19 @@ internal fun ArtPage(
             )
         }
 
-        LazyColumn(state = listState, modifier = Modifier.fillMaxSize().underTopBar(page), contentPadding = PaddingValues(bottom = 40.dp)) {
+        val listArea = if (tvHeaderFocus == null) Modifier else Modifier
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
+            .padding(top = 60.dp)
+            .focusProperties {
+                exit = { direction ->
+                    if (direction == FocusDirection.Up) tvHeaderFocus else FocusRequester.Default
+                }
+            }
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize().then(listArea).underTopBar(page),
+            contentPadding = PaddingValues(bottom = 40.dp),
+        ) {
             item {
                 Box(Modifier.fillMaxWidth().height(heroHeight)) {
                     if (heroBox != null) heroBox()
@@ -402,8 +418,8 @@ internal fun ArtPage(
 
         TopBar(
             title = title,
-            fill = { ((scrolled - heroPx * 0.35f) / (heroPx * 0.35f)).coerceIn(0f, 1f) },
-            titleIn = { ((scrolled - heroPx * 0.62f) / (heroPx * 0.2f)).coerceIn(0f, 1f) },
+            fill = { if (tvHeaderFocus != null) 1f else ((scrolled - heroPx * 0.35f) / (heroPx * 0.35f)).coerceIn(0f, 1f) },
+            titleIn = { if (tvHeaderFocus != null) 1f else ((scrolled - heroPx * 0.62f) / (heroPx * 0.2f)).coerceIn(0f, 1f) },
             leading = leading,
             trailing = trailing,
             below = page,
@@ -612,6 +628,7 @@ fun SignInScreen(app: AppState) {
 
 @Composable
 fun HomeScreen(app: AppState) {
+    val headerFocus = remember { FocusRequester() }
     val now = System.currentTimeMillis()
     val latest = app.latestWeekend(now)
     val latestContent = latest?.let { app.weekendContent[it.meetingKey] }
@@ -645,9 +662,13 @@ fun HomeScreen(app: AppState) {
         artKey = null,
         title = "Apexview",
         listState = app.homeList,
+        tvHeaderFocus = headerFocus.takeIf { app.isTv },
         trailing = { backdrop ->
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                GlyphButton(Icons.Rounded.CalendarMonth, "Calendar and past seasons", backdrop = backdrop) { app.open(Screen.Calendar) }
+                GlyphButton(
+                    Icons.Rounded.CalendarMonth, "Calendar and past seasons",
+                    modifier = Modifier.focusRequester(headerFocus), backdrop = backdrop,
+                ) { app.open(Screen.Calendar) }
                 GlyphButton(Icons.Rounded.Settings, "Settings", backdrop = backdrop) { app.open(Screen.Settings) }
             }
         },

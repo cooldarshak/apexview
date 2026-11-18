@@ -3200,21 +3200,35 @@ class AppState(
                         recordTimingDiagnostic(
                             "Archive lookup: videoClock=${watched ?: "unavailable"}, catalogStart=${ref!!.sessionStartUtcMs ?: "unavailable"}"
                         )
+                        var towerReady = false
+                        var mapReady = false
                         val loaded = LiveTimingArchive(token!!, userAgent).load(
                             ref = ref!!,
                             watchedUtc = watched,
                             replayPositionMs = leaderTile()?.feed?.player?.currentPosition ?: 0L,
-                            positionScratchDir = context.cacheDir.takeIf { isTv },
+                            positionScratchDir = context.cacheDir,
+                            replayCache = ReplayCoreCache(context.cacheDir, contentId),
+                            timingOffsetMs = mapOffsetMs,
                             onProgress = { status ->
                                 if (timingContentId == contentId) {
-                                    mapStatus = status
+                                    if (timing?.outline?.size?.let { it >= 8 } != true) mapStatus = status
                                     recordTimingDiagnostic(status)
                                 }
                             },
                             onPartial = { partial ->
                                 if (timingContentId == contentId) {
-                                    rememberOutline(partial)
                                     showTiming(partial)
+                                    val player = leaderTile()?.feed
+                                    val clock = (player?.wallClockMs()
+                                        ?: partial.startUtcMs + (player?.player?.currentPosition ?: 0L)) + mapOffsetMs
+                                    if (!towerReady && partial.laps.values.any { it.at(clock) != null }) {
+                                        towerReady = true
+                                        recordTimingDiagnostic("Replay tower ready at playback clock")
+                                    }
+                                    if (!mapReady && partial.outline.size >= 8 && partial.tracks.values.any { it.at(clock) != null }) {
+                                        mapReady = true
+                                        recordTimingDiagnostic("Replay map ready with driver positions at playback clock")
+                                    }
                                     recordTimingDiagnostic(
                                         "Partial data: drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
                                             "cars=${partial.tracks.size}, outlinePoints=${partial.outline.size / 2}"
@@ -3257,7 +3271,7 @@ class AppState(
 
     /** A replay's car speeds, fetched the first time an onboard wants them. Without them, no speed shows. */
     fun loadSpeeds(session: SessionTiming) {
-        if (session.live || session.radioBase.isBlank() || isTv && session.archivePartial || speedsFor == session.radioBase) return
+        if (session.live || session.radioBase.isBlank() || session.archivePartial || speedsFor == session.radioBase) return
         val token = api.ascendon ?: return
         speedsFor = session.radioBase
         speedsJob?.cancel()

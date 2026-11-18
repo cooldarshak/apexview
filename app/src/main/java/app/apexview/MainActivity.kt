@@ -228,13 +228,15 @@ private fun PipSetup(app: AppState) {
 private fun Root(app: AppState) {
     PipSetup(app)
     val watching = app.tiles.isNotEmpty() && !app.browsing
-    BackHandler(enabled = app.auth == AuthState.SIGNED_IN) {
+    val handlesBack = !app.isTv || app.backStack.size > 1 || app.tiles.isNotEmpty() ||
+        app.picker != null || app.tileMenu != null || app.mapSheetOpen
+    BackHandler(enabled = app.auth == AuthState.SIGNED_IN && handlesBack) {
         when {
             app.tileMenu != null -> app.closeTileMenu()
             app.mapSheetOpen -> app.mapSheetOpen = false
             watching && app.picker == null && app.isTv && app.chromeVisible -> app.chromeVisible = false
             watching && app.picker == null -> app.stopAll()
-            !app.back() -> Unit
+            else -> app.back()
         }
     }
 

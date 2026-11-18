@@ -1,5 +1,6 @@
 package app.apexview
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -34,6 +35,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -510,26 +514,20 @@ private fun TowerSector(sector: SectorCell?) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Row(
-            Modifier.fillMaxWidth().height(8.dp),
-            horizontalArrangement = Arrangement.spacedBy(1.dp),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            val segments = sector?.segments.orEmpty()
-            if (segments.isEmpty()) {
-                repeat(5) {
-                    Box(
-                        Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(1.dp))
-                            .background(Color.White.copy(alpha = 0.10f))
-                    )
-                }
-            } else {
-                segments.forEach { status ->
-                    Box(
-                        Modifier.weight(1f).height(8.dp).clip(RoundedCornerShape(1.dp))
-                            .background(segmentColor(status))
-                    )
-                }
+        val segments = sector?.segments.orEmpty()
+        Canvas(Modifier.fillMaxWidth().height(8.dp)) {
+            val count = segments.size.takeIf { it > 0 } ?: 5
+            val gap = minOf(1.dp.toPx(), size.width / (2 * count))
+            val width = (size.width - (count - 1) * gap) / count
+            val height = if (segments.isEmpty()) 6.dp.toPx() else size.height
+            val radius = CornerRadius(minOf(1.dp.toPx(), width / 2))
+            repeat(count) { index ->
+                drawRoundRect(
+                    color = segmentColor(segments.getOrNull(index) ?: 0),
+                    topLeft = Offset(index * (width + gap), size.height - height),
+                    size = Size(width, height),
+                    cornerRadius = radius,
+                )
             }
         }
         Text(

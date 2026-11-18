@@ -54,13 +54,17 @@ internal fun LongArray.floorIndex(utcMs: Long): Int {
 }
 
 class DriverLaps(
-    private val times: LongArray,
-    private val states: List<Snapshot>,
-    private val crossings: LongArray,
+    internal val times: LongArray,
+    internal val states: List<Snapshot>,
+    internal val crossings: LongArray,
     /** When the driver's completed-lap count changed, and to what (F1's NumberOfLaps). */
-    private val lapTimes: LongArray = LongArray(0),
-    private val lapCounts: IntArray = IntArray(0),
+    internal val lapTimes: LongArray = LongArray(0),
+    internal val lapCounts: IntArray = IntArray(0),
 ) {
+    internal fun shiftedBy(offsetMs: Long) = DriverLaps(
+        times.shiftedBy(offsetMs), states, crossings.shiftedBy(offsetMs), lapTimes.shiftedBy(offsetMs), lapCounts,
+    )
+
     class Snapshot(
         val position: Int?,
         val sectors: List<SectorCell?>,
@@ -153,6 +157,8 @@ class DriverLaps(
         const val RECENT_LAPS = 5
     }
 }
+
+internal fun LongArray.shiftedBy(offsetMs: Long) = LongArray(size) { this[it] + offsetMs }
 
 /**
  * Builds every driver's [DriverLaps] from F1's TimingData and TimingDataF1 streams. Lines are "HH:MM:SS.mmm" +
