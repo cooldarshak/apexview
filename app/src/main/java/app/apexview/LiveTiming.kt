@@ -1059,6 +1059,16 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         }
 
         val loadJob = kotlin.coroutines.coroutineContext
+        fun ReplayCore.partial() = SessionTiming(
+            type = type, drivers = drivers, tracks = tracks, states = states, outline = outline,
+            hasStartFinish = hasStartFinish, corners = emptyList(), startUtcMs = startUtc,
+            circuitKey = ref.circuitKey, laps = laps, radioBase = BASE + path,
+        ).apply { archivePartial = true }
+        val previewStarted = android.os.SystemClock.elapsedRealtime()
+        replayCache?.readPreview(replayPositionMs) { loadJob.ensureActive() }?.let { preview ->
+            publish(preview.partial())
+            progress("Replay startup snapshot hit · ${android.os.SystemClock.elapsedRealtime() - previewStarted}ms")
+        }
         val cacheStarted = android.os.SystemClock.elapsedRealtime()
         val cached = replayCache?.read { loadJob.ensureActive() }
         progress(
@@ -1076,21 +1086,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         var outline = core.outline
         // Publish the traced map immediately. Optional external circuit lookup may provide a
         // better outline/corner labels, but it must not hold up a usable map or timing tower.
-        publish(
-            SessionTiming(
-                type = type,
-                drivers = drivers,
-                tracks = built,
-                states = states,
-                outline = outline,
-                hasStartFinish = core.hasStartFinish,
-                corners = emptyList(),
-                startUtcMs = streamStart,
-                circuitKey = ref.circuitKey,
-                laps = laps,
-                radioBase = BASE + path,
-            ).apply { archivePartial = true }
-        )
+        publish(core.partial())
 
         if (cached == null && replayCache != null && core.outline.size >= 8 &&
             core.tracks.isNotEmpty() && core.laps.isNotEmpty()

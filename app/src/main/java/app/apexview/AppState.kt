@@ -1649,7 +1649,13 @@ class AppState(
     /** The track map's window in laptop mode, below the hinge; placed and remembered on its own. */
     val laptopMapPanel = MapPanel()
     /** The map window on screen now. */
-    val activeMapPanel get() = if (laptopActive) laptopMapPanel else mapPanel
+    private val tvLogoMapPanel = MapPanel()
+    val tvLogoMapAnchored get() = layoutMode == LayoutMode.TV && !laptopActive && canvasW > canvasH
+    val activeMapPanel get() = when {
+        laptopActive -> laptopMapPanel
+        tvLogoMapAnchored -> tvLogoMapPanel
+        else -> mapPanel
+    }
     var mapOpacity by mutableFloatStateOf(0.9f)
         private set
     /** Driver marker radius in dp; smaller defaults keep a crowded circuit readable. */
@@ -2199,6 +2205,28 @@ class AppState(
 
     // Saving and resuming.
 
+    private var replayPreviewContent: Long? = null
+    private var replayPreviewPosition: Long? = null
+    private var replayPreviewWrite: kotlinx.coroutines.Job? = null
+
+    private fun saveReplayPreview(contentId: Long, positionMs: Long) {
+        val archive = timing?.takeIf { timingContentId == contentId && !it.live && !it.archivePartial } ?: return
+        val playhead = replayPlayhead(contentId, positionMs)
+        val videoUtc = playhead.videoUtcMs ?: return
+        if (replayPreviewContent == contentId &&
+            replayPreviewPosition?.let { abs(positionMs - it) < 25_000L } == true
+        ) return
+        replayPreviewContent = contentId
+        replayPreviewPosition = positionMs
+        replayPreviewWrite?.cancel()
+        replayPreviewWrite = scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val job = coroutineContext
+            ReplayCoreCache(context.cacheDir, contentId).writePreview(archive, positionMs, videoUtc + playhead.offsetMs) {
+                job.ensureActive()
+            }
+        }
+    }
+
     /**
      * Records the leading session as it stands. Called every few seconds while watching, when
      * the app goes to the background and when the viewer closes. A replay watched to its last
@@ -2234,6 +2262,7 @@ class AppState(
             mapMode = mapMode.name,
             layout = layout,
         )
+        if (!live) saveReplayPreview(leader.contentId, position)
         recents.removeAll { it.contentId == saved.contentId }
         recents.add(0, saved)
         while (recents.size > MAX_RECENTS) recents.removeAt(recents.lastIndex)
@@ -3968,12 +3997,16 @@ class AppState(
             placeMapIfNeeded(width, height)
             return
         }
-        if (keepMapClear && keepTowerClear) {
+        if (tvLayoutActive || keepMapClear && keepTowerClear) {
             val panelLayoutMode = if (tvLayoutActive) LayoutMode.TV else layoutMode
             val panelOverlayMode = if (tvLayoutActive) OverlayLayoutMode.DOCKED else overlayLayoutMode
             val plan = Layouts.withCombinedOverlays(panelLayoutMode, ordered.size, width, height, panelOverlayMode)
             combinedOverlayPlan = plan
-            if (plan.floating) {
+            if (tvLayoutActive && width > height) {
+                towerSpot.place(plan.tower)
+                tvLogoMapPanel.place(plan.map)
+                tvLogoMapPanel.placed = true
+            } else if (plan.floating) {
                 keepTowerInArea(plan.workspace, width, height)
                 placeMapInAreaIfNeeded(plan.workspace, width, height)
             } else {
@@ -4201,7 +4234,7 @@ class AppState(
     /** Keeps the map's place, size, turn and opacity for next time. */
     fun storeMapPanel() {
         val panel = activeMapPanel
-        if (canvasW <= 0f || !panel.placed) return
+        if (tvLogoMapAnchored || canvasW <= 0f || !panel.placed) return
         prefs.edit().putString(if (laptopActive) PREF_LAPTOP_MAP else PREF_MAP_PANEL, panel.toJson(canvasW, canvasH, mapOpacity)).apply()
     }
 
@@ -4255,7 +4288,7 @@ class AppState(
     fun arrangeMap(pan: androidx.compose.ui.geometry.Offset, zoom: Float, rotation: Float) {
         // Docked overlays stay fixed in the normal layout, but the TV preset exposes D-pad
         // move/resize handles and must let its map be adjusted without unlocking video tiles.
-        if (combinedOverlaysDocked && layoutMode != LayoutMode.TV) return
+        if (tvLogoMapAnchored || combinedOverlaysDocked && layoutMode != LayoutMode.TV) return
         val panel = activeMapPanel
         panel.x += pan.x
         panel.y += pan.y
@@ -4415,6 +4448,7 @@ class AppState(
 
     /** Width and height are in canvas pixels, like [FloatingSpot]. */
     fun updateTowerSize(widthPx: Float, heightPx: Float) {
+        if (tvLogoMapAnchored) return
         val panel = towerSpot
         if (canvasW <= 0f || canvasH <= 0f) {
             panel.w = widthPx
@@ -4439,7 +4473,7 @@ class AppState(
     }
 
     internal fun applyTowerEdit(area: Area) {
-        if (!arranging || towerLocked) return
+        if (!arranging || towerLocked || tvLogoMapAnchored) return
         towerSpot.place(area)
         if (towerExpandedForMapMove) {
             towerHeightBeforeMapMove = area.h

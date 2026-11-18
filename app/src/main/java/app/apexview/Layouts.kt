@@ -42,6 +42,17 @@ data class CombinedOverlayPlan(
  * rest share a strip beside or below it, whichever leaves more picture on screen.
  */
 object Layouts {
+    internal fun tvSingleLandscapeSlot(width: Float, height: Float): Slot {
+        val videoTop = height * 0.09375f
+        val videoHeight = height * (1f - 0.09375f - 0.0625f)
+        return Slot(0f, videoTop, min(width * 0.66f, videoHeight * 16f / 9f))
+    }
+
+    private fun tvMapOver(main: Slot): Area {
+        val width = main.w * 0.35f
+        return Area(main.x + main.w - width - main.w * 0.015f, main.y + main.h * 0.015f, width, main.h * 0.32f)
+    }
+
     /**
      * Gives the video feeds a dedicated main area and reserves the rest for the timing tower and
      * map together. Portrait uses stacked horizontal bands; landscape uses a right-hand sidebar.
@@ -62,17 +73,16 @@ object Layouts {
         val map: Area
         val tvLandscape = mode == LayoutMode.TV && !portrait && !floating
         if (tvLandscape) {
-            // Match the TV broadcast composition: a slim title strip across the top, the
-            // main 16:9 picture below it on the left, timing at the top-right, map beneath it,
-            // and a small black margin at the bottom.
+            // Keep the 16:9 picture on the left and timing in the full right column.
+            // The tracker overlays the main video's logo corner.
             val titleBand = height * 0.09375f
             val bottomMargin = height * 0.0625f
             val feedWidth = width * 0.66f
-            val towerBottom = height * 0.65625f
+
             feeds = Area(0f, titleBand, feedWidth, height - titleBand - bottomMargin)
             workspace = Area(feedWidth, 0f, width - feedWidth, height)
-            tower = Area(workspace.x, 0f, workspace.w, towerBottom)
-            map = Area(workspace.x, towerBottom, workspace.w, height - bottomMargin - towerBottom)
+            tower = workspace
+            map = tvMapOver(tvSingleLandscapeSlot(width, height))
         } else if (portrait) {
             val feedFraction = if (floating) 0.50f else 0.34f
             feeds = Area(0f, 0f, width, height * feedFraction)
@@ -101,11 +111,12 @@ object Layouts {
         val slots = if (tvLandscape && n == 1) {
             // The broadcast feed starts immediately below the top title band rather than
             // vertically centering the image in the whole left column.
-            listOf(Slot(feeds.x, feeds.y, min(feeds.w, feeds.h * 16f / 9f)))
+            listOf(tvSingleLandscapeSlot(width, height))
         } else {
             place(mode, n, feeds.w, feeds.h).map { Slot(it.x + feeds.x, it.y + feeds.y, it.w) }
         }
-        return CombinedOverlayPlan(slots, feeds, workspace, tower, map, floating)
+        return CombinedOverlayPlan(slots, feeds, workspace, tower,
+            if (tvLandscape && slots.isNotEmpty()) tvMapOver(slots.first()) else map, floating)
     }
 
     fun place(mode: LayoutMode, n: Int, width: Float, height: Float): List<Slot> = when {

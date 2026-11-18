@@ -24,12 +24,21 @@ internal class ReplayCore(
 internal class ReplayCoreCache(directory: File, private val contentId: Long) {
     private val folder = File(directory, "replay-timing")
     private val file = File(folder, "$contentId.bin")
+    private val preview = File(File(directory, "replay-previews"), "$contentId.bin")
 
-    fun read(checkActive: () -> Unit): ReplayCore? {
+    fun read(checkActive: () -> Unit): ReplayCore? = readFile(file, null, checkActive)
+
+    fun readPreview(positionMs: Long, checkActive: () -> Unit): ReplayCore? =
+        readFile(preview, positionMs, checkActive)
+
+    private fun readFile(file: File, previewPositionMs: Long?, checkActive: () -> Unit): ReplayCore? {
         if (file.length() !in 1..MAX_BYTES || System.currentTimeMillis() - file.lastModified() > MAX_AGE_MS) return null
         return try {
             DataInputStream(file.inputStream().buffered(BUFFER_SIZE)).use { input ->
                 if (input.readInt() != VERSION || input.readLong() != contentId) return null
+                if (previewPositionMs != null &&
+                    kotlin.math.abs(input.readLong() - previewPositionMs) > PREVIEW_REUSE_MS
+                ) return null
                 val path = input.readUTF()
                 val type = input.readUTF()
                 val startUtc = input.readLong()
@@ -101,11 +110,54 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
         }
     }
 
-    fun write(core: ReplayCore, checkActive: () -> Unit): Boolean {
+    fun write(core: ReplayCore, checkActive: () -> Unit): Boolean = writeFile(file, core, null, checkActive)
+
+    fun writePreview(session: SessionTiming, positionMs: Long, utcMs: Long, checkActive: () -> Unit): Boolean {
+        val path = session.radioBase.removePrefix(LiveTimingArchive.BASE)
+        if (path == session.radioBase || path.isBlank() || session.live || session.archivePartial) return false
+        if (session.tracks.values.none { it.at(utcMs) != null } ||
+            session.laps.values.none { it.at(utcMs)?.position != null }
+        ) return false
+        val from = utcMs - 90_000L
+        val until = utcMs + 120_000L
+        val tracks = session.tracks.mapNotNull { (number, track) ->
+            checkActive()
+            val range = previewRange(track.t, track.n, from, until) ?: return@mapNotNull null
+            val end = range.last + 1
+            number to DriverTrack(track.t.copyOfRange(range.first, end), track.x.copyOfRange(range.first, end),
+                track.y.copyOfRange(range.first, end), range.count())
+        }.toMap()
+        val states = session.states.mapNotNull { (number, state) ->
+            val range = previewRange(state.t, state.t.size, from, until) ?: return@mapNotNull null
+            number to StateLog(state.t.copyOfRange(range.first, range.last + 1), state.s.copyOfRange(range.first, range.last + 1))
+        }.toMap()
+        val laps = session.laps.mapNotNull { (number, history) ->
+            checkActive()
+            val range = previewRange(history.times, history.times.size, from, until) ?: return@mapNotNull null
+            val end = range.last + 1
+            number to DriverLaps(history.times.copyOfRange(range.first, end), history.states.subList(range.first, end),
+                history.crossings, history.lapTimes, history.lapCounts)
+        }.toMap()
+        val core = ReplayCore(path, session.type, session.drivers, tracks, states, session.outline,
+            session.hasStartFinish, session.startUtcMs, laps, emptyList())
+        return writeFile(preview, core, positionMs, checkActive)
+    }
+
+    private fun previewRange(times: LongArray, size: Int, from: Long, until: Long): IntRange? {
+        if (size == 0) return null
+        val left = java.util.Arrays.binarySearch(times, 0, size, from)
+        val right = java.util.Arrays.binarySearch(times, 0, size, until)
+        val first = (if (left < 0) -left - 2 else left).coerceIn(0, size - 1)
+        val last = (if (right < 0) -right - 1 else right).coerceIn(first, size - 1)
+        return first..last
+    }
+
+    private fun writeFile(file: File, core: ReplayCore, previewPositionMs: Long?, checkActive: () -> Unit): Boolean {
         if (core.outline.size < 8 || core.drivers.isEmpty() || core.tracks.isEmpty() || core.laps.isEmpty()) return false
-        folder.mkdirs()
+        val destination = file.parentFile ?: return false
+        destination.mkdirs()
         val temporary = try {
-            File.createTempFile("timing-", ".tmp", folder)
+            File.createTempFile("timing-", ".tmp", destination)
         } catch (_: IOException) {
             return false
         }
@@ -113,6 +165,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
             DataOutputStream(temporary.outputStream().buffered(BUFFER_SIZE)).use { output ->
                 output.writeInt(VERSION)
                 output.writeLong(contentId)
+                if (previewPositionMs != null) output.writeLong(previewPositionMs)
                 output.writeUTF(core.path)
                 output.writeUTF(core.type)
                 output.writeLong(core.startUtc)
@@ -186,8 +239,14 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
             }
             checkActive()
             if (temporary.length() > MAX_BYTES || !temporary.renameTo(file)) return false
-            folder.listFiles { entry -> entry != file && entry.extension == "bin" }
-                ?.sortedByDescending { it.lastModified() }?.drop(1)?.forEach { it.delete() }
+            val maxFiles = if (previewPositionMs == null) 6 else 12
+            val budget = if (previewPositionMs == null) 192L * 1024 * 1024 else 16L * 1024 * 1024
+            var bytes = file.length()
+            destination.listFiles { entry -> entry != file && entry.extension == "bin" }
+                ?.sortedByDescending { it.lastModified() }?.forEachIndexed { index, entry ->
+                    bytes += entry.length()
+                    if (index >= maxFiles - 1 || bytes > budget) entry.delete()
+                }
             return true
         } catch (_: IOException) {
             return false

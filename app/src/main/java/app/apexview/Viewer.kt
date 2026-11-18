@@ -357,7 +357,7 @@ fun ViewerScreen(app: AppState) {
             val popped = if (app.inPip) app.pipTile() else null
             app.tiles.forEach { tile ->
                 if (!tile.protectedCompositionHidden && (popped == null || tile === popped)) {
-                    key(tile.id) { TileView(app, tile, controlsOnly = true) }
+                    key(tile.id) { TileView(app, tile, controlsOnly = true, presetSlot = tvStartupSlot(app, width, height)) }
                 }
             }
             if (app.inPip) return@Box
@@ -478,20 +478,7 @@ fun ViewerScreen(app: AppState) {
                 // The tower is outside mapGestures so dragging it cannot accidentally grab the
                 // circuit underneath. Apply the same transforms as the feed/map canvas instead.
                 Box(
-                    Modifier.fillMaxSize()
-                        .graphicsLayer {
-                            val k = 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
-                            scaleX = k
-                            scaleY = k
-                            transformOrigin = TransformOrigin(0f, 0.5f)
-                        }
-                        .graphicsLayer {
-                            val scale = if (app.inPip) 1f else 1f - lift * band / height
-                            scaleX = scale
-                            scaleY = scale
-                            transformOrigin = TransformOrigin(0.5f, 1f)
-                            translationY = -sheetShift
-                        }
+                    Modifier.fillMaxSize().then(videoTransform)
                         .zIndex(CHROME_Z - 1)
                 ) {
                     TowerPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height)
@@ -902,10 +889,15 @@ internal fun PlaybackVideoCanvas(app: AppState, width: Float, height: Float) {
     } else {
         val popped = if (app.inPip) app.pipTile() else null
         app.tiles.filter { !it.protectedCompositionHidden && (popped == null || it === popped) }.forEach { tile ->
-            key(tile.id) { TileView(app, tile, videoOnly = true) }
+            key(tile.id) { TileView(app, tile, videoOnly = true, presetSlot = tvStartupSlot(app, width, height)) }
         }
     }
 }
+
+private fun tvStartupSlot(app: AppState, width: Float, height: Float): Slot? =
+    if (app.layoutMode == LayoutMode.TV && width > height && !app.laptopActive &&
+        app.tiles.size == 1 && app.singleDecoderScenePlayer == null
+    ) Layouts.tvSingleLandscapeSlot(width, height) else null
 
 private fun clock(ms: Long): String {
     val s = ms / 1000
@@ -922,7 +914,10 @@ private val overlayShadow = androidx.compose.ui.graphics.Shadow(Color.Black, blu
  */
 @OptIn(UnstableApi::class)
 @Composable
-private fun TileView(app: AppState, tile: Tile, videoOnly: Boolean = false, controlsOnly: Boolean = false) {
+private fun TileView(
+    app: AppState, tile: Tile, videoOnly: Boolean = false, controlsOnly: Boolean = false,
+    presetSlot: Slot? = null,
+) {
     val density = LocalDensity.current
     val presentedFeed = app.singleDecoderScenePlayer ?: tile.feed
     if (!videoOnly) LaunchedEffect(tile.id) {
@@ -937,8 +932,11 @@ private fun TileView(app: AppState, tile: Tile, videoOnly: Boolean = false, cont
             .then(
                 if (app.inPip) Modifier.fillMaxSize()
                 else Modifier
-                    .offset { IntOffset(tile.x.roundToInt(), tile.y.roundToInt()) }
-                    .requiredSize(with(density) { tile.w.toDp() }, with(density) { tile.h.toDp() })
+                    .offset { IntOffset((presetSlot?.x ?: tile.x).roundToInt(), (presetSlot?.y ?: tile.y).roundToInt()) }
+                    .requiredSize(
+                        with(density) { (presetSlot?.w ?: tile.w).toDp() },
+                        with(density) { (presetSlot?.h ?: tile.h).toDp() },
+                    )
             )
             .zIndex(tile.z)
             .helpAnchor(app, "tile:${tile.id}")
@@ -974,6 +972,13 @@ private fun TileView(app: AppState, tile: Tile, videoOnly: Boolean = false, cont
                         // Media3 1.5 made this workaround opt-in. Without it, PlayerView inside
                         // Compose AndroidView can stretch, crop or leak its SurfaceView surface.
                         if (!textureView) setEnableComposeSurfaceSyncWorkaround(true)
+                        addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+                            val width = right - left
+                            val height = bottom - top
+                            if (DiagnosticLogs.recording && (width != oldRight - oldLeft || height != oldBottom - oldTop)) {
+                                android.util.Log.i("PitwallLayout", "playerView tile=${tile.id} size=${width}x$height")
+                            }
+                        }
                     }
                 },
                 update = { it.player = tile.feed.player },
@@ -996,7 +1001,7 @@ private fun TileView(app: AppState, tile: Tile, videoOnly: Boolean = false, cont
                         onLongPress = { app.openTileMenu(tile); app.showChrome() },
                     )
                 }
-                .then(if (app.arranging) Modifier.arrangeGestures(app, tile) else Modifier)
+                .then(if (app.arranging && presetSlot == null) Modifier.arrangeGestures(app, tile) else Modifier)
         )
 
         // Tapped as the feed the next car picked on the map replaces: a soft light runs round it.
@@ -1819,7 +1824,7 @@ private fun MapSheet(app: AppState) {
                         trackColor = Ink.surfaceHigh,
                     )
                 }
-                Column(
+                if (!app.tvLogoMapAnchored) Column(
                     Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
                         .background(Ink.background).padding(horizontal = 16.dp, vertical = 12.dp)
                 ) {
@@ -1861,7 +1866,7 @@ private fun MapSheet(app: AppState) {
                         modifier = Modifier.padding(top = 8.dp),
                     )
                 }
-                Column(
+                if (!app.tvLogoMapAnchored) Column(
                     Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
                         .background(Ink.background).padding(vertical = 4.dp)
                 ) {

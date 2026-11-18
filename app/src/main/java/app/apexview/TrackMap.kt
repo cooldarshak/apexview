@@ -402,7 +402,7 @@ fun MapPanelView(app: AppState, timing: SessionTiming) {
             app.isTv,
             lockControlTemporarilyVisible,
         )
-        if (showControls && showLockControl) {
+        if (showControls && showLockControl && !app.tvLogoMapAnchored) {
             MapControls(app, timing)
         }
     }

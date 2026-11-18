@@ -54,6 +54,21 @@ class ReplayCoreCacheTest {
         assertEquals(source.parts, restored.parts)
         assertNull(ReplayCoreCache(temporary.root, 18).read {})
 
+        val targetUtc = 2_000_500L
+        val targetPosition = 2_000_000L
+        val timing = SessionTiming(
+            source.type, source.drivers, source.tracks, source.states, source.outline,
+            source.hasStartFinish, emptyList(), source.startUtc, laps = source.laps,
+            radioBase = LiveTimingArchive.BASE + source.path,
+        )
+        assertTrue(cache.writePreview(timing, targetPosition, targetUtc) {})
+        val preview = requireNotNull(cache.readPreview(targetPosition + 20_000L) {})
+        assertEquals(track.at(targetUtc), preview.tracks.getValue("16").at(targetUtc))
+        assertEquals(4, preview.laps.getValue("16").at(targetUtc)?.position)
+        assertTrue(preview.tracks.getValue("16").n < track.n)
+        assertNull(cache.readPreview(targetPosition + 46_000L) {})
+        assertEquals(track.n, cache.read {}?.tracks?.get("16")?.n)
+
         temporary.root.resolve("replay-timing/17.bin").outputStream().use { it.write(1) }
         assertNull(cache.read {})
     }

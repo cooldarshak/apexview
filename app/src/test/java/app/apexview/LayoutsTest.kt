@@ -103,7 +103,7 @@ class LayoutsTest {
     }
 
     @Test
-    fun tvLandscapeLayoutKeepsVideoLeftTowerTopRightAndMapBelow() {
+    fun tvLandscapeLayoutKeepsFullHeightTowerAndMapOverTheMainVideo() {
         for ((width, height) in listOf(1920f to 1080f, 1280f to 720f, 3840f to 2160f)) {
             for (feedCount in 1..4) {
                 val plan = Layouts.withCombinedOverlays(
@@ -115,8 +115,12 @@ class LayoutsTest {
                 assertEquals(plan.feeds.w, plan.workspace.x, 0.01f)
                 assertEquals(0f, plan.tower.y, 0.01f)
                 assertEquals(plan.workspace.x, plan.tower.x, 0.01f)
-                assertEquals(plan.tower.y + plan.tower.h, plan.map.y, 0.5f)
-                assertTrue(plan.map.y + plan.map.h <= height + 0.5f)
+                assertEquals(height, plan.tower.h, 0.5f)
+                val main = plan.slots.first()
+                assertTrue(plan.map.x > main.x + main.w / 2f)
+                assertTrue(plan.map.x + plan.map.w <= main.x + main.w)
+                assertTrue(plan.map.y >= main.y && plan.map.y + plan.map.h <= main.y + main.h)
+                assertTrue(!plan.tower.overlaps(plan.map))
                 assertTrue(plan.slots.all { slot ->
                     slot.x >= plan.feeds.x - 0.5f && slot.y >= plan.feeds.y - 0.5f &&
                         slot.x + slot.w <= plan.feeds.x + plan.feeds.w + 0.5f &&
@@ -244,16 +248,17 @@ class LayoutsTest {
         assertEquals(plan.feeds.w, plan.workspace.x, 0.1f)
         assertEquals(width - plan.feeds.w, plan.workspace.w, 1f)
         assertEquals(0f, plan.tower.y, 0.1f)
-        assertEquals(height * 0.65625f, plan.tower.h, 1f)
-        assertEquals(plan.tower.y + plan.tower.h, plan.map.y, 0.1f)
-        assertEquals(height * 0.28125f, plan.map.h, 1f)
-        assertEquals(height * 0.0625f, height - plan.map.y - plan.map.h, 1f)
+        assertEquals(height, plan.tower.h, 1f)
+        assertTrue(plan.map.x > width * 0.4f)
+        assertTrue(plan.map.x + plan.map.w <= plan.feeds.w)
         assertTrue(!plan.tower.overlaps(plan.map))
         assertEquals(1, plan.slots.size)
         val video = plan.slots.single()
         assertEquals(0f, video.x, 0.1f)
         assertEquals(plan.feeds.y, video.y, 0.1f)
         assertEquals(plan.feeds.w, video.w, 1f)
+        assertEquals(video, Layouts.tvSingleLandscapeSlot(width, height))
+        assertTrue(Area(video.x, video.y, video.w, video.h).overlaps(plan.map))
         assertEquals(9f / 16f, video.h / video.w, 0.001f)
         assertTrue(video.x + video.w <= plan.feeds.x + plan.feeds.w + 1f)
     }

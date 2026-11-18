@@ -360,7 +360,7 @@ internal fun FloatingPanel(
             content()
         }
         // The corner grip: drag to resize, edges snapping like the feeds'.
-        if (tower && !locked && app.arranging) {
+        if (tower && !locked && app.arranging && !app.tvLogoMapAnchored) {
             val region = bounds ?: Area(0f, 0f, width, height)
             val maximumWidth = with(density) { panelWidth.toPx() }
             val maximumHeight = with(density) { panelHeight.toPx() }
