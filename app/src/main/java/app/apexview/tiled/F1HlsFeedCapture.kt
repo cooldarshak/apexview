@@ -153,9 +153,11 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 track.hevcConfiguration?.sps?.singleOrNull()
                     ?: throw PermanentCaptureException("No compatible HEVC CMAF representation")
             }
+            require(sizes.all { it.displayHeight >= minimumHeight }) {
+                "Cast needs at least ${minimumHeight}p per source; the actual HEVC pictures are smaller. No lower-quality stream was sent."
+            }
             val fits = sizes.all { shape ->
-                shape.displayHeight >= minimumHeight &&
-                    HevcArchiveAtlasPlan.choose(perFeed.size, shape.width, shape.height, maximumOutputWidth, 2160) != null
+                HevcArchiveAtlasPlan.choose(perFeed.size, shape.width, shape.height, maximumOutputWidth, 2160) != null
             }
             if (fits) return Triple(selected, playlists, inits)
             android.util.Log.w("PitwallCast", "ARCHIVE_CODED_SIZE_REJECT feeds=${perFeed.size} " +
