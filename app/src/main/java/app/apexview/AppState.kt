@@ -1032,12 +1032,13 @@ class AppState(
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                 require(localConnection?.socket === socket && generation == castPreparationGeneration &&
                     selected.map { it.id to it.feed.sourceStream.profileLabel } == tiles.map { it.id to it.feed.sourceStream.profileLabel }) { "Cast selection or connection changed during preparation" }
+                // Keep the existing stream alive if the replacement layout cannot be sent.
+                loadNativeComposedCast(next, selected, targetMs)
                 nativeCastPump?.cancel(); nativeCastPump = null
                 nativeComposedCast?.let { retiredNativeCasts += it }
                 castRelay?.let { retiredCastRelays += it }; castRelay = null
                 nativeComposedCast = next; directCast = null; owned = null
                 if (preparingNativeCast === next) preparingNativeCast = null
-                loadNativeComposedCast(next, selected, targetMs)
                 nativeCastPump = scope.launch {
                     try {
                         while (nativeComposedCast === next) {
