@@ -8,6 +8,7 @@ on:
       - fix/tv-timing-map-and-dpad-sliders
       - customtiledview
       - feature/hevc-stitching-poc
+      - improvements
   workflow_dispatch:
 
 permissions:
@@ -48,6 +49,8 @@ jobs:
           sudo apt-get -o Acquire::Languages=none -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --no-install-recommends -y ffmpeg
           ffmpeg -hide_banner -decoders 2>&1 | grep -q hevc
+      - name: Validate finished Cast scene fixture
+        run: python3 tools/validate_finished_cast_scene.py --output "$RUNNER_TEMP/finished-cast-scene.mp4"
       - name: Build Kvazaar HEVC encoder with tile support
         timeout-minutes: 15
         run: |
