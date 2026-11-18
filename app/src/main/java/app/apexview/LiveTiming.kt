@@ -48,6 +48,21 @@ internal data class ReplayPlayhead(
     fun utcAt(archiveStart: Long): Long = (videoUtcMs ?: archiveStart + positionMs) + offsetMs
 }
 
+/** Keeps a streaming preview centered when the manifest clock corrects a replay estimate. */
+internal class ReplayPositionWindow(initialTargetMs: Long) {
+    var targetMs = initialTargetMs.coerceAtLeast(0L)
+        private set
+    val firstMs get() = (targetMs - 90_000L).coerceAtLeast(0L)
+    val lastMs get() = targetMs + 120_000L
+
+    fun retarget(currentMs: Long): Boolean {
+        val next = currentMs.coerceAtLeast(0L)
+        if (abs(next - targetMs) < 30_000L) return false
+        targetMs = next
+        return true
+    }
+}
+
 enum class LapState { UNKNOWN, PIT, OUT_LAP, PUSH, COOL_DOWN, KNOCKED_OUT }
 
 class DriverInfo(
@@ -811,11 +826,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                     }
                                     val firstLines = reader.lineSequence().take(100).map(::copy).toList()
                                     val probe = positionsStreamStart(firstLines.joinToString("\n")) ?: initialStart
-                                    val target = (targetUtc(initialStart) - probe).coerceAtLeast(0)
+                                    val wanted = ReplayPositionWindow(targetUtc(initialStart) - probe)
                                     // Bound startup work to a few minutes of positions near the replay clock.
                                     // Copy the remaining data through to disk for seeks and full history.
-                                    val wanted = (target - 90_000).coerceAtLeast(0)..(target + 120_000)
-                                    report("streaming position window targetMs=$target")
+                                    report("streaming position window targetMs=${wanted.targetMs}")
                                     val incoming = firstLines.asSequence() + reader.lineSequence().map(::copy)
                                     val records = incoming.iterator()
                                     val window = sequence {
@@ -824,8 +838,11 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                             val prefix = streamPrefixLength(line)
                                             if (prefix >= line.length) continue
                                             val offset = streamOffsetMs(line, prefix)
-                                            if (offset > wanted.last) break
-                                            if (offset in wanted) yield(line)
+                                            if (wanted.retarget(targetUtc(initialStart) - probe)) {
+                                                report("retargeted position window offsetMs=$offset targetMs=${wanted.targetMs}")
+                                            }
+                                            if (offset > wanted.lastMs) break
+                                            if (offset >= wanted.firstMs) yield(line)
                                         }
                                     }
                                     var previewSent = false
@@ -896,7 +913,14 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                 text.appendLine(line)
                                 line
                             }.iterator()
-                            val preview = DriverTimingParser.preview(lines, start, { targetUtc(start) }, { job.ensureActive() })
+                            val preview = DriverTimingParser.preview(lines, start, {
+                                val clock = playhead()
+                                // A resumed race can start almost an hour away from the heartbeat
+                                // estimate. Let Media3 resolve that clock while the prefix streams in.
+                                if (clock != null && clock.positionMs >= 180_000L && clock.videoUtcMs == null &&
+                                    android.os.SystemClock.elapsedRealtime() - started < 3_000L
+                                ) Long.MAX_VALUE else targetUtc(start)
+                            }, { job.ensureActive() })
                             if (preview != null) {
                                 checkpoint("tower-preview", "drivers=${preview.laps.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
                                 withContext(Dispatchers.Main) {
@@ -929,15 +953,19 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                         val accumulator = StateHistoryAccumulator()
                         val laps = traceStage("tower-history") { report ->
                             val job = kotlin.coroutines.coroutineContext
-                            var previewPublished = false
+                            var publishedTarget: Long? = null
                             DriverTimingParser.parse(timingStream, initialStart, timingF1Stream, accumulator, report,
                                 checkActive = { job.ensureActive() }) { through, buildLaps ->
-                                if (!previewPublished && through >= targetUtc(initialStart)) {
-                                    previewPublished = true
-                                    val snapshot = DriverTimingParse(buildLaps(), accumulator.finish())
-                                    launch(Dispatchers.Main) {
-                                        partialHistory = snapshot
-                                        publishTopics()
+                                val target = targetUtc(initialStart)
+                                if (through >= target && publishedTarget?.let { abs(target - it) < 30_000L } != true) {
+                                    val laps = buildLaps()
+                                    if (laps.values.any { it.at(target)?.position != null }) {
+                                        publishedTarget = target
+                                        val snapshot = DriverTimingParse(laps, accumulator.finish())
+                                        launch(Dispatchers.Main) {
+                                            partialHistory = snapshot
+                                            publishTopics()
+                                        }
                                     }
                                 }
                             }

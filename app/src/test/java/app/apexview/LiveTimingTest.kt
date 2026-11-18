@@ -23,6 +23,18 @@ class LiveTimingTest {
     private val t0 = Instant.parse("2026-10-24T20:00:00Z").toEpochMilli()
 
     @Test
+    fun positionPreviewFollowsACorrectedArchiveClock() {
+        val window = ReplayPositionWindow(4_781_048L)
+        assertEquals(4_901_048L, window.lastMs)
+        assertEquals(false, window.retarget(4_782_000L))
+        assertTrue(window.retarget(7_644_032L))
+        assertEquals(7_554_032L, window.firstMs)
+        assertEquals(7_764_032L, window.lastMs)
+        assertTrue(window.retarget(5_000L))
+        assertEquals(0L, window.firstMs)
+    }
+
+    @Test
     fun leavingThePitsWithoutPitOutStillCountsAsOut() {
         val stream = listOf(
             "00:00:01.000{\"Lines\":{\"4\":{\"InPit\":true,\"NumberOfLaps\":0}}}",

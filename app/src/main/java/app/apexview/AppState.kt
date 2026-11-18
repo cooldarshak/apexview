@@ -66,7 +66,11 @@ class Tile(val id: Int, val contentId: Long, channel: Channel, feed: FeedPlayer)
         h = w * 9f / 16f
     }
 
+    var layoutMotion: kotlinx.coroutines.Job? = null
+
     fun place(slot: Slot) {
+        layoutMotion?.cancel()
+        layoutMotion = null
         x = slot.x
         y = slot.y
         resize(slot.w)
@@ -3996,7 +4000,13 @@ class AppState(
             }
             handPlaced = false
             if (composed != null) placeComposedViewport(composed, plan.feeds)
-            else plan.slots.zip(ordered).forEach { (slot, tile) -> settle(tile, slot) }
+            else plan.slots.zip(ordered).forEach { (slot, tile) ->
+                if (tvLayoutActive) tile.place(slot) else settle(tile, slot)
+            }
+            if (tvLayoutActive && DiagnosticLogs.recording) android.util.Log.i(
+                "PitwallLayout",
+                "mode=TV canvas=${width.toInt()}x${height.toInt()} main=${ordered.firstOrNull()?.let { "${it.x},${it.y},${it.w},${it.h}" }}",
+            )
             return
         } else {
             combinedOverlayPlan = null
@@ -4074,6 +4084,8 @@ class AppState(
     private fun placeComposedViewport(host: Tile, area: Area) {
         // A composed representation has its own aspect ratio. PlayerView FIT preserves all cells.
         // Do not pass it through Tile.resize(), which forces every source tile back to 16:9.
+        host.layoutMotion?.cancel()
+        host.layoutMotion = null
         host.x = area.x
         host.y = area.y
         host.w = area.w
@@ -4584,6 +4596,8 @@ class AppState(
 
     /** A finger (or two) came down on [tile] to move or resize it. */
     fun beginArrange(tile: Tile) {
+        tile.layoutMotion?.cancel()
+        tile.layoutMotion = null
         raise(tile)
         arrangeRaw = Box16(tile.x, tile.y, tile.w)
         arrangeOthers = tiles.filter { it !== tile }.map { it to Box16(it.x, it.y, it.w) }
@@ -4654,6 +4668,7 @@ class AppState(
      * resize) only pull tiles back on screen.
      */
     fun onCanvasResized(width: Float, height: Float) {
+        if (width == canvasW && height == canvasH) return
         val turned = canvasW > 0f && (canvasW > canvasH) != (width > height)
         val refit = canvasW > 0f && (turned || abs(width - canvasW) > canvasW * 0.1f || abs(height - canvasH) > canvasH * 0.1f)
         if (refit && handPlaced && tiles.isNotEmpty() && focusTileId == null && !laptopActive) {
@@ -4677,6 +4692,11 @@ class AppState(
         canvasW = width
         canvasH = height
         keepMapOnScreen()
+        if (layoutMode == LayoutMode.TV && !laptopActive) {
+            handPlaced = false
+            layoutRequest++
+            return
+        }
         if (!refit) {
             keepOnScreen(width, height)
             return
@@ -5065,7 +5085,8 @@ class AppState(
         val from = Slot(tile.x, tile.y, tile.w)
         // animate() needs the display's frame clock, which only Compose's UI dispatcher carries;
         // the plain lifecycle scope has none and crashed the double-tap swap in 0.9 and 0.10.
-        scope.launch(AndroidUiDispatcher.Main) {
+        tile.layoutMotion?.cancel()
+        tile.layoutMotion = scope.launch(AndroidUiDispatcher.Main) {
             animate(0f, 1f, animationSpec = tween(Motion.SCREEN_MS, easing = EaseOut)) { f, _ ->
                 tile.x = from.x + (to.x - from.x) * f
                 tile.y = from.y + (to.y - from.y) * f
@@ -5083,6 +5104,7 @@ class AppState(
         if (audioHint === tile) audioHint = null
         if (targetTile === tile) targetTile = null
         tileMenu = null
+        tile.layoutMotion?.cancel()
         tile.feed.release()
         tiles.remove(tile)
         if (tiles.isEmpty()) {
@@ -5366,7 +5388,7 @@ class AppState(
         if (singleDecoderSceneActive) protectedCompositionHost?.feed?.prioritizeArchiveSeek(target)
         val shift = target - leader.feed.player.currentPosition
         // Every tile moves by the same amount, so their offsets from each other survive the seek.
-        tiles.filter { nativeArchiveTiles.isEmpty() || it === protectedCompositionHost }.forEach { it.feed.player.seekTo((it.feed.player.currentPosition + shift).coerceAtLeast(0L)) }
+        tiles.filter { nativeArchiveTiles.isEmpty() || it === protectedCompositionHost }.forEach { it.feed.seekFromControls((it.feed.player.currentPosition + shift).coerceAtLeast(0L)) }
         positionMs = target
         if (restartRollingComposition) startArchiveSingleDecoderComposition(leader.contentId)
         showChrome()

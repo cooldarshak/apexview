@@ -273,8 +273,9 @@ fun ViewerScreen(app: AppState) {
     // Laptop mode keeps the stream still: the controls lie over its top edge instead.
     // SurfaceView is the recommended Android TV output, but scaling its parent while the
     // controls animate can desynchronise its surface from Compose. TV chrome overlays in place.
+    val fixedVideoGeometry = app.isTv || app.layoutMode == LayoutMode.TV
     val lift by animateFloatAsState(
-        if (!app.isTv && app.chromeVisible && !app.arranging && !app.laptopActive) 1f else 0f,
+        if (!fixedVideoGeometry && app.chromeVisible && !app.arranging && !app.laptopActive) 1f else 0f,
         motion,
         label = "lift",
     )
@@ -306,8 +307,12 @@ fun ViewerScreen(app: AppState) {
         // Android doesn't change the window's size and report leaving the pop-out at the same moment,
         // so its size also counts by itself. Taken for the screen, it left the feeds laid out small.
         val popOutSized = isPopOutSized(view, width, height)
-        LaunchedEffect(app.layoutRequest, app.inPip, popOutSized) { if (!app.inPip && !popOutSized) app.layoutIfRequested(width, height) }
-        LaunchedEffect(width, height, app.inPip) { if (!app.inPip && !popOutSized) app.onCanvasResized(width, height) }
+        LaunchedEffect(width, height, app.layoutRequest, app.inPip, popOutSized) {
+            if (!app.inPip && !popOutSized) {
+                app.onCanvasResized(width, height)
+                app.layoutIfRequested(width, height)
+            }
+        }
         // Once the window has settled after the pop-out, feeds left small are fitted again.
         LaunchedEffect(app.inPip) {
             if (!app.inPip) {
@@ -316,7 +321,7 @@ fun ViewerScreen(app: AppState) {
             }
         }
 
-        val videoTransform = if (app.isTv) Modifier else Modifier
+        val videoTransform = if (fixedVideoGeometry) Modifier else Modifier
             .graphicsLayer {
                 val k = 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
                 scaleX = k; scaleY = k; transformOrigin = TransformOrigin(0f, 0.5f)
@@ -344,19 +349,7 @@ fun ViewerScreen(app: AppState) {
         Box(
             Modifier
                 .fillMaxSize()
-                .graphicsLayer {
-                    val k = if (app.isTv) 1f else 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
-                    scaleX = k
-                    scaleY = k
-                    transformOrigin = TransformOrigin(0f, 0.5f)
-                }
-                .graphicsLayer {
-                    val scale = if (app.inPip || app.isTv) 1f else 1f - lift * band / height
-                    scaleX = scale
-                    scaleY = scale
-                    transformOrigin = TransformOrigin(0.5f, 1f)
-                    translationY = if (app.isTv) 0f else -sheetShift
-                }
+                .then(videoTransform)
                 .mapGestures(app, density)
         ) {
             // The pop-out is this same screen with one feed filling it: the feed keeps its video

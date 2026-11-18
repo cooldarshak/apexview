@@ -17,6 +17,8 @@ class TileFit {
     @Volatile var share = 1f
     /** 0 means automatic tile fitting; otherwise prefer the best available height up to this cap. */
     @Volatile var qualityHeight = 0
+    /** Prefer a smaller first segment on a replay resume or explicit seek in Auto. */
+    @Volatile var fastStart = false
 }
 
 /**
@@ -82,10 +84,11 @@ class TileFitSelectionFactory(private val fit: TileFit) : AdaptiveTrackSelection
         adaptationCheckpoints,
         Clock.DEFAULT,
     ) {
+        private val availableRenditions = (0 until length()).map {
+            getFormat(it).let { candidate -> candidate.width to candidate.height }
+        }
+
         override fun canSelectFormat(format: Format, trackBitrate: Int, effectiveBitrate: Long): Boolean {
-            val availableRenditions = (0 until length()).map {
-                getFormat(it).let { candidate -> candidate.width to candidate.height }
-            }
             val forcedHeight = fit.qualityHeight.takeIf { it > 0 }?.let {
                 highestAvailableVideoHeightAtOrBelow(availableRenditions, it)
             }
@@ -94,8 +97,12 @@ class TileFitSelectionFactory(private val fit: TileFit) : AdaptiveTrackSelection
                 // move between bitrates at that resolution. Auto retains tile-size fitting.
                 format.height == forcedHeight
             } else {
+                val ceiling = pixelCeiling(availableRenditions, fit.width, fit.height)
+                val fastStartCeiling = if (fit.fastStart) availableRenditions
+                    .filter { (width, height) -> width > 0 && height in 1..540 }
+                    .maxOfOrNull { (width, height) -> width * height } else null
                 format.width <= 0 || format.height <= 0 ||
-                    format.width * format.height <= pixelCeiling(availableRenditions, fit.width, fit.height)
+                    format.width * format.height <= minOf(ceiling, fastStartCeiling ?: ceiling)
             }
             return fits && super.canSelectFormat(format, trackBitrate, effectiveBitrate)
         }

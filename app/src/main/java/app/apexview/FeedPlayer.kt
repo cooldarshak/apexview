@@ -263,7 +263,10 @@ class FeedPlayer(
     private fun qualityHeight(quality: VideoQuality) =
         if (stableTvResolution && quality == VideoQuality.AUTO) 720 else quality.maxHeight
 
-    private val fit = TileFit().apply { qualityHeight = videoQuality.targetHeight }
+    private val fit = TileFit().apply {
+        qualityHeight = videoQuality.targetHeight
+        fastStart = startMs != C.TIME_UNSET
+    }
     private var selectedVideoQuality = videoQuality
     private var externalQualityFloor = false
     private val sourceTrackSelector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context, TileFitSelectionFactory(fit))
@@ -516,6 +519,7 @@ class FeedPlayer(
                 renderTimeMs: Long,
             ) {
                 firstFrameRendered = true
+                fit.fastStart = false
                 val seekAt = pendingSeekAtMs
                 if (seekAt != null && renderTimeMs >= seekAt) {
                     playbackEvent("seek-rendered", "seek=$seekSequence elapsedMs=${renderTimeMs - seekAt} " +
@@ -646,6 +650,11 @@ class FeedPlayer(
         if (startMs == C.TIME_UNSET) player.setMediaItem(item) else player.setMediaItem(item, startMs)
         player.playWhenReady = true
         player.prepare()
+    }
+
+    internal fun seekFromControls(positionMs: Long) {
+        if (!player.isCurrentMediaItemLive && archiveVodSession == null) fit.fastStart = true
+        player.seekTo(positionMs)
     }
 
     /**
