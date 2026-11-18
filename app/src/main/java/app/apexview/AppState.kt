@@ -1527,6 +1527,24 @@ class AppState(
         private set
     private var timingDiagnosticStartedAtMs = 0L
 
+    internal fun logPlaybackSample() {
+        if (tiles.isEmpty()) return
+        android.util.Log.i("PitwallPlayback", "event=scene uptimeMs=${android.os.SystemClock.elapsedRealtime()} " +
+            "content=${leaderTile()?.contentId} feeds=${tiles.size} layout=${layoutMode.name} " +
+            "tower=$towerOpen map=${mapMode.name} cast=$castingActive handoff=$castPlaybackHandedOff " +
+            "positionMs=$castFramePositionMs")
+        tiles.forEach { it.feed.logPlaybackSample() }
+    }
+
+    private fun replayPlayhead(contentId: Long, savedPosition: Long?): ReplayPlayhead {
+        val feed = leaderTile()?.takeIf { it.contentId == contentId }?.feed
+            ?: return ReplayPlayhead(savedPosition ?: 0L, null, mapOffsetMs)
+        val position = castFramePositionMs
+        val base = if (castPlaybackHandedOff) remoteWallClockBaseMs ?: castSourceWallClockBaseMs
+            else feed.windowStartMs()
+        return ReplayPlayhead(position, base?.plus(position), mapOffsetMs)
+    }
+
     private fun recordTimingDiagnostic(message: String, reset: Boolean = false) {
         val now = android.os.SystemClock.elapsedRealtime()
         if (reset || timingDiagnosticStartedAtMs == 0L) {
@@ -1535,8 +1553,10 @@ class AppState(
         }
         val elapsed = ((now - timingDiagnosticStartedAtMs).coerceAtLeast(0L) / 1000.0)
         val entry = "%05.1fs  %s".format(java.util.Locale.US, elapsed, message)
-        timingDiagnostics = (timingDiagnostics + entry).takeLast(8)
-        android.util.Log.i("ApexviewTiming", entry)
+        if (timing?.outline?.size?.let { it >= 8 } != true) {
+            timingDiagnostics = (timingDiagnostics + entry).takeLast(8)
+        }
+        android.util.Log.i("ApexviewTiming", "$entry trace=$timingDiagnosticStartedAtMs elapsedMs=${now - timingDiagnosticStartedAtMs}")
     }
 
     /** Live decoder status for the TV overlay; no codec capability query is repeated here. */
@@ -3194,67 +3214,114 @@ class AppState(
                         continue
                     }
                     mapStatus = "Loading F1 timing archive…"
+                    val trace = timingDiagnosticStartedAtMs
                     try {
                         // When the picture was broadcast: identifies the session if the title can't.
-                        val replayFeed = leaderTile()?.takeIf { it.contentId == contentId }?.feed
                         val savedPosition = pendingResume?.takeIf { it.contentId == contentId && !it.live }?.positionMs
-                        val watched = replayFeed?.wallClockMs()
-                        val replayPosition = savedPosition ?: replayFeed?.player?.currentPosition ?: 0L
+                        val initial = replayPlayhead(contentId, savedPosition)
+                        val playhead = java.util.concurrent.atomic.AtomicReference(initial)
                         recordTimingDiagnostic(
-                            "Archive lookup: videoClock=${watched ?: "unavailable"}, replayPositionMs=$replayPosition, " +
-                                "catalogStart=${ref!!.sessionStartUtcMs ?: "unavailable"}"
+                            "Archive lookup: videoClock=${initial.videoUtcMs ?: "unavailable"} positionMs=${initial.positionMs} " +
+                                "catalogStart=${ref!!.sessionStartUtcMs ?: "unavailable"} attempt=$attempt"
                         )
-                        var towerReady = false
-                        var mapReady = false
-                        val loaded = LiveTimingArchive(token!!, userAgent).load(
-                            ref = ref!!,
-                            watchedUtc = watched,
-                            replayPositionMs = replayPosition,
-                            positionScratchDir = context.cacheDir,
-                            replayCache = ReplayCoreCache(context.cacheDir, contentId),
-                            timingOffsetMs = mapOffsetMs,
-                            onProgress = { status ->
-                                if (timingContentId == contentId) {
-                                    if (timing?.outline?.size?.let { it >= 8 } != true) mapStatus = status
-                                    recordTimingDiagnostic(status)
-                                }
-                            },
-                            onPartial = { partial ->
-                                if (timingContentId == contentId) {
-                                    showTiming(partial)
-                                    val player = leaderTile()?.feed
-                                    val clock = (player?.wallClockMs()
-                                        ?: partial.startUtcMs + (player?.player?.currentPosition ?: 0L)) + mapOffsetMs
-                                    if (!towerReady && partial.laps.values.any { it.at(clock) != null }) {
-                                        towerReady = true
-                                        recordTimingDiagnostic("Replay tower ready at playback clock")
-                                    }
-                                    if (!mapReady && partial.outline.size >= 8 && partial.tracks.values.any { it.at(clock) != null }) {
-                                        mapReady = true
-                                        recordTimingDiagnostic("Replay map ready with driver positions at playback clock")
-                                    }
-                                    recordTimingDiagnostic(
-                                        "Partial data: drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
-                                            "cars=${partial.tracks.size}, outlinePoints=${partial.outline.size / 2}"
-                                    )
-                                    mapStatus = when {
-                                        partial.outline.size >= 8 -> null
-                                        partial.tracks.isEmpty() -> "Loading track positions…"
-                                        else -> "Track data loaded; waiting for a usable circuit outline…"
+                        var towerReadyMs: Long? = null
+                        var mapReadyMs: Long? = null
+                        var lastClockBase: Long? = null
+                        var clockLogged = false
+                        var budgetReported = false
+                        fun inspectPlayback() {
+                            val sample = replayPlayhead(contentId, savedPosition)
+                            playhead.set(sample)
+                            val base = sample.videoUtcMs?.minus(sample.positionMs)
+                            if (!clockLogged || base != lastClockBase) {
+                                clockLogged = true
+                                lastClockBase = base
+                                recordTimingDiagnostic("Replay clock source=${if (base == null) "archive-estimate" else "video"} " +
+                                    "baseUtcMs=$base positionMs=${sample.positionMs} offsetMs=${sample.offsetMs}")
+                            }
+                            val session = timing
+                            val elapsed = android.os.SystemClock.elapsedRealtime() - trace
+                            val clock = session?.let { sample.utcAt(it.startUtcMs) }
+                            if (session != null && clock != null && leaderTile()?.contentId == contentId) {
+                                if (towerReadyMs == null) {
+                                    val rows = session.laps.count { it.value.at(clock)?.position != null }
+                                    if (rows > 0) {
+                                        towerReadyMs = elapsed
+                                        recordTimingDiagnostic("Replay tower ready utcMs=$clock rankedRows=$rows")
                                     }
                                 }
-                            },
-                        )
+                                if (mapReadyMs == null && session.outline.size >= 8) {
+                                    val cars = session.tracks.count { it.value.at(clock) != null }
+                                    if (cars > 0) {
+                                        mapReadyMs = elapsed
+                                        recordTimingDiagnostic("Replay map ready utcMs=$clock positionedCars=$cars")
+                                    }
+                                }
+                            }
+                            if (!budgetReported && elapsed >= 5_000) {
+                                budgetReported = true
+                                recordTimingDiagnostic("Replay 5s checkpoint towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs " +
+                                    "clockUtcMs=$clock positionMs=${sample.positionMs} " +
+                                    "trackFromUtcMs=${session?.firstTrackUtc} trackThroughUtcMs=${session?.lastTrackUtc}")
+                            }
+                        }
+                        val loaded = coroutineScope {
+                            val clockJob = launch {
+                                while (true) {
+                                    inspectPlayback()
+                                    kotlinx.coroutines.delay(200)
+                                }
+                            }
+                            try {
+                                LiveTimingArchive(token!!, userAgent).load(
+                                    ref = ref!!,
+                                    watchedUtc = initial.videoUtcMs,
+                                    replayPositionMs = initial.positionMs,
+                                    positionScratchDir = context.cacheDir,
+                                    replayCache = ReplayCoreCache(context.cacheDir, contentId),
+                                    timingOffsetMs = initial.offsetMs,
+                                    playhead = playhead::get,
+                                    traceId = trace,
+                                    onProgress = { status ->
+                                        if (timingContentId == contentId) {
+                                            if (timing?.outline?.size?.let { it >= 8 } != true) mapStatus = status
+                                            recordTimingDiagnostic(status)
+                                        }
+                                    },
+                                    onPartial = { partial ->
+                                        if (timingContentId == contentId) {
+                                            showTiming(partial)
+                                            inspectPlayback()
+                                            recordTimingDiagnostic(
+                                                "Partial data: drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
+                                                    "cars=${partial.tracks.size}, outlinePoints=${partial.outline.size / 2} " +
+                                                    "trackFromUtcMs=${partial.firstTrackUtc} trackThroughUtcMs=${partial.lastTrackUtc}"
+                                            )
+                                            mapStatus = when {
+                                                partial.outline.size >= 8 -> null
+                                                partial.tracks.isEmpty() -> "Loading track positions…"
+                                                else -> "Track data loaded; waiting for a usable circuit outline…"
+                                            }
+                                        }
+                                    },
+                                )
+                            } finally {
+                                clockJob.cancel()
+                            }
+                        }
                         if (timingContentId != contentId) return@launch
-                        rememberOutline(loaded)
                         showTiming(loaded)
+                        inspectPlayback()
                         recordTimingDiagnostic(
                             "Archive complete: drivers=${loaded.drivers.size}, laps=${loaded.laps.size}, " +
-                                "cars=${loaded.tracks.size}, outlinePoints=${loaded.outline.size / 2}"
+                                "cars=${loaded.tracks.size}, outlinePoints=${loaded.outline.size / 2} " +
+                                "towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs"
                         )
+                        launch(kotlinx.coroutines.Dispatchers.IO) { rememberOutline(loaded) }
                         mapStatus = if (loaded.outline.isEmpty()) "Couldn't trace the track; showing cars only" else null
                         return@launch
                     } catch (e: kotlinx.coroutines.CancellationException) {
+                        android.util.Log.i("ApexviewTiming", "Replay cancelled content=$contentId trace=$trace")
                         throw e
                     } catch (e: Exception) {
                         if (timingContentId != contentId) return@launch

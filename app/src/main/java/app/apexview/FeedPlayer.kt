@@ -195,6 +195,23 @@ class FeedPlayer(
     private var licensed = false
     val hasLoadedDrmKeys: Boolean get() = licensed
     private var firstFrameRendered = false
+    private val diagnosticId = System.identityHashCode(this)
+    private var loggedClock = false
+
+    private fun playbackEvent(event: String, detail: String) {
+        if (DiagnosticLogs.recording) {
+            Log.i("PitwallPlayback", "feed=$diagnosticId uptimeMs=${android.os.SystemClock.elapsedRealtime()} event=$event $detail")
+        }
+    }
+
+    internal fun logPlaybackSample() {
+        val counters = player.videoDecoderCounters
+        counters?.ensureUpdated()
+        playbackEvent("sample", "positionMs=${player.currentPosition} bufferedMs=${player.bufferedPosition} " +
+            "state=${player.playbackState} playing=${player.isPlaying} decoder=${activeVideoDecoderName ?: "none"} " +
+            "rendered=${counters?.renderedOutputBufferCount ?: 0} dropped=${counters?.droppedBufferCount ?: 0} " +
+            "skipped=${counters?.skippedOutputBufferCount ?: 0} maxConsecutiveDrops=${counters?.maxConsecutiveDroppedBufferCount ?: 0}")
+    }
     var activeVideoDecoderCount by mutableStateOf(0)
         private set
     val activeVideoDecoderName: String? get() = decoder.takeIf { activeVideoDecoderCount > 0 && it.isNotBlank() }
@@ -363,6 +380,10 @@ class FeedPlayer(
             "TCL_STABLE_RENDITION preferred=${videoQuality.name} cap=${qualityWidth(videoQuality)}x${qualityHeight(videoQuality)}")
         player.addListener(object : Player.Listener {
             override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+                if (DiagnosticLogs.recording && !loggedClock) windowStartMs()?.let { start ->
+                    loggedClock = true
+                    playbackEvent("clock", "windowStartUtcMs=$start reason=$reason positionMs=${player.currentPosition}")
+                }
                 if (!startAtBeginning || timeline.isEmpty) return
                 if (timeline.getWindow(player.currentMediaItemIndex, Timeline.Window()).isPlaceholder) return
                 startAtBeginning = false
@@ -377,6 +398,7 @@ class FeedPlayer(
                     else -> "Stopped"
                 }
                 buffering = playbackState == Player.STATE_BUFFERING
+                playbackEvent("state", "state=$playbackState positionMs=${player.currentPosition} bufferedMs=${player.bufferedPosition}")
                 if (playbackState == Player.STATE_READY && !started) {
                     started = true
                     // A rolling average of how long feeds take to start, for the next one.
@@ -388,10 +410,15 @@ class FeedPlayer(
 
             override fun onPlayerError(e: PlaybackException) {
                 error = "${e.errorCodeName}: ${describe(e)}"
+                playbackEvent("error", "positionMs=${player.currentPosition} $error")
                 val archiveFailure = generateSequence(e as Throwable) { it.cause }
                     .filterIsInstance<app.apexview.tiled.ArchiveVodMediaException>().firstOrNull()
                 problem = archiveFailure?.reason ?: explain(e)
                 refresh()
+            }
+
+            override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+                playbackEvent("discontinuity", "fromMs=${oldPosition.positionMs} toMs=${newPosition.positionMs} reason=$reason")
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -481,12 +508,17 @@ class FeedPlayer(
                 renderTimeMs: Long,
             ) {
                 firstFrameRendered = true
+                playbackEvent("first-frame", "renderUptimeMs=$renderTimeMs positionMs=${eventTime.currentPlaybackPositionMs} decoder=$decoder")
                 if (stream.allowHevcProfileProbe) {
                     HevcFeedProfileCapture.updateFirstFrameRendered(
                         stream.profileGroup, stream.profileLabel
                     )
                 }
                 refresh()
+            }
+
+            override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long) {
+                playbackEvent("drops", "frames=$droppedFrames intervalMs=$elapsedMs positionMs=${eventTime.currentPlaybackPositionMs}")
             }
 
             override fun onSurfaceSizeChanged(eventTime: AnalyticsListener.EventTime, width: Int, height: Int) {

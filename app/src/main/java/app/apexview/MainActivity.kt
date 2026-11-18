@@ -55,6 +55,7 @@ class MainActivity : FragmentActivity() {
     private lateinit var app: AppState
     private var castContext: CastContext? = null
     private var externalDisplay: ExternalDisplayController? = null
+    private var frameDiagnostics: WindowFrameDiagnostics? = null
     private val castSessionListener = object : SessionManagerListener<CastSession> {
         override fun onSessionStarting(session: CastSession) = Unit
         override fun onSessionStarted(session: CastSession, sessionId: String) =
@@ -112,6 +113,20 @@ class MainActivity : FragmentActivity() {
                 }
             }
         }
+        lifecycleScope.launch {
+            repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+                while (true) {
+                    if (DiagnosticLogs.isEnabled(applicationContext)) {
+                        if (frameDiagnostics == null) frameDiagnostics = WindowFrameDiagnostics(window)
+                        if (DiagnosticLogs.recording) app.logPlaybackSample()
+                    } else {
+                        frameDiagnostics?.close()
+                        frameDiagnostics = null
+                    }
+                    kotlinx.coroutines.delay(2_000)
+                }
+            }
+        }
         addOnPictureInPictureModeChangedListener { app.setPip(it.isInPictureInPictureMode) }
         ContextCompat.registerReceiver(
             this, pipControls,
@@ -161,6 +176,8 @@ class MainActivity : FragmentActivity() {
     }
 
     override fun onDestroy() {
+        frameDiagnostics?.close()
+        frameDiagnostics = null
         externalDisplay?.close(); externalDisplay = null
         castContext?.sessionManager?.removeSessionManagerListener(castSessionListener, CastSession::class.java)
         castContext = null

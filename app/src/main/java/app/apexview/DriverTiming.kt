@@ -243,6 +243,46 @@ object DriverTimingParser {
         return true
     }
 
+    private fun materialize(drivers: Map<String, Live>, copySnapshots: Boolean) =
+        drivers.mapValues { (_, driver) ->
+            DriverLaps(driver.times.toLongArray(), if (copySnapshots) driver.snaps.toList() else driver.snaps,
+                driver.crossings.toLongArray(), driver.lapTimes.toLongArray(), driver.lapCounts.toIntArray())
+        }
+
+    /** Consume the ordered primary prefix until the playhead has usable standings. */
+    internal fun preview(
+        lines: Iterator<String>,
+        streamStart: Long,
+        targetUtc: () -> Long,
+        checkActive: () -> Unit,
+    ): DriverTimingParse? {
+        val drivers = mutableMapOf<String, Live>()
+        val states = StateHistoryAccumulator()
+        var through = Long.MIN_VALUE
+        while (lines.hasNext()) {
+            checkActive()
+            val line = lines.next()
+            val prefix = streamPrefixLength(line)
+            if (prefix >= line.length) continue
+            val time = streamStart + streamOffsetMs(line, prefix)
+            if (time < through) return null  // Use the full ordered merge for a disordered archive.
+            through = time
+            val rows = runCatching { JSONObject(line.substring(prefix)).optJSONObject("Lines") }.getOrNull()
+                ?: continue
+            states.accept(rows, time)
+            rows.keys().forEach { number ->
+                val row = rows.optJSONObject(number) ?: return@forEach
+                val driver = drivers.getOrPut(number) { Live() }
+                apply(driver, row, time)
+                driver.snap(time)
+            }
+            if (time >= targetUtc() && drivers.values.any { it.position != null }) {
+                return DriverTimingParse(materialize(drivers, copySnapshots = false), states.finish())
+            }
+        }
+        return null
+    }
+
     fun parse(stream: String, streamStart: Long, timingF1: String = ""): Map<String, DriverLaps> =
         parse(stream, streamStart, timingF1, null)
 
@@ -260,10 +300,6 @@ object DriverTimingParser {
         var records = 0
         var invalidJson = 0
         var missingLines = 0
-        fun materialize(copySnapshots: Boolean) = drivers.mapValues { (_, l) ->
-            DriverLaps(l.times.toLongArray(), if (copySnapshots) l.snaps.toList() else l.snaps,
-                l.crossings.toLongArray(), l.lapTimes.toLongArray(), l.lapCounts.toIntArray())
-        }
         fun consume(event: TimedLine) {
             checkActive()
             records++
@@ -279,7 +315,7 @@ object DriverTimingParser {
                 apply(live, d, event.time)
                 live.snap(event.time)
             }
-            if (records % 1024 == 0) onProgress?.invoke(event.time) { materialize(true) }
+            if (records % 1024 == 0) onProgress?.invoke(event.time) { materialize(drivers, copySnapshots = true) }
         }
 
         checkpoint?.invoke("checking timestamp order primaryChars=${stream.length} supplementChars=${timingF1.length}")
@@ -312,7 +348,7 @@ object DriverTimingParser {
         }
 
         checkpoint?.invoke("building history records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size}")
-        return materialize(false)
+        return materialize(drivers, copySnapshots = false)
     }
 
     private fun apply(l: Live, d: JSONObject, t: Long) {

@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.os.Process
 import android.provider.MediaStore
 import android.util.Log
@@ -18,6 +19,8 @@ import java.io.OutputStreamWriter
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.util.Timer
+import kotlin.concurrent.timerTask
 
 /** Opt-in, process-scoped logcat capture. Android does not grant apps system-wide log access. */
 object DiagnosticLogs {
@@ -32,6 +35,12 @@ object DiagnosticLogs {
     private var writer: BufferedWriter? = null
     private var bytes = 0L
     private var generation = 0
+    private var segment = 0
+    private var captureId = ""
+    private var dirty = false
+    private val history = DiagnosticHistory()
+    @Volatile var recording = false
+        private set
     var status by mutableStateOf("Logging is off")
         private set
 
@@ -43,7 +52,7 @@ object DiagnosticLogs {
 
     fun setEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(ENABLED, enabled).apply()
-        if (enabled) start(context.applicationContext) else stop()
+        if (enabled) start(context.applicationContext) else stop(context.applicationContext)
     }
 
     private fun publishStatus(value: String) { main.post { status = value } }
@@ -59,15 +68,31 @@ object DiagnosticLogs {
     }
 
     private fun capture(context: Context, token: Int) {
+        val timer = Timer("PitwallLogFlush", true)
         try {
+            val child = ProcessBuilder("logcat", "-b", "main", "-b", "system", "-b", "crash",
+                "-v", "threadtime", "--pid=${Process.myPid()}", "-T", "2000").redirectErrorStream(true).start()
             synchronized(lock) {
-                if (token != generation) return
+                if (token != generation) { child.destroy(); return }
+                process = child
+                segment = 0
+                captureId = "${Process.myPid()}-${SystemClock.elapsedRealtime()}"
+                history.clear()
                 openFile(context)
-                writeLocked(context, "\n=== Pitwall logging started ${Instant.now()} pid=${Process.myPid()} ===\n")
-                writeLocked(context, "${CrashReports.about()} · build=${BuildConfig.BUILT_AT} · device=${Build.DEVICE}\n")
-                writeLocked(context, "App process logcat only; system-wide logs and dumpsys require external access.\n")
-                writer?.flush()
+                flushLocked()
+                recording = true
             }
+            timer.scheduleAtFixedRate(timerTask {
+                synchronized(lock) {
+                    if (token != generation) return@synchronized
+                    try {
+                        flushSummariesLocked(context)
+                    } catch (e: Exception) {
+                        Log.e("PitwallDiagnostics", "Periodic write failed", e)
+                        child.destroy()
+                    }
+                }
+            }, 1_000, 1_000)
             publishStatus("Recording to Download/Pitwall")
             if (Build.VERSION.SDK_INT >= 30) {
                 runCatching {
@@ -84,26 +109,21 @@ object DiagnosticLogs {
                     .filter { info -> info.supportedTypes.any { it.equals("video/hevc", true) || it.equals("video/avc", true) } }
                     .forEach { info -> append(context, "CODEC_AVAILABLE name=${info.name} types=${info.supportedTypes.joinToString()}") }
             }.onFailure { append(context, "CODEC_ENUMERATION_FAILED ${it.javaClass.simpleName}: ${it.message}") }
-            val child = ProcessBuilder("logcat", "-v", "threadtime", "--pid=${Process.myPid()}", "-T", "1").redirectErrorStream(true).start()
-            synchronized(lock) {
-                if (token != generation) { child.destroy(); return }
-                process = child
-            }
             child.inputStream.bufferedReader().use { reader ->
                 while (true) {
                     val line = reader.readLine() ?: break
                     synchronized(lock) {
                         if (token != generation) return
-                        writeLocked(context, line + "\n")
-                        // Logs remain useful after an unexpected process termination.
-                        writer?.flush()
+                        val captured = history.accept(line) ?: return@synchronized
+                        writeLocked(context, "$captured\n")
+                        if (" F " in captured || "FATAL EXCEPTION" in captured) flushLocked()
                     }
                 }
             }
             synchronized(lock) {
                 if (token == generation) {
-                    writeLocked(context, "Logcat capture ended unexpectedly. Re-enable logging to retry.\n")
-                    writer?.flush()
+                    writeLocked(context, "CAPTURE_ENDED utc=${Instant.now()}\n")
+                    flushSummariesLocked(context)
                     publishStatus("Log capture stopped. Turn off and on to retry.")
                 }
             }
@@ -111,8 +131,10 @@ object DiagnosticLogs {
             synchronized(lock) { if (token == generation) publishStatus("Logging error: ${e.javaClass.simpleName}. Turn off and on to retry.") }
             Log.e("PitwallDiagnostics", "Log capture failed", e)
         } finally {
+            timer.cancel()
             synchronized(lock) {
                 if (token == generation) {
+                    recording = false
                     runCatching { writer?.close() }; writer = null
                     process?.destroy(); process = null
                     worker = null
@@ -130,7 +152,7 @@ object DiagnosticLogs {
                 if (it.moveToFirst()) it.getLong(0) else null
             } }.getOrNull()
         }
-        if (uri == null || size == null || size >= MAX_BYTES) {
+        if (uri == null || size == null || size > MAX_BYTES - 2_048L) {
             val stamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS").withZone(ZoneOffset.UTC).format(Instant.now())
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, "pitwall-$stamp.log")
@@ -145,6 +167,31 @@ object DiagnosticLogs {
         val output = resolver.openOutputStream(uri, "wa") ?: error("Could not open diagnostic log")
         writer = BufferedWriter(OutputStreamWriter(output, Charsets.UTF_8))
         bytes = size
+        segment++
+        writeSafe("\n=== PITWALL_CAPTURE id=$captureId segment=$segment utc=${Instant.now()} uptimeMs=${SystemClock.elapsedRealtime()} ===\n")
+        writeSafe("${CrashReports.about()} · build=${BuildConfig.BUILT_AT} · device=${Build.DEVICE}\n")
+        writeSafe("Scope: app process logcat, buffers main/system/crash. Surface timeout repeats are counted.\n")
+        if (rotate) {
+            writeSafe("=== CONTEXT FROM PRIOR SEGMENTS ===\n")
+            history.context().forEach { writeSafe("$it\n") }
+            writeSafe("=== END CONTEXT ===\n")
+        }
+    }
+
+    private fun writeSafe(text: String, size: Int = text.toByteArray(Charsets.UTF_8).size) {
+        writer?.write(text)
+        bytes += size
+        dirty = true
+    }
+
+    private fun flushLocked() {
+        if (dirty) writer?.flush()
+        dirty = false
+    }
+
+    private fun flushSummariesLocked(context: Context) {
+        history.drain().forEach { writeLocked(context, "$it\n") }
+        flushLocked()
     }
 
     private fun writeLocked(context: Context, text: String) {
@@ -154,22 +201,29 @@ object DiagnosticLogs {
             writer?.close(); writer = null
             openFile(context, rotate = true)
         }
-        writer?.write(safe)
-        bytes += encodedSize
+        writeSafe(safe, encodedSize)
+        history.retain(safe.trimEnd())
     }
 
     /** Used for diagnostics outside logcat and the uncaught-exception handler. */
     fun append(context: Context, text: String) {
         synchronized(lock) {
             if (writer == null) return
-            runCatching { writeLocked(context.applicationContext, "$text\n"); writer?.flush() }
+            runCatching { writeLocked(context.applicationContext, "$text\n"); flushLocked() }
         }
     }
 
-    fun stop() {
+    private fun stop(context: Context) {
         synchronized(lock) {
             ++generation
-            runCatching { writer?.write("=== Logging stopped ${Instant.now()} ===\n"); writer?.close() }
+            recording = false
+            runCatching {
+                if (writer != null) {
+                    writeLocked(context, "=== Logging stopped ${Instant.now()} ===\n")
+                    flushSummariesLocked(context)
+                }
+            }
+            runCatching { writer?.close() }
             writer = null
             process?.destroy(); process = null
             worker = null
@@ -181,10 +235,15 @@ object DiagnosticLogs {
 
 /** Remove common credentials and signed addresses before writing public Downloads files. */
 internal object DiagnosticRedaction {
-    fun redact(text: String): String = text
-        .replace(Regex("""(?i)https?://[^\s"'<>]+"""), "[URL]")
-        .replace(Regex("(?i)\\b(bearer)\\s+[^\\s,;]+"), "$1 [redacted]")
-        .replace(Regex("(?i)\\b(cookie|set-cookie|authorization)\\s*[:=][^\\r\\n]*"), "$1=[redacted]")
-        .replace(Regex("(?i)([\"']?(?:ascendontoken|entitlementtoken|access[_-]?token|refresh[_-]?token|password|session[_-]?token)[\"']?\\s*[:=]\\s*[\"']?)[^\\s,;\"'}]+"), "$1[redacted]")
-        .replace(Regex("\\beyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\b"), "[token]")
+    private val patterns = listOf(
+        Regex("""(?i)https?://[^\s"'<>]+""") to "[URL]",
+        Regex("(?i)\\b(bearer)\\s+[^\\s,;]+") to "$1 [redacted]",
+        Regex("(?i)\\b(cookie|set-cookie|authorization)\\s*[:=][^\\r\\n]*") to "$1=[redacted]",
+        Regex("(?i)([\"']?(?:ascendontoken|entitlementtoken|access[_-]?token|refresh[_-]?token|password|session[_-]?token)[\"']?\\s*[:=]\\s*[\"']?)[^\\s,;\"'}]+") to "$1[redacted]",
+        Regex("\\beyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\b") to "[token]",
+    )
+
+    fun redact(text: String): String = patterns.fold(text) { value, (pattern, replacement) ->
+        pattern.replace(value, replacement)
+    }
 }
