@@ -4,6 +4,7 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
 import java.io.IOException
+import java.nio.ByteBuffer
 
 /** Indexed data needed to draw both replay overlays and seek without parsing the source again. */
 internal class ReplayCore(
@@ -37,16 +38,22 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
                 val drivers = input.readByDriver {
                     DriverInfo(readUTF(), readUTF(), readInt(), readUTF(), readUTF(), readUTF())
                 }
+                val samples = ByteBuffer.allocate(TRACK_BLOCK_SAMPLES * TRACK_SAMPLE_BYTES)
                 val tracks = input.readByDriver {
                     val n = count(MAX_SAMPLES)
                     val t = LongArray(n)
                     val x = FloatArray(n)
                     val y = FloatArray(n)
-                    repeat(n) {
-                        if (it % 4096 == 0) checkActive()
-                        t[it] = readLong()
-                        x[it] = readFloat()
-                        y[it] = readFloat()
+                    for (first in 0 until n step TRACK_BLOCK_SAMPLES) {
+                        checkActive()
+                        val end = minOf(first + TRACK_BLOCK_SAMPLES, n)
+                        readFully(samples.array(), 0, (end - first) * TRACK_SAMPLE_BYTES)
+                        samples.clear()
+                        for (i in first until end) {
+                            t[i] = samples.long
+                            x[i] = samples.float
+                            y[i] = samples.float
+                        }
                     }
                     DriverTrack(t, x, y, n)
                 }
@@ -120,13 +127,18 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
                     writeUTF(driver.lastName)
                     writeUTF(driver.team)
                 }
+                val samples = ByteBuffer.allocate(TRACK_BLOCK_SAMPLES * TRACK_SAMPLE_BYTES)
                 output.writeByDriver(core.tracks) { track ->
                     writeInt(track.n)
-                    repeat(track.n) {
-                        if (it % 4096 == 0) checkActive()
-                        writeLong(track.t[it])
-                        writeFloat(track.x[it])
-                        writeFloat(track.y[it])
+                    for (first in 0 until track.n step TRACK_BLOCK_SAMPLES) {
+                        checkActive()
+                        samples.clear()
+                        for (i in first until minOf(first + TRACK_BLOCK_SAMPLES, track.n)) {
+                            samples.putLong(track.t[i])
+                            samples.putFloat(track.x[i])
+                            samples.putFloat(track.y[i])
+                        }
+                        write(samples.array(), 0, samples.position())
                     }
                 }
                 output.writeByDriver(core.states) { state ->
@@ -237,6 +249,8 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
 
     private companion object {
         const val VERSION = 1
+        const val TRACK_BLOCK_SAMPLES = 4096
+        const val TRACK_SAMPLE_BYTES = Long.SIZE_BYTES + 2 * Int.SIZE_BYTES
         const val BUFFER_SIZE = 128 * 1024
         const val MAX_BYTES = 64L * 1024 * 1024
         const val MAX_SAMPLES = 200_000

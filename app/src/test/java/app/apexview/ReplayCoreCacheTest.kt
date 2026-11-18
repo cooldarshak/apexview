@@ -19,7 +19,13 @@ class ReplayCoreCacheTest {
             4, listOf(sector, null, null), listOf(null, sector, null), sector,
             "+1.3", false, "+9.4", "+1.3", bestLap = sector,
         )
-        val track = DriverTrack(longArrayOf(1000, 2000), floatArrayOf(2f, 4f), floatArrayOf(3f, 5f), 2)
+        val samples = 4097
+        val track = DriverTrack(
+            LongArray(samples) { (it + 1) * 1000L },
+            FloatArray(samples) { it * 2f + 2f },
+            FloatArray(samples) { it * 2f + 3f },
+            samples,
+        )
         val laps = DriverLaps(longArrayOf(1000), listOf(snapshot), longArrayOf(1200), longArrayOf(1200), intArrayOf(6))
         val source = ReplayCore(
             "2026/Race/", "Race", mapOf("16" to DriverInfo("16", "LEC", 42)),
@@ -33,7 +39,9 @@ class ReplayCoreCacheTest {
         assertEquals(source.path, restored.path)
         assertArrayEquals(source.outline, restored.outline, 0f)
         assertEquals("LEC", restored.drivers.getValue("16").tla)
-        assertEquals(3f to 4f, restored.tracks.getValue("16").at(1500))
+        val restoredTrack = restored.tracks.getValue("16")
+        assertEquals(3f to 4f, restoredTrack.at(1500))
+        assertEquals(8193f to 8194f, restoredTrack.at(4_096_500))
         assertEquals(LapState.PUSH, restored.states.getValue("16").at(1500))
         val history = restored.laps.getValue("16")
         assertEquals(7, history.lapAt(1500))
@@ -48,6 +56,18 @@ class ReplayCoreCacheTest {
 
         temporary.root.resolve("replay-timing/17.bin").outputStream().use { it.write(1) }
         assertNull(cache.read {})
+    }
+
+    @Test
+    fun reusesOnlyARecentPreviouslyObservedClock() {
+        val saved = ReplayClockAnchor(baseMs = 1_791_719_700_480L, observedAtMs = 1_794_989_000_000L)
+        val decoded = requireNotNull(ReplayClockAnchor.read(saved.encode(), saved.observedAtMs + 60_000))
+        assertEquals(saved, decoded)
+        val sample = ReplayPlayhead(12_000L, decoded.baseMs + 12_000L, -7_000L, cachedVideoClock = true)
+        assertEquals(saved.baseMs + 5_000L, sample.utcAt(1))
+        assertNull(ReplayClockAnchor.read(saved.encode(), saved.observedAtMs + 8 * 86_400_000L))
+        assertNull(ReplayClockAnchor.read(saved.encode(), saved.observedAtMs - 1))
+        assertNull(ReplayClockAnchor.read("0/${saved.observedAtMs}", saved.observedAtMs))
     }
 
     @Test

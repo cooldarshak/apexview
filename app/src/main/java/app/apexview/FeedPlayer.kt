@@ -197,6 +197,9 @@ class FeedPlayer(
     private var firstFrameRendered = false
     private val diagnosticId = System.identityHashCode(this)
     private var loggedClock = false
+    private var firstFrameLogged = false
+    private var seekSequence = 0
+    private var pendingSeekAtMs: Long? = null
 
     private fun playbackEvent(event: String, detail: String) {
         if (DiagnosticLogs.recording) {
@@ -418,7 +421,12 @@ class FeedPlayer(
             }
 
             override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
-                playbackEvent("discontinuity", "fromMs=${oldPosition.positionMs} toMs=${newPosition.positionMs} reason=$reason")
+                if (DiagnosticLogs.recording && reason == Player.DISCONTINUITY_REASON_SEEK) {
+                    pendingSeekAtMs = android.os.SystemClock.elapsedRealtime()
+                    seekSequence++
+                }
+                playbackEvent("discontinuity", "fromMs=${oldPosition.positionMs} toMs=${newPosition.positionMs} " +
+                    "reason=$reason seek=$seekSequence")
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -508,6 +516,17 @@ class FeedPlayer(
                 renderTimeMs: Long,
             ) {
                 firstFrameRendered = true
+                val seekAt = pendingSeekAtMs
+                if (seekAt != null && renderTimeMs >= seekAt) {
+                    playbackEvent("seek-rendered", "seek=$seekSequence elapsedMs=${renderTimeMs - seekAt} " +
+                        "positionMs=${eventTime.currentPlaybackPositionMs} decoder=$decoder")
+                    pendingSeekAtMs = null
+                }
+                if (!firstFrameLogged) {
+                    playbackEvent("startup-rendered", "elapsedMs=${(renderTimeMs - createdAt).coerceAtLeast(0)} " +
+                        "positionMs=${eventTime.currentPlaybackPositionMs} decoder=$decoder")
+                    firstFrameLogged = true
+                }
                 playbackEvent("first-frame", "renderUptimeMs=$renderTimeMs positionMs=${eventTime.currentPlaybackPositionMs} decoder=$decoder")
                 if (stream.allowHevcProfileProbe) {
                     HevcFeedProfileCapture.updateFirstFrameRendered(
@@ -527,11 +546,60 @@ class FeedPlayer(
                 if (archiveVodSession != null) Log.i("ApexviewSingleDecoder", "ARCHIVE_SURFACE width=$width height=$height")
             }
 
+            private val observedLoads = mutableMapOf<Long, Int>()
+
+            override fun onLoadStarted(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData,
+            ) {
+                if (!DiagnosticLogs.recording || firstFrameLogged && pendingSeekAtMs == null) return
+                observedLoads[loadEventInfo.loadTaskId] = seekSequence
+                logLoad("load-start", loadEventInfo, mediaLoadData, seekSequence)
+            }
+
+            private fun logLoad(
+                event: String,
+                info: LoadEventInfo,
+                media: MediaLoadData,
+                seek: Int,
+                detail: String = "",
+            ) {
+                playbackEvent(event, "load=${info.loadTaskId} seek=$seek dataType=${media.dataType} " +
+                    "trackType=${media.trackType} startMs=${media.mediaStartTimeMs} endMs=${media.mediaEndTimeMs} " +
+                    "loadUptimeMs=${info.elapsedRealtimeMs} durationMs=${info.loadDurationMs} bytes=${info.bytesLoaded}$detail")
+            }
+
+            override fun onLoadCanceled(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData,
+            ) {
+                val seek = observedLoads.remove(loadEventInfo.loadTaskId) ?: return
+                logLoad("load-cancel", loadEventInfo, mediaLoadData, seek)
+            }
+
+            override fun onLoadError(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData,
+                error: java.io.IOException,
+                wasCanceled: Boolean,
+            ) {
+                val seek = observedLoads[loadEventInfo.loadTaskId] ?: return
+                logLoad("load-error", loadEventInfo, mediaLoadData, seek,
+                    " error=${error.javaClass.simpleName} canceled=$wasCanceled")
+                if (wasCanceled) observedLoads.remove(loadEventInfo.loadTaskId)
+            }
+
             override fun onLoadCompleted(
                 eventTime: AnalyticsListener.EventTime,
                 loadEventInfo: LoadEventInfo,
                 mediaLoadData: MediaLoadData,
             ) {
+                observedLoads.remove(loadEventInfo.loadTaskId)?.let {
+                    logLoad("load-end", loadEventInfo, mediaLoadData, it)
+                }
                 // The length of the stream's video chunks, for where the next feed should start.
                 // (F1's HLS reports its video chunks as the default track type, not video.)
                 if (mediaLoadData.dataType == C.DATA_TYPE_MEDIA &&

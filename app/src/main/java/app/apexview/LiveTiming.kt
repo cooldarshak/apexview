@@ -39,7 +39,12 @@ data class SessionRef(
 internal fun archiveLookupTime(watchedUtc: Long?, sessionStartUtcMs: Long?): Long? =
     watchedUtc ?: sessionStartUtcMs
 
-internal data class ReplayPlayhead(val positionMs: Long, val videoUtcMs: Long?, val offsetMs: Long) {
+internal data class ReplayPlayhead(
+    val positionMs: Long,
+    val videoUtcMs: Long?,
+    val offsetMs: Long,
+    val cachedVideoClock: Boolean = false,
+) {
     fun utcAt(archiveStart: Long): Long = (videoUtcMs ?: archiveStart + positionMs) + offsetMs
 }
 
@@ -824,14 +829,19 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                         }
                                     }
                                     var previewSent = false
+                                    var lastPreviewCheckMs = -1_000L
                                     val initial = parsePositionLines(window, { job.ensureActive() }) { builders ->
-                                        if (!previewSent) {
-                                            val shape = availableCircuit.get()?.outline
-                                            if (shape != null && shape.size >= 8) {
-                                                val snapshot = builders.mapValues { it.value.build() }
-                                                val currentUtc = targetUtc(initialStart)
-                                                val positioned = snapshot.values.count { it.at(currentUtc) != null }
-                                                if (positioned > 0) {
+                                        val now = android.os.SystemClock.elapsedRealtime()
+                                        if (!previewSent && now - lastPreviewCheckMs >= 250) {
+                                            lastPreviewCheckMs = now
+                                            val currentUtc = targetUtc(initialStart)
+                                            val snapshot = builders.mapValues { it.value.build() }
+                                            val positioned = snapshot.values.count { it.at(currentUtc) != null }
+                                            if (positioned > 0) {
+                                                val remoteShape = availableCircuit.get()?.outline
+                                                val shape = remoteShape?.takeIf { it.size >= 8 }
+                                                    ?: traceOutline(builders.values.toList())
+                                                if (shape.size >= 8) {
                                                     previewSent = true
                                                     report("position window ready before lookahead targetUtcMs=$currentUtc cars=$positioned")
                                                     launch { publishTracks(snapshot, shape, initialStart) }

@@ -1558,13 +1558,40 @@ class AppState(
         tiles.forEach { it.feed.logPlaybackSample() }
     }
 
+    private var replayClockKey: String? = null
+    private var replayClockBaseMs: Long? = null
+
+    private fun replayClockKey(tile: Tile): String? {
+        val feed = tile.feed
+        val stream = feed.sourceStream
+        val ref = sessionRefs[tile.contentId] ?: return null
+        if (castPlaybackHandedOff || feed.isArchiveVodPlayback || tile.contentId != timingContentId ||
+            timing?.live == true || feed.player.isCurrentMediaItemLive
+        ) return null
+        return "replayClock/${tile.contentId}/${ref.year}/${ref.sessionKey}/${tile.channel.channelId}/" +
+            "${stream.streamType}/${stream.requestedPlatform}/${stream.playerType}"
+    }
+
     private fun replayPlayhead(contentId: Long, savedPosition: Long?): ReplayPlayhead {
-        val feed = leaderTile()?.takeIf { it.contentId == contentId }?.feed
+        val tile = leaderTile()?.takeIf { it.contentId == contentId }
             ?: return ReplayPlayhead(savedPosition ?: 0L, null, mapOffsetMs)
         val position = castFramePositionMs
         val base = if (castPlaybackHandedOff) remoteWallClockBaseMs ?: castSourceWallClockBaseMs
-            else feed.windowStartMs()
-        return ReplayPlayhead(position, base?.plus(position), mapOffsetMs)
+            else tile.feed.windowStartMs()
+        val key = replayClockKey(tile)
+        if (key != null && key != replayClockKey) {
+            replayClockKey = key
+            replayClockBaseMs = prefs.getString(key, null)?.let { ReplayClockAnchor.read(it) }?.baseMs
+        }
+        if (key != null && base != null && base > 0 && base != replayClockBaseMs) {
+            replayClockBaseMs?.let {
+                recordTimingDiagnostic("Replay clock corrected deltaMs=${base - it}")
+            }
+            replayClockBaseMs = base
+            prefs.edit().putString(key, ReplayClockAnchor(base, System.currentTimeMillis()).encode()).apply()
+        }
+        val cached = if (key != null) replayClockBaseMs else null
+        return ReplayPlayhead(position, (base ?: cached)?.plus(position), mapOffsetMs, base == null && cached != null)
     }
 
     private fun recordTimingDiagnostic(message: String, reset: Boolean = false) {
@@ -3033,6 +3060,7 @@ class AppState(
             if (timingContentId != contentId || (timing == null && liveFeed?.isActive != true)) {
                 loadTiming(contentId)
             }
+            val offerStartedMs = android.os.SystemClock.elapsedRealtime()
             val streams = picks.mapNotNull { channel ->
                 try {
                     channel to streamFor(contentId, channel, failures)
@@ -3041,6 +3069,10 @@ class AppState(
                     null
                 }
             }
+            if (DiagnosticLogs.recording) android.util.Log.i(
+                "PitwallPlayback",
+                "event=offers content=$contentId count=${streams.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - offerStartedMs}",
+            )
             if (streams.isEmpty()) {
                 if (!hasVideoPlan) {
                     planPromptOpen = true
@@ -3065,14 +3097,19 @@ class AppState(
             if (first && pendingResume?.contentId != contentId) mapMode = if (contentId in notSessions) MapMode.OFF else savedMapMode()
             // A feed added while one fills the screen brings the whole layout back.
             focusTileId = null
+            val resumeAt = pendingResume?.takeIf { it.contentId == contentId && !it.live }?.positionMs
+            val startAt = resumeAt ?: joinAt
             streams.forEach { (channel, stream) ->
-                val feed = newFeed(stream, startWithVideo = !isTv && (decoderMode != DecoderMode.SINGLE || tiles.isEmpty() && streams.size == 1))
+                val feed = newFeed(
+                    stream,
+                    startMs = startAt ?: C.TIME_UNSET,
+                    startWithVideo = !isTv && (decoderMode != DecoderMode.SINGLE || tiles.isEmpty() && streams.size == 1),
+                )
                 if (preparingSingle) feed.player.playWhenReady = false
                 if (decoderMode == DecoderMode.SINGLE && (tiles.isNotEmpty() || streams.size > 1))
                     feed.setProtectedCompositionVideoRole(false, 1, 1)
                 // From the start: the first moment F1 keeps, so nothing after it is seen first.
-                if (fromStart && joinAt == null) feed.startFromBeginning()
-                joinAt?.let(feed.player::seekTo)
+                if (fromStart && startAt == null) feed.startFromBeginning()
                 val tile = Tile(nextTileId++, contentId, channel, feed)
                 tiles.add(tile)
                 raise(tile)
@@ -3099,8 +3136,6 @@ class AppState(
                 pendingResume = null
                 tiles.firstOrNull { it.channel.key() == saved.audioChannel }?.let(::setAudio)
                 tiles.firstOrNull { it.channel.key() == saved.bigChannel }?.let { bigTileId = it.id }
-                // A live session comes back at the live edge; a replay at the saved moment.
-                if (!saved.live) tiles.forEach { it.feed.player.seekTo(saved.positionMs) }
             }
             // A feed more means a fresh fit of the layout in use; the map stays where it is.
             handPlaced = false
@@ -3182,6 +3217,8 @@ class AppState(
      */
     private fun loadTiming(contentId: Long) {
         timingContentId = contentId
+        replayClockKey = null
+        replayClockBaseMs = null
         recordTimingDiagnostic("Starting timing load for content=$contentId", reset = true)
         pitDriver = null
         timing = null
@@ -3249,16 +3286,24 @@ class AppState(
                         var towerReadyMs: Long? = null
                         var mapReadyMs: Long? = null
                         var lastClockBase: Long? = null
-                        var clockLogged = false
+                        var lastClockSource: String? = null
                         var budgetReported = false
+                        var oneSecondReported = false
+                        var videoClockObserved = false
                         fun inspectPlayback() {
                             val sample = replayPlayhead(contentId, savedPosition)
                             playhead.set(sample)
                             val base = sample.videoUtcMs?.minus(sample.positionMs)
-                            if (!clockLogged || base != lastClockBase) {
-                                clockLogged = true
+                            val clockSource = when {
+                                base == null -> "archive-estimate"
+                                sample.cachedVideoClock -> "cached-video"
+                                else -> "video"
+                            }
+                            if (clockSource == "video") videoClockObserved = true
+                            if (clockSource != lastClockSource || base != lastClockBase) {
+                                lastClockSource = clockSource
                                 lastClockBase = base
-                                recordTimingDiagnostic("Replay clock source=${if (base == null) "archive-estimate" else "video"} " +
+                                recordTimingDiagnostic("Replay clock source=$clockSource " +
                                     "baseUtcMs=$base positionMs=${sample.positionMs} offsetMs=${sample.offsetMs}")
                             }
                             val session = timing
@@ -3280,13 +3325,18 @@ class AppState(
                                     }
                                 }
                             }
-                            if (!budgetReported && elapsed >= 5_000) {
-                                budgetReported = true
+                            val budget = when {
+                                !oneSecondReported && elapsed >= 1_000 -> 1
+                                !budgetReported && elapsed >= 5_000 -> 5
+                                else -> null
+                            }
+                            if (budget != null) {
+                                if (budget == 1) oneSecondReported = true else budgetReported = true
                                 val rows = if (session == null || clock == null) 0 else
                                     session.laps.count { it.value.at(clock)?.position != null }
                                 val cars = if (session == null || clock == null || session.outline.size < 8) 0 else
                                     session.tracks.count { it.value.at(clock) != null }
-                                recordTimingDiagnostic("Replay 5s checkpoint towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs " +
+                                recordTimingDiagnostic("Replay ${budget}s checkpoint towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs " +
                                     "clockUtcMs=$clock positionMs=${sample.positionMs} rankedRows=$rows positionedCars=$cars " +
                                     "trackFromUtcMs=${session?.firstTrackUtc} trackThroughUtcMs=${session?.lastTrackUtc}")
                             }
@@ -3295,8 +3345,9 @@ class AppState(
                         val clockJob = launch {
                             do {
                                 inspectPlayback()
-                                kotlinx.coroutines.delay(200)
-                            } while (!archiveComplete || towerReadyMs == null || mapReadyMs == null || !budgetReported)
+                                kotlinx.coroutines.delay(if (oneSecondReported) 200 else 50)
+                            } while (!archiveComplete || towerReadyMs == null || mapReadyMs == null ||
+                                !budgetReported || !videoClockObserved)
                         }
                         try {
                             val loaded = LiveTimingArchive(token!!, userAgent).load(
@@ -3344,7 +3395,7 @@ class AppState(
                             mapStatus = if (loaded.outline.isEmpty()) "Couldn't trace the track; showing cars only" else null
                             // The cached archive may finish before Media3 supplies the playhead.
                             // Continue observing briefly so the first usable rows and dots still have a timestamp.
-                            if (towerReadyMs == null || mapReadyMs == null || !budgetReported) {
+                            if (towerReadyMs == null || mapReadyMs == null || !budgetReported || !videoClockObserved) {
                                 val observed = kotlinx.coroutines.withTimeoutOrNull(15_000) { clockJob.join(); true }
                                 if (observed == null) recordTimingDiagnostic(
                                     "Replay readiness observation ended towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs"
@@ -3529,9 +3580,13 @@ class AppState(
     fun mapTimeMs(): Long? = mapTimeAt(castFramePositionMs)
 
     internal fun mapTimeAt(position: Long): Long? {
-        val leader = leaderTile()?.feed ?: return null
-        val start = if (castPlaybackHandedOff) remoteWallClockBaseMs ?: castSourceWallClockBaseMs
-            else leader.wallClockMs()?.minus(leader.player.currentPosition)
+        val tile = leaderTile() ?: return null
+        val feed = tile.feed
+        val current = if (castPlaybackHandedOff) remoteWallClockBaseMs ?: castSourceWallClockBaseMs
+            else feed.windowStartMs()
+        val remembered = if (current == null && replayClockBaseMs != null && replayClockKey(tile) == replayClockKey)
+            replayClockBaseMs else null
+        val start = current ?: remembered
         mapClockEstimated = start == null
         return (start ?: timing?.startUtcMs ?: return null) + position + mapOffsetMs
     }
