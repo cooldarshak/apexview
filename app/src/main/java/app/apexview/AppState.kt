@@ -975,15 +975,19 @@ class AppState(
 
     private fun prepareNativeComposedCast(selected: List<Tile>, targetMs: Long = castFramePositionMs, liveEdge: Boolean = false) {
         if (castBusy) return
-        if (selected.size !in 2..6 || selected.any { it.channel.channelId == null }) {
+        if (selected.size !in 2..6 || selected.map { it.contentId }.distinct().size != 1 ||
+            selected.any { it.channel.channelId == null }) {
             message = "Protected multiview casting needs two to six explicit F1 channels from one session."
             return
         }
         val socket = localConnection?.socket ?: return
         val clock = leaderTile()?.feed ?: selected.first().feed
         val live = selected.any { it.contentId in knownLiveContentIds || it.feed.player.isCurrentMediaItemLive }
-        val windowOffset = if (clock.player.currentTimeline.isEmpty) 0L else clock.player.currentTimeline
-            .getWindow(clock.player.currentMediaItemIndex, androidx.media3.common.Timeline.Window()).positionInFirstPeriodMs
+        val timeline = clock.player.currentTimeline
+        val mediaItemIndex = clock.player.currentMediaItemIndex
+        val windowOffset = if (mediaItemIndex in 0 until timeline.windowCount) {
+            timeline.getWindow(mediaItemIndex, androidx.media3.common.Timeline.Window()).positionInFirstPeriodMs
+        } else 0L
         val localWindowUtc = clock.windowStartMs()
         val windowUtc = (if (castPlaybackHandedOff) remoteWallClockBaseMs else null) ?: localWindowUtc
         val dashOffset = if (live && localWindowUtc != null && windowUtc != null) localWindowUtc - windowOffset - windowUtc else -windowOffset
@@ -994,6 +998,7 @@ class AppState(
         castRetryAfter = android.os.SystemClock.elapsedRealtime() + 5_000
         castPreparationJob = scope.launch {
             var owned: app.apexview.cast.NativeComposedCastSession? = null
+            var preparationDetail: String? = null
             try {
                 val factory = androidx.media3.datasource.DefaultHttpDataSource.Factory().setUserAgent(userAgent)
                     .setAllowCrossProtocolRedirects(true).setDefaultRequestProperties(mapOf(
@@ -1008,7 +1013,21 @@ class AppState(
                 val next = requireNotNull(owned)
                 preparingNativeCast = next
                 kotlinx.coroutines.withTimeout(60_000) {
-                    while (!next.ready) { next.update(targetMs); if (!next.ready) kotlinx.coroutines.delay(250) }
+                    while (!next.ready) {
+                        val snapshot = next.update(targetMs)
+                        if (!next.ready && generation == castPreparationGeneration) {
+                            val detail = DiagnosticRedaction.redact(
+                                snapshot.failure?.reason ?: snapshot.detail ?: snapshot.compositionStatus
+                            ).take(170)
+                            if (detail != preparationDetail) {
+                                preparationDetail = detail
+                                castStatus = "Preparing TV playback (${snapshot.capturedFeeds}/${selected.size} feeds): $detail"
+                                message = castStatus
+                                android.util.Log.i("PitwallCast", "NATIVE_CAST_PREPARING: $castStatus")
+                            }
+                            kotlinx.coroutines.delay(250)
+                        }
+                    }
                 }
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                 require(localConnection?.socket === socket && generation == castPreparationGeneration &&
@@ -1035,7 +1054,11 @@ class AppState(
                 }
                 startNativeCastSceneUpdates(next)
             } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
-                if (generation == castPreparationGeneration) { castStatus = "HD protected feeds did not become ready in time. Retry casting."; message = castStatus }
+                if (generation == castPreparationGeneration) {
+                    castStatus = "HD protected feeds did not become ready in time." +
+                        (preparationDetail?.let { " Last stage: $it" } ?: "")
+                    message = castStatus
+                }
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (error: Exception) {
                 if (generation == castPreparationGeneration) {
