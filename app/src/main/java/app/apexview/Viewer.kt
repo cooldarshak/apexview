@@ -554,7 +554,7 @@ private fun Modifier.mapGestures(app: AppState, density: androidx.compose.ui.uni
     val window = app.laptopActive || app.mapMode.inWindow
     // Floating overlay mode is independently movable; it must not depend on the feed layout's
     // Snap/Free arranging toggle. Docked mode remains fixed.
-    if (!(app.arranging || app.combinedOverlaysFloating) || app.mapLocked || !window || timing == null || app.combinedOverlaysDocked) return this
+    if (!(app.arranging || app.combinedOverlaysFloating) || app.mapLocked || !window || timing == null || (app.combinedOverlaysDocked && !app.trackLogoAnchored)) return this
     // Keyed on the circuit, not the timing: live timing is replaced every couple of seconds, and
     // restarting this mid-gesture used to leave the map "grabbed", so feeds wouldn't move again.
     return pointerInput(timing.circuitKey, timing.outline.size, app.arranging, app.combinedOverlaysFloating, app.mapLocked, app.laptopActive, circle) {
@@ -918,6 +918,7 @@ private fun TileView(
     app: AppState, tile: Tile, videoOnly: Boolean = false, controlsOnly: Boolean = false,
     presetSlot: Slot? = null,
 ) {
+    if (videoOnly && presetSlot == null && !tile.hasLayoutSlot && !app.inPip) return
     val density = LocalDensity.current
     val presentedFeed = app.singleDecoderScenePlayer ?: tile.feed
     if (!videoOnly) LaunchedEffect(tile.id) {
@@ -1744,7 +1745,7 @@ private fun MapSheet(app: AppState) {
                         if (!app.combinedOverlaysDocked) {
                             SwitchRow("Lock the map in place", app.mapLocked) { app.toggleMapLock() }
                         }
-                        SwitchRow("Keep feeds clear of the map", app.mapReserve, app::chooseMapReserve)
+                        if (!app.trackLogoAnchored) SwitchRow("Keep feeds clear of the map", app.mapReserve, app::chooseMapReserve)
                     }
                     Text(
                         if (app.mapMode == MapMode.TRACK) "Locked, the map stays put while you arrange the feeds under it. Kept clear, the feeds make room for it instead of lying under it."

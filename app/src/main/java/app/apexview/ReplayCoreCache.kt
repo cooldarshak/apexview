@@ -28,6 +28,10 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
 
     fun read(checkActive: () -> Unit): ReplayCore? = readFile(file, null, checkActive)
 
+    fun deletePreview() {
+        preview.delete()
+    }
+
     fun readPreview(positionMs: Long, checkActive: () -> Unit): ReplayCore? =
         readFile(preview, positionMs, checkActive)
 

@@ -266,6 +266,21 @@ class LayoutsTest {
     }
 
     @Test
+    fun trackerStartsInTheMainFeedLogoCornerAndEditsStayWithinTheVideo() {
+        for (mode in listOf(LayoutMode.TV, LayoutMode.FEATURED, LayoutMode.GRID)) {
+            val main = if (mode == LayoutMode.TV) Layouts.tvSingleLandscapeSlot(2316f, 1080f)
+                else Layouts.place(mode, 3, 2316f, 1080f).first()
+            val video = Area(main.x, main.y, main.w, main.h)
+            val anchor = Layouts.logoMapOver(main)
+            assertTrue(anchor.x > video.x + video.w / 2)
+            assertEquals(anchor, Layouts.fitMapInside(anchor, video))
+            val moved = Layouts.fitMapInside(anchor.copy(x = 3000f, y = -50f), video)
+            assertEquals(video.x + video.w, moved.x + moved.w, 0.01f)
+            assertEquals(video.y, moved.y, 0.01f)
+        }
+    }
+
+    @Test
     fun timingTowerReservationLeavesASeparateRectangle() {
         for (mode in listOf(LayoutMode.FEATURED, LayoutMode.GRID)) {
             for ((width, height) in listOf(w to h, 1920f to 1080f, 1080f to 1920f, 1280f to 720f)) {

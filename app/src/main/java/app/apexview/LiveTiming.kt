@@ -5,6 +5,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
@@ -704,10 +706,36 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         }
         fun targetUtc(startUtc: Long) =
             (playhead() ?: ReplayPlayhead(replayPositionMs, watchedUtc, timingOffsetMs)).utcAt(startUtc)
+        suspend fun archiveSession(): Pair<String, String> {
+            val cachedIndex = positionScratchDir?.let { java.io.File(it, "timing-season-${ref.year}.json") }
+            if (ref.sessionKey != null && cachedIndex != null &&
+                cachedIndex.length() in 1..MAX_SEASON_INDEX_BYTES &&
+                System.currentTimeMillis() - cachedIndex.lastModified() in 0..SEASON_INDEX_MAX_AGE_MS
+            ) {
+                val cached = runCatching {
+                    exactArchiveSession(ref.sessionKey, JSONObject(cachedIndex.readText()))
+                }.getOrNull()
+                if (cached != null) {
+                    progress("Timing season index hit · ${ref.year}")
+                    return cached
+                }
+            }
+            val raw = fetchStage("${ref.year}/Index.json")
+            val index = JSONObject(raw)
+            val session = findSession(ref, watchedUtc, index)
+            if (cachedIndex != null && raw.length <= MAX_SEASON_INDEX_BYTES) runCatching {
+                val temporary = java.io.File.createTempFile("timing-season-", ".tmp", positionScratchDir)
+                try {
+                    temporary.writeText(raw)
+                    temporary.renameTo(cachedIndex)
+                } finally {
+                    temporary.delete()
+                }
+            }
+            return session
+        }
         suspend fun loadCore(): ReplayCore = coroutineScope {
-            val index = JSONObject(fetchStage("${ref.year}/Index.json"))
-            progress("Matching meeting/session keys in F1 index…")
-            val (path, type) = findSession(ref, watchedUtc, index)
+            val (path, type) = archiveSession()
             progress("Archive session resolved: $path · type=$type")
             val driverTask = async { parseDrivers(JSONObject(fetchStage(path + "DriverList.json"))) }
             val heartbeatTask = async { parseStreamStart(fetchStage(path + "Heartbeat.jsonStream")) }
@@ -899,6 +927,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 }
             }
             val historyTask = async(Dispatchers.IO) {
+                val primaryPreview = CompletableDeferred<Unit>()
                 val timingTask = async {
                     val topic = path + "TimingData.jsonStream"
                     val started = android.os.SystemClock.elapsedRealtime()
@@ -928,6 +957,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                     publishTopics()
                                 }
                             }
+                            primaryPreview.complete(Unit)
                             while (lines.hasNext()) lines.next()
                             progress("OK TimingData.jsonStream · ${text.length} chars · ${android.os.SystemClock.elapsedRealtime() - started}ms")
                             text.toString()
@@ -935,11 +965,16 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     } catch (cancelled: kotlinx.coroutines.CancellationException) {
                         throw cancelled
                     } catch (error: Exception) {
+                        primaryPreview.complete(Unit)
                         progress("FAIL TimingData.jsonStream · ${error.javaClass.simpleName}: ${error.message}")
                         null
                     }
                 }
-                val timingF1Task = async { fetchOptionalStage(path + "TimingDataF1.jsonStream").orEmpty() }
+                val timingF1Task = async {
+                    // Let the primary standings and position streams start before optional mini-sectors.
+                    withTimeoutOrNull(1_500L) { primaryPreview.await() }
+                    fetchOptionalStage(path + "TimingDataF1.jsonStream").orEmpty()
+                }
                 val timingStream = timingTask.await()
                 val timingF1Stream = timingF1Task.await()
                 val initialStart = heartbeatTask.await()
@@ -1501,6 +1536,21 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         }
     }
 
+    internal fun exactArchiveSession(sessionKey: Int, index: JSONObject): Pair<String, String>? {
+        val meetings = index.getJSONArray("Meetings")
+        for (i in 0 until meetings.length()) {
+            val sessions = meetings.getJSONObject(i).getJSONArray("Sessions")
+            for (j in 0 until sessions.length()) {
+                val session = sessions.getJSONObject(j)
+                val path = session.optString("Path")
+                if (session.optInt("Key") == sessionKey && path.isNotBlank()) {
+                    return path to session.optString("Type")
+                }
+            }
+        }
+        return null
+    }
+
     /** Finds the session's archive path by F1's session key, else by meeting and session name. */
     private fun findSession(ref: SessionRef, watchedUtc: Long?, index: JSONObject): Pair<String, String> {
         val lookupUtc = archiveLookupTime(watchedUtc, ref.sessionStartUtcMs)
@@ -1860,6 +1910,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         internal const val BASE = "https://livetiming.formula1.com/static/"
         /** Lines read to find a stream's start. */
         private const val START_SAMPLES = 50
+        private const val MAX_SEASON_INDEX_BYTES = 2L * 1024L * 1024L
+        private const val SEASON_INDEX_MAX_AGE_MS = 24L * 60L * 60_000L
         /** The heartbeat and the car positions may disagree by this much before the cars win. */
         private const val STREAM_START_SLACK_MS = 60_000L
         private val SESSION_PART = Regex("\"SessionPart\":(\\d+)")

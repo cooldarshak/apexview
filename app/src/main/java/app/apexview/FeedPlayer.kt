@@ -123,6 +123,7 @@ class FeedPlayer(
     startMs: Long = C.TIME_UNSET,
     /** Auto or a maximum requested video rendition shared by the viewer. */
     videoQuality: VideoQuality = VideoQuality.AUTO,
+    preferFastStart: Boolean = false,
 ) {
     /** Authorized per-channel F1 offer used by the DASH segment-only capture path. */
     internal val sourceStream: PlayInfo = stream
@@ -265,7 +266,7 @@ class FeedPlayer(
 
     private val fit = TileFit().apply {
         qualityHeight = videoQuality.targetHeight
-        fastStart = startMs != C.TIME_UNSET
+        fastStart = preferFastStart || startMs != C.TIME_UNSET
     }
     private var selectedVideoQuality = videoQuality
     private var externalQualityFloor = false

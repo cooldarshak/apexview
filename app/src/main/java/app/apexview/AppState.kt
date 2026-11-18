@@ -67,6 +67,8 @@ class Tile(val id: Int, val contentId: Long, channel: Channel, feed: FeedPlayer)
     }
 
     var layoutMotion: kotlinx.coroutines.Job? = null
+    var hasLayoutSlot by mutableStateOf(false)
+        internal set
 
     fun place(slot: Slot) {
         layoutMotion?.cancel()
@@ -74,6 +76,7 @@ class Tile(val id: Int, val contentId: Long, channel: Channel, feed: FeedPlayer)
         x = slot.x
         y = slot.y
         resize(slot.w)
+        hasLayoutSlot = true
     }
 
     companion object {
@@ -183,17 +186,17 @@ class MapPanel {
     /** False until placed, by default or from storage. */
     var placed = false
 
-    fun toJson(width: Float, height: Float, opacity: Float): String = JSONObject()
-        .put("x", (x / width).toDouble()).put("y", (y / height).toDouble())
+    fun toJson(width: Float, height: Float, opacity: Float, left: Float = 0f, top: Float = 0f): String = JSONObject()
+        .put("x", ((x - left) / width).toDouble()).put("y", ((y - top) / height).toDouble())
         .put("w", (w / width).toDouble()).put("h", (h / height).toDouble())
         .put("rotation", rotation.toDouble()).put("opacity", opacity.toDouble())
         .toString()
 
     /** Puts back a stored panel on a canvas of this size; returns its opacity. */
-    fun restore(text: String?, width: Float, height: Float): Float? = runCatching {
+    fun restore(text: String?, width: Float, height: Float, left: Float = 0f, top: Float = 0f): Float? = runCatching {
         val j = JSONObject(text ?: return null)
-        x = j.getDouble("x").toFloat() * width
-        y = j.getDouble("y").toFloat() * height
+        x = left + j.getDouble("x").toFloat() * width
+        y = top + j.getDouble("y").toFloat() * height
         w = j.getDouble("w").toFloat() * width
         h = j.getDouble("h").toFloat() * height
         rotation = j.getDouble("rotation").toFloat()
@@ -1649,11 +1652,14 @@ class AppState(
     /** The track map's window in laptop mode, below the hinge; placed and remembered on its own. */
     val laptopMapPanel = MapPanel()
     /** The map window on screen now. */
-    private val tvLogoMapPanel = MapPanel()
+    private val logoMapPanel = MapPanel()
+    private var logoMapVideo: Area? = null
     val tvLogoMapAnchored get() = layoutMode == LayoutMode.TV && !laptopActive && canvasW > canvasH
+    val trackLogoAnchored get() = !laptopActive && mapMode == MapMode.TRACK &&
+        (layoutMode == LayoutMode.FEATURED || layoutMode == LayoutMode.GRID || layoutMode == LayoutMode.TV)
     val activeMapPanel get() = when {
         laptopActive -> laptopMapPanel
-        tvLogoMapAnchored -> tvLogoMapPanel
+        trackLogoAnchored -> logoMapPanel
         else -> mapPanel
     }
     var mapOpacity by mutableFloatStateOf(0.9f)
@@ -2272,6 +2278,21 @@ class AppState(
     private fun clearSavedWatch() {
         val leader = leaderTile() ?: return
         if (recents.removeAll { it.contentId == leader.contentId }) storeRecents()
+    }
+
+    fun removeContinueWatching(contentId: Long) {
+        if (!recents.removeAll { it.contentId == contentId }) return
+        storeRecents()
+        val pending = replayPreviewWrite.takeIf { replayPreviewContent == contentId }
+        if (pending != null) {
+            pending.cancel()
+            replayPreviewContent = null
+            replayPreviewPosition = null
+        }
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            pending?.join()
+            ReplayCoreCache(context.cacheDir, contentId).deletePreview()
+        }
     }
 
     private fun storeRecents() {
@@ -3136,6 +3157,7 @@ class AppState(
                 val feed = newFeed(
                     stream,
                     startMs = startAt ?: C.TIME_UNSET,
+                    preferFastStart = contentId in knownArchiveContentIds,
                     startWithVideo = !isTv && (decoderMode != DecoderMode.SINGLE || tiles.isEmpty() && streams.size == 1),
                 )
                 if (preparingSingle) feed.player.playWhenReady = false
@@ -3195,9 +3217,10 @@ class AppState(
         stream: PlayInfo,
         startMs: Long = C.TIME_UNSET,
         startWithVideo: Boolean = !isTv,
-    ) = makeFeed(stream, startMs, startWithVideo).also { it.setBaseSpeed(playbackSpeed) }
+        preferFastStart: Boolean = false,
+    ) = makeFeed(stream, startMs, startWithVideo, preferFastStart).also { it.setBaseSpeed(playbackSpeed) }
 
-    private fun makeFeed(stream: PlayInfo, startMs: Long, startWithVideo: Boolean) = FeedPlayer(
+    private fun makeFeed(stream: PlayInfo, startMs: Long, startWithVideo: Boolean, preferFastStart: Boolean = false) = FeedPlayer(
         context, stream,
         ascendon = api.ascendon.orEmpty(),
         entitlement = api.entitlement.orEmpty(),
@@ -3208,6 +3231,7 @@ class AppState(
         startWithVideo = startWithVideo && !castPlaybackHandedOff,
         videoQuality = settings.videoQuality,
         startMs = startMs,
+        preferFastStart = preferFastStart,
     ).also { if (castPlaybackHandedOff) it.suspendForRemotePlayback(true) }
 
     /**
@@ -3417,6 +3441,7 @@ class AppState(
                             )
                             if (timingContentId != contentId) return@launch
                             showTiming(loaded)
+                            saveReplayPreview(contentId, castFramePositionMs)
                             archiveComplete = true
                             inspectPlayback()
                             recordTimingDiagnostic(
@@ -3957,19 +3982,18 @@ class AppState(
         // selected main feed in the dedicated feed region instead of bypassing that layout.
         val tvLayoutActive = layoutMode == LayoutMode.TV && !laptopActive
         val combinedReservationsActive =
-            tvLayoutActive || (mapMode.inWindow && mapReserve && towerOpen && towerReserve && timing != null && !laptopActive)
+            tvLayoutActive || (mapMode.inWindow && mapReserve && !trackLogoAnchored && towerOpen && towerReserve && timing != null && !laptopActive)
         tiles.firstOrNull { it.id == focusTileId }?.takeIf { composed == null && compactCanvas && !combinedReservationsActive }?.let { focus ->
             focus.place(Layouts.place(LayoutMode.GRID, 1, width, height).first())
             raise(focus)
             tiles.filter { it !== focus }.forEach { it.place(Slot(width * 2, 0f, it.w)) }
+            placeMapIfNeeded(width, height)
             return
         }
         focusTileId = null
 
         // The combined map/tower reservation takes precedence over a saved feed-only layout.
-        if (tvLayoutActive || (mapMode.inWindow && mapReserve && towerOpen && towerReserve && timing != null && !laptopActive)) {
-            resumeLayout = null
-        }
+        if (combinedReservationsActive) resumeLayout = null
         // Coming back to a session puts its feeds back where they were.
         if (composed == null) resumeLayout?.let { (boxes, layout) ->
             resumeLayout = null
@@ -3990,7 +4014,7 @@ class AppState(
         // this is their starting workspace: the map can later be dragged over the video area.
         // TV owns its video/timing/map regions even while F1 timing is still connecting. This
         // prevents startup latency from collapsing the TV layout back into a feed-only grid.
-        val keepMapClear = tvLayoutActive || (mapMode.inWindow && mapReserve && timing != null)
+        val keepMapClear = tvLayoutActive || (mapMode.inWindow && mapReserve && !trackLogoAnchored && timing != null)
         val keepTowerClear = towerOpen && (tvLayoutActive || towerReserve && timing != null) && !laptopActive
         if (composed != null && !keepMapClear && !keepTowerClear) {
             placeComposedViewport(composed, Area(0f, 0f, width, height))
@@ -4004,8 +4028,7 @@ class AppState(
             combinedOverlayPlan = plan
             if (tvLayoutActive && width > height) {
                 towerSpot.place(plan.tower)
-                tvLogoMapPanel.place(plan.map)
-                tvLogoMapPanel.placed = true
+
             } else if (plan.floating) {
                 keepTowerInArea(plan.workspace, width, height)
                 placeMapInAreaIfNeeded(plan.workspace, width, height)
@@ -4035,6 +4058,10 @@ class AppState(
             if (composed != null) placeComposedViewport(composed, plan.feeds)
             else plan.slots.zip(ordered).forEach { (slot, tile) ->
                 if (tvLayoutActive) tile.place(slot) else settle(tile, slot)
+            }
+            if (trackLogoAnchored) {
+                if (composed != null) placeLogoMap(Slot(composed.x, composed.y, composed.w))
+                else plan.slots.firstOrNull()?.let(::placeLogoMap)
             }
             if (tvLayoutActive && DiagnosticLogs.recording) android.util.Log.i(
                 "PitwallLayout",
@@ -4111,7 +4138,8 @@ class AppState(
             else -> Layouts.place(layoutMode, ordered.size, width, height)
         }
         slots.zip(ordered).forEach { (slot, tile) -> settle(tile, slot) }
-        placeMapIfNeeded(width, height)
+        if (trackLogoAnchored) slots.firstOrNull()?.let(::placeLogoMap)
+        else placeMapIfNeeded(width, height)
     }
 
     private fun placeComposedViewport(host: Tile, area: Area) {
@@ -4123,6 +4151,7 @@ class AppState(
         host.y = area.y
         host.w = area.w
         host.h = area.h
+        host.hasLayoutSlot = true
     }
 
     /** Restores and clamps the tower to the workspace shared with the map. */
@@ -4179,7 +4208,26 @@ class AppState(
      * The track map's first spot: where it was last left (or saved), else a square in the
      * bottom-right corner, over the feeds.
      */
+    private fun logoMapKey() = "trackLogo/${layoutMode.name}/${wayUp}"
+
+    private fun placeLogoMap(main: Slot) {
+        if (main.w <= 0f || mapGrabbed) return
+        val video = Area(main.x, main.y, main.w, main.h)
+        logoMapVideo = video
+        val panel = logoMapPanel
+        panel.rotation = 0f
+        panel.place(Layouts.logoMapOver(main))
+        panel.restore(prefs.getString(logoMapKey(), null), video.w, video.h, video.x, video.y)?.let { mapOpacity = it }
+        panel.place(Layouts.fitMapInside(Area(panel.x, panel.y, panel.w, panel.h), video))
+        panel.placed = true
+    }
+
     private fun placeMapIfNeeded(width: Float, height: Float) {
+        if (trackLogoAnchored) {
+            val main = tiles.firstOrNull { it.id == focusTileId } ?: bigFirst().firstOrNull()
+            main?.let { placeLogoMap(Slot(it.x, it.y, it.w)) }
+            return
+        }
         if (mapPanel.placed) return
         mapPanel.restore(prefs.getString(PREF_MAP_PANEL, null), width, height)?.let { mapOpacity = it }
         if (mapPanel.placed) {
@@ -4234,7 +4282,12 @@ class AppState(
     /** Keeps the map's place, size, turn and opacity for next time. */
     fun storeMapPanel() {
         val panel = activeMapPanel
-        if (tvLogoMapAnchored || canvasW <= 0f || !panel.placed) return
+        if (canvasW <= 0f || !panel.placed) return
+        if (trackLogoAnchored) {
+            val video = logoMapVideo ?: return
+            prefs.edit().putString(logoMapKey(), panel.toJson(video.w, video.h, mapOpacity, video.x, video.y)).apply()
+            return
+        }
         prefs.edit().putString(if (laptopActive) PREF_LAPTOP_MAP else PREF_MAP_PANEL, panel.toJson(canvasW, canvasH, mapOpacity)).apply()
     }
 
@@ -4253,7 +4306,7 @@ class AppState(
         if (mode == mapMode) return
         mapMode = mode
         prefs.edit().putString(PREF_MAP_MODE, mode.name).apply()
-        if (mapReserve || towerOpen && towerReserve) {
+        if (trackLogoAnchored || mapReserve || towerOpen && towerReserve) {
             // Overlay reservations take priority over any hand-placed feed layout.
             requestOverlayLayout()
         }
@@ -4288,13 +4341,15 @@ class AppState(
     fun arrangeMap(pan: androidx.compose.ui.geometry.Offset, zoom: Float, rotation: Float) {
         // Docked overlays stay fixed in the normal layout, but the TV preset exposes D-pad
         // move/resize handles and must let its map be adjusted without unlocking video tiles.
-        if (tvLogoMapAnchored || combinedOverlaysDocked && layoutMode != LayoutMode.TV) return
+        if (mapLocked || combinedOverlaysDocked && !trackLogoAnchored && layoutMode != LayoutMode.TV) return
         val panel = activeMapPanel
         panel.x += pan.x
         panel.y += pan.y
         if (zoom != 1f) panel.scale(zoom)
         if (rotation != 0f) panel.rotation = (panel.rotation + rotation).mod(360f)
-        if (combinedOverlaysFloating || layoutMode == LayoutMode.TV) {
+        if (trackLogoAnchored) {
+            logoMapVideo?.let { panel.place(Layouts.fitMapInside(Area(panel.x, panel.y, panel.w, panel.h), it)) }
+        } else if (combinedOverlaysFloating || layoutMode == LayoutMode.TV) {
             // TV map controls may move the map within the screen even though the tower remains
             // docked. Floating mode also expands the tower when the map leaves its workspace.
             keepMapOnScreen()
@@ -4670,6 +4725,7 @@ class AppState(
         arrangeRaw = null
         arrangeOthers = emptyList()
         handPlaced = true
+        if (trackLogoAnchored) placeMapIfNeeded(canvasW, canvasH)
         saveWatch()
     }
 
@@ -5005,6 +5061,7 @@ class AppState(
         glide(tile, bigSlot)
         glide(big, tileSlot)
         bigTileId = tile.id
+        if (trackLogoAnchored) placeLogoMap(bigSlot)
         handPlaced = true
         raise(tile)
         if (!tile.audible) {
@@ -5126,6 +5183,7 @@ class AppState(
                 tile.y = from.y + (to.y - from.y) * f
                 tile.resize(from.w + (to.w - from.w) * f)
             }
+            tile.hasLayoutSlot = true
         }
     }
 

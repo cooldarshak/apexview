@@ -48,6 +48,7 @@ import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -244,6 +245,7 @@ private fun <T> Shelf(
     posters: Boolean = false,
     /** A link by the title, such as View all. */
     action: Pair<String, () -> Unit>? = null,
+    itemKey: ((T) -> Any)? = null,
     card: @Composable (T, Dp) -> Unit,
 ) {
     if (items.isEmpty()) return
@@ -264,7 +266,7 @@ private fun <T> Shelf(
                 contentPadding = PaddingValues(horizontal = SidePadding),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                items(items) { card(it, cardWidth) }
+                items(items, key = itemKey) { card(it, cardWidth) }
             }
         }
     }
@@ -702,19 +704,32 @@ fun HomeScreen(app: AppState) {
         fun continueWatching() {
             app.recents.toList().takeIf { it.isNotEmpty() && app.tiles.isEmpty() }?.let { recents ->
                 item {
-                    Shelf(app, "Continue watching", recents) { it, width ->
-                        val left = (it.durationMs - it.positionMs).coerceAtLeast(0) / 1000
-                        val weekend = it.title.substringBefore(" · ")
-                        ArtCard(
-                            it.image,
-                            it.title.substringAfter(" · "),
-                            if (it.live) "$weekend · Live"
-                            else "$weekend · " + (if (left >= 3600) "${left / 3600}h ${left / 60 % 60}m left" else "${left / 60}m left"),
-                            width,
-                            live = it.live,
-                            progress = if (it.live || it.durationMs <= 0) null else it.positionMs.toFloat() / it.durationMs,
-                            onClick = { app.resumeWatching(it) },
-                        )
+                    Shelf(app, "Continue watching", recents, itemKey = { it.contentId }) { saved, width ->
+                        val left = (saved.durationMs - saved.positionMs).coerceAtLeast(0) / 1000
+                        val weekend = saved.title.substringBefore(" · ")
+                        Box(Modifier.width(width)) {
+                            ArtCard(
+                                saved.image,
+                                saved.title.substringAfter(" · "),
+                                if (saved.live) "$weekend · Live"
+                                else "$weekend · " + (if (left >= 3600) "${left / 3600}h ${left / 60 % 60}m left" else "${left / 60}m left"),
+                                width,
+                                live = saved.live,
+                                progress = if (saved.live || saved.durationMs <= 0) null else saved.positionMs.toFloat() / saved.durationMs,
+                                onClick = { app.resumeWatching(saved) },
+                            )
+                            Box(
+                                Modifier.align(Alignment.TopEnd).padding(4.dp).size(48.dp)
+                                    .pressable(scaleTo = 1f) { app.removeContinueWatching(saved.contentId) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Box(Modifier.size(30.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.75f)),
+                                    contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Rounded.Close, "Remove ${saved.title} from Continue watching",
+                                        tint = Color.White, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        }
                     }
                     Spacer(Modifier.height(28.dp))
                 }

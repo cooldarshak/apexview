@@ -23,6 +23,16 @@ class LiveTimingTest {
     private val t0 = Instant.parse("2026-10-24T20:00:00Z").toEpochMilli()
 
     @Test
+    fun cachedSeasonIndexNeedsTheExactPublishedSession() {
+        val index = org.json.JSONObject(
+            """{"Meetings":[{"Sessions":[{"Key":42,"Type":"Race","Path":"2026/Race/"},{"Key":43,"Type":"Practice"}]}]}"""
+        )
+        assertEquals("2026/Race/" to "Race", archive.exactArchiveSession(42, index))
+        assertNull(archive.exactArchiveSession(43, index))
+        assertNull(archive.exactArchiveSession(44, index))
+    }
+
+    @Test
     fun positionPreviewFollowsACorrectedArchiveClock() {
         val window = ReplayPositionWindow(4_781_048L)
         assertEquals(4_901_048L, window.lastMs)

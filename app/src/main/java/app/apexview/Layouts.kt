@@ -48,9 +48,19 @@ object Layouts {
         return Slot(0f, videoTop, min(width * 0.66f, videoHeight * 16f / 9f))
     }
 
-    private fun tvMapOver(main: Slot): Area {
+    internal fun logoMapOver(main: Slot): Area {
         val width = main.w * 0.35f
         return Area(main.x + main.w - width - main.w * 0.015f, main.y + main.h * 0.015f, width, main.h * 0.32f)
+    }
+
+    internal fun fitMapInside(map: Area, video: Area): Area {
+        val width = map.w.coerceIn(min(1f, video.w), video.w)
+        val height = map.h.coerceIn(min(1f, video.h), video.h)
+        return Area(
+            map.x.coerceIn(video.x, (video.x + video.w - width).coerceAtLeast(video.x)),
+            map.y.coerceIn(video.y, (video.y + video.h - height).coerceAtLeast(video.y)),
+            width, height,
+        )
     }
 
     /**
@@ -82,7 +92,7 @@ object Layouts {
             feeds = Area(0f, titleBand, feedWidth, height - titleBand - bottomMargin)
             workspace = Area(feedWidth, 0f, width - feedWidth, height)
             tower = workspace
-            map = tvMapOver(tvSingleLandscapeSlot(width, height))
+            map = logoMapOver(tvSingleLandscapeSlot(width, height))
         } else if (portrait) {
             val feedFraction = if (floating) 0.50f else 0.34f
             feeds = Area(0f, 0f, width, height * feedFraction)
@@ -116,7 +126,7 @@ object Layouts {
             place(mode, n, feeds.w, feeds.h).map { Slot(it.x + feeds.x, it.y + feeds.y, it.w) }
         }
         return CombinedOverlayPlan(slots, feeds, workspace, tower,
-            if (tvLandscape && slots.isNotEmpty()) tvMapOver(slots.first()) else map, floating)
+            if (tvLandscape && slots.isNotEmpty()) logoMapOver(slots.first()) else map, floating)
     }
 
     fun place(mode: LayoutMode, n: Int, width: Float, height: Float): List<Slot> = when {

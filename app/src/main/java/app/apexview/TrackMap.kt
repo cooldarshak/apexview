@@ -8,7 +8,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.rounded.OpenWith
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -33,6 +32,7 @@ import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -395,14 +395,14 @@ fun MapPanelView(app: AppState, timing: SessionTiming) {
             keepControlsForLayout,
             app.arranging,
             app.combinedOverlaysFloating,
-            app.combinedOverlaysDocked,
+            app.combinedOverlaysDocked && !app.trackLogoAnchored,
         )
         val showLockControl = shouldShowMapLockControl(
             app.mapLocked,
             app.isTv,
-            lockControlTemporarilyVisible,
+            lockControlTemporarilyVisible || app.arranging,
         )
-        if (showControls && showLockControl && !app.tvLogoMapAnchored) {
+        if (showControls && showLockControl) {
             MapControls(app, timing)
         }
     }
@@ -443,9 +443,11 @@ private fun MapControls(app: AppState, timing: SessionTiming) {
                 modifier = Modifier.size(18.dp),
             )
         }
+        var remoteEdit by remember { mutableStateOf<String?>(null) }
         if (!app.mapLocked) MapControl(
             at(bounds.right - control, bounds.top)
                 .onKeyEvent { event ->
+                    if (remoteEdit != "move") return@onKeyEvent false
                     when (event.key) {
                         Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
                             if (event.type == KeyEventType.KeyDown) {
@@ -459,8 +461,8 @@ private fun MapControls(app: AppState, timing: SessionTiming) {
                         else -> false
                     }
                 }
-                .focusable()
-                .tvFocusRing()
+                .onFocusChanged { if (!it.isFocused && remoteEdit == "move") remoteEdit = null }
+                .pressable(scaleTo = 1f) { remoteEdit = if (remoteEdit == "move") null else "move" }
                 .pointerInput(Unit) {
                     detectDragGestures(
                         onDragStart = { app.mapGrabbed = true },
@@ -478,6 +480,7 @@ private fun MapControls(app: AppState, timing: SessionTiming) {
         if (!app.mapLocked) MapControl(
             at(bounds.right, bounds.bottom)
                 .onKeyEvent { event ->
+                    if (remoteEdit != "resize") return@onKeyEvent false
                     when (event.key) {
                         Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
                             if (event.type == KeyEventType.KeyDown) {
@@ -492,8 +495,9 @@ private fun MapControls(app: AppState, timing: SessionTiming) {
                         else -> false
                     }
                 }
-                .focusable()
-                .tvFocusRing()
+                .onFocusChanged { if (!it.isFocused && remoteEdit == "resize") remoteEdit = null }
+                .semantics { contentDescription = "Resize the map" }
+                .pressable(scaleTo = 1f) { remoteEdit = if (remoteEdit == "resize") null else "resize" }
                 .pointerInput(Unit) {
                     detectDragGestures(
                         onDragStart = { app.mapGrabbed = true },
