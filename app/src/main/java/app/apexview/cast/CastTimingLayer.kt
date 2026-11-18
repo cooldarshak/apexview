@@ -1,7 +1,6 @@
 package app.apexview.cast
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -36,7 +35,15 @@ internal fun CastTimingLayer(state: CastTimingReceiver, canvasWidth: Float, canv
         CompositionLocalProvider(LocalDensity provides density) {
             Box(Modifier.fillMaxSize().drawWithContent {
                 drawContent()
-                onDrawn(frame.table.rows.size, frame.cars.size)
+                val rows = if (timing != null && frame.tower != null) frame.table.rows.size else 0
+                val cars = when {
+                    timing == null || frame.mapMode == MapMode.OFF -> 0
+                    frame.mapMode.inWindow && frame.map == null -> 0
+                    frame.mapMode == MapMode.PIT -> frame.circle?.ring?.size ?: 0
+                    timing.outline.size < 4 -> 0
+                    else -> frame.cars.size
+                }
+                onDrawn(rows, cars)
             }) {
                 if (timing != null) frame.tower?.let { p ->
                     Box(panel(p).graphicsLayer(alpha = frame.towerOpacity).clip(RoundedCornerShape(16.dp))
@@ -64,11 +71,7 @@ internal fun CastTimingLayer(state: CastTimingReceiver, canvasWidth: Float, canv
 private fun ReceiverMap(timing: SessionTiming, frame: CastTimingProtocol.Frame, canvasWidth: Float,
                         canvasHeight: Float, scale: Float, density: Density, positionMs: () -> Long,
                         onDriver: (String, Boolean) -> Unit) {
-    var position by remember { mutableLongStateOf(frame.positionMs) }
-    LaunchedEffect(positionMs) {
-        var last = 0L
-        while (true) withFrameMillis { time -> if (time - last >= 66L) { position = positionMs(); last = time } }
-    }
+    val position = rememberTvMapTime(positionMs)
     val cars = frame.carsAt(position)
     fun panel(p: CastTimingProtocol.Panel) = Modifier
         .offset { IntOffset((p.x * scale).roundToInt(), (p.y * scale).roundToInt()) }
@@ -100,9 +103,5 @@ private fun ReceiverMap(timing: SessionTiming, frame: CastTimingProtocol.Frame, 
 
 @Composable
 private fun DriverTargets(targets: List<Pair<String, Offset>>, selected: (String) -> Unit) {
-    val density = LocalDensity.current
-    targets.forEach { (number, p) ->
-        Box(Modifier.offset { IntOffset(p.x.roundToInt() - with(density) { 12.dp.toPx() }.roundToInt(), p.y.roundToInt() - with(density) { 12.dp.toPx() }.roundToInt()) }
-            .size(24.dp).focusable().pressable { selected(number) })
-    }
+    DriverFocusTargets(targets, with(LocalDensity.current) { 12.dp.toPx() }, selected, selected)
 }

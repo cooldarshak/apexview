@@ -8,7 +8,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.rounded.OpenWith
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -22,6 +21,7 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -169,6 +169,7 @@ internal class Car(val number: String, val x: Float, val y: Float, val state: La
 /** Shared wall-clock map/card time for components that need display-frame precision. */
 @Composable
 internal fun rememberMapTime(app: AppState): Long {
+    if (app.isTv) return rememberTvMapTime { app.mapTimeMs() ?: 0L }
     var now by remember { mutableLongStateOf(0L) }
     LaunchedEffect(Unit) {
         while (true) withFrameMillis { now = app.mapTimeMs() ?: 0L }
@@ -182,15 +183,30 @@ internal fun rememberMapTime(app: AppState): Long {
  */
 internal const val MAP_RENDER_INTERVAL_MS = 33L
 
+/** Sleep between TV samples so the overlays do not request every display frame. */
+@Composable
+internal fun rememberTvMapTime(read: () -> Long): Long {
+    val clock by rememberUpdatedState(read)
+    var now by remember { mutableLongStateOf(clock()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = clock()
+            delay(66)
+        }
+    }
+    return now
+}
+
 @Composable
 internal fun rememberMapRenderTime(app: AppState): Long {
+    if (app.isTv) return rememberTvMapTime { app.mapTimeMs() ?: 0L }
     var now by remember { mutableLongStateOf(0L) }
     LaunchedEffect(app) {
         var lastPublishedFrameMs = Long.MIN_VALUE
         while (true) {
             withFrameMillis { frameMs ->
                 if (lastPublishedFrameMs == Long.MIN_VALUE ||
-                    frameMs - lastPublishedFrameMs >= if (app.isTv) 100L else MAP_RENDER_INTERVAL_MS
+                    frameMs - lastPublishedFrameMs >= MAP_RENDER_INTERVAL_MS
                 ) {
                     now = app.mapTimeMs() ?: 0L
                     lastPublishedFrameMs = frameMs
@@ -271,22 +287,26 @@ internal fun CarTargets(
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun DriverFocusTargets(
+internal fun DriverFocusTargets(
     positions: List<Pair<String, Offset>>,
     half: Float,
     onTap: (String) -> Unit,
     onHold: (String) -> Unit,
 ) {
     val target = with(LocalDensity.current) { (half * 2).toDp() }
-    positions.forEach { (number, p) ->
-        Box(
-            Modifier
-                .offset { IntOffset((p.x - half).roundToInt(), (p.y - half).roundToInt()) }
-                .size(target)
-                .combinedClickable(onLongClick = { onHold(number) }) { onTap(number) }
-                .focusable()
-                .tvFocusRing()
-        )
+    val latest = rememberUpdatedState(positions)
+    val select = rememberUpdatedState(onTap)
+    val hold = rememberUpdatedState(onHold)
+    positions.forEachIndexed { index, (number, _) ->
+        key(number) {
+            Box(remember(index, number, half, target) {
+                Modifier.offset {
+                    val p = latest.value.getOrNull(index)?.second ?: Offset.Zero
+                    IntOffset((p.x - half).roundToInt(), (p.y - half).roundToInt())
+                }.size(target).tvFocusRing()
+                    .combinedClickable(onLongClick = { hold.value(number) }) { select.value(number) }
+            })
+        }
     }
 }
 

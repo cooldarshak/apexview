@@ -42,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
@@ -51,7 +52,7 @@ import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.delay
 
 private val ROW_HEIGHT = 34.dp
-private val TYRE_COLORS = mapOf(
+internal val TYRE_COLORS = mapOf(
     "SOFT" to Color(0xFFFF3B30),
     "MEDIUM" to Color(0xFFFFD60A),
     "HARD" to Color(0xFFF2F2F2),
@@ -194,6 +195,8 @@ internal fun TimingTowerContents(
     tyres: Map<String, Tyre?>, speeds: Map<String, Pair<Int?, Int?>>, onTop: String?,
     speedUnit: String, tvLayout: Boolean, onDriver: (String) -> Unit,
 ) {
+    val context = LocalContext.current
+    val television = remember(context) { isTvDevice(context) }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         // The table is 361dp wide, plus its 18dp side padding. Scale its layout with the panel
         // so S1/S2/S3 and the tyre column remain inside the visible window when it is narrowed.
@@ -234,7 +237,10 @@ internal fun TimingTowerContents(
                     items(rows, key = { it.first }) { (number, state) ->
                         val kmh = speeds[number]?.first
                         val gear = speeds[number]?.second
-                        TowerRow(
+                        if (television) {
+                            TvTowerRow(timing.drivers[number], number, state, tyres[number], kmh, gear,
+                                speedUnit, number == onTop, rowHeight) { onDriver(number) }
+                        } else TowerRow(
                             timing = timing,
                             number = number,
                             state = state,
@@ -535,7 +541,7 @@ private fun TowerSector(sector: SectorCell?) {
     }
 }
 
-private fun segmentColor(status: Int) = when (status) {
+internal fun segmentColor(status: Int) = when (status) {
     2048 -> Color(0xFFFFD60A) // Yellow
     2049 -> Color(0xFF30D158) // Personal best
     2051 -> Color(0xFFBF5AF2) // Session best
@@ -560,7 +566,7 @@ private fun Header(text: String, width: Dp, align: TextAlign = TextAlign.End) {
     Text(text, style = Type.caption.copy(fontSize = 7.sp), textAlign = align, maxLines = 1, modifier = Modifier.width(width))
 }
 
-private fun lapColor(pace: Pace?) = when (pace) {
+internal fun lapColor(pace: Pace?) = when (pace) {
     Pace.PURPLE -> Color(0xFFBF5AF2)
     Pace.GREEN -> Color(0xFF30D158)
     else -> Color.White
