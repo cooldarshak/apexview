@@ -35,8 +35,17 @@ internal class FinishedCastEncodingSession(
                         override fun onFormat(format: MediaFormat) = fragments.format(format)
                         override fun onSample(data: ByteArray, presentationTimeUs: Long, keyFrame: Boolean) =
                             fragments.sample(data, presentationTimeUs, keyFrame)
-                        override fun onEnd() = fragments.finish(1_000_000L / frameRate)
-                        override fun onError(error: Exception) = fail(error.message ?: "Cast encoder failed")
+                        override fun onEnd() {
+                            try {
+                                fragments.finish(1_000_000L / frameRate)
+                            } finally {
+                                releaseOnWorker()
+                            }
+                        }
+
+                        override fun onError(error: Exception) {
+                            fail(error.message ?: "Cast encoder failed")
+                        }
                     })
                 encoder = created
                 main.post {
@@ -74,18 +83,30 @@ internal class FinishedCastEncodingSession(
         check(Looper.myLooper() == main.looper)
         if (closed) return
         closed = true
-        if (attached) scene.detachEncoderOutput(::releaseEncoder) else releaseEncoder()
+        if (attached) scene.detachEncoderOutput(::finishEncoderInput)
+        else worker.post { releaseOnWorker() }
     }
 
-    private fun releaseEncoder() {
+    private fun finishEncoderInput() {
         worker.post {
+            val current = encoder ?: return@post
             try {
-                encoder?.close()
-            } finally {
-                encoder = null
-                video.finish()
-                thread.quitSafely()
+                current.finishInput()
+                worker.postDelayed({ releaseOnWorker() }, 2_000L)
+            } catch (_: Exception) {
+                releaseOnWorker()
             }
+        }
+    }
+
+    private fun releaseOnWorker() {
+        val current = encoder
+        encoder = null
+        try {
+            current?.close()
+        } finally {
+            video.finish()
+            thread.quitSafely()
         }
     }
 }
