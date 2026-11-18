@@ -42,6 +42,17 @@ class CardState(
  * last lap, gap, position or pit status keeps a full copy of the state, so [at] is a lookup
  * rather than a replay.
  */
+/** Last sample at or before the playback clock. Handles repeated timestamps. */
+internal fun LongArray.floorIndex(utcMs: Long): Int {
+    var low = 0
+    var high = size
+    while (low < high) {
+        val mid = (low + high) ushr 1
+        if (this[mid] <= utcMs) low = mid + 1 else high = mid
+    }
+    return low - 1
+}
+
 class DriverLaps(
     private val times: LongArray,
     private val states: List<Snapshot>,
@@ -70,7 +81,7 @@ class DriverLaps(
      * earlier). Counting crossings instead started every live session at lap 1.
      */
     fun lapAt(utcMs: Long): Int? {
-        val i = lapTimes.indexOfLast { it <= utcMs }
+        val i = lapTimes.floorIndex(utcMs)
         return if (i < 0) null else lapCounts[i] + 1
     }
 
@@ -102,30 +113,24 @@ class DriverLaps(
             .filter { (start, end) -> end - start in MIN_LAP_MS..MAX_LAP_MS }
 
     /** Whether the driver was out of the race at [utcMs]. */
-    fun retiredAt(utcMs: Long): Boolean = times.indexOfLast { it <= utcMs }.let { it >= 0 && states[it].retired }
+    fun retiredAt(utcMs: Long): Boolean = times.floorIndex(utcMs).let { it >= 0 && states[it].retired }
 
     /** When the driver's current spell in the pit lane began, if they're in it at [utcMs]. */
     fun inPitSince(utcMs: Long): Long? {
-        var i = times.indexOfLast { it <= utcMs }
+        var i = times.floorIndex(utcMs)
         if (i < 0 || !states[i].inPit) return null
         while (i > 0 && states[i - 1].inPit) i--
         return times[i]
     }
 
     /** When the driver last crossed the line, by [utcMs]. */
-    fun lastCrossing(utcMs: Long): Long? = crossings.lastOrNull { it <= utcMs }
+    fun lastCrossing(utcMs: Long): Long? = crossings.getOrNull(crossings.floorIndex(utcMs))
 
     fun at(utcMs: Long): CardState? {
-        var i = -1
-        var lo = 0
-        var hi = times.size - 1
-        while (lo <= hi) {
-            val mid = (lo + hi) ushr 1
-            if (times[mid] <= utcMs) { i = mid; lo = mid + 1 } else hi = mid - 1
-        }
+        val i = times.floorIndex(utcMs)
         if (i < 0) return null
         val s = states[i]
-        val lapStart = crossings.lastOrNull { it <= utcMs }
+        val lapStart = crossings.getOrNull(crossings.floorIndex(utcMs))
         return CardState(
             position = s.position,
             sectors = s.sectors,
@@ -189,30 +194,19 @@ object DriverTimingParser {
             a === b || (a != null && b != null && a.time == b.time && a.pace == b.pace &&
                 a.segments == b.segments && a.previousTime == b.previousTime)
 
-        private fun sameSnapshot(a: DriverLaps.Snapshot, b: DriverLaps.Snapshot): Boolean =
-            a.position == b.position &&
-                a.sectors.indices.all { sameCell(a.sectors[it], b.sectors[it]) } &&
-                a.lapSectors.indices.all { sameCell(a.lapSectors[it], b.lapSectors[it]) } &&
-                sameCell(a.lastLap, b.lastLap) &&
-                a.gap == b.gap && a.inPit == b.inPit && a.toLeader == b.toLeader &&
-                a.ahead == b.ahead && a.retired == b.retired && sameCell(a.bestLap, b.bestLap)
+        private fun matches(previous: DriverLaps.Snapshot): Boolean =
+            previous.position == position && previous.gap == gap && previous.inPit == inPit &&
+                previous.toLeader == toLeader && previous.ahead == ahead && previous.retired == retired &&
+                sameCell(previous.lastLap, lastLap) && sameCell(previous.bestLap, bestLap) &&
+                sector.indices.all { sameCell(previous.sectors[it], sector[it]) && sameCell(previous.lapSectors[it], lapSectors[it]) }
 
         fun snap(t: Long) {
+            if (snaps.lastOrNull()?.let(::matches) == true) return
             val copy = DriverLaps.Snapshot(position, sector.toList(), lapSectors.toList(), lastLap, gap, inPit, toLeader, ahead, retired, bestLap)
-            if (times.isNotEmpty()) {
-                val last = snaps.last()
-                if (times.last() == t) {
-                    if (!sameSnapshot(last, copy)) snaps[snaps.lastIndex] = copy
-                    return
-                }
-                // Archive topics often repeat every driver's full state in several deltas.
-                // Keep only observable state changes; crossings and lap counts are tracked in
-                // their own timestamp arrays and do not depend on storing duplicate snapshots.
-                if (sameSnapshot(last, copy)) return
-            }
-            times += t
-            snaps += copy
+            if (times.lastOrNull() == t) snaps[snaps.lastIndex] = copy
+            else { times += t; snaps += copy }
         }
+
     }
 
     /**
@@ -430,7 +424,7 @@ object DriverTimingParser {
                 if (index >= 0 && status >= 0) l.sectorSegments[i][index] = status
             }
         }
-        val segmentValues = l.sectorSegments[i].toSortedMap().values.toList()
+        val segmentValues = l.sectorSegments[i].values.toList()
         l.sector[i] = if (l.sectorValue[i].isNotEmpty() || segmentValues.isNotEmpty()) {
             SectorCell(l.sectorValue[i], if (l.sectorValue[i].isEmpty()) Pace.NONE else pace(l.sectorFlags[i]), segmentValues, l.sectorPrevious[i])
         } else null
@@ -461,7 +455,7 @@ class Tyre(val compound: String, val laps: Int)
 /** One driver's tyres through the session. */
 class TyreLog(private val times: LongArray, private val tyres: List<Tyre>) {
     fun at(utcMs: Long): Tyre? {
-        val i = times.indexOfLast { it <= utcMs }
+        val i = times.floorIndex(utcMs)
         return if (i < 0) null else tyres[i]
     }
 }

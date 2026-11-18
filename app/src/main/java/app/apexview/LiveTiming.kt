@@ -260,14 +260,7 @@ class DriverTrack(private val t: LongArray, private val x: FloatArray, private v
 
 /** A driver's lap states as they changed through the session. */
 class StateLog(private val t: LongArray, private val s: Array<LapState>) {
-    fun at(utcMs: Long): LapState {
-        var result = LapState.UNKNOWN
-        for (i in t.indices) {
-            if (t[i] > utcMs) break
-            result = s[i]
-        }
-        return result
-    }
+    fun at(utcMs: Long): LapState = s.getOrNull(t.floorIndex(utcMs)) ?: LapState.UNKNOWN
 }
 
 /** A car's speed and gear through a session, from F1 CarData (speed in km/h). */
@@ -370,6 +363,10 @@ class SessionTiming(
     val weather: WeatherLog = WeatherLog.NONE,
 ) {
     val geometry = TrackGeometry(outline)
+    val firstTrackUtc: Long? = tracks.values.minOfOrNull { it.startMs }
+    val lastTrackUtc: Long? = tracks.values.maxOfOrNull { it.endMs }
+    var archivePartial = false
+
 
     /** Each car's speed, by racing number. */
     var speeds by mutableStateOf<Map<String, SpeedLog>>(emptyMap())
@@ -613,6 +610,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         ref: SessionRef,
         watchedUtc: Long? = null,
         replayPositionMs: Long = 0,
+        positionScratchDir: java.io.File? = null,
         onProgress: suspend (String) -> Unit = {},
         onPartial: suspend (SessionTiming) -> Unit = {},
     ): SessionTiming = withContext(Dispatchers.IO) {
@@ -667,7 +665,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 circuitKey = ref.circuitKey,
                 laps = emptyMap(),
                 radioBase = BASE + path,
-            )
+            ).apply { archivePartial = true }
         )
         // Serialize partial updates on Main so whichever independent topic finishes first can
         // publish without erasing the other topic when it completes later.
@@ -715,7 +713,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 states = partialHistory.states.states, outline = partialOutline,
                 hasStartFinish = false, corners = emptyList(), startUtcMs = initialStart,
                 circuitKey = ref.circuitKey, laps = partialHistory.laps, radioBase = BASE + path,
-            ))
+            ).apply { archivePartial = true })
         }
         val positionsTask = async(Dispatchers.IO) {
             progress("Streaming and parsing Position.z.jsonStream…")
@@ -723,8 +721,19 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             try {
                 traceStage("map-position-stream") { report ->
                     report("opening HTTP stream")
-                    open(path + "Position.z.jsonStream").bufferedReader().useLines { lines ->
-                        report("HTTP stream open; reading and decoding records")
+                    val topic = path + "Position.z.jsonStream"
+                    suspend fun publishTracks(snapshot: Map<String, DriverTrack>, outline: FloatArray) {
+                        withContext(Dispatchers.Main) {
+                            // A start-of-race preview must not replace a window covering a resumed replay.
+                            val covered = partialTracks.values.any { firstViewTime in it.startMs..it.endMs }
+                            if (!covered || snapshot.values.any { firstViewTime in it.startMs..it.endMs }) {
+                                partialTracks = snapshot
+                                partialOutline = outline
+                                publishTopics()
+                            }
+                        }
+                    }
+                    fun parseFull(reader: java.io.BufferedReader): PositionParseReport = reader.useLines { lines ->
                         var lastPreviewAt = 0L
                         var previewOutline = FloatArray(0)
                         parsePositionLines(lines, { job.ensureActive() }, report) { builders ->
@@ -733,16 +742,58 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                 lastPreviewAt = now
                                 if (previewOutline.isEmpty()) previewOutline = traceOutline(builders.values.toList())
                                 if (previewOutline.isNotEmpty()) {
-                                    // Builders append only. Each DriverTrack view captures a fixed sample count.
                                     val snapshot = builders.mapValues { it.value.build() }
                                     val outline = previewOutline
-                                    launch(Dispatchers.Main) {
-                                        partialTracks = snapshot
-                                        partialOutline = outline
-                                        publishTopics()
+                                    launch { publishTracks(snapshot, outline) }
+                                }
+                            }
+                        }
+                    }
+                    if (positionScratchDir == null) parseFull(open(topic).bufferedReader())
+                    else {
+                        val spool = java.io.File.createTempFile("replay-positions-", ".stream", positionScratchDir)
+                        try {
+                            open(topic).buffered().use { input ->
+                                spool.outputStream().buffered().use { output ->
+                                    val buffer = ByteArray(32 * 1024)
+                                    var total = 0L
+                                    while (true) {
+                                        job.ensureActive()
+                                        val count = input.read(buffer)
+                                        if (count < 0) break
+                                        total += count
+                                        if (total > 64L * 1024 * 1024) throw IOException("Position archive exceeds 64 MiB")
+                                        output.write(buffer, 0, count)
                                     }
                                 }
                             }
+                            val probe = spool.bufferedReader().useLines { lines ->
+                                positionsStreamStart(lines.take(100).joinToString("\n"))
+                            } ?: initialStart
+                            val target = (firstViewTime - probe).coerceAtLeast(0)
+                            val wanted = (target - 150_000).coerceAtLeast(0)..(target + 180_000)
+                            report("decoding position window targetMs=$target bytes=${spool.length()}")
+                            val initial = spool.bufferedReader().useLines { lines ->
+                                val window = lines.filter { line ->
+                                    job.ensureActive()
+                                    val prefix = streamPrefixLength(line)
+                                    prefix < line.length && streamOffsetMs(line, prefix) in wanted
+                                }
+                                parsePositionLines(window, { job.ensureActive() })
+                            }
+                            val outline = traceOutline(initial.tracks.values.toList())
+                            if (outline.isNotEmpty()) publishTracks(initial.tracks.mapValues { it.value.build() }, outline)
+                            report("position window available cars=${initial.tracks.size} outlinePoints=${outline.size / 2}")
+                            val thread = android.os.Process.myTid()
+                            val previousPriority = android.os.Process.getThreadPriority(thread)
+                            try {
+                                android.os.Process.setThreadPriority(thread, android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                                parseFull(spool.bufferedReader())
+                            } finally {
+                                android.os.Process.setThreadPriority(thread, previousPriority)
+                            }
+                        } finally {
+                            spool.delete()
                         }
                     }
                 }

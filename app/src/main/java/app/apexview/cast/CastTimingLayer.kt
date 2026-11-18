@@ -27,12 +27,6 @@ internal fun CastTimingLayer(state: CastTimingReceiver, canvasWidth: Float, canv
                              onDriver: (String, Boolean) -> Unit, onDrawn: (Int, Int) -> Unit) {
     val frame = state.frame ?: return
     val timing = state.geometry?.takeIf { it.id == frame.geometryId }?.timing
-    var position by remember { mutableLongStateOf(frame.positionMs) }
-    LaunchedEffect(positionMs) {
-        var last = 0L
-        while (true) withFrameMillis { time -> if (time - last >= MAP_RENDER_INTERVAL_MS) { position = positionMs(); last = time } }
-    }
-    val cars = frame.carsAt(position)
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val scale = constraints.maxWidth / canvasWidth
         val density = Density(frame.density * scale, frame.fontScale)
@@ -40,7 +34,10 @@ internal fun CastTimingLayer(state: CastTimingReceiver, canvasWidth: Float, canv
             .offset { IntOffset((p.x * scale).roundToInt(), (p.y * scale).roundToInt()) }
             .requiredSize((p.width / frame.density).dp, (p.height / frame.density).dp)
         CompositionLocalProvider(LocalDensity provides density) {
-            Box(Modifier.fillMaxSize().drawWithContent { drawContent(); onDrawn(frame.table.rows.size, cars.size) }) {
+            Box(Modifier.fillMaxSize().drawWithContent {
+                drawContent()
+                onDrawn(frame.table.rows.size, frame.cars.size)
+            }) {
                 if (timing != null) frame.tower?.let { p ->
                     Box(panel(p).graphicsLayer(alpha = frame.towerOpacity).clip(RoundedCornerShape(16.dp))
                         .background(Color.Black.copy(alpha = .72f)).padding(top = (frame.towerHeaderPx / frame.density).dp)) {
@@ -52,29 +49,50 @@ internal fun CastTimingLayer(state: CastTimingReceiver, canvasWidth: Float, canv
                         }
                     }
                 }
-                if (timing != null && frame.mapMode == MapMode.EDGE) {
-                    EdgeDrawingContent(timing, canvasWidth * scale, canvasHeight * scale,
-                        with(density) { 30.dp.toPx() }, 0f, frame.mapOpacity, frame.utcMs + position - frame.positionMs,
-                        cars, frame.stop, frame.flags, frame.leader) { targets -> DriverTargets(targets) { onDriver(it, false) } }
+                if (timing != null && frame.mapMode != MapMode.OFF) {
+                    ReceiverMap(timing, frame, canvasWidth, canvasHeight, scale, density, positionMs, onDriver)
                 }
-                if (timing != null && frame.mapMode.inWindow) frame.map?.let { p ->
-                    Box(panel(p)) {
-                        if (frame.mapMode == MapMode.PIT) {
-                            val left = (-p.x).coerceIn(0f, p.width); val top = (-p.y).coerceIn(0f, p.height)
-                            val right = (canvasWidth - p.x).coerceIn(left, p.width)
-                            val bottom = (canvasHeight - p.y).coerceIn(top, p.height)
-                            val centre = Offset((left + right) / 2 * scale, (top + bottom) / 2 * scale)
-                            val radius = (min(right - left, bottom - top) / 2 - LABEL_ROOM.value * frame.density).coerceAtLeast(1f) * scale
-                            PitCircleDrawing(timing, frame.circle, p.width * scale, p.height * scale, centre, radius,
-                                frame.mapOpacity) { targets -> DriverTargets(targets) { onDriver(it, true) } }
-                        } else TrackDrawingContent(timing, p.width * scale, p.height * scale, frame.mapRotation,
-                            frame.mapOpacity, frame.dotSize, frame.labelSize, frame.utcMs + position - frame.positionMs,
-                            cars, frame.stop, frame.flags, frame.leader) { targets -> DriverTargets(targets) { onDriver(it, false) } }
-                    }
-                }
-                if (frame.message != null && (timing == null || frame.table.rows.isEmpty() && cars.isEmpty())) {
+                if (frame.message != null && timing == null) {
                     Text(frame.message, style = Type.footnote, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp))
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReceiverMap(timing: SessionTiming, frame: CastTimingProtocol.Frame, canvasWidth: Float,
+                        canvasHeight: Float, scale: Float, density: Density, positionMs: () -> Long,
+                        onDriver: (String, Boolean) -> Unit) {
+    var position by remember { mutableLongStateOf(frame.positionMs) }
+    LaunchedEffect(positionMs) {
+        var last = 0L
+        while (true) withFrameMillis { time -> if (time - last >= 66L) { position = positionMs(); last = time } }
+    }
+    val cars = frame.carsAt(position)
+    fun panel(p: CastTimingProtocol.Panel) = Modifier
+        .offset { IntOffset((p.x * scale).roundToInt(), (p.y * scale).roundToInt()) }
+        .requiredSize((p.width / frame.density).dp, (p.height / frame.density).dp)
+    if (frame.mapMode == MapMode.EDGE) {
+        EdgeDrawingContent(timing, canvasWidth * scale, canvasHeight * scale,
+            with(density) { 30.dp.toPx() }, 0f, frame.mapOpacity, frame.utcMs + position - frame.positionMs,
+            cars, frame.stop, frame.flags, frame.leader) { targets -> DriverTargets(targets) { onDriver(it, false) } }
+    }
+    if (frame.mapMode.inWindow) frame.map?.let { p ->
+        Box(panel(p)) {
+            if (frame.mapMode == MapMode.PIT) {
+                val left = (-p.x).coerceIn(0f, p.width); val top = (-p.y).coerceIn(0f, p.height)
+                val right = (canvasWidth - p.x).coerceIn(left, p.width)
+                val bottom = (canvasHeight - p.y).coerceIn(top, p.height)
+                val centre = Offset((left + right) / 2 * scale, (top + bottom) / 2 * scale)
+                val radius = (min(right - left, bottom - top) / 2 - LABEL_ROOM.value * frame.density).coerceAtLeast(1f) * scale
+                PitCircleDrawing(timing, frame.circle, p.width * scale, p.height * scale, centre, radius,
+                    frame.mapOpacity) { targets -> DriverTargets(targets) { onDriver(it, true) } }
+            } else TrackDrawingContent(timing, p.width * scale, p.height * scale, frame.mapRotation,
+                frame.mapOpacity, frame.dotSize, frame.labelSize, frame.utcMs + position - frame.positionMs,
+                cars, frame.stop, frame.flags, frame.leader) { targets -> DriverTargets(targets) { onDriver(it, false) } }
+            if (cars.isEmpty() && frame.message != null) {
+                Text(frame.message, style = Type.footnote, modifier = Modifier.align(Alignment.BottomCenter))
             }
         }
     }

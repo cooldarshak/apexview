@@ -128,9 +128,9 @@ internal object CastTimingProtocol {
         return Table(rows, tyres, speeds)
     }
     fun encodeFrame(geometryId: String, positionMs: Long, now: Long, density: Float, fontScale: Float,
-        app: AppState, timing: SessionTiming?, table: JSONArray, circle: PitCircleData?, stop: PitStopNow?): JSONObject {
+        app: AppState, timing: SessionTiming?, table: JSONArray, circle: PitCircleData?, stop: PitStopNow?,
+        cars: List<Car>): JSONObject {
         val flags = timing?.flags?.at(now) ?: FlagPicture(TrackCondition.CLEAR, emptyMap())
-        val cars = timing?.let { carsAt(it, now) }.orEmpty()
         val header = timing?.let { towerSessionHeader(it, now) } ?: TowerSessionHeaderData("TIMING", "", Color.White, "", emptyList())
         val panel = app.activeMapPanel
         val tower = app.towerSpot
@@ -154,7 +154,7 @@ internal object CastTimingProtocol {
             .put("stop", stop?.let { JSONArray(listOf(it.number, it.carProgress, it.ghostProgress, it.outBehind?.first ?: JSONObject.NULL, it.outBehind?.second ?: 0)) } ?: JSONObject.NULL)
             .put("circle", encodeCircle(circle)).put("rows", table)
             .put("header", JSONArray(listOf(header.name, header.track, header.color.toArgb(), header.counter, JSONArray(header.weather))))
-            .put("message", app.mapStatus?.let(DiagnosticRedaction::redact)?.safe(220) ?: JSONObject.NULL)
+            .put("message", (timing?.let { noPositionsLine(it, now) } ?: app.mapStatus)?.let(DiagnosticRedaction::redact)?.safe(220) ?: JSONObject.NULL)
     }
     fun decodeFrame(j: JSONObject, previousRows: Pair<String, Table>? = null): Pair<Frame, Pair<String, Table>> {
         require(j.getInt("version") == VERSION && j.getString("kind") == "frame")

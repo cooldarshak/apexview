@@ -297,9 +297,12 @@ class PitwallReceiverActivity : ComponentActivity() {
                 decoderCount = (decoderCount - 1).coerceAtLeast(0)
                 Log.i("PitwallReceiver", "VIDEO_DECODER_RELEASE name=$decoderName active=$decoderCount")
             }
+            override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long) {
+                if (player === next) Log.w("PitwallReceiver", "VIDEO_DROPPED frames=$droppedFrames elapsedMs=$elapsedMs positionMs=${controllerPosition()}")
+            }
             override fun onRenderedFirstFrame(eventTime: AnalyticsListener.EventTime, output: Any, renderTimeMs: Long) {
                 // For a scene, wait for the GLES output swap, not merely codec output to its texture.
-                if (player === next && (scene == null || direct)) reportRendering()
+                if (player === next && (scene == null || surfacePlayback(scene, direct))) reportRendering()
             }
         })
         next.addListener(object : Player.Listener {
@@ -352,6 +355,12 @@ class PitwallReceiverActivity : ComponentActivity() {
         controlsJob?.cancel()
         controlsJob = lifecycleScope.launch { delay(4_000); controlsVisible = false }
     }
+    // A whole-picture single feed needs no GPU atlas extraction. The native video surface
+    // handles buffer presentation while Compose draws the overlays above it.
+    private fun surfacePlayback(model: app.apexview.scene.VideoScene?, direct: Boolean): Boolean =
+        direct || (model != null && model.sources == 1 && model.windows.size == 1 &&
+            model.atlasWidth == model.sourceDisplayWidth && model.atlasHeight == model.sourceDisplayHeight)
+
     private fun isDirectPlayback() = playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optBoolean("pitwallDirect") == true
     private fun streamMetadata() = playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallStream")
     private fun controllerPosition(): Long {
@@ -423,7 +432,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                             val modifier = if (maxWidth / maxHeight > ratio) Modifier.fillMaxHeight().aspectRatio(ratio)
                                 else Modifier.fillMaxWidth().aspectRatio(ratio)
                             Box(modifier) {
-                            if (isDirectPlayback()) BoxWithConstraints(Modifier.fillMaxSize()) {
+                            if (surfacePlayback(model, isDirectPlayback())) BoxWithConstraints(Modifier.fillMaxSize()) {
                                 val scale = constraints.maxWidth / model.width
                                 val density = androidx.compose.ui.platform.LocalDensity.current
                                 model.windows.singleOrNull()?.let { cell ->
@@ -457,7 +466,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                                 if (sceneView === it) sceneView = null
                                 it.release()
                             }, modifier = Modifier.fillMaxSize())
-                            CastTimingLayer(timingState, model.width, model.height, { controllerPosition() }, { number, pit ->
+                            CastTimingLayer(timingState, model.width, model.height, remember { { controllerPosition() } }, { number, pit ->
                                 connection?.send(FcastProtocol.UI_CONTROL, JSONObject().put("action", if (pit) "pitDriver" else "driver").put("number", number))
                             }, { rows, cars ->
                                 if (!timingReported && (rows > 0 || cars > 0)) {

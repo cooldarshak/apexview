@@ -23,9 +23,12 @@ internal class CastTimingPublisher(private val context: Context, private val app
     private var lastFullSnapshotAt = Long.MIN_VALUE
     private var sourceTiming: SessionTiming? = null
     private var geometry: JSONObject? = null
+    private var lastFrameAt = Long.MIN_VALUE
 
     fun messages(playbackId: String): List<JSONObject> {
         val elapsed = android.os.SystemClock.elapsedRealtime()
+        if (lastPlaybackId == playbackId && lastFrameAt != Long.MIN_VALUE && elapsed - lastFrameAt < 200) return emptyList()
+        lastFrameAt = elapsed
         val resend = lastPlaybackId != playbackId || lastFullSnapshotAt == Long.MIN_VALUE || elapsed - lastFullSnapshotAt >= 5_000
         if (lastPlaybackId != playbackId) {
             lastPlaybackId = playbackId
@@ -34,7 +37,8 @@ internal class CastTimingPublisher(private val context: Context, private val app
         }
         if (resend) lastFullSnapshotAt = elapsed
         val timing = app.timing
-        val now = app.mapTimeMs() ?: 0L
+        val position = app.castFramePositionMs
+        val now = app.mapTimeAt(position) ?: 0L
         val output = mutableListOf<JSONObject>()
         if (timing != null) {
             // Replay geometry is immutable within a published session snapshot.
@@ -61,12 +65,14 @@ internal class CastTimingPublisher(private val context: Context, private val app
                 .put("id", rowsId).put("rows", rows)
         }
         val basis = if (timing != null && (app.mapMode == MapMode.PIT || app.pitDriver != null)) pitBasis(timing, now) else null
-        val cars = timing?.let { carsAt(it, now) }.orEmpty()
+        val cars = if (app.mapMode != MapMode.OFF) timing?.let { carsAt(it, now) }.orEmpty() else emptyList()
         val stop = basis?.let { pitStopNow(it, app.pitDriver, cars.map { car -> car.number to timing!!.geometry.progress(car.x, car.y) }) }
         val circle = if (app.mapMode == MapMode.PIT && timing != null && basis != null) pitCircleData(app, timing, now, basis) else null
-        val message = CastTimingProtocol.encodeFrame(geometryId, app.castFramePositionMs, now,
+        if (resend) android.util.Log.i("PitwallCast", "TIMING_SAMPLE positionMs=$position utc=$now " +
+            "rows=${rows.length()} cars=${cars.size} trackStart=${timing?.firstTrackUtc} trackEnd=${timing?.lastTrackUtc}")
+        val message = CastTimingProtocol.encodeFrame(geometryId, position, now,
             context.resources.displayMetrics.density, context.resources.configuration.fontScale,
-            app, timing, rows, circle, stop)
+            app, timing, rows, circle, stop, cars)
         message.remove("rows")
         output += message.put("playbackId", playbackId).put("tableId", rowsId).put("sequence", ++sequence)
         return output.flatMap(TimingMessageChunks::split)

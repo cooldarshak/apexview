@@ -23,7 +23,9 @@ internal class CastTimingReceiver {
         val j = assembler.accept(packet) ?: return
         if (j.optString("playbackId") != playbackId) return
         when (j.getString("kind")) {
-            "geometry" -> { geometry = CastTimingProtocol.decodeGeometry(j) }
+            "geometry" -> {
+                if (geometry?.id != j.getString("id")) geometry = CastTimingProtocol.decodeGeometry(j)
+            }
             "table" -> {
                 require(j.getInt("version") == 1)
                 val incoming = j.getJSONArray("rows"); require(incoming.length() <= 24)

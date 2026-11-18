@@ -362,6 +362,7 @@ class AppState(
     private var localDirectSupported = false
     private data class DirectCast(val tileId: Int, val contentId: Long, val channel: Int, val label: String)
     private var directCast by mutableStateOf<DirectCast?>(null)
+    private var castSourceWallClockBaseMs: Long? = null
     private var remoteWallClockBaseMs: Long? = null
     private var nativeComposedCast by mutableStateOf<app.apexview.cast.NativeComposedCastSession?>(null)
     private var nativeCastPump: Job? = null
@@ -606,6 +607,9 @@ class AppState(
         startCastSceneUpdates(relay)
     }
     private fun handOffCastPlayback() {
+        if (!castPlaybackHandedOff) castSourceWallClockBaseMs = leaderTile()?.feed?.let { feed ->
+            feed.wallClockMs()?.minus(feed.player.currentPosition)
+        }
         retiredCastRelays.forEach { it.close() }; retiredCastRelays.clear()
         retiredNativeCasts.forEach { it.close() }; retiredNativeCasts.clear()
         if (castPlaybackHandedOff || !castingActive) return
@@ -882,6 +886,7 @@ class AppState(
             else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll) }
         } else castPlaybackHandedOff = false
         remoteWallClockBaseMs = null
+        castSourceWallClockBaseMs = null
     }
     fun stopFullSceneCast() {
         stopExternalDisplay()
@@ -3139,6 +3144,8 @@ class AppState(
         pitDriver = null
         timing = null
         speedsJob?.cancel()
+        speedsFor = null
+        archiveSpeeds = emptyMap()
         mapStatus = "Resolving F1 session…"
         liveFeed?.cancel()
         liveFeed = scope.launch {
@@ -3197,6 +3204,7 @@ class AppState(
                             ref = ref!!,
                             watchedUtc = watched,
                             replayPositionMs = leaderTile()?.feed?.player?.currentPosition ?: 0L,
+                            positionScratchDir = context.cacheDir.takeIf { isTv },
                             onProgress = { status ->
                                 if (timingContentId == contentId) {
                                     mapStatus = status
@@ -3244,17 +3252,22 @@ class AppState(
     }
 
     private var speedsJob: kotlinx.coroutines.Job? = null
-    private var speedsFor: SessionTiming? = null
+    private var speedsFor: String? = null
+    private var archiveSpeeds: Map<String, SpeedLog> = emptyMap()
 
     /** A replay's car speeds, fetched the first time an onboard wants them. Without them, no speed shows. */
     fun loadSpeeds(session: SessionTiming) {
-        if (session.live || speedsFor === session) return
+        if (session.live || session.radioBase.isBlank() || isTv && session.archivePartial || speedsFor == session.radioBase) return
         val token = api.ascendon ?: return
-        speedsFor = session
+        speedsFor = session.radioBase
         speedsJob?.cancel()
         speedsJob = scope.launch {
             try {
-                session.speeds = LiveTimingArchive(token, userAgent).loadSpeeds(session.radioBase)
+                val loaded = LiveTimingArchive(token, userAgent).loadSpeeds(session.radioBase)
+                if (speedsFor == session.radioBase) {
+                    archiveSpeeds = loaded
+                    timing?.takeIf { !it.live && it.radioBase == session.radioBase }?.speeds = loaded
+                }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -3358,6 +3371,7 @@ class AppState(
     /** Puts a session's timing on screen; the first time, the map gets its place. */
     private fun showTiming(loaded: SessionTiming) {
         val first = timing == null
+        if (!loaded.live && speedsFor == loaded.radioBase) loaded.speeds = archiveSpeeds
         timing = loaded
         if (!first) return
         // A tower reservation is a direct layout constraint, even if the user previously
@@ -3393,15 +3407,14 @@ class AppState(
      * The session time (UTC ms) of the leading tile's picture. Uses the stream's own clock when it
      * has one; otherwise guesses from the timing feed's start and lets the user line it up.
      */
-    fun mapTimeMs(): Long? {
+    fun mapTimeMs(): Long? = mapTimeAt(castFramePositionMs)
+
+    internal fun mapTimeAt(position: Long): Long? {
         val leader = leaderTile()?.feed ?: return null
-        val clock = leader.wallClockMs()
-        mapClockEstimated = clock == null
-        val position = if (castPlaybackHandedOff) castFramePositionMs else leader.player.currentPosition
-        val base = if (castPlaybackHandedOff && remoteWallClockBaseMs != null) requireNotNull(remoteWallClockBaseMs) + position
-            else if (clock != null) clock + position - leader.player.currentPosition
-            else (timing?.startUtcMs ?: return null) + position
-        return base + mapOffsetMs
+        val start = if (castPlaybackHandedOff) remoteWallClockBaseMs ?: castSourceWallClockBaseMs
+            else leader.wallClockMs()?.minus(leader.player.currentPosition)
+        mapClockEstimated = start == null
+        return (start ?: timing?.startUtcMs ?: return null) + position + mapOffsetMs
     }
 
     /**

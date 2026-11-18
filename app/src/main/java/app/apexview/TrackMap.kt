@@ -189,7 +189,7 @@ internal fun rememberMapRenderTime(app: AppState): Long {
         while (true) {
             withFrameMillis { frameMs ->
                 if (lastPublishedFrameMs == Long.MIN_VALUE ||
-                    frameMs - lastPublishedFrameMs >= MAP_RENDER_INTERVAL_MS
+                    frameMs - lastPublishedFrameMs >= if (app.isTv) 100L else MAP_RENDER_INTERVAL_MS
                 ) {
                     now = app.mapTimeMs() ?: 0L
                     lastPublishedFrameMs = frameMs
@@ -562,8 +562,10 @@ private class LineMarks(timing: SessionTiming) {
 private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, height: Float, turn: Float) {
     val now = rememberMapRenderTime(app)
     val cars = carsAt(timing, now)
-    val stop = pitStopNow(rememberPitBasis(app, timing, now), app.pitDriver,
-        cars.map { it.number to timing.geometry.progress(it.x, it.y) })
+    val stop = app.pitDriver?.let { driver ->
+        pitStopNow(rememberPitBasis(app, timing, now), driver,
+            cars.map { it.number to timing.geometry.progress(it.x, it.y) })
+    }
     TrackDrawingContent(timing, width, height, turn, app.mapOpacity, app.mapDotSizeDp, app.mapLabelSizeSp,
         now, cars, stop, timing.flags.at(now)) { targets -> CarTargets(app, targets) }
 }
@@ -857,8 +859,10 @@ internal class Ribbon(
 fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, inset: Float, screenCornerRadius: Float) {
     val now = rememberMapRenderTime(app)
     val cars = carsAt(timing, now)
-    val stop = pitStopNow(rememberPitBasis(app, timing, now), app.pitDriver,
-        cars.map { it.number to timing.geometry.progress(it.x, it.y) })
+    val stop = app.pitDriver?.let { driver ->
+        pitStopNow(rememberPitBasis(app, timing, now), driver,
+            cars.map { it.number to timing.geometry.progress(it.x, it.y) })
+    }
     EdgeDrawingContent(timing, width, height, inset, screenCornerRadius, app.mapOpacity, now,
         cars, stop, timing.flags.at(now)) { targets -> CarTargets(app, targets) }
 }
@@ -992,6 +996,10 @@ internal fun DrawScope.drawPitStop(stop: PitStopNow, color: Color, label: TextLa
  * Apexview joins, and F1 publishes the earlier part once the session is over.
  */
 internal fun noPositionsLine(timing: SessionTiming, now: Long): String? {
+    if (timing.archivePartial && timing.firstTrackUtc != null &&
+        (now < timing.firstTrackUtc || now > requireNotNull(timing.lastTrackUtc))) {
+        return "Loading driver positions for this replay point…"
+    }
     if (!timing.beforePositions(now)) return null
     val minutes = ((timing.positionsFromUtc!! - now) / 60_000L).coerceAtLeast(1)
     return "No car positions for the next $minutes min, until Apexview joined live timing"

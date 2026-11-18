@@ -232,6 +232,17 @@ class FeedPlayer(
     var buffering by mutableStateOf(true)
         private set
 
+    // The G09's Amlogic OMX path still showed frame corruption when Auto climbed through
+    // several resolutions, even after making each resolution change replace the codec.
+    private val stableTvResolution = android.os.Build.VERSION.SDK_INT == 31 &&
+        android.os.Build.MANUFACTURER.equals("TCL", ignoreCase = true) &&
+        android.os.Build.DEVICE.equals("G09", ignoreCase = true)
+
+    private fun qualityWidth(quality: VideoQuality) =
+        if (stableTvResolution && quality == VideoQuality.AUTO) 1280 else quality.maxWidth
+    private fun qualityHeight(quality: VideoQuality) =
+        if (stableTvResolution && quality == VideoQuality.AUTO) 720 else quality.maxHeight
+
     private val fit = TileFit().apply { qualityHeight = videoQuality.targetHeight }
     private var selectedVideoQuality = videoQuality
     private var externalQualityFloor = false
@@ -345,8 +356,11 @@ class FeedPlayer(
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !startWithVideo)
             .setPreferredAudioLanguage(commentary)
             .setPreferredTextLanguage(commentary)
-            .setMaxVideoSize(videoQuality.maxWidth, videoQuality.maxHeight)
+            .setMaxVideoSize(qualityWidth(videoQuality), qualityHeight(videoQuality))
+            .setForceHighestSupportedBitrate(stableTvResolution)
             .build()
+        if (stableTvResolution) Log.i("PitwallVideo",
+            "TCL_STABLE_RENDITION preferred=${videoQuality.name} cap=${qualityWidth(videoQuality)}x${qualityHeight(videoQuality)}")
         player.addListener(object : Player.Listener {
             override fun onTimelineChanged(timeline: Timeline, reason: Int) {
                 if (!startAtBeginning || timeline.isEmpty) return
@@ -751,7 +765,7 @@ class FeedPlayer(
         }
         videoOn = enableVideo && !remotePlaybackSuspended
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setMaxVideoSize(selectedVideoQuality.maxWidth, selectedVideoQuality.maxHeight)
+            .setMaxVideoSize(qualityWidth(selectedVideoQuality), qualityHeight(selectedVideoQuality))
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enableVideo || remotePlaybackSuspended)
             .build()
         player.playWhenReady = playWhenReady && !remotePlaybackSuspended
@@ -775,7 +789,7 @@ class FeedPlayer(
         selectedVideoQuality = value
         fit.qualityHeight = if (externalQualityFloor) maxOf(720, value.targetHeight) else value.targetHeight
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setMaxVideoSize(if (externalQualityFloor) maxOf(1280, value.maxWidth) else value.maxWidth, if (externalQualityFloor) maxOf(720, value.maxHeight) else value.maxHeight)
+            .setMaxVideoSize(if (externalQualityFloor) maxOf(1280, qualityWidth(value)) else qualityWidth(value), if (externalQualityFloor) maxOf(720, qualityHeight(value)) else qualityHeight(value))
             .build()
         refresh()
     }
@@ -788,8 +802,8 @@ class FeedPlayer(
         fit.qualityHeight = if (enabled) maxOf(720, q.targetHeight) else q.targetHeight
         sourceTrackSelector.parameters = sourceTrackSelector.buildUponParameters()
             .setMinVideoSize(1, if (enabled) 720 else 0)
-            .setMaxVideoSize(if (enabled) maxOf(1280, q.maxWidth) else q.maxWidth,
-                if (enabled) maxOf(720, q.maxHeight) else q.maxHeight)
+            .setMaxVideoSize(if (enabled) maxOf(1280, qualityWidth(q)) else qualityWidth(q),
+                if (enabled) maxOf(720, qualityHeight(q)) else qualityHeight(q))
             .setExceedVideoConstraintsIfNecessary(!enabled)
             .build()
     }
