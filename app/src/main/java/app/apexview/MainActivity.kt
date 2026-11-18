@@ -2,6 +2,7 @@ package app.apexview
 
 import app.apexview.cast.PitwallCastSheet
 import app.apexview.cast.local.ExternalDisplayController
+import app.apexview.cast.local.CastConnectionService
 import android.app.Activity
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
@@ -114,7 +115,7 @@ class MainActivity : FragmentActivity() {
         addOnPictureInPictureModeChangedListener { app.setPip(it.isInPictureInPictureMode) }
         ContextCompat.registerReceiver(
             this, pipControls,
-            IntentFilter().apply { listOf(PIP_BACK, PIP_PLAY, PIP_FORWARD).forEach(::addAction) },
+            IntentFilter().apply { listOf(PIP_BACK, PIP_PLAY, PIP_FORWARD, CastConnectionService.STOP_CONNECTION).forEach(::addAction) },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
     }
@@ -130,6 +131,7 @@ class MainActivity : FragmentActivity() {
                 PIP_BACK -> app.skip(-10_000)
                 PIP_PLAY -> app.togglePlay()
                 PIP_FORWARD -> app.skip(10_000)
+                CastConnectionService.STOP_CONNECTION -> app.stopFullSceneCast()
             }
         }
     }

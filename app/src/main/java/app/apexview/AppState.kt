@@ -473,6 +473,8 @@ class AppState(
         localChosen = true; localReady = false; castDeviceName = device.name
         castPickerOpen = false; castBusy = true
         castStatus = "Connecting to ${device.name}…"; message = castStatus
+        runCatching { app.apexview.cast.local.CastConnectionService.start(context) }
+            .onFailure { android.util.Log.w("PitwallCast", "Connected-device background service could not start: ${it.javaClass.simpleName}") }
         localConnectionJob = scope.launch {
             val socket = java.net.Socket()
             var assigned = false
@@ -507,7 +509,10 @@ class AppState(
                 }
             } finally {
                 if (!assigned) runCatching { socket.close() }
-                if (attempt == localConnectionGeneration) localConnectionJob = null
+                if (attempt == localConnectionGeneration) {
+                    localConnectionJob = null
+                    if (localConnection == null) app.apexview.cast.local.CastConnectionService.stop(context)
+                }
             }
         }
     }
@@ -874,6 +879,7 @@ class AppState(
         castSceneConfirmed = false
         googleCastLoadedUrl = null
         castRelay?.close(); castRelay = null
+        if (localConnection == null) app.apexview.cast.local.CastConnectionService.stop(context)
         if (resumeLocal) {
             returnCastPlayback()
             if (singleDecoderSceneActive) singleDecoderScenePlayer?.setAudible(!mutedAll)
@@ -893,6 +899,7 @@ class AppState(
         localConnectionJob?.cancel(); localConnectionJob = null
         val previous = localConnection; localConnection = null; previous?.close()
         localReady = false; localTimingSupported = false; localWidevineSupported = false; localDirectSupported = false; localChosen = false; googleCastSelected = false
+        app.apexview.cast.local.CastConnectionService.stop(context)
         releaseCastRelay(resumeLocal); castBusy = false
         castStatus = "Casting stopped."
     }
@@ -4819,7 +4826,7 @@ class AppState(
 
     /** Leaving the app without a pop-out (or closing the pop-out) pauses everything. */
     fun pauseForBackground() {
-        if (castPlaybackHandedOff || externalDisplayActive || externalDisplayRequested && android.os.SystemClock.elapsedRealtime() < externalRequestDeadline) { saveWatch(); return }
+        if (castPlaybackHandedOff || localChosen && localConnection != null || externalDisplayActive || externalDisplayRequested && android.os.SystemClock.elapsedRealtime() < externalRequestDeadline) { saveWatch(); return }
         saveWatch()
         if (tiles.isNotEmpty() && playing) togglePlay()
     }

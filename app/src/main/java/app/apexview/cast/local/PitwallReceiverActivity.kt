@@ -34,6 +34,7 @@ import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import app.apexview.*
+import app.apexview.R
 import app.apexview.cast.CastSceneProtocol
 import app.apexview.cast.CastTimingReceiver
 import app.apexview.cast.CastTimingLayer

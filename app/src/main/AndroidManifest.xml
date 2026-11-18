@@ -14,6 +14,10 @@
     <!-- Recording live timing through a session in the background, with its notification showing. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Android TV: remote only, and listed in the TV launcher. -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -57,7 +61,7 @@
             </intent-filter>
         </activity>
 
-        <!-- Local clear-media receiver. DRM credentials remain in the signed-in phone app. -->
+        <!-- Local receiver. Protected media uses the TV installation's own F1 authorization. -->
         <activity
             android:name=".cast.local.PitwallReceiverActivity"
             android:theme="@style/Theme.Pitwall"
@@ -79,6 +83,12 @@
         <receiver
             android:name=".RecordingReceiver"
             android:exported="false" />
+
+        <service
+            android:name=".cast.local.CastConnectionService"
+            android:exported="false"
+            android:stopWithTask="true"
+            android:foregroundServiceType="connectedDevice" />
 
         <service
             android:name=".LiveRecorderService"
