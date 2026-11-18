@@ -238,6 +238,7 @@ object Layouts {
         towerWidth: Float,
         towerHeight: Float,
         mapMinSide: Float? = null,
+        preferredTower: Area? = null,
     ): OverlayArrangement {
         val panelW = towerWidth.coerceIn(1f, width)
         val panelH = towerHeight.coerceIn(1f, height)
@@ -258,12 +259,25 @@ object Layouts {
             candidates += place(mode, n, width * (1f - fraction), height)
         }
 
+        if (preferredTower != null) {
+            val (x, y, w, h) = preferredTower
+            listOf(Area(0f, 0f, x, height), Area(x + w, 0f, width - x - w, height),
+                Area(0f, 0f, width, y), Area(0f, y + h, width, height - y - h))
+                .filter { it.w > 1f && it.h > 1f }
+                .forEach { band ->
+                    candidates += place(mode, n, band.w, band.h).map { Slot(it.x + band.x, it.y + band.y, it.w) }
+                }
+        }
+        var bestKeepsTower = false
         var best: OverlayArrangement? = null
         var bestScore = Double.NEGATIVE_INFINITY
         candidates.forEach { slots ->
             val free = freeAreas(slots, width, height)
             free.filter { it.w >= panelW && it.h >= panelH }.forEach gapLoop@ { gap ->
-                val tower = Area(gap.x, gap.y, panelW, panelH)
+                val preferred = preferredTower?.takeIf {
+                    it.x >= gap.x && it.y >= gap.y && it.x + it.w <= gap.x + gap.w && it.y + it.h <= gap.y + gap.h
+                }
+                val tower = preferred ?: Area(gap.x, gap.y, panelW, panelH)
                 val map = if (minMapSide == null) null else free
                     .filter { area ->
                         area.w >= minMapSide && area.h >= minMapSide && !area.overlaps(tower)
@@ -272,7 +286,8 @@ object Layouts {
                 if (minMapSide != null && map == null) return@gapLoop
                 val picture = slots.sumOf { (it.w * it.h).toDouble() }
                 val score = picture + panelW.toDouble() * panelH + (map?.let { it.w.toDouble() * it.h } ?: 0.0)
-                if (score > bestScore) {
+                if (preferred != null && !bestKeepsTower || (preferred != null) == bestKeepsTower && score > bestScore) {
+                    bestKeepsTower = preferred != null
                     bestScore = score
                     best = OverlayArrangement(slots, tower, map)
                 }
@@ -322,4 +337,20 @@ data class Area(val x: Float, val y: Float, val w: Float, val h: Float) {
     fun overlaps(s: Slot) = x < s.x + s.w - 1 && s.x < x + w - 1 && y < s.y + s.h - 1 && s.y < y + h - 1
     fun overlaps(other: Area) = x < other.x + other.w - 1 && other.x < x + w - 1 &&
         y < other.y + other.h - 1 && other.y < y + h - 1
+}
+
+internal enum class TowerEdit { MOVE, HEIGHT, SIZE }
+
+/** Resizing can grow back into the workspace when the panel is already against an edge. */
+internal fun Area.adjustTower(
+    edit: TowerEdit, dx: Float, dy: Float, bounds: Area,
+    minWidth: Float, minHeight: Float, maxWidth: Float, maxHeight: Float,
+): Area {
+    val width = (w + if (edit == TowerEdit.SIZE) dx else 0f).coerceIn(minWidth, maxWidth)
+    val height = (h + if (edit != TowerEdit.MOVE) dy else 0f).coerceIn(minHeight, maxHeight)
+    val left = (x + if (edit == TowerEdit.MOVE) dx else 0f)
+        .coerceIn(bounds.x, (bounds.x + bounds.w - width).coerceAtLeast(bounds.x))
+    val top = (y + if (edit == TowerEdit.MOVE) dy else 0f)
+        .coerceIn(bounds.y, (bounds.y + bounds.h - height).coerceAtLeast(bounds.y))
+    return Area(left, top, width, height)
 }

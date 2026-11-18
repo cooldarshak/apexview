@@ -133,25 +133,22 @@ fun SessionCountdown(app: AppState, timing: SessionTiming, style: TextStyle, mod
 fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float, feedScale: Float) {
     val density = LocalDensity.current
     val plan = app.combinedOverlayPlan
-    val docked = plan?.floating == false
-    val bounds = plan?.let { if (it.floating) it.workspace else it.tower }
+    val bounds = plan?.workspace
     val maxTowerWidth = bounds?.let { with(density) { it.w.toDp() } } ?: TOWER_WIDTH
     val maxTowerHeight = bounds?.let { with(density) { it.h.toDp() } } ?: with(density) {
-        minOf(TOWER_HEIGHT, (height.toDp() - 40.dp).coerceAtLeast(AppState.TOWER_MIN_HEIGHT_DP.dp))
+        minOf(TOWER_HEIGHT, height.toDp())
     }
     TowerTextScale(app) {
         FloatingPanel(
-            app, app.towerSpot, "Timing", "Hide timing", app::toggleTower, width, height, feedScale,
+            app, app.towerSpot, "", "Hide timing tower", app::toggleTower, width, height, feedScale,
             maxWidth = maxTowerWidth, maxHeight = maxTowerHeight,
             minWidth = minOf(AppState.TOWER_MIN_WIDTH_DP.dp, maxTowerWidth),
-            minHeight = minOf(AppState.TOWER_MIN_HEIGHT_DP.dp, maxTowerHeight),
+            minHeight = minOf(AppState.TOWER_MIN_HEIGHT_DP.dp, maxTowerHeight,
+                plan?.takeUnless { it.floating }?.let { with(density) { it.tower.h.toDp() } } ?: maxTowerHeight),
             bounds = bounds,
-            compactHeader = true,
-            compactHeaderHeight = if (app.layoutMode == LayoutMode.TV) {
-                with(density) { height.toDp() * 0.09375f }
-            } else null,
+            tower = true,
             opacity = app.towerOpacity,
-            locked = app.towerLocked || docked,
+            locked = app.towerLocked,
             onResizeFinished = app::finishTowerResize,
         ) {
             TimingTower(app, timing)
@@ -227,10 +224,10 @@ internal fun TimingTowerContents(
             val rowHeight = if (rows.isEmpty()) ROW_HEIGHT else {
                 // The TV preset uses a compact broadcast tower so more of the field is visible.
                 // On other layouts preserve the existing minimum for touch readability.
-                ((maxHeight.value / contentScale - 73f) / rows.size)
+                ((maxHeight.value / contentScale - 67f) / rows.size)
                     .coerceIn(minimumRowHeight / contentScale, ROW_HEIGHT.value).dp
             }
-            Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
+            Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp)) {
                 TowerSessionHeader(header)
                 TowerHeader()
                 LazyColumn(Modifier.weight(1f), state = listState) {

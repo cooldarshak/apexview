@@ -823,7 +823,22 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                             if (offset in wanted) yield(line)
                                         }
                                     }
-                                    val initial = parsePositionLines(window, { job.ensureActive() })
+                                    var previewSent = false
+                                    val initial = parsePositionLines(window, { job.ensureActive() }) { builders ->
+                                        if (!previewSent) {
+                                            val shape = availableCircuit.get()?.outline
+                                            if (shape != null && shape.size >= 8) {
+                                                val snapshot = builders.mapValues { it.value.build() }
+                                                val currentUtc = targetUtc(initialStart)
+                                                val positioned = snapshot.values.count { it.at(currentUtc) != null }
+                                                if (positioned > 0) {
+                                                    previewSent = true
+                                                    report("position window ready before lookahead targetUtcMs=$currentUtc cars=$positioned")
+                                                    launch { publishTracks(snapshot, shape, initialStart) }
+                                                }
+                                            }
+                                        }
+                                    }
                                     val traced = traceOutline(initial.tracks.values.toList())
                                     val outline = when {
                                         traced.isNotEmpty() -> traced
@@ -999,7 +1014,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             ReplayCore(
                 path, type, drivers, built, history.states.states,
                 outline, line != null, streamStart, history.laps,
-                traceStage("session-parts") { _ -> parseParts(timingStream.orEmpty(), streamStart) },
+                if (type.contains("Qualifying", ignoreCase = true)) {
+                    traceStage("session-parts") { _ -> parseParts(timingStream.orEmpty(), streamStart) }
+                } else emptyList(),
             )
         }
 

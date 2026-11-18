@@ -251,6 +251,7 @@ private fun Root(app: AppState) {
         when {
             app.tileMenu != null -> app.closeTileMenu()
             app.mapSheetOpen -> app.mapSheetOpen = false
+            watching && app.picker == null && app.arranging -> app.toggleArranging()
             watching && app.picker == null && app.isTv && app.chromeVisible -> app.chromeVisible = false
             watching && app.picker == null -> app.stopAll()
             else -> app.back()

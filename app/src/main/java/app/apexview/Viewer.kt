@@ -461,7 +461,9 @@ fun ViewerScreen(app: AppState) {
             if (!laptop && app.layoutMode == LayoutMode.TV && tvPlan != null) {
                 val status = app.mapStatus ?: "Waiting for timing data…"
                 if (app.towerOpen && (app.timing == null || app.timing?.laps?.isEmpty() == true)) {
-                    TvOverlayPending("TIMING", tvPlan.tower, status, app.timingDiagnostics, app.tvDecoderDiagnostic)
+                    val spot = app.towerSpot
+                    val area = if (spot.w > 0f && spot.h > 0f) Area(spot.x, spot.y, spot.w, spot.h) else tvPlan.tower
+                    TvOverlayPending(null, area, status, app.timingDiagnostics, app.tvDecoderDiagnostic)
                 }
                 if (app.mapMode == MapMode.TRACK &&
                     (app.timing == null || (app.timing?.outline?.size ?: 0) < 8)
@@ -662,7 +664,9 @@ private fun TopChrome(app: AppState, cutout: Clearance) {
             modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
         )
         GoogleCastPlayerButton(app)
-        if (!app.isTv) Glyph(if (app.arranging) Icons.Rounded.LockOpen else Icons.Rounded.Lock, if (app.arranging) "Lock layout" else "Unlock to move and resize", modifier = Modifier.helpAnchor(app, "lock"), onClick = app::toggleArranging)
+        Glyph(if (app.arranging) Icons.Rounded.LockOpen else Icons.Rounded.Lock,
+            if (app.arranging) "Lock layout" else "Unlock to move and resize",
+            modifier = Modifier.helpAnchor(app, "lock"), onClick = app::toggleArranging)
         if (app.singleDecoderFailure != null) Glyph(Icons.Rounded.Refresh, "Retry single decoder", onClick = app::retrySingleDecoder)
         Glyph(Icons.Rounded.Add, "Add a feed", modifier = Modifier.helpAnchor(app, "add")) { app.openPickerForPlaying() }
         if (app.isTv || LocalConfiguration.current.screenWidthDp > LocalConfiguration.current.screenHeightDp) {
@@ -683,7 +687,7 @@ private fun TopChrome(app: AppState, cutout: Clearance) {
             Glyph(Icons.Rounded.GridView, "Layout: ${app.layoutMode.label}", modifier = Modifier.helpAnchor(app, "layout")) { app.layoutSheetOpen = true; app.showChrome() }
         }
         if (app.timing != null) Glyph(Icons.Rounded.Headset, if (app.radioOpen) "Hide team radio" else "Team radio", modifier = Modifier.helpAnchor(app, "radio-button"), onClick = app::toggleRadio)
-        if (app.timing?.laps?.isNotEmpty() == true && !app.laptopActive) Glyph(Icons.Rounded.FormatListNumbered, if (app.towerOpen) "Hide timing" else "Timing", onClick = app::toggleTower)
+        if (app.timing?.laps?.isNotEmpty() == true && !app.laptopActive) Glyph(Icons.Rounded.FormatListNumbered, if (app.towerOpen) "Hide timing tower" else "Show timing tower", onClick = app::toggleTower)
         if (app.timing != null || app.mapStatus != null) Glyph(Icons.Rounded.Map, "Track map", modifier = Modifier.helpAnchor(app, "map")) { app.mapSheetOpen = true }
         if (!app.isTv) Glyph(Icons.Rounded.HelpOutline, "What everything does", 22, onClick = app::showHelp)
     }
@@ -1144,7 +1148,7 @@ private fun TileView(app: AppState, tile: Tile, videoOnly: Boolean = false, cont
 /** A visible TV diagnostic panel while live/archive timing is being resolved. */
 @Composable
 private fun TvOverlayPending(
-    title: String,
+    title: String?,
     area: Area,
     status: String,
     diagnostics: List<String>,
@@ -1163,7 +1167,7 @@ private fun TvOverlayPending(
             .padding(12.dp),
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(title, style = Type.subhead.copy(color = Ink.primary, fontWeight = FontWeight.Bold))
+            if (title != null) Text(title, style = Type.subhead.copy(color = Ink.primary, fontWeight = FontWeight.Bold))
             Text(status, style = Type.footnote.copy(color = Ink.secondary), maxLines = 2)
             Text(decoderDiagnostic, style = Type.caption.copy(color = Ink.secondary), maxLines = 2)
             diagnostics.takeLast(4).forEach { line ->
@@ -1538,7 +1542,7 @@ private fun LayoutSheet(app: AppState) {
             Text(
                 when {
                     app.layoutMode == LayoutMode.TV ->
-                        "Video fills the left two-thirds. The timing tower stays at the top-right, with the track map below. This is saved as the default for new sessions."
+                        "Video uses the left area. Unlock the layout to move or resize the timing tower in the sidebar."
                     app.layoutMode == LayoutMode.TILE_TEST ->
                         "Choose exactly two feeds from the same F1 session. The feed picker opens so you can select them manually. The app compares their HEVC tile parameters and reports whether the current 2×1 test assembler accepts them. Normal playback remains unchanged."
                     app.layoutMode == LayoutMode.SINGLE_DECODER_TEST ->
@@ -1555,7 +1559,7 @@ private fun LayoutSheet(app: AppState) {
                 SecondaryButton("Save this layout") { app.saveLayoutAsDefault(); app.layoutSheetOpen = false }
             }
             Text(
-                "Every stream with $n feed${if (n == 1) "" else "s"} will start like this, the map included. Main + strip and Grid stay as they are.",
+                "Every stream with $n feed${if (n == 1) "" else "s"} will start with this arrangement, including the tower and map. Main + strip and Grid stay as they are.",
                 style = Type.footnote,
                 modifier = Modifier.padding(top = 8.dp),
             )
@@ -1639,11 +1643,11 @@ private fun MapSheet(app: AppState) {
         val config = LocalConfiguration.current
         val selectedMapMode = remember { FocusRequester() }
         LaunchedEffect(Unit) { runCatching { selectedMapMode.requestFocus() } }
-        val combinedWorkspace = app.combinedOverlayPlan?.takeIf { it.floating }?.workspace
+        val combinedWorkspace = app.combinedOverlayPlan?.workspace
         val maxTowerWidthDp = combinedWorkspace?.let { with(density) { it.w.toDp().value } }
             ?: (config.screenWidthDp - 32f).coerceAtLeast(AppState.TOWER_MIN_WIDTH_DP)
         val maxTowerHeightDp = combinedWorkspace?.let { with(density) { it.h.toDp().value } }
-            ?: (config.screenHeightDp - 40f).coerceAtLeast(AppState.TOWER_MIN_HEIGHT_DP)
+            ?: config.screenHeightDp.toFloat()
         val minTowerWidthDp = minOf(AppState.TOWER_MIN_WIDTH_DP, maxTowerWidthDp)
         val minTowerHeightDp = minOf(AppState.TOWER_MIN_HEIGHT_DP, maxTowerHeightDp)
         val defaultTowerWidthDp = minOf(AppState.TOWER_DEFAULT_WIDTH_DP, maxTowerWidthDp)
@@ -1822,52 +1826,44 @@ private fun MapSheet(app: AppState) {
                         trackColor = Ink.surfaceHigh,
                     )
                 }
-                if (!app.combinedOverlaysDocked) {
-                    Column(
-                        Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
-                            .background(Ink.background).padding(horizontal = 16.dp, vertical = 12.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Width", style = Type.body, modifier = Modifier.weight(1f))
-                            Text("%.0f dp".format(towerWidthDp), style = Type.footnote)
-                        }
-                        AppleSlider(
-                            value = towerWidthDp,
-                            onValueChange = { value ->
-                                app.updateTowerSize(
-                                    with(density) { value.dp.toPx() },
-                                    with(density) { towerHeightDp.dp.toPx() },
-                                )
-                            },
-                            valueRange = minTowerWidthDp..maxTowerWidthDp,
-                            onValueChangeFinished = app::finishTowerResize,
-                            trackColor = Ink.surfaceHigh,
-                        )
-                        Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("Height", style = Type.body, modifier = Modifier.weight(1f))
-                            Text("%.0f dp".format(towerHeightDp), style = Type.footnote)
-                        }
-                        AppleSlider(
-                            value = towerHeightDp,
-                            onValueChange = { value ->
-                                app.updateTowerSize(
-                                    with(density) { towerWidthDp.dp.toPx() },
-                                    with(density) { value.dp.toPx() },
-                                )
-                            },
-                            valueRange = minTowerHeightDp..maxTowerHeightDp,
-                            onValueChangeFinished = app::finishTowerResize,
-                            trackColor = Ink.surfaceHigh,
-                        )
-                        Text(
-                            "Minimum width is 300 dp where the available screen area allows it, keeping the sector and tyre columns visible. You can also drag the tower header to move it and its corner grip to resize it.",
-                            style = Type.footnote,
-                            modifier = Modifier.padding(top = 8.dp),
-                        )
+                Column(
+                    Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
+                        .background(Ink.background).padding(horizontal = 16.dp, vertical = 12.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Width", style = Type.body, modifier = Modifier.weight(1f))
+                        Text("%.0f dp".format(towerWidthDp), style = Type.footnote)
                     }
-                } else {
+                    AppleSlider(
+                        value = towerWidthDp,
+                        onValueChange = { value ->
+                            app.updateTowerSize(
+                                with(density) { value.dp.toPx() },
+                                with(density) { towerHeightDp.dp.toPx() },
+                            )
+                        },
+                        valueRange = minTowerWidthDp..maxTowerWidthDp,
+                        onValueChangeFinished = app::finishTowerResize,
+                        trackColor = Ink.surfaceHigh,
+                    )
+                    Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Height", style = Type.body, modifier = Modifier.weight(1f))
+                        Text("%.0f dp".format(towerHeightDp), style = Type.footnote)
+                    }
+                    AppleSlider(
+                        value = towerHeightDp,
+                        onValueChange = { value ->
+                            app.updateTowerSize(
+                                with(density) { towerWidthDp.dp.toPx() },
+                                with(density) { value.dp.toPx() },
+                            )
+                        },
+                        valueRange = minTowerHeightDp..maxTowerHeightDp,
+                        onValueChangeFinished = app::finishTowerResize,
+                        trackColor = Ink.surfaceHigh,
+                    )
                     Text(
-                        "This layout fixes the tower and map in their own sections. Choose Move and overlap to resize and place them freely.",
+                        "Unlock the layout to use the tower handles. Drag on touch, or press OK on a handle, use the arrows, then press OK to finish.",
                         style = Type.footnote,
                         modifier = Modifier.padding(top = 8.dp),
                     )
@@ -1876,9 +1872,7 @@ private fun MapSheet(app: AppState) {
                     Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
                         .background(Ink.background).padding(vertical = 4.dp)
                 ) {
-                    if (!app.combinedOverlaysDocked) {
-                        SwitchRow("Lock the timing tower in place", app.towerLocked) { app.toggleTowerLock() }
-                    }
+                    SwitchRow("Lock the timing tower in place", app.towerLocked) { app.toggleTowerLock() }
                     SwitchRow("Keep feeds clear of the timing tower", app.towerReserve, app::chooseTowerReserve)
                 }
                 Text(
