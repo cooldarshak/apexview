@@ -28,6 +28,8 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.IOException
 import java.util.Calendar
 import kotlin.math.abs
@@ -1706,6 +1708,7 @@ class AppState(
     private var timingContentId: Long? = null
 
     /** Play sessions by content ID. Every tile of a content shares one. */
+    private val playOfferMutex = Mutex()
     private val sessions = mutableMapOf<Long, MultiPlay>()
     /** Contents whose multiview session F1 refused; their feeds use one session each. */
     private val singleSessionOnly = mutableSetOf<Long>()
@@ -3122,9 +3125,10 @@ class AppState(
                 loadTiming(contentId)
             }
             val offerStartedMs = android.os.SystemClock.elapsedRealtime()
+            val standalone = isTclG09() && tiles.isEmpty() && picks.size == 1
             val streams = picks.mapNotNull { channel ->
                 try {
-                    channel to streamFor(contentId, channel, failures)
+                    channel to streamFor(contentId, channel, failures, standalone)
                 } catch (e: Exception) {
                     failures += "${channel.title}: ${e.message}"
                     null
@@ -3152,6 +3156,14 @@ class AppState(
             if (settings.decoderMode == DecoderMode.SINGLE) decoderMode = DecoderMode.SINGLE
             val first = tiles.isEmpty()
             val preparingSingle = decoderMode == DecoderMode.SINGLE && (tiles.isNotEmpty() || streams.size > 1)
+            // Opening a multiview PLAY can supersede the single-channel PLAY. Move the
+            // existing window onto that same authorization before adding the other windows.
+            val sharedSession = sessions[contentId]
+            if (isTclG09() && sharedSession != null) {
+                tiles.filter { it.contentId == contentId && it.feed.sourceStream.playerType == "player_bm" }.forEach { tile ->
+                    replaceTvFeed(tile, sharedSession.channelStream(tile.channel, contentId))
+                }
+            }
             if (preparingSingle) tiles.forEach { it.feed.player.playWhenReady = false }
             // A press conference or a show has no cars to follow: its map starts off, without
             // touching the style saved for sessions.
@@ -3246,22 +3258,37 @@ class AppState(
      * multiview session, as in F1's web player and eXViewer. Falls back to one session per feed
      * if F1 refuses the multiview session.
      */
-    private suspend fun streamFor(contentId: Long, channel: Channel, failures: MutableList<String>): PlayInfo {
+    private suspend fun streamFor(contentId: Long, channel: Channel, failures: MutableList<String>, standalone: Boolean = false): PlayInfo = playOfferMutex.withLock {
+        // G09 renders the 1920x1088 tiled multiview input incorrectly at its cropped 720p size.
+        // For one TV window ask F1 for its ordinary single-channel presentation.
+        if (standalone) {
+            try {
+                return@withLock api.contentPlay(contentId, channel.channelId).also { sessions.remove(contentId) }
+            } catch (e: IOException) {
+                android.util.Log.w("PitwallVideo", "Single-channel offer unavailable. Trying the shared F1 offer.")
+                if (contentId in singleSessionOnly) throw e
+            }
+        }
         if (contentId !in singleSessionOnly && contentId !in sessions) {
             val list = channelsByContent[contentId].orEmpty()
             val default = list.firstOrNull { it.isDefault } ?: list.firstOrNull()
             try {
                 sessions[contentId] = api.multiPlay(contentId, default?.channelId)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 singleSessionOnly += contentId
                 failures += "Multiview session refused, using one session per feed: ${e.message}"
             }
         }
-        val session = sessions[contentId] ?: return api.contentPlay(contentId, channel.channelId, fallback = true)
+        val session = sessions[contentId] ?: return@withLock api.contentPlay(contentId, channel.channelId, fallback = true)
 
-        val url = if (channel.channelId == null) session.feeds.values.firstOrNull()
-        else session.feeds[channel.channelId]
-        return session.stream(
+        session.channelStream(channel, contentId)
+    }
+
+    private fun MultiPlay.channelStream(channel: Channel, contentId: Long): PlayInfo {
+        val url = if (channel.channelId == null) feeds.values.firstOrNull() else feeds[channel.channelId]
+        return stream(
             url ?: throw IOException(
                 if (singleFeedPlan) "F1 didn't send this feed to your plan. Watching several at once needs F1 TV Premium."
                 else "F1 returned no stream for this channel"
@@ -3269,6 +3296,16 @@ class AppState(
             channel.channelId,
             contentId
         )
+    }
+
+    private fun replaceTvFeed(tile: Tile, stream: PlayInfo) {
+        val previous = tile.feed
+        val startMs = if (previous.player.isCurrentMediaItemLive) C.TIME_UNSET else previous.player.currentPosition
+        val next = newFeed(stream, startMs, startWithVideo = false)
+        previous.release()
+        tile.feed = next
+        next.player.playWhenReady = playing && !castPlaybackHandedOff
+        next.setAudible(tile.audible && !mutedAll && !castingActive)
     }
 
     // Track map.
@@ -3817,7 +3854,7 @@ class AppState(
         if (laptopActive && tile.id == bigTileId) rememberBroadcast()
         task("Switching to ${channel.title}") {
             val failures = mutableListOf<String>()
-            val stream = streamFor(tile.contentId, channel, failures)
+            val stream = streamFor(tile.contentId, channel, failures, standalone = isTclG09() && tiles.size == 1)
             if (tile !in tiles) return@task
             val old = tile.feed
             // Start where the tile was (switching the leader from the start once pulled every
@@ -5222,6 +5259,26 @@ class AppState(
             singleDecoderFailure = null
             tiles.forEach { it.feed.clearProtectedCompositionVideoRole(); it.feed.player.playWhenReady = playing }
             applyVideoBudget()
+            val remaining = tiles.singleOrNull()
+            if (isTclG09() && remaining != null && remaining.feed.sourceStream.playerType == "player_tm" && !castingActive) {
+                val previous = remaining.feed
+                scope.launch {
+                    try {
+                        playOfferMutex.withLock {
+                            fun stillSingle() = tiles.singleOrNull() === remaining && remaining.feed === previous && !castingActive
+                            if (!stillSingle()) return@withLock
+                            val stream = api.contentPlay(remaining.contentId, remaining.channel.channelId)
+                            sessions.remove(remaining.contentId)
+                            if (stillSingle()) {
+                                replaceTvFeed(remaining, stream)
+                                applyVideoBudget()
+                            }
+                        }
+                    } catch (e: IOException) {
+                        android.util.Log.w("PitwallVideo", "Single-channel offer unavailable after removing a feed.")
+                    }
+                }
+            }
         }
     }
 

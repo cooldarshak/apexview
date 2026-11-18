@@ -101,6 +101,11 @@ internal fun queryVideoDecoderBudget(context: Context, softwareDrm: Boolean, isT
     }
 }
 
+internal fun isTclG09(): Boolean =
+    android.os.Build.VERSION.SDK_INT == 31 &&
+        android.os.Build.MANUFACTURER.equals("TCL", ignoreCase = true) &&
+        android.os.Build.DEVICE.equals("G09", ignoreCase = true)
+
 /**
  * One feed: its own ExoPlayer and its own Widevine session, licensed by F1's license server
  * with the user's tokens. [status] is the diagnostics line shown on the tile.
@@ -255,9 +260,7 @@ class FeedPlayer(
 
     // The G09's Amlogic OMX path still showed frame corruption when Auto climbed through
     // several resolutions, even after making each resolution change replace the codec.
-    private val stableTvResolution = android.os.Build.VERSION.SDK_INT == 31 &&
-        android.os.Build.MANUFACTURER.equals("TCL", ignoreCase = true) &&
-        android.os.Build.DEVICE.equals("G09", ignoreCase = true)
+    private val stableTvResolution = isTclG09()
 
     private fun qualityWidth(quality: VideoQuality) =
         if (stableTvResolution && quality == VideoQuality.AUTO) 1280 else quality.maxWidth
