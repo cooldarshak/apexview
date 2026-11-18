@@ -308,6 +308,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
 
     private companion object {
         const val VERSION = 1
+        const val PREVIEW_REUSE_MS = 45_000L
         const val TRACK_BLOCK_SAMPLES = 4096
         const val TRACK_SAMPLE_BYTES = Long.SIZE_BYTES + 2 * Int.SIZE_BYTES
         const val BUFFER_SIZE = 128 * 1024
