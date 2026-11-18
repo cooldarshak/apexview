@@ -47,6 +47,8 @@ class ComposedCmafRelayTest {
         }
         assertEquals(app.apexview.cast.local.ReceiverTimeline.position(93_000, 6_000, 8_000),
             app.apexview.cast.local.ReceiverTimeline.position(93_000, 12_000, 2_000))
+        assertEquals(60_000L, app.apexview.cast.local.ReceiverTimeline.restorePosition(93_000L, 50_000, 83_000))
+        assertEquals(50_000L, app.apexview.cast.local.ReceiverTimeline.restorePosition(null, 50_000, 83_000))
         assertEquals(100L, app.apexview.cast.local.ReceiverTimeline.seek(500, 100))
         assertEquals(500L, app.apexview.cast.local.ReceiverTimeline.seek(500, -1))
     }

@@ -376,6 +376,9 @@ class PitwallReceiverActivity : ComponentActivity() {
             .put("speed", current?.playbackParameters?.speed ?: 1f)
             .put("buffering", loadingRequested || current?.playbackState == Player.STATE_BUFFERING)
             .put("finished", current?.playbackState == Player.STATE_ENDED).apply {
+                streamMetadata()?.takeIf { it.has("wallClockBaseMs") }?.let {
+                    put("wallClockMs", Math.addExact(it.getLong("wallClockBaseMs"), controllerPosition()))
+                }
                 if (isDirectPlayback() && current != null && !current.currentTimeline.isEmpty) {
                     val start = current.currentTimeline.getWindow(current.currentMediaItemIndex, Timeline.Window()).windowStartTimeMs
                     if (start != C.TIME_UNSET) put("wallClockMs", start + current.currentPosition)

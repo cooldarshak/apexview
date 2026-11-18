@@ -22,7 +22,7 @@ internal class NativeComposedCastSession(
     userAgent: String, ascendon: String, entitlement: String, factory: DataSource.Factory,
     address: String, peer: InetAddress, private val preferredHeight: Int, private val language: String,
     val live: Boolean, val durationMs: Long, private val dashClockOffsetMs: Long, private val hlsClockOffsetMs: Long,
-    val audioLabel: String, private val startAtLiveEdge: Boolean = false,
+    val audioLabel: String, private val startAtLiveEdge: Boolean = false, val phoneWindowStartMs: Long? = null,
 ) : AutoCloseable {
     val sourceLabels = feeds.map { it.label }
     private val group = "cast-${UUID.randomUUID()}"

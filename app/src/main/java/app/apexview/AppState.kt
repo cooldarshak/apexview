@@ -629,7 +629,8 @@ class AppState(
         castPlaybackHandedOff = false
         tiles.forEach {
             it.feed.suspendForRemotePlayback(false)
-            it.feed.player.seekTo(target)
+            val localTarget = app.apexview.cast.local.ReceiverTimeline.restorePosition(remoteWallClockBaseMs, target, it.feed.windowStartMs())
+            it.feed.player.seekTo(localTarget)
             it.feed.player.playWhenReady = playing && (!singleDecoderSceneActive || it === protectedCompositionHost)
         }
         applyVideoBudget()
@@ -874,7 +875,7 @@ class AppState(
         castSceneJob?.cancel(); castSceneJob = null
         nativeCastPump?.cancel(); nativeCastPump = null
         nativeComposedCast?.close(); nativeComposedCast = null
-        directCast = null; remoteWallClockBaseMs = null
+        directCast = null
         retiredNativeCasts.forEach { it.close() }; retiredNativeCasts.clear()
         castSceneConfirmed = false
         googleCastLoadedUrl = null
@@ -885,6 +886,7 @@ class AppState(
             if (singleDecoderSceneActive) singleDecoderScenePlayer?.setAudible(!mutedAll)
             else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll) }
         } else castPlaybackHandedOff = false
+        remoteWallClockBaseMs = null
     }
     fun stopFullSceneCast() {
         stopExternalDisplay()
@@ -956,7 +958,10 @@ class AppState(
         val live = selected.any { it.contentId in knownLiveContentIds || it.feed.player.isCurrentMediaItemLive }
         val windowOffset = if (clock.player.currentTimeline.isEmpty) 0L else clock.player.currentTimeline
             .getWindow(clock.player.currentMediaItemIndex, androidx.media3.common.Timeline.Window()).positionInFirstPeriodMs
-        val hlsOffset = clock.wallClockMs()?.let { clock.player.currentPosition - it } ?: 0L
+        val localWindowUtc = clock.windowStartMs()
+        val windowUtc = (if (castPlaybackHandedOff) remoteWallClockBaseMs else null) ?: localWindowUtc
+        val dashOffset = if (live && localWindowUtc != null && windowUtc != null) localWindowUtc - windowOffset - windowUtc else -windowOffset
+        val hlsOffset = windowUtc?.let { -it } ?: clock.wallClockMs()?.let { clock.player.currentPosition - it } ?: 0L
         val audio = selected.firstOrNull { it.audible } ?: selected.first()
         castBusy = true; castStatus = "Preparing complete HD feeds and protected audio for the TV…"; message = castStatus
         val generation = ++castPreparationGeneration
@@ -973,7 +978,7 @@ class AppState(
                     socket.localAddress.hostAddress!!, socket.inetAddress,
                     if (settings.videoQuality == VideoQuality.P1080) 1080 else 720, settings.commentary,
                     live, if (live) 0L else clock.player.duration.takeIf { it > 0 } ?: durationMs,
-                    -windowOffset, hlsOffset, audio.feed.sourceStream.profileLabel, liveEdge)
+                    dashOffset, hlsOffset, audio.feed.sourceStream.profileLabel, liveEdge, windowUtc)
                 val next = requireNotNull(owned)
                 kotlinx.coroutines.withTimeout(60_000) {
                     while (!next.ready) { next.update(targetMs); if (!next.ready) kotlinx.coroutines.delay(250) }
@@ -1035,7 +1040,9 @@ class AppState(
         localLoadId = java.util.UUID.randomUUID().toString(); castSceneConfirmed = false
         remoteCastClock.update(targetMs, playing, playbackSpeed, session.durationMs)
         val custom = JSONObject().put("pitwallScene", layout).put("playbackId", localLoadId)
-            .put("pitwallStream", JSONObject().put("originMs", session.originMs).put("durationMs", session.durationMs).put("live", session.live))
+            .put("pitwallStream", JSONObject().put("originMs", session.originMs).put("durationMs", session.durationMs).put("live", session.live).apply {
+                session.phoneWindowStartMs?.let { put("wallClockBaseMs", it) }
+            })
         if (session.protectedOutput) custom.put("pitwallLicense", license.encode())
         localConnection?.send(app.apexview.cast.local.FcastProtocol.PLAY, JSONObject()
             .put("container", "application/dash+xml").put("url", session.mediaUrl).put("time", targetMs / 1000.0)
