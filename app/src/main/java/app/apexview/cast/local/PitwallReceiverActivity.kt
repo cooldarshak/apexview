@@ -192,6 +192,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                         FcastProtocol.TIMING -> if (timingPeer && body != null) {
                             try { timingState.accept(body, playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId").orEmpty()) }
                             catch (error: Exception) { Log.w("PitwallReceiver", "Timing display message rejected: ${error.javaClass.simpleName}") }
+                            return // The periodic playback update carries the clock independently of overlay updates.
                         }
                         FcastProtocol.SCENE -> {
                             require(pitwallPeer && scene != null && body != null)

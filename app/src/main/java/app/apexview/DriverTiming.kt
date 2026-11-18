@@ -220,22 +220,23 @@ object DriverTimingParser {
      * F1 publishes micro-sector segment status on the latter. Events are ordered by UTC so a
      * delayed snapshot from one topic cannot roll back a newer update from the other.
      */
-    private data class TimedLine(val time: Long, val source: Int, val line: String)
+    private data class TimedLine(val time: Long, val source: Int, val line: String, val prefix: Int)
 
     private fun timedLines(text: String, source: Int, streamStart: Long): Sequence<TimedLine> =
         text.lineSequence().mapNotNull { line ->
             val prefix = streamPrefixLength(line)
             if (line.length <= prefix) null
-            else runCatching { TimedLine(streamStart + offsetMs(line), source, line) }.getOrNull()
+            else runCatching { TimedLine(streamStart + streamOffsetMs(line, prefix), source, line, prefix) }.getOrNull()
         }
 
     /** F1's archived topic files are normally append-ordered. Check before using a bounded merge. */
-    private fun isChronological(text: String, streamStart: Long): Boolean {
+    private fun isChronological(text: String, streamStart: Long, checkActive: () -> Unit): Boolean {
         var previous = Long.MIN_VALUE
         for (line in text.lineSequence()) {
+            checkActive()
             val prefix = streamPrefixLength(line)
             if (line.length <= prefix) continue
-            val time = runCatching { streamStart + offsetMs(line) }.getOrNull() ?: continue
+            val time = runCatching { streamStart + streamOffsetMs(line, prefix) }.getOrNull() ?: continue
             if (time < previous) return false
             previous = time
         }
@@ -251,19 +252,25 @@ object DriverTimingParser {
         timingF1: String,
         stateHistory: StateHistoryAccumulator?,
         checkpoint: ((String) -> Unit)? = null,
+        checkActive: () -> Unit = {},
+        onProgress: ((Long, () -> Map<String, DriverLaps>) -> Unit)? = null,
     ): Map<String, DriverLaps> {
         val drivers = mutableMapOf<String, Live>()
 
         var records = 0
         var invalidJson = 0
         var missingLines = 0
+        fun materialize(copySnapshots: Boolean) = drivers.mapValues { (_, l) ->
+            DriverLaps(l.times.toLongArray(), if (copySnapshots) l.snaps.toList() else l.snaps,
+                l.crossings.toLongArray(), l.lapTimes.toLongArray(), l.lapCounts.toIntArray())
+        }
         fun consume(event: TimedLine) {
+            checkActive()
             records++
             if (records == 1 || records % 1024 == 0) {
                 checkpoint?.invoke("merge records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size}")
             }
-            val prefix = streamPrefixLength(event.line)
-            val json = runCatching { JSONObject(event.line.substring(prefix)) }.getOrNull() ?: run { invalidJson++; return }
+            val json = runCatching { JSONObject(event.line.substring(event.prefix)) }.getOrNull() ?: run { invalidJson++; return }
             val lines = json.optJSONObject("Lines") ?: run { missingLines++; return }
             if (event.source == 0) stateHistory?.accept(lines, event.time)
             lines.keys().forEach { number ->
@@ -272,10 +279,11 @@ object DriverTimingParser {
                 apply(live, d, event.time)
                 live.snap(event.time)
             }
+            if (records % 1024 == 0) onProgress?.invoke(event.time) { materialize(true) }
         }
 
         checkpoint?.invoke("checking timestamp order primaryChars=${stream.length} supplementChars=${timingF1.length}")
-        if (isChronological(stream, streamStart) && isChronological(timingF1, streamStart)) {
+        if (isChronological(stream, streamStart, checkActive) && isChronological(timingF1, streamStart, checkActive)) {
             checkpoint?.invoke("merging chronological streams")
             // Merge the two sorted topics with one pending line per source. This avoids creating
             // and sorting a large in-memory Event list on Android TV for multi-megabyte archives.
@@ -304,9 +312,7 @@ object DriverTimingParser {
         }
 
         checkpoint?.invoke("building history records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size}")
-        return drivers.mapValues { (_, l) ->
-            DriverLaps(l.times.toLongArray(), l.snaps, l.crossings.toLongArray(), l.lapTimes.toLongArray(), l.lapCounts.toIntArray())
-        }
+        return materialize(false)
     }
 
     private fun apply(l: Live, d: JSONObject, t: Long) {

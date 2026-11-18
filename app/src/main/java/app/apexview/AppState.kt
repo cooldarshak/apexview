@@ -594,6 +594,7 @@ class AppState(
         val scene = castVideoScene(relay.session) ?: throw IOException("The phone layout is not ready. Keep the player open and retry casting.")
         val time = castFramePositionMs.coerceAtLeast(0L)
         localLoadId = java.util.UUID.randomUUID().toString()
+        castSceneConfirmed = false
         remoteCastClock.update(time, playing, playbackSpeed, relay.session.durationUs / 1000)
         link.send(app.apexview.cast.local.FcastProtocol.PLAY, JSONObject()
             .put("container", "application/x-mpegURL").put("url", relay.googleCastMediaUrl)
@@ -924,11 +925,12 @@ class AppState(
             while (directCast === state) {
                 if (tiles.size != 1 || tiles.singleOrNull()?.feed?.sourceStream?.profileLabel != state.label) {
                     if (!castBusy && android.os.SystemClock.elapsedRealtime() >= castRetryAfter) prepareFullSceneCast(true)
-                } else {
+                } else if (castSceneConfirmed) {
                     directCastScene(state)?.let { model ->
                         if (model.toString() != previous) { localConnection?.send(app.apexview.cast.local.FcastProtocol.SCENE, model); previous = model.toString() }
                     }
                     if (localTimingSupported) runCatching { timing.messages(localLoadId).forEach { localConnection?.send(app.apexview.cast.local.FcastProtocol.TIMING, it) } }
+                        .onFailure { android.util.Log.w("PitwallCast", "Timing state update rejected: ${it.javaClass.simpleName}") }
                 }
                 kotlinx.coroutines.delay(100)
             }
@@ -1059,7 +1061,7 @@ class AppState(
             while (nativeComposedCast === session) {
                 if (tiles.map { it.feed.sourceStream.profileLabel } != session.sourceLabels || (tiles.firstOrNull { it.audible } ?: tiles.firstOrNull())?.feed?.sourceStream?.profileLabel != session.audioLabel) {
                     if (!castBusy && android.os.SystemClock.elapsedRealtime() >= castRetryAfter) prepareFullSceneCast(true)
-                } else {
+                } else if (castSceneConfirmed) {
                     nativeCastScene(session)?.let { model ->
                         if (model.toString() != previous) { localConnection?.send(app.apexview.cast.local.FcastProtocol.SCENE, model); previous = model.toString() }
                     }
@@ -1105,14 +1107,14 @@ class AppState(
                     val text = scene.toString()
                     if (text != last || loops % (if (localChosen && localTimingSupported) 50 else 10) == 0) {
                         runCatching {
-                            if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.SCENE, scene)
+                            if (localChosen && castSceneConfirmed) localConnection?.send(app.apexview.cast.local.FcastProtocol.SCENE, scene)
                             else if (usesLayoutCastReceiver) googleCastSession?.sendMessage(app.apexview.cast.CastSceneProtocol.NAMESPACE,
                                 JSONObject().put("type", "scene").put("scene", scene).toString())
                         }.onFailure { android.util.Log.w("PitwallCast", "Scene send failed: ${it.javaClass.simpleName}") }
-                        last = text
+                        if (!localChosen || castSceneConfirmed) last = text
                     }
                 }
-                if (localChosen && localTimingSupported) runCatching {
+                if (localChosen && localTimingSupported && castSceneConfirmed) runCatching {
                     timing.messages(localLoadId).forEach { localConnection?.send(app.apexview.cast.local.FcastProtocol.TIMING, it) }
                 }.onFailure { android.util.Log.w("PitwallCast", "Timing display update failed: ${it.javaClass.simpleName}") }
                 if (++loops == (if (localChosen && localTimingSupported) 150 else 30) && !castSceneConfirmed) {
@@ -3194,6 +3196,7 @@ class AppState(
                         val loaded = LiveTimingArchive(token!!, userAgent).load(
                             ref = ref!!,
                             watchedUtc = watched,
+                            replayPositionMs = leaderTile()?.feed?.player?.currentPosition ?: 0L,
                             onProgress = { status ->
                                 if (timingContentId == contentId) {
                                     mapStatus = status

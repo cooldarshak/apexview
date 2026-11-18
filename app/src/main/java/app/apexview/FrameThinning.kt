@@ -4,11 +4,14 @@ import android.content.Context
 import android.os.Handler
 import androidx.annotation.OptIn
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.mediacodec.DefaultMediaCodecAdapterFactory
 import androidx.media3.exoplayer.mediacodec.MediaCodecAdapter
+import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.video.MediaCodecVideoRenderer
 import androidx.media3.exoplayer.video.VideoRendererEventListener
@@ -76,6 +79,23 @@ private class ThinningVideoRenderer(
     DefaultRenderersFactory.MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY,
 ) {
     private val thinner = FrameThinner()
+
+    private val isTv = (context.getSystemService(Context.UI_MODE_SERVICE) as? android.app.UiModeManager)
+        ?.currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+
+    override fun canReuseCodec(codecInfo: MediaCodecInfo, oldFormat: Format, newFormat: Format): DecoderReuseEvaluation {
+        val reuse = super.canReuseCodec(codecInfo, oldFormat, newFormat)
+        if (isTv && codecInfo.name.startsWith("OMX.amlogic.hevc.", ignoreCase = true) &&
+            oldFormat.width > 0 && oldFormat.height > 0 && newFormat.width > 0 && newFormat.height > 0 &&
+            (oldFormat.width != newFormat.width || oldFormat.height != newFormat.height)) {
+            android.util.Log.i("PitwallVideo", "RECREATE_ON_SIZE_CHANGE codec=${codecInfo.name} " +
+                "${oldFormat.width}x${oldFormat.height} -> ${newFormat.width}x${newFormat.height}")
+            return DecoderReuseEvaluation(codecInfo.name, oldFormat, newFormat,
+                DecoderReuseEvaluation.REUSE_RESULT_NO,
+                reuse.discardReasons or DecoderReuseEvaluation.DISCARD_REASON_VIDEO_RESOLUTION_CHANGED)
+        }
+        return reuse
+    }
 
     override fun onPositionReset(positionUs: Long, joining: Boolean) {
         super.onPositionReset(positionUs, joining)

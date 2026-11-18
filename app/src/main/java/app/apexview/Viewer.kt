@@ -316,16 +316,17 @@ fun ViewerScreen(app: AppState) {
             }
         }
 
-        Box(Modifier.fillMaxSize()
+        val videoTransform = if (app.isTv) Modifier else Modifier
             .graphicsLayer {
-                val k = if (app.isTv) 1f else 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
+                val k = 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
                 scaleX = k; scaleY = k; transformOrigin = TransformOrigin(0f, 0.5f)
             }
             .graphicsLayer {
-                val scale = if (app.inPip || app.isTv) 1f else 1f - lift * band / height
+                val scale = if (app.inPip) 1f else 1f - lift * band / height
                 scaleX = scale; scaleY = scale; transformOrigin = TransformOrigin(0.5f, 1f)
-                translationY = if (app.isTv) 0f else -sheetShift
-            }) {
+                translationY = -sheetShift
+            }
+        Box(Modifier.fillMaxSize().then(videoTransform)) {
             if (app.castPlaybackHandedOff || app.externalDisplayActive) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {

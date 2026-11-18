@@ -69,6 +69,15 @@ object DiagnosticLogs {
                 writer?.flush()
             }
             publishStatus("Recording to Download/Pitwall")
+            if (Build.VERSION.SDK_INT >= 30) {
+                runCatching {
+                    val manager = context.getSystemService(android.app.ActivityManager::class.java)
+                    manager?.getHistoricalProcessExitReasons(null, 0, 3).orEmpty().forEach { exit ->
+                        append(context, "PREVIOUS_PROCESS_EXIT pid=${exit.pid} time=${Instant.ofEpochMilli(exit.timestamp)} " +
+                            "reason=${exit.reason} status=${exit.status} pssKiB=${exit.pss} rssKiB=${exit.rss}")
+                    }
+                }.onFailure { append(context, "PROCESS_EXIT_QUERY_FAILED ${it.javaClass.simpleName}") }
+            }
             // Capabilities describe what the device advertises; actual decoder use is logged by playback.
             runCatching {
                 MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.filter { !it.isEncoder }

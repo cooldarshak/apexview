@@ -19,26 +19,44 @@ internal class CastTimingPublisher(private val context: Context, private val app
     private var profileKey: Pair<Long, Long>? = null
     private var profile = LapProfile.EVEN
     private var sequence = 0L
+    private var lastPlaybackId = ""
+    private var lastFullSnapshotAt = Long.MIN_VALUE
+    private var sourceTiming: SessionTiming? = null
+    private var geometry: JSONObject? = null
 
     fun messages(playbackId: String): List<JSONObject> {
+        val elapsed = android.os.SystemClock.elapsedRealtime()
+        val resend = lastPlaybackId != playbackId || lastFullSnapshotAt == Long.MIN_VALUE || elapsed - lastFullSnapshotAt >= 5_000
+        if (lastPlaybackId != playbackId) {
+            lastPlaybackId = playbackId
+            rowsText = ""
+            lastTableUtc = Long.MIN_VALUE
+        }
+        if (resend) lastFullSnapshotAt = elapsed
         val timing = app.timing
         val now = app.mapTimeMs() ?: 0L
         val output = mutableListOf<JSONObject>()
         if (timing != null) {
-            val geometry = CastTimingProtocol.geometry(timing)
-            val id = geometry.getString("id")
+            // Replay geometry is immutable within a published session snapshot.
+            if (timing !== sourceTiming || timing.live && resend) {
+                geometry = CastTimingProtocol.geometry(timing)
+                sourceTiming = timing
+            }
+            val currentGeometry = requireNotNull(geometry)
+            val id = currentGeometry.getString("id")
             if (id != geometryId) {
                 geometryId = id; rowsText = ""; lastTableUtc = Long.MIN_VALUE
-                output += geometry.put("playbackId", playbackId)
-            }
+                output += JSONObject(currentGeometry.toString()).put("playbackId", playbackId)
+            } else if (resend) output += JSONObject(currentGeometry.toString()).put("playbackId", playbackId)
             if (lastTableUtc == Long.MIN_VALUE || kotlin.math.abs(now - lastTableUtc) >= 400) {
                 rows = CastTimingProtocol.table(timing, now)
                 lastTableUtc = now
             }
-        } else { rows = JSONArray(); geometryId = "" }
+        } else { rows = JSONArray(); geometryId = ""; geometry = null; sourceTiming = null }
         val text = rows.toString()
-        if (text != rowsText || rowsId == 0L) {
-            rowsText = text; rowsId++
+        if (text != rowsText || rowsId == 0L || resend) {
+            if (text != rowsText || rowsId == 0L) rowsId++
+            rowsText = text
             output += JSONObject().put("version", 1).put("kind", "table").put("playbackId", playbackId)
                 .put("id", rowsId).put("rows", rows)
         }

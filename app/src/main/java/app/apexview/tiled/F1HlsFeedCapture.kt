@@ -35,7 +35,7 @@ private suspend fun <T, R> mapArchiveFeedsBounded(
 
 /** Reads the HLS/CMAF actually supplied by player_tm, without another PLAY or media player. */
 internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximumHeight: Int = 2160,
-                                private val maximumOutputWidth: Int = 4096, private val minimumCaptureHeight: Int = 0) {
+                                private val maximumOutputWidth: Int = 4096, private val minimumCaptureHeight: Int = 0, fullPictures: Boolean = minimumCaptureHeight > 0) {
     private data class Offer(val feed: F1DashFeedCapture.Feed, val uri: Uri, val format: Format?, val master: HlsMultivariantPlaylist?, val audioGroupId: String? = null)
     private class Init(val uri: Uri, val offset: Long, val length: Long, val bytes: ByteArray, val report: CmafBoxInspector.Report)
     private val reader = CmafHttpReader(factory)
@@ -43,7 +43,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     private val vodPlaylists = java.util.concurrent.ConcurrentHashMap<String, HlsMediaPlaylist>()
     private val initializations = java.util.concurrent.ConcurrentHashMap<String, Init>()
     private val actual = java.util.concurrent.ConcurrentHashMap<String, ManifestProtocol>()
-    private val clearComposition = ClearCmafArchiveComposition(fullPictures = minimumCaptureHeight > 0)
+    private val clearComposition = ClearCmafArchiveComposition(fullPictures = fullPictures)
     private var previousStartUs: Long? = null
     private var mediaToArchiveOffsetUs: Long? = null
     private var pssh: ByteArray? = null
@@ -61,13 +61,8 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         try { return withContext(Dispatchers.IO) {
             require(feeds.size in 1..app.apexview.AppState.MAX_SINGLE_DECODER_FEEDS && feeds.map { it.label }.distinct().size == feeds.size)
             val perFeed = mapArchiveFeedsBounded(feeds) { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }
-            val selected = chooseCommon(perFeed, preferredHeight, feeds.size, minimumHeight)
-            val playlists = mapArchiveFeedsBounded(selected, block = ::loadMedia)
-            require(playlists.all { it.hasEndTag && it.segments.isNotEmpty() }) { "Archive VOD requires complete HLS replay playlists" }
+            val (selected, playlists, inits) = loadFittingVod(perFeed, preferredHeight, minimumHeight)
             playlists.forEach { playlist ->
-                require(playlist.segments.none { it.fullSegmentEncryptionKeyUri != null || it.initializationSegment?.fullSegmentEncryptionKeyUri != null }) {
-                    "HLS AES-128 full-segment encryption is unsupported; no key is requested"
-                }
                 val firstMap = requireNotNull(playlist.segments.first().initializationSegment) { "HLS archive has no CMAF initialization" }
                 require(playlist.segments.all { segment -> segment.initializationSegment?.let {
                     it.url == firstMap.url && it.byteRangeOffset == firstMap.byteRangeOffset && it.byteRangeLength == firstMap.byteRangeLength
@@ -76,16 +71,6 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 }
             }
             val indexedOffers = selected.mapIndexed { index, offer -> index to offer }
-            val inits = mapArchiveFeedsBounded(indexedOffers) { (index, offer) ->
-                loadInit(offer, playlists[index].segments.first())
-            }
-            val tracks = inits.map { it.report.tracks.singleOrNull { track -> track.handler == "vide" }
-                ?: throw PermanentCaptureException("HLS archive must contain one video track") }
-            if (tracks.any { it.encrypted }) throw ProtectedArchiveBackendRequired()
-            require(tracks.all { it.hevcConfiguration != null }) { "No compatible HEVC CMAF representation" }
-            require(tracks.all { track -> track.hevcConfiguration!!.sps.single().displayHeight >= minimumHeight }) {
-                "Cast needs at least ${minimumHeight}p per source; the actual HEVC pictures are smaller. No lower-quality stream was sent."
-            }
             require(playlists.none { it.tags.any { tag -> tag.startsWith("#EXT-X-KEY:") && !tag.contains("METHOD=NONE") } }) {
                 "HLS declares protection but the selected CMAF track is clear"
             }
@@ -143,6 +128,48 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         }
     }
 
+    private suspend fun loadFittingVod(
+        perFeed: List<List<Offer>>, preferredHeight: Int, minimumHeight: Int,
+    ): Triple<List<Offer>, List<HlsMediaPlaylist>, List<Init>> {
+        var offers = perFeed
+        while (true) {
+            val selected = chooseCommon(offers, preferredHeight, perFeed.size, minimumHeight)
+            val playlists = mapArchiveFeedsBounded(selected, block = ::loadMedia)
+            require(playlists.all { it.hasEndTag && it.segments.isNotEmpty() }) {
+                "Archive VOD requires complete HLS replay playlists"
+            }
+            playlists.forEach { playlist ->
+                require(playlist.segments.none { it.fullSegmentEncryptionKeyUri != null || it.initializationSegment?.fullSegmentEncryptionKeyUri != null }) {
+                    "HLS AES-128 full-segment encryption is unsupported; no key is requested"
+                }
+            }
+            val inits = mapArchiveFeedsBounded(selected.indices.toList()) { i ->
+                loadInit(selected[i], playlists[i], playlists[i].segments.first())
+            }
+            val tracks = inits.map { it.report.tracks.singleOrNull { track -> track.handler == "vide" }
+                ?: throw PermanentCaptureException("HLS archive must contain one video track") }
+            if (tracks.any { it.encrypted }) throw ProtectedArchiveBackendRequired()
+            val sizes = tracks.map { track ->
+                track.hevcConfiguration?.sps?.singleOrNull()
+                    ?: throw PermanentCaptureException("No compatible HEVC CMAF representation")
+            }
+            val fits = sizes.all { shape ->
+                shape.displayHeight >= minimumHeight &&
+                    HevcArchiveAtlasPlan.choose(perFeed.size, shape.width, shape.height, maximumOutputWidth, 2160) != null
+            }
+            if (fits) return Triple(selected, playlists, inits)
+            android.util.Log.w("PitwallCast", "ARCHIVE_CODED_SIZE_REJECT feeds=${perFeed.size} " +
+                "coded=${sizes.joinToString { "${it.width}x${it.height}" }}")
+            val declared = selected.firstNotNullOfOrNull { it.format }
+                ?: throw PermanentCaptureException("The supplied HLS playlists have fixed renditions and their coded pictures do not fit the combined stream")
+            offers = offers.map { list -> list.filter { offer ->
+                val format = offer.format
+                format == null || format.width != declared.width || format.height != declared.height
+            } }
+            if (offers.any { it.isEmpty() }) throw PermanentCaptureException("No offered HEVC rendition fits the combined archive picture")
+        }
+    }
+
     suspend fun captureAtPosition(group: String, feeds: List<F1DashFeedCapture.Feed>, positionMs: Long, live: Boolean = false, followLiveEdge: Boolean = true): F1DashFeedCapture.Snapshot = withContext(Dispatchers.IO) {
         var format: Format? = null
         val startedMs = android.os.SystemClock.elapsedRealtime()
@@ -174,7 +201,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             if (segments.any { it.fullSegmentEncryptionKeyUri != null || it.initializationSegment?.fullSegmentEncryptionKeyUri != null }) {
                 throw PermanentCaptureException("HLS AES-128 full-segment encryption is unsupported; no key is requested")
             }
-            val inits = selected.zip(segments).map { (offer, segment) -> loadInit(offer, segment) }
+            val inits = selected.indices.map { i -> loadInit(selected[i], playlists[i], segments[i]) }
             val tracks = inits.map { it.report.tracks.singleOrNull { track -> track.handler == "vide" }
                 ?: throw PermanentCaptureException("HLS CMAF initialization must contain exactly one video track") }
             if (tracks.any { it.hevcConfiguration == null }) throw PermanentCaptureException("HLS CMAF has no supported HEVC video configuration")
@@ -276,7 +303,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                     it.format.height in 1..maximumHeight
             }.map { Offer(feed, it.url, it.format, playlist, it.audioGroupId) }.ifEmpty { throw PermanentCaptureException("${feed.label}: HLS offers no supported HEVC variant") }
             is HlsMediaPlaylist -> {
-                if (playlist.hasEndTag) vodPlaylists[feed.label] = playlist
+                if (playlist.hasEndTag) vodPlaylists[playlist.baseUri] = playlist
                 listOf(Offer(feed, Uri.parse(playlist.baseUri), null, null))
             }
             else -> throw PermanentCaptureException("${feed.label}: unsupported HLS playlist")
@@ -296,15 +323,14 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             .maxByOrNull { it.format?.bitrate ?: 0 } ?: throw PermanentCaptureException("HLS common HEVC rendition unavailable") }
     }
 
-    private fun loadMedia(offer: Offer): HlsMediaPlaylist = vodPlaylists[offer.feed.label] ?: run {
+    private fun loadMedia(offer: Offer): HlsMediaPlaylist = vodPlaylists[offer.uri.toString()] ?: run {
         val playlist = parse(offer.uri, offer.master) as? HlsMediaPlaylist ?: throw PermanentCaptureException("HLS variant did not return a media playlist")
-        if (playlist.hasEndTag) vodPlaylists[offer.feed.label] = playlist
+        if (playlist.hasEndTag) vodPlaylists[offer.uri.toString()] = playlist
         playlist
     }
 
-    private fun loadInit(offer: Offer, segment: HlsMediaPlaylist.Segment): Init {
+    private fun loadInit(offer: Offer, playlist: HlsMediaPlaylist, segment: HlsMediaPlaylist.Segment): Init {
         val map = segment.initializationSegment ?: throw PermanentCaptureException("${offer.feed.label}: HLS has no EXT-X-MAP; MPEG-TS is not HEVC CMAF")
-        val playlist = vodPlaylists[offer.feed.label] ?: throw PermanentCaptureException("Archive playlist unavailable")
         val uri = UriUtil.resolveToUri(playlist.baseUri, map.url)
         initializations[offer.feed.label]?.let { if (it.uri == uri && it.offset == map.byteRangeOffset && it.length == map.byteRangeLength) return it }
         val bytes = reader.read(uri, MAX_INIT_BYTES, map.byteRangeOffset, map.byteRangeLength).bytes

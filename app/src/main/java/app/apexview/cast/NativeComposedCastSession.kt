@@ -27,7 +27,7 @@ internal class NativeComposedCastSession(
     val sourceLabels = feeds.map { it.label }
     private val group = "cast-${UUID.randomUUID()}"
     val compositionGroup: String get() = group
-    private val capture = F1ArchiveFeedCapture(userAgent, ascendon, entitlement, factory, 0, preferredHeight)
+    private val capture = F1ArchiveFeedCapture(userAgent, ascendon, entitlement, factory, 0, preferredHeight, fullPictures = true)
     private val audio = CmafCastAudio(CmafHttpReader(factory), language)
     private val relay = ComposedCmafRelay(address, peer)
     val mediaUrl get() = relay.url

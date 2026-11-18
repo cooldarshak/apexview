@@ -10,13 +10,13 @@ internal interface CmafCaptureLifecycle { fun reset() }
 internal class F1ArchiveFeedCapture(
     userAgent: String, ascendon: String, entitlement: String,
     dataSourceFactory: DataSource.Factory? = null,
-    private val minimumHeight: Int = 0, private val maximumHeight: Int = 2160,
+    private val minimumHeight: Int = 0, private val maximumHeight: Int = 2160, fullPictures: Boolean = minimumHeight > 0,
 ) : CmafCaptureLifecycle {
     private val factory = dataSourceFactory ?: DefaultHttpDataSource.Factory().setUserAgent(userAgent)
         .setAllowCrossProtocolRedirects(true)
         .setDefaultRequestProperties(mapOf("ascendontoken" to ascendon, "entitlementtoken" to entitlement))
     private val dash = F1DashFeedCapture(userAgent, ascendon, entitlement, dataSourceFactory = factory, maximumVideoHeight = maximumHeight, minimumVideoHeight = minimumHeight)
-    private val hls = F1HlsFeedCapture(factory, maximumHeight, minimumCaptureHeight = minimumHeight)
+    private val hls = F1HlsFeedCapture(factory, maximumHeight, minimumCaptureHeight = minimumHeight, fullPictures = fullPictures)
     private var usingHls = false
     val clearOutput get() = usingHls && hls.clearOutput == true
     val protection get() = if (usingHls) when (hls.clearOutput) { true -> "CLEAR"; false -> "CBCS"; null -> "UNVERIFIED" } else "CBCS"
