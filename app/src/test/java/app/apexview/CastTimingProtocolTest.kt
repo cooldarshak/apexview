@@ -41,28 +41,28 @@ class CastTimingProtocolTest {
         assertEquals(source.drivers.getValue("1").color, geometry.timing.drivers.getValue("1").color)
         assertTrue(geometry.timing.tracks.isEmpty()) // Full position/timing histories never cross the LAN.
         val json = frame(geometry.id)
-        val (decoded, cached) = CastTimingProtocol.decodeFrame(json)
+        val decoded = CastTimingProtocol.decodeFrame(json)
         assertEquals(10f, decoded.carsAt(5100).single().x, 0f)
         assertEquals(0f, decoded.carsAt(5000).single().x, 0f)
-        assertTrue(decoded.carsAt(20000).isEmpty()) // A seek cannot draw stale car positions.
+        assertEquals(20f, decoded.carsAt(20000).single().x, 0f) // Delayed telemetry holds the endpoint.
         assertEquals(2, decoded.flags.yellow[1])
         assertEquals(TrackCondition.SAFETY_CAR, decoded.flags.track)
         assertEquals(2100, decoded.stop!!.outBehind!!.second.toInt())
         assertEquals("SOFT", decoded.table.tyres.getValue("1")!!.compound)
         assertEquals(listOf(2048, 2049), decoded.table.rows.single().second.sectors.first()!!.segments)
-        assertSame(decoded.table, CastTimingProtocol.decodeFrame(json, cached).first.table)
+        assertSame(decoded.table, CastTimingProtocol.decodeFrame(json, decoded.table).table)
         assertEquals(.75f, decoded.mapOpacity, 0f)
         assertFalse(encoded.toString().contains("token", true))
     }
     @Test fun independentEmptyTopicsAndHideUpdatesDoNotEraseTheOtherPanel() {
         val geo = CastTimingProtocol.geometry(timing())
         val j = frame(geo.getString("id")).put("cars", JSONArray()).put("mapMode", "OFF").put("map", JSONObject.NULL)
-        val state = CastTimingProtocol.decodeFrame(j).first
+        val state = CastTimingProtocol.decodeFrame(j)
         assertEquals(1, state.table.rows.size)
         assertNull(state.map)
         val mapOnly = frame(geo.getString("id")).put("rows", JSONArray()).put("tower", JSONObject.NULL)
-        assertEquals(1, CastTimingProtocol.decodeFrame(mapOnly).first.cars.size)
-        assertTrue(CastTimingProtocol.decodeFrame(mapOnly).first.table.rows.isEmpty())
+        assertEquals(1, CastTimingProtocol.decodeFrame(mapOnly).cars.size)
+        assertTrue(CastTimingProtocol.decodeFrame(mapOnly).table.rows.isEmpty())
     }
     @Test fun largeCurrentTablesRoundTripInsideStandardFcastFramesAndAssemblerIsBounded() {
         var time = 100L
@@ -92,6 +92,12 @@ class CastTimingProtocolTest {
         receiver.accept(frame(geo.getString("id")).put("playbackId", "old").put("tableId", 1).put("sequence", 3), "current")
         receiver.accept(frame(geo.getString("id")).put("playbackId", "current").put("tableId", 1).put("sequence", 1), "current")
         assertSame(first, receiver.frame)
+        receiver.onSeek(5000, 25000)
+        receiver.accept(JSONObject(j.toString()).put("sequence", 3).put("clockEpoch", 0), "current")
+        assertNull(receiver.frame)
+        receiver.accept(JSONObject(j.toString()).put("sequence", 4).put("position", 25000).put("clockEpoch", 1), "current")
+        assertEquals(25000L, receiver.frame!!.positionMs)
+        assertSame(first!!.table, receiver.frame!!.table)
         receiver.clear(); assertNull(receiver.frame); assertNull(receiver.geometry)
     }
     @Test fun malformedTelemetryIsRejectedBeforeRenderAllocation() {

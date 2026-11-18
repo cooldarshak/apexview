@@ -311,6 +311,13 @@ class PitwallReceiverActivity : ComponentActivity() {
             }
         })
         next.addListener(object : Player.Listener {
+            override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+                if (player !== next || reason != Player.DISCONTINUITY_REASON_SEEK && reason != Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) return
+                val target = controllerPosition()
+                timingState.onSeek(target + oldPosition.positionMs - newPosition.positionMs, target)
+                sendPlayback()
+            }
+
             override fun onPlayerError(error: PlaybackException) { if (player === next) fail("TV playback failed: ${error.errorCodeName}") }
             override fun onVideoSizeChanged(size: VideoSize) {
                 if (player !== next) return
@@ -384,6 +391,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         val current = player
         connection?.send(FcastProtocol.PLAYBACK_UPDATE, JSONObject().put("generationTime", System.currentTimeMillis())
             .put("playbackId", playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId").orEmpty())
+            .put("clockEpoch", timingState.clockEpoch)
             .put("state", if (loadingRequested) if (desiredPlaying) 1 else 2 else if (!active || current?.playbackState == Player.STATE_ENDED) 0 else if (current?.playWhenReady == true) 1 else 2)
             .put("time", if (loadingRequested) playData?.optDouble("time", 0.0) ?: 0.0 else controllerPosition() / 1000.0)
             .put("duration", (streamMetadata()?.optLong("durationMs") ?: current?.duration ?: 0L).coerceAtLeast(0L) / 1000.0)

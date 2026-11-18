@@ -40,6 +40,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
         val position = app.castFramePositionMs
         val now = app.mapTimeAt(position) ?: 0L
         val output = mutableListOf<JSONObject>()
+        var tableSampled = false
         if (timing != null) {
             // Replay geometry is immutable within a published session snapshot.
             if (timing !== sourceTiming || timing.live && resend) {
@@ -54,10 +55,15 @@ internal class CastTimingPublisher(private val context: Context, private val app
             } else if (resend) output += JSONObject(currentGeometry.toString()).put("playbackId", playbackId)
             if (lastTableUtc == Long.MIN_VALUE || kotlin.math.abs(now - lastTableUtc) >= 400) {
                 rows = CastTimingProtocol.table(timing, now)
+                tableSampled = true
                 lastTableUtc = now
             }
-        } else { rows = JSONArray(); geometryId = ""; geometry = null; sourceTiming = null }
-        val text = rows.toString()
+        } else {
+            tableSampled = rows.length() > 0 || rowsText.isEmpty()
+            if (tableSampled) rows = JSONArray()
+            geometryId = ""; geometry = null; sourceTiming = null
+        }
+        val text = if (tableSampled) rows.toString() else rowsText
         if (text != rowsText || rowsId == 0L || resend) {
             if (text != rowsText || rowsId == 0L) rowsId++
             rowsText = text
@@ -74,7 +80,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
             context.resources.displayMetrics.density, context.resources.configuration.fontScale,
             app, timing, rows, circle, stop, cars)
         message.remove("rows")
-        output += message.put("playbackId", playbackId).put("tableId", rowsId).put("sequence", ++sequence)
+        output += message.put("playbackId", playbackId).put("tableId", rowsId).put("sequence", ++sequence).put("clockEpoch", app.castTimingEpoch)
         return output.flatMap(TimingMessageChunks::split)
     }
     private fun pitBasis(timing: SessionTiming, now: Long): PitBasis {

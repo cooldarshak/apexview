@@ -398,7 +398,13 @@ class AppState(
     internal fun reportCastTowerBounds(x: Float, y: Float, width: Float, height: Float) {
         castTowerBounds = app.apexview.cast.CastTimingProtocol.Panel(x, y, width, height)
     }
+    internal var castTimingEpoch = 0L
+        private set
     private var localLoadId = ""
+        set(value) {
+            field = value
+            castTimingEpoch = 0L
+        }
     private var localChosen = false
     var castDeviceName by mutableStateOf("TV")
         private set
@@ -585,6 +591,7 @@ class AppState(
                 }
                 protocol.PLAYBACK_UPDATE -> if (localReady && body != null) {
                     if (body.has("playbackId") && body.optString("playbackId") != localLoadId) return
+                    castTimingEpoch = body.optLong("clockEpoch", 0L)
                     val wall = body.optLong("wallClockMs", 0)
                     if (wall in 946684800000L..4102444800000L) remoteWallClockBaseMs = wall - (body.optDouble("time", 0.0) * 1000).toLong()
                     val state = body.optInt("state")

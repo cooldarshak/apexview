@@ -28,7 +28,7 @@ internal object CastTimingProtocol {
         val flags: FlagPicture, val stop: PitStopNow?, val circle: PitCircleData?, val table: Table,
         val header: TowerSessionHeaderData, val message: String?) {
         fun carsAt(position: Long): List<Car> {
-            if (abs(position - positionMs) > 2_000) return emptyList()
+            // Hold the last measured endpoint between packets. Seeks invalidate frames at the receiver.
             val f = ((position - positionMs) / 200f).coerceIn(0f, 1f)
             return cars.map { Car(it.number, it.x + (it.nextX - it.x) * f, it.y + (it.nextY - it.y) * f, it.state) }
         }
@@ -112,7 +112,7 @@ internal object CastTimingProtocol {
                     .put(timing.speeds[n]?.kmhAt(now) ?: JSONObject.NULL).put(timing.speeds[n]?.gearAt(now) ?: JSONObject.NULL))
             }
     }
-    private fun readTable(a: JSONArray): Table {
+    fun readTable(a: JSONArray): Table {
         val tyres = mutableMapOf<String, Tyre?>(); val speeds = mutableMapOf<String, Pair<Int?, Int?>>()
         val rows = (0 until a.count(MAX_DRIVERS)).map { i ->
             val r = a.getJSONArray(i); require(r.length() == 15)
@@ -156,7 +156,7 @@ internal object CastTimingProtocol {
             .put("header", JSONArray(listOf(header.name, header.track, header.color.toArgb(), header.counter, JSONArray(header.weather))))
             .put("message", (timing?.let { noPositionsLine(it, now) } ?: app.mapStatus)?.let(DiagnosticRedaction::redact)?.safe(220) ?: JSONObject.NULL)
     }
-    fun decodeFrame(j: JSONObject, previousRows: Pair<String, Table>? = null): Pair<Frame, Pair<String, Table>> {
+    fun decodeFrame(j: JSONObject, table: Table = readTable(j.getJSONArray("rows"))): Frame {
         require(j.getInt("version") == VERSION && j.getString("kind") == "frame")
         val carArray = j.getJSONArray("cars")
         val cars = (0 until carArray.count(MAX_DRIVERS)).map { i -> carArray.getJSONArray(i).let {
@@ -167,20 +167,17 @@ internal object CastTimingProtocol {
         val yellow = j.getJSONArray("yellow").let { a -> (0 until a.count(64)).associate { i -> a.getJSONArray(i).let { it.getInt(0) to it.getInt(1).also { v -> require(v in 1..2) } } } }
         val resumption = j.optJSONArray("resumption")?.let { Resumption(it.getLong(0), it.getLong(1), it.getString(2).safe()) }
         val stop = j.optJSONArray("stop")?.let { PitStopNow(it.getString(0).safe(8), it.f(1), it.f(2), it.optionalString(3)?.let { n -> n to it.getLong(4) }) }
-        val a = j.getJSONArray("rows"); val rowsText = a.toString()
-        val table = if (previousRows?.first == rowsText) previousRows.second else readTable(a)
         val h = j.getJSONArray("header"); val weather = h.getJSONArray(4)
         val header = TowerSessionHeaderData(h.getString(0).safe(), h.getString(1).safe(), Color(h.getInt(2)), h.getString(3).safe(), (0 until weather.count(6)).map { weather.getString(it).safe(32) })
         val position = j.getLong("position").also { require(it in 0..604_800_000L) }
         val utc = j.getLong("utc").also { require(it in 0..4_102_444_800_000L) }
-        val frame = Frame(j.getString("geometry").safe(64), position, utc,
+        return Frame(j.getString("geometry").safe(64), position, utc,
             j.f("density", .25f, 10f), j.f("fontScale", .25f, 10f), MapMode.valueOf(j.getString("mapMode")), readPanel(j.opt("map")), readPanel(j.opt("tower")),
             j.f("rotation", -10000f, 10000f), j.f("mapOpacity", 0f, 1f), j.f("dot", 1f, 40f), j.f("label", 1f, 80f),
             j.f("towerOpacity", 0f, 1f), j.f("towerFont", .25f, 5f), j.f("towerHeader", 0f, 10000f), j.getBoolean("tv"),
             j.getString("speedUnit").also { require(it == Settings.MPH || it == Settings.KMH) }, if (j.isNull("onTop")) null else j.getString("onTop").safe(8),
             if (j.isNull("leader")) null else j.getString("leader").safe(8), cars, FlagPicture(TrackCondition.entries[j.getInt("condition")], yellow, resumption),
             stop, decodeCircle(j.optJSONObject("circle")), table, header, if (j.isNull("message")) null else j.getString("message").safe(220))
-        return frame to (rowsText to table)
     }
     private fun encodeCircle(c: PitCircleData?): Any = c?.let {
         JSONObject().put("reference", it.referenceMs).put("ring", JSONArray().apply { it.ring.take(MAX_DRIVERS).forEach { r -> put(JSONArray(listOf(r.car.number, r.car.state.ordinal, r.at, r.distance))) } })

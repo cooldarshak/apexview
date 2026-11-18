@@ -5,7 +5,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import app.apexview.cast.local.TimingMessageChunks
-import org.json.JSONArray
 import org.json.JSONObject
 
 internal class CastTimingReceiver {
@@ -15,10 +14,28 @@ internal class CastTimingReceiver {
         private set
     private val assembler = TimingMessageChunks.Assembler(SystemClock::elapsedRealtime)
     private var tableId = -1L
-    private var rows = JSONArray()
-    private var decodedRows: Pair<String, CastTimingProtocol.Table>? = null
+    private var table: CastTimingProtocol.Table? = null
+    var clockEpoch = 0L
+        private set
+    private var pendingLegacySeek: Pair<Long, Long>? = null
     private var lastSequence = -1L
-    fun clear() { geometry = null; frame = null; tableId = -1; lastSequence = -1; rows = JSONArray(); decodedRows = null; assembler.clear() }
+    fun clear() {
+        geometry = null
+        frame = null
+        tableId = -1
+        table = null
+        lastSequence = -1
+        clockEpoch = 0
+        pendingLegacySeek = null
+        assembler.clear()
+    }
+
+    fun onSeek(fromMs: Long, toMs: Long) {
+        if (fromMs == toMs) return
+        clockEpoch++
+        pendingLegacySeek = fromMs to toMs
+        frame = null
+    }
     fun accept(packet: JSONObject, playbackId: String) {
         val j = assembler.accept(packet) ?: return
         if (j.optString("playbackId") != playbackId) return
@@ -28,16 +45,28 @@ internal class CastTimingReceiver {
             }
             "table" -> {
                 require(j.getInt("version") == 1)
-                val incoming = j.getJSONArray("rows"); require(incoming.length() <= 24)
-                tableId = j.getLong("id"); rows = incoming
+                val id = j.getLong("id")
+                if (id <= tableId) return
+                table = CastTimingProtocol.readTable(j.getJSONArray("rows"))
+                tableId = id
             }
             "frame" -> {
                 val sequence = j.getLong("sequence")
                 if (sequence <= lastSequence || j.getLong("tableId") != tableId) return
                 if (j.getString("geometry").isNotEmpty() && j.getString("geometry") != geometry?.id) return
-                j.put("rows", rows)
-                val result = CastTimingProtocol.decodeFrame(j, decodedRows)
-                decodedRows = result.second; frame = result.first; lastSequence = sequence
+                val currentTable = table ?: return
+                if (j.has("clockEpoch")) {
+                    if (j.getLong("clockEpoch") != clockEpoch) return
+                } else {
+                    // Older senders have no seek acknowledgement. Discard updates still at the old playhead.
+                    pendingLegacySeek?.let { (from, to) ->
+                        val position = j.getLong("position")
+                        if (kotlin.math.abs(position - from) < kotlin.math.abs(position - to)) return
+                    }
+                }
+                frame = CastTimingProtocol.decodeFrame(j, currentTable)
+                pendingLegacySeek = null
+                lastSequence = sequence
             }
         }
     }
