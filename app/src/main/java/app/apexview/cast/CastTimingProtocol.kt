@@ -142,7 +142,7 @@ internal object CastTimingProtocol {
             .put("mapMode", app.mapMode.name).put("map", encodePanel(mapPanel)).put("tower", encodePanel(towerPanel))
             .put("rotation", panel.rotation).put("mapOpacity", app.mapOpacity).put("dot", app.mapDotSizeDp).put("label", app.mapLabelSizeSp)
             .put("towerOpacity", app.towerOpacity).put("towerFont", app.towerFontScale)
-            .put("towerHeader", if (app.layoutMode == LayoutMode.TV) app.canvasSize.second * 0.09375f else 22 * density)
+            .put("towerHeader", 0f)
             .put("tv", app.layoutMode == LayoutMode.TV).put("speedUnit", app.settings.speedUnit)
             .put("onTop", app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString() ?: JSONObject.NULL)
             .put("leader", timing?.let { leaderAt(it, now) } ?: JSONObject.NULL)
