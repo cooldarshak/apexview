@@ -277,7 +277,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(false)
             .setMediaCodecSelector(ReceiverCodecSelector())
         val selector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this)
-        if (direct) selector.parameters = selector.buildUponParameters().setMinVideoSize(1, 720)
+        if (direct) selector.parameters = selector.buildUponParameters()
             .setMaxVideoSize(1920, 1080).setExceedVideoConstraintsIfNecessary(false).build()
         val next = ExoPlayer.Builder(this, renderers).setTrackSelector(selector)
             .setMediaSourceFactory(DefaultMediaSourceFactory(data).apply { widevine?.sessions?.let { key -> setDrmSessionManagerProvider { key } } })
@@ -307,7 +307,6 @@ class PitwallReceiverActivity : ComponentActivity() {
                 if (player !== next) return
                 val model = scene ?: return
                 if (direct) {
-                    if (size.height < 720) { fail("The TV's authorized source is below 720p"); return }
                     scene = model.copy(atlasWidth = size.width, atlasHeight = size.height, atlasColumns = 1,
                         sourceCodedWidth = size.width, sourceCodedHeight = size.height,
                         sourceDisplayWidth = size.width, sourceDisplayHeight = size.height)

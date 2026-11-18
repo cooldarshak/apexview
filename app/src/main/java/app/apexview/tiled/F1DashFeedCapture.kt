@@ -553,9 +553,9 @@ internal class F1DashFeedCapture(
                 .filter { (width, height) -> width > 0 && height in maxOf(1, minimumVideoHeight)..maximumVideoHeight }
                 .toSet()
         }.reduce { left, right -> left intersect right }
-        return if (minimumVideoHeight > 0) HevcArchiveRenditionPlan.choose(common.filter { (w, h) ->
-            HevcArchiveAtlasPlan.choose(feeds.size, ((w + 63) / 64) * 64, ((h + 63) / 64) * 64, 4096, 2160) != null
-        }.toSet(), maximumVideoHeight, minimumVideoHeight, feeds.size, 4096) else common.maxWithOrNull(compareBy<Pair<Int, Int>> { it.second }.thenBy { it.first })
+        return if (maximumVideoHeight <= 1080 || minimumVideoHeight > 0)
+            HevcArchiveRenditionPlan.choose(common, maximumVideoHeight, minimumVideoHeight, feeds.size, 4096)
+        else common.maxWithOrNull(compareBy<Pair<Int, Int>> { it.second }.thenBy { it.first })
     }
 
     private fun LoadedFeed.representationFor(width: Int, height: Int): Representation {

@@ -36,10 +36,10 @@ class CastSceneProtocolTest {
         val single = VideoScene(1920f, 1080f, 1920, 1080, 1, listOf(windows.first()), 1, 1920, 1088, 1920, 1080)
         assertEquals(single, CastSceneProtocol.decode(CastSceneProtocol.encode(single)))
     }
-    @Test fun receiverRejectsLowResolutionFalseGeometryAndUnknownSourceMappings() {
+    @Test fun receiverRejectsFalseGeometryAndUnknownSourceMappings() {
         fun valid() = CastSceneProtocol.encode(VideoScene(1920f, 1080f, 2560, 1472, 4,
             (0..3).map { VideoWindow(it, it, (it % 2) * 960f, (it / 2) * 540f, 960f, 540f, 0f) }, 2, 1280, 736, 1280, 720))
-        for (bad in listOf(valid().put("sourceDisplayHeight", 540), valid().put("sources", 25),
+        for (bad in listOf(valid().put("sourceDisplayHeight", 0), valid().put("sources", 25),
             valid().put("atlasWidth", 1280), valid().put("height", 0), valid().put("version", 2))) {
             assertThrows(IllegalArgumentException::class.java) { CastSceneProtocol.decode(bad) }
         }

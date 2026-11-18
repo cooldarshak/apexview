@@ -434,18 +434,10 @@ class AppState(
         externalDisplayRequested = false; externalDisplayActive = false
         tiles.forEach { it.feed.setExternalQualityFloor(false) }
     }
-    internal fun externalDisplayQualityReady(): Boolean {
-        val native = singleDecoderScenePlayer?.archiveSceneSession
-        if (native != null) return native.sourceDisplayHeight >= 720
-        return tiles.isNotEmpty() && tiles.all { it.feed.player.videoFormat?.height?.let { h -> h >= 720 } == true }
-    }
     internal fun requestExternalDisplayPlayback() {
         if (tiles.isEmpty()) { message = "Open the feeds before connecting a wireless display."; return }
         externalDisplayRequested = true
         externalRequestDeadline = android.os.SystemClock.elapsedRealtime() + 120_000L
-        val native = singleDecoderScenePlayer?.archiveSceneSession
-        if (native == null) tiles.forEach { it.feed.setExternalQualityFloor(true) }
-        else if (native.sourceDisplayHeight < 720) tiles.firstOrNull()?.let { startArchiveSingleDecoderComposition(it.contentId) }
         scope.launch {
             kotlinx.coroutines.delay(120_000)
             if (externalDisplayRequested && !externalDisplayActive && android.os.SystemClock.elapsedRealtime() >= externalRequestDeadline) clearExternalDisplayRequest()
@@ -560,7 +552,9 @@ class AppState(
                     if (body?.optString("playbackId") != localLoadId || !castingActive) return
                     castSceneConfirmed = true
                     handOffCastPlayback()
-                    castStatus = "Playing on $castDeviceName in the phone video layout. ${nativeComposedCast?.geometry?.displayHeight ?: castRelay?.session?.sourceDisplayHeight ?: 720}p sources."
+                    val height = nativeComposedCast?.geometry?.displayHeight ?: castRelay?.session?.sourceDisplayHeight
+                    castStatus = "Playing on $castDeviceName in the phone video layout." +
+                        (height?.let { " ${it}p sources." } ?: "")
                     message = castStatus
                 }
                 protocol.PLAYBACK_UPDATE -> if (localReady && body != null) {
@@ -668,7 +662,7 @@ class AppState(
                 when (event.optString("type")) {
                     "rendering" -> {
                         castSceneConfirmed = true
-                        castStatus = "TV receiver is rendering the phone video layout. Sources are at least 720p."
+                        castStatus = "TV receiver is rendering the phone video layout."
                         android.util.Log.i("PitwallCast", "SCENE_RENDERING_CONFIRMED sources=${event.optInt("sources")}")
                     }
                     "error" -> {
@@ -750,12 +744,11 @@ class AppState(
                             clockTile.feed.sourceStream.profileLabel,
                             preferredHeight = if (settings.videoQuality == VideoQuality.P1080) 1080 else 720,
                             commentary = settings.commentary,
-                            minimumHeight = 720,
+                            minimumHeight = 0,
                         ).also { ownedSession = it }
                     } finally { capture.reset() }
                 }
-                require(session.sourceDisplayHeight >= 720) { "Cast source quality is below 720p. No lower-quality stream was sent." }
-                android.util.Log.i("PitwallCast", "CAST_SOURCE_QUALITY minimum=720 actual=${session.sourceDisplayWidth}x${session.sourceDisplayHeight} feeds=${session.sourceLabels.size} atlas=${session.width}x${session.height} decoderMode=$decoderMode layoutReceiver=$usesLayoutCastReceiver")
+                android.util.Log.i("PitwallCast", "CAST_SOURCE_QUALITY actual=${session.sourceDisplayWidth}x${session.sourceDisplayHeight} feeds=${session.sourceLabels.size} atlas=${session.width}x${session.height} decoderMode=$decoderMode layoutReceiver=$usesLayoutCastReceiver")
                 val manager = context.getSystemService(android.net.ConnectivityManager::class.java)
                 val network = manager.allNetworks.firstOrNull { network -> manager.getNetworkCapabilities(network)?.let {
                     it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) || it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)
@@ -784,7 +777,7 @@ class AppState(
                 directCast = null
                 nativeCastPump?.cancel(); nativeCastPump = null
                 nativeComposedCast?.let { retiredNativeCasts += it }; nativeComposedCast = null
-                castStatus = if (localChosen || usesLayoutCastReceiver) "Sending at least 720p sources and the phone video layout to the TV…"
+                castStatus = if (localChosen || usesLayoutCastReceiver) "Sending the phone video layout to the TV…"
                     else "Casting ${session.sourceDisplayHeight}p sources. This build uses the standard receiver, which shows the encoded grid; the phone layout needs the registered Pitwall receiver."
                 message = castStatus
                 castTiles.forEach { it.feed.setAudible(false) }
@@ -2398,10 +2391,9 @@ class AppState(
                         // independently advancing source clock or interrupt working playback.
                         val session = capture.prepareVod(selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel,
                             it.feed.sourceStream.url) }, probePositionMs, host.feed.sourceStream.profileLabel,
-                            if (externalDisplayRequested) maxOf(720, settings.videoQuality.targetHeight) else
-                                minOf(settings.videoQuality.targetHeight.takeIf { it > 0 } ?: 720,
+                            minOf(settings.videoQuality.targetHeight.takeIf { it > 0 } ?: 720,
                                     if (selected.size > 4) 270 else if (selected.size > 2) 540 else 720),
-                            settings.commentary, minimumHeight = if (externalDisplayRequested) 720 else 0)
+                            settings.commentary)
                         try {
                             host.feed.requireArchiveHardwareSupport(session.codedWidth, session.codedHeight, session.frameRate * playbackSpeed)
                             prepared = session

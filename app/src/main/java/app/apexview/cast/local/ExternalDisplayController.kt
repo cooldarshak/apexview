@@ -64,23 +64,14 @@ internal class ExternalDisplayController(private val activity: FragmentActivity,
             if (presentation != null) stop()
             return
         }
-        if (app.singleDecoderScenePlayer == null) app.tiles.forEach { it.feed.setExternalQualityFloor(true) }
         if (presentation?.display?.displayId == display.displayId) return
         if (requestedDisplay != display.displayId) {
             dismiss(); requestedDisplay = display.displayId
             Log.i("PitwallMiracast", "EXTERNAL_DISPLAY id=${display.displayId} name=${display.name} size=${display.mode.physicalWidth}x${display.mode.physicalHeight} flags=${display.flags}")
         }
-        if (min(display.mode.physicalWidth, display.mode.physicalHeight) < 720) {
-            app.reportExternalDisplayStatus("The wireless display exposes less than 720p. Choose an HD display mode in Smart View or use the Pitwall TV receiver.")
-            return
-        }
         val protectedVideo = app.tiles.any { it.feed.sourceStream.licenseUrl != null && !it.feed.usesSoftwareDrm }
         if (protectedVideo && !supportsProtectedDisplay(display.flags)) {
             app.reportExternalDisplayStatus("This wireless display does not advertise protected video support. Use the signed-in Pitwall TV receiver.")
-            return
-        }
-        if (!app.externalDisplayQualityReady()) {
-            app.reportExternalDisplayStatus("Preparing at least 720p source feeds for the wireless display…")
             return
         }
         // Remove phone video views before attaching those same players to the Presentation.

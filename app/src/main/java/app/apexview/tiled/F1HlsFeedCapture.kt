@@ -149,7 +149,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         try {
             require(feeds.size in 2..6 && feeds.map { it.label }.distinct().size == feeds.size)
             val perFeed = feeds.map { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }
-            val selected = chooseCommon(perFeed, minimumHeight = minimumCaptureHeight)
+            val selected = chooseCommon(perFeed, preferredHeight = maximumHeight.takeIf { it <= 1080 }, minimumHeight = minimumCaptureHeight)
             format = selected.first().format
             val playlists = coroutineScope { selected.map { offer -> async { loadMedia(offer) } }.awaitAll() }
             if (!live && playlists.any { !it.hasEndTag }) throw PermanentCaptureException("HLS single-decoder archive capture requires complete replay playlists")

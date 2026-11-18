@@ -37,7 +37,6 @@ internal object CastSceneProtocol {
                     coordinate(w, "width"), coordinate(w, "height"), coordinate(w, "z"))
             } }, json.getInt("atlasColumns"), dimension("sourceCodedWidth"), dimension("sourceCodedHeight"),
             dimension("sourceDisplayWidth"), dimension("sourceDisplayHeight"))
-        require(scene.sourceDisplayHeight >= 720) { "Pitwall casting requires at least 720p sources" }
         require(scene.atlasWidth.toLong() * scene.atlasHeight <= 35_651_584L) { "Atlas exceeds supported picture size" }
         require(scene.atlasColumns in 1..sources)
         require(scene.atlasWidth.toLong() in ((scene.atlasColumns - 1L) * scene.sourceCodedWidth + scene.sourceDisplayWidth)..(scene.atlasColumns.toLong() * scene.sourceCodedWidth)) { "Atlas columns do not match the stream" }

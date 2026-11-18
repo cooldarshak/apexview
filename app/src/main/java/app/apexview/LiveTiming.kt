@@ -655,7 +655,20 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 circuitKey = ref.circuitKey, laps = partialHistory.laps, radioBase = BASE + path,
             ))
         }
-        val positionsTask = async(Dispatchers.IO) { fetchOptionalStage(path + "Position.z.jsonStream") }
+        val positionsTask = async(Dispatchers.IO) {
+            progress("Streaming and parsing Position.z.jsonStream…")
+            val job = coroutineContext
+            try {
+                open(path + "Position.z.jsonStream").bufferedReader().useLines { lines ->
+                    parsePositionLines(lines) { job.ensureActive() }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                progress("PARSE FAIL positions · ${e.javaClass.simpleName}: ${e.message}")
+                PositionParseReport(emptyMap(), 0, 0, 0, 0)
+            }
+        }
         val historyTask = async(Dispatchers.IO) {
             val timingTask = async { fetchOptionalStage(path + "TimingData.jsonStream") }
             val timingF1Task = async { fetchOptionalStage(path + "TimingDataF1.jsonStream").orEmpty() }
@@ -690,10 +703,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         // tower and lap-state histories share each decoded JSON object, avoiding two concurrent
         // full passes over this multi-megabyte stream on lower-memory Android TV devices.
         progress("Loading track positions while timing history parses…")
-        val positions = positionsTask.await().orEmpty()
-        progress("PARSING Position.z.jsonStream · ${positions.length} chars")
         val positionParseStarted = android.os.SystemClock.elapsedRealtime()
-        val positionReport = withContext(Dispatchers.Default) { parsePositionsDetailed(positions) }
+        val positionReport = positionsTask.await()
         val tracks = positionReport.tracks
         progress(
             "PARSED positions · records=${positionReport.decodedRecords}/${positionReport.inputRecords}, " +
@@ -718,7 +729,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         val (timingStream, timingF1Stream, initialHistory) = historyTask.await()
         // Heartbeat anchors the stream clock. Some sessions have bad offsets; the cars' own
         // timestamps win when they disagree with it by more than a minute.
-        val streamStart = if (positions.isEmpty()) initialStart else streamStart(heartbeat, positions)
+        val streamStart = positionReport.streamStart?.takeIf { abs(it - initialStart) > STREAM_START_SLACK_MS } ?: initialStart
         val corrected = streamStart != initialStart
         val parsedAndLaps = if (!corrected || timingStream == null) {
             progress("Timing clock ${if (corrected) "has no TimingData source" else "unchanged"} · reusing early timing parse")
@@ -1256,18 +1267,25 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         val decodedRecords: Int,
         val malformedRecords: Int,
         val positionSamples: Int,
+        val streamStart: Long? = null,
     )
 
     internal fun parsePositions(stream: String): Map<String, TrackBuilder> =
         parsePositionsDetailed(stream).tracks
 
-    internal fun parsePositionsDetailed(stream: String): PositionParseReport {
+    internal fun parsePositionsDetailed(stream: String): PositionParseReport =
+        parsePositionLines(stream.lineSequence())
+
+    private fun parsePositionLines(lines: Sequence<String>, checkActive: () -> Unit = {}): PositionParseReport {
+        val starts = ArrayList<Long>(START_SAMPLES)
         val tracks = mutableMapOf<String, TrackBuilder>()
         var inputRecords = 0
         var decodedRecords = 0
         var malformedRecords = 0
         var positionSamples = 0
-        stream.lineSequence().forEach { line ->
+        lines.forEach { raw ->
+            checkActive()
+            val line = raw.removePrefix("\uFEFF")
             val prefix = streamPrefixLength(line)
             if (line.length <= prefix) return@forEach
             inputRecords++
@@ -1282,11 +1300,13 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 malformedRecords++
                 return@forEach
             }
+            if (starts.size < START_SAMPLES) positionStart(line, samples)?.let(starts::add)
             decodedRecords++
             positionSamples += samples.length()
             addPositions(json, tracks)
         }
-        return PositionParseReport(tracks, inputRecords, decodedRecords, malformedRecords, positionSamples)
+        return PositionParseReport(tracks, inputRecords, decodedRecords, malformedRecords, positionSamples,
+            starts.sorted().let { it.getOrNull(it.size / 2) })
     }
 
     /**
@@ -1363,12 +1383,16 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             if (line.length <= streamPrefixLength(line)) return@mapNotNull null
             val json = runCatching { JSONObject(inflate(line.substring(streamPrefixLength(line)))) }.getOrNull() ?: return@mapNotNull null
             val samples = json.optJSONArray("Position") ?: return@mapNotNull null
-            val latest = (0 until samples.length()).mapNotNull { i ->
-                runCatching { Instant.parse(samples.getJSONObject(i).getString("Timestamp")).toEpochMilli() }.getOrNull()
-            }.maxOrNull() ?: return@mapNotNull null
-            runCatching { latest - offsetMs(line) }.getOrNull()
+            positionStart(line, samples)
         }.take(START_SAMPLES).toList().sorted()
         return if (starts.isEmpty()) null else starts[starts.size / 2]
+    }
+
+    private fun positionStart(line: String, samples: org.json.JSONArray): Long? {
+        val latest = (0 until samples.length()).mapNotNull { i ->
+            runCatching { Instant.parse(samples.getJSONObject(i).getString("Timestamp")).toEpochMilli() }.getOrNull()
+        }.maxOrNull() ?: return null
+        return runCatching { latest - offsetMs(line) }.getOrNull()
     }
 
     internal fun parseStates(stream: String, streamStart: Long): StateParse {
@@ -1454,7 +1478,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
     internal fun fetchStream(path: String): String = fetch(path)
 
     private fun fetch(path: String): String =
-        open(path).use { it.readBytes() }.toString(Charsets.UTF_8).removePrefix("﻿")
+        open(path).bufferedReader(Charsets.UTF_8).use { it.readText() }.removePrefix("﻿")
 
     private fun open(path: String): java.io.InputStream {
         val conn = URL(BASE + path).openConnection() as HttpURLConnection
@@ -1477,7 +1501,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             val buffer = ByteArray(8192)
             while (!inflater.finished()) {
                 val n = inflater.inflate(buffer)
-                if (n == 0 && (inflater.needsInput() || inflater.needsDictionary())) break
+                if (n == 0 && !inflater.finished()) throw IOException("Incomplete or stalled compressed timing record")
                 out.write(buffer, 0, n)
             }
             return out.toString("UTF-8").removePrefix("﻿")

@@ -27,7 +27,7 @@ internal class NativeComposedCastSession(
     val sourceLabels = feeds.map { it.label }
     private val group = "cast-${UUID.randomUUID()}"
     val compositionGroup: String get() = group
-    private val capture = F1ArchiveFeedCapture(userAgent, ascendon, entitlement, factory, 720, preferredHeight)
+    private val capture = F1ArchiveFeedCapture(userAgent, ascendon, entitlement, factory, 0, preferredHeight)
     private val audio = CmafCastAudio(CmafHttpReader(factory), language)
     private val relay = ComposedCmafRelay(address, peer)
     val mediaUrl get() = relay.url
@@ -71,7 +71,6 @@ internal class NativeComposedCastSession(
         var packaged: ProtectedHevcComposedDashPackageBuilder.Package? = null
         try {
             val shape = requireNotNull(window.sourceGeometry) { "Full source-picture geometry was not prepared" }
-            require(shape.displayHeight >= 720) { "Actual source feed is below 720p" }
             if (sourceStartUs == null) {
                 sourceStartUs = sourceUs; pto = window.fragments.first().baseDecodeTimeTicks
                 val actualHls = snapshot.actualManifests.values.firstOrNull() == ManifestProtocol.HLS
