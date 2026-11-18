@@ -89,7 +89,9 @@ class LayoutsTest {
                     assertTrue(plan.workspace.x + plan.workspace.w <= width + 0.5f)
                     assertTrue(plan.workspace.y + plan.workspace.h <= height + 0.5f)
                     assertTrue("Tower outside workspace: ${plan.tower}", plan.tower.x >= plan.workspace.x && plan.tower.y >= plan.workspace.y)
-                    assertTrue("Map outside workspace: ${plan.map}", plan.map.x >= plan.workspace.x && plan.map.y >= plan.workspace.y)
+                    if (mode != LayoutMode.TV || height >= width) {
+                        assertTrue("Map outside workspace: ${plan.map}", plan.map.x >= plan.workspace.x && plan.map.y >= plan.workspace.y)
+                    }
                     assertTrue(!plan.tower.overlaps(plan.map))
                     assertTrue(plan.slots.none { plan.workspace.overlaps(it) })
                     plan.slots.forEach { slot ->
@@ -104,7 +106,7 @@ class LayoutsTest {
 
     @Test
     fun tvLandscapeLayoutKeepsFullHeightTowerAndMapOverTheMainVideo() {
-        for ((width, height) in listOf(1920f to 1080f, 1280f to 720f, 3840f to 2160f)) {
+        for ((width, height) in listOf(1920f to 1080f, 1280f to 720f, 3840f to 2160f, 2316f to 1080f)) {
             for (feedCount in 1..4) {
                 val plan = Layouts.withCombinedOverlays(
                     LayoutMode.TV, feedCount, width, height, OverlayLayoutMode.DOCKED,
