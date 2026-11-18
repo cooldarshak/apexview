@@ -229,20 +229,6 @@ object DriverTimingParser {
             else runCatching { TimedLine(streamStart + streamOffsetMs(line, prefix), source, line, prefix) }.getOrNull()
         }
 
-    /** F1's archived topic files are normally append-ordered. Check before using a bounded merge. */
-    private fun isChronological(text: String, streamStart: Long, checkActive: () -> Unit): Boolean {
-        var previous = Long.MIN_VALUE
-        for (line in text.lineSequence()) {
-            checkActive()
-            val prefix = streamPrefixLength(line)
-            if (line.length <= prefix) continue
-            val time = runCatching { streamStart + streamOffsetMs(line, prefix) }.getOrNull() ?: continue
-            if (time < previous) return false
-            previous = time
-        }
-        return true
-    }
-
     private fun materialize(drivers: Map<String, Live>, copySnapshots: Boolean) =
         drivers.mapValues { (_, driver) ->
             DriverLaps(driver.times.toLongArray(), if (copySnapshots) driver.snaps.toList() else driver.snaps,
@@ -319,7 +305,7 @@ object DriverTimingParser {
         }
 
         checkpoint?.invoke("checking timestamp order primaryChars=${stream.length} supplementChars=${timingF1.length}")
-        if (isChronological(stream, streamStart, checkActive) && isChronological(timingF1, streamStart, checkActive)) {
+        if (timingStreamIsChronological(stream, checkActive) && timingStreamIsChronological(timingF1, checkActive)) {
             checkpoint?.invoke("merging chronological streams")
             // Merge the two sorted topics with one pending line per source. This avoids creating
             // and sorting a large in-memory Event list on Android TV for multi-megabyte archives.

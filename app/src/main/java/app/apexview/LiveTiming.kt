@@ -580,13 +580,13 @@ internal fun rebaseStream(stream: String, archiveStart: Long, newStart: Long, un
 }
 
 // The archive prefixes are fixed ASCII fields. Avoid creating native regex matchers per record.
-private fun archivePrefixEnd(line: String): Int {
-    val start = if (line.firstOrNull() == '\uFEFF') 1 else 0
+private fun archivePrefixEnd(line: String, from: Int = 0, until: Int = line.length): Int {
+    val start = if (from < until && line[from] == '\uFEFF') from + 1 else from
     var hour = start
-    while (hour < line.length && line[hour] in '0'..'9') hour++
-    if (hour < line.length && line[hour] == '.') hour++ else hour = start
+    while (hour < until && line[hour] in '0'..'9') hour++
+    if (hour < until && line[hour] == '.') hour++ else hour = start
     val end = hour + 12
-    if (end > line.length) return -1
+    if (end > until) return -1
     for (i in 0 until 12) {
         val ch = line[hour + i]
         if (when (i) { 2, 5 -> ch != ':'; 8 -> ch != '.'; else -> ch !in '0'..'9' }) return -1
@@ -603,14 +603,36 @@ internal fun streamOffsetMs(line: String): Long {
     return streamOffsetMs(line, end)
 }
 
-internal fun streamOffsetMs(line: String, end: Int): Long {
+internal fun streamOffsetMs(line: String, end: Int): Long = streamOffsetMs(line, 0, end)
+
+private fun streamOffsetMs(line: String, from: Int, end: Int): Long {
     val hour = end - 12
-    val start = if (line.firstOrNull() == '\uFEFF') 1 else 0
+    val start = if (line[from] == '\uFEFF') from + 1 else from
     var days = 0L
     for (i in start until hour - 1) days = days * 10 + (line[i] - '0')
     fun pair(i: Int) = (line[i] - '0') * 10 + (line[i + 1] - '0')
     return (((days * 24 + pair(hour)) * 60 + pair(hour + 3)) * 60 + pair(hour + 6)) * 1000 +
         pair(end - 3) * 10 + (line[end - 1] - '0')
+}
+
+/** Check ordering without allocating a substring for every line of the archive. */
+internal fun timingStreamIsChronological(text: String, checkActive: () -> Unit): Boolean {
+    var start = 0
+    var previous = Long.MIN_VALUE
+    var records = 0
+    while (start < text.length) {
+        if (records++ % 256 == 0) checkActive()
+        var end = start
+        while (end < text.length && text[end] != '\n' && text[end] != '\r') end++
+        val prefix = archivePrefixEnd(text, start, end)
+        if (prefix in 0 until end) {
+            val offset = streamOffsetMs(text, start, prefix)
+            if (offset < previous) return false
+            previous = offset
+        }
+        start = end + 1
+    }
+    return true
 }
 
 class LiveTimingArchive(private val token: String, private val userAgent: String) {
@@ -1019,7 +1041,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             core.tracks.isNotEmpty() && core.laps.isNotEmpty()
         ) launch {
             val writeJob = kotlin.coroutines.coroutineContext
-            if (replayCache.write(core) { writeJob.ensureActive() }) progress("Replay index saved")
+            val started = android.os.SystemClock.elapsedRealtime()
+            val saved = replayCache.write(core) { writeJob.ensureActive() }
+            progress("Replay index ${if (saved) "saved" else "write failed"} · ${android.os.SystemClock.elapsedRealtime() - started}ms")
         }
 
         val isRace = type.contains("Race", ignoreCase = true)

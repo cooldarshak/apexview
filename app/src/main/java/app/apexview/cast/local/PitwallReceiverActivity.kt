@@ -90,9 +90,14 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var controlsVisible by mutableStateOf(true)
     private var controlsJob: kotlinx.coroutines.Job? = null
 
+    private var frameDiagnostics: app.apexview.WindowFrameDiagnostics? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         DiagnosticLogs.startIfEnabled(applicationContext)
+        if (DiagnosticLogs.isEnabled(applicationContext)) {
+            frameDiagnostics = app.apexview.WindowFrameDiagnostics(window, role = "receiver")
+        }
         CrashReports.install(applicationContext)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContent { AppTheme { ReceiverScreen() } }
@@ -525,6 +530,8 @@ class PitwallReceiverActivity : ComponentActivity() {
         super.onStop()
     }
     override fun onDestroy() {
+        frameDiagnostics?.close()
+        frameDiagnostics = null
         destroyed = true; advertisement?.close(); runCatching { server?.close() }
         connection?.close(); connection = null; stopPlayback()
         if (httpDelegate.isInitialized()) {

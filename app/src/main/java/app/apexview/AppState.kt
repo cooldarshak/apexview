@@ -3260,66 +3260,78 @@ class AppState(
                             }
                             if (!budgetReported && elapsed >= 5_000) {
                                 budgetReported = true
+                                val rows = if (session == null || clock == null) 0 else
+                                    session.laps.count { it.value.at(clock)?.position != null }
+                                val cars = if (session == null || clock == null || session.outline.size < 8) 0 else
+                                    session.tracks.count { it.value.at(clock) != null }
                                 recordTimingDiagnostic("Replay 5s checkpoint towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs " +
-                                    "clockUtcMs=$clock positionMs=${sample.positionMs} " +
+                                    "clockUtcMs=$clock positionMs=${sample.positionMs} rankedRows=$rows positionedCars=$cars " +
                                     "trackFromUtcMs=${session?.firstTrackUtc} trackThroughUtcMs=${session?.lastTrackUtc}")
                             }
                         }
-                        val loaded = coroutineScope {
-                            val clockJob = launch {
-                                while (true) {
-                                    inspectPlayback()
-                                    kotlinx.coroutines.delay(200)
-                                }
-                            }
-                            try {
-                                LiveTimingArchive(token!!, userAgent).load(
-                                    ref = ref!!,
-                                    watchedUtc = initial.videoUtcMs,
-                                    replayPositionMs = initial.positionMs,
-                                    positionScratchDir = context.cacheDir,
-                                    replayCache = ReplayCoreCache(context.cacheDir, contentId),
-                                    timingOffsetMs = initial.offsetMs,
-                                    playhead = playhead::get,
-                                    traceId = trace,
-                                    onProgress = { status ->
-                                        if (timingContentId == contentId) {
-                                            if (timing?.outline?.size?.let { it >= 8 } != true) mapStatus = status
-                                            recordTimingDiagnostic(status)
-                                        }
-                                    },
-                                    onPartial = { partial ->
-                                        if (timingContentId == contentId) {
-                                            showTiming(partial)
-                                            inspectPlayback()
-                                            recordTimingDiagnostic(
-                                                "Partial data: drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
-                                                    "cars=${partial.tracks.size}, outlinePoints=${partial.outline.size / 2} " +
-                                                    "trackFromUtcMs=${partial.firstTrackUtc} trackThroughUtcMs=${partial.lastTrackUtc}"
-                                            )
-                                            mapStatus = when {
-                                                partial.outline.size >= 8 -> null
-                                                partial.tracks.isEmpty() -> "Loading track positions…"
-                                                else -> "Track data loaded; waiting for a usable circuit outline…"
-                                            }
-                                        }
-                                    },
-                                )
-                            } finally {
-                                clockJob.cancel()
-                            }
+                        var archiveComplete = false
+                        val clockJob = launch {
+                            do {
+                                inspectPlayback()
+                                kotlinx.coroutines.delay(200)
+                            } while (!archiveComplete || towerReadyMs == null || mapReadyMs == null || !budgetReported)
                         }
-                        if (timingContentId != contentId) return@launch
-                        showTiming(loaded)
-                        inspectPlayback()
-                        recordTimingDiagnostic(
-                            "Archive complete: drivers=${loaded.drivers.size}, laps=${loaded.laps.size}, " +
-                                "cars=${loaded.tracks.size}, outlinePoints=${loaded.outline.size / 2} " +
-                                "towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs"
-                        )
-                        launch(kotlinx.coroutines.Dispatchers.IO) { rememberOutline(loaded) }
-                        mapStatus = if (loaded.outline.isEmpty()) "Couldn't trace the track; showing cars only" else null
-                        return@launch
+                        try {
+                            val loaded = LiveTimingArchive(token!!, userAgent).load(
+                                ref = ref!!,
+                                watchedUtc = initial.videoUtcMs,
+                                replayPositionMs = initial.positionMs,
+                                positionScratchDir = context.cacheDir,
+                                replayCache = ReplayCoreCache(context.cacheDir, contentId),
+                                timingOffsetMs = initial.offsetMs,
+                                playhead = playhead::get,
+                                traceId = trace,
+                                onProgress = { status ->
+                                    if (timingContentId == contentId) {
+                                        if (timing?.outline?.size?.let { it >= 8 } != true) mapStatus = status
+                                        recordTimingDiagnostic(status)
+                                    }
+                                },
+                                onPartial = { partial ->
+                                    if (timingContentId == contentId) {
+                                        showTiming(partial)
+                                        inspectPlayback()
+                                        recordTimingDiagnostic(
+                                            "Partial data: drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
+                                                "cars=${partial.tracks.size}, outlinePoints=${partial.outline.size / 2} " +
+                                                "trackFromUtcMs=${partial.firstTrackUtc} trackThroughUtcMs=${partial.lastTrackUtc}"
+                                        )
+                                        mapStatus = when {
+                                            partial.outline.size >= 8 -> null
+                                            partial.tracks.isEmpty() -> "Loading track positions…"
+                                            else -> "Track data loaded; waiting for a usable circuit outline…"
+                                        }
+                                    }
+                                },
+                            )
+                            if (timingContentId != contentId) return@launch
+                            showTiming(loaded)
+                            archiveComplete = true
+                            inspectPlayback()
+                            recordTimingDiagnostic(
+                                "Archive complete: drivers=${loaded.drivers.size}, laps=${loaded.laps.size}, " +
+                                    "cars=${loaded.tracks.size}, outlinePoints=${loaded.outline.size / 2} " +
+                                    "towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs"
+                            )
+                            launch(kotlinx.coroutines.Dispatchers.IO) { rememberOutline(loaded) }
+                            mapStatus = if (loaded.outline.isEmpty()) "Couldn't trace the track; showing cars only" else null
+                            // The cached archive may finish before Media3 supplies the playhead.
+                            // Continue observing briefly so the first usable rows and dots still have a timestamp.
+                            if (towerReadyMs == null || mapReadyMs == null || !budgetReported) {
+                                val observed = kotlinx.coroutines.withTimeoutOrNull(15_000) { clockJob.join(); true }
+                                if (observed == null) recordTimingDiagnostic(
+                                    "Replay readiness observation ended towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs"
+                                )
+                            }
+                            return@launch
+                        } finally {
+                            clockJob.cancel()
+                        }
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         android.util.Log.i("ApexviewTiming", "Replay cancelled content=$contentId trace=$trace")
                         throw e

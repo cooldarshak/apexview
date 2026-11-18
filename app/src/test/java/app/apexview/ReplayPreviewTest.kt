@@ -1,10 +1,19 @@
 package app.apexview
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ReplayPreviewTest {
+    @Test
+    fun checksArchiveOrderAcrossBomDayPrefixesAndMixedLineEndings() {
+        val sorted = "\uFEFF23:59:59.999{}\r\n1.00:00:00.000{}\r1.00:00:00.010{}"
+        assertTrue(timingStreamIsChronological(sorted) {})
+        assertFalse(timingStreamIsChronological("$sorted\n1.00:00:00.009{}") {})
+    }
+
     @Test
     fun publishesPrimaryStandingsAtThePlayheadAndLeavesTheRestUnread() {
         val lines = listOf(

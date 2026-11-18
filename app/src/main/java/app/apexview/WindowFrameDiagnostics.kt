@@ -9,7 +9,7 @@ import android.view.FrameMetrics
 import android.view.Window
 
 /** Summarizes window render times independently of the video decoder counters. */
-internal class WindowFrameDiagnostics(private val window: Window) : AutoCloseable {
+internal class WindowFrameDiagnostics(private val window: Window, private val role: String = "player") : AutoCloseable {
     private val thread = HandlerThread("PitwallFrameMetrics").apply { start() }
     private var started = 0L
     private var frames = 0
@@ -34,7 +34,7 @@ internal class WindowFrameDiagnostics(private val window: Window) : AutoCloseabl
         missedReports += dropped
         maxNs = maxOf(maxNs, duration)
         if (now - started >= 2_000) {
-            Log.i("PitwallFrames", "uptimeMs=$now intervalMs=${now - started} frames=$frames " +
+            Log.i("PitwallFrames", "role=$role uptimeMs=$now intervalMs=${now - started} frames=$frames " +
                 "slow=$slow firstDraws=$firstDraws missedReports=$missedReports maxFrameMs=${maxNs / 1_000_000}")
             reset(now)
         }
