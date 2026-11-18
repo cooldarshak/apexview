@@ -191,7 +191,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                         FcastProtocol.PAUSE -> { desiredPlaying = false; player?.pause() }
                         FcastProtocol.RESUME -> { desiredPlaying = true; player?.play() }
                         FcastProtocol.STOP -> stopPlayback()
-                        FcastProtocol.SEEK -> player?.seekTo((number(body, "time", 0.0, 604800.0) * 1000).toLong())
+                        FcastProtocol.SEEK -> seekFromSender((number(body, "time", 0.0, 604800.0) * 1000).toLong())
                         FcastProtocol.SET_SPEED -> { desiredSpeed = number(body, "speed", 0.25, 4.0).toFloat(); player?.setPlaybackSpeed(desiredSpeed) }
                         FcastProtocol.SET_VOLUME -> { desiredVolume = number(body, "volume", 0.0, 1.0).toFloat(); player?.volume = desiredVolume }
                         FcastProtocol.TIMING -> if (timingPeer && body != null) {
@@ -372,9 +372,25 @@ class PitwallReceiverActivity : ComponentActivity() {
         val current = player ?: return 0
         if (isDirectPlayback()) return current.currentPosition
         val info = streamMetadata() ?: return current.currentPosition
-        val offset = if (current.currentTimeline.isEmpty) 0L else current.currentTimeline.getWindow(current.currentMediaItemIndex, Timeline.Window()).positionInFirstPeriodUs / 1000
-        return ReceiverTimeline.position(info.getLong("originMs"), offset, current.currentPosition)
+        return ReceiverTimeline.position(info.getLong("originMs"), periodOffsetMs(current), current.currentPosition)
     }
+
+    private fun seekFromSender(targetMs: Long) {
+        val current = player ?: return
+        val originMs = if (isDirectPlayback()) null else streamMetadata()?.getLong("originMs")
+        val localTarget = if (originMs == null) targetMs else
+            targetMs - ReceiverTimeline.position(originMs, periodOffsetMs(current), 0)
+        current.seekTo(ReceiverTimeline.seek(localTarget, current.duration))
+    }
+
+    private fun periodOffsetMs(current: Player): Long {
+        val timeline = current.currentTimeline
+        val index = current.currentMediaItemIndex
+        return if (index in 0 until timeline.windowCount) {
+            timeline.getWindow(index, Timeline.Window()).positionInFirstPeriodUs / 1000
+        } else 0L
+    }
+
     private fun controllerSeek(targetMs: Long) {
         if (streamMetadata() != null) connection?.send(FcastProtocol.UI_CONTROL, JSONObject().put("action", "seek").put("time", targetMs / 1000.0))
         else player?.let { it.seekTo(ReceiverTimeline.seek(targetMs, it.duration)) }
