@@ -365,6 +365,7 @@ class AppState(
     private var remoteWallClockBaseMs: Long? = null
     private var nativeComposedCast by mutableStateOf<app.apexview.cast.NativeComposedCastSession?>(null)
     private var nativeCastPump: Job? = null
+    private var preparingNativeCast: app.apexview.cast.NativeComposedCastSession? = null
     private val retiredNativeCasts = mutableListOf<app.apexview.cast.NativeComposedCastSession>()
     internal var castTowerBounds: app.apexview.cast.CastTimingProtocol.Panel? = null
         private set
@@ -980,6 +981,7 @@ class AppState(
                     live, if (live) 0L else clock.player.duration.takeIf { it > 0 } ?: durationMs,
                     dashOffset, hlsOffset, audio.feed.sourceStream.profileLabel, liveEdge, windowUtc)
                 val next = requireNotNull(owned)
+                preparingNativeCast = next
                 kotlinx.coroutines.withTimeout(60_000) {
                     while (!next.ready) { next.update(targetMs); if (!next.ready) kotlinx.coroutines.delay(250) }
                 }
@@ -990,6 +992,7 @@ class AppState(
                 nativeComposedCast?.let { retiredNativeCasts += it }
                 castRelay?.let { retiredCastRelays += it }; castRelay = null
                 nativeComposedCast = next; directCast = null; owned = null
+                if (preparingNativeCast === next) preparingNativeCast = null
                 loadNativeComposedCast(next, selected, targetMs)
                 nativeCastPump = scope.launch {
                     try {
@@ -1014,7 +1017,11 @@ class AppState(
                     castStatus = DiagnosticRedaction.redact(error.message ?: "Protected TV preparation failed").take(240); message = castStatus
                     android.util.Log.w("PitwallCast", DiagnosticRedaction.redact(error.stackTraceToString()))
                 }
-            } finally { owned?.close(); if (generation == castPreparationGeneration) { castBusy = false; castPreparationJob = null } }
+            } finally {
+                if (preparingNativeCast === owned) preparingNativeCast = null
+                owned?.close()
+                if (generation == castPreparationGeneration) { castBusy = false; castPreparationJob = null }
+            }
         }
     }
     private fun nativeCastScene(session: app.apexview.cast.NativeComposedCastSession): JSONObject? {
@@ -2905,6 +2912,15 @@ class AppState(
         layoutRequest++
     }
 
+    private fun clearLocalHevcComposition() {
+        val retained = buildSet {
+            nativeComposedCast?.let { add(it.compositionGroup) }
+            preparingNativeCast?.let { add(it.compositionGroup) }
+            retiredNativeCasts.forEach { add(it.compositionGroup) }
+        }
+        ProtectedHevcLiveComposition.clearAll(retainGroups = retained)
+    }
+
     /** Stop protected capture and restore the original tile arrangement and feed player. */
     fun stopProtectedCompositionPresentation(restorePlayer: Boolean = true, keepSourceVideoDisabled: Boolean = false) {
         val wasStarting = archiveCompositionStarting
@@ -2940,7 +2956,7 @@ class AppState(
         }
         protectedCompositionBounds = emptyMap()
         protectedCompositionHost = null
-        ProtectedHevcLiveComposition.clearAll()
+        clearLocalHevcComposition()
         HevcFeedProfileCapture.clearTileTestSelection()
         if (keepSourceVideoDisabled) tiles.forEach { it.feed.setProtectedCompositionVideoRole(false, it.w.toInt().coerceAtLeast(1), it.h.toInt().coerceAtLeast(1)) }
         else applyVideoBudget()
@@ -3622,7 +3638,7 @@ class AppState(
             f1DashCaptureJob = null
             f1DashCapture = null
             HevcFeedProfileCapture.clearTileTestSelection()
-            ProtectedHevcLiveComposition.clearAll()
+            clearLocalHevcComposition()
         }
         layoutMode = mode
         if (mode == LayoutMode.TV) {

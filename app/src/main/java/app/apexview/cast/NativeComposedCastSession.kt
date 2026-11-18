@@ -26,6 +26,7 @@ internal class NativeComposedCastSession(
 ) : AutoCloseable {
     val sourceLabels = feeds.map { it.label }
     private val group = "cast-${UUID.randomUUID()}"
+    val compositionGroup: String get() = group
     private val capture = F1ArchiveFeedCapture(userAgent, ascendon, entitlement, factory, 720, preferredHeight)
     private val audio = CmafCastAudio(CmafHttpReader(factory), language)
     private val relay = ComposedCmafRelay(address, peer)
@@ -97,7 +98,7 @@ internal class NativeComposedCastSession(
         if (closed) return
         closed = true; relay.close()
         cleanup.launch {
-            try { gate.withLock { capture.reset(); audio.close(); ProtectedHevcLiveComposition.clearSelection(group) } }
+            try { gate.withLock { capture.reset(); audio.close(); ProtectedHevcLiveComposition.clearSelection(group, discardInitialization = true) } }
             finally { cleanup.cancel() }
         }
     }

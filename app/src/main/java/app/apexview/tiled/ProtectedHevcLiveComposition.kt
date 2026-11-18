@@ -190,16 +190,17 @@ internal object ProtectedHevcLiveComposition {
     }
 
     @Synchronized
-    fun clearSelection(group: String) {
+    fun clearSelection(group: String, discardInitialization: Boolean = false) {
         sessions.remove(group)?.clear()
+        if (discardInitialization) pendingInitializations.remove(group)?.values?.forEach(PendingInitialization::zero)
     }
 
     @Synchronized
-    fun clearAll() {
-        sessions.values.forEach(Session::clear)
-        sessions.clear()
-        pendingInitializations.values.flatMap { it.values }.forEach(PendingInitialization::zero)
-        pendingInitializations.clear()
+    fun clearAll(retainGroups: Set<String> = emptySet()) {
+        sessions.keys.filter { it !in retainGroups }.forEach { sessions.remove(it)?.clear() }
+        pendingInitializations.keys.filter { it !in retainGroups }.forEach { group ->
+            pendingInitializations.remove(group)?.values?.forEach(PendingInitialization::zero)
+        }
     }
 
     /**
