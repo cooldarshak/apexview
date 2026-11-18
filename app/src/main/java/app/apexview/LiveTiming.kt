@@ -8,6 +8,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -647,7 +649,41 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         var partialTracks: Map<String, DriverTrack> = emptyMap()
         var partialOutline = FloatArray(0)
         var partialHistory = DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
+        fun checkpoint(stage: String, detail: String) {
+            val heap = Runtime.getRuntime()
+            android.util.Log.i("ApexviewTiming", "archive=$path stage=$stage $detail " +
+                "heapUsedMiB=${(heap.totalMemory() - heap.freeMemory()) / 1048576} " +
+                "heapMaxMiB=${heap.maxMemory() / 1048576}")
+        }
+        suspend fun <T> traceStage(stage: String, block: suspend ((String) -> Unit) -> T): T = coroutineScope {
+            val started = android.os.SystemClock.elapsedRealtime()
+            val last = java.util.concurrent.atomic.AtomicReference("starting")
+            val report: (String) -> Unit = { detail ->
+                last.set(detail)
+                checkpoint(stage, detail)
+            }
+            val heartbeatJob = launch(Dispatchers.IO) {
+                while (true) {
+                    delay(10_000)
+                    val seconds = (android.os.SystemClock.elapsedRealtime() - started) / 1000
+                    checkpoint(stage, "still running after ${seconds}s · last=${last.get()}")
+                }
+            }
+            report("begin")
+            try {
+                block(report).also { report("complete elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}") }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                report("cancelled")
+                throw e
+            } catch (e: Exception) {
+                report("failed type=${e.javaClass.simpleName} at ${e.stackTrace.firstOrNull()}")
+                throw e
+            } finally {
+                heartbeatJob.cancel()
+            }
+        }
         suspend fun publishTopics() {
+            checkpoint("publish-overlays", "towerDrivers=${partialHistory.laps.size} cars=${partialTracks.size} outlinePoints=${partialOutline.size / 2}")
             onPartial(SessionTiming(
                 type = type, drivers = drivers, tracks = partialTracks,
                 states = partialHistory.states.states, outline = partialOutline,
@@ -659,8 +695,12 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             progress("Streaming and parsing Position.z.jsonStream…")
             val job = coroutineContext
             try {
-                open(path + "Position.z.jsonStream").bufferedReader().useLines { lines ->
-                    parsePositionLines(lines) { job.ensureActive() }
+                traceStage("map-position-stream") { report ->
+                    report("opening HTTP stream")
+                    open(path + "Position.z.jsonStream").bufferedReader().useLines { lines ->
+                        report("HTTP stream open; reading and decoding records")
+                        parsePositionLines(lines, { job.ensureActive() }, report)
+                    }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -682,7 +722,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 val started = android.os.SystemClock.elapsedRealtime()
                 try {
                     val accumulator = StateHistoryAccumulator()
-                    val laps = DriverTimingParser.parse(timingStream, initialStart, timingF1Stream, accumulator)
+                    val laps = traceStage("tower-history") { report ->
+                        DriverTimingParser.parse(timingStream, initialStart, timingF1Stream, accumulator, report)
+                    }
                     DriverTimingParse(laps, accumulator.finish()).also {
                         progress("PARSED timing history · towerDrivers=${it.laps.size} stateDrivers=${it.states.states.size} · ${android.os.SystemClock.elapsedRealtime() - started}ms")
                     }
@@ -717,8 +759,12 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
 
         val geometryStarted = android.os.SystemClock.elapsedRealtime()
         progress("Building the track map while timing tower finishes · cars=${tracks.size}")
-        val built = withContext(Dispatchers.Default) { tracks.mapValues { it.value.build() } }
-        val traced = withContext(Dispatchers.Default) { traceOutline(tracks.values.toList()) }
+        val built = withContext(Dispatchers.Default) {
+            traceStage("map-track-arrays") { _ -> tracks.mapValues { it.value.build() } }
+        }
+        val traced = withContext(Dispatchers.Default) {
+            traceStage("map-outline") { _ -> traceOutline(tracks.values.toList()) }
+        }
         withContext(Dispatchers.Main) {
             partialTracks = built
             partialOutline = traced
@@ -740,7 +786,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 val stateStarted = android.os.SystemClock.elapsedRealtime()
                 try {
                     val history = StateHistoryAccumulator()
-                    val laps = DriverTimingParser.parse(timingStream, streamStart, timingF1Stream, history)
+                    val laps = traceStage("tower-clock-correction") { report ->
+                        DriverTimingParser.parse(timingStream, streamStart, timingF1Stream, history, report)
+                    }
                     DriverTimingParse(laps, history.finish()).also {
                         progress("REPARSED timing history · towerDrivers=${it.laps.size} stateDrivers=${it.states.states.size} crossings=${it.states.crossings.size} · ${android.os.SystemClock.elapsedRealtime() - stateStarted}ms")
                     }
@@ -1276,7 +1324,11 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
     internal fun parsePositionsDetailed(stream: String): PositionParseReport =
         parsePositionLines(stream.lineSequence())
 
-    private fun parsePositionLines(lines: Sequence<String>, checkActive: () -> Unit = {}): PositionParseReport {
+    private fun parsePositionLines(
+        lines: Sequence<String>,
+        checkActive: () -> Unit = {},
+        checkpoint: ((String) -> Unit)? = null,
+    ): PositionParseReport {
         val starts = ArrayList<Long>(START_SAMPLES)
         val tracks = mutableMapOf<String, TrackBuilder>()
         var inputRecords = 0
@@ -1289,6 +1341,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             val prefix = streamPrefixLength(line)
             if (line.length <= prefix) return@forEach
             inputRecords++
+            if (inputRecords == 1 || inputRecords % 1024 == 0) {
+                checkpoint?.invoke("records=$inputRecords decoded=$decodedRecords malformed=$malformedRecords samples=$positionSamples cars=${tracks.size}")
+            }
             val json = try {
                 JSONObject(inflate(line.substring(prefix)))
             } catch (_: Exception) {

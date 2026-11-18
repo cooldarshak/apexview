@@ -250,13 +250,21 @@ object DriverTimingParser {
         streamStart: Long,
         timingF1: String,
         stateHistory: StateHistoryAccumulator?,
+        checkpoint: ((String) -> Unit)? = null,
     ): Map<String, DriverLaps> {
         val drivers = mutableMapOf<String, Live>()
 
+        var records = 0
+        var invalidJson = 0
+        var missingLines = 0
         fun consume(event: TimedLine) {
+            records++
+            if (records == 1 || records % 1024 == 0) {
+                checkpoint?.invoke("merge records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size}")
+            }
             val prefix = streamPrefixLength(event.line)
-            val json = runCatching { JSONObject(event.line.substring(prefix)) }.getOrNull() ?: return
-            val lines = json.optJSONObject("Lines") ?: return
+            val json = runCatching { JSONObject(event.line.substring(prefix)) }.getOrNull() ?: run { invalidJson++; return }
+            val lines = json.optJSONObject("Lines") ?: run { missingLines++; return }
             if (event.source == 0) stateHistory?.accept(lines, event.time)
             lines.keys().forEach { number ->
                 val d = lines.optJSONObject(number) ?: return@forEach
@@ -266,7 +274,9 @@ object DriverTimingParser {
             }
         }
 
+        checkpoint?.invoke("checking timestamp order primaryChars=${stream.length} supplementChars=${timingF1.length}")
         if (isChronological(stream, streamStart) && isChronological(timingF1, streamStart)) {
+            checkpoint?.invoke("merging chronological streams")
             // Merge the two sorted topics with one pending line per source. This avoids creating
             // and sorting a large in-memory Event list on Android TV for multi-megabyte archives.
             val primary = timedLines(stream, 0, streamStart).iterator()
@@ -285,6 +295,7 @@ object DriverTimingParser {
                 }
             }
         } else {
+            checkpoint?.invoke("sorting out-of-order streams")
             // Preserve the previous defensive behaviour for malformed/out-of-order archives.
             timedLines(stream, 0, streamStart)
                 .plus(timedLines(timingF1, 1, streamStart))
@@ -292,6 +303,7 @@ object DriverTimingParser {
                 .forEach(::consume)
         }
 
+        checkpoint?.invoke("building history records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size}")
         return drivers.mapValues { (_, l) ->
             DriverLaps(l.times.toLongArray(), l.snaps, l.crossings.toLongArray(), l.lapTimes.toLongArray(), l.lapCounts.toIntArray())
         }
