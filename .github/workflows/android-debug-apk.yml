@@ -52,8 +52,17 @@ jobs:
               ffmpeg -hide_banner -filters | grep -w drawtext >/dev/null
           }
           if ! ffmpeg_ready; then
-            sudo apt-get -o Acquire::Languages=none -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --no-install-recommends -y ffmpeg fonts-dejavu-core
+            ffmpeg_dir="$RUNNER_TEMP/pitwall-ffmpeg"
+            mkdir -p "$ffmpeg_dir"
+            archive="$ffmpeg_dir/ffmpeg.tar.xz"
+            release=autobuild-2026-11-18-12-39
+            asset=ffmpeg-n8.1.3-36-ge22a4510c9-linux64-gpl-8.1.tar.xz
+            curl --fail --location --retry 2 --max-time 120 \
+              "https://github.com/BtbN/FFmpeg-Builds/releases/download/$release/$asset" -o "$archive"
+            printf '%s  %s\n' fce424851b0a982bdd4ac4e96f0e7b32cf29de999e54500676d41ad175ed0c79 "$archive" | sha256sum --check
+            tar -xJf "$archive" -C "$ffmpeg_dir" --strip-components=1
+            export PATH="$ffmpeg_dir/bin:$PATH"
+            echo "$ffmpeg_dir/bin" >> "$GITHUB_PATH"
           fi
           ffmpeg_ready
           ffmpeg -version > "$RUNNER_TEMP/ffmpeg-version.txt"

@@ -26,21 +26,21 @@ def encode(output):
     for index, (color, width, height, _, _) in enumerate(FEEDS):
         args += ["-f", "lavfi", "-i",
                  f"color={color}:size={width}x{height}:rate={FPS}:duration=2"]
-        filters.append(f"[{index}:v]drawtext=text='FEED {index + 1}':"
+        filters.append(f"[{index}:v]drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='FEED {index + 1}':"
                        f"x=12:y=12:fontsize=18:fontcolor=white[feed{index}]")
     layout = "|".join(f"{x}_{y}" for _, _, _, x, y in FEEDS)
     inputs = "".join(f"[feed{i}]" for i in range(len(FEEDS)))
     filters += [
         f"{inputs}xstack=inputs=4:layout={layout}:fill=black[feeds]",
         "[feeds]pad=960:540:0:0,drawbox=x=640:y=0:w=320:h=340:color=0x181818:t=fill,"
-        "drawtext=text='TIMING TOWER':x=654:y=14:fontsize=20:fontcolor=white[tower]",
+        "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='TIMING TOWER':x=654:y=14:fontsize=20:fontcolor=white[tower]",
     ]
     table = "tower"
     for row, driver in enumerate(("VER", "NOR", "LEC", "PIA")):
         y = 52 + 45 * row
         filters.append(
             f"[{table}]drawbox=x=650:y={y}:w=290:h=37:color=0x6630bc:t=fill,"
-            f"drawtext=text='{row + 1}  {driver}    S1  S2  S3':"
+            f"drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='{row + 1}  {driver}    S1  S2  S3':"
             f"x=658:y={y + 8}:fontsize=18:fontcolor=white[row{row}]"
         )
         table = f"row{row}"
@@ -48,7 +48,7 @@ def encode(output):
     filters += [
         f"[{table}]drawbox=x=423:y=103:w=205:h=110:color=0x161616:t=fill,"
         "drawbox=x=443:y=121:w=165:h=72:color=white:t=3,"
-        "drawtext=text='TRACKER':x=460:y=152:fontsize=16:fontcolor=white[track]",
+        "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='TRACKER':x=460:y=152:fontsize=16:fontcolor=white[track]",
         "[track][4:v]overlay=x='443+60*t':y=117:shortest=1[scene]",
     ]
     run("ffmpeg", *args, "-filter_complex", ";".join(filters), "-map", "[scene]",
