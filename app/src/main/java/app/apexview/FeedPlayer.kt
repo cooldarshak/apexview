@@ -229,6 +229,19 @@ class FeedPlayer(
     internal val selectedVideoTrackCount: Int get() = player.currentTracks.groups.sumOf { group ->
         if (group.type == C.TRACK_TYPE_VIDEO) (0 until group.mediaTrackGroup.length).count { group.isTrackSelected(it) } else 0
     }
+    internal fun compositionPlaybackEvidence(): String {
+        val counters = player.videoDecoderCounters
+        counters?.ensureUpdated()
+        val format = player.videoFormat
+        return "decoder=${activeVideoDecoderName ?: "none"} hardware=$activeVideoDecoderHardware " +
+            "drm=${drmLevel.ifBlank { "unknown" }} keysLoaded=$hasLoadedDrmKeys " +
+            "firstFrame=$hasRenderedFirstFrame selectedVideoTracks=$selectedVideoTrackCount " +
+            "codedFormat=${format?.width ?: 0}x${format?.height ?: 0} fps=${format?.frameRate ?: -1f} " +
+            "surface=${composedSurfaceWidth}x$composedSurfaceHeight positionMs=${player.currentPosition} " +
+            "bufferedMs=${player.totalBufferedDuration} rendered=${counters?.renderedOutputBufferCount ?: 0} " +
+            "dropped=${counters?.droppedBufferCount ?: 0} playing=${player.isPlaying}"
+    }
+
     internal val renderedVideoFrames: Int get() {
         val counters = player.videoDecoderCounters ?: return 0
         counters.ensureUpdated()

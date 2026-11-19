@@ -374,6 +374,7 @@ class AppState(
     private var castRetryAfter = 0L
     private val retiredCastRelays = mutableListOf<app.apexview.cast.SceneCastRelay>()
     val castingActive: Boolean get() = castRelay != null || nativeComposedCast != null || directCast != null
+    var tvCastingMenuOpen by mutableStateOf(false)
     var castPickerOpen by mutableStateOf(false)
     internal var localCastDevices by mutableStateOf<List<app.apexview.cast.local.PitwallDevice>>(emptyList())
         private set
@@ -443,7 +444,7 @@ class AppState(
         localCastDevices = emptyList(); localCastDiscoveryStatus = "Looking for Pitwall TVs…"
         localDiscovery = app.apexview.cast.local.PitwallDiscovery(context, { devices ->
             localCastDevices = devices
-            localCastDiscoveryStatus = if (devices.isEmpty()) "Open Settings → Receive from phone on the TV. Both devices need the same local network."
+            localCastDiscoveryStatus = if (devices.isEmpty()) "Open TV casting → Receive from phone on the TV. Both devices need the same local network."
                 else "Choose a TV. Allow the connection on its screen."
         }, { error -> localCastDiscoveryStatus = error }).also { it.start() }
     }
@@ -2634,9 +2635,11 @@ class AppState(
                     val log = "$phase decoder=${host.feed.activeVideoDecoderName} activeVideoDecoders=$observedActiveVideoDecoders firstFrame=${host.feed.hasRenderedFirstFrame}"
                     val now = android.os.SystemClock.elapsedRealtime()
                     if (log != previousLog || now - lastEvidenceAt >= 5_000L) {
-                        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_PLAYBACK $log renderedFrames=${host.feed.renderedVideoFrames} " +
-                            "selectedVideoTracks=${host.feed.selectedVideoTrackCount} sceneOutput=${sceneOutputSize.first}x${sceneOutputSize.second} " +
-                            "codecSurface=${host.feed.composedSurfaceWidth}x${host.feed.composedSurfaceHeight} bufferedMs=${host.feed.player.totalBufferedDuration}")
+                        android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_PLAYBACK path=finite " +
+                            "content=$contentId attempt=${attempt + 1} feeds=${selected.size} " +
+                            "stage=${phase.replace(' ', '_')} activeVideoDecoders=$observedActiveVideoDecoders " +
+                            "sceneOutput=${sceneOutputSize.first}x${sceneOutputSize.second} " +
+                            host.feed.compositionPlaybackEvidence())
                         previousLog = log
                         lastEvidenceAt = now
                     }
@@ -2718,7 +2721,14 @@ class AppState(
             ?: selectedTiles.first { it !== host }
         val group = "archive-content-$contentId-${java.util.UUID.randomUUID()}"
         f1DashCaptureJob?.cancel()
-        val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
+        val maxHeight = if (isTclG09()) {
+            minOf(settings.videoQuality.targetHeight.takeIf { it > 0 } ?: 720,
+                if (selectedTiles.size > 4) 540 else 720)
+        } else settings.videoQuality.targetHeight.takeIf { it > 0 } ?: 2160
+        val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty(),
+            maximumHeight = maxHeight)
+        val evidence = "content=$contentId attempt=${attempt + 1} feeds=${feeds.size}"
+        android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_START $evidence path=rolling maxSourceHeight=$maxHeight tclG09=${isTclG09()}")
         f1DashCapture = capture
         ProtectedHevcLiveComposition.selectFeeds(group, labels)
         val startup = ArchiveCompositionStartup()
@@ -2819,7 +2829,13 @@ class AppState(
                                 app.apexview.tiled.ProtectedHevcComposedDashPackageBuilder.build(
                                     window, pssh, window.fragments.first().baseDecodeTimeTicks,
                                     System.currentTimeMillis(), clearOutput = capture.clearOutput,
-                                ).zero()
+                                ).let { packaged ->
+                                    try {
+                                        android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_PREFLIGHT $evidence " +
+                                            "protection=${capture.protection} picture=${packaged.width}x${packaged.height} " +
+                                            "fragments=${window.fragments.size} manifests=${lastSnapshot?.actualManifests?.values?.distinct()}")
+                                    } finally { packaged.zero() }
+                                }
                                 preflightPassed = true
                             } catch (error: Exception) {
                                 window.zero()
@@ -2838,8 +2854,9 @@ class AppState(
                             selectedTiles.map { tile -> async { tile.feed.awaitVideoDecoderRelease(3_000L) } }.awaitAll()
                         }
                         releasedCount = (decodersBefore - selectedTiles.sumOf { it.feed.activeVideoDecoderCount }).coerceAtLeast(0)
-                        if (releaseResults.any { !it }) throw IOException("Decoder release failed for ${releaseResults.count { !it }} source players")
-                        android.util.Log.i("ApexviewSingleDecoder", "Preflight PASS. All source players decoder-free; observed releases=$releasedCount.")
+                        val remaining = observedActiveVideoDecoders
+                        android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_HANDOFF $evidence releases=$releasedCount activeVideoDecoders=$remaining")
+                        if (releaseResults.any { !it } || remaining != 0) throw IOException("Source video decoder release was not confirmed")
                     },
                     replaceHost = { window ->
                         if (host.audible) setAudio(audioMaster)
@@ -2860,6 +2877,8 @@ class AppState(
                     dispose = { it.zero() },
                 )
                 var waitingSince: Long? = null
+                var lastStage = ""
+                var lastEvidenceAt = 0L
                 while (true) {
                     host.feed.problem?.let { throw IOException("Composed decoder/DRM playback failed: $it") }
                     if (!browsing && !host.feed.hasRenderedFirstFrame) {
@@ -2873,6 +2892,19 @@ class AppState(
                         composedArchiveFillingBuffer || host.feed.buffering -> "BUFFERING"
                         composedFirstFrameSeen -> "ACTIVE"
                         else -> "WAITING FOR FIRST FRAME"
+                    }
+                    val activeDecoders = observedActiveVideoDecoders
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (playback != lastStage || DiagnosticLogs.recording && now - lastEvidenceAt >= 5_000L) {
+                        android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_PLAYBACK $evidence " +
+                            "stage=${playback.replace(' ', '_')} activeVideoDecoders=$activeDecoders " +
+                            host.feed.compositionPlaybackEvidence())
+                        lastStage = playback
+                        lastEvidenceAt = now
+                    }
+                    if (activeDecoders > 1) throw IOException("Composed playback allocated $activeDecoders active video decoders")
+                    if (composedFirstFrameSeen && host.feed.activeVideoDecoderHardware == "hardware NO") {
+                        throw IOException("Composed playback selected a software video decoder")
                     }
                     if (playback == "ACTIVE" && message == SINGLE_DECODER_ACTIVATING) message = null
                     val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
@@ -2915,7 +2947,7 @@ class AppState(
                 applyVideoBudget()
                 playback = "FAILED"
                 diagnostics()
-                android.util.Log.w("ApexviewSingleDecoder", "Archive composition failed: $terminalReason")
+                android.util.Log.w("ApexviewSingleDecoder", "F1_COMPOSITION_FAILED $evidence activeVideoDecoders=$observedActiveVideoDecoders reason=${DiagnosticRedaction.redact(terminalReason.orEmpty())}")
                 message = "Single decoder failed: $terminalReason. Use Retry or select Multiple decoders in Settings."
             } finally {
                 if (f1DashCapture === capture) {

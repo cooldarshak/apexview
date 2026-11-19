@@ -29,6 +29,8 @@ internal class DiagnosticHistory {
         if ("Starting timing load for content=" in line) replayStart = line.take(1024)
         if (("ApexviewTiming:" in line && "heapUsedMiB=" !in line) ||
             ("PitwallPlayback:" in line && "event=sample" !in line && "event=scene" !in line) ||
+            ("ApexviewSingleDecoder:" in line && ("F1_COMPOSITION_" in line || "ARCHIVE_VOD_FAILED" in line)) ||
+            ("PitwallReceiver:" in line && ("VIDEO_DECODER_INIT" in line || "VIDEO_FORMAT" in line || "SCENE_RENDERING_CONFIRMED" in line)) ||
             "PREVIOUS_PROCESS_EXIT" in line
         ) {
             if (milestones.size == 96) milestones.removeFirst()

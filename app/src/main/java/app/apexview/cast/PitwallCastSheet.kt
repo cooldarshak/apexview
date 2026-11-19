@@ -28,7 +28,7 @@ internal fun PitwallCastSheet(app: AppState) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("Cast to TV", style = Type.title2)
             Text("Pitwall TV · same video layout", style = Type.headline)
-            Text("On the TV, open Settings → TV casting → Receive from phone. Use the same Wi-Fi or Ethernet network.", style = Type.footnote)
+            Text("On the TV, open TV casting → Receive from phone. Use the same Wi-Fi or Ethernet network.", style = Type.footnote)
             Text(app.localCastDiscoveryStatus, style = Type.subhead)
             app.localCastDevices.forEach { device -> PrimaryButton(device.name, enabled = !app.castBusy) { app.connectLocalCast(device) } }
             SecondaryButton("Search again") { app.startLocalDiscovery() }

@@ -45,6 +45,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
@@ -197,6 +198,36 @@ private fun PickCard(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun TvCastingMenu(app: AppState) {
+    val firstAction = remember { androidx.compose.ui.focus.FocusRequester() }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    fun choose(action: () -> Unit) {
+        app.tvCastingMenuOpen = false
+        action()
+    }
+    ModalBottomSheet(
+        onDismissRequest = { app.tvCastingMenuOpen = false },
+        sheetState = sheetState,
+        containerColor = Ink.background,
+    ) {
+        androidx.compose.runtime.LaunchedEffect(sheetState.currentValue) {
+            if (app.isTv && sheetState.currentValue == androidx.compose.material3.SheetValue.Expanded) {
+                firstAction.requestFocus()
+            }
+        }
+        Column(Modifier.navigationBarsPadding().verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
+            Group("TV casting", footer = "Pitwall TV connects over your local network. Compatible replays use the phone layout and one TV video decoder. Your device handles screen mirroring.") {
+                SettingRow("Receive from phone", onClick = { choose(app::openTvReceiver) },
+                    modifier = Modifier.focusRequester(firstAction))
+                SettingRow("Find a TV", onClick = { choose(app::openCastPicker) })
+                SettingRow("Screen mirroring / Smart View", onClick = { choose(app::openMiracast) })
+            }
+        }
+    }
+}
+
 // Settings.
 
 @Composable
@@ -209,9 +240,9 @@ private fun Group(title: String, footer: String? = null, content: @Composable ()
 }
 
 @Composable
-private fun SettingRow(label: String, value: String? = null, valueColor: Color = Ink.secondary, onClick: (() -> Unit)? = null, trailing: @Composable (() -> Unit)? = null) {
+private fun SettingRow(label: String, value: String? = null, valueColor: Color = Ink.secondary, onClick: (() -> Unit)? = null, modifier: Modifier = Modifier, trailing: @Composable (() -> Unit)? = null) {
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
             .then(if (onClick != null) Modifier.pressable(scaleTo = 0.99f, onClick = onClick) else Modifier)
             .heightIn(min = 50.dp)
@@ -340,13 +371,6 @@ fun SettingsScreen(app: AppState) {
                         app.choosePlatform(platform)
                     }
                 }
-            }
-        }
-        item {
-            Group("TV casting", footer = "Pitwall TV connects over your local network with no developer account or subscription. Clear replay video uses the phone layout and one TV video decoder. Miracast is handled by your device's wireless display software.") {
-                SettingRow("Receive from phone", onClick = app::openTvReceiver)
-                SettingRow("Find a TV", onClick = app::openCastPicker)
-                SettingRow("Screen mirroring / Smart View", onClick = app::openMiracast)
             }
         }
         item {

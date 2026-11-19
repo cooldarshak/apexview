@@ -46,6 +46,7 @@ import androidx.compose.material.icons.rounded.ArrowBackIosNew
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Close
@@ -671,6 +672,7 @@ fun HomeScreen(app: AppState) {
                     Icons.Rounded.CalendarMonth, "Calendar and past seasons",
                     modifier = Modifier.focusRequester(headerFocus), backdrop = backdrop,
                 ) { app.open(Screen.Calendar) }
+                GlyphButton(Icons.Rounded.Cast, "TV casting", backdrop = backdrop) { app.tvCastingMenuOpen = true }
                 GlyphButton(Icons.Rounded.Settings, "Settings", backdrop = backdrop) { app.open(Screen.Settings) }
             }
         },

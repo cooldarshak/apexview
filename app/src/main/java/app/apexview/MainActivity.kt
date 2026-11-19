@@ -275,6 +275,7 @@ private fun Root(app: AppState) {
                 }
             }
         }
+        if (!app.inPip && app.tvCastingMenuOpen) TvCastingMenu(app)
         if (!app.inPip && app.castPickerOpen) PitwallCastSheet(app)
         if (!app.inPip) app.picker?.let { FeedPickerSheet(app, it) }
         // Offered while browsing, never over a stream being watched.
