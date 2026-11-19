@@ -124,6 +124,17 @@ internal object HevcSourceCellCompatibility {
         return Result(reasons.isEmpty(), reasons.distinct())
     }
 
+    /** Coding compatibility alone. A mixed-resolution output validates dimensions by row
+     * and column in [HevcOutputGridValidator], not by requiring every cell to be identical. */
+    fun compareCodingParameters(first: HevcSourceCellSelection, second: HevcSourceCellSelection): Result {
+        val reasons = validateSelection(first, "First") + validateSelection(second, "Second") +
+            HevcParameterSetCompatibility.compare(
+                first.picture.parameterSets.vps, first.picture.parameterSets.sps, first.picture.parameterSets.pps,
+                second.picture.parameterSets.vps, second.picture.parameterSets.sps, second.picture.parameterSets.pps,
+            ).reasons
+        return Result(reasons.isEmpty(), reasons.distinct())
+    }
+
     internal fun validateSelection(
         selection: HevcSourceCellSelection,
         label: String = "Source"
@@ -333,7 +344,7 @@ internal object HevcOutputGridValidator {
         if (ordered.isNotEmpty()) {
             val anchor = ordered.first().sourceCell
             ordered.drop(1).forEach { placement ->
-                reasons += HevcSourceCellCompatibility.compare(anchor, placement.sourceCell).reasons
+                reasons += HevcSourceCellCompatibility.compareCodingParameters(anchor, placement.sourceCell).reasons
             }
         }
         if (reasons.isNotEmpty()) return Result(false, reasons.distinct(), null)

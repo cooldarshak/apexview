@@ -85,7 +85,7 @@ class Settings(context: Context) {
 
     /** Null means inherit the default; an explicit AUTO asks Media3 to adapt this feed. */
     fun feedVideoQualityOverride(label: String): VideoQuality? = feedQualityOverrides[label]
-    fun videoQualityForFeed(label: String): VideoQuality = feedVideoQualityOverrides[label] ?: videoQuality
+    fun videoQualityForFeed(label: String): VideoQuality = feedQualityOverrides[label] ?: videoQuality
 
     fun updateFeedVideoQuality(label: String, quality: VideoQuality?) {
         require(label.isNotBlank() && label.length <= 256)

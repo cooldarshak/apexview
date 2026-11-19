@@ -57,6 +57,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -1615,7 +1616,7 @@ private fun VideoQualitySheet(app: AppState) {
                 modifier = Modifier.padding(top = 12.dp),
             )
             val active = app.tiles.distinctBy { it.feed.sourceStream.profileLabel }
-                .sortedBy { if (it.id == app.bigTileId) 0 else 1 }
+                .sortedBy { if (it.id == app.bigTileIdForUi) 0 else 1 }
             if (active.isNotEmpty()) {
                 Text("Each feed", style = Type.title2, modifier = Modifier.padding(top = 24.dp))
                 Text("Choose a quality for each feed, independent of its screen position. Default inherits the selection above.",
@@ -1623,7 +1624,7 @@ private fun VideoQualitySheet(app: AppState) {
                 active.forEach { tile ->
                     val label = tile.feed.sourceStream.profileLabel
                     Column(Modifier.padding(top = 18.dp)) {
-                        Text((if (tile.id == app.bigTileId) "Main · " else "") + label,
+                        Text((if (tile.id == app.bigTileIdForUi) "Main · " else "") + label,
                             style = Type.subhead)
                         Segments(
                             options = listOf<VideoQuality?>(null) + VideoQuality.entries,
@@ -1639,7 +1640,8 @@ private fun VideoQualitySheet(app: AppState) {
                 }
                 if (app.settings.decoderMode == DecoderMode.SINGLE && active.size > 1 &&
                     PerFeedQualityPolicy.commonDecoderQuality(active.map { app.settings.videoQualityForFeed(it.feed.sourceStream.profileLabel) }) == null) {
-                    Text(PerFeedQualityPolicy.MIXED_UNSUPPORTED,
+                    Text("Mixed quality uses the one-decoder HEVC atlas when source tiles are compatible. " +
+                        "An incompatible stream will show its exact composition failure rather than opening extra decoders.",
                         style = Type.footnote, modifier = Modifier.padding(top = 16.dp))
                 }
             }

@@ -87,6 +87,8 @@ internal class HevcArchiveVodSession(
         private set
     var sourceDisplayHeight: Int = 0
         private set
+    var mixedSourceRects: List<HevcMixedArchiveAtlasPlan.SourceRect> = emptyList()
+        private set
     val durationUs: Long get() = groups.last().let { it.startUs + it.durationUs }
     val sourceLabels: List<String> get() = inputs.map { it.label }
     val segmentCount: Int get() = groups.size
@@ -162,13 +164,24 @@ internal class HevcArchiveVodSession(
             val sourcePps = config.pps.single()
             val columns = if (sourcePps.tilesEnabled) sourcePps.numTileColumns else 1
             val rows = if (sourcePps.tilesEnabled) sourcePps.numTileRows else 1
-            val atlas = requireNotNull(HevcArchiveAtlasPlan.choose(inputs.size, sourceSps.width, sourceSps.height,
-                maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT)) { "Full archive feeds exceed composed picture size; choose fewer feeds or a lower common HEVC rendition" }
+            val mixedInputs = inputs.map { input ->
+                val hvc = requireNotNull(input.report.tracks.single { it.handler == "vide" }.hevcConfiguration)
+                HevcMixedArchiveAtlasPlan.Source(hvc.vps.single(), hvc.sps.single(), hvc.pps.single())
+            }
+            val mixed = mixedInputs.any { it.sps.width != sourceSps.width || it.sps.height != sourceSps.height }
+            val mixedAtlas = if (mixed) requireNotNull(HevcMixedArchiveAtlasPlan.choose(mixedInputs,
+                maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT)) {
+                "Selected source resolutions have incompatible HEVC tile geometry for one decoder"
+            } else null
+            val atlas = if (mixedAtlas == null) requireNotNull(HevcArchiveAtlasPlan.choose(inputs.size, sourceSps.width, sourceSps.height,
+                maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT)) {
+                "Full archive feeds exceed composed picture size; choose fewer feeds or a lower common HEVC rendition"
+            } else null
             val trackScale = requireNotNull(firstTrack.timescale)
             val firstFragment = CmafBoxInspector.inspect(batches.first().first(), inputs.first().report).fragments.single()
             val step = firstFragment.sampleTimings.map { requireNotNull(it.durationTicks) }.distinct().single()
             val divisor = java.math.BigInteger.valueOf(trackScale).gcd(java.math.BigInteger.valueOf(step)).longValueExact()
-            val cells = (0 until atlas.columns * atlas.rows).flatMap { slot ->
+            val cells = mixedAtlas?.cells ?: (0 until (requireNotNull(atlas).columns * atlas.rows)).flatMap { slot ->
                 val feed = slot.coerceAtMost(inputs.lastIndex)
                 (0 until rows).flatMap { row -> (0 until columns).map { col ->
                 HevcTizenGridComposer.CellSelection(feed, row * columns + col,
@@ -179,7 +192,7 @@ internal class HevcArchiveVodSession(
             val composed = try { if (inputs.size == 1) HevcClearCmafGridComposer.passThrough(composingFeeds.single())
                 else HevcClearCmafGridComposer.compose(HevcClearCmafGridComposer.Request(
                 composingFeeds,
-                HevcOutputGridDimensions(columns * atlas.columns, rows * atlas.rows), cells,
+                mixedAtlas?.grid ?: HevcOutputGridDimensions(columns * requireNotNull(atlas).columns, rows * atlas.rows), cells,
                 firstOutputSequenceNumber = anchor + 1L,
                 frameRateNumerator = (trackScale / divisor).toInt(), frameRateDenominator = (step / divisor).toInt()))
             } finally { ownedInits.forEach { it.fill(0) } }
@@ -207,11 +220,14 @@ internal class HevcArchiveVodSession(
                         frameRate = trackScale.toDouble() / step
                         codedWidth = composed.codedWidth
                         codedHeight = composed.codedHeight
-                        atlasColumns = atlas.columns; atlasRows = atlas.rows
+                        atlasColumns = atlas?.columns ?: mixedAtlas!!.grid.columns
+                        atlasRows = atlas?.rows ?: mixedAtlas!!.grid.rows
                         sourceCodedWidth = sourceSps.width; sourceCodedHeight = sourceSps.height
                         sourceDisplayWidth = sourceSps.displayWidth; sourceDisplayHeight = sourceSps.displayHeight
-                        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_ATLAS feeds=${inputs.size} cells=${atlas.columns}x${atlas.rows} " +
-                            "sourceCoded=${sourceSps.width}x${sourceSps.height} sourceDisplay=${sourceSps.displayWidth}x${sourceSps.displayHeight} ctb=${sourceSps.ctbSize}")
+                        mixedSourceRects = mixedAtlas?.sourceRects.orEmpty()
+                        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_ATLAS feeds=${inputs.size} cells=${atlasColumns}x${atlasRows} " +
+                            "mixed=$mixed sourceCoded=${sourceSps.width}x${sourceSps.height} " +
+                            "sourceDisplay=${sourceSps.displayWidth}x${sourceSps.displayHeight} ctb=${sourceSps.ctbSize}")
                     } else {
                         require(initialization!!.contentEquals(composed.initializationSegment)) { "Archive representation changed its initialization" }
                         require(abs(requireNotNull(presentationOffsetTicks) - offset) <= 1L) { "Archive decode timestamps differ from the VOD timeline" }

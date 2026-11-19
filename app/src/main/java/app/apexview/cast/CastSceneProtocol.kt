@@ -2,6 +2,7 @@ package app.apexview.cast
 
 import app.apexview.scene.VideoScene
 import app.apexview.scene.VideoWindow
+import app.apexview.scene.VideoSourceRect
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -14,6 +15,9 @@ internal object CastSceneProtocol {
             .put("sources", scene.sources).put("atlasColumns", scene.atlasColumns)
             .put("sourceCodedWidth", scene.sourceCodedWidth).put("sourceCodedHeight", scene.sourceCodedHeight)
             .put("sourceDisplayWidth", scene.sourceDisplayWidth).put("sourceDisplayHeight", scene.sourceDisplayHeight)
+            .put("sourceRects", JSONArray().apply { scene.sourceRects.forEach { rect ->
+                put(JSONObject().put("x", rect.x).put("y", rect.y).put("width", rect.width).put("height", rect.height))
+            } })
             .put("windows", JSONArray().apply { scene.windows.forEach { w ->
                 put(JSONObject().put("id", w.id).put("source", w.source).put("x", w.x).put("y", w.y)
                     .put("width", w.width).put("height", w.height).put("z", w.z))
@@ -36,12 +40,18 @@ internal object CastSceneProtocol {
                 VideoWindow(w.getInt("id"), w.getInt("source"), coordinate(w, "x"), coordinate(w, "y"),
                     coordinate(w, "width"), coordinate(w, "height"), coordinate(w, "z"))
             } }, json.getInt("atlasColumns"), dimension("sourceCodedWidth"), dimension("sourceCodedHeight"),
-            dimension("sourceDisplayWidth"), dimension("sourceDisplayHeight"))
+            dimension("sourceDisplayWidth"), dimension("sourceDisplayHeight"),
+            json.optJSONArray("sourceRects")?.let { array -> List(array.length()) { i ->
+                array.getJSONObject(i).let { obj -> VideoSourceRect(obj.getInt("x"), obj.getInt("y"),
+                    obj.getInt("width"), obj.getInt("height")) }
+            } }.orEmpty())
         require(scene.atlasWidth.toLong() * scene.atlasHeight <= 35_651_584L) { "Atlas exceeds supported picture size" }
         require(scene.atlasColumns in 1..sources)
-        require(scene.atlasWidth.toLong() in ((scene.atlasColumns - 1L) * scene.sourceCodedWidth + scene.sourceDisplayWidth)..(scene.atlasColumns.toLong() * scene.sourceCodedWidth)) { "Atlas columns do not match the stream" }
-        val rows = (sources + scene.atlasColumns - 1) / scene.atlasColumns
-        require(scene.atlasHeight.toLong() in ((rows - 1L) * scene.sourceCodedHeight + scene.sourceDisplayHeight)..(rows.toLong() * scene.sourceCodedHeight)) { "Atlas rows do not match the stream" }
+        if (scene.sourceRects.isEmpty()) {
+            require(scene.atlasWidth.toLong() in ((scene.atlasColumns - 1L) * scene.sourceCodedWidth + scene.sourceDisplayWidth)..(scene.atlasColumns.toLong() * scene.sourceCodedWidth)) { "Atlas columns do not match the stream" }
+            val rows = (sources + scene.atlasColumns - 1) / scene.atlasColumns
+            require(scene.atlasHeight.toLong() in ((rows - 1L) * scene.sourceCodedHeight + scene.sourceDisplayHeight)..(rows.toLong() * scene.sourceCodedHeight)) { "Atlas rows do not match the stream" }
+        }
         scene.quads()
         return scene
     }

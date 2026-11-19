@@ -1336,6 +1336,7 @@ class AppState(
             canvasW, canvasH, session.width, session.height, labels.size, windows,
             session.atlasColumns, session.sourceCodedWidth, session.sourceCodedHeight,
             session.sourceDisplayWidth, session.sourceDisplayHeight,
+            session.mixedSourceRects.map { app.apexview.scene.VideoSourceRect(it.x, it.y, it.width, it.height) },
         ))
     }
 
@@ -1399,7 +1400,8 @@ class AppState(
                     app.apexview.scene.VideoWindow(tile.id, source, 0f, 0f, width, height, tile.z)
                 else app.apexview.scene.VideoWindow(tile.id, source, tile.x, tile.y, tile.w, tile.h, tile.z)
             }, session.atlasColumns, session.sourceCodedWidth, session.sourceCodedHeight,
-            session.sourceDisplayWidth, session.sourceDisplayHeight)
+            session.sourceDisplayWidth, session.sourceDisplayHeight,
+            session.mixedSourceRects.map { app.apexview.scene.VideoSourceRect(it.x, it.y, it.width, it.height) })
     }
     fun setDecoderPreference(mode: DecoderMode) {
         if (mode == DecoderMode.MULTIPLE && tiles.size > MAX_FEEDS) {
@@ -2672,13 +2674,9 @@ class AppState(
             return
         }
         val composedQuality = PerFeedQualityPolicy.commonDecoderQuality(selected.map { qualityFor(it) })
-        if (composedQuality == null) {
-            singleDecoderFailure = PerFeedQualityPolicy.MIXED_UNSUPPORTED
-            android.util.Log.w("ApexviewSingleDecoder", "F1_COMPOSITION_MIXED_QUALITY_REJECT " +
-                PerFeedQualityPolicy.description(selected.map { it.feed.sourceStream.profileLabel }, selected.map(::qualityFor)))
-            message = singleDecoderFailure
-            return
-        }
+        val desired = selected.associate { it.feed.sourceStream.profileLabel to qualityFor(it).targetHeight }
+        android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_SOURCE_QUALITIES " +
+            PerFeedQualityPolicy.description(selected.map { it.feed.sourceStream.profileLabel }, selected.map(::qualityFor)))
         singleDecoderFailure = null
         val host = protectedCompositionHost?.takeIf { it in selected } ?: selected.firstOrNull { it.audible } ?: selected.first()
         val previousLayout = layoutMode
@@ -2744,15 +2742,16 @@ class AppState(
                     preflight = {
                         // Capture the selected position once. Slow preparation must not chase an
                         // independently advancing source clock or interrupt working playback.
-                        val quality = composedQuality
+                        val quality = composedQuality ?: VideoQuality.AUTO
                         val preferredHeight = quality.targetHeight.takeIf { it > 0 }
                             ?: if (selected.size > 4) 270 else if (selected.size > 2) 540 else 720
-                        val minimumHeight = if (quality == VideoQuality.P1080) 1080 else 0
+                        val minimumHeight = if (composedQuality == VideoQuality.P1080) 1080 else 0
                         val session = capture.prepareVod(selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel,
                             it.feed.sourceStream.url) }, probePositionMs, host.feed.sourceStream.profileLabel,
-                            preferredHeight, settings.commentary, minimumHeight)
+                            preferredHeight, settings.commentary, minimumHeight, desired)
                         android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_QUALITY content=$contentId " +
-                            "feeds=${selected.size} requested=${quality.label} source=${session.sourceDisplayWidth}x${session.sourceDisplayHeight} " +
+                            "feeds=${selected.size} requested=${PerFeedQualityPolicy.description(desired.keys.toList(), selected.map(::qualityFor))} " +
+                            "source=${session.sourceDisplayWidth}x${session.sourceDisplayHeight} mixed=${session.mixedSourceRects.isNotEmpty()} " +
                             "coded=${session.codedWidth}x${session.codedHeight} fps=${session.frameRate}")
                         try {
                             host.feed.requireArchiveHardwareSupport(session.codedWidth, session.codedHeight, session.frameRate * playbackSpeed)
@@ -5755,24 +5754,11 @@ class AppState(
         settings.updateFeedVideoQuality(label, choice)
         val selected = tiles.filter { it.contentId == tile.contentId }
         val composed = selected.size > 1 && settings.decoderMode == DecoderMode.SINGLE
-        val common = PerFeedQualityPolicy.commonDecoderQuality(selected.map(::qualityFor))
-        if (composed && common == null) {
-            singleDecoderFailure = PerFeedQualityPolicy.MIXED_UNSUPPORTED
-            message = singleDecoderFailure
-            android.util.Log.w("ApexviewSingleDecoder", "F1_COMPOSITION_MIXED_QUALITY_REJECT " +
-                PerFeedQualityPolicy.description(selected.map { it.feed.sourceStream.profileLabel }, selected.map(::qualityFor)))
-            // Keep the last proven composed stream running. Do not force its codec to the
-            // size of an individual source or allocate extra decoders behind the user's back.
-        } else {
-            singleDecoderFailure = null
-            if (composed && nativeArchiveTiles.isNotEmpty() && !castPlaybackHandedOff) {
-                stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
-            }
-            tiles.filter { it.feed.sourceStream.profileLabel == label }.forEach {
-                if (!it.feed.isArchiveVodPlayback) it.feed.setVideoQuality(qualityFor(it))
-            }
-            if (composed && !castPlaybackHandedOff) startArchiveSingleDecoderComposition(tile.contentId)
+        singleDecoderFailure = null
+        tiles.filter { it.feed.sourceStream.profileLabel == label }.forEach {
+            if (!it.feed.isArchiveVodPlayback) it.feed.setVideoQuality(qualityFor(it))
         }
+        if (composed && !castPlaybackHandedOff) startArchiveSingleDecoderComposition(tile.contentId)
         showChrome()
     }
 
@@ -5780,15 +5766,8 @@ class AppState(
         val rebuildArchive = settings.videoQuality != value && nativeArchiveTiles.isNotEmpty() && !castPlaybackHandedOff
         val contentId = if (rebuildArchive) protectedCompositionHost?.contentId else null
         settings.updateVideoQuality(value)
-        val uniform = PerFeedQualityPolicy.commonDecoderQuality(tiles.map(::qualityFor))
-        if (contentId != null && uniform == null) {
-            singleDecoderFailure = PerFeedQualityPolicy.MIXED_UNSUPPORTED
-            message = singleDecoderFailure
-        } else {
-            if (contentId != null) stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
-            tiles.forEach { if (!it.feed.isArchiveVodPlayback) it.feed.setVideoQuality(qualityFor(it)) }
-            if (contentId != null) startArchiveSingleDecoderComposition(contentId)
-        }
+        tiles.forEach { if (!it.feed.isArchiveVodPlayback) it.feed.setVideoQuality(qualityFor(it)) }
+        if (contentId != null) startArchiveSingleDecoderComposition(contentId)
         qualitySheetOpen = false
         showChrome()
     }

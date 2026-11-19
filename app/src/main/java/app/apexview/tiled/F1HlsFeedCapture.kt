@@ -56,12 +56,13 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         preferredHeight: Int = if (feeds.size > 2) 540 else 720,
         commentary: String? = null,
         minimumHeight: Int = 0,
+        preferredHeights: Map<String, Int> = emptyMap(),
     ): HevcArchiveVodSession {
         var acquired: HevcArchiveVodSession? = null
         try { return withContext(Dispatchers.IO) {
             require(feeds.size in 1..app.apexview.AppState.MAX_SINGLE_DECODER_FEEDS && feeds.map { it.label }.distinct().size == feeds.size)
             val perFeed = mapArchiveFeedsBounded(feeds) { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }
-            val (selected, playlists, inits) = loadFittingVod(perFeed, preferredHeight, minimumHeight)
+            val (selected, playlists, inits) = loadFittingVod(perFeed, preferredHeight, minimumHeight, preferredHeights)
             playlists.forEach { playlist ->
                 val firstMap = requireNotNull(playlist.segments.first().initializationSegment) { "HLS archive has no CMAF initialization" }
                 require(playlist.segments.all { segment -> segment.initializationSegment?.let {
@@ -130,10 +131,13 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
 
     private suspend fun loadFittingVod(
         perFeed: List<List<Offer>>, preferredHeight: Int, minimumHeight: Int,
+        preferredHeights: Map<String, Int> = emptyMap(),
     ): Triple<List<Offer>, List<HlsMediaPlaylist>, List<Init>> {
         var offers = perFeed
+        val independent = preferredHeights.values.distinct().size > 1
         while (true) {
-            val selected = chooseCommon(offers, preferredHeight, perFeed.size, minimumHeight)
+            val selected = if (independent) chooseIndividual(offers, preferredHeights, preferredHeight, minimumHeight)
+                else chooseCommon(offers, preferredHeight, perFeed.size, minimumHeight)
             val playlists = mapArchiveFeedsBounded(selected, block = ::loadMedia)
             require(playlists.all { it.hasEndTag && it.segments.isNotEmpty() }) {
                 "Archive VOD requires complete HLS replay playlists"
@@ -156,10 +160,19 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             require(sizes.all { it.displayHeight >= minimumHeight }) {
                 "Requested at least ${minimumHeight}p per feed; the actual HEVC pictures are smaller."
             }
-            val fits = sizes.all { shape ->
+            val fits = if (independent) {
+                HevcMixedArchiveAtlasPlan.choose(tracks.map { track ->
+                    val hvc = requireNotNull(track.hevcConfiguration)
+                    HevcMixedArchiveAtlasPlan.Source(hvc.vps.single(), hvc.sps.single(), hvc.pps.single())
+                }, maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT) != null
+            } else sizes.all { shape ->
                 HevcArchiveAtlasPlan.choose(perFeed.size, shape.width, shape.height, maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT) != null
             }
             if (fits) return Triple(selected, playlists, inits)
+            if (independent) throw PermanentCaptureException(
+                "Selected per-feed HEVC renditions cannot form one decoder-safe atlas. " +
+                    "Source SPS/PPS tile boundaries or codec parameters are incompatible: " +
+                    sizes.joinToString { "${it.width}x${it.height}" })
             android.util.Log.w("PitwallCast", "ARCHIVE_CODED_SIZE_REJECT feeds=${perFeed.size} " +
                 "coded=${sizes.joinToString { "${it.width}x${it.height}" }}")
             val declared = selected.firstNotNullOfOrNull { it.format }
@@ -323,6 +336,18 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 else "No common HEVC rendition fits $feedCount feeds in the composed picture; choose fewer feeds or a lower source rendition")
         return perFeed.map { list -> list.filter { it.format == null || it.format.width == size.first && it.format.height == size.second }
             .maxByOrNull { it.format?.bitrate ?: 0 } ?: throw PermanentCaptureException("HLS common HEVC rendition unavailable") }
+    }
+
+    /** Each user-selected feed gets its own rendition. No decoder/player is allocated here. */
+    private fun chooseIndividual(perFeed: List<List<Offer>>, heights: Map<String, Int>,
+                                 defaultHeight: Int, minimumHeight: Int): List<Offer> = perFeed.map { variants ->
+        val label = variants.first().feed.label
+        val requested = heights[label]?.takeIf { it > 0 } ?: defaultHeight
+        variants.filter { it.format == null ||
+            (it.format.height in minimumHeight..requested && it.format.width > 0) }
+            .maxWithOrNull(compareBy<Offer> { it.format?.height ?: requested }
+                .thenBy { it.format?.bitrate ?: 0 })
+            ?: throw PermanentCaptureException("$label has no available HEVC rendition at or below ${requested}p")
     }
 
     private fun loadMedia(offer: Offer): HlsMediaPlaylist = vodPlaylists[offer.uri.toString()] ?: run {

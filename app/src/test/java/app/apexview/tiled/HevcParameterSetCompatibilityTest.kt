@@ -83,8 +83,32 @@ class HevcParameterSetCompatibilityTest {
             )
         )
         assertFalse(output.compatible)
-        assertTrue(output.reasons.any { it.contains("different CTB dimensions") ||
-            it.contains("different coded pixel dimensions") })
+        assertTrue(output.reasons.any { it.contains("output row") || it.contains("source cell") })
+    }
+
+    @Test fun mixed1080AndThree540SourceTileGridsFitOneHevcAtlasWhenAligned() {
+        val base = fixture(tilesEnabled = false)
+        val common = base.sps.copy(ctbSize = 32, log2CtbSize = 5)
+        val large = HevcMixedArchiveAtlasPlan.Source(base.vps,
+            common.copy(width = 1920, height = 1088, displayWidth = 1920, displayHeight = 1080,
+                picWidthInCtbs = 60, picHeightInCtbs = 34, conformanceWindowBottom = 8),
+            base.pps.copy(tilesEnabled = true, uniformTileSpacing = false,
+                numTileColumns = 2, numTileRows = 2,
+                explicitColumnWidthsMinus1 = listOf(29), explicitRowHeightsMinus1 = listOf(16),
+                tileColumnWidthsInCtbs = listOf(30, 30), tileRowHeightsInCtbs = listOf(17, 17),
+                loopFilterAcrossTiles = true))
+        val small = HevcMixedArchiveAtlasPlan.Source(base.vps,
+            common.copy(width = 960, height = 544, displayWidth = 960, displayHeight = 540,
+                picWidthInCtbs = 30, picHeightInCtbs = 17, conformanceWindowBottom = 4),
+            base.pps.copy(tileColumnWidthsInCtbs = listOf(30), tileRowHeightsInCtbs = listOf(17)))
+        val plan = HevcMixedArchiveAtlasPlan.choose(listOf(large, small, small, small))
+        assertNotNull("Four feeds must fit a 2880×1632 single-decoder picture", plan)
+        assertEquals(2880, plan!!.codedWidth)
+        assertEquals(1632, plan.codedHeight)
+        assertEquals(1920, plan.sourceRects[0].width)
+        assertEquals(1080, plan.sourceRects[0].height)
+        assertEquals(3, plan.sourceRects.drop(1).size)
+        assertEquals(9, plan.cells.size)
     }
 
     @Test fun rejectsDifferentCtbSizeBitDepthChromaAndProfileConstraints() {
