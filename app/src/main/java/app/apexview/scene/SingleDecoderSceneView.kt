@@ -301,9 +301,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         config = selected
         contextGl = EGL14.eglCreateContext(display, selected, EGL14.EGL_NO_CONTEXT,
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
-        val surface = Surface(output)
-        outputSurface = surface
-        window = EGL14.eglCreateWindowSurface(display, selected, surface, intArrayOf(EGL14.EGL_NONE), 0)
+        val displaySurface = Surface(output)
+        outputSurface = displaySurface
+        window = EGL14.eglCreateWindowSurface(display, selected, displaySurface, intArrayOf(EGL14.EGL_NONE), 0)
         check(EGL14.eglMakeCurrent(display, window, window, contextGl)) { "Unable to bind scene output" }
         // Display callbacks already limit swaps to one per vsync. A second, blocking
         // EGL swap interval can hold this same GL thread while codec frames wait to be
