@@ -93,6 +93,12 @@ internal class HevcArchiveVodSession(
     val durationUs: Long get() = groups.last().let { it.startUs + it.durationUs }
     val sourceLabels: List<String> get() = inputs.map { it.label }
     val segmentCount: Int get() = groups.size
+    /** Actual visible source pictures from the selected hvcC/SPS, not the user's quality cap. */
+    val actualSourceDimensions: Map<String, Pair<Int, Int>> by lazy { inputs.associate { input ->
+        val sps = requireNotNull(input.report.tracks.single { it.handler == "vide" }
+            .hevcConfiguration).sps.single()
+        input.label to (sps.displayWidth to sps.displayHeight)
+    } }
     val selectedHeight: Int? get() = inputs.first().format?.height
     val archiveStartTimeMs: Long? get() = inputs.firstOrNull { it.label == clockLabel }?.playlist?.let {
         if (it.hasProgramDateTime) it.startTimeUs / 1000L else null
@@ -114,6 +120,15 @@ internal class HevcArchiveVodSession(
         require(!parsed.dynamic && parsed.periodCount == 1) { "Archive MPD must have one finite period" }
         android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_PREPARED feeds=${inputs.size} segments=$segmentCount " +
             "sourceHeight=$selectedHeight output=${width}x$height probe=$probe fullFrames=true clock=ONE_PLAYER")
+        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SOURCE_RENDITIONS " +
+            inputs.joinToString(", ") { input ->
+                val actual = actualSourceDimensions.getValue(input.label)
+                val sps = requireNotNull(input.report.tracks.single { it.handler == "vide" }
+                    .hevcConfiguration).sps.single()
+                "${input.label}=${actual.first}x${actual.second}" +
+                    "(coded=${sps.width}x${sps.height}," +
+                    "hls=${input.format?.width ?: "unknown"}x${input.format?.height ?: "unknown"})"
+            })
     }
 
     fun dataSourceFactory(): DataSource.Factory = DataSource.Factory { ResourceDataSource(this) }

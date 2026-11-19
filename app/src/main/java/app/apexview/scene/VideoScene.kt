@@ -12,7 +12,8 @@ data class VideoScene(val width: Float, val height: Float, val atlasWidth: Int,
                       val atlasColumns: Int = sources, val sourceCodedWidth: Int = atlasWidth / atlasColumns.coerceAtLeast(1),
                       val sourceCodedHeight: Int = atlasHeight, val sourceDisplayWidth: Int = sourceCodedWidth,
                       val sourceDisplayHeight: Int = sourceCodedHeight,
-                      val sourceRects: List<VideoSourceRect> = emptyList()) {
+                      val sourceRects: List<VideoSourceRect> = emptyList(),
+                      val sourceFrameRate: Double = 0.0) {
     data class Quad(val id: Int, val positions: FloatArray, val texture: FloatArray)
 
     /** Same geometry is used by native GLES and the cast receiver. Overlap follows tile z order. */

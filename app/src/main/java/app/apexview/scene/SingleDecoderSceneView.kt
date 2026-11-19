@@ -10,6 +10,7 @@ import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -44,6 +45,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var contextGl: EGLContext = EGL14.EGL_NO_CONTEXT
     private var window: EGLSurface = EGL14.EGL_NO_SURFACE
+    private var outputSurface: Surface? = null
+    private var hintedFrameRate = -1f
     private var config: EGLConfig? = null
     @Volatile private var clip: ReplayClipEncoder? = null
     private var clipResult: ((String) -> Unit)? = null
@@ -218,6 +221,29 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
     }
 
+    /** Allow the display to use a seamless 50/100 Hz mode for 50 fps content when supported.
+     * Never request a disruptive/non-seamless switch during playback or rotation. */
+    private fun applyOutputFrameRateHint() {
+        if (Build.VERSION.SDK_INT < 30) return
+        val surface = outputSurface ?: return
+        val fps = SceneFrameRatePolicy.hint(scene?.sourceFrameRate ?: 0.0)
+        if (fps == hintedFrameRate) return
+        try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                surface.setFrameRate(fps, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                    Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS)
+            } else {
+                surface.setFrameRate(fps, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+            }
+            hintedFrameRate = fps
+            Log.i("ApexviewSingleDecoder", "SCENE_FRAME_RATE_HINT fps=$fps strategy=SEAMLESS_ONLY " +
+                "displayRefreshRateChange=NOT_VERIFIED")
+        } catch (error: RuntimeException) {
+            // Optional display policy advice must not interrupt the verified decoder path.
+            Log.w("ApexviewSingleDecoder", "SCENE_FRAME_RATE_HINT_UNAVAILABLE ${error.javaClass.simpleName}")
+        }
+    }
+
     init { surfaceTextureListener = this; isOpaque = true }
 
     fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene) {
@@ -228,7 +254,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             player = nextPlayer
             input?.let { nextPlayer.setVideoSurface(it) }
         }
-        if (changed) gl.post { guarded { scheduleDisplayFrame() } }
+        if (changed) gl.post { guarded { applyOutputFrameRateHint(); scheduleDisplayFrame() } }
     }
 
     override fun onSurfaceTextureAvailable(output: SurfaceTexture, width: Int, height: Int) {
@@ -275,8 +301,16 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         config = selected
         contextGl = EGL14.eglCreateContext(display, selected, EGL14.EGL_NO_CONTEXT,
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
-        window = EGL14.eglCreateWindowSurface(display, selected, output, intArrayOf(EGL14.EGL_NONE), 0)
+        val surface = Surface(output)
+        outputSurface = surface
+        window = EGL14.eglCreateWindowSurface(display, selected, surface, intArrayOf(EGL14.EGL_NONE), 0)
         check(EGL14.eglMakeCurrent(display, window, window, contextGl)) { "Unable to bind scene output" }
+        // Display callbacks already limit swaps to one per vsync. A second, blocking
+        // EGL swap interval can hold this same GL thread while codec frames wait to be
+        // latched. Let the platform reject interval zero if the driver requires one.
+        val asynchronousSwap = EGL14.eglSwapInterval(display, 0)
+        Log.i("ApexviewSingleDecoder", "SCENE_SWAP_INTERVAL requested=0 accepted=$asynchronousSwap pacing=CHOREOGRAPHER")
+        applyOutputFrameRateHint()
         fun shader(type: Int, code: String): Int {
             val id = GLES20.glCreateShader(type)
             GLES20.glShaderSource(id, code); GLES20.glCompileShader(id)
@@ -399,6 +433,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             if (contextGl != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, contextGl)
             EGL14.eglTerminate(display)
         }
+        outputSurface?.release(); outputSurface = null
+        hintedFrameRate = -1f
         display = EGL14.EGL_NO_DISPLAY; contextGl = EGL14.EGL_NO_CONTEXT; window = EGL14.EGL_NO_SURFACE
         texture = 0; program = 0
         imageUniform = -1; transformUniform = -1; positionAttribute = -1; uvAttribute = -1

@@ -1634,7 +1634,14 @@ private fun VideoQualitySheet(app: AppState) {
                                 .horizontalScroll(rememberScrollState()),
                             onPick = { app.chooseFeedVideoQuality(tile.id, it) },
                         )
-                        Text("Requested: ${app.settings.videoQualityForFeed(label).label}",
+                        val actual = app.singleDecoderScenePlayer?.archiveSceneSession
+                            ?.actualSourceDimensions?.get(label)
+                        Text(if (actual == null) {
+                            "Requested ceiling: ${app.settings.videoQualityForFeed(label).label} · Actual rendition shown during single-decoder playback"
+                        } else {
+                            "Requested ceiling: ${app.settings.videoQualityForFeed(label).label} · Playing: " +
+                                "${actual.first} × ${actual.second} (${actual.second}p)"
+                        },
                             style = Type.footnote, modifier = Modifier.padding(top = 6.dp))
                     }
                 }

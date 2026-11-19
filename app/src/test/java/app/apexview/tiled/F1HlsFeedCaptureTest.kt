@@ -335,6 +335,10 @@ seg.m4s
             assertTrue(network.requested.none { it.endsWith("s1.m4s") })
             assertEquals(2880, session.width)
             assertEquals(540, session.height)
+            // The source's actual cropped SPS dimensions are separate from a requested
+            // quality ceiling and from its CTB-aligned coded storage dimensions.
+            assertEquals((960 to 540), session.actualSourceDimensions.getValue("channel-0"))
+            assertEquals((960 to 540), session.actualSourceDimensions.getValue("channel-1"))
         } finally { session.close(); capture.reset() }
     }
 

@@ -1400,7 +1400,8 @@ class AppState(
                 else app.apexview.scene.VideoWindow(tile.id, source, tile.x, tile.y, tile.w, tile.h, tile.z)
             }, session.atlasColumns, session.sourceCodedWidth, session.sourceCodedHeight,
             session.sourceDisplayWidth, session.sourceDisplayHeight,
-            session.mixedSourceRects.map { app.apexview.scene.VideoSourceRect(it.x, it.y, it.width, it.height) })
+            session.mixedSourceRects.map { app.apexview.scene.VideoSourceRect(it.x, it.y, it.width, it.height) },
+            session.frameRate)
     }
     fun setDecoderPreference(mode: DecoderMode) {
         if (mode == DecoderMode.MULTIPLE && tiles.size > MAX_FEEDS) {
