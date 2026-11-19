@@ -73,4 +73,23 @@ class VideoSceneTest {
         assertEquals(.5f + .5f / 960f, quad[3].texture[0], .0001f)
         assertTrue(quad[0].texture[1] > quad[2].texture[5])
     }
+
+    @Test fun mixedAtlasUsesPerFeedSourceRectsWithoutAnotherDecoder() {
+        val scene = VideoScene(1920f, 1080f, 2880, 1632, 4,
+            (0..3).map { VideoWindow(it, it, 0f, 0f, 960f, 540f, it.toFloat()) },
+            atlasColumns = 3, sourceCodedWidth = 1920, sourceCodedHeight = 1088,
+            sourceDisplayWidth = 1920, sourceDisplayHeight = 1080,
+            sourceRects = listOf(
+                VideoSourceRect(0, 0, 1920, 1080),
+                VideoSourceRect(1920, 0, 960, 540),
+                VideoSourceRect(1920, 544, 960, 540),
+                VideoSourceRect(1920, 1088, 960, 540),
+            ))
+        val quads = scene.quads()
+        assertEquals(4, quads.size)
+        assertEquals(1920f / 2880f + .5f / 2880, quads[1].texture[0], .0001f)
+        assertEquals(1f - 544f / 1632f - .5f / 1632f, quads[2].texture[5], .0001f)
+        assertEquals(1f - (544f + 540f) / 1632f + .5f / 1632f, quads[2].texture[1], .0001f)
+        assertEquals(1f - (1088f + 540f) / 1632f + .5f / 1632f, quads[3].texture[1], .0001f)
+    }
 }

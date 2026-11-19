@@ -47,6 +47,7 @@ internal class HevcArchiveVodSession(
     private val cache = LinkedHashMap<Int, ByteArray>(4, 0.75f, true)
     private val cacheLock = Any()
     private val composeLock = Any()
+    private var cachedMixedAtlas: HevcMixedArchiveAtlasPlan.Plan? = null
     // A seek needs one fragment from each camera. Run those independent I/O requests
     // concurrently, bounded to four requests even for larger selections.
     private val fetchers = Executors.newFixedThreadPool(inputs.size.coerceIn(1, 4)) { r -> Thread(r, "ApexviewVodFetch").apply { isDaemon = true } }
@@ -169,8 +170,8 @@ internal class HevcArchiveVodSession(
                 HevcMixedArchiveAtlasPlan.Source(hvc.vps.single(), hvc.sps.single(), hvc.pps.single())
             }
             val mixed = mixedInputs.any { it.sps.width != sourceSps.width || it.sps.height != sourceSps.height }
-            val mixedAtlas = if (mixed) requireNotNull(HevcMixedArchiveAtlasPlan.choose(mixedInputs,
-                maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT)) {
+            val mixedAtlas = if (mixed) requireNotNull(cachedMixedAtlas ?: HevcMixedArchiveAtlasPlan.choose(mixedInputs,
+                maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT)?.also { cachedMixedAtlas = it }) {
                 "Selected source resolutions have incompatible HEVC tile geometry for one decoder"
             } else null
             val atlas = if (mixedAtlas == null) requireNotNull(HevcArchiveAtlasPlan.choose(inputs.size, sourceSps.width, sourceSps.height,
@@ -220,7 +221,8 @@ internal class HevcArchiveVodSession(
                         frameRate = trackScale.toDouble() / step
                         codedWidth = composed.codedWidth
                         codedHeight = composed.codedHeight
-                        atlasColumns = atlas?.columns ?: mixedAtlas!!.grid.columns
+                        // Mixed crops use explicit rectangles, not the legacy source-count grid.
+                        atlasColumns = atlas?.columns ?: minOf(mixedAtlas!!.grid.columns, inputs.size)
                         atlasRows = atlas?.rows ?: mixedAtlas!!.grid.rows
                         sourceCodedWidth = sourceSps.width; sourceCodedHeight = sourceSps.height
                         sourceDisplayWidth = sourceSps.displayWidth; sourceDisplayHeight = sourceSps.displayHeight

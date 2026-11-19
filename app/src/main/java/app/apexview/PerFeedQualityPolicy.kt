@@ -1,6 +1,6 @@
 package app.apexview
 
-/** Compressed HEVC stitching currently requires equal-resolution sources and one SPS/PPS. */
+/** Encrypted CMAF stitching has a stricter representation gate than clear VOD tile stitching. */
 internal object PerFeedQualityPolicy {
     fun commonDecoderQuality(qualities: List<VideoQuality>): VideoQuality? {
         if (qualities.isEmpty()) return null
@@ -10,7 +10,7 @@ internal object PerFeedQualityPolicy {
     fun description(labels: List<String>, qualities: List<VideoQuality>): String =
         labels.zip(qualities).joinToString(", ") { (name, quality) -> "$name=${quality.label}" }
 
-    const val MIXED_UNSUPPORTED = "Mixed source resolutions need a compatible HEVC tile composer. " +
-        "This build keeps one decoder and will not silently use multiple source decoders. " +
-        "Choose matching quality for now, or use Multiple decoders."
+    const val MIXED_UNSUPPORTED = "Mixed-resolution encrypted HEVC composition has not passed the protected-subsample gate. " +
+        "Clear HEVC archives can use the mixed tile atlas when their source tiles fit. " +
+        "No additional video decoders will be started."
 }

@@ -757,11 +757,6 @@ class AppState(
             return
         }
         val castQuality = PerFeedQualityPolicy.commonDecoderQuality(castTiles.map(::qualityFor))
-        if (castQuality == null && !singleDecoderSceneActive) {
-            castStatus = PerFeedQualityPolicy.MIXED_UNSUPPORTED
-            message = castStatus
-            return
-        }
         val verifiedClear = singleDecoderScenePlayer?.archiveSceneSession?.sourceLabels?.toSet() == castTiles.map { it.feed.sourceStream.profileLabel }.toSet()
         if (verifiedClear && singleDecoderSceneActive && singleDecoderScenePlayer?.hasLoadedDrmKeys != true) {
             prepareBakedCast(castTiles)
@@ -798,7 +793,8 @@ class AppState(
                 val expectedLabels = selection.map { it.second }.toSet()
                 val activeComposition = singleDecoderScenePlayer?.archiveSessionForCast()
                     ?.takeIf { it.sourceLabels.toSet() == expectedLabels && it.sourceLabels.size == expectedLabels.size &&
-                        (castQuality?.targetHeight?.takeIf { h -> h > 0 }?.let { h -> it.sourceDisplayHeight <= h }
+                        (if (castQuality == null) it.mixedSourceRects.size == expectedLabels.size else
+                            castQuality.targetHeight.takeIf { h -> h > 0 }?.let { h -> it.sourceDisplayHeight <= h }
                             ?: (it.sourceDisplayHeight >= 720)) }
                 val session = activeComposition ?: run {
                     val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
@@ -810,6 +806,9 @@ class AppState(
                             preferredHeight = castQuality?.targetHeight?.takeIf { it > 0 } ?: 720,
                             commentary = settings.commentary,
                             minimumHeight = 0,
+                            preferredHeights = castTiles.associate {
+                                it.feed.sourceStream.profileLabel to qualityFor(it).targetHeight
+                            },
                         ).also { ownedSession = it }
                     } finally { capture.reset() }
                 }
@@ -2679,6 +2678,7 @@ class AppState(
             PerFeedQualityPolicy.description(selected.map { it.feed.sourceStream.profileLabel }, selected.map(::qualityFor)))
         singleDecoderFailure = null
         val host = protectedCompositionHost?.takeIf { it in selected } ?: selected.firstOrNull { it.audible } ?: selected.first()
+        val replacingActiveScene = singleDecoderSceneActive && singleDecoderScenePlayer === host.feed
         val previousLayout = layoutMode
         val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
         f1DashCaptureJob?.cancel()
@@ -2731,7 +2731,7 @@ class AppState(
         val probePositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
         selected.forEach { android.util.Log.i("ApexviewPlaybackOffer", it.feed.sourceStream.offerDiagnostic) }
         // Enforce the selected decoder budget immediately, including while validation runs.
-        selected.forEach { it.feed.player.playWhenReady = false }
+        if (!replacingActiveScene) selected.forEach { it.feed.player.playWhenReady = false }
         applyVideoBudget()
         archiveCompositionStarting = true
         message = SINGLE_DECODER_ACTIVATING
@@ -2842,7 +2842,12 @@ class AppState(
                 singleDecoderFailure = failure
                 // Preserve the failure evidence before restore cancels this capture's ownership.
                 diagnostic()
-                if (startup.sourceDecodersTouched || singleDecoderSceneActive) restore() else {
+                if (startup.sourceDecodersTouched) restore()
+                else if (replacingActiveScene) {
+                    // A failed quality preflight must not tear down an already working
+                    // one-decoder scene. Its existing atlas and media session remain live.
+                    android.util.Log.i("ApexviewSingleDecoder", "QUALITY_PREFLIGHT_FAILED_PREVIOUS_SCENE_RETAINED")
+                } else {
                     selected.forEach { it.feed.player.playWhenReady = false }; applyVideoBudget()
                 }
                 message = "Single decoder failed: $failure. Use Retry or select Multiple decoders in Settings."

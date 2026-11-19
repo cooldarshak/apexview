@@ -102,13 +102,13 @@ class HevcParameterSetCompatibilityTest {
                 picWidthInCtbs = 30, picHeightInCtbs = 17, conformanceWindowBottom = 4),
             base.pps.copy(tileColumnWidthsInCtbs = listOf(30), tileRowHeightsInCtbs = listOf(17)))
         val plan = HevcMixedArchiveAtlasPlan.choose(listOf(large, small, small, small))
-        assertNotNull("Four feeds must fit a 2880×1632 single-decoder picture", plan)
-        assertEquals(2880, plan!!.codedWidth)
-        assertEquals(1632, plan.codedHeight)
+        assertNotNull("Four independently selected feeds must fit a bounded one-decoder picture", plan)
+        assertEquals(1920, plan!!.codedWidth)
+        assertEquals(2176, plan.codedHeight)
         assertEquals(1920, plan.sourceRects[0].width)
         assertEquals(1080, plan.sourceRects[0].height)
         assertEquals(3, plan.sourceRects.drop(1).size)
-        assertEquals(9, plan.cells.size)
+        assertEquals(8, plan.cells.size)
     }
 
     @Test fun rejectsDifferentCtbSizeBitDepthChromaAndProfileConstraints() {
