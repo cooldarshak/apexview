@@ -1662,8 +1662,7 @@ class AppState(
     val laptopMapPanel = MapPanel()
     /** The map window on screen now. */
     private val logoMapPanel = MapPanel()
-    private var logoMapVideo: Area? = null
-    val tvLogoMapAnchored get() = layoutMode == LayoutMode.TV && !laptopActive && canvasW > canvasH
+    val tvLandscapeLayout get() = layoutMode == LayoutMode.TV && !laptopActive && canvasW > canvasH
     val trackLogoAnchored get() = !laptopActive && mapMode == MapMode.TRACK &&
         (layoutMode == LayoutMode.FEATURED || layoutMode == LayoutMode.GRID || layoutMode == LayoutMode.TV)
     val activeMapPanel get() = when {
@@ -3917,6 +3916,12 @@ class AppState(
             return
         }
         val enteringTvLayout = mode == LayoutMode.TV && layoutMode != LayoutMode.TV
+        if (tvLandscapeLayout && mode != LayoutMode.TV) {
+            towerSpot.x = -1f
+            towerSpot.y = -1f
+            towerSpot.w = -1f
+            towerSpot.h = -1f
+        }
         if (!singleDecoderSceneActive) {
             f1DashCaptureJob?.cancel()
             f1DashCaptureJob = null
@@ -4068,11 +4073,11 @@ class AppState(
         if (tvLayoutActive || keepMapClear && keepTowerClear) {
             val panelLayoutMode = if (tvLayoutActive) LayoutMode.TV else layoutMode
             val panelOverlayMode = if (tvLayoutActive) OverlayLayoutMode.DOCKED else overlayLayoutMode
-            val plan = Layouts.withCombinedOverlays(panelLayoutMode, ordered.size, width, height, panelOverlayMode)
+            val plan = Layouts.withCombinedOverlays(panelLayoutMode, ordered.size, width, height,
+                panelOverlayMode, tvTowerWidth = width * tvTowerWidthShare)
             combinedOverlayPlan = plan
             if (tvLayoutActive && width > height) {
                 towerSpot.place(plan.tower)
-
             } else if (plan.floating) {
                 keepTowerInArea(plan.workspace, width, height)
                 placeMapInAreaIfNeeded(plan.workspace, width, height)
@@ -4122,9 +4127,9 @@ class AppState(
             custom != null -> custom.slots(width, height)
             keepTowerClear -> {
                 val density = context.resources.displayMetrics.density
-                val minTowerWidth = minOf(TOWER_MIN_WIDTH_DP * density, width)
+                val widthRange = towerWidthRange(width, null)
                 val minTowerHeight = minOf(TOWER_MIN_HEIGHT_DP * density, height)
-                val maxTowerWidth = (width - 32f * density).coerceAtLeast(minTowerWidth).coerceAtMost(width)
+                val maxTowerWidth = widthRange.endInclusive
                 val maxTowerHeight = height
                 // FloatingPanel normally restores these dimensions when it first appears.
                 // A reserved tower is positioned by the layout solver first, so restore the
@@ -4139,7 +4144,7 @@ class AppState(
                 }
                 val requestedWidth = (towerSpot.w.takeIf { it > 0f }
                     ?: minOf(TOWER_DEFAULT_WIDTH_DP * density, maxTowerWidth))
-                    .coerceIn(minTowerWidth, maxTowerWidth)
+                    .coerceIn(widthRange)
                 val requestedHeight = (towerSpot.h.takeIf { it > 0f }
                     ?: minOf(TOWER_DEFAULT_HEIGHT_DP * density, maxTowerHeight))
                     .coerceIn(minTowerHeight, maxTowerHeight)
@@ -4210,11 +4215,11 @@ class AppState(
                 if (saved[3] > 0f) towerSpot.h = saved[3] * height
             }
         }
-        val minWidth = minOf(TOWER_MIN_WIDTH_DP * density, defaultBounds?.w ?: area.w)
+        val widthRange = towerWidthRange(width, area)
         val minHeight = minOf(TOWER_MIN_HEIGHT_DP * density, defaultBounds?.h ?: area.h)
         val defaultWidth = defaultBounds?.w ?: minOf(TOWER_DEFAULT_WIDTH_DP * density, area.w * 0.92f)
         val defaultHeight = defaultBounds?.h ?: minOf(TOWER_DEFAULT_HEIGHT_DP * density, area.h * 0.58f)
-        towerSpot.w = (towerSpot.w.takeIf { it > 0f } ?: defaultWidth).coerceIn(minWidth, area.w)
+        towerSpot.w = (towerSpot.w.takeIf { it > 0f } ?: defaultWidth).coerceIn(widthRange)
         towerSpot.h = (towerSpot.h.takeIf { it > 0f } ?: defaultHeight).coerceIn(minHeight, area.h)
         if (towerSpot.x < 0f || towerSpot.y < 0f) {
             towerSpot.x = defaultBounds?.x ?: area.x + (area.w - towerSpot.w) / 2f
@@ -4253,17 +4258,18 @@ class AppState(
      * bottom-right corner, over the feeds.
      */
     private fun logoMapKey() = "trackLogo/${layoutMode.name}/${wayUp}"
+    private fun canvasTrackMapKey() = "trackCanvas/${layoutMode.name}/${wayUp}"
 
     private fun placeLogoMap(main: Slot) {
-        if (main.w <= 0f || mapGrabbed) return
-        val video = Area(main.x, main.y, main.w, main.h)
-        logoMapVideo = video
+        if (main.w <= 0f || mapGrabbed || canvasW <= 0f || canvasH <= 0f) return
         val panel = logoMapPanel
         panel.rotation = 0f
         panel.place(Layouts.logoMapOver(main))
-        panel.restore(prefs.getString(logoMapKey(), null), video.w, video.h, video.x, video.y)?.let { mapOpacity = it }
-        panel.place(Layouts.fitMapInside(Area(panel.x, panel.y, panel.w, panel.h), video))
+        val saved = panel.restore(prefs.getString(canvasTrackMapKey(), null), canvasW, canvasH)
+            ?: panel.restore(prefs.getString(logoMapKey(), null), main.w, main.h, main.x, main.y)
+        saved?.let { mapOpacity = it }
         panel.placed = true
+        keepMapOnScreen()
     }
 
     private fun placeMapIfNeeded(width: Float, height: Float) {
@@ -4311,15 +4317,14 @@ class AppState(
      * right edge with no way to reach it.
      */
     private fun keepMapOnScreen() {
-        if (canvasW <= 0f) return
+        if (canvasW <= 0f || canvasH <= 0f) return
         // Only the one in use: on the narrow cover screen, this pushed laptop mode's map to the left,
         // over the timing tower, where unfolding found it.
         activeMapPanel.let { panel ->
             if (!panel.placed) return
-            panel.w = panel.w.coerceAtMost(canvasW)
-            panel.h = panel.h.coerceAtMost(canvasH)
-            panel.x = panel.x.coerceIn(0f, canvasW - panel.w)
-            panel.y = panel.y.coerceIn(0f, canvasH - panel.h)
+            panel.place(Layouts.fitMapInside(
+                Area(panel.x, panel.y, panel.w, panel.h), Area(0f, 0f, canvasW, canvasH),
+            ))
         }
     }
 
@@ -4327,12 +4332,12 @@ class AppState(
     fun storeMapPanel() {
         val panel = activeMapPanel
         if (canvasW <= 0f || !panel.placed) return
-        if (trackLogoAnchored) {
-            val video = logoMapVideo ?: return
-            prefs.edit().putString(logoMapKey(), panel.toJson(video.w, video.h, mapOpacity, video.x, video.y)).apply()
-            return
+        val key = when {
+            laptopActive -> PREF_LAPTOP_MAP
+            trackLogoAnchored -> canvasTrackMapKey()
+            else -> PREF_MAP_PANEL
         }
-        prefs.edit().putString(if (laptopActive) PREF_LAPTOP_MAP else PREF_MAP_PANEL, panel.toJson(canvasW, canvasH, mapOpacity)).apply()
+        prefs.edit().putString(key, panel.toJson(canvasW, canvasH, mapOpacity)).apply()
     }
 
     private fun requestOverlayLayout() {
@@ -4391,13 +4396,9 @@ class AppState(
         panel.y += pan.y
         if (zoom != 1f) panel.scale(zoom)
         if (rotation != 0f) panel.rotation = (panel.rotation + rotation).mod(360f)
-        if (trackLogoAnchored) {
-            logoMapVideo?.let { panel.place(Layouts.fitMapInside(Area(panel.x, panel.y, panel.w, panel.h), it)) }
-        } else if (combinedOverlaysFloating || layoutMode == LayoutMode.TV) {
-            // TV map controls may move the map within the screen even though the tower remains
-            // docked. Floating mode also expands the tower when the map leaves its workspace.
-            keepMapOnScreen()
-            if (combinedOverlaysFloating) combinedOverlayPlan?.workspace?.let(::expandTowerWhenMapLeavesWorkspace)
+        keepMapOnScreen()
+        if (combinedOverlaysFloating && !trackLogoAnchored) {
+            combinedOverlayPlan?.workspace?.let(::expandTowerWhenMapLeavesWorkspace)
         }
         showChrome()
     }
@@ -4481,6 +4482,9 @@ class AppState(
     var towerOpen by mutableStateOf(prefs.getBoolean(PREF_TOWER, false))
         private set
     val towerSpot = FloatingSpot(prefs, PREF_TOWER_SPOT, perOrientation = true)
+    private var tvTowerWidthShare by mutableFloatStateOf(
+        prefs.getFloat(PREF_TV_TOWER_WIDTH, Layouts.DEFAULT_TV_TOWER_SHARE),
+    )
     var towerOpacity by mutableFloatStateOf(prefs.getFloat(PREF_TOWER_OPACITY, 0.9f))
         private set
     var towerFontScale by mutableFloatStateOf(prefs.getFloat(PREF_TOWER_FONT_SCALE, 1f))
@@ -4545,9 +4549,32 @@ class AppState(
         if (mapReserve && towerOpen && towerReserve) requestOverlayLayout()
     }
 
+    internal fun towerWidthRange(width: Float = canvasW, workspace: Area? = combinedOverlayPlan?.workspace): ClosedFloatingPointRange<Float> {
+        if (tvLandscapeLayout) return Layouts.tvTowerWidthRange(width)
+        val density = context.resources.displayMetrics.density
+        val maxWidth = workspace?.w ?: (width - 32f * density).coerceAtLeast(1f)
+        return minOf(TOWER_MIN_WIDTH_DP * density, maxWidth * 0.8f)..maxWidth
+    }
+
+    internal val tvTowerWidthPx get() = tvTowerWidthShare * canvasW
+
+    fun updateTowerWidth(widthPx: Float) {
+        if (tvLandscapeLayout && canvasW > 0f) {
+            val share = widthPx.coerceIn(towerWidthRange()) / canvasW
+            if (share != tvTowerWidthShare) {
+                tvTowerWidthShare = share
+                requestOverlayLayout()
+            }
+        } else {
+            val heightPx = towerSpot.h.takeIf { it > 0f }
+                ?: TOWER_DEFAULT_HEIGHT_DP * context.resources.displayMetrics.density
+            updateTowerSize(widthPx, heightPx)
+        }
+    }
+
     /** Width and height are in canvas pixels, like [FloatingSpot]. */
     fun updateTowerSize(widthPx: Float, heightPx: Float) {
-        if (tvLogoMapAnchored) return
+        if (tvLandscapeLayout) return
         val panel = towerSpot
         if (canvasW <= 0f || canvasH <= 0f) {
             panel.w = widthPx
@@ -4556,15 +4583,15 @@ class AppState(
         }
         val density = context.resources.displayMetrics.density
         val workspace = combinedOverlayPlan?.workspace
-        val minWidth = minOf(TOWER_MIN_WIDTH_DP * density, workspace?.w ?: canvasW)
+        val widthRange = towerWidthRange()
         val minHeight = minOf(TOWER_MIN_HEIGHT_DP * density, workspace?.h ?: canvasH)
-        val maxWidth = workspace?.w ?: (canvasW - 32f * density).coerceAtLeast(minWidth).coerceAtMost(canvasW)
+        val maxWidth = widthRange.endInclusive
         val maxHeight = workspace?.h ?: canvasH
         val oldWidth = panel.w.takeIf { it > 0f } ?: minOf(TOWER_DEFAULT_WIDTH_DP * density, maxWidth)
         val oldHeight = panel.h.takeIf { it > 0f } ?: minOf(TOWER_DEFAULT_HEIGHT_DP * density, maxHeight)
         val centerX = if (panel.x >= 0f) panel.x + oldWidth / 2f else canvasW / 2f
         val centerY = if (panel.y >= 0f) panel.y + oldHeight / 2f else canvasH / 2f
-        panel.w = widthPx.coerceIn(minWidth, maxWidth)
+        panel.w = widthPx.coerceIn(widthRange)
         panel.h = heightPx.coerceIn(minHeight, maxHeight)
         panel.x = (centerX - panel.w / 2f).coerceIn(workspace?.x ?: 0f, ((workspace?.x ?: 0f) + maxWidth - panel.w).coerceAtLeast(workspace?.x ?: 0f))
         panel.y = (centerY - panel.h / 2f).coerceIn(workspace?.y ?: 0f, ((workspace?.y ?: 0f) + maxHeight - panel.h).coerceAtLeast(workspace?.y ?: 0f))
@@ -4572,7 +4599,7 @@ class AppState(
     }
 
     internal fun applyTowerEdit(area: Area) {
-        if (!arranging || towerLocked || tvLogoMapAnchored) return
+        if (!arranging || towerLocked || tvLandscapeLayout) return
         towerSpot.place(area)
         if (towerExpandedForMapMove) {
             towerHeightBeforeMapMove = area.h
@@ -4587,7 +4614,8 @@ class AppState(
     }
 
     fun storeTowerPanel() {
-        if (canvasW > 0f && canvasH > 0f && towerSpot.x >= 0f) towerSpot.store(canvasW, canvasH)
+        if (tvLandscapeLayout) prefs.edit().putFloat(PREF_TV_TOWER_WIDTH, tvTowerWidthShare).apply()
+        else if (canvasW > 0f && canvasH > 0f && towerSpot.x >= 0f) towerSpot.store(canvasW, canvasH)
     }
 
     /** Feed rectangles, for finding open space. */
@@ -5672,6 +5700,7 @@ class AppState(
         private const val PREF_TOWER_FONT_SCALE = "towerFontScale"
         private const val PREF_TOWER_LOCKED = "towerLocked"
         private const val PREF_TOWER_RESERVE = "towerReserve"
+        private const val PREF_TV_TOWER_WIDTH = "tvTowerWidthShare"
         const val TOWER_DEFAULT_WIDTH_DP = 380f
         const val TOWER_DEFAULT_HEIGHT_DP = 720f
         const val TOWER_MIN_WIDTH_DP = 300f
@@ -5718,10 +5747,10 @@ class AppState(
         private const val PREF_OVERLAY_LAYOUT = "overlayLayoutMode"
         private const val PREF_MAP_DOT_SIZE = "mapDotSizeDp"
         private const val PREF_MAP_LABEL_SIZE = "mapLabelSizeSp"
-        private const val MIN_MAP_DOT_SIZE = 3f
-        private const val MAX_MAP_DOT_SIZE = 8f
-        private const val MIN_MAP_LABEL_SIZE = 7f
-        private const val MAX_MAP_LABEL_SIZE = 12f
+        const val MIN_MAP_DOT_SIZE = 1f
+        const val MAX_MAP_DOT_SIZE = 8f
+        const val MIN_MAP_LABEL_SIZE = 4f
+        const val MAX_MAP_LABEL_SIZE = 12f
         private const val PREF_START_LINE = "startLine"
         private const val PREF_PIT_LOSS = "pitLoss"
         // Snap mode: edges pull together inside 12dp; a push past 56dp goes through.

@@ -42,10 +42,14 @@ data class CombinedOverlayPlan(
  * rest share a strip beside or below it, whichever leaves more picture on screen.
  */
 object Layouts {
-    internal fun tvSingleLandscapeSlot(width: Float, height: Float): Slot {
+    internal const val DEFAULT_TV_TOWER_SHARE = 0.34f
+
+    internal fun tvTowerWidthRange(width: Float) = width * 0.20f..width * 0.60f
+
+    internal fun tvSingleLandscapeSlot(width: Float, height: Float, feedWidth: Float = width - width * DEFAULT_TV_TOWER_SHARE): Slot {
         val videoTop = height * 0.09375f
         val videoHeight = height * (1f - 0.09375f - 0.0625f)
-        return Slot(0f, videoTop, min(width * 0.66f, videoHeight * 16f / 9f))
+        return Slot(0f, videoTop, min(feedWidth, videoHeight * 16f / 9f))
     }
 
     internal fun logoMapOver(main: Slot): Area {
@@ -53,12 +57,12 @@ object Layouts {
         return Area(main.x + main.w - width - main.w * 0.015f, main.y + main.h * 0.015f, width, main.h * 0.32f)
     }
 
-    internal fun fitMapInside(map: Area, video: Area): Area {
-        val width = map.w.coerceIn(min(1f, video.w), video.w)
-        val height = map.h.coerceIn(min(1f, video.h), video.h)
+    internal fun fitMapInside(map: Area, bounds: Area): Area {
+        val width = map.w.coerceIn(min(1f, bounds.w), bounds.w)
+        val height = map.h.coerceIn(min(1f, bounds.h), bounds.h)
         return Area(
-            map.x.coerceIn(video.x, (video.x + video.w - width).coerceAtLeast(video.x)),
-            map.y.coerceIn(video.y, (video.y + video.h - height).coerceAtLeast(video.y)),
+            map.x.coerceIn(bounds.x, (bounds.x + bounds.w - width).coerceAtLeast(bounds.x)),
+            map.y.coerceIn(bounds.y, (bounds.y + bounds.h - height).coerceAtLeast(bounds.y)),
             width, height,
         )
     }
@@ -74,6 +78,7 @@ object Layouts {
         width: Float,
         height: Float,
         overlayMode: OverlayLayoutMode,
+        tvTowerWidth: Float = width * DEFAULT_TV_TOWER_SHARE,
     ): CombinedOverlayPlan {
         val portrait = height >= width
         val floating = overlayMode == OverlayLayoutMode.FLOATING
@@ -87,12 +92,13 @@ object Layouts {
             // The tracker overlays the main video's logo corner.
             val titleBand = height * 0.09375f
             val bottomMargin = height * 0.0625f
-            val feedWidth = width * 0.66f
+            val towerWidth = tvTowerWidth.coerceIn(tvTowerWidthRange(width))
+            val feedWidth = width - towerWidth
 
             feeds = Area(0f, titleBand, feedWidth, height - titleBand - bottomMargin)
-            workspace = Area(feedWidth, 0f, width - feedWidth, height)
+            workspace = Area(feedWidth, 0f, towerWidth, height)
             tower = workspace
-            map = logoMapOver(tvSingleLandscapeSlot(width, height))
+            map = logoMapOver(tvSingleLandscapeSlot(width, height, feedWidth))
         } else if (portrait) {
             val feedFraction = if (floating) 0.50f else 0.34f
             feeds = Area(0f, 0f, width, height * feedFraction)
@@ -121,7 +127,7 @@ object Layouts {
         val slots = if (tvLandscape && n == 1) {
             // The broadcast feed starts immediately below the top title band rather than
             // vertically centering the image in the whole left column.
-            listOf(tvSingleLandscapeSlot(width, height))
+            listOf(tvSingleLandscapeSlot(width, height, feeds.w))
         } else {
             place(mode, n, feeds.w, feeds.h).map { Slot(it.x + feeds.x, it.y + feeds.y, it.w) }
         }

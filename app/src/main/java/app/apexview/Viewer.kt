@@ -1643,17 +1643,20 @@ private fun MapSheet(app: AppState) {
         val selectedMapMode = remember { FocusRequester() }
         LaunchedEffect(Unit) { runCatching { selectedMapMode.requestFocus() } }
         val combinedWorkspace = app.combinedOverlayPlan?.workspace
-        val maxTowerWidthDp = combinedWorkspace?.let { with(density) { it.w.toDp().value } }
-            ?: (config.screenWidthDp - 32f).coerceAtLeast(AppState.TOWER_MIN_WIDTH_DP)
+        val widthRange = with(density) {
+            val widthPx = app.canvasSize.first.takeIf { it > 0f } ?: config.screenWidthDp.dp.toPx()
+            app.towerWidthRange(widthPx).let { it.start.toDp().value..it.endInclusive.toDp().value }
+        }
+        val maxTowerWidthDp = widthRange.endInclusive
         val maxTowerHeightDp = combinedWorkspace?.let { with(density) { it.h.toDp().value } }
             ?: config.screenHeightDp.toFloat()
-        val minTowerWidthDp = minOf(AppState.TOWER_MIN_WIDTH_DP, maxTowerWidthDp)
         val minTowerHeightDp = minOf(AppState.TOWER_MIN_HEIGHT_DP, maxTowerHeightDp)
         val defaultTowerWidthDp = minOf(AppState.TOWER_DEFAULT_WIDTH_DP, maxTowerWidthDp)
         val defaultTowerHeightDp = minOf(AppState.TOWER_DEFAULT_HEIGHT_DP, maxTowerHeightDp)
         val towerWidthDp = with(density) {
-            (app.towerSpot.w.takeIf { it > 0f } ?: defaultTowerWidthDp.dp.toPx()).toDp().value
-        }.coerceIn(minTowerWidthDp, maxTowerWidthDp)
+            val widthPx = if (app.tvLandscapeLayout) app.tvTowerWidthPx else app.towerSpot.w
+            (widthPx.takeIf { it > 0f } ?: defaultTowerWidthDp.dp.toPx()).toDp().value
+        }.coerceIn(widthRange)
         val towerHeightDp = with(density) {
             (app.towerSpot.h.takeIf { it > 0f } ?: defaultTowerHeightDp.dp.toPx()).toDp().value
         }.coerceIn(minTowerHeightDp, maxTowerHeightDp)
@@ -1761,24 +1764,24 @@ private fun MapSheet(app: AppState) {
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("Driver dot size", style = Type.body, modifier = Modifier.weight(1f))
-                            Text("%.0f dp".format(app.mapDotSizeDp), style = Type.footnote)
+                            Text("%.1f dp".format(app.mapDotSizeDp), style = Type.footnote)
                         }
                         AppleSlider(
                             value = app.mapDotSizeDp,
                             onValueChange = app::updateMapDotSize,
-                            valueRange = 3f..8f,
+                            valueRange = AppState.MIN_MAP_DOT_SIZE..AppState.MAX_MAP_DOT_SIZE,
                             trackColor = Ink.surfaceHigh,
                         )
                     }
                     Column(Modifier.padding(top = 8.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("Driver abbreviation size", style = Type.body, modifier = Modifier.weight(1f))
-                            Text("%.0f sp".format(app.mapLabelSizeSp), style = Type.footnote)
+                            Text("%.1f sp".format(app.mapLabelSizeSp), style = Type.footnote)
                         }
                         AppleSlider(
                             value = app.mapLabelSizeSp,
                             onValueChange = app::updateMapLabelSize,
-                            valueRange = 7f..12f,
+                            valueRange = AppState.MIN_MAP_LABEL_SIZE..AppState.MAX_MAP_LABEL_SIZE,
                             trackColor = Ink.surfaceHigh,
                         )
                     }
@@ -1825,7 +1828,7 @@ private fun MapSheet(app: AppState) {
                         trackColor = Ink.surfaceHigh,
                     )
                 }
-                if (!app.tvLogoMapAnchored) Column(
+                Column(
                     Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
                         .background(Ink.background).padding(horizontal = 16.dp, vertical = 12.dp)
                 ) {
@@ -1835,39 +1838,36 @@ private fun MapSheet(app: AppState) {
                     }
                     AppleSlider(
                         value = towerWidthDp,
-                        onValueChange = { value ->
-                            app.updateTowerSize(
-                                with(density) { value.dp.toPx() },
-                                with(density) { towerHeightDp.dp.toPx() },
-                            )
-                        },
-                        valueRange = minTowerWidthDp..maxTowerWidthDp,
+                        onValueChange = { value -> app.updateTowerWidth(with(density) { value.dp.toPx() }) },
+                        valueRange = widthRange,
                         onValueChangeFinished = app::finishTowerResize,
                         trackColor = Ink.surfaceHigh,
                     )
-                    Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Height", style = Type.body, modifier = Modifier.weight(1f))
-                        Text("%.0f dp".format(towerHeightDp), style = Type.footnote)
+                    if (!app.tvLandscapeLayout) {
+                        Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Height", style = Type.body, modifier = Modifier.weight(1f))
+                            Text("%.0f dp".format(towerHeightDp), style = Type.footnote)
+                        }
+                        AppleSlider(
+                            value = towerHeightDp,
+                            onValueChange = { value ->
+                                app.updateTowerSize(
+                                    with(density) { towerWidthDp.dp.toPx() },
+                                    with(density) { value.dp.toPx() },
+                                )
+                            },
+                            valueRange = minTowerHeightDp..maxTowerHeightDp,
+                            onValueChangeFinished = app::finishTowerResize,
+                            trackColor = Ink.surfaceHigh,
+                        )
                     }
-                    AppleSlider(
-                        value = towerHeightDp,
-                        onValueChange = { value ->
-                            app.updateTowerSize(
-                                with(density) { towerWidthDp.dp.toPx() },
-                                with(density) { value.dp.toPx() },
-                            )
-                        },
-                        valueRange = minTowerHeightDp..maxTowerHeightDp,
-                        onValueChangeFinished = app::finishTowerResize,
-                        trackColor = Ink.surfaceHigh,
-                    )
                     Text(
                         "Unlock the layout to use the tower handles. Drag on touch, or press OK on a handle, use the arrows, then press OK to finish.",
                         style = Type.footnote,
                         modifier = Modifier.padding(top = 8.dp),
                     )
                 }
-                if (!app.tvLogoMapAnchored) Column(
+                if (!app.tvLandscapeLayout) Column(
                     Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
                         .background(Ink.background).padding(vertical = 4.dp)
                 ) {

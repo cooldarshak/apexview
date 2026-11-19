@@ -266,7 +266,7 @@ class LayoutsTest {
     }
 
     @Test
-    fun trackerStartsInTheMainFeedLogoCornerAndEditsStayWithinTheVideo() {
+    fun trackerStartsOverTheLogoAndCanMovePastTheRightEdgeOfTheVideo() {
         for (mode in listOf(LayoutMode.TV, LayoutMode.FEATURED, LayoutMode.GRID)) {
             val main = if (mode == LayoutMode.TV) Layouts.tvSingleLandscapeSlot(2316f, 1080f)
                 else Layouts.place(mode, 3, 2316f, 1080f).first()
@@ -274,10 +274,24 @@ class LayoutsTest {
             val anchor = Layouts.logoMapOver(main)
             assertTrue(anchor.x > video.x + video.w / 2)
             assertEquals(anchor, Layouts.fitMapInside(anchor, video))
-            val moved = Layouts.fitMapInside(anchor.copy(x = 3000f, y = -50f), video)
-            assertEquals(video.x + video.w, moved.x + moved.w, 0.01f)
-            assertEquals(video.y, moved.y, 0.01f)
+            val screen = Area(0f, 0f, 2316f, 1080f)
+            val moved = Layouts.fitMapInside(anchor.copy(x = 3000f, y = -50f), screen)
+            assertTrue(moved.x + moved.w > video.x + video.w)
+            assertEquals(screen.w, moved.x + moved.w, 0.01f)
+            assertEquals(screen.y, moved.y, 0.01f)
         }
+    }
+
+    @Test
+    fun landscapeTowerWidthChangesTheFeedAreaAndKeepsTheSidebarDocked() {
+        val narrow = Layouts.withCombinedOverlays(LayoutMode.TV, 1, 1920f, 1080f, OverlayLayoutMode.DOCKED, 400f)
+        val wide = Layouts.withCombinedOverlays(LayoutMode.TV, 1, 1920f, 1080f, OverlayLayoutMode.DOCKED, 900f)
+        assertEquals(400f, narrow.tower.w)
+        assertEquals(900f, wide.tower.w)
+        assertEquals(1920f, wide.tower.x + wide.tower.w)
+        assertEquals(1080f, wide.tower.h)
+        assertTrue(wide.slots.single().w < narrow.slots.single().w)
+        assertTrue(!wide.tower.overlaps(wide.slots.single()))
     }
 
     @Test

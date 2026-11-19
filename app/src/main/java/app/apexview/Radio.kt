@@ -245,11 +245,12 @@ internal fun FloatingPanel(
         minOf(maxWidth, bounds?.let { it.w.toDp() } ?: (width.toDp() - 32.dp))
     }
     val panelHeight = with(density) { minOf(maxHeight, bounds?.let { it.h.toDp() } ?: maxHeight) }
+    val defaultPanelWidth = if (tower) minOf(AppState.TOWER_DEFAULT_WIDTH_DP.dp, panelWidth) else panelWidth
     val effectiveMinWidth = minWidth.coerceAtMost(panelWidth)
     val effectiveMinHeight = minHeight.coerceAtMost(panelHeight)
     if (spot.x < 0f) {
         with(density) {
-            val w = panelWidth.toPx()
+            val w = defaultPanelWidth.toPx()
             val h = panelHeight.toPx()
             val saved = spot.saved(width, height)
             if (saved != null && saved.size >= 4 && saved[2] > 0f && saved[3] > 0f) {
@@ -279,7 +280,7 @@ internal fun FloatingPanel(
     }
     val shownWidth = if (spot.w > 0f) with(density) {
         spot.w.toDp().coerceIn(effectiveMinWidth, panelWidth)
-    } else panelWidth
+    } else defaultPanelWidth
     val shownHeight = if (spot.h > 0f) with(density) {
         spot.h.toDp().coerceIn(effectiveMinHeight, panelHeight)
     } else panelHeight
@@ -360,7 +361,12 @@ internal fun FloatingPanel(
             content()
         }
         // The corner grip: drag to resize, edges snapping like the feeds'.
-        if (tower && !locked && app.arranging && !app.tvLogoMapAnchored) {
+        if (tower && !locked && app.arranging && app.tvLandscapeLayout) {
+            TowerEditHandle(Modifier.align(Alignment.CenterStart), minOf(54.dp, shownWidth / 3f),
+                Icons.Rounded.ZoomOutMap, "Change timing tower width",
+                { Area(spot.x, spot.y, spot.w, spot.h) },
+                { start, delta -> app.updateTowerWidth(start.w - delta.x) }, app::finishTowerResize)
+        } else if (tower && !locked && app.arranging) {
             val region = bounds ?: Area(0f, 0f, width, height)
             val maximumWidth = with(density) { panelWidth.toPx() }
             val maximumHeight = with(density) { panelHeight.toPx() }

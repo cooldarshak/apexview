@@ -135,7 +135,9 @@ fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float
     val density = LocalDensity.current
     val plan = app.combinedOverlayPlan
     val bounds = plan?.workspace
-    val maxTowerWidth = bounds?.let { with(density) { it.w.toDp() } } ?: TOWER_WIDTH
+    val widthRange = app.towerWidthRange(width)
+    val maxTowerWidth = with(density) { (if (app.tvLandscapeLayout) bounds?.w ?: width else widthRange.endInclusive).toDp() }
+    val minTowerWidth = with(density) { widthRange.start.toDp().coerceAtMost(maxTowerWidth) }
     val maxTowerHeight = bounds?.let { with(density) { it.h.toDp() } } ?: with(density) {
         minOf(TOWER_HEIGHT, height.toDp())
     }
@@ -143,7 +145,7 @@ fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float
         FloatingPanel(
             app, app.towerSpot, "", "Hide timing tower", app::toggleTower, width, height, feedScale,
             maxWidth = maxTowerWidth, maxHeight = maxTowerHeight,
-            minWidth = minOf(AppState.TOWER_MIN_WIDTH_DP.dp, maxTowerWidth),
+            minWidth = minTowerWidth,
             minHeight = minOf(AppState.TOWER_MIN_HEIGHT_DP.dp, maxTowerHeight,
                 plan?.takeUnless { it.floating }?.let { with(density) { it.tower.h.toDp() } } ?: maxTowerHeight),
             bounds = bounds,
@@ -203,7 +205,7 @@ internal fun TimingTowerContents(
         // Let the 1/3 landscape sidebar shrink the complete table rather than clip its last columns.
         // The text-size setting remains available when the sidebar is especially narrow.
         val baseDensity = LocalDensity.current
-        val contentScale = ((maxWidth.value - 18f) / 361f).coerceIn(0.60f, 1f)
+        val contentScale = (maxWidth.value / 379f).coerceIn(0.25f, if (television) 1.75f else 1.25f)
         CompositionLocalProvider(
             LocalDensity provides Density(baseDensity.density * contentScale, baseDensity.fontScale)
         ) {
@@ -228,7 +230,7 @@ internal fun TimingTowerContents(
                 // The TV preset uses a compact broadcast tower so more of the field is visible.
                 // On other layouts preserve the existing minimum for touch readability.
                 ((maxHeight.value / contentScale - 67f) / rows.size)
-                    .coerceIn(minimumRowHeight / contentScale, ROW_HEIGHT.value).dp
+                    .coerceIn((minimumRowHeight / contentScale).coerceAtMost(ROW_HEIGHT.value), ROW_HEIGHT.value).dp
             }
             Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp)) {
                 TowerSessionHeader(header)
@@ -607,5 +609,4 @@ private fun broadcastName(channel: Channel) = channel.title.split(" ").joinToStr
 }
 
 /** The floating tower's size until it's resized: every column, and about ten drivers. */
-private val TOWER_WIDTH = 380.dp
 private val TOWER_HEIGHT = 720.dp
