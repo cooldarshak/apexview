@@ -12,6 +12,7 @@ import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.util.Log
 import android.view.PixelCopy
 import android.view.Window
@@ -29,6 +30,7 @@ import java.nio.ByteOrder
 internal class SingleDecoderSceneView(context: Context) : TextureView(context), TextureView.SurfaceTextureListener {
     private val thread = HandlerThread("ApexviewSingleScene").apply { start() }
     private val gl = Handler(thread.looper)
+    private val main = Handler(Looper.getMainLooper())
     private var player: ExoPlayer? = null
     @Volatile private var scene: VideoScene? = null
     @Volatile private var released = false
@@ -58,9 +60,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 clip = encoder
                 clipResult = result
                 copyReplayFrame(source, bounds, encoder)
-                gl.postDelayed({ if (clip === encoder) stopClip("Replay clip timed out before enough video frames arrived") }, 20_000)
             } catch (error: Exception) {
-                post { result("Could not start replay clip: ${error.message ?: error.javaClass.simpleName}") }
+                main.post { result("Could not start replay clip: ${error.message ?: error.javaClass.simpleName}") }
             }
         }
     }
@@ -77,12 +78,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                     if (clip === encoder && !released) {
                         try {
                             check(status == PixelCopy.SUCCESS) { "Viewer capture failed (PixelCopy $status)" }
-                            val finished = encoder.frame(requestedAt)
-                            if (finished) stopClip(encoder.finish())
-                            else {
-                                val delayMs = (40L - (System.nanoTime() - requestedAt) / 1_000_000L).coerceAtLeast(0L)
-                                gl.postDelayed({ if (clip === encoder) copyReplayFrame(source, bounds, encoder) }, delayMs)
-                            }
+                            encoder.frame(requestedAt)
+                            val delayMs = (40L - (System.nanoTime() - requestedAt) / 1_000_000L).coerceAtLeast(0L)
+                            gl.postDelayed({ if (clip === encoder) copyReplayFrame(source, bounds, encoder) }, delayMs)
                         } catch (error: Exception) {
                             stopClip("Replay clip failed: ${error.message ?: error.javaClass.simpleName}")
                         } finally {
@@ -98,8 +96,18 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
     }
 
-    fun cancelReplayClip() {
-        gl.post { if (clip != null) stopClip("Replay clip cancelled because playback changed") }
+    fun finishReplayClip() {
+        gl.post { saveClip() }
+    }
+
+    private fun saveClip() {
+        val encoder = clip ?: return
+        val message = try {
+            encoder.finish()
+        } catch (error: Exception) {
+            "Could not save replay recording: ${error.message ?: error.javaClass.simpleName}"
+        }
+        stopClip(message)
     }
 
     private fun stopClip(message: String) {
@@ -107,7 +115,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         clip = null
         val result = clipResult
         clipResult = null
-        post { result?.invoke(message) }
+        main.post { result?.invoke(message) }
     }
 
     private var decoderTexture: SurfaceTexture? = null
@@ -268,7 +276,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     private fun destroy() {
-        if (clip != null) stopClip("Replay clip stopped because playback closed")
+        saveClip()
         config = null
         decoderTexture?.setOnFrameAvailableListener(null)
         input?.release(); input = null

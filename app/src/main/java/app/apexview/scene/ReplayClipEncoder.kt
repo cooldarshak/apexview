@@ -16,11 +16,10 @@ import android.opengl.GLES20
 import android.opengl.GLUtils
 import android.provider.MediaStore
 import android.util.Log
-import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/** GL-thread only. Encodes a short, video-only snapshot of an already-authorized clear replay. */
+/** GL-thread only. Encodes a video-only recording of an already-authorized clear replay. */
 internal class ReplayClipEncoder(
     private val context: Context,
     private val display: EGLDisplay,
@@ -29,7 +28,12 @@ internal class ReplayClipEncoder(
     private val width: Int,
     private val height: Int,
 ) {
-    private val file = File.createTempFile("pitwall-replay-", ".mp4", context.cacheDir)
+    private val resolver = context.contentResolver
+    private val name = "Pitwall-replay-${System.currentTimeMillis()}.mp4"
+    private var destination: android.net.Uri? = null
+    private var published = false
+    private var framesWritten = 0L
+    private var lastPresentationUs = 0L
     // PixelCopy may still own the bitmap when a clip is cancelled. Let its callback release
     // the final reference instead of recycling the bitmap while that copy is pending.
     val pixels = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -59,7 +63,16 @@ internal class ReplayClipEncoder(
             encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             input = encoder.createInputSurface()
             encoder.start()
-            muxer = MediaMuxer(file.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val uri = checkNotNull(resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, name)
+                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Pitwall")
+                put(MediaStore.Video.Media.IS_PENDING, 1)
+            }))
+            destination = uri
+            muxer = checkNotNull(resolver.openFileDescriptor(uri, "rw")).use {
+                MediaMuxer(it.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            }
             egl = EGL14.eglCreateWindowSurface(display, config, input, intArrayOf(EGL14.EGL_NONE), 0)
             check(egl != EGL14.EGL_NO_SURFACE) { "Could not create the encoder surface" }
             program = GLES20.glCreateProgram()
@@ -86,7 +99,7 @@ internal class ReplayClipEncoder(
     }
 
     /** Returns true after submitting the last frame. The display is rebound by the caller. */
-    fun frame(timestampNs: Long): Boolean {
+    fun frame(timestampNs: Long) {
         if (firstNs < 0) firstNs = timestampNs
         check(EGL14.eglMakeCurrent(display, egl, egl, glContext)) { "Encoder surface unavailable" }
         val elapsedNs = timestampNs - firstNs
@@ -112,7 +125,6 @@ internal class ReplayClipEncoder(
         check(EGLExt.eglPresentationTimeANDROID(display, egl, elapsedNs))
         check(EGL14.eglSwapBuffers(display, egl)) { "Encoder frame submission failed" }
         drain(end = false)
-        return elapsedNs >= 10_000_000_000L
     }
 
     private fun drain(end: Boolean) {
@@ -135,6 +147,8 @@ internal class ReplayClipEncoder(
                         if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
                             check(track >= 0)
                             output.writeSampleData(track, checkNotNull(encoder.getOutputBuffer(index)), info)
+                            framesWritten++
+                            lastPresentationUs = maxOf(lastPresentationUs, info.presentationTimeUs)
                         }
                     } finally { encoder.releaseOutputBuffer(index, false) }
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return
@@ -146,25 +160,16 @@ internal class ReplayClipEncoder(
     fun finish(): String {
         checkNotNull(codec).signalEndOfInputStream()
         drain(end = true)
-        check(track >= 0) { "No video frames were encoded" }
+        check(track >= 0 && framesWritten > 0) { "No video frames were encoded" }
         checkNotNull(muxer).stop()
         track = -1
-        val resolver = context.contentResolver
-        val name = "Pitwall-replay-${System.currentTimeMillis()}.mp4"
-        val uri = checkNotNull(resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, name)
-            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Pitwall")
-            put(MediaStore.Video.Media.IS_PENDING, 1)
-        }))
-        try {
-            checkNotNull(resolver.openOutputStream(uri)).use { out -> file.inputStream().use { it.copyTo(out) } }
-            check(resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null) == 1)
-        } catch (error: Exception) {
-            resolver.delete(uri, null, null)
-            throw error
-        }
-        Log.i("ApexviewSingleDecoder", "F1_REPLAY_CLIP_SAVED source=viewer_window output=${width}x${height} videoTracks=1")
+        checkNotNull(muxer).release()
+        muxer = null
+        val uri = checkNotNull(destination)
+        check(resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null) == 1)
+        published = true
+        Log.i("ApexviewSingleDecoder", "F1_REPLAY_CLIP_SAVED source=viewer_window output=${width}x${height} " +
+            "videoTracks=1 frames=$framesWritten durationMs=${lastPresentationUs / 1000}")
         return "Saved $name in Movies/Pitwall"
     }
 
@@ -176,7 +181,7 @@ internal class ReplayClipEncoder(
         input?.release()
         if (track >= 0) runCatching { muxer?.stop() }
         runCatching { muxer?.release() }
-        file.delete()
+        if (!published) destination?.let { runCatching { resolver.delete(it, null, null) } }
     }
 
 }

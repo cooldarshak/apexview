@@ -534,6 +534,8 @@ fun ViewerScreen(app: AppState) {
         ) { BottomChrome(app, clearOf(cutouts, width, height - bottomBand, height)) }
 
         if (!app.replayClipRunning) Messages(app, Modifier.zIndex(CHROME_Z + 1).align(Alignment.Center))
+        else Box(Modifier.fillMaxSize().zIndex(CHROME_Z + 3)
+            .pointerInput(Unit) { detectTapGestures(onTap = { app.replayClipStopRequested = true }) })
         // In the corner, or centred where the screen is too narrow for a corner to mean much.
         VotePrompt(app, Modifier.zIndex(CHROME_Z + 1).align(if (compactWidth) Alignment.BottomCenter else Alignment.BottomEnd))
         NextLivePrompt(app, Modifier.zIndex(CHROME_Z + 1).align(if (compactWidth) Alignment.BottomCenter else Alignment.BottomEnd))
@@ -920,9 +922,11 @@ internal fun PlaybackVideoCanvas(
                 return@LaunchedEffect
             }
             recordingBounds = bounds
+            app.replayClipStopRequested = false
             app.replayClipRunning = true
             target.startReplayClip(window, bounds) { result ->
                 app.replayClipRunning = false
+                app.replayClipStopRequested = false
                 app.reportReplayClipStatus(result)
             }
         }
@@ -935,8 +939,9 @@ internal fun PlaybackVideoCanvas(
                 val position = host.player.currentPosition
                 if (source == null || host.archiveSceneSession !== source || position < lastPosition ||
                     position - lastPosition > 1_000 || app.castingActive || app.externalDisplayActive ||
-                    app.chromeVisible || app.inPip || app.layoutSheetOpen || app.helpOpen || viewerBounds != recordingBounds) {
-                    target.cancelReplayClip()
+                    app.chromeVisible || app.inPip || app.layoutSheetOpen || app.helpOpen || viewerBounds != recordingBounds ||
+                    app.replayClipStopRequested || host.player.playbackState == androidx.media3.common.Player.STATE_ENDED) {
+                    target.finishReplayClip()
                     break
                 }
                 lastPosition = position
@@ -1615,13 +1620,13 @@ private fun LayoutSheet(app: AppState) {
             }
             if (app.canMakeReplayClip && !app.replayClipRunning) {
                 Row(Modifier.padding(top = 12.dp)) {
-                    SecondaryButton("Save 10-second replay clip") {
+                    SecondaryButton("Start replay recording") {
                         app.layoutSheetOpen = false
                         app.chromeVisible = false
                         app.replayClipRequested = true
                     }
                 }
-                Text("Video only. Uses the visible replay layout.", style = Type.footnote)
+                Text("Video only. Tap the replay or press OK on the remote to stop and save.", style = Type.footnote)
             }
             val n = app.tiles.size
             val hasSaved = app.savedLayout(n) != null

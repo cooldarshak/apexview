@@ -5474,6 +5474,11 @@ class AppState(
         if (tiles.isEmpty() || browsing || inPip) return false
         val down = event.action == android.view.KeyEvent.ACTION_DOWN
         val first = down && event.repeatCount == 0
+        if (replayClipRunning && event.keyCode in listOf(android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                android.view.KeyEvent.KEYCODE_ENTER, android.view.KeyEvent.KEYCODE_NUMPAD_ENTER)) {
+            if (first) replayClipStopRequested = true
+            return true
+        }
         when (event.keyCode) {
             android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> if (first) togglePlay()
             android.view.KeyEvent.KEYCODE_MEDIA_PLAY -> if (first && !playing) togglePlay()
@@ -5544,6 +5549,7 @@ class AppState(
 
     internal var replayClipRequested by mutableStateOf(false)
     internal var replayClipRunning by mutableStateOf(false)
+    internal var replayClipStopRequested by mutableStateOf(false)
     internal val canMakeReplayClip: Boolean
         get() = singleDecoderScenePlayer?.archiveSceneSession != null && timing?.let {
             it.outline.size >= 4 && it.laps.isNotEmpty() && it.tracks.isNotEmpty()
