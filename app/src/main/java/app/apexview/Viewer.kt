@@ -888,9 +888,44 @@ internal fun PlaybackVideoCanvas(app: AppState, width: Float, height: Float) {
     val scene = app.videoScene(width, height)
     val host = app.singleDecoderScenePlayer
     if (scene != null && host != null) {
+        var view by remember { mutableStateOf<SingleDecoderSceneView?>(null) }
+        LaunchedEffect(view, app.replayClipRequested) {
+            val target = view ?: return@LaunchedEffect
+            if (app.replayClipRequested) {
+                app.replayClipRequested = false
+                val timing = app.timing
+                if (app.canMakeReplayClip && timing != null && host.player.isPlaying && !app.replayClipRunning) {
+                    app.replayClipRunning = true
+                    target.replayClockMs = app.mapTimeAt(host.player.currentPosition)
+                    app.message = "Encoding a 10-second replay clip…"
+                    target.startReplayClip(timing) { result ->
+                        app.replayClipRunning = false
+                        app.message = result
+                    }
+                } else app.message = "Play a clear replay with timing data loaded before making a clip."
+            }
+        }
+        LaunchedEffect(view, host, app.replayClipRunning) {
+            val target = view ?: return@LaunchedEffect
+            if (!app.replayClipRunning) return@LaunchedEffect
+            val source = host.archiveSceneSession
+            var lastPosition = host.player.currentPosition
+            while (app.replayClipRunning) {
+                val position = host.player.currentPosition
+                if (source == null || host.archiveSceneSession !== source || position < lastPosition ||
+                    position - lastPosition > 1_000 || app.castingActive || app.externalDisplayActive) {
+                    target.cancelReplayClip()
+                    break
+                }
+                target.replayClockMs = app.mapTimeAt(position)
+                lastPosition = position
+                delay(80)
+            }
+        }
         AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
             onFailure = app::failSingleDecoderScene
             onOutputSize = app::reportSceneOutputSize
+            view = this
         } }, update = { it.bind(host.player, scene) }, onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
     } else {
         val popped = if (app.inPip) app.pipTile() else null
@@ -1556,6 +1591,15 @@ private fun LayoutSheet(app: AppState) {
             app.singleDecoderDiagnostic?.let { diagnostic ->
                 Text(diagnostic, style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
                 Text("Active video decoders (app callbacks): ${app.observedActiveVideoDecoders}", style = Type.footnote)
+            }
+            if (app.canMakeReplayClip && !app.replayClipRunning) {
+                Row(Modifier.padding(top = 12.dp)) {
+                    SecondaryButton("Save 10-second replay clip") {
+                        app.layoutSheetOpen = false
+                        app.replayClipRequested = true
+                    }
+                }
+                Text("Video only. Includes the timing tower and track map.", style = Type.footnote)
             }
             val n = app.tiles.size
             val hasSaved = app.savedLayout(n) != null

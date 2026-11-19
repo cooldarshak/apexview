@@ -5540,6 +5540,13 @@ class AppState(
     var playbackSpeed by mutableStateOf(prefs.getFloat(PREF_SPEED, 1f).takeIf { it in SPEEDS } ?: 1f)
         private set
     var speedSheetOpen by mutableStateOf(false)
+    internal var replayClipRequested by mutableStateOf(false)
+    internal var replayClipRunning by mutableStateOf(false)
+    internal val canMakeReplayClip: Boolean
+        get() = singleDecoderScenePlayer?.archiveSceneSession != null && timing?.let {
+            it.outline.size >= 4 && it.laps.isNotEmpty() && it.tracks.isNotEmpty()
+        } == true && !castPlaybackHandedOff && !externalDisplayActive
+
     var qualitySheetOpen by mutableStateOf(false)
 
     fun chooseVideoQuality(value: VideoQuality) {

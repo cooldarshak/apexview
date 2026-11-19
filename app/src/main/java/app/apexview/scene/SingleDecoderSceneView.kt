@@ -19,7 +19,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * One codec output texture, one visible output view. No per-window players/decoders and no encoder.
+ * One codec output texture, one visible output view. No per-window players or decoders.
  * Logical windows sample regions of the already composed frame, with the usual layout/z order.
  * This renderer is used only for verified CLEAR media. Protected video keeps its secure path.
  */
@@ -37,6 +37,40 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var contextGl: EGLContext = EGL14.EGL_NO_CONTEXT
     private var window: EGLSurface = EGL14.EGL_NO_SURFACE
+    private var config: EGLConfig? = null
+    private var clip: ReplayClipEncoder? = null
+    @Volatile var replayClockMs: Long? = null
+    private var clipResult: ((String) -> Unit)? = null
+
+    fun startReplayClip(timing: app.apexview.SessionTiming, result: (String) -> Unit) {
+        gl.post {
+            if (clip != null) return@post
+            try {
+                check(!released && hasFrame && EGL14.eglMakeCurrent(display, window, window, contextGl)) {
+                    "Video needs to be playing before making a replay clip"
+                }
+                val encoder = ReplayClipEncoder(context.applicationContext, display, contextGl, checkNotNull(config), timing)
+                clip = encoder
+                clipResult = result
+                gl.postDelayed({ if (clip === encoder) stopClip("Replay clip timed out before enough video frames arrived") }, 20_000)
+            } catch (error: Exception) {
+                post { result("Could not start replay clip: ${error.message ?: error.javaClass.simpleName}") }
+            }
+        }
+    }
+
+    fun cancelReplayClip() {
+        gl.post { if (clip != null) stopClip("Replay clip cancelled because playback changed") }
+    }
+
+    private fun stopClip(message: String) {
+        clip?.close()
+        clip = null
+        val result = clipResult
+        clipResult = null
+        post { result?.invoke(message) }
+    }
+
     private var decoderTexture: SurfaceTexture? = null
     private var texture = 0
     private var program = 0
@@ -98,12 +132,16 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         check(EGL14.eglInitialize(display, IntArray(2), 0, IntArray(2), 1)) { "EGL initialization failed" }
         val configs = arrayOfNulls<EGLConfig>(1)
         val count = IntArray(1)
-        check(EGL14.eglChooseConfig(display, intArrayOf(EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-            EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
-            EGL14.EGL_ALPHA_SIZE, 8, EGL14.EGL_NONE), 0, configs, 0, 1, count, 0) && count[0] > 0) { "No GLES2 configuration" }
-        contextGl = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT,
+        val attributes = intArrayOf(EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+            EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8)
+        fun choose(extra: IntArray) = EGL14.eglChooseConfig(display,
+            attributes + extra + EGL14.EGL_NONE, 0, configs, 0, 1, count, 0) && count[0] > 0
+        check(choose(intArrayOf(0x3142, 1)) || choose(intArrayOf())) { "No GLES2 configuration" }
+        val selected = checkNotNull(configs[0])
+        config = selected
+        contextGl = EGL14.eglCreateContext(display, selected, EGL14.EGL_NO_CONTEXT,
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
-        window = EGL14.eglCreateWindowSurface(display, configs[0], output, intArrayOf(EGL14.EGL_NONE), 0)
+        window = EGL14.eglCreateWindowSurface(display, selected, output, intArrayOf(EGL14.EGL_NONE), 0)
         check(EGL14.eglMakeCurrent(display, window, window, contextGl)) { "Unable to bind scene output" }
         fun shader(type: Int, code: String): Int {
             val id = GLES20.glCreateShader(type)
@@ -136,6 +174,19 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 if (decoderTexture === frames && !released) {
                     frames.updateTexImage(); frames.getTransformMatrix(transform); hasFrame = true; rendered++
                     draw()
+                    val encoder = clip
+                    val model = scene
+                    val clock = replayClockMs
+                    if (encoder != null && model != null && clock != null) {
+                        try {
+                            val finished = encoder.frame(frames.timestamp, clock, model.width / model.height) { drawVideo(model) }
+                            if (finished) stopClip(encoder.finish())
+                        } catch (error: Exception) {
+                            stopClip("Replay clip failed: ${error.message ?: error.javaClass.simpleName}")
+                        } finally {
+                            EGL14.eglMakeCurrent(display, window, window, contextGl)
+                        }
+                    }
                 }
             }
         }, gl)
@@ -148,24 +199,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         if (window == EGL14.EGL_NO_SURFACE || !EGL14.eglMakeCurrent(display, window, window, contextGl)) return
         GLES20.glViewport(0, 0, outputWidth, outputHeight)
         GLES20.glClearColor(0f, 0f, 0f, 1f); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        if (hasFrame) {
-            GLES20.glUseProgram(program)
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
-            GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "image"), 0)
-            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "st"), 1, false, transform, 0)
-            val p = GLES20.glGetAttribLocation(program, "p"); val uv = GLES20.glGetAttribLocation(program, "uv")
-            GLES20.glEnableVertexAttribArray(p); GLES20.glEnableVertexAttribArray(uv)
-            if (cachedModel != model) {
-                fun buffer(values: FloatArray) = ByteBuffer.allocateDirect(values.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(values); position(0) }
-                cachedQuads = model.quads().map { buffer(it.positions) to buffer(it.texture) }
-                cachedModel = model
-            }
-            for ((positions, coordinates) in cachedQuads) {
-                GLES20.glVertexAttribPointer(p, 2, GLES20.GL_FLOAT, false, 0, positions)
-                GLES20.glVertexAttribPointer(uv, 2, GLES20.GL_FLOAT, false, 0, coordinates)
-                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            }
-        }
+        if (hasFrame) drawVideo(model)
         check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" }
         if (hasFrame && !firstFrameReported) {
             firstFrameReported = true
@@ -175,6 +209,25 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         if (now - lastLogNs >= 5_000_000_000L) {
             Log.i("ApexviewSingleDecoder", "SINGLE_DECODER_SCENE output=${outputWidth}x$outputHeight inputTextures=1 outputViews=1 sources=${model.sources} windows=${model.windows.size} frames=$rendered")
             lastLogNs = now
+        }
+    }
+
+    private fun drawVideo(model: VideoScene) {
+        GLES20.glUseProgram(program)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "image"), 0)
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "st"), 1, false, transform, 0)
+        val p = GLES20.glGetAttribLocation(program, "p"); val uv = GLES20.glGetAttribLocation(program, "uv")
+        GLES20.glEnableVertexAttribArray(p); GLES20.glEnableVertexAttribArray(uv)
+        if (cachedModel != model) {
+            fun buffer(values: FloatArray) = ByteBuffer.allocateDirect(values.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(values); position(0) }
+            cachedQuads = model.quads().map { buffer(it.positions) to buffer(it.texture) }
+            cachedModel = model
+        }
+        for ((positions, coordinates) in cachedQuads) {
+            GLES20.glVertexAttribPointer(p, 2, GLES20.GL_FLOAT, false, 0, positions)
+            GLES20.glVertexAttribPointer(uv, 2, GLES20.GL_FLOAT, false, 0, coordinates)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
     }
 
@@ -189,6 +242,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     private fun destroy() {
+        if (clip != null) stopClip("Replay clip stopped because playback closed")
+        config = null
         decoderTexture?.setOnFrameAvailableListener(null)
         input?.release(); input = null
         decoderTexture?.release(); decoderTexture = null; hasFrame = false
