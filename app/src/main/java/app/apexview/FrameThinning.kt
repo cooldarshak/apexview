@@ -1,10 +1,13 @@
 package app.apexview
 
 import android.content.Context
+import android.media.MediaCrypto
+import android.media.MediaFormat
 import android.os.Handler
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.Format
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -15,6 +18,8 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.video.MediaCodecVideoRenderer
 import androidx.media3.exoplayer.video.VideoRendererEventListener
+import app.apexview.tiled.HevcBitstream
+import app.apexview.tiled.HevcParameterSets
 
 /**
  * Picks which frames a sped-up feed shows, evenly, so it hands the screen no more frames a
@@ -65,6 +70,18 @@ internal class FrameThinner {
     }
 }
 
+/** Media3 reports the cropped display size. The decoder still needs the full coded picture. */
+internal fun croppedHevcCodedSize(format: Format): Pair<Int, Int>? {
+    if (format.sampleMimeType != MimeTypes.VIDEO_H265 || format.width <= 0 || format.height <= 0) return null
+    return format.initializationData.asSequence()
+        .flatMap { csd -> runCatching { HevcBitstream.splitAnnexB(csd) }.getOrDefault(emptyList()).asSequence() }
+        .filter { it.type == 33 }
+        .mapNotNull { runCatching { HevcParameterSets.parseSps(it.bytes) }.getOrNull() }
+        .firstOrNull { sps -> sps.displayWidth == format.width && sps.displayHeight == format.height &&
+            (sps.width - sps.displayWidth >= sps.ctbSize || sps.height - sps.displayHeight >= sps.ctbSize) }
+        ?.let { it.width to it.height }
+}
+
 /** The usual video renderer, showing only the frames [FrameThinner] keeps. */
 @OptIn(UnstableApi::class)
 private class ThinningVideoRenderer(
@@ -82,6 +99,22 @@ private class ThinningVideoRenderer(
 
     private val isTv = (context.getSystemService(Context.UI_MODE_SERVICE) as? android.app.UiModeManager)
         ?.currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+
+    override fun getMediaCodecConfiguration(
+        codecInfo: MediaCodecInfo, format: Format, crypto: MediaCrypto?, codecOperatingRate: Float,
+    ): MediaCodecAdapter.Configuration {
+        val configuration = super.getMediaCodecConfiguration(codecInfo, format, crypto, codecOperatingRate)
+        if (!isTclG09() || !codecInfo.name.startsWith("OMX.amlogic.hevc.", ignoreCase = true)) return configuration
+        val (width, height) = croppedHevcCodedSize(format) ?: return configuration
+        configuration.mediaFormat.apply {
+            setInteger(MediaFormat.KEY_WIDTH, width)
+            setInteger(MediaFormat.KEY_HEIGHT, height)
+            setInteger(MediaFormat.KEY_MAX_WIDTH, maxOf(width, getInteger(MediaFormat.KEY_MAX_WIDTH)))
+            setInteger(MediaFormat.KEY_MAX_HEIGHT, maxOf(height, getInteger(MediaFormat.KEY_MAX_HEIGHT)))
+        }
+        android.util.Log.i("PitwallVideo", "TCL_CODED_PICTURE coded=${width}x$height display=${format.width}x${format.height}")
+        return configuration
+    }
 
     override fun canReuseCodec(codecInfo: MediaCodecInfo, oldFormat: Format, newFormat: Format): DecoderReuseEvaluation {
         val reuse = super.canReuseCodec(codecInfo, oldFormat, newFormat)

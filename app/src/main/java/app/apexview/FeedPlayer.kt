@@ -262,10 +262,12 @@ class FeedPlayer(
     // several resolutions, even after making each resolution change replace the codec.
     private val stableTvResolution = isTclG09()
 
+    // The 720p F1 variant on G09 is a cropped 1920x1088 frame, so it offers no decoder
+    // size saving. For Auto, favor the full-frame rendition and keep the user's explicit caps.
     private fun qualityWidth(quality: VideoQuality) =
-        if (stableTvResolution && quality == VideoQuality.AUTO) 1280 else quality.maxWidth
+        if (stableTvResolution && quality == VideoQuality.AUTO) VideoQuality.P1080.maxWidth else quality.maxWidth
     private fun qualityHeight(quality: VideoQuality) =
-        if (stableTvResolution && quality == VideoQuality.AUTO) 720 else quality.maxHeight
+        if (stableTvResolution && quality == VideoQuality.AUTO) VideoQuality.P1080.maxHeight else quality.maxHeight
 
     private val fit = TileFit().apply {
         qualityHeight = videoQuality.targetHeight
@@ -385,6 +387,7 @@ class FeedPlayer(
             .setPreferredTextLanguage(commentary)
             .setMaxVideoSize(qualityWidth(videoQuality), qualityHeight(videoQuality))
             .setForceHighestSupportedBitrate(stableTvResolution)
+            .apply { if (stableTvResolution) setPreferredVideoMimeTypes(MimeTypes.VIDEO_H264) }
             .build()
         if (stableTvResolution) Log.i("PitwallVideo",
             "TCL_STABLE_RENDITION preferred=${videoQuality.name} cap=${qualityWidth(videoQuality)}x${qualityHeight(videoQuality)}")

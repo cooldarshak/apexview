@@ -1,5 +1,8 @@
 package app.apexview.tiled
 
+import androidx.media3.common.Format
+import androidx.media3.common.MimeTypes
+import app.apexview.croppedHevcCodedSize
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -110,6 +113,14 @@ class HevcParameterSetParserTest {
         assertEquals(9, sps.bitDepthChroma)
         assertEquals(1, sps.conformanceWindowLeft)
         assertEquals(2, sps.conformanceWindowRight)
+    }
+
+    @Test fun usesTheFullDecoderSizeForA720pCrop() {
+        val csd = byteArrayOf(0, 0, 0, 1) + nal(33, spsBits(cropRight = 320, cropBottom = 184, codedHeight = 1088))
+        val format = Format.Builder().setSampleMimeType(MimeTypes.VIDEO_H265).setWidth(1280).setHeight(720)
+            .setInitializationData(listOf(csd)).build()
+        assertEquals(1920 to 1088, croppedHevcCodedSize(format))
+        assertEquals(null, croppedHevcCodedSize(format.buildUpon().setWidth(1920).setHeight(1080).build()))
     }
 
     @Test fun extractsUniformPpsTileGridAndCalculatesCtbPartitions() {
@@ -229,7 +240,8 @@ class HevcParameterSetParserTest {
         cropBottom: Int = 0,
         bitDepthLumaMinus8: Int = 0,
         bitDepthChromaMinus8: Int = 0,
-        withVui: Boolean = false
+        withVui: Boolean = false,
+        codedHeight: Int = 1080,
     ): ByteArray = BitWriter().apply {
         write(1, 4) // sps_video_parameter_set_id
         write(0, 3) // sps_max_sub_layers_minus1
@@ -238,7 +250,7 @@ class HevcParameterSetParserTest {
         writeUe(0) // sps id
         writeUe(1) // 4:2:0 chroma
         writeUe(1920)
-        writeUe(1080)
+        writeUe(codedHeight)
         val hasCrop = cropLeft + cropRight + cropTop + cropBottom > 0
         write(if (hasCrop) 1 else 0, 1)
         if (hasCrop) {

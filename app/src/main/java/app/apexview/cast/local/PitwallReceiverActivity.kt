@@ -20,6 +20,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
@@ -28,7 +29,6 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -280,17 +280,33 @@ class PitwallReceiverActivity : ComponentActivity() {
             data
         }
         val nextScene = body.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallScene")?.let(CastSceneProtocol::decode)
-        val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(false)
+        val renderers = ThinningRenderersFactory(this).setEnableDecoderFallback(false)
             .setMediaCodecSelector(ReceiverCodecSelector())
         val selector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this)
         if (direct) selector.parameters = selector.buildUponParameters()
-            .setMaxVideoSize(1920, 1080).setExceedVideoConstraintsIfNecessary(false).build()
+            .setMaxVideoSize(1920, 1080).setExceedVideoConstraintsIfNecessary(false)
+            .apply {
+                if (isTclG09()) {
+                    setPreferredVideoMimeTypes(MimeTypes.VIDEO_H264)
+                    setForceHighestSupportedBitrate(true)
+                }
+            }.build()
         val next = ExoPlayer.Builder(this, renderers).setTrackSelector(selector)
             .setMediaSourceFactory(DefaultMediaSourceFactory(data).apply { widevine?.sessions?.let { key -> setDrmSessionManagerProvider { key } } })
             .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(5_000, 15_000, 1_000, 2_000).build())
             .build()
         scene = nextScene; player = next; active = true; generation++; renderingReported = false; decoderCount = 0
         next.addAnalyticsListener(object : AnalyticsListener {
+            override fun onVideoInputFormatChanged(
+                eventTime: AnalyticsListener.EventTime, format: androidx.media3.common.Format,
+                decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
+            ) {
+                if (player !== next) return
+                @Suppress("DEPRECATION")
+                val displayHz = windowManager.defaultDisplay.refreshRate
+                Log.i("PitwallReceiver", "VIDEO_FORMAT size=${format.width}x${format.height} " +
+                    "fps=${format.frameRate} displayHz=$displayHz mime=${format.sampleMimeType}")
+            }
             override fun onVideoDecoderInitialized(eventTime: AnalyticsListener.EventTime, decoderName: String, initializedTimestampMs: Long, initializationDurationMs: Long) {
                 if (player !== next) return
                 decoderCount++
@@ -320,7 +336,7 @@ class PitwallReceiverActivity : ComponentActivity() {
 
             override fun onPlayerError(error: PlaybackException) { if (player === next) fail("TV playback failed: ${error.errorCodeName}") }
             override fun onVideoSizeChanged(size: VideoSize) {
-                if (player !== next) return
+                if (player !== next || size.width <= 0 || size.height <= 0) return
                 val model = scene ?: return
                 if (direct) {
                     scene = model.copy(atlasWidth = size.width, atlasHeight = size.height, atlasColumns = 1,
