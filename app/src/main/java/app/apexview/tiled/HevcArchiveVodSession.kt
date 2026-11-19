@@ -163,7 +163,7 @@ internal class HevcArchiveVodSession(
             val columns = if (sourcePps.tilesEnabled) sourcePps.numTileColumns else 1
             val rows = if (sourcePps.tilesEnabled) sourcePps.numTileRows else 1
             val atlas = requireNotNull(HevcArchiveAtlasPlan.choose(inputs.size, sourceSps.width, sourceSps.height,
-                maximumOutputWidth, 2160)) { "Full archive feeds exceed composed picture size; choose fewer feeds or a lower common HEVC rendition" }
+                maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT)) { "Full archive feeds exceed composed picture size; choose fewer feeds or a lower common HEVC rendition" }
             val trackScale = requireNotNull(firstTrack.timescale)
             val firstFragment = CmafBoxInspector.inspect(batches.first().first(), inputs.first().report).fragments.single()
             val step = firstFragment.sampleTimings.map { requireNotNull(it.durationTicks) }.distinct().single()

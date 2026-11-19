@@ -2570,11 +2570,16 @@ class AppState(
                     preflight = {
                         // Capture the selected position once. Slow preparation must not chase an
                         // independently advancing source clock or interrupt working playback.
+                        val quality = settings.videoQuality
+                        val preferredHeight = quality.targetHeight.takeIf { it > 0 }
+                            ?: if (selected.size > 4) 270 else if (selected.size > 2) 540 else 720
+                        val minimumHeight = if (quality == VideoQuality.P1080) 1080 else 0
                         val session = capture.prepareVod(selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel,
                             it.feed.sourceStream.url) }, probePositionMs, host.feed.sourceStream.profileLabel,
-                            minOf(settings.videoQuality.targetHeight.takeIf { it > 0 } ?: 720,
-                                    if (selected.size > 4) 270 else if (selected.size > 2) 540 else 720),
-                            settings.commentary)
+                            preferredHeight, settings.commentary, minimumHeight)
+                        android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_QUALITY content=$contentId " +
+                            "feeds=${selected.size} requested=${quality.label} source=${session.sourceDisplayWidth}x${session.sourceDisplayHeight} " +
+                            "coded=${session.codedWidth}x${session.codedHeight} fps=${session.frameRate}")
                         try {
                             host.feed.requireArchiveHardwareSupport(session.codedWidth, session.codedHeight, session.frameRate * playbackSpeed)
                             prepared = session
@@ -5538,8 +5543,12 @@ class AppState(
     var qualitySheetOpen by mutableStateOf(false)
 
     fun chooseVideoQuality(value: VideoQuality) {
+        val rebuildArchive = settings.videoQuality != value && nativeArchiveTiles.isNotEmpty() && !castPlaybackHandedOff
+        val contentId = if (rebuildArchive) protectedCompositionHost?.contentId else null
         settings.updateVideoQuality(value)
+        if (contentId != null) stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
         tiles.forEach { it.feed.setVideoQuality(value) }
+        if (contentId != null) startArchiveSingleDecoderComposition(contentId)
         qualitySheetOpen = false
         showChrome()
     }

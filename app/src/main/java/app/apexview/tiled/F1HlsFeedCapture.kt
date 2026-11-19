@@ -154,10 +154,10 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                     ?: throw PermanentCaptureException("No compatible HEVC CMAF representation")
             }
             require(sizes.all { it.displayHeight >= minimumHeight }) {
-                "Cast needs at least ${minimumHeight}p per source; the actual HEVC pictures are smaller. No lower-quality stream was sent."
+                "Requested at least ${minimumHeight}p per feed; the actual HEVC pictures are smaller."
             }
             val fits = sizes.all { shape ->
-                HevcArchiveAtlasPlan.choose(perFeed.size, shape.width, shape.height, maximumOutputWidth, 2160) != null
+                HevcArchiveAtlasPlan.choose(perFeed.size, shape.width, shape.height, maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT) != null
             }
             if (fits) return Triple(selected, playlists, inits)
             android.util.Log.w("PitwallCast", "ARCHIVE_CODED_SIZE_REJECT feeds=${perFeed.size} " +
@@ -319,7 +319,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         val common = declared.map { list -> list.map { it.format!!.width to it.format.height }.toSet() }.reduce { a, b -> a intersect b }
         val size = HevcArchiveRenditionPlan.choose(common, preferredHeight, minimumHeight, feedCount, maximumOutputWidth)
             ?: throw PermanentCaptureException(if (minimumHeight > 0)
-                "No common HEVC rendition of at least ${minimumHeight}p fits $feedCount feeds. Use fewer feeds; casting will not silently drop below ${minimumHeight}p."
+                "No common HEVC rendition of at least ${minimumHeight}p fits $feedCount feeds. Try fewer feeds or select a lower quality."
                 else "No common HEVC rendition fits $feedCount feeds in the composed picture; choose fewer feeds or a lower source rendition")
         return perFeed.map { list -> list.filter { it.format == null || it.format.width == size.first && it.format.height == size.second }
             .maxByOrNull { it.format?.bitrate ?: 0 } ?: throw PermanentCaptureException("HLS common HEVC rendition unavailable") }

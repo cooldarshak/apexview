@@ -7,7 +7,7 @@ internal object HevcArchiveRenditionPlan {
         require(minimumHeight >= 0)
         val legal = common.filter { (width, height) ->
             height >= minimumHeight && (preferredHeight == null || (width > 0 && height > 0 &&
-                HevcArchiveAtlasPlan.choose(feeds, ((width + 63) / 64) * 64, ((height + 63) / 64) * 64, maximumWidth, 2160) != null))
+                HevcArchiveAtlasPlan.choose(feeds, ((width + 63) / 64) * 64, ((height + 63) / 64) * 64, maximumWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT) != null))
         }
         val sizes = if (preferredHeight == null) legal else legal.filter { it.second <= preferredHeight }
             .ifEmpty { legal.minByOrNull { it.second }?.let(::listOf).orEmpty() }
