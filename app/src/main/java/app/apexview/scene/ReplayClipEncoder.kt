@@ -16,10 +16,11 @@ import android.opengl.GLES20
 import android.opengl.GLUtils
 import android.provider.MediaStore
 import android.util.Log
+import app.apexview.cast.BakedCastTransportStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/** GL-thread only. Encodes a video-only recording of an already-authorized clear replay. */
+/** GL-thread only. Encodes the actual visible clear viewer, either to a clip or a live Cast sink. */
 internal class ReplayClipEncoder(
     private val context: Context,
     private val display: EGLDisplay,
@@ -27,6 +28,7 @@ internal class ReplayClipEncoder(
     config: EGLConfig,
     private val width: Int,
     private val height: Int,
+    private val castSample: ((BakedCastTransportStream.Sample) -> Unit)? = null,
 ) {
     private val resolver = context.contentResolver
     private val name = "Pitwall-replay-${System.currentTimeMillis()}.mp4"
@@ -42,6 +44,7 @@ internal class ReplayClipEncoder(
     private var muxer: MediaMuxer? = null
     private var egl = EGL14.EGL_NO_SURFACE
     private var track = -1
+    private var codecHeaders = ByteArray(0)
     private var texture = 0
     private var program = 0
     private var firstNs = -1L
@@ -63,15 +66,17 @@ internal class ReplayClipEncoder(
             encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             input = encoder.createInputSurface()
             encoder.start()
-            val uri = checkNotNull(resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
-                put(MediaStore.Video.Media.DISPLAY_NAME, name)
-                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Pitwall")
-                put(MediaStore.Video.Media.IS_PENDING, 1)
-            }))
-            destination = uri
-            muxer = checkNotNull(resolver.openFileDescriptor(uri, "rw")).use {
-                MediaMuxer(it.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            if (castSample == null) {
+                val uri = checkNotNull(resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
+                    put(MediaStore.Video.Media.DISPLAY_NAME, name)
+                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Pitwall")
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
+                }))
+                destination = uri
+                muxer = checkNotNull(resolver.openFileDescriptor(uri, "rw")).use {
+                    MediaMuxer(it.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                }
             }
             egl = EGL14.eglCreateWindowSurface(display, config, input, intArrayOf(EGL14.EGL_NONE), 0)
             check(egl != EGL14.EGL_NO_SURFACE) { "Could not create the encoder surface" }
@@ -129,7 +134,6 @@ internal class ReplayClipEncoder(
 
     private fun drain(end: Boolean) {
         val encoder = checkNotNull(codec)
-        val output = checkNotNull(muxer)
         val info = MediaCodec.BufferInfo()
         val deadline = System.nanoTime() + 3_000_000_000L
         while (true) {
@@ -139,14 +143,34 @@ internal class ReplayClipEncoder(
                     check(System.nanoTime() < deadline) { "Encoder did not finish the replay clip" }
                 }
                 MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                    track = output.addTrack(encoder.outputFormat)
-                    output.start()
+                    if (castSample == null) {
+                        track = checkNotNull(muxer).addTrack(encoder.outputFormat)
+                        checkNotNull(muxer).start()
+                    } else {
+                        val format = encoder.outputFormat
+                        codecHeaders = listOf("csd-0", "csd-1").mapNotNull { name ->
+                            format.getByteBuffer(name)?.let { data ->
+                                val duplicate = data.duplicate()
+                                ByteArray(duplicate.remaining()).also(duplicate::get)
+                            }
+                        }.fold(ByteArray(0)) { acc, bytes -> acc + BakedAvcAccessUnit.annexB(bytes) }
+                    }
                 }
                 else -> if (index >= 0) {
                     try {
                         if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
-                            check(track >= 0)
-                            output.writeSampleData(track, checkNotNull(encoder.getOutputBuffer(index)), info)
+                            val buffer = checkNotNull(encoder.getOutputBuffer(index))
+                            if (castSample == null) {
+                                check(track >= 0)
+                                checkNotNull(muxer).writeSampleData(track, buffer, info)
+                            } else {
+                                val bytes = ByteArray(info.size)
+                                buffer.position(info.offset); buffer.limit(info.offset + info.size); buffer.get(bytes)
+                                val key = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
+                                val picture = BakedAvcAccessUnit.annexB(bytes)
+                                castSample.invoke(BakedCastTransportStream.Sample(info.presentationTimeUs,
+                                    if (key) codecHeaders + picture else picture, video = true, keyFrame = key))
+                            }
                             framesWritten++
                             lastPresentationUs = maxOf(lastPresentationUs, info.presentationTimeUs)
                         }
@@ -158,6 +182,7 @@ internal class ReplayClipEncoder(
     }
 
     fun finish(): String {
+        check(castSample == null) { "Live Cast does not produce a recording" }
         checkNotNull(codec).signalEndOfInputStream()
         drain(end = true)
         check(track >= 0 && framesWritten > 0) { "No video frames were encoded" }
@@ -182,6 +207,12 @@ internal class ReplayClipEncoder(
         if (track >= 0) runCatching { muxer?.stop() }
         runCatching { muxer?.release() }
         if (!published) destination?.let { runCatching { resolver.delete(it, null, null) } }
+    }
+
+    /** Live sessions never publish a MediaStore file; stop without finalizing an MP4. */
+    fun stopCast() {
+        check(castSample != null)
+        close()
     }
 
 }

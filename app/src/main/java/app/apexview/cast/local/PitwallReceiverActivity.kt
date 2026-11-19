@@ -511,6 +511,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                                 if (sceneView === it) sceneView = null
                                 it.release()
                             }, modifier = Modifier.fillMaxSize())
+                            if (playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optBoolean("pitwallBaked") != true)
                             CastTimingLayer(timingState, model.width, model.height, remember { { controllerPosition() } }, { number, pit ->
                                 connection?.send(FcastProtocol.UI_CONTROL, JSONObject().put("action", if (pit) "pitDriver" else "driver").put("number", number))
                             }, { rows, cars ->

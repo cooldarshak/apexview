@@ -363,6 +363,9 @@ class AppState(
     var castStatus by mutableStateOf<String?>(null)
         private set
     private var castRelay by mutableStateOf<app.apexview.cast.SceneCastRelay?>(null)
+    /** A live, baked picture + commentary stream. Remains on the phone until Cast stops. */
+    internal var bakedCastSession by mutableStateOf<app.apexview.cast.BakedCastLiveSession?>(null)
+        private set
     private var googleCastRemoteClient: com.google.android.gms.cast.framework.media.RemoteMediaClient? = null
     private var googleCastSession: com.google.android.gms.cast.framework.CastSession? = null
     private var castSceneJob: Job? = null
@@ -373,7 +376,7 @@ class AppState(
     private var castPreparationGeneration = 0L
     private var castRetryAfter = 0L
     private val retiredCastRelays = mutableListOf<app.apexview.cast.SceneCastRelay>()
-    val castingActive: Boolean get() = castRelay != null || nativeComposedCast != null || directCast != null
+    val castingActive: Boolean get() = bakedCastSession != null || castRelay != null || nativeComposedCast != null || directCast != null
     var tvCastingMenuOpen by mutableStateOf(false)
     var castPickerOpen by mutableStateOf(false)
     internal var localCastDevices by mutableStateOf<List<app.apexview.cast.local.PitwallDevice>>(emptyList())
@@ -586,10 +589,11 @@ class AppState(
                 protocol.RENDERING -> {
                     if (body?.optString("playbackId") != localLoadId || !castingActive) return
                     castSceneConfirmed = true
-                    handOffCastPlayback()
+                    if (bakedCastSession == null) handOffCastPlayback()
+                    else android.util.Log.i("PitwallCast", "BAKED_CAST_RECEIVER_CONFIRMED feeds=${bakedCastSession?.feeds} picture=${bakedCastSession?.width}x${bakedCastSession?.height} phonePlayback=ACTIVE")
                     val height = nativeComposedCast?.geometry?.displayHeight ?: castRelay?.session?.sourceDisplayHeight
-                    castStatus = "Playing on $castDeviceName in the phone video layout." +
-                        (height?.let { " ${it}p sources." } ?: "")
+                    castStatus = if (bakedCastSession != null) "Streaming the baked phone picture, tower, map and commentary to $castDeviceName."
+                        else "Playing on $castDeviceName in the phone video layout." + (height?.let { " ${it}p sources." } ?: "")
                     message = castStatus
                 }
                 protocol.PLAYBACK_UPDATE -> if (localReady && body != null) {
@@ -716,8 +720,10 @@ class AppState(
                 }
             }
         }.onFailure { android.util.Log.w("PitwallCast", "Scene channel registration failed: ${it.javaClass.simpleName}") }
+        val baked = bakedCastSession
         val relay = castRelay
-        if (relay != null) loadGoogleCastMedia(relay) else startFullSceneCast()
+        if (baked != null) { if (baked.playable) loadGoogleBakedCast(baked) }
+        else if (relay != null) loadGoogleCastMedia(relay) else startFullSceneCast()
     }
     fun onGoogleCastSessionEnded() {
         googleCastRemoteClient?.unregisterCallback(googleRemoteCallback)
@@ -751,6 +757,10 @@ class AppState(
             return
         }
         val verifiedClear = singleDecoderScenePlayer?.archiveSceneSession?.sourceLabels?.toSet() == castTiles.map { it.feed.sourceStream.profileLabel }.toSet()
+        if (verifiedClear && singleDecoderSceneActive && singleDecoderScenePlayer?.hasLoadedDrmKeys != true) {
+            prepareBakedCast(castTiles)
+            return
+        }
         val nativeRequired = castTiles.any { it.contentId in knownLiveContentIds || it.feed.player.isCurrentMediaItemLive ||
             !verifiedClear && (it.feed.hasLoadedDrmKeys || it.feed.player.videoFormat?.drmInitData != null ||
                 it.feed.player.videoFormat == null && it.feed.sourceStream.licenseUrl != null) }
@@ -861,6 +871,146 @@ class AppState(
             }
         }
     }
+
+    /** Clear archive only. The TV receives one AVC picture with all on-screen overlays already in it. */
+    private fun prepareBakedCast(castTiles: List<Tile>) {
+        val host = singleDecoderScenePlayer ?: return
+        val archive = host.archiveSceneSession ?: return
+        if (replayClipRunning || replayClipRequested) {
+            message = "Stop replay recording before starting a continuous Cast stream."
+            return
+        }
+        if (host.activeVideoDecoderCount != 1 || !host.hasRenderedFirstFrame) {
+            message = "Wait for the single hardware decoder's first picture before casting."
+            return
+        }
+        val audible = castTiles.firstOrNull { it.audible }?.feed?.sourceStream?.profileLabel
+            ?: castTiles.first().feed.sourceStream.profileLabel
+        val audioUri = archive.audioUris[audible] ?: archive.audioUri
+        if (audioUri == null) {
+            message = "No clear F1 commentary rendition is available for this replay. Continuous Cast needs real audio."
+            return
+        }
+        val originalConnection = localConnection
+        val originalGoogleReceiver = googleCastRemoteClient
+        val selected = castTiles.map { it.id to it.feed.sourceStream.profileLabel }
+        val generation = ++castPreparationGeneration
+        val old = bakedCastSession
+        bakedCastSession = null
+        old?.close()
+        castBusy = true
+        chromeVisible = false
+        layoutSheetOpen = false
+        tvCastingMenuOpen = false
+        castStatus = "Preparing the live phone picture and commentary for the TV…"
+        message = castStatus
+        castPreparationJob?.cancel()
+        castPreparationJob = scope.launch {
+            var session: app.apexview.cast.BakedCastLiveSession? = null
+            try {
+                val manager = context.getSystemService(android.net.ConnectivityManager::class.java)
+                val network = manager.allNetworks.firstOrNull { network -> manager.getNetworkCapabilities(network)?.let {
+                    it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ||
+                        it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)
+                } == true } ?: throw IOException("Connect the phone and TV to the same local network.")
+                val address = (if (localChosen) originalConnection?.socket?.localAddress
+                    ?.takeIf { it is java.net.Inet4Address }?.hostAddress else null)
+                    ?: manager.getLinkProperties(network)?.linkAddresses?.map { it.address }
+                        ?.firstOrNull { it is java.net.Inet4Address && !it.isLoopbackAddress }?.hostAddress
+                    ?: throw IOException("The phone has no Wi-Fi IPv4 address for Cast.")
+                val peer = if (localChosen) originalConnection?.socket?.inetAddress else null
+                val factory = androidx.media3.datasource.DefaultHttpDataSource.Factory().setUserAgent(userAgent)
+                    .setAllowCrossProtocolRedirects(true).setDefaultRequestProperties(mapOf(
+                        "ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
+                val next = app.apexview.cast.BakedCastLiveSession(address, peer,
+                    app.apexview.tiled.CmafHttpReader(factory), audioUri, castTiles.size, scope) { reason ->
+                    scope.launch {
+                        if (bakedCastSession === session && generation == castPreparationGeneration) {
+                            castStatus = reason.take(220); message = castStatus
+                            releaseCastRelay()
+                        }
+                    }
+                }
+                session = next
+                bakedCastSession = next // PlaybackVideoCanvas starts capturing this very same viewer window.
+                kotlinx.coroutines.withTimeout(25_000) { next.awaitPlayable() }
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                check(generation == castPreparationGeneration && bakedCastSession === next) { "Cast source changed" }
+                check(castTiles.map { it.id to it.feed.sourceStream.profileLabel } == selected) {
+                    "Feeds changed before Cast was ready"
+                }
+                check(if (localChosen) localReady && localConnection === originalConnection
+                    else googleCastRemoteClient === originalGoogleReceiver) { "TV disconnected during preparation" }
+                android.util.Log.i("PitwallCast", "BAKED_CAST_READY feeds=${castTiles.size} " +
+                    "picture=${next.width}x${next.height} sourceDecoder=${host.activeVideoDecoderName} " +
+                    "audio=AAC liveHls=true phonePlayback=ACTIVE")
+                if (localChosen) loadLocalBakedCast(next) else loadGoogleBakedCast(next)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                if (session != null && bakedCastSession === session) bakedCastSession = null
+                session?.close()
+                if (cancelled !is kotlinx.coroutines.TimeoutCancellationException) throw cancelled
+                castStatus = "Continuous Cast timed out waiting for the first audio/video segment."
+                message = castStatus
+            } catch (error: Exception) {
+                if (session != null && bakedCastSession === session) bakedCastSession = null
+                session?.close()
+                android.util.Log.w("PitwallCast", "BAKED_CAST_START_FAILED ${error.javaClass.simpleName}: " +
+                    DiagnosticRedaction.redact(error.message.orEmpty()).take(150))
+                castStatus = "Continuous Cast could not start: " +
+                    DiagnosticRedaction.redact(error.message ?: error.javaClass.simpleName).take(180)
+                message = castStatus
+            } finally {
+                if (generation == castPreparationGeneration) { castBusy = false; castPreparationJob = null }
+            }
+        }
+    }
+
+    private fun bakedCastScene(session: app.apexview.cast.BakedCastLiveSession): JSONObject =
+        app.apexview.cast.CastSceneProtocol.encode(app.apexview.scene.VideoScene(
+            session.width.toFloat(), session.height.toFloat(), session.width, session.height, 1,
+            listOf(app.apexview.scene.VideoWindow(0, 0, 0f, 0f,
+                session.width.toFloat(), session.height.toFloat(), 0f)),
+            1, session.width, session.height, session.width, session.height))
+
+    private fun loadLocalBakedCast(session: app.apexview.cast.BakedCastLiveSession) {
+        val link = localConnection ?: throw IOException("Pitwall receiver disconnected")
+        localLoadId = java.util.UUID.randomUUID().toString()
+        castSceneConfirmed = false
+        link.send(app.apexview.cast.local.FcastProtocol.PLAY, JSONObject()
+            .put("container", "application/x-mpegURL").put("url", session.url)
+            .put("time", 0).put("speed", 1).put("volume", if (mutedAll) 0 else 1)
+            .put("metadata", JSONObject().put("type", 0).put("title", "Pitwall TV baked live scene")
+                .put("custom", JSONObject().put("pitwallScene", bakedCastScene(session))
+                    .put("pitwallBaked", true).put("playbackId", localLoadId))))
+        castStatus = "Streaming one baked video and commentary track to Pitwall Cast…"
+        message = castStatus
+    }
+
+    private fun loadGoogleBakedCast(session: app.apexview.cast.BakedCastLiveSession) {
+        val client = googleCastRemoteClient ?: return
+        if (googleCastLoadedUrl == session.url) return
+        val metadata = com.google.android.gms.cast.MediaMetadata(com.google.android.gms.cast.MediaMetadata.MEDIA_TYPE_MOVIE).apply {
+            putString(com.google.android.gms.cast.MediaMetadata.KEY_TITLE, "Pitwall TV live scene")
+            putString(com.google.android.gms.cast.MediaMetadata.KEY_SUBTITLE, "${session.feeds} feeds, map, tower and commentary")
+        }
+        val media = com.google.android.gms.cast.MediaInfo.Builder(session.url)
+            .setContentType("application/x-mpegURL")
+            .setStreamType(com.google.android.gms.cast.MediaInfo.STREAM_TYPE_LIVE)
+            .setMetadata(metadata).setCustomData(JSONObject().put("pitwallBaked", true)).build()
+        googleCastLoadedUrl = session.url
+        googleLoading = true
+        client.load(media, true, 0L).setResultCallback { result ->
+            if (bakedCastSession !== session) return@setResultCallback
+            googleLoading = false
+            if (result.status.isSuccess) {
+                client.setStreamMute(mutedAll)
+                castSceneConfirmed = true
+                castStatus = "Google Cast is playing the full baked picture with synchronized commentary."
+                message = castStatus
+                android.util.Log.i("PitwallCast", "BAKED_GOOGLE_CAST_LOADED picture=${session.width}x${session.height} feeds=${session.feeds}")
+            } else failGoogleCastLoad("Google Cast rejected the live scene (${result.status.statusCode}).")
+        }
+    }
     private fun loadGoogleCastMedia(
         relay: app.apexview.cast.SceneCastRelay,
         layoutScene: JSONObject? = if (usesLayoutCastReceiver) castVideoScene(relay.session) else null,
@@ -922,6 +1072,9 @@ class AppState(
         ++castPreparationGeneration
         googleLoading = false; googleHasPlayed = false
         castBusy = false
+        val oldBaked = bakedCastSession
+        bakedCastSession = null
+        oldBaked?.close()
         retiredCastRelays.forEach { it.close() }; retiredCastRelays.clear()
         castSceneJob?.cancel(); castSceneJob = null
         nativeCastPump?.cancel(); nativeCastPump = null
@@ -5521,6 +5674,7 @@ class AppState(
         else protectedCompositionAudioMaster ?: tiles.firstOrNull()
 
     fun togglePlay() {
+        val bakedWasPlaying = bakedCastSession != null
         playing = !playing
         if (castingActive) {
             remoteCastClock.update(castFramePositionMs, playing, playbackSpeed, durationMs)
@@ -5533,6 +5687,12 @@ class AppState(
         val shown = if (inPip) pipTile() else null
         tiles.filter { !singleDecoderSceneActive || it === protectedCompositionHost }.forEach {
             it.feed.player.playWhenReady = playing && (singleDecoderSceneActive || !inPip || it === shown || it.audible)
+        }
+        if (bakedWasPlaying && playing) {
+            // Restart the live stream at the new viewer clock after pause, without a stale
+            // source timeline continuing to drive the commentator ahead of the picture.
+            releaseCastRelay()
+            scope.launch { kotlinx.coroutines.delay(600); if (tiles.isNotEmpty()) prepareFullSceneCast(false) }
         }
         showChrome()
     }
@@ -5553,7 +5713,7 @@ class AppState(
     internal val canMakeReplayClip: Boolean
         get() = singleDecoderScenePlayer?.archiveSceneSession != null && timing?.let {
             it.outline.size >= 4 && it.laps.isNotEmpty() && it.tracks.isNotEmpty()
-        } == true && !castPlaybackHandedOff && !externalDisplayActive
+        } == true && !castingActive && !castPlaybackHandedOff && !externalDisplayActive
 
     var qualitySheetOpen by mutableStateOf(false)
 
@@ -5660,6 +5820,8 @@ class AppState(
             prepareNativeComposedCast(tiles.toList(), target)
             return
         }
+        val restartBaked = bakedCastSession != null
+        if (restartBaked) releaseCastRelay()
         if (castingActive) {
             val target = if (durationMs > 0) targetMs.coerceIn(0L, durationMs) else targetMs.coerceAtLeast(0L)
             remoteCastClock.update(target, playing, playbackSpeed, durationMs)
@@ -5684,6 +5846,10 @@ class AppState(
         tiles.filter { nativeArchiveTiles.isEmpty() || it === protectedCompositionHost }.forEach { it.feed.seekFromControls((it.feed.player.currentPosition + shift).coerceAtLeast(0L)) }
         positionMs = target
         if (restartRollingComposition) startArchiveSingleDecoderComposition(leader.contentId)
+        if (restartBaked) scope.launch {
+            kotlinx.coroutines.delay(1_000)
+            if (tiles.isNotEmpty() && !castingActive) prepareFullSceneCast(false)
+        }
         showChrome()
     }
 

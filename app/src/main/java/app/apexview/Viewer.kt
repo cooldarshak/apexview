@@ -906,6 +906,27 @@ internal fun PlaybackVideoCanvas(
     if (scene != null && host != null) {
         var view by remember { mutableStateOf<SingleDecoderSceneView?>(null) }
         var recordingBounds by remember { mutableStateOf<Rect?>(null) }
+        val bakedSession = app.bakedCastSession
+        LaunchedEffect(view, bakedSession) {
+            val target = view ?: return@LaunchedEffect
+            if (bakedSession == null) {
+                target.stopBakedCast()
+                return@LaunchedEffect
+            }
+            // The Cast button closes its sheet first. Capture from the real window so every
+            // selected feed, timing row, map marker and speed label is part of the one video.
+            delay(Motion.SCREEN_MS.toLong() + 100L)
+            val window = captureWindow
+            val bounds = viewerBounds
+            if (window == null || bounds == null || bounds.isEmpty ||
+                host.archiveSceneSession == null ||
+                window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0) {
+                bakedSession.captureFailed("An authorized clear single-decoder viewer is required")
+            } else target.startBakedCast(window, bounds, bakedSession, host.player.currentPosition)
+        }
+        DisposableEffect(view) {
+            onDispose { view?.stopBakedCast() }
+        }
         LaunchedEffect(view, app.replayClipRequested) {
             val target = view ?: return@LaunchedEffect
             val window = captureWindow ?: return@LaunchedEffect

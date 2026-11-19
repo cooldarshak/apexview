@@ -18,6 +18,7 @@ import android.view.PixelCopy
 import android.view.Window
 import android.view.Surface
 import android.view.TextureView
+import app.apexview.cast.BakedCastLiveSession
 import androidx.media3.exoplayer.ExoPlayer
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -45,6 +46,67 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var config: EGLConfig? = null
     @Volatile private var clip: ReplayClipEncoder? = null
     private var clipResult: ((String) -> Unit)? = null
+    @Volatile private var castEncoder: ReplayClipEncoder? = null
+    @Volatile private var castSession: BakedCastLiveSession? = null
+
+    /** Capture the ACTUAL viewer pixels (including timing/map), for a continuous TV stream. */
+    fun startBakedCast(source: Window, bounds: Rect, session: BakedCastLiveSession, playbackPositionMs: Long) {
+        gl.post {
+            if (castSession === session) return@post
+            stopBakedCastOnGl()
+            try {
+                check(clip == null) { "Stop replay recording before casting" }
+                check(!released && hasFrame && EGL14.eglMakeCurrent(display, window, window, contextGl)) {
+                    "Wait for the single-decoder replay picture before casting"
+                }
+                check(source.attributes.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE == 0) {
+                    "Protected video cannot be copied to an unprotected Cast stream"
+                }
+                val scale = minOf(1.0, 1920.0 / maxOf(bounds.width(), bounds.height()))
+                val width = ((bounds.width() * scale).toInt() and -2).coerceAtLeast(2)
+                val height = ((bounds.height() * scale).toInt() and -2).coerceAtLeast(2)
+                val encoder = ReplayClipEncoder(context.applicationContext, display, contextGl, checkNotNull(config), width, height,
+                    castSample = session::videoSample)
+                castEncoder = encoder; castSession = session
+                session.setOutputSize(width, height, playbackPositionMs)
+                copyBakedFrame(source, bounds, encoder, session)
+            } catch (error: Exception) {
+                session.captureFailed(error.message ?: error.javaClass.simpleName)
+            }
+        }
+    }
+
+    private fun copyBakedFrame(source: Window, bounds: Rect, encoder: ReplayClipEncoder, session: BakedCastLiveSession) {
+        val requestedAt = System.nanoTime()
+        post {
+            if (released || castEncoder !== encoder || castSession !== session) return@post
+            try {
+                check(source.attributes.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE == 0)
+                PixelCopy.request(source, Rect(bounds), encoder.pixels, { status ->
+                    if (castEncoder === encoder && castSession === session && !released) {
+                        try {
+                            check(status == PixelCopy.SUCCESS) { "PixelCopy $status" }
+                            encoder.frame(requestedAt)
+                            val delayMs = (40L - (System.nanoTime() - requestedAt) / 1_000_000L).coerceAtLeast(0L)
+                            gl.postDelayed({ if (castEncoder === encoder) copyBakedFrame(source, bounds, encoder, session) }, delayMs)
+                        } catch (error: Exception) {
+                            stopBakedCastOnGl(); session.captureFailed(error.message ?: error.javaClass.simpleName)
+                        } finally { EGL14.eglMakeCurrent(display, window, window, contextGl) }
+                    }
+                }, gl)
+            } catch (error: Exception) {
+                gl.post { stopBakedCastOnGl(); session.captureFailed(error.message ?: error.javaClass.simpleName) }
+            }
+        }
+    }
+
+    fun stopBakedCast(session: BakedCastLiveSession? = null) {
+        gl.post { if (session == null || castSession === session) stopBakedCastOnGl() }
+    }
+
+    private fun stopBakedCastOnGl() {
+        castEncoder?.stopCast(); castEncoder = null; castSession = null
+    }
 
     fun startReplayClip(source: Window, bounds: Rect, result: (String) -> Unit) {
         gl.post {
@@ -276,6 +338,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     private fun destroy() {
+        stopBakedCastOnGl()
         saveClip()
         config = null
         decoderTexture?.setOnFrameAvailableListener(null)
