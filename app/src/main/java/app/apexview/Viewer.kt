@@ -1,6 +1,8 @@
 package app.apexview
 
 import android.app.Activity
+import android.graphics.Rect
+import android.view.WindowManager
 import app.apexview.scene.SingleDecoderSceneView
 import androidx.compose.ui.draw.drawWithContent
 import android.content.ClipData
@@ -115,6 +117,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
@@ -280,9 +284,16 @@ fun ViewerScreen(app: AppState) {
         label = "lift",
     )
 
+    val window = (view.context as Activity).window
+    var viewerBounds by remember { mutableStateOf<Rect?>(null) }
     BoxWithConstraints(
         Modifier
             .fillMaxSize()
+            .onGloballyPositioned { coordinates ->
+                val bounds = coordinates.boundsInWindow()
+                viewerBounds = Rect(bounds.left.roundToInt(), bounds.top.roundToInt(),
+                    bounds.right.roundToInt(), bounds.bottom.roundToInt())
+            }
             .background(Ink.background)
             .onFocusChanged { app.controlsFocused = it.hasFocus }
             .pointerInput(Unit) { detectTapGestures(onTap = { app.toggleChrome() }) }
@@ -339,7 +350,7 @@ fun ViewerScreen(app: AppState) {
                         Text("Use this phone to control playback and arrange the TV video windows.", style = Type.subhead)
                     }
                 }
-            } else PlaybackVideoCanvas(app, width, height)
+            } else PlaybackVideoCanvas(app, width, height, window, viewerBounds)
 
         }
 
@@ -522,7 +533,7 @@ fun ViewerScreen(app: AppState) {
             enter = fadeIn(fade), exit = fadeOut(fade),
         ) { BottomChrome(app, clearOf(cutouts, width, height - bottomBand, height)) }
 
-        Messages(app, Modifier.zIndex(CHROME_Z + 1).align(Alignment.Center))
+        if (!app.replayClipRunning) Messages(app, Modifier.zIndex(CHROME_Z + 1).align(Alignment.Center))
         // In the corner, or centred where the screen is too narrow for a corner to mean much.
         VotePrompt(app, Modifier.zIndex(CHROME_Z + 1).align(if (compactWidth) Alignment.BottomCenter else Alignment.BottomEnd))
         NextLivePrompt(app, Modifier.zIndex(CHROME_Z + 1).align(if (compactWidth) Alignment.BottomCenter else Alignment.BottomEnd))
@@ -884,28 +895,38 @@ private fun Messages(app: AppState, modifier: Modifier) {
 
 /** Binds existing players on exactly one display. It never allocates another player. */
 @Composable
-internal fun PlaybackVideoCanvas(app: AppState, width: Float, height: Float) {
+internal fun PlaybackVideoCanvas(
+    app: AppState, width: Float, height: Float,
+    captureWindow: android.view.Window? = null, viewerBounds: Rect? = null,
+) {
     val scene = app.videoScene(width, height)
     val host = app.singleDecoderScenePlayer
     if (scene != null && host != null) {
         var view by remember { mutableStateOf<SingleDecoderSceneView?>(null) }
+        var recordingBounds by remember { mutableStateOf<Rect?>(null) }
         LaunchedEffect(view, app.replayClipRequested) {
             val target = view ?: return@LaunchedEffect
-            if (app.replayClipRequested) {
-                app.replayClipRequested = false
-                val timing = app.timing
-                if (app.canMakeReplayClip && timing != null && host.player.isPlaying && !app.replayClipRunning) {
-                    app.replayClipRunning = true
-                    target.replayClockMs = app.mapTimeAt(host.player.currentPosition)
-                    app.reportReplayClipStatus("Encoding a 10-second replay clip…")
-                    target.startReplayClip(timing) { result ->
-                        app.replayClipRunning = false
-                        app.reportReplayClipStatus(result)
-                    }
-                } else app.reportReplayClipStatus("Play a clear replay with timing data loaded before making a clip.")
+            val window = captureWindow ?: return@LaunchedEffect
+            if (!app.replayClipRequested) return@LaunchedEffect
+            // The sheet closes and playback chrome finishes fading before the first copy.
+            delay(Motion.SCREEN_MS.toLong() + 100L)
+            val bounds = viewerBounds
+            val source = host.archiveSceneSession
+            app.replayClipRequested = false
+            if (bounds == null || bounds.isEmpty || source == null || !app.canMakeReplayClip ||
+                !host.player.isPlaying || app.replayClipRunning ||
+                window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0) {
+                app.reportReplayClipStatus("Play a clear replay with timing data loaded before making a clip.")
+                return@LaunchedEffect
+            }
+            recordingBounds = bounds
+            app.replayClipRunning = true
+            target.startReplayClip(window, bounds) { result ->
+                app.replayClipRunning = false
+                app.reportReplayClipStatus(result)
             }
         }
-        LaunchedEffect(view, host, app.replayClipRunning) {
+        LaunchedEffect(view, host, app.replayClipRunning, viewerBounds) {
             val target = view ?: return@LaunchedEffect
             if (!app.replayClipRunning) return@LaunchedEffect
             val source = host.archiveSceneSession
@@ -913,11 +934,11 @@ internal fun PlaybackVideoCanvas(app: AppState, width: Float, height: Float) {
             while (app.replayClipRunning) {
                 val position = host.player.currentPosition
                 if (source == null || host.archiveSceneSession !== source || position < lastPosition ||
-                    position - lastPosition > 1_000 || app.castingActive || app.externalDisplayActive) {
+                    position - lastPosition > 1_000 || app.castingActive || app.externalDisplayActive ||
+                    app.chromeVisible || app.inPip || app.layoutSheetOpen || app.helpOpen || viewerBounds != recordingBounds) {
                     target.cancelReplayClip()
                     break
                 }
-                target.replayClockMs = app.mapTimeAt(position)
                 lastPosition = position
                 delay(80)
             }
@@ -1596,10 +1617,11 @@ private fun LayoutSheet(app: AppState) {
                 Row(Modifier.padding(top = 12.dp)) {
                     SecondaryButton("Save 10-second replay clip") {
                         app.layoutSheetOpen = false
+                        app.chromeVisible = false
                         app.replayClipRequested = true
                     }
                 }
-                Text("Video only. Includes the timing tower and track map.", style = Type.footnote)
+                Text("Video only. Uses the visible replay layout.", style = Type.footnote)
             }
             val n = app.tiles.size
             val hasSaved = app.savedLayout(n) != null

@@ -1,6 +1,7 @@
 package app.apexview.scene
 
 import android.content.Context
+import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.opengl.EGL14
 import android.opengl.EGLConfig
@@ -12,6 +13,8 @@ import android.opengl.GLES20
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import android.view.PixelCopy
+import android.view.Window
 import android.view.Surface
 import android.view.TextureView
 import androidx.media3.exoplayer.ExoPlayer
@@ -38,23 +41,59 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var contextGl: EGLContext = EGL14.EGL_NO_CONTEXT
     private var window: EGLSurface = EGL14.EGL_NO_SURFACE
     private var config: EGLConfig? = null
-    private var clip: ReplayClipEncoder? = null
-    @Volatile var replayClockMs: Long? = null
+    @Volatile private var clip: ReplayClipEncoder? = null
     private var clipResult: ((String) -> Unit)? = null
 
-    fun startReplayClip(timing: app.apexview.SessionTiming, result: (String) -> Unit) {
+    fun startReplayClip(source: Window, bounds: Rect, result: (String) -> Unit) {
         gl.post {
             if (clip != null) return@post
             try {
                 check(!released && hasFrame && EGL14.eglMakeCurrent(display, window, window, contextGl)) {
                     "Video needs to be playing before making a replay clip"
                 }
-                val encoder = ReplayClipEncoder(context.applicationContext, display, contextGl, checkNotNull(config), timing)
+                val scale = minOf(1.0, 1920.0 / maxOf(bounds.width(), bounds.height()))
+                val width = ((bounds.width() * scale).toInt() and -2).coerceAtLeast(2)
+                val height = ((bounds.height() * scale).toInt() and -2).coerceAtLeast(2)
+                val encoder = ReplayClipEncoder(context.applicationContext, display, contextGl, checkNotNull(config), width, height)
                 clip = encoder
                 clipResult = result
+                copyReplayFrame(source, bounds, encoder)
                 gl.postDelayed({ if (clip === encoder) stopClip("Replay clip timed out before enough video frames arrived") }, 20_000)
             } catch (error: Exception) {
                 post { result("Could not start replay clip: ${error.message ?: error.javaClass.simpleName}") }
+            }
+        }
+    }
+
+    private fun copyReplayFrame(source: Window, bounds: Rect, encoder: ReplayClipEncoder) {
+        val requestedAt = System.nanoTime()
+        post {
+            if (released || clip !== encoder) return@post
+            try {
+                check(source.attributes.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE == 0) {
+                    "The viewer window became protected"
+                }
+                PixelCopy.request(source, Rect(bounds), encoder.pixels, { status ->
+                    if (clip === encoder && !released) {
+                        try {
+                            check(status == PixelCopy.SUCCESS) { "Viewer capture failed (PixelCopy $status)" }
+                            val finished = encoder.frame(requestedAt)
+                            if (finished) stopClip(encoder.finish())
+                            else {
+                                val delayMs = (40L - (System.nanoTime() - requestedAt) / 1_000_000L).coerceAtLeast(0L)
+                                gl.postDelayed({ if (clip === encoder) copyReplayFrame(source, bounds, encoder) }, delayMs)
+                            }
+                        } catch (error: Exception) {
+                            stopClip("Replay clip failed: ${error.message ?: error.javaClass.simpleName}")
+                        } finally {
+                            EGL14.eglMakeCurrent(display, window, window, contextGl)
+                        }
+                    }
+                }, gl)
+            } catch (error: Exception) {
+                gl.post {
+                    if (clip === encoder) stopClip("Replay clip failed: ${error.message ?: error.javaClass.simpleName}")
+                }
             }
         }
     }
@@ -174,19 +213,6 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 if (decoderTexture === frames && !released) {
                     frames.updateTexImage(); frames.getTransformMatrix(transform); hasFrame = true; rendered++
                     draw()
-                    val encoder = clip
-                    val model = scene
-                    val clock = replayClockMs
-                    if (encoder != null && model != null && clock != null) {
-                        try {
-                            val finished = encoder.frame(frames.timestamp, clock, model.width / model.height) { drawVideo(model) }
-                            if (finished) stopClip(encoder.finish())
-                        } catch (error: Exception) {
-                            stopClip("Replay clip failed: ${error.message ?: error.javaClass.simpleName}")
-                        } finally {
-                            EGL14.eglMakeCurrent(display, window, window, contextGl)
-                        }
-                    }
                 }
             }
         }, gl)
