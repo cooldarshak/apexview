@@ -4754,6 +4754,10 @@ class AppState(
         private set
     var towerFontScale by mutableFloatStateOf(prefs.getFloat(PREF_TOWER_FONT_SCALE, 1f))
         private set
+    var speedReadoutScale by mutableFloatStateOf(
+        SpeedReadoutScale.clamp(prefs.getFloat(PREF_SPEED_READOUT_SCALE, SpeedReadoutScale.DEFAULT)),
+    )
+        private set
     var towerLocked by mutableStateOf(prefs.getBoolean(PREF_TOWER_LOCKED, false))
         private set
     var towerReserve by mutableStateOf(prefs.getBoolean(PREF_TOWER_RESERVE, false))
@@ -4775,6 +4779,11 @@ class AppState(
     fun updateTowerFontScale(value: Float) {
         towerFontScale = value.coerceIn(TOWER_MIN_FONT_SCALE, TOWER_MAX_FONT_SCALE)
         prefs.edit().putFloat(PREF_TOWER_FONT_SCALE, towerFontScale).apply()
+    }
+
+    fun updateSpeedReadoutScale(value: Float) {
+        speedReadoutScale = SpeedReadoutScale.clamp(value)
+        prefs.edit().putFloat(PREF_SPEED_READOUT_SCALE, speedReadoutScale).apply()
     }
 
     fun updateTowerOpacity(value: Float) {
@@ -6023,6 +6032,7 @@ class AppState(
         private const val PREF_TOWER_SPOT = "towerSpot"
         private const val PREF_TOWER_OPACITY = "towerOpacity"
         private const val PREF_TOWER_FONT_SCALE = "towerFontScale"
+        private const val PREF_SPEED_READOUT_SCALE = "speedReadoutScale"
         private const val PREF_TOWER_LOCKED = "towerLocked"
         private const val PREF_TOWER_RESERVE = "towerReserve"
         private const val PREF_TV_TOWER_WIDTH = "tvTowerWidthShare"

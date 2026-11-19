@@ -58,19 +58,20 @@ fun SpeedReadout(app: AppState, timing: SessionTiming, number: String, modifier:
     LaunchedEffect(timing) { app.loadSpeeds(timing) }
     val kmh = timing.speeds[number]?.kmhAt(rememberMapTime(app)) ?: return
     val unit = app.settings.speedUnit
+    val scale = app.speedReadoutScale
     Row(
         modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(6.dp * scale))
             .background(Color.Black.copy(alpha = 0.72f))
-            .padding(horizontal = 8.dp, vertical = 5.dp),
+            .padding(horizontal = 8.dp * scale, vertical = 5.dp * scale),
         verticalAlignment = Alignment.Bottom,
     ) {
-        Text("${speedIn(kmh, unit)}", style = digits.copy(fontSize = 17.sp, fontWeight = FontWeight.Bold))
-        Spacer(Modifier.width(4.dp))
+        Text("${speedIn(kmh, unit)}", style = digits.copy(fontSize = (17f * scale).sp, fontWeight = FontWeight.Bold))
+        Spacer(Modifier.width(4.dp * scale))
         Text(
             if (unit == Settings.KMH) "km/h" else "mph",
-            style = digits.copy(fontSize = 11.sp, color = Color.White.copy(alpha = 0.75f)),
-            modifier = Modifier.padding(bottom = 1.dp),
+            style = digits.copy(fontSize = (11f * scale).sp, color = Color.White.copy(alpha = 0.75f)),
+            modifier = Modifier.padding(bottom = 1.dp * scale),
         )
     }
 }

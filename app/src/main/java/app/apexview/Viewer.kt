@@ -156,8 +156,6 @@ private const val LIVE_EDGE_MS = 30_000L
 private val CARD_MIN_TILE = 230.dp
 private val CARD_MAX_WIDTH = 250.dp
 private val CARD_MARGIN = 10.dp
-/** What the speed needs beside the card: its own width and the margins. */
-private val SPEED_ROOM = 100.dp
 
 /** Corner radius of the physical screen, so the edge ribbon can follow it. 0 if unknown. */
 @Composable
@@ -1118,14 +1116,11 @@ private fun TileView(
             )
         }
         if (number != null && timing != null && !app.arranging) {
-            // On a feed too narrow for both, it sits above the card rather than on it.
-            val overCard = timing.laps.isNotEmpty() && tileWidth in CARD_MIN_TILE..(CARD_MAX_WIDTH + SPEED_ROOM)
+            // Keep the speed above the F1 camera graphic, away from the driver's timing card
+            // and the video controls that occupy the bottom of smaller onboard feeds.
             SpeedReadout(
                 app, timing, number,
-                Modifier.align(Alignment.BottomEnd).padding(
-                    end = CARD_MARGIN,
-                    bottom = if (overCard) 66.dp else if (app.settings.showStats) 28.dp else CARD_MARGIN,
-                ),
+                Modifier.align(Alignment.TopStart).padding(start = 6.dp, top = 6.dp),
             )
         }
 
@@ -1958,6 +1953,21 @@ private fun MapSheet(app: AppState) {
                     "Show the live driver order, lap times, gaps, sectors and tyre information over the video feeds.",
                     style = Type.footnote,
                     modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 2.dp, bottom = 4.dp),
+                )
+            }
+            Column(
+                Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
+                    .background(Ink.background).padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Onboard speed readout size", style = Type.body, modifier = Modifier.weight(1f))
+                    Text("%d%%".format((app.speedReadoutScale * 100f).toInt()), style = Type.footnote)
+                }
+                AppleSlider(
+                    value = app.speedReadoutScale,
+                    onValueChange = app::updateSpeedReadoutScale,
+                    valueRange = SpeedReadoutScale.MIN..SpeedReadoutScale.MAX,
+                    trackColor = Ink.surfaceHigh,
                 )
             }
             if (app.towerOpen) {

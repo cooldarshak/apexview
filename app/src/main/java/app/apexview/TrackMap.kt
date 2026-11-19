@@ -167,15 +167,11 @@ private val PUSH_RING = Color(0xFFFFD400)
 
 internal class Car(val number: String, val x: Float, val y: Float, val state: LapState)
 
-/** Shared wall-clock map/card time for components that need display-frame precision. */
+/** The video keeps its 50 fps clock. Text overlays need fewer Compose updates than the video. */
 @Composable
 internal fun rememberMapTime(app: AppState): Long {
     if (app.isTv) return rememberTvMapTime { app.mapTimeMs() ?: 0L }
-    var now by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(Unit) {
-        while (true) withFrameMillis { now = app.mapTimeMs() ?: 0L }
-    }
-    return now
+    return rememberMapRenderTime(app)
 }
 
 /**
@@ -183,6 +179,10 @@ internal fun rememberMapTime(app: AppState): Long {
  * Publish map state at 30 Hz, while the video continues on its own playback/surface clock.
  */
 internal const val MAP_RENDER_INTERVAL_MS = 33L
+
+/** Sample at most 31 times/second, even on 60/120 Hz displays. Recover from clock resets. */
+internal fun isOverlaySampleDue(frameMs: Long, lastFrameMs: Long): Boolean =
+    lastFrameMs == Long.MIN_VALUE || frameMs < lastFrameMs || frameMs - lastFrameMs >= MAP_RENDER_INTERVAL_MS
 
 /** Sleep between TV samples so the overlays do not request every display frame. */
 @Composable
@@ -205,9 +205,7 @@ internal fun rememberMapRenderTime(app: AppState): Long {
         var lastPublishedFrameMs = Long.MIN_VALUE
         while (true) {
             withFrameMillis { frameMs ->
-                if (lastPublishedFrameMs == Long.MIN_VALUE ||
-                    frameMs - lastPublishedFrameMs >= MAP_RENDER_INTERVAL_MS
-                ) {
+                if (isOverlaySampleDue(frameMs, lastPublishedFrameMs)) {
                     now = app.mapTimeMs() ?: 0L
                     lastPublishedFrameMs = frameMs
                 }
