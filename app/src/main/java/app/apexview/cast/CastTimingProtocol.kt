@@ -13,10 +13,26 @@ import kotlin.math.abs
 /** Only current display state crosses the LAN. No archive histories, tokens, URLs or radio paths. */
 internal object CastTimingProtocol {
     const val VERSION = 1
+    internal const val POSITION_STEP_MS = 200L
     private const val MAX_DRIVERS = 24
     private const val MAX_COORDINATES = 3072
     data class Panel(val x: Float, val y: Float, val width: Float, val height: Float)
-    data class CarMotion(val number: String, val x: Float, val y: Float, val nextX: Float, val nextY: Float, val state: LapState)
+    data class CarMotion(
+        val number: String, val x: Float, val y: Float, val nextX: Float, val nextY: Float, val state: LapState,
+        val later: List<Pair<Float, Float>> = emptyList(),
+    ) {
+        fun at(steps: Float): Car {
+            val last = later.size + 1
+            val progress = steps.coerceIn(0f, last.toFloat())
+            val i = progress.toInt().coerceAtMost(last - 1)
+            val fraction = progress - i
+            val fromX = if (i == 0) x else if (i == 1) nextX else later[i - 2].first
+            val fromY = if (i == 0) y else if (i == 1) nextY else later[i - 2].second
+            val toX = if (i == 0) nextX else later[i - 1].first
+            val toY = if (i == 0) nextY else later[i - 1].second
+            return Car(number, fromX + (toX - fromX) * fraction, fromY + (toY - fromY) * fraction, state)
+        }
+    }
     class Geometry(val id: String, val timing: SessionTiming)
     class Table(val rows: List<Pair<String, CardState>>, val tyres: Map<String, Tyre?>,
                 val speeds: Map<String, Pair<Int?, Int?>>)
@@ -29,8 +45,8 @@ internal object CastTimingProtocol {
         val header: TowerSessionHeaderData, val message: String?) {
         fun carsAt(position: Long): List<Car> {
             // Hold the last measured endpoint between packets. Seeks invalidate frames at the receiver.
-            val f = ((position - positionMs) / 200f).coerceIn(0f, 1f)
-            return cars.map { Car(it.number, it.x + (it.nextX - it.x) * f, it.y + (it.nextY - it.y) * f, it.state) }
+            val steps = (position - positionMs).toFloat() / POSITION_STEP_MS
+            return cars.map { it.at(steps) }
         }
     }
     private fun number(v: Double, bound: Double = 10_000_000.0): Float = v.toFloat().also {
@@ -101,7 +117,7 @@ internal object CastTimingProtocol {
             (0 until segments.count(64)).map { segments.getInt(it).also { s -> require(s in 0..4096) } }, a.getString(3).safe(32))
     }
     fun table(timing: SessionTiming, now: Long): JSONArray = JSONArray().apply {
-        timing.laps.entries.mapNotNull { (n, laps) -> laps.at(now)?.let { n to it } }.sortedBy { it.second.position ?: 99 }
+        timing.laps.entries.mapNotNull { (n, laps) -> laps.at(now, includeRunningTime = false)?.let { n to it } }.sortedBy { it.second.position ?: 99 }
             .take(MAX_DRIVERS).forEach { (n, s) ->
                 val tyre = timing.tyres[n]?.at(now)
                 put(JSONArray().put(n).put(s.position ?: JSONObject.NULL).put(s.inPit).put(s.retired)
@@ -147,8 +163,16 @@ internal object CastTimingProtocol {
             .put("onTop", app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString() ?: JSONObject.NULL)
             .put("leader", timing?.let { leaderAt(it, now) } ?: JSONObject.NULL)
             .put("cars", JSONArray().apply { cars.take(MAX_DRIVERS).forEach { car ->
-                val next = timing!!.tracks[car.number]?.atOrFirst(now + 200)
-                put(JSONArray(listOf(car.number, car.x, car.y, next?.first ?: car.x, next?.second ?: car.y, car.state.ordinal)))
+                val track = timing!!.tracks[car.number]
+                var next = track?.atOrFirst(now + POSITION_STEP_MS) ?: (car.x to car.y)
+                val row = JSONArray(listOf(car.number, car.x, car.y, next.first, next.second, car.state.ordinal))
+                // Keep the original 200 ms endpoint for older receivers. New receivers receive
+                // another two measured points so a late packet doesn't stop the cars mid-corner.
+                for (step in 2..3) {
+                    next = track?.atOrFirst(now + step * POSITION_STEP_MS) ?: next
+                    row.put(next.first).put(next.second)
+                }
+                put(row)
             } }).put("condition", flags.track.ordinal).put("yellow", JSONArray().apply { flags.yellow.entries.take(64).forEach { put(JSONArray(listOf(it.key, it.value))) } })
             .put("resumption", flags.resumption?.let { JSONArray(listOf(it.announcedUtc, it.atUtc, it.what.safe())) } ?: JSONObject.NULL)
             .put("stop", stop?.let { JSONArray(listOf(it.number, it.carProgress, it.ghostProgress, it.outBehind?.first ?: JSONObject.NULL, it.outBehind?.second ?: 0)) } ?: JSONObject.NULL)
@@ -161,7 +185,9 @@ internal object CastTimingProtocol {
         val carArray = j.getJSONArray("cars")
         val cars = (0 until carArray.count(MAX_DRIVERS)).map { i -> carArray.getJSONArray(i).let {
             val n = it.getString(0).safe(8); require(n.matches(Regex("[0-9]{1,3}")))
-            CarMotion(n, it.f(1), it.f(2), it.f(3), it.f(4), LapState.entries[it.getInt(5)])
+            require(it.length() in 6..10 && it.length() % 2 == 0)
+            val later = (6 until it.length() step 2).map { index -> it.f(index) to it.f(index + 1) }
+            CarMotion(n, it.f(1), it.f(2), it.f(3), it.f(4), LapState.entries[it.getInt(5)], later)
         } }
         require(cars.map { it.number }.distinct().size == cars.size)
         val yellow = j.getJSONArray("yellow").let { a -> (0 until a.count(64)).associate { i -> a.getJSONArray(i).let { it.getInt(0) to it.getInt(1).also { v -> require(v in 1..2) } } } }

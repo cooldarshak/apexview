@@ -11,6 +11,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
@@ -20,49 +21,91 @@ import app.apexview.*
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** Native UI overlays share the source window canvas. They create no media players or codecs. */
+/** Native UI overlays share the source window canvas and the receiver's playback clock. */
 @Composable
 internal fun CastTimingLayer(state: CastTimingReceiver, canvasWidth: Float, canvasHeight: Float, positionMs: () -> Long,
                              onDriver: (String, Boolean) -> Unit, onDrawn: (Int, Int) -> Unit) {
-    val frame = state.frame ?: return
-    val timing = state.geometry?.takeIf { it.id == frame.geometryId }?.timing
+    val counts by remember(state) {
+        derivedStateOf(structuralEqualityPolicy()) {
+            val frame = state.frame
+            val geometry = state.geometry
+            if (frame == null || geometry == null || frame.geometryId != geometry.id) return@derivedStateOf 0 to 0
+            val rows = if (frame.tower != null) frame.table.rows.size else 0
+            val cars = when {
+                frame.mapMode == MapMode.OFF -> 0
+                frame.mapMode.inWindow && frame.map == null -> 0
+                frame.mapMode == MapMode.PIT -> frame.circle?.ring?.size ?: 0
+                geometry.timing.outline.size < 4 -> 0
+                else -> frame.cars.size
+            }
+            rows to cars
+        }
+    }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val scale = constraints.maxWidth / canvasWidth
-        val density = Density(frame.density * scale, frame.fontScale)
-        fun panel(p: CastTimingProtocol.Panel) = Modifier
-            .offset { IntOffset((p.x * scale).roundToInt(), (p.y * scale).roundToInt()) }
-            .requiredSize((p.width / frame.density).dp, (p.height / frame.density).dp)
-        CompositionLocalProvider(LocalDensity provides density) {
-            Box(Modifier.fillMaxSize().drawWithContent {
-                drawContent()
-                val rows = if (timing != null && frame.tower != null) frame.table.rows.size else 0
-                val cars = when {
-                    timing == null || frame.mapMode == MapMode.OFF -> 0
-                    frame.mapMode.inWindow && frame.map == null -> 0
-                    frame.mapMode == MapMode.PIT -> frame.circle?.ring?.size ?: 0
-                    timing.outline.size < 4 -> 0
-                    else -> frame.cars.size
-                }
-                onDrawn(rows, cars)
-            }) {
-                if (timing != null) frame.tower?.let { p ->
-                    Box(panel(p).graphicsLayer(alpha = frame.towerOpacity).clip(RoundedCornerShape(16.dp))
-                        .background(Color.Black.copy(alpha = .72f)).padding(top = (frame.towerHeaderPx / frame.density).dp)) {
-                        val base = LocalDensity.current
-                        CompositionLocalProvider(LocalDensity provides Density(base.density, base.fontScale * frame.towerFontScale)) {
-                            if (frame.table.rows.isEmpty()) Text(frame.message ?: "Waiting for timing rows…", style = Type.footnote, modifier = Modifier.padding(12.dp))
-                            else TimingTowerContents(timing, frame.table.rows, frame.header, frame.table.tyres, frame.table.speeds,
-                                frame.onTop, frame.speedUnit, frame.tvLayout) { onDriver(it, false) }
-                        }
-                    }
-                }
-                if (timing != null && frame.mapMode != MapMode.OFF) {
-                    ReceiverMap(timing, frame, canvasWidth, canvasHeight, scale, density, positionMs, onDriver)
-                }
-                if (frame.message != null && timing == null) {
-                    Text(frame.message, style = Type.footnote, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp))
-                }
+        Box(Modifier.fillMaxSize().drawWithContent {
+            drawContent()
+            val (rows, cars) = counts
+            onDrawn(rows, cars)
+        }) {
+            ReceiverTower(state, scale, onDriver)
+            ReceiverTrack(state, canvasWidth, canvasHeight, scale, positionMs, onDriver)
+        }
+    }
+}
+
+private data class TowerFrame(
+    val panel: CastTimingProtocol.Panel, val geometryId: String,
+    val table: CastTimingProtocol.Table, val header: TowerSessionHeaderData,
+    val density: Float, val fontScale: Float, val towerFontScale: Float, val opacity: Float,
+    val headerPx: Float, val onTop: String?, val speedUnit: String, val tvLayout: Boolean, val emptyMessage: String?,
+)
+
+/** Car motion packets update the map independently of table publication. */
+@Composable
+private fun ReceiverTower(state: CastTimingReceiver, scale: Float, onDriver: (String, Boolean) -> Unit) {
+    val tower by remember(state) {
+        derivedStateOf(structuralEqualityPolicy()) {
+            val f = state.frame ?: return@derivedStateOf null
+            val p = f.tower ?: return@derivedStateOf null
+            TowerFrame(p, f.geometryId, f.table, f.header, f.density, f.fontScale, f.towerFontScale, f.towerOpacity,
+                f.towerHeaderPx, f.onTop, f.speedUnit, f.tvLayout, f.message.takeIf { f.table.rows.isEmpty() })
+        }
+    }
+    val f = tower ?: return
+    val timing = state.geometry?.takeIf { it.id == f.geometryId }?.timing ?: return
+    val density = Density(f.density * scale, f.fontScale * f.towerFontScale)
+    CompositionLocalProvider(LocalDensity provides density) {
+        Box(Modifier.offset { IntOffset((f.panel.x * scale).roundToInt(), (f.panel.y * scale).roundToInt()) }
+            .requiredSize((f.panel.width / f.density).dp, (f.panel.height / f.density).dp)
+            .graphicsLayer {
+                alpha = f.opacity
+                compositingStrategy = CompositingStrategy.ModulateAlpha
+            }.clip(RoundedCornerShape(16.dp)).background(Color.Black.copy(alpha = .72f))
+            .padding(top = (f.headerPx / f.density).dp)) {
+            if (f.table.rows.isEmpty()) {
+                Text(f.emptyMessage ?: "Waiting for timing rows…", style = Type.footnote, modifier = Modifier.padding(12.dp))
+            } else {
+                TimingTowerContents(timing, f.table.rows, f.header, f.table.tyres, f.table.speeds,
+                    f.onTop, f.speedUnit, f.tvLayout) { onDriver(it, false) }
             }
+        }
+    }
+}
+
+@Composable
+private fun BoxScope.ReceiverTrack(state: CastTimingReceiver, canvasWidth: Float, canvasHeight: Float,
+                                   scale: Float, positionMs: () -> Long, onDriver: (String, Boolean) -> Unit) {
+    val frame = state.frame ?: return
+    val timing = state.geometry?.takeIf { it.id == frame.geometryId }?.timing
+    if (timing == null) {
+        frame.message?.let { Text(it, style = Type.footnote, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)) }
+        return
+    }
+    if (frame.mapMode != MapMode.OFF) {
+        val density = Density(frame.density * scale, frame.fontScale)
+        CompositionLocalProvider(LocalDensity provides density) {
+            ReceiverMap(timing, frame, canvasWidth, canvasHeight, scale, density, positionMs, onDriver)
         }
     }
 }
@@ -71,7 +114,7 @@ internal fun CastTimingLayer(state: CastTimingReceiver, canvasWidth: Float, canv
 private fun ReceiverMap(timing: SessionTiming, frame: CastTimingProtocol.Frame, canvasWidth: Float,
                         canvasHeight: Float, scale: Float, density: Density, positionMs: () -> Long,
                         onDriver: (String, Boolean) -> Unit) {
-    val position = rememberTvMapTime(positionMs)
+    val position = if (frame.mapMode == MapMode.PIT) frame.positionMs else rememberTvMapTime(positionMs)
     val cars = frame.carsAt(position)
     fun panel(p: CastTimingProtocol.Panel) = Modifier
         .offset { IntOffset((p.x * scale).roundToInt(), (p.y * scale).roundToInt()) }
@@ -79,7 +122,9 @@ private fun ReceiverMap(timing: SessionTiming, frame: CastTimingProtocol.Frame, 
     if (frame.mapMode == MapMode.EDGE) {
         EdgeDrawingContent(timing, canvasWidth * scale, canvasHeight * scale,
             with(density) { 30.dp.toPx() }, 0f, frame.mapOpacity, frame.utcMs + position - frame.positionMs,
-            cars, frame.stop, frame.flags, frame.leader) { targets -> DriverTargets(targets) { onDriver(it, false) } }
+            cars, frame.stop, frame.flags, frame.leader, frame.dotSize, frame.labelSize) {
+            targets -> DriverTargets(targets) { onDriver(it, false) }
+        }
     }
     if (frame.mapMode.inWindow) frame.map?.let { p ->
         Box(panel(p)) {

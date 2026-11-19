@@ -54,6 +54,16 @@ class CastTimingProtocolTest {
         assertEquals(.75f, decoded.mapOpacity, 0f)
         assertFalse(encoded.toString().contains("token", true))
     }
+    @Test fun delayedMotionUsesTheNextSamplesWithoutExtrapolatingPastThem() {
+        val j = frame(CastTimingProtocol.geometry(timing()).getString("id"))
+        j.getJSONArray("cars").getJSONArray(0).put(35).put(30).put(50).put(50)
+        val state = CastTimingProtocol.decodeFrame(j)
+        assertEquals(10f, state.carsAt(5100).single().x, 0f)
+        assertEquals(27.5f, state.carsAt(5300).single().x, 0f)
+        assertEquals(40f, state.carsAt(5500).single().y, 0f)
+        assertEquals(50f, state.carsAt(9000).single().x, 0f)
+    }
+
     @Test fun independentEmptyTopicsAndHideUpdatesDoNotEraseTheOtherPanel() {
         val geo = CastTimingProtocol.geometry(timing())
         val j = frame(geo.getString("id")).put("cars", JSONArray()).put("mapMode", "OFF").put("map", JSONObject.NULL)

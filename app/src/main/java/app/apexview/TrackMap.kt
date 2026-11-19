@@ -35,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -191,7 +192,7 @@ internal fun rememberTvMapTime(read: () -> Long): Long {
     LaunchedEffect(Unit) {
         while (true) {
             now = clock()
-            delay(66)
+            delay(40)
         }
     }
     return now
@@ -238,7 +239,7 @@ internal fun DrawScope.drawCar(timing: SessionTiming, car: Car, at: Offset, base
     }
     val alpha = if (dim) 0.4f else 1f
     if (push) drawCircle(PUSH_RING, radius + 3.dp.toPx(), at)
-    drawCircle(Color.Black.copy(alpha = alpha), radius + 1.5.dp.toPx(), at)
+    drawCircle(Color.Black.copy(alpha = alpha), radius + minOf(1.5.dp.toPx(), radius * .45f), at)
     drawCircle(color.copy(alpha = alpha), radius, at)
     return alpha
 }
@@ -603,7 +604,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
     targets: @Composable (List<Pair<String, Offset>>) -> Unit = {},
 ) {
     val density = LocalDensity.current
-    val fit = remember(timing, width, height, turn) {
+    val fit = remember(timing.outline, width, height, turn, density) {
         MapFit.of(timing.outline, width, height, margin = mapMarginPx(density), turn = turn)
     } ?: return
     val path = remember(fit) {
@@ -617,15 +618,15 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
         }
     }
     val measurer = rememberTextMeasurer()
-    val names = remember(timing, labelSizeSp) {
+    val names = remember(timing.drivers, labelSizeSp, measurer) {
         timing.drivers.mapValues { measurer.label(it.value.tla, labelSizeSp.sp) }
     }
-    val turns = remember(timing) { timing.corners.associate { it.number to measurer.label("${it.number}", 9.sp, bold = false) } }
+    val turns = remember(timing.corners, measurer) { timing.corners.associate { it.number to measurer.label("${it.number}", 9.sp, bold = false) } }
     val marks = remember(timing, timing.startLine) { LineMarks(timing) }
     val finishLabel = remember(marks) { measurer.label(marks.finishLabel, 8.sp) }
     val startLabel = remember { measurer.label("START", 8.sp) }
     fun lapPoint(f: Float) = timing.geometry.pointAt(f).let { g -> fit.map(g[0], g[1]) }
-    val sectors = remember(fit) { sectorPaths(timing, ::lapPoint) }
+    val sectors = remember(fit, timing.marshalSectors) { sectorPaths(timing, ::lapPoint) }
     val scLabel = remember { measurer.label("SC", 8.sp) }
     val cars = currentCars.map { it to fit.map(it.x, it.y) }
     val pitLabel = remember { measurer.label("PIT", 8.sp) }
@@ -637,49 +638,62 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
         ?.let { leader -> cars.firstOrNull { it.first.number == leader }?.first }
         ?.let { lapPoint(timing.geometry.progress(it.x, it.y) + SAFETY_CAR_AHEAD) }
 
-    Canvas(Modifier.fillMaxSize().graphicsLayer(alpha = opacity)) {
-        drawPath(path, Color.Black.copy(alpha = 0.45f), style = Stroke(7.dp.toPx()))
-        drawPath(path, Color.White.copy(alpha = 0.6f), style = Stroke(3.dp.toPx()))
-        drawFlags(flags, path, sectors, 3.5.dp.toPx(), pulse)
-        drawSectorGlyphs(flags, sectors, 14.dp.toPx()) { f -> lapPoint(f).let { p -> p + outward(p, Offset(width / 2, height / 2)) * 18.dp.toPx() } }
-        drawCaption(flags, caption, width / 2, height - 4.dp.toPx(), pulse)
-        stopText?.let { text ->
-            val above = caption?.let { it.size.height + 6.dp.toPx() } ?: 0f
-            drawText(text, topLeft = Offset(width / 2 - text.size.width / 2f, height - 4.dp.toPx() - above - text.size.height))
-        }
-        val center = Offset(width / 2, height / 2)
+    // Keep the circuit and its labels in their own recorded layer. Moving cars only redraw
+    // the foreground, with no offscreen alpha buffer around the entire track map.
+    val circuit: DrawScope.() -> Unit = remember(fit, path, timing.corners, turns, marks.start,
+        timing.hasStartFinish, finishLabel, startLabel) {
+        {
+            drawPath(path, Color.Black.copy(alpha = 0.45f), style = Stroke(7.dp.toPx()))
+            drawPath(path, Color.White.copy(alpha = 0.6f), style = Stroke(3.dp.toPx()))
+            val center = Offset(width / 2, height / 2)
 
-        fun mark(f: Float, chequered: Boolean, label: TextLayoutResult) {
-            val g = timing.geometry.pointAt(f)
-            val p = fit.map(g[0], g[1])
-            val ahead = fit.map(g[0] + g[2] * 10f, g[1] + g[3] * 10f)
-            val len = hypot(ahead.x - p.x, ahead.y - p.y).coerceAtLeast(0.001f)
-            val along = Offset((ahead.x - p.x) / len, (ahead.y - p.y) / len)
-            val across = Offset(-along.y, along.x)
-            drawLineMark(p, across, along, 9.dp.toPx(), chequered)
-            val out = outward(p, center) * 20.dp.toPx()
-            drawText(label, topLeft = p + out - Offset(label.size.width / 2f, label.size.height / 2f))
-        }
-        if (timing.hasStartFinish && timing.outline.size >= 4) {
-            mark(0f, chequered = true, finishLabel)
-            marks.start?.takeIf { !marks.together }?.let { mark(it, chequered = false, startLabel) }
-        }
+            fun mark(f: Float, chequered: Boolean, label: TextLayoutResult) {
+                val g = timing.geometry.pointAt(f)
+                val p = fit.map(g[0], g[1])
+                val ahead = fit.map(g[0] + g[2] * 10f, g[1] + g[3] * 10f)
+                val len = hypot(ahead.x - p.x, ahead.y - p.y).coerceAtLeast(0.001f)
+                val along = Offset((ahead.x - p.x) / len, (ahead.y - p.y) / len)
+                val across = Offset(-along.y, along.x)
+                drawLineMark(p, across, along, 9.dp.toPx(), chequered)
+                val out = outward(p, center) * 20.dp.toPx()
+                drawText(label, topLeft = p + out - Offset(label.size.width / 2f, label.size.height / 2f))
+            }
+            if (timing.hasStartFinish && timing.outline.size >= 4) {
+                mark(0f, chequered = true, finishLabel)
+                marks.start?.takeIf { !marks.together }?.let { mark(it, chequered = false, startLabel) }
+            }
 
-        timing.corners.forEach { corner ->
-            val label = turns[corner.number] ?: return@forEach
-            val p = fit.map(corner.x, corner.y)
-            val at = p + outward(p, center) * 14.dp.toPx()
-            drawText(label, topLeft = at - Offset(label.size.width / 2f, label.size.height / 2f), alpha = 0.75f)
+            timing.corners.forEach { corner ->
+                val label = turns[corner.number] ?: return@forEach
+                val p = fit.map(corner.x, corner.y)
+                val at = p + outward(p, center) * 14.dp.toPx()
+                drawText(label, topLeft = at - Offset(label.size.width / 2f, label.size.height / 2f), alpha = 0.75f)
+            }
         }
-
-        stop?.let { drawPitStop(it, Color(timing.drivers[it.number]?.color ?: android.graphics.Color.WHITE), pitLabel) { f -> lapPoint(f) } }
-        cars.forEach { (car, p) ->
-            val r = dotSizeDp.dp.toPx()
-            val alpha = drawCar(timing, car, p, r)
-            if (car.number == stop?.number) drawCircle(Color.White, r + 4.dp.toPx(), p, style = Stroke(2.dp.toPx()))
-            names[car.number]?.let { drawText(it, topLeft = Offset(p.x + r + 3.dp.toPx(), p.y - it.size.height / 2f), alpha = alpha) }
+    }
+    Box(Modifier.fillMaxSize()) {
+        val layer = Modifier.fillMaxSize().graphicsLayer {
+            alpha = opacity
+            compositingStrategy = CompositingStrategy.ModulateAlpha
         }
-        safetyCar?.let { drawSafetyCar(it, 10.dp.toPx(), scLabel) }
+        Canvas(layer, onDraw = circuit)
+        Canvas(layer) {
+            drawFlags(flags, path, sectors, 3.5.dp.toPx(), pulse)
+            drawSectorGlyphs(flags, sectors, 14.dp.toPx()) { f -> lapPoint(f).let { p -> p + outward(p, Offset(width / 2, height / 2)) * 18.dp.toPx() } }
+            drawCaption(flags, caption, width / 2, height - 4.dp.toPx(), pulse)
+            stopText?.let { text ->
+                val above = caption?.let { it.size.height + 6.dp.toPx() } ?: 0f
+                drawText(text, topLeft = Offset(width / 2 - text.size.width / 2f, height - 4.dp.toPx() - above - text.size.height))
+            }
+            stop?.let { drawPitStop(it, Color(timing.drivers[it.number]?.color ?: android.graphics.Color.WHITE), pitLabel) { f -> lapPoint(f) } }
+            cars.forEach { (car, p) ->
+                val r = dotSizeDp.dp.toPx()
+                val alpha = drawCar(timing, car, p, r)
+                if (car.number == stop?.number) drawCircle(Color.White, r + 4.dp.toPx(), p, style = Stroke(2.dp.toPx()))
+                names[car.number]?.let { drawText(it, topLeft = Offset(p.x + r + minOf(3.dp.toPx(), r), p.y - it.size.height / 2f), alpha = alpha) }
+            }
+            safetyCar?.let { drawSafetyCar(it, 10.dp.toPx(), scLabel) }
+        }
     }
     targets(cars.map { (car, p) -> car.number to p })
 }
@@ -785,7 +799,7 @@ private fun DrawScope.drawCaption(flags: FlagPicture, caption: TextLayoutResult?
 
 /** The safety car: a yellow dot marked SC. F1 doesn't send its position, so it rides just ahead of the leader. */
 private fun DrawScope.drawSafetyCar(at: Offset, radius: Float, label: TextLayoutResult) {
-    drawCircle(Color.Black, radius + 1.5.dp.toPx(), at)
+    drawCircle(Color.Black, radius + minOf(1.5.dp.toPx(), radius * .45f), at)
     drawCircle(FlagYellow, radius, at)
     drawText(label, color = Color.Black, topLeft = at - Offset(label.size.width / 2f, label.size.height / 2f))
 }
@@ -889,13 +903,16 @@ fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, i
             cars.map { it.number to timing.geometry.progress(it.x, it.y) })
     }
     EdgeDrawingContent(timing, width, height, inset, screenCornerRadius, app.mapOpacity, now,
-        cars, stop, timing.flags.at(now)) { targets -> CarTargets(app, targets) }
+        cars, stop, timing.flags.at(now), dotSizeDp = app.mapDotSizeDp, labelSizeSp = app.mapLabelSizeSp) {
+        targets -> CarTargets(app, targets)
+    }
 }
 
 @Composable
 internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Float, inset: Float,
     screenCornerRadius: Float, opacity: Float, now: Long, currentCars: List<Car>,
     stop: PitStopNow?, flags: FlagPicture, leader: String? = null,
+    dotSizeDp: Float, labelSizeSp: Float,
     targets: @Composable (List<Pair<String, Offset>>) -> Unit = {},
 ) {
     val fallback = with(LocalDensity.current) { 24.dp.toPx() }
@@ -910,7 +927,9 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
         )
     }
     val measurer = rememberTextMeasurer()
-    val names = remember(timing) { timing.drivers.mapValues { measurer.label(it.value.tla, 10.sp) } }
+    val names = remember(timing.drivers, labelSizeSp, measurer) {
+        timing.drivers.mapValues { measurer.label(it.value.tla, labelSizeSp.sp) }
+    }
     val turns = remember(timing) {
         timing.corners.map { timing.geometry.progress(it.x, it.y) to measurer.label("T${it.number}", 8.sp, bold = false) }
     }
@@ -929,8 +948,11 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     val stopLine = stop?.let { pitStopLine(timing, it) } ?: noPositionsLine(timing, now)
     val stopText = remember(stopLine) { stopLine?.let { measurer.label(it, 13.sp) } }
 
-    Canvas(Modifier.fillMaxSize().graphicsLayer(alpha = opacity)) {
-        val line = ribbon.path()
+    val line = remember(ribbon) { ribbon.path() }
+    Canvas(Modifier.fillMaxSize().graphicsLayer {
+        alpha = opacity
+        compositingStrategy = CompositingStrategy.ModulateAlpha
+    }) {
         drawPath(line, Color.Black.copy(alpha = 0.5f), style = Stroke(6.dp.toPx()))
         drawPath(line, Color.White.copy(alpha = 0.5f), style = Stroke(2.dp.toPx()))
         drawFlags(flags, line, sectors, 2.5.dp.toPx(), pulse)
@@ -977,8 +999,9 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
         val lastAt = FloatArray(3) { -Float.MAX_VALUE }
         cars.forEach { (car, f) ->
             val p = ribbon.point(f)
-            val alpha = drawCar(timing, car, p, 5.dp.toPx())
-            if (car.number == stop?.number) drawCircle(Color.White, 9.dp.toPx(), p, style = Stroke(2.dp.toPx()))
+            val radius = dotSizeDp.dp.toPx()
+            val alpha = drawCar(timing, car, p, radius)
+            if (car.number == stop?.number) drawCircle(Color.White, radius + 4.dp.toPx(), p, style = Stroke(2.dp.toPx()))
             val label = names[car.number] ?: return@forEach
             val along = f * ribbon.perimeter
             val gap = label.size.width + 6.dp.toPx()

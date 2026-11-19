@@ -435,6 +435,12 @@ fun ViewerScreen(app: AppState) {
                     }
                 }
             }
+            if (app.trackLogoAnchored && app.towerOpen) app.timing?.takeIf { it.laps.isNotEmpty() }?.let { timing ->
+                // Keep the tracker visible and movable over the sidebar as well as over video.
+                Box(Modifier.zIndex(5e8f)) {
+                    TowerPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height)
+                }
+            }
             // Above every tile (their z grows by one per touch), below the controls.
             app.timing?.let { timing ->
                 AnimatedVisibility(!laptop, Modifier.fillMaxSize().zIndex(1e9f), enter = fadeIn(swap), exit = fadeOut(swap)) {
@@ -473,7 +479,7 @@ fun ViewerScreen(app: AppState) {
             Box(Modifier.zIndex(CHROME_Z - 1)) { RadioPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height) }
         }
         // Laptop mode has the tower below the hinge already.
-        if (app.towerOpen && !app.laptopActive) app.timing?.takeIf { it.laps.isNotEmpty() }?.let { timing ->
+        if (app.towerOpen && !app.laptopActive && !app.trackLogoAnchored) app.timing?.takeIf { it.laps.isNotEmpty() }?.let { timing ->
             if (app.combinedOverlayPlan != null) {
                 // The tower is outside mapGestures so dragging it cannot accidentally grab the
                 // circuit underneath. Apply the same transforms as the feed/map canvas instead.

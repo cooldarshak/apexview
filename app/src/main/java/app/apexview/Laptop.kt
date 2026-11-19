@@ -168,25 +168,32 @@ private fun TowerTextScale(app: AppState, content: @Composable () -> Unit) {
     )
 }
 
+private data class TowerSample(
+    val rows: List<Pair<String, CardState>>,
+    val header: TowerSessionHeaderData,
+    val tyres: Map<String, Tyre?>,
+    val speeds: Map<String, Pair<Int?, Int?>>,
+)
+
 /** Live running order. The screen follows the same delayed picture clock as the map. */
 @Composable
 private fun TimingTower(app: AppState, timing: SessionTiming) {
-    // Replays load their car telemetry lazily; live sessions already carry it on SessionTiming.
     LaunchedEffect(timing) { app.loadSpeeds(timing) }
-    var now by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(Unit) {
+    var sample by remember { mutableStateOf<TowerSample?>(null) }
+    LaunchedEffect(app, timing) {
         while (true) {
-            now = app.mapTimeMs() ?: 0L
-            delay(500)
+            val now = app.mapTimeMs() ?: 0L
+            val rows = timing.laps.mapNotNull { (number, laps) ->
+                laps.at(now, includeRunningTime = false)?.let { number to it }
+            }.sortedBy { it.second.position ?: 99 }
+            sample = TowerSample(rows, towerSessionHeader(timing, now), timing.tyres.mapValues { it.value.at(now) },
+                timing.speeds.mapValues { it.value.kmhAt(now) to it.value.gearAt(now) })
+            delay(if (app.isTv) 250L else 500L)
         }
     }
-    val rows = timing.laps.mapNotNull { (number, laps) -> laps.at(now)?.let { number to it } }
-        .sortedBy { it.second.position ?: 99 }
+    val visible = sample ?: return
     val onTop = app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString()
-
-    TimingTowerContents(timing, rows, towerSessionHeader(timing, now),
-        timing.tyres.mapValues { it.value.at(now) },
-        timing.speeds.mapValues { it.value.kmhAt(now) to it.value.gearAt(now) },
+    TimingTowerContents(timing, visible.rows, visible.header, visible.tyres, visible.speeds,
         onTop, app.settings.speedUnit, app.layoutMode == LayoutMode.TV, app::showOnboard)
 }
 

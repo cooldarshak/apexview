@@ -27,7 +27,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
 
     fun messages(playbackId: String): List<JSONObject> {
         val elapsed = android.os.SystemClock.elapsedRealtime()
-        if (lastPlaybackId == playbackId && lastFrameAt != Long.MIN_VALUE && elapsed - lastFrameAt < 200) return emptyList()
+        if (lastPlaybackId == playbackId && lastFrameAt != Long.MIN_VALUE && elapsed - lastFrameAt < CastTimingProtocol.POSITION_STEP_MS) return emptyList()
         lastFrameAt = elapsed
         val resend = lastPlaybackId != playbackId || lastFullSnapshotAt == Long.MIN_VALUE || elapsed - lastFullSnapshotAt >= 5_000
         if (lastPlaybackId != playbackId) {
@@ -53,10 +53,16 @@ internal class CastTimingPublisher(private val context: Context, private val app
                 geometryId = id; rowsText = ""; lastTableUtc = Long.MIN_VALUE
                 output += JSONObject(currentGeometry.toString()).put("playbackId", playbackId)
             } else if (resend) output += JSONObject(currentGeometry.toString()).put("playbackId", playbackId)
-            if (lastTableUtc == Long.MIN_VALUE || kotlin.math.abs(now - lastTableUtc) >= 400) {
-                rows = CastTimingProtocol.table(timing, now)
+            if (app.towerOpen) {
+                if (lastTableUtc == Long.MIN_VALUE || kotlin.math.abs(now - lastTableUtc) >= CastTimingProtocol.POSITION_STEP_MS) {
+                    rows = CastTimingProtocol.table(timing, now)
+                    tableSampled = true
+                    lastTableUtc = now
+                }
+            } else if (rows.length() > 0) {
+                rows = JSONArray()
                 tableSampled = true
-                lastTableUtc = now
+                lastTableUtc = Long.MIN_VALUE
             }
         } else {
             tableSampled = rows.length() > 0 || rowsText.isEmpty()

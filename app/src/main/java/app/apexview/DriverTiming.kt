@@ -7,7 +7,7 @@ import org.json.JSONObject
 enum class Pace { NONE, YELLOW, GREEN, PURPLE }
 
 /** A sector time plus the F1 micro-sector status strip and its previous value. */
-class SectorCell(
+data class SectorCell(
     val time: String,
     val pace: Pace,
     val segments: List<Int> = emptyList(),
@@ -15,7 +15,7 @@ class SectorCell(
 )
 
 /** What a driver's timing card shows at one moment. */
-class CardState(
+data class CardState(
     val position: Int?,
     /** S1..S3 of the lap in progress; null where not yet set. */
     val sectors: List<SectorCell?>,
@@ -140,16 +140,16 @@ class DriverLaps(
     /** When the driver last crossed the line, by [utcMs]. */
     fun lastCrossing(utcMs: Long): Long? = crossings.getOrNull(crossings.floorIndex(utcMs))
 
-    fun at(utcMs: Long): CardState? {
+    fun at(utcMs: Long, includeRunningTime: Boolean = true): CardState? {
         val i = times.floorIndex(utcMs)
         if (i < 0) return null
         val s = states[i]
-        val lapStart = crossings.getOrNull(crossings.floorIndex(utcMs))
+        val lapStart = if (includeRunningTime && !s.inPit) lastCrossing(utcMs) else null
         return CardState(
             position = s.position,
             sectors = s.sectors,
             lapSectors = s.lapSectors,
-            runningMs = if (s.inPit || lapStart == null) null else utcMs - lapStart,
+            runningMs = lapStart?.let { utcMs - it },
             lastLap = s.lastLap,
             gap = s.gap,
             inPit = s.inPit,
