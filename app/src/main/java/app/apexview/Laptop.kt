@@ -493,7 +493,7 @@ fun TowerRow(
             }
         }
         repeat(3) { index ->
-            val sector = state.sectors.getOrNull(index) ?: state.lapSectors.getOrNull(index)
+            val sector = state.towerSector(index)
             TowerSector(sector)
         }
         Column(
@@ -544,10 +544,10 @@ private fun TowerSector(sector: SectorCell?) {
 }
 
 internal fun segmentColor(status: Int) = when (status) {
-    2048 -> Color(0xFFFFD60A) // Yellow
+    2048, 2052 -> Color(0xFFFFD60A) // Yellow
     2049 -> Color(0xFF30D158) // Personal best
     2051 -> Color(0xFFBF5AF2) // Session best
-    2064 -> Color(0xFFFF453A) // Stopped
+    2064 -> Color(0xFF28A8F8) // Pit lane
     else -> Color.White.copy(alpha = 0.10f)
 }
 

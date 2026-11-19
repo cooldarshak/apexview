@@ -534,9 +534,9 @@ internal class StateHistoryAccumulator {
                 state = LapState.OUT_LAP
             }
             if (driver.has("NumberOfLaps")) {
-                val count = driver.optInt("NumberOfLaps")
+                val count = driver.optInt("NumberOfLaps", -1)
                 val previous = laps[number]
-                laps[number] = count
+                if (count >= (previous ?: 0)) laps[number] = count
                 if (previous != null && count > previous) {
                     crossings += number to time
                     state = when (state) {
@@ -562,6 +562,8 @@ internal class StateHistoryAccumulator {
 }
 
 internal data class DriverTimingParse(val laps: Map<String, DriverLaps>, val states: StateParse)
+internal data class DriverTimingPreview(val throughUtcMs: Long, val history: DriverTimingParse)
+internal const val TOWER_PREVIEW_LOOKAHEAD_MS = 60_000L
 
 /**
  * Reads a past session from F1's live timing archive (livetiming.formula1.com/static). The archive
@@ -942,20 +944,27 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                 text.appendLine(line)
                                 line
                             }.iterator()
-                            val preview = DriverTimingParser.preview(lines, start, {
+                            fun previewTarget(): Long {
                                 val clock = playhead()
-                                // A resumed race can start almost an hour away from the heartbeat
-                                // estimate. Let Media3 resolve that clock while the prefix streams in.
+                                // A resumed race can start far from the heartbeat estimate.
                                 if (clock != null && clock.positionMs >= 180_000L && clock.videoUtcMs == null &&
                                     android.os.SystemClock.elapsedRealtime() - started < 3_000L
-                                ) Long.MAX_VALUE else targetUtc(start)
-                            }, { job.ensureActive() })
-                            if (preview != null) {
-                                checkpoint("tower-preview", "drivers=${preview.laps.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
+                                ) return Long.MAX_VALUE
+                                return targetUtc(start)
+                            }
+                            for (preview in DriverTimingParser.previews(lines, start, ::previewTarget, { job.ensureActive() })) {
+                                val elapsed = android.os.SystemClock.elapsedRealtime() - started
+                                checkpoint("tower-preview", "drivers=${preview.history.laps.size} throughUtcMs=${preview.throughUtcMs} elapsedMs=$elapsed")
                                 withContext(Dispatchers.Main) {
-                                    partialHistory = preview
+                                    partialHistory = preview.history
                                     publishTopics()
                                 }
+                                primaryPreview.complete(Unit)
+                                val clock = playhead()
+                                val videoClockReady = clock != null && clock.videoUtcMs != null && !clock.cachedVideoClock
+                                if ((videoClockReady || elapsed >= 10_000L) &&
+                                    preview.throughUtcMs - targetUtc(start) >= TOWER_PREVIEW_LOOKAHEAD_MS
+                                ) break
                             }
                             primaryPreview.complete(Unit)
                             while (lines.hasNext()) lines.next()
@@ -989,20 +998,27 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                         val laps = traceStage("tower-history") { report ->
                             val job = kotlin.coroutines.coroutineContext
                             var publishedTarget: Long? = null
-                            DriverTimingParser.parse(timingStream, initialStart, timingF1Stream, accumulator, report,
-                                checkActive = { job.ensureActive() }) { through, buildLaps ->
-                                val target = targetUtc(initialStart)
-                                if (through >= target && publishedTarget?.let { abs(target - it) < 30_000L } != true) {
-                                    val laps = buildLaps()
-                                    if (laps.values.any { it.at(target)?.position != null }) {
-                                        publishedTarget = target
-                                        val snapshot = DriverTimingParse(laps, accumulator.finish())
-                                        launch(Dispatchers.Main) {
-                                            partialHistory = snapshot
-                                            publishTopics()
+                            val threadId = android.os.Process.myTid()
+                            val priority = android.os.Process.getThreadPriority(threadId)
+                            try {
+                                android.os.Process.setThreadPriority(threadId, android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                                DriverTimingParser.parse(timingStream, initialStart, timingF1Stream, accumulator, report,
+                                    checkActive = { job.ensureActive() }) { through, buildLaps ->
+                                    val target = targetUtc(initialStart)
+                                    if (through >= target && publishedTarget?.let { abs(target - it) < 30_000L } != true) {
+                                        val laps = buildLaps()
+                                        if (laps.values.any { it.at(target)?.position != null }) {
+                                            publishedTarget = target
+                                            val snapshot = DriverTimingParse(laps, accumulator.finish())
+                                            launch(Dispatchers.Main) {
+                                                partialHistory = snapshot
+                                                publishTopics()
+                                            }
                                         }
                                     }
                                 }
+                            } finally {
+                                android.os.Process.setThreadPriority(threadId, priority)
                             }
                         }
                         DriverTimingParse(laps, accumulator.finish()).also {

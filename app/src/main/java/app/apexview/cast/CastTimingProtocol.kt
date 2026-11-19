@@ -106,7 +106,7 @@ internal object CastTimingProtocol {
                 val tyre = timing.tyres[n]?.at(now)
                 put(JSONArray().put(n).put(s.position ?: JSONObject.NULL).put(s.inPit).put(s.retired)
                     .put(s.positionChange ?: JSONObject.NULL).put(sector(s.lastLap)).put(sector(s.bestLap))
-                    .put(JSONArray().apply { repeat(3) { put(sector(s.sectors.getOrNull(it) ?: s.lapSectors.getOrNull(it))) } })
+                    .put(JSONArray().apply { repeat(3) { put(sector(s.towerSector(it))) } })
                     .put(s.gap?.safe() ?: JSONObject.NULL).put(s.toLeader?.safe() ?: JSONObject.NULL).put(s.ahead?.safe() ?: JSONObject.NULL)
                     .put(tyre?.compound?.safe(24) ?: JSONObject.NULL).put(tyre?.laps ?: 0)
                     .put(timing.speeds[n]?.kmhAt(now) ?: JSONObject.NULL).put(timing.speeds[n]?.gearAt(now) ?: JSONObject.NULL))

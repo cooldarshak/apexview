@@ -37,6 +37,16 @@ class CardState(
     val positionChange: Int? = null,
 )
 
+/** The tower shows a single lap. A previous sector supplies only the strip's width. */
+internal fun CardState.towerSector(index: Int): SectorCell? {
+    val current = sectors.getOrNull(index)
+    val previousCount = lapSectors.getOrNull(index)?.segments?.size ?: 0
+    val currentCount = current?.segments?.size ?: 0
+    if (previousCount <= currentCount) return current
+    val strip = List(previousCount) { current?.segments?.getOrNull(it) ?: 0 }
+    return SectorCell(current?.time.orEmpty(), current?.pace ?: Pace.NONE, strip, current?.previousTime.orEmpty())
+}
+
 /**
  * One driver's timing through the session, as recorded snapshots: each change to the sectors,
  * last lap, gap, position or pit status keeps a full copy of the state, so [at] is a lookup
@@ -168,6 +178,7 @@ internal fun LongArray.shiftedBy(offsetMs: Long) = LongArray(size) { this[it] + 
  */
 object DriverTimingParser {
     private const val LATE_SECTOR_MS = 3_000L
+    private const val MAX_MINI_SECTORS = 64
 
     private class Live {
         var position: Int? = null
@@ -182,7 +193,7 @@ object DriverTimingParser {
         var bestLap: SectorCell? = null
         var bestLapValue = ""
         val bestLapFlags = BooleanArray(2)
-        val sectorSegments = Array(3) { sortedMapOf<Int, Int>() }
+        val sectorSegments = Array(3) { emptyList<Int>() }
         val sectorPrevious = Array(3) { "" }
         var gap: String? = null
         var toLeader: String? = null
@@ -235,23 +246,24 @@ object DriverTimingParser {
                 driver.crossings.toLongArray(), driver.lapTimes.toLongArray(), driver.lapCounts.toIntArray())
         }
 
-    /** Consume the ordered primary prefix until the playhead has usable standings. */
-    internal fun preview(
+    /** Publish the playhead's prefix, then keep following it while the archive is loading. */
+    internal fun previews(
         lines: Iterator<String>,
         streamStart: Long,
         targetUtc: () -> Long,
         checkActive: () -> Unit,
-    ): DriverTimingParse? {
+    ): Sequence<DriverTimingPreview> = sequence {
         val drivers = mutableMapOf<String, Live>()
         val states = StateHistoryAccumulator()
         var through = Long.MIN_VALUE
+        var publishedThrough: Long? = null
         while (lines.hasNext()) {
             checkActive()
             val line = lines.next()
             val prefix = streamPrefixLength(line)
             if (prefix >= line.length) continue
             val time = streamStart + streamOffsetMs(line, prefix)
-            if (time < through) return null  // Use the full ordered merge for a disordered archive.
+            if (time < through) return@sequence  // Use the full ordered merge for a disordered archive.
             through = time
             val rows = runCatching { JSONObject(line.substring(prefix)).optJSONObject("Lines") }.getOrNull()
                 ?: continue
@@ -262,11 +274,15 @@ object DriverTimingParser {
                 apply(driver, row, time)
                 driver.snap(time)
             }
-            if (time >= targetUtc() && drivers.values.any { it.position != null }) {
-                return DriverTimingParse(materialize(drivers, copySnapshots = false), states.finish())
+            val target = targetUtc()
+            val last = publishedThrough
+            val needsPreview = last == null || target > last + 5_000L ||
+                last - target < TOWER_PREVIEW_LOOKAHEAD_MS && time - last >= TOWER_PREVIEW_LOOKAHEAD_MS
+            if (time >= target && needsPreview && drivers.values.any { it.position != null }) {
+                publishedThrough = time
+                yield(DriverTimingPreview(time, DriverTimingParse(materialize(drivers, copySnapshots = true), states.finish())))
             }
         }
-        return null
     }
 
     fun parse(stream: String, streamStart: Long, timingF1: String = ""): Map<String, DriverLaps> =
@@ -356,11 +372,15 @@ object DriverTimingParser {
         d.optJSONObject("IntervalToPositionAhead")?.let { o -> if (o.has("Value")) l.ahead = o.optString("Value").ifEmpty { null } }
         if (d.has("TimeDiffToPositionAhead")) l.ahead = d.optString("TimeDiffToPositionAhead").ifEmpty { null }
 
-        when (val sectors = d.opt("Sectors")) {
-            is JSONArray -> for (i in 0 until minOf(3, sectors.length())) sectors.optJSONObject(i)?.let { applySector(l, i, it, t) }
-            is JSONObject -> sectors.keys().forEach { k ->
-                val i = k.toIntOrNull() ?: return@forEach
-                if (i in 0..2) sectors.optJSONObject(k)?.let { applySector(l, i, it, t) }
+        val completed = d.optInt("NumberOfLaps", -1).takeIf { it >= 0 }
+        val previousLaps = l.laps
+        val staleLap = completed != null && previousLaps != null && completed < previousLaps
+        val crossing = completed != null && previousLaps != null && completed > previousLaps
+        val sectors = d.opt("Sectors")
+        if (!staleLap) forEachSector(sectors) { i, sector ->
+            // At the line, keep the finished lap intact while applying its final split.
+            if (!crossing || sector.optString("Value").isNotEmpty() || i == 2 && !sector.has("Value")) {
+                applySector(l, i, sector, t)
             }
         }
         latestObject(d.opt("Stats"))?.let { stats ->
@@ -386,54 +406,66 @@ object DriverTimingParser {
             if (o.has("OverallFastest")) l.bestLapFlags[1] = o.optBoolean("OverallFastest")
             l.bestLap = l.bestLapValue.takeIf { it.isNotEmpty() }?.let { SectorCell(it, pace(l.bestLapFlags)) }
         }
-        // After the sectors, so a final sector sent with the crossing still counts for the lap
-        // it finished. F1 leaves the old sectors up well into the next lap; the card doesn't.
-        if (d.has("NumberOfLaps")) {
-            val n = d.optInt("NumberOfLaps")
-            if (l.laps != null && n > l.laps!!) {
-                l.crossings += t
-                l.crossedAt = t
-                l.sector.copyInto(l.lapSectors)
-                l.sector.fill(null)
-                l.sectorValue.fill("")
-                l.sectorPrevious.fill("")
-                l.sectorSegments.forEach { it.clear() }
-                l.sectorFlags.forEach { it.fill(false) }
+        if (crossing) {
+            l.crossings += t
+            l.crossedAt = t
+            l.sector.copyInto(l.lapSectors)
+            l.sector.fill(null)
+            l.sectorValue.fill("")
+            l.sectorPrevious.fill("")
+            l.sectorSegments.fill(emptyList())
+            l.sectorFlags.forEach { it.fill(false) }
+            // A batched update can also contain the beginning of the new lap.
+            forEachSector(sectors) { i, sector ->
+                if (i < 2 && sector.optString("Value").isEmpty()) applySector(l, i, sector, t)
             }
-            l.laps = n
-            if (l.lapCounts.lastOrNull() != n) {
-                l.lapTimes += t
-                l.lapCounts += n
+        }
+        if (completed != null && !staleLap && l.lapCounts.lastOrNull() != completed) {
+            l.laps = completed
+            l.lapTimes += t
+            l.lapCounts += completed
+        }
+    }
+
+    private inline fun forEachSector(sectors: Any?, apply: (Int, JSONObject) -> Unit) {
+        when (sectors) {
+            is JSONArray -> for (i in 0 until minOf(3, sectors.length())) {
+                sectors.optJSONObject(i)?.let { apply(i, it) }
+            }
+            is JSONObject -> for (i in 0..2) {
+                sectors.optJSONObject(i.toString())?.let { apply(i, it) }
             }
         }
     }
 
     private fun applySector(l: Live, i: Int, o: JSONObject, t: Long) {
-        // The last sector can land just after the crossing: it belongs to the lap just done.
+        // The last split can arrive after the crossing, even after the new S1 has started.
         val crossed = l.crossedAt
-        if (i == 2 && crossed != null && t - crossed in 1..LATE_SECTOR_MS && l.sector[0] == null) {
-            val value = o.optString("Value")
-            if (value.isNotEmpty()) {
-                val flags = booleanArrayOf(o.optBoolean("PersonalFastest"), o.optBoolean("OverallFastest"))
-                val segments = mutableListOf<Int>()
-                when (val rawSegments = o.opt("Segments")) {
-                    is JSONArray -> for (n in 0 until rawSegments.length()) {
-                        rawSegments.optJSONObject(n)?.optInt("Status", -1)?.takeIf { it >= 0 }?.let { segments += it }
-                    }
-                    is JSONObject -> rawSegments.keys().forEach { key ->
-                        rawSegments.optJSONObject(key)?.optInt("Status", -1)?.takeIf { it >= 0 }?.let { segments += it }
-                    }
+        if (i == 2 && crossed != null && t - crossed in 0..LATE_SECTOR_MS) {
+            val previous = l.lapSectors[i]
+            val reported = o.optString("Value")
+            val existing = previous?.segments.orEmpty()
+            val segments = mergeSegments(existing, o.opt("Segments"), keepCleared = false)
+            if (reported.isNotEmpty() || segments !== existing) {
+                val pace = when {
+                    o.optBoolean("OverallFastest") -> Pace.PURPLE
+                    o.optBoolean("PersonalFastest") -> Pace.GREEN
+                    reported.isEmpty() || !o.has("OverallFastest") && !o.has("PersonalFastest") ->
+                        previous?.pace?.takeUnless { it == Pace.NONE } ?: if (reported.isEmpty()) Pace.NONE else Pace.YELLOW
+                    else -> Pace.YELLOW
                 }
-                l.lapSectors[2] = SectorCell(value, pace(flags), segments, o.optString("PreviousValue"))
+                l.lapSectors[i] = SectorCell(reported.ifEmpty { previous?.time.orEmpty() }, pace, segments,
+                    o.optString("PreviousValue").ifEmpty { previous?.previousTime.orEmpty() })
             }
             return
         }
         if (o.has("Value")) {
             val value = o.optString("Value")
-            // A sector emptied means a new lap: its flags and micro-segments no longer apply.
-            if (value.isEmpty()) {
+            // An empty value also occurs in an in-progress split. Only a completed split
+            // changing to empty clears fallback state when no explicit zero statuses arrive.
+            if (value.isEmpty() && l.sectorValue[i].isNotEmpty()) {
                 l.sectorFlags[i].fill(false)
-                l.sectorSegments[i].clear()
+                l.sectorSegments[i] = emptyList()
                 l.sectorPrevious[i] = ""
             }
             l.sectorValue[i] = value
@@ -441,21 +473,31 @@ object DriverTimingParser {
         if (o.has("PreviousValue")) l.sectorPrevious[i] = o.optString("PreviousValue")
         if (o.has("PersonalFastest")) l.sectorFlags[i][0] = o.optBoolean("PersonalFastest")
         if (o.has("OverallFastest")) l.sectorFlags[i][1] = o.optBoolean("OverallFastest")
-        when (val rawSegments = o.opt("Segments")) {
-            is JSONArray -> for (n in 0 until rawSegments.length()) {
-                val status = rawSegments.optJSONObject(n)?.optInt("Status", -1) ?: -1
-                if (status >= 0) l.sectorSegments[i][n] = status
-            }
-            is JSONObject -> rawSegments.keys().forEach { key ->
-                val index = key.toIntOrNull() ?: return@forEach
-                val status = rawSegments.optJSONObject(key)?.optInt("Status", -1) ?: -1
-                if (index >= 0 && status >= 0) l.sectorSegments[i][index] = status
+        val segments = mergeSegments(l.sectorSegments[i], o.opt("Segments"))
+        l.sectorSegments[i] = segments
+        l.sector[i] = if (l.sectorValue[i].isNotEmpty() || segments.isNotEmpty()) {
+            SectorCell(l.sectorValue[i], if (l.sectorValue[i].isEmpty()) Pace.NONE else pace(l.sectorFlags[i]), segments, l.sectorPrevious[i])
+        } else null
+    }
+
+    private fun mergeSegments(previous: List<Int>, raw: Any?, keepCleared: Boolean = true): List<Int> {
+        var changed: MutableList<Int>? = null
+        fun set(index: Int, segment: JSONObject?) {
+            if (index !in 0 until MAX_MINI_SECTORS) return
+            val status = segment?.optInt("Status", -1) ?: return
+            if (status !in 0..4096 || status == 0 && !keepCleared) return
+            if ((changed ?: previous).getOrNull(index) == status) return
+            val next = changed ?: previous.toMutableList().also { changed = it }
+            repeat((index + 1 - next.size).coerceAtLeast(0)) { next.add(0) }
+            next[index] = status
+        }
+        when (raw) {
+            is JSONArray -> for (i in 0 until minOf(raw.length(), MAX_MINI_SECTORS)) set(i, raw.optJSONObject(i))
+            is JSONObject -> raw.keys().forEach { key ->
+                key.toIntOrNull()?.let { set(it, raw.optJSONObject(key)) }
             }
         }
-        val segmentValues = l.sectorSegments[i].values.toList()
-        l.sector[i] = if (l.sectorValue[i].isNotEmpty() || segmentValues.isNotEmpty()) {
-            SectorCell(l.sectorValue[i], if (l.sectorValue[i].isEmpty()) Pace.NONE else pace(l.sectorFlags[i]), segmentValues, l.sectorPrevious[i])
-        } else null
+        return changed ?: previous
     }
 
     /** Latest qualifying-part entry in F1's keyed-object or array delta shapes. */

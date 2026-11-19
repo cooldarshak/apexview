@@ -37,7 +37,7 @@ internal fun TvTowerRow(
     val leader = state.toLeader ?: "–"
     val gearText = gear?.let { if (it == 0) "N" else it.toString() } ?: "–"
     val speed = kmh?.let { speedIn(it, speedUnit).toString() } ?: "–"
-    val sectors = (0..2).map { state.sectors.getOrNull(it) ?: state.lapSectors.getOrNull(it) }
+    val sectors = (0..2).map { state.towerSector(it) }
     val description = buildString {
         append("Position $position, $name, gear $gearText, $speed $speedUnit. Last $lastLap, best $bestLap. Interval $interval, leader $leader.")
         sectors.forEachIndexed { index, sector -> sector?.time?.takeIf { it.isNotBlank() }?.let { append(" S${index + 1} $it.") } }
