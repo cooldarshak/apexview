@@ -8,6 +8,7 @@ on:
       - fix/tv-timing-map-and-dpad-sliders
       - customtiledview
       - feature/hevc-stitching-poc
+      - feature/continuous-baked-scene-cast
   workflow_dispatch:
 
 permissions:
