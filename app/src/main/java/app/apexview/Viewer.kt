@@ -897,12 +897,12 @@ internal fun PlaybackVideoCanvas(app: AppState, width: Float, height: Float) {
                 if (app.canMakeReplayClip && timing != null && host.player.isPlaying && !app.replayClipRunning) {
                     app.replayClipRunning = true
                     target.replayClockMs = app.mapTimeAt(host.player.currentPosition)
-                    app.message = "Encoding a 10-second replay clip…"
+                    app.reportReplayClipStatus("Encoding a 10-second replay clip…")
                     target.startReplayClip(timing) { result ->
                         app.replayClipRunning = false
-                        app.message = result
+                        app.reportReplayClipStatus(result)
                     }
-                } else app.message = "Play a clear replay with timing data loaded before making a clip."
+                } else app.reportReplayClipStatus("Play a clear replay with timing data loaded before making a clip.")
             }
         }
         LaunchedEffect(view, host, app.replayClipRunning) {

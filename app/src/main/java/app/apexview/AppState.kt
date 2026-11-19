@@ -5540,6 +5540,8 @@ class AppState(
     var playbackSpeed by mutableStateOf(prefs.getFloat(PREF_SPEED, 1f).takeIf { it in SPEEDS } ?: 1f)
         private set
     var speedSheetOpen by mutableStateOf(false)
+    internal fun reportReplayClipStatus(text: String) { message = text }
+
     internal var replayClipRequested by mutableStateOf(false)
     internal var replayClipRunning by mutableStateOf(false)
     internal val canMakeReplayClip: Boolean
