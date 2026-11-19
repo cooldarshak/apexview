@@ -15,26 +15,28 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Bounded peer-only HTTP publication of unchanged CBCS CMAF and its public DRM metadata. */
-internal class ComposedCmafRelay(address: String, private val peer: InetAddress) : AutoCloseable {
+internal class ComposedCmafRelay(address: String, private val peer: InetAddress?, private val liveHls: Boolean = false) : AutoCloseable {
     private val token = ByteArray(24).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
     private val server = ServerSocket(0)
-    val url = "http://$address:${server.localPort}/p/$token/manifest.mpd"
+    val url = "http://$address:${server.localPort}/p/$token/" + if (liveHls) "live.m3u8" else "manifest.mpd"
     private val accepting = Executors.newSingleThreadExecutor()
     private val workers = ThreadPoolExecutor(3, 3, 0, TimeUnit.SECONDS, ArrayBlockingQueue(6))
     private val sockets = ConcurrentHashMap.newKeySet<Socket>()
     private val closed = AtomicBoolean(false)
     private val lock = Any()
     private var resources = emptyMap<String, ByteArray>()
-    fun publish(next: ProtectedHevcComposedDashPackageBuilder.Package) = synchronized(lock) {
+    fun publish(next: ProtectedHevcComposedDashPackageBuilder.Package) = publishResources(next.resources)
+
+    internal fun publishResources(next: Map<String, ByteArray>) = synchronized(lock) {
         require(!closed.get())
-        require(next.resources.size <= 24 && next.resources.values.sumOf { it.size.toLong() } <= 128L * 1024 * 1024) { "Receiver media window exceeds its bounded memory budget" }
-        val previous = resources; resources = next.resources
+        require(next.size <= 24 && next.values.sumOf { it.size.toLong() } <= 128L * 1024 * 1024) { "Receiver media window exceeds its bounded memory budget" }
+        val previous = resources; resources = next
         previous.values.forEach { it.fill(0) }
     }
     init { accepting.execute {
         while (!closed.get()) {
             val socket = try { server.accept() } catch (_: Exception) { break }
-            if (socket.inetAddress != peer || sockets.size >= 9) { socket.close(); continue }
+            if (peer != null && socket.inetAddress != peer || sockets.size >= 9) { socket.close(); continue }
             socket.soTimeout = 8_000; sockets += socket
             try { workers.execute { socket.use { runCatching { serve(it) }; sockets -= it } } }
             catch (_: RuntimeException) { sockets -= socket; socket.close() }
@@ -57,9 +59,17 @@ internal class ComposedCmafRelay(address: String, private val peer: InetAddress)
         val prefix = "/p/$token/"
         val path = request[1].substringBefore('?')
         val name = if (path.startsWith(prefix)) path.removePrefix(prefix) else ""
+        val output = socket.getOutputStream()
+        val cors = if (liveHls) "Access-Control-Allow-Origin: *\r\n" +
+            "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n" +
+            "Access-Control-Allow-Headers: Range, Content-Type\r\n" +
+            "Access-Control-Allow-Private-Network: true\r\n" else ""
+        if (liveHls && request[0] == "OPTIONS" && name.isNotEmpty()) {
+            output.write("HTTP/1.1 204 No Content\r\n${cors}Content-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
+            return
+        }
         val body = if (request[0] in setOf("GET", "HEAD") && name.matches(Regex("[a-zA-Z0-9.-]{1,80}")))
             synchronized(lock) { resources[name]?.copyOf() } else null
-        val output = socket.getOutputStream()
         if (body == null) { output.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray()); return }
         try {
             val parsed = range?.let { Regex("bytes=(\\d+)-(\\d*)").matchEntire(it) }
@@ -68,11 +78,16 @@ internal class ComposedCmafRelay(address: String, private val peer: InetAddress)
             if (range != null && (parsed == null || start !in 0L..body.lastIndex.toLong() || end < start || end >= body.size)) {
                 output.write("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray()); return
             }
-            val mime = if (name.endsWith(".mpd")) "application/dash+xml" else "video/mp4"
+            val mime = when {
+                name.endsWith(".mpd") -> "application/dash+xml"
+                name.endsWith(".m3u8") -> "application/x-mpegURL"
+                name.endsWith(".ts") -> "video/mp2t"
+                else -> "video/mp4"
+            }
             val length = end - start + 1
             val extra = if (range != null) "Content-Range: bytes $start-$end/${body.size}\r\n" else ""
             output.write(("HTTP/1.1 ${if (range == null) "200 OK" else "206 Partial Content"}\r\nContent-Type: $mime\r\n" +
-                "Content-Length: $length\r\nAccept-Ranges: bytes\r\nCache-Control: no-store\r\nConnection: close\r\n$extra\r\n").toByteArray())
+                "Content-Length: $length\r\n${cors}Accept-Ranges: bytes\r\nCache-Control: no-store\r\nConnection: close\r\n$extra\r\n").toByteArray())
             if (request[0] == "GET") output.write(body, start.toInt(), length.toInt())
             output.flush()
         } finally { body.fill(0) }
