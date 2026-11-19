@@ -21,7 +21,9 @@ internal object HevcOutputParameterSetWriter {
         val tileRowHeightsInCtbs: List<Int>,
         val loopFilterAcrossTilesEnabled: Boolean,
         val frameRateNumerator: Int,
-        val frameRateDenominator: Int = 1
+        val frameRateDenominator: Int = 1,
+        /** A mixed-size atlas uses per-source crops, not the template feed's global crop. */
+        val uncroppedOutputPicture: Boolean = false
     )
 
     data class Output(
@@ -130,7 +132,7 @@ internal object HevcOutputParameterSetWriter {
         val outputVps = rewriteVps(sourceVpsNal, request.vpsId, outputLevel)
         val outputSps = rewriteSps(
             sourceSpsNal, request.vpsId, request.spsId,
-            request.codedWidth, request.codedHeight, outputLevel
+            request.codedWidth, request.codedHeight, outputLevel, request.uncroppedOutputPicture
         )
         val outputPps = rewritePps(
             sourcePpsNal, request.ppsId, request.spsId,
@@ -148,6 +150,9 @@ internal object HevcOutputParameterSetWriter {
         require(parsedSps.width == request.codedWidth && parsedSps.height == request.codedHeight) {
             "Generated SPS dimensions failed round-trip validation"
         }
+        if (request.uncroppedOutputPicture) require(
+            parsedSps.displayWidth == request.codedWidth && parsedSps.displayHeight == request.codedHeight
+        ) { "Mixed-size atlas SPS must expose the complete coded picture" }
         require(parsedPps.ppsId == request.ppsId && parsedPps.spsId == request.spsId) {
             "Generated PPS references failed round-trip validation"
         }
@@ -200,7 +205,8 @@ internal object HevcOutputParameterSetWriter {
         spsId: Int,
         width: Int,
         height: Int,
-        levelIdc: Int
+        levelIdc: Int,
+        uncroppedOutputPicture: Boolean
     ): ByteArray {
         require(HevcBitstream.parseNalHeader(nal).type == 33) { "Expected an SPS NAL" }
         val bits = parameterSyntaxBits(nal)
@@ -227,12 +233,20 @@ internal object HevcOutputParameterSetWriter {
         reader.readUe()
         val heightEnd = reader.position
 
+        // SPS conformance_window_flag and the four optional offsets immediately follow
+        // pic_height_in_luma_samples. A source feed's bottom crop applies only to its own
+        // picture. Retaining it on a mixed-resolution atlas can crop a different feed.
+        val conformanceStart = reader.position
+        if (reader.readBit() != 0) repeat(4) { reader.readUe() }
+        val conformanceEnd = reader.position
+
         require(levelStart + 8 <= bits.size) { "SPS profile-tier-level is truncated" }
-        return spliceNal(nal, bits, listOf(
+        return spliceNal(nal, bits, listOfNotNull(
             Patch(vpsStart, vpsEnd, fixedBits(vpsId, 4)),
             Patch(spsIdStart, spsIdEnd, unsignedExpGolombBits(spsId.toLong())),
             Patch(widthStart, widthEnd, unsignedExpGolombBits(width.toLong())),
             Patch(heightStart, heightEnd, unsignedExpGolombBits(height.toLong())),
+            if (uncroppedOutputPicture) Patch(conformanceStart, conformanceEnd, listOf(0)) else null,
             Patch(levelStart, levelStart + 8, fixedBits(levelIdc, 8))
         ))
     }

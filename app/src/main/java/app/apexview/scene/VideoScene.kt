@@ -21,10 +21,19 @@ data class VideoScene(val width: Float, val height: Float, val atlasWidth: Int,
         require(atlasWidth > 0 && atlasHeight > 0 && sources > 0)
         require(atlasColumns in 1..sources && sourceCodedWidth > 0 && sourceCodedHeight > 0 &&
             sourceDisplayWidth in 1..sourceCodedWidth && sourceDisplayHeight in 1..sourceCodedHeight)
-        require(sourceRects.isEmpty() || (sourceRects.size == sources && sourceRects.all {
-            it.x >= 0 && it.y >= 0 && it.width > 0 && it.height > 0 &&
-                it.x.toLong() + it.width <= atlasWidth && it.y.toLong() + it.height <= atlasHeight
-        }))
+        if (sourceRects.isNotEmpty()) {
+            require(sourceRects.size == sources) {
+                "Atlas has ${sourceRects.size} source rectangles for $sources feeds"
+            }
+            sourceRects.forEachIndexed { index, rect ->
+                require(rect.x >= 0 && rect.y >= 0 && rect.width > 0 && rect.height > 0 &&
+                    rect.x.toLong() + rect.width <= atlasWidth &&
+                    rect.y.toLong() + rect.height <= atlasHeight) {
+                    "Feed $index crop (${rect.x},${rect.y}) ${rect.width}x${rect.height} " +
+                        "exceeds visible atlas ${atlasWidth}x${atlasHeight}"
+                }
+            }
+        }
         require(windows.map { it.id }.distinct().size == windows.size)
         return windows.sortedBy { it.z }.map { cell ->
             require(cell.source in 0 until sources)

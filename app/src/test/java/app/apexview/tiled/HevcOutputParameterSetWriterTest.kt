@@ -108,6 +108,43 @@ class HevcOutputParameterSetWriterTest {
     }
 
     @Test
+    fun mixedQualityAtlasDoesNotInheritSourceCropAndClipLast540pFeed() {
+        val directory = fixtureDirectory()
+        assumeTrue("Synthetic HEVC source fixture directory is not configured", directory != null)
+        val source = readParameterSets(File(directory!!, "feed_a.hevc"))
+        val sps = HevcParameterSets.parseSps(source.second)
+        val pps = HevcParameterSets.parsePps(source.third, sps)
+        // The S22 Ultra failure was a 1920x1632 coded atlas inherited an 8-pixel
+        // bottom crop, losing part of the last 540p source. The fixture may use
+        // another CTB size, so derive the coded atlas bounds from its actual SPS.
+        assertTrue("Fixture must have a cropped bottom CTB row", sps.displayHeight < sps.height)
+        val codedWidth = sps.picWidthInCtbs * sps.ctbSize * 2
+        val codedHeight = sps.picHeightInCtbs * sps.ctbSize * 3
+        val output = HevcOutputParameterSetWriter.generate(
+            source.first, source.second, source.third,
+            HevcOutputParameterSetWriter.Request(
+                vpsId = HevcParameterSets.parseVps(source.first).vpsId,
+                spsId = sps.spsId,
+                ppsId = pps.ppsId,
+                codedWidth = codedWidth,
+                codedHeight = codedHeight,
+                tileColumnWidthsInCtbs = List(2) { sps.picWidthInCtbs },
+                tileRowHeightsInCtbs = List(3) { sps.picHeightInCtbs },
+                loopFilterAcrossTilesEnabled = false,
+                frameRateNumerator = 50,
+                uncroppedOutputPicture = true
+            )
+        )
+        val rewritten = HevcParameterSets.parseSps(output.sps)
+        assertEquals(codedWidth, rewritten.width)
+        assertEquals(codedHeight, rewritten.height)
+        assertEquals(codedWidth, rewritten.displayWidth)
+        assertEquals(codedHeight, rewritten.displayHeight)
+        assertEquals(0, rewritten.conformanceWindowBottom)
+        assertTrue(2 * sps.picHeightInCtbs * sps.ctbSize + sps.displayHeight <= rewritten.displayHeight)
+    }
+
+    @Test
     fun roundTripsRealKvazaarTwoByOneOutputHeadersForIndependentFfmpegDecode() {
         val directory = tileFixtureDirectory()
         assumeTrue("Synthetic HEVC tile fixture directory is not configured", directory != null)

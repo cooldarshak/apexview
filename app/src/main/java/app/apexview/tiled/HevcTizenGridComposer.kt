@@ -191,6 +191,18 @@ internal object HevcTizenGridComposer {
                     selected.header.loopFilterAcrossSlicesFieldBit != null
             }
         val templateFeed = feeds[orderedSelections.first().feedIndex]
+        // Uniform sources can preserve their common display crop. When source sizes
+        // differ, the output is a coded atlas of independently cropped source pictures.
+        // Reusing the template's conformance window would clip bottom/right feed tiles.
+        val mixedSourceDimensions = feeds.any { feed ->
+            feed.sps.width != templateFeed.sps.width || feed.sps.height != templateFeed.sps.height ||
+                feed.sps.displayWidth != templateFeed.sps.displayWidth ||
+                feed.sps.displayHeight != templateFeed.sps.displayHeight ||
+                feed.sps.conformanceWindowLeft != templateFeed.sps.conformanceWindowLeft ||
+                feed.sps.conformanceWindowTop != templateFeed.sps.conformanceWindowTop ||
+                feed.sps.conformanceWindowRight != templateFeed.sps.conformanceWindowRight ||
+                feed.sps.conformanceWindowBottom != templateFeed.sps.conformanceWindowBottom
+        }
         val generated = HevcOutputParameterSetWriter.generate(
             sourceVpsNal = templateFeed.vpsNal,
             sourceSpsNal = templateFeed.spsNal,
@@ -205,7 +217,8 @@ internal object HevcTizenGridComposer {
                 tileRowHeightsInCtbs = geometry.tileRowHeightsInCtbs,
                 loopFilterAcrossTilesEnabled = canGateLoopFilter,
                 frameRateNumerator = frameRateNumerator,
-                frameRateDenominator = frameRateDenominator
+                frameRateDenominator = frameRateDenominator,
+                uncroppedOutputPicture = mixedSourceDimensions
             )
         )
         val outputSps = HevcParameterSets.parseSps(generated.sps)

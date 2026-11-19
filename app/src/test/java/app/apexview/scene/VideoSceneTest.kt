@@ -92,4 +92,24 @@ class VideoSceneTest {
         assertEquals(1f - (544f + 540f) / 1632f + .5f / 1632f, quads[2].texture[1], .0001f)
         assertEquals(1f - (1088f + 540f) / 1632f + .5f / 1632f, quads[3].texture[1], .0001f)
     }
+
+    @Test fun mixed1080AndTwo540RequiresFullAtlasCropRatherThanTemplateFeedCrop() {
+        val windows = (0..2).map { VideoWindow(it, it, 0f, 0f, 960f, 540f, it.toFloat()) }
+        val rects = listOf(
+            VideoSourceRect(0, 0, 1920, 1080),
+            VideoSourceRect(0, 1088, 960, 540),
+            VideoSourceRect(960, 1088, 960, 540),
+        )
+        fun scene(displayHeight: Int) = VideoScene(2316f, 1080f, 1920, displayHeight, 3,
+            windows, atlasColumns = 2, sourceCodedWidth = 1920, sourceCodedHeight = 1088,
+            sourceDisplayWidth = 1920, sourceDisplayHeight = 1080,
+            sourceRects = rects)
+        try {
+            scene(1624).quads()
+            fail("Original 1624-pixel SPS crop must reject a 540p feed ending at pixel 1628")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("exceeds visible atlas 1920x1624"))
+        }
+        assertEquals(3, scene(1632).quads().size)
+    }
 }
