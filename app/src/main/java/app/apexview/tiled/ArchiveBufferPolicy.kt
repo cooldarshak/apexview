@@ -21,6 +21,12 @@ internal object ArchiveBufferPolicy {
     const val RETAINED_SEGMENTS = 3
     const val STARTUP_LEAD_US = 3_000_000L
 
+    /** A finite, cache-sized warm window. Never prefetch beyond the advertised archive. */
+    fun warmFollowing(number: Int, lastIndex: Int): IntRange {
+        require(number >= 0 && lastIndex >= number)
+        return (number + 1)..minOf(lastIndex, number + RETAINED_SEGMENTS - 1)
+    }
+
     /** Keep the segment containing the audio clock plus two following segments. */
     fun maximumLeadUs(candidates: List<ArchiveDashSegmentSelector.Candidate>, positionUs: Long): Long {
         if (candidates.isEmpty()) return 0

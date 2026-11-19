@@ -15,6 +15,7 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
 import android.view.PixelCopy
+import android.view.Choreographer
 import android.view.Window
 import android.view.Surface
 import android.view.TextureView
@@ -192,6 +193,32 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var failed = false
     private var rendered = 0L
     private var lastLogNs = 0L
+    private val frameDemand = SceneFrameDemand()
+    private var displayClock: Choreographer? = null
+    private val displayFrame = Choreographer.FrameCallback {
+        guarded {
+            val updateVideo = frameDemand.beginFrame()
+            if (updateVideo) {
+                val frames = decoderTexture
+                if (frames != null && EGL14.eglMakeCurrent(display, window, window, contextGl)) {
+                    frames.updateTexImage()
+                    frames.getTransformMatrix(transform)
+                    hasFrame = true
+                    rendered++
+                }
+            }
+            draw()
+        }
+    }
+
+    /** Swap on display vsync, avoiding one expensive EGL swap per queued codec callback. */
+    private fun scheduleDisplayFrame(videoArrived: Boolean = false) {
+        val schedule = if (videoArrived) frameDemand.videoArrived() else frameDemand.requestDraw()
+        if (schedule) {
+            val clock = displayClock ?: Choreographer.getInstance().also { displayClock = it }
+            clock.postFrameCallback(displayFrame)
+        }
+    }
 
     init { surfaceTextureListener = this; isOpaque = true }
 
@@ -203,7 +230,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             player = nextPlayer
             input?.let { nextPlayer.setVideoSurface(it) }
         }
-        if (changed) gl.post { guarded { draw() } }
+        if (changed) gl.post { guarded { scheduleDisplayFrame() } }
     }
 
     override fun onSurfaceTextureAvailable(output: SurfaceTexture, width: Int, height: Int) {
@@ -214,7 +241,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
         outputWidth = width; outputHeight = height
         onOutputSize(width, height)
-        gl.post { guarded { draw() } }
+        gl.post { guarded { scheduleDisplayFrame() } }
     }
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
@@ -281,8 +308,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         frames.setOnFrameAvailableListener({
             guarded {
                 if (decoderTexture === frames && !released) {
-                    frames.updateTexImage(); frames.getTransformMatrix(transform); hasFrame = true; rendered++
-                    draw()
+                    scheduleDisplayFrame(videoArrived = true)
                 }
             }
         }, gl)
@@ -338,6 +364,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     private fun destroy() {
+        displayClock?.removeFrameCallback(displayFrame)
+        frameDemand.reset()
         stopBakedCastOnGl()
         saveClip()
         config = null

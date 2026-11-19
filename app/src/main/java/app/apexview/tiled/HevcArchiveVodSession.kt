@@ -53,7 +53,7 @@ internal class HevcArchiveVodSession(
     private val fetchers = Executors.newFixedThreadPool(inputs.size.coerceIn(1, 4)) { r -> Thread(r, "ApexviewVodFetch").apply { isDaemon = true } }
     private val warmer = Executors.newSingleThreadExecutor { r -> Thread(r, "ApexviewVodWarm").apply { isDaemon = true } }
     private val warmLock = Any()
-    private var warmNumber: Int? = null
+    private var warmNumbers: IntRange = IntRange.EMPTY
     @Volatile private var warmTask: Future<*>? = null
     @Volatile private var closed = false
     private val owners = java.util.concurrent.atomic.AtomicInteger(1)
@@ -124,25 +124,38 @@ internal class HevcArchiveVodSession(
     fun prioritizeSeek(positionMs: Long) {
         val target = segmentAt(positionMs.coerceAtLeast(0) * 1000L)
         synchronized(warmLock) {
-            if (warmNumber != target && warmTask?.isDone == false) warmTask?.cancel(true)
+            if (target !in warmNumbers && warmTask?.isDone == false) warmTask?.cancel(true)
         }
     }
 
     fun segment(number: Int): ByteArray {
         synchronized(warmLock) {
-            if (warmNumber != number && warmTask?.isDone == false) warmTask?.cancel(true)
+            if (number !in warmNumbers && warmTask?.isDone == false) warmTask?.cancel(true)
         }
         val bytes = composeOrRead(number)
         synchronized(warmLock) {
             if (!closed && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
-                warmNumber = number + 1
-                warmTask = warmer.submit { runCatching { composeOrRead(number + 1).fill(0) } }
+                val next = ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex)
+                warmNumbers = next
+                warmTask = warmer.submit {
+                    for (candidate in next) {
+                        if (closed || Thread.currentThread().isInterrupted) break
+                        if (runCatching { composeOrRead(candidate).fill(0) }.isFailure) break
+                    }
+                }
             }
         }
         return bytes
     }
 
-    private fun composeOrRead(number: Int): ByteArray = synchronized(composeLock) {
+    private fun composeOrRead(number: Int): ByteArray {
+        // A warm task may be composing a later segment. Let the playback thread take its
+        // already-composed bytes without waiting for unrelated network or HEVC work.
+        synchronized(cacheLock) { checkOpen(); cache[number]?.copyOf() }?.let { return it }
+        return composeOrReadSerialized(number)
+    }
+
+    private fun composeOrReadSerialized(number: Int): ByteArray = synchronized(composeLock) {
         checkOpen()
         require(number in groups.indices) { "Archive segment is outside the finite timeline" }
         val cached = synchronized(cacheLock) { cache[number]?.copyOf() }
@@ -236,7 +249,7 @@ internal class HevcArchiveVodSession(
                     }
                     val output = composed.mediaFragments.last().copyOf()
                     cache.put(number, output)?.fill(0)
-                    while (cache.size > 3) cache.remove(cache.keys.first())?.fill(0)
+                    while (cache.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) cache.remove(cache.keys.first())?.fill(0)
                     android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs " +
                         "composeMs=${(System.nanoTime() - started) / 1_000_000L - fetchMs} durationMs=${groups[number].durationUs / 1000L} clock=PLAYER_REQUEST cache=${cache.size}")
                     output.copyOf()

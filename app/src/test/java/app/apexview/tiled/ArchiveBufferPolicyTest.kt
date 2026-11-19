@@ -4,6 +4,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ArchiveBufferPolicyTest {
+    @Test fun readAheadStaysWithinThreeSegmentsAndArchiveEnd() {
+        assertEquals(1..2, ArchiveBufferPolicy.warmFollowing(0, 12))
+        assertEquals(12..12, ArchiveBufferPolicy.warmFollowing(11, 12))
+        assertTrue(ArchiveBufferPolicy.warmFollowing(12, 12).isEmpty())
+    }
+
     @Test fun anExpiredPreflightWindowCannotReplaceThePlayingSources() {
         val captured = CmafWindowTiming(11_520_000, 17_280_000)
         assertFalse(ArchiveBufferPolicy.ready(captured, 19_600_000, 120_000_000, minimumLeadUs = 0))
