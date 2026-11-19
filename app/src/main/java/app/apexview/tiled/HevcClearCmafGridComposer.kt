@@ -1,6 +1,7 @@
 package app.apexview.tiled
 
 import java.io.ByteArrayOutputStream
+import java.io.InterruptedIOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -95,7 +96,8 @@ internal object HevcClearCmafGridComposer {
             cells = request.cells,
             frameRateNumerator = request.frameRateNumerator,
             frameRateDenominator = request.frameRateDenominator,
-            outputNalLengthSize = first.config.nalLengthSize
+            outputNalLengthSize = first.config.nalLengthSize,
+            includeAnnexBOutput = false
         )
         require(composed.pictures.size == first.fragments.sumOf { it.samples.size }) {
             "Composed picture count does not match the CMAF sample sequence"
@@ -127,6 +129,7 @@ internal object HevcClearCmafGridComposer {
         val outputFragments = mutableListOf<ByteArray>()
         var pictureOffset = 0
         parsedFeeds.first().fragments.forEachIndexed { fragmentIndex, sourceFragment ->
+            checkNotInterrupted()
             val count = sourceFragment.samples.size
             val outputSamples = sourceFragment.samples.mapIndexed { sampleIndex, sourceSample ->
                 val picture = composed.pictures[pictureOffset + sampleIndex]
@@ -204,6 +207,7 @@ internal object HevcClearCmafGridComposer {
         rawParameterSets.forEach { appendAnnexB(annexB, it) }
 
         feed.mediaFragments.forEachIndexed { fragmentIndex, bytes ->
+            checkNotInterrupted()
             val report = CmafBoxInspector.inspect(bytes, priorInitialization = initReport)
             require(report.errors.isEmpty()) {
                 "Feed ${feed.label} fragment $fragmentIndex is invalid: ${report.errors.joinToString("; ")}"
@@ -230,6 +234,7 @@ internal object HevcClearCmafGridComposer {
             }
             val parsed = parseFragmentSamples(bytes, fragmentMetadata)
             parsed.samples.forEachIndexed { sampleIndex, sample ->
+                checkNotInterrupted()
                 val accessUnit = HevcAccessUnitInspector.inspectLengthPrefixedSample(
                     sample = sample.bytes,
                     nalLengthSize = config.nalLengthSize,
@@ -483,4 +488,10 @@ internal object HevcClearCmafGridComposer {
 
     private val ENCRYPTION_BOXES = setOf("senc", "saiz", "saio", "sbgp", "sgpd")
     private const val UINT32_MAX = 0xffff_ffffL
+
+    private fun checkNotInterrupted() {
+        if (Thread.currentThread().isInterrupted) {
+            throw InterruptedIOException("CMAF composition interrupted for a playback or seek request")
+        }
+    }
 }

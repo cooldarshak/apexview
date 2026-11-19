@@ -1,6 +1,7 @@
 package app.apexview.tiled
 
 import java.io.ByteArrayOutputStream
+import java.io.InterruptedIOException
 
 /**
  * Native Kotlin port of the per-cell HEVC stitching strategy used by F1 TV Tizen.
@@ -90,7 +91,10 @@ internal object HevcTizenGridComposer {
         cells: List<CellSelection>,
         frameRateNumerator: Int = 50,
         frameRateDenominator: Int = 1,
-        outputNalLengthSize: Int = 4
+        outputNalLengthSize: Int = 4,
+        // CMAF callers already have length-prefixed pictures. Rebuilding a second full
+        // Annex-B stream doubles peak output memory and allocation pressure for no benefit.
+        includeAnnexBOutput: Boolean = true
     ): Result {
         require(feedStreams.size >= 2) { "At least two independent source feeds are required" }
         require(outputNalLengthSize in 1..4) { "Output NAL length size must be between 1 and 4" }
@@ -149,6 +153,7 @@ internal object HevcTizenGridComposer {
         }
 
         val selectedByFrame = feeds.first().pictures.indices.map { frameIndex ->
+            checkNotInterrupted()
             // A source picture can contribute several source tiles (and may fill an
             // unused atlas cell). Parse its slices once per frame, not once per cell.
             val locatedByFeed = mutableMapOf<Int, List<LocatedSlice>>()
@@ -225,6 +230,7 @@ internal object HevcTizenGridComposer {
         val outputPps = HevcParameterSets.parsePps(generated.pps, outputSps)
 
         val outputPictures = selectedByFrame.mapIndexed { frameIndex, selectedSlices ->
+            checkNotInterrupted()
             val vclOutput = ArrayList<ByteArray>(orderedSelections.size)
             val evidence = ArrayList<SliceEvidence>(orderedSelections.size)
             selectedSlices.forEachIndexed { outputIndex, located ->
@@ -273,18 +279,21 @@ internal object HevcTizenGridComposer {
                 frameIndex = frameIndex,
                 fullPoc = feeds.first().pictureIdentities[frameIndex].pictureOrderCount,
                 sampleData = lengthPrefix(vclOutput, outputNalLengthSize),
-                vclNals = vclOutput,
+                // CMAF has already copied these NALs into the sample data, so retaining
+                // every rewritten slice would double the live video payload in memory.
+                vclNals = if (includeAnnexBOutput) vclOutput else emptyList(),
                 evidence = evidence
             )
         }
 
-        val outputStream = ByteArrayOutputStream()
-        listOf(generated.vps, generated.sps, generated.pps).forEach {
-            writeAnnexB(outputStream, it)
-        }
-        outputPictures.forEach { picture ->
-            picture.vclNals.forEach { writeAnnexB(outputStream, it) }
-        }
+        val annexB = if (includeAnnexBOutput) {
+            val outputStream = ByteArrayOutputStream()
+            listOf(generated.vps, generated.sps, generated.pps).forEach { writeAnnexB(outputStream, it) }
+            outputPictures.forEach { picture ->
+                picture.vclNals.forEach { writeAnnexB(outputStream, it) }
+            }
+            outputStream.toByteArray()
+        } else ByteArray(0)
 
         return Result(
             outputParameters = generated,
@@ -296,7 +305,7 @@ internal object HevcTizenGridComposer {
             tileRowHeightsInCtbs = generated.tileRowHeightsInCtbs,
             pictures = outputPictures,
             sourcePictureIdentities = feeds.map { it.pictureIdentities },
-            annexB = outputStream.toByteArray(),
+            annexB = annexB,
             outputLoopFilterAcrossTilesEnabled = outputPps.loopFilterAcrossTiles == true
         )
     }
@@ -525,5 +534,11 @@ internal object HevcTizenGridComposer {
     private fun writeAnnexB(output: ByteArrayOutputStream, nal: ByteArray) {
         output.write(byteArrayOf(0, 0, 0, 1))
         output.write(nal)
+    }
+
+    private fun checkNotInterrupted() {
+        if (Thread.currentThread().isInterrupted) {
+            throw InterruptedIOException("HEVC composition interrupted for a playback or seek request")
+        }
     }
 }

@@ -143,6 +143,27 @@ class HevcSyntheticFeedAlignmentTest {
         assertTrue(composed.pictures.first().evidence[1].destinationCtbAddress > 0)
         assertTrue(composed.pictures.all { it.sampleData.isNotEmpty() })
 
+        // The archive CMAF path needs length-prefixed samples, not another full
+        // Annex-B video. Omitting the duplicate output must preserve every sample.
+        val compact = HevcTizenGridComposer.composeAnnexBStreams(
+            feedStreams = listOf(feedABytes, feedBWithDifferentPps),
+            grid = HevcOutputGridDimensions(columns = 2, rows = 1),
+            cells = listOf(
+                HevcTizenGridComposer.CellSelection(0, 0, 0, 0),
+                HevcTizenGridComposer.CellSelection(1, 0, 1, 0)
+            ),
+            frameRateNumerator = 25,
+            frameRateDenominator = 1,
+            includeAnnexBOutput = false
+        )
+        assertTrue(compact.annexB.isEmpty())
+        assertEquals(composed.codedWidth, compact.codedWidth)
+        assertEquals(composed.codedHeight, compact.codedHeight)
+        assertEquals(composed.pictures.size, compact.pictures.size)
+        composed.pictures.zip(compact.pictures).forEach { (full, small) ->
+            assertTrue("Removing the unused Annex-B copy must not change coded video", full.sampleData.contentEquals(small.sampleData))
+        }
+
         val outputDirectory = System.getenv("APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR")
         assumeTrue("CI output evidence directory is not configured", !outputDirectory.isNullOrBlank())
         val outputFile = File(outputDirectory!!, "tizen_grid_composed_2x1.hevc")

@@ -10,6 +10,13 @@ class ArchiveBufferPolicyTest {
         assertTrue(ArchiveBufferPolicy.warmFollowing(12, 12).isEmpty())
     }
 
+    @Test fun playbackRequestPreemptsAnUnrelatedExpensiveWarmup() {
+        assertTrue(ArchiveBufferPolicy.preemptWarmup(42, cached = false, active = 41))
+        assertTrue(ArchiveBufferPolicy.preemptWarmup(88, cached = false, active = null))
+        assertFalse(ArchiveBufferPolicy.preemptWarmup(41, cached = false, active = 41))
+        assertFalse(ArchiveBufferPolicy.preemptWarmup(88, cached = true, active = 41))
+    }
+
     @Test fun anExpiredPreflightWindowCannotReplaceThePlayingSources() {
         val captured = CmafWindowTiming(11_520_000, 17_280_000)
         assertFalse(ArchiveBufferPolicy.ready(captured, 19_600_000, 120_000_000, minimumLeadUs = 0))

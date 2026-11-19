@@ -53,7 +53,7 @@ internal class HevcArchiveVodSession(
     private val fetchers = Executors.newFixedThreadPool(inputs.size.coerceIn(1, 4)) { r -> Thread(r, "ApexviewVodFetch").apply { isDaemon = true } }
     private val warmer = Executors.newSingleThreadExecutor { r -> Thread(r, "ApexviewVodWarm").apply { isDaemon = true } }
     private val warmLock = Any()
-    private var warmNumbers: IntRange = IntRange.EMPTY
+    private var warmActiveNumber: Int? = null
     @Volatile private var warmTask: Future<*>? = null
     @Volatile private var closed = false
     private val owners = java.util.concurrent.atomic.AtomicInteger(1)
@@ -123,29 +123,46 @@ internal class HevcArchiveVodSession(
     /** Stop stale warm-ahead work as soon as a user seeks to a different fragment. */
     fun prioritizeSeek(positionMs: Long) {
         val target = segmentAt(positionMs.coerceAtLeast(0) * 1000L)
-        synchronized(warmLock) {
-            if (target !in warmNumbers && warmTask?.isDone == false) warmTask?.cancel(true)
-        }
+        preemptUnrelatedWarmup(target)
     }
 
     fun segment(number: Int): ByteArray {
-        synchronized(warmLock) {
-            if (number !in warmNumbers && warmTask?.isDone == false) warmTask?.cancel(true)
-        }
+        require(number in groups.indices) { "Archive segment is outside the finite timeline" }
+        preemptUnrelatedWarmup(number)
+        val started = System.nanoTime()
+        val wasCached = synchronized(cacheLock) { cache.containsKey(number) }
         val bytes = composeOrRead(number)
+        val waitMs = (System.nanoTime() - started) / 1_000_000L
+        if (!wasCached || waitMs > 50L) {
+            android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_REQUEST number=$number cached=$wasCached waitMs=$waitMs")
+        }
         synchronized(warmLock) {
             if (!closed && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
                 val next = ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex)
-                warmNumbers = next
                 warmTask = warmer.submit {
                     for (candidate in next) {
                         if (closed || Thread.currentThread().isInterrupted) break
-                        if (runCatching { composeOrRead(candidate).fill(0) }.isFailure) break
+                        synchronized(warmLock) { warmActiveNumber = candidate }
+                        try {
+                            if (runCatching { composeOrRead(candidate).fill(0) }.isFailure) break
+                        } finally {
+                            synchronized(warmLock) { warmActiveNumber = null }
+                        }
                     }
                 }
             }
         }
         return bytes
+    }
+
+    private fun preemptUnrelatedWarmup(number: Int) {
+        val cached = synchronized(cacheLock) { checkOpen(); cache.containsKey(number) }
+        synchronized(warmLock) {
+            if (warmTask?.isDone == false && ArchiveBufferPolicy.preemptWarmup(
+                    number, cached, warmActiveNumber)) {
+                warmTask?.cancel(true)
+            }
+        }
     }
 
     private fun composeOrRead(number: Int): ByteArray {
@@ -172,6 +189,7 @@ internal class HevcArchiveVodSession(
                 "Archive segment starts mid-GOP; independent CMAF segment starts are required for native replay seeking"
             }
             val fetchMs = (System.nanoTime() - started) / 1_000_000L
+            checkOpen() // A seek may have interrupted a background fetch.
             val firstTrack = inputs.first().report.tracks.single { it.handler == "vide" }
             val config = requireNotNull(firstTrack.hevcConfiguration)
             val sourceSps = config.sps.single()
@@ -240,9 +258,13 @@ internal class HevcArchiveVodSession(
                         sourceCodedWidth = sourceSps.width; sourceCodedHeight = sourceSps.height
                         sourceDisplayWidth = sourceSps.displayWidth; sourceDisplayHeight = sourceSps.displayHeight
                         mixedSourceRects = mixedAtlas?.sourceRects.orEmpty()
+                        val uniqueSourcePixels = mixedInputs.sumOf { it.sps.width.toLong() * it.sps.height }
+                        val decodedPixels = composed.codedWidth.toLong() * composed.codedHeight
                         android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_ATLAS feeds=${inputs.size} cells=${atlasColumns}x${atlasRows} " +
                             "mixed=$mixed sourceCoded=${sourceSps.width}x${sourceSps.height} " +
-                            "sourceDisplay=${sourceSps.displayWidth}x${sourceSps.displayHeight} ctb=${sourceSps.ctbSize}")
+                            "sourceDisplay=${sourceSps.displayWidth}x${sourceSps.displayHeight} ctb=${sourceSps.ctbSize} " +
+                            "decodedPixels=$decodedPixels uniqueSourcePixels=$uniqueSourcePixels " +
+                            "atlasExtraPixels=${decodedPixels - uniqueSourcePixels}")
                     } else {
                         require(initialization!!.contentEquals(composed.initializationSegment)) { "Archive representation changed its initialization" }
                         require(abs(requireNotNull(presentationOffsetTicks) - offset) <= 1L) { "Archive decode timestamps differ from the VOD timeline" }
@@ -250,8 +272,10 @@ internal class HevcArchiveVodSession(
                     val output = composed.mediaFragments.last().copyOf()
                     cache.put(number, output)?.fill(0)
                     while (cache.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) cache.remove(cache.keys.first())?.fill(0)
+                    val worker = if (Thread.currentThread().name == "ApexviewVodWarm") "PREFETCH" else "PLAYBACK"
                     android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs " +
-                        "composeMs=${(System.nanoTime() - started) / 1_000_000L - fetchMs} durationMs=${groups[number].durationUs / 1000L} clock=PLAYER_REQUEST cache=${cache.size}")
+                        "composeMs=${(System.nanoTime() - started) / 1_000_000L - fetchMs} durationMs=${groups[number].durationUs / 1000L} " +
+                        "worker=$worker clock=PLAYER_REQUEST cache=${cache.size}")
                     output.copyOf()
                 }
             } finally {

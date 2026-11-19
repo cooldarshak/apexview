@@ -184,6 +184,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var decoderTexture: SurfaceTexture? = null
     private var texture = 0
     private var program = 0
+    private var imageUniform = -1
+    private var transformUniform = -1
+    private var positionAttribute = -1
+    private var uvAttribute = -1
     private var hasFrame = false
     private var outputWidth = 0
     private var outputHeight = 0
@@ -194,24 +198,18 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var rendered = 0L
     private var lastLogNs = 0L
     private val frameDemand = SceneFrameDemand()
+    private val pacing = SceneFramePacing()
     private var displayClock: Choreographer? = null
-    private val displayFrame = Choreographer.FrameCallback {
+    private val displayFrame = Choreographer.FrameCallback { frameTimeNs ->
         guarded {
-            val updateVideo = frameDemand.beginFrame()
-            if (updateVideo) {
-                val frames = decoderTexture
-                if (frames != null && EGL14.eglMakeCurrent(display, window, window, contextGl)) {
-                    frames.updateTexImage()
-                    frames.getTransformMatrix(transform)
-                    hasFrame = true
-                    rendered++
-                }
-            }
+            val newVideo = frameDemand.beginFrame()
+            val started = System.nanoTime()
             draw()
+            pacing.onDisplayFrame(frameTimeNs, System.nanoTime() - started, newVideo)
         }
     }
 
-    /** Swap on display vsync, avoiding one expensive EGL swap per queued codec callback. */
+    /** Swap on display vsync; decoding does not wait for a display callback to release buffers. */
     private fun scheduleDisplayFrame(videoArrived: Boolean = false) {
         val schedule = if (videoArrived) frameDemand.videoArrived() else frameDemand.requestDraw()
         if (schedule) {
@@ -296,6 +294,13 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         val linked = IntArray(1); GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linked, 0)
         check(linked[0] != 0) { "Scene shader link failed" }
         GLES20.glDeleteShader(vertex); GLES20.glDeleteShader(fragment)
+        imageUniform = GLES20.glGetUniformLocation(program, "image")
+        transformUniform = GLES20.glGetUniformLocation(program, "st")
+        positionAttribute = GLES20.glGetAttribLocation(program, "p")
+        uvAttribute = GLES20.glGetAttribLocation(program, "uv")
+        check(imageUniform >= 0 && transformUniform >= 0 && positionAttribute >= 0 && uvAttribute >= 0) {
+            "Scene shader input locations are unavailable"
+        }
         val textures = IntArray(1); GLES20.glGenTextures(1, textures, 0); texture = textures[0]
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
@@ -308,6 +313,15 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         frames.setOnFrameAvailableListener({
             guarded {
                 if (decoderTexture === frames && !released) {
+                    // A decoder can exhaust its output BufferQueue while the EGL display
+                    // swap is blocked. Latch promptly to release the prior codec buffer;
+                    // coalesce only the *drawing* onto a Choreographer vsync.
+                    check(EGL14.eglMakeCurrent(display, window, window, contextGl)) { "Scene GL context unavailable" }
+                    frames.updateTexImage()
+                    frames.getTransformMatrix(transform)
+                    hasFrame = true
+                    rendered++
+                    pacing.onTextureLatched(System.nanoTime())
                     scheduleDisplayFrame(videoArrived = true)
                 }
             }
@@ -329,7 +343,12 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
-            Log.i("ApexviewSingleDecoder", "SINGLE_DECODER_SCENE output=${outputWidth}x$outputHeight inputTextures=1 outputViews=1 sources=${model.sources} windows=${model.windows.size} frames=$rendered")
+            val metrics = pacing.snapshotAndReset()
+            Log.i("ApexviewSingleDecoder", "SINGLE_DECODER_SCENE output=${outputWidth}x$outputHeight inputTextures=1 outputViews=1 sources=${model.sources} windows=${model.windows.size} frames=$rendered " +
+                "pacingLatched=${metrics.latched} pacingPresented=${metrics.presented} " +
+                "callbackGaps45ms=${metrics.callbackGaps} displayGaps45ms=${metrics.displayGaps} " +
+                "slowSwaps18ms=${metrics.slowSwaps} maxCallbackGapMs=${metrics.maxCallbackGapMs} " +
+                "maxDisplayGapMs=${metrics.maxDisplayGapMs} maxSwapMs=${metrics.maxSwapMs}")
             lastLogNs = now
         }
     }
@@ -337,18 +356,17 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private fun drawVideo(model: VideoScene) {
         GLES20.glUseProgram(program)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
-        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "image"), 0)
-        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "st"), 1, false, transform, 0)
-        val p = GLES20.glGetAttribLocation(program, "p"); val uv = GLES20.glGetAttribLocation(program, "uv")
-        GLES20.glEnableVertexAttribArray(p); GLES20.glEnableVertexAttribArray(uv)
+        GLES20.glUniform1i(imageUniform, 0)
+        GLES20.glUniformMatrix4fv(transformUniform, 1, false, transform, 0)
+        GLES20.glEnableVertexAttribArray(positionAttribute); GLES20.glEnableVertexAttribArray(uvAttribute)
         if (cachedModel != model) {
             fun buffer(values: FloatArray) = ByteBuffer.allocateDirect(values.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(values); position(0) }
             cachedQuads = model.quads().map { buffer(it.positions) to buffer(it.texture) }
             cachedModel = model
         }
         for ((positions, coordinates) in cachedQuads) {
-            GLES20.glVertexAttribPointer(p, 2, GLES20.GL_FLOAT, false, 0, positions)
-            GLES20.glVertexAttribPointer(uv, 2, GLES20.GL_FLOAT, false, 0, coordinates)
+            GLES20.glVertexAttribPointer(positionAttribute, 2, GLES20.GL_FLOAT, false, 0, positions)
+            GLES20.glVertexAttribPointer(uvAttribute, 2, GLES20.GL_FLOAT, false, 0, coordinates)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
     }
@@ -366,6 +384,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private fun destroy() {
         displayClock?.removeFrameCallback(displayFrame)
         frameDemand.reset()
+        pacing.reset()
         stopBakedCastOnGl()
         saveClip()
         config = null
@@ -382,5 +401,6 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
         display = EGL14.EGL_NO_DISPLAY; contextGl = EGL14.EGL_NO_CONTEXT; window = EGL14.EGL_NO_SURFACE
         texture = 0; program = 0
+        imageUniform = -1; transformUniform = -1; positionAttribute = -1; uvAttribute = -1
     }
 }

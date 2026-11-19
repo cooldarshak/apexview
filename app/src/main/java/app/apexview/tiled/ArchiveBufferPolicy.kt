@@ -27,6 +27,14 @@ internal object ArchiveBufferPolicy {
         return (number + 1)..minOf(lastIndex, number + RETAINED_SEGMENTS - 1)
     }
 
+    /**
+     * An uncached playback/seek request outranks warming a DIFFERENT fragment.
+     * A request for the fragment currently being composed should share that result.
+     * Cache hits must never discard useful background work.
+     */
+    fun preemptWarmup(requested: Int, cached: Boolean, active: Int?): Boolean =
+        !cached && active != requested
+
     /** Keep the segment containing the audio clock plus two following segments. */
     fun maximumLeadUs(candidates: List<ArchiveDashSegmentSelector.Candidate>, positionUs: Long): Long {
         if (candidates.isEmpty()) return 0
