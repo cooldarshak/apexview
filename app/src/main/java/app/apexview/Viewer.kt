@@ -1575,7 +1575,7 @@ private fun SpeedSheet(app: AppState) {
     }
 }
 
-/** Video rendition shared by every feed; Auto keeps the existing tile-fit adaptive behaviour. */
+/** Global default, plus independent persistent quality requests for individual F1 feeds. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun VideoQualitySheet(app: AppState) {
@@ -1597,22 +1597,52 @@ private fun VideoQualitySheet(app: AppState) {
                 .padding(bottom = 24.dp)
         ) {
             Text("Video quality", style = Type.title2)
+            Text("Default for all feeds", style = Type.subhead, modifier = Modifier.padding(top = 14.dp))
             Segments(
                 options = VideoQuality.values().toList(),
                 chosen = app.settings.videoQuality,
                 label = { it.label },
-                modifier = Modifier.padding(top = 20.dp).fillMaxWidth(),
+                modifier = Modifier.padding(top = 12.dp).fillMaxWidth().horizontalScroll(rememberScrollState()),
                 focus = current,
                 onPick = app::chooseVideoQuality,
             )
             Text(
                 when (app.settings.videoQuality) {
-                    VideoQuality.AUTO -> "Auto chooses a rendition for each tile's size and available bandwidth."
-                    else -> "Requests ${app.settings.videoQuality.label} across every feed. When that exact rendition is unavailable, the highest available rendition below it is used. Higher settings can buffer, especially with several feeds."
+                    VideoQuality.AUTO -> "Auto selects a rendition using the feed size and available bandwidth."
+                    else -> "Feeds without an override request at most ${app.settings.videoQuality.label}. Actual quality depends on the F1 renditions available."
                 },
                 style = Type.footnote,
                 modifier = Modifier.padding(top = 12.dp),
             )
+            val active = app.tiles.distinctBy { it.feed.sourceStream.profileLabel }
+                .sortedBy { if (it.id == app.bigTileId) 0 else 1 }
+            if (active.isNotEmpty()) {
+                Text("Each feed", style = Type.title2, modifier = Modifier.padding(top = 24.dp))
+                Text("Choose a quality for each feed, independent of its screen position. Default inherits the selection above.",
+                    style = Type.footnote, modifier = Modifier.padding(top = 8.dp))
+                active.forEach { tile ->
+                    val label = tile.feed.sourceStream.profileLabel
+                    Column(Modifier.padding(top = 18.dp)) {
+                        Text((if (tile.id == app.bigTileId) "Main · " else "") + label,
+                            style = Type.subhead)
+                        Segments(
+                            options = listOf<VideoQuality?>(null) + VideoQuality.entries,
+                            chosen = app.settings.feedVideoQualityOverride(label),
+                            label = { it?.label ?: "Default" },
+                            modifier = Modifier.padding(top = 8.dp).fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            onPick = { app.chooseFeedVideoQuality(tile.id, it) },
+                        )
+                        Text("Requested: ${app.settings.videoQualityForFeed(label).label}",
+                            style = Type.footnote, modifier = Modifier.padding(top = 6.dp))
+                    }
+                }
+                if (app.settings.decoderMode == DecoderMode.SINGLE && active.size > 1 &&
+                    PerFeedQualityPolicy.commonDecoderQuality(active.map { app.settings.videoQualityForFeed(it.feed.sourceStream.profileLabel) }) == null) {
+                    Text(PerFeedQualityPolicy.MIXED_UNSUPPORTED,
+                        style = Type.footnote, modifier = Modifier.padding(top = 16.dp))
+                }
+            }
         }
     }
 }

@@ -9,6 +9,7 @@ on:
       - customtiledview
       - feature/hevc-stitching-poc
       - feature/continuous-baked-scene-cast
+      - feature/per-feed-adaptive-hevc-quality
   workflow_dispatch:
 
 permissions:

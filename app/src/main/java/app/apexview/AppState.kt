@@ -756,6 +756,12 @@ class AppState(
             message = castStatus
             return
         }
+        val castQuality = PerFeedQualityPolicy.commonDecoderQuality(castTiles.map(::qualityFor))
+        if (castQuality == null && !singleDecoderSceneActive) {
+            castStatus = PerFeedQualityPolicy.MIXED_UNSUPPORTED
+            message = castStatus
+            return
+        }
         val verifiedClear = singleDecoderScenePlayer?.archiveSceneSession?.sourceLabels?.toSet() == castTiles.map { it.feed.sourceStream.profileLabel }.toSet()
         if (verifiedClear && singleDecoderSceneActive && singleDecoderScenePlayer?.hasLoadedDrmKeys != true) {
             prepareBakedCast(castTiles)
@@ -791,7 +797,9 @@ class AppState(
             try {
                 val expectedLabels = selection.map { it.second }.toSet()
                 val activeComposition = singleDecoderScenePlayer?.archiveSessionForCast()
-                    ?.takeIf { it.sourceLabels.toSet() == expectedLabels && it.sourceLabels.size == expectedLabels.size && it.sourceDisplayHeight >= 720 }
+                    ?.takeIf { it.sourceLabels.toSet() == expectedLabels && it.sourceLabels.size == expectedLabels.size &&
+                        (castQuality?.targetHeight?.takeIf { h -> h > 0 }?.let { h -> it.sourceDisplayHeight <= h }
+                            ?: (it.sourceDisplayHeight >= 720)) }
                 val session = activeComposition ?: run {
                     val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
                     try {
@@ -799,7 +807,7 @@ class AppState(
                             castTiles.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel, it.feed.sourceStream.url) },
                             castFramePositionMs.coerceAtLeast(0),
                             clockTile.feed.sourceStream.profileLabel,
-                            preferredHeight = if (settings.videoQuality == VideoQuality.P1080) 1080 else 720,
+                            preferredHeight = castQuality?.targetHeight?.takeIf { it > 0 } ?: 720,
                             commentary = settings.commentary,
                             minimumHeight = 0,
                         ).also { ownedSession = it }
@@ -1159,6 +1167,11 @@ class AppState(
             message = "Protected multiview casting needs two to six explicit F1 channels from one session."
             return
         }
+        val commonQuality = PerFeedQualityPolicy.commonDecoderQuality(selected.map(::qualityFor))
+        if (commonQuality == null) {
+            message = PerFeedQualityPolicy.MIXED_UNSUPPORTED
+            return
+        }
         val socket = localConnection?.socket ?: return
         val clock = leaderTile()?.feed ?: selected.first().feed
         val live = selected.any { it.contentId in knownLiveContentIds || it.feed.player.isCurrentMediaItemLive }
@@ -1183,7 +1196,7 @@ class AppState(
                     selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel, it.feed.sourceStream.url) },
                     userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty(), factory,
                     socket.localAddress.hostAddress!!, socket.inetAddress,
-                    if (settings.videoQuality == VideoQuality.P1080) 1080 else 720, settings.commentary,
+                    commonQuality.targetHeight.takeIf { it > 0 } ?: 720, settings.commentary,
                     live, if (live) 0L else clock.player.duration.takeIf { it > 0 } ?: durationMs,
                     dashOffset, hlsOffset, audio.feed.sourceStream.profileLabel, liveEdge, windowUtc)
                 val next = requireNotNull(owned)
@@ -2658,6 +2671,14 @@ class AppState(
             }
             return
         }
+        val composedQuality = PerFeedQualityPolicy.commonDecoderQuality(selected.map { qualityFor(it) })
+        if (composedQuality == null) {
+            singleDecoderFailure = PerFeedQualityPolicy.MIXED_UNSUPPORTED
+            android.util.Log.w("ApexviewSingleDecoder", "F1_COMPOSITION_MIXED_QUALITY_REJECT " +
+                PerFeedQualityPolicy.description(selected.map { it.feed.sourceStream.profileLabel }, selected.map(::qualityFor)))
+            message = singleDecoderFailure
+            return
+        }
         singleDecoderFailure = null
         val host = protectedCompositionHost?.takeIf { it in selected } ?: selected.firstOrNull { it.audible } ?: selected.first()
         val previousLayout = layoutMode
@@ -2723,7 +2744,7 @@ class AppState(
                     preflight = {
                         // Capture the selected position once. Slow preparation must not chase an
                         // independently advancing source clock or interrupt working playback.
-                        val quality = settings.videoQuality
+                        val quality = composedQuality
                         val preferredHeight = quality.targetHeight.takeIf { it > 0 }
                             ?: if (selected.size > 4) 270 else if (selected.size > 2) 540 else 720
                         val minimumHeight = if (quality == VideoQuality.P1080) 1080 else 0
@@ -2871,6 +2892,14 @@ class AppState(
             applyVideoBudget()
             return
         }
+        val composedQuality = PerFeedQualityPolicy.commonDecoderQuality(selectedTiles.map(::qualityFor))
+        if (composedQuality == null) {
+            singleDecoderFailure = PerFeedQualityPolicy.MIXED_UNSUPPORTED
+            message = singleDecoderFailure
+            android.util.Log.w("ApexviewSingleDecoder", "F1_PROTECTED_MIXED_QUALITY_REJECT " +
+                PerFeedQualityPolicy.description(labels, selectedTiles.map(::qualityFor)))
+            return
+        }
         val feeds = selectedTiles.zip(labels).map { (tile, label) ->
             F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url)
         }
@@ -2880,9 +2909,9 @@ class AppState(
         val group = "archive-content-$contentId-${java.util.UUID.randomUUID()}"
         f1DashCaptureJob?.cancel()
         val maxHeight = if (isTclG09()) {
-            minOf(settings.videoQuality.targetHeight.takeIf { it > 0 } ?: 720,
+            minOf(composedQuality.targetHeight.takeIf { it > 0 } ?: 720,
                 if (selectedTiles.size > 4) 540 else 720)
-        } else settings.videoQuality.targetHeight.takeIf { it > 0 } ?: 2160
+        } else composedQuality.targetHeight.takeIf { it > 0 } ?: 2160
         val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty(),
             maximumHeight = maxHeight)
         val evidence = "content=$contentId attempt=${attempt + 1} feeds=${feeds.size}"
@@ -3478,7 +3507,7 @@ class AppState(
         subtitles = settings.subtitles,
         commentary = settings.commentary,
         startWithVideo = startWithVideo && !castPlaybackHandedOff,
-        videoQuality = settings.videoQuality,
+        videoQuality = settings.videoQualityForFeed(stream.profileLabel),
         startMs = startMs,
         preferFastStart = preferFastStart,
     ).also { if (castPlaybackHandedOff) it.suspendForRemotePlayback(true) }
@@ -5717,13 +5746,49 @@ class AppState(
 
     var qualitySheetOpen by mutableStateOf(false)
 
+    private fun qualityFor(tile: Tile): VideoQuality = settings.videoQualityForFeed(tile.feed.sourceStream.profileLabel)
+
+    /** A choice belongs to the F1 feed, not its current on-screen size or tile position. */
+    fun chooseFeedVideoQuality(tileId: Int, choice: VideoQuality?) {
+        val tile = tiles.firstOrNull { it.id == tileId } ?: return
+        val label = tile.feed.sourceStream.profileLabel
+        settings.updateFeedVideoQuality(label, choice)
+        val selected = tiles.filter { it.contentId == tile.contentId }
+        val composed = selected.size > 1 && settings.decoderMode == DecoderMode.SINGLE
+        val common = PerFeedQualityPolicy.commonDecoderQuality(selected.map(::qualityFor))
+        if (composed && common == null) {
+            singleDecoderFailure = PerFeedQualityPolicy.MIXED_UNSUPPORTED
+            message = singleDecoderFailure
+            android.util.Log.w("ApexviewSingleDecoder", "F1_COMPOSITION_MIXED_QUALITY_REJECT " +
+                PerFeedQualityPolicy.description(selected.map { it.feed.sourceStream.profileLabel }, selected.map(::qualityFor)))
+            // Keep the last proven composed stream running. Do not force its codec to the
+            // size of an individual source or allocate extra decoders behind the user's back.
+        } else {
+            singleDecoderFailure = null
+            if (composed && nativeArchiveTiles.isNotEmpty() && !castPlaybackHandedOff) {
+                stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
+            }
+            tiles.filter { it.feed.sourceStream.profileLabel == label }.forEach {
+                if (!it.feed.isArchiveVodPlayback) it.feed.setVideoQuality(qualityFor(it))
+            }
+            if (composed && !castPlaybackHandedOff) startArchiveSingleDecoderComposition(tile.contentId)
+        }
+        showChrome()
+    }
+
     fun chooseVideoQuality(value: VideoQuality) {
         val rebuildArchive = settings.videoQuality != value && nativeArchiveTiles.isNotEmpty() && !castPlaybackHandedOff
         val contentId = if (rebuildArchive) protectedCompositionHost?.contentId else null
         settings.updateVideoQuality(value)
-        if (contentId != null) stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
-        tiles.forEach { it.feed.setVideoQuality(value) }
-        if (contentId != null) startArchiveSingleDecoderComposition(contentId)
+        val uniform = PerFeedQualityPolicy.commonDecoderQuality(tiles.map(::qualityFor))
+        if (contentId != null && uniform == null) {
+            singleDecoderFailure = PerFeedQualityPolicy.MIXED_UNSUPPORTED
+            message = singleDecoderFailure
+        } else {
+            if (contentId != null) stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
+            tiles.forEach { if (!it.feed.isArchiveVodPlayback) it.feed.setVideoQuality(qualityFor(it)) }
+            if (contentId != null) startArchiveSingleDecoderComposition(contentId)
+        }
         qualitySheetOpen = false
         showChrome()
     }

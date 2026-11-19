@@ -5,7 +5,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
-/** Resolution preference applied to every active and newly opened feed. */
+/** Requested upper resolution for a feed, subject to the renditions F1 actually offers. */
 enum class VideoQuality(
     val label: String,
     val maxWidth: Int,
@@ -13,6 +13,10 @@ enum class VideoQuality(
     val targetHeight: Int,
 ) {
     AUTO("Auto", Int.MAX_VALUE, Int.MAX_VALUE, 0),
+    P270("270p", 480, 270, 270),
+    P360("360p", 640, 360, 360),
+    P480("480p", 854, 480, 480),
+    P540("540p", 960, 540, 540),
     P720("720p", 1280, 720, 720),
     P1080("1080p", 1920, 1080, 1080);
 
@@ -65,9 +69,36 @@ class Settings(context: Context) {
     var votePrompt by mutableStateOf(prefs.getBoolean("votePrompt", true))
         private set
 
-    /** Video rendition cap shared by all feeds and retained for the next session. */
+    /** Default rendition cap for feeds without their own quality choice. */
     var videoQuality by mutableStateOf(VideoQuality.fromPreference(prefs.getString("videoQuality", null)))
         private set
+
+    private val feedQualityOverrides = androidx.compose.runtime.mutableStateMapOf<String, VideoQuality>().apply {
+        prefs.all.forEach { (key, value) ->
+            if (key.startsWith(FEED_QUALITY_PREFIX) && value is String) {
+                VideoQuality.entries.firstOrNull { it.name == value }?.let { quality ->
+                    put(key.removePrefix(FEED_QUALITY_PREFIX), quality)
+                }
+            }
+        }
+    }
+
+    /** Null means inherit the default; an explicit AUTO asks Media3 to adapt this feed. */
+    fun feedVideoQualityOverride(label: String): VideoQuality? = feedQualityOverrides[label]
+    fun videoQualityForFeed(label: String): VideoQuality = feedVideoQualityOverrides[label] ?: videoQuality
+
+    fun updateFeedVideoQuality(label: String, quality: VideoQuality?) {
+        require(label.isNotBlank() && label.length <= 256)
+        val editor = prefs.edit()
+        if (quality == null) {
+            feedQualityOverrides.remove(label)
+            editor.remove(FEED_QUALITY_PREFIX + label)
+        } else {
+            feedQualityOverrides[label] = quality
+            editor.putString(FEED_QUALITY_PREFIX + label, quality.name)
+        }
+        editor.apply()
+    }
 
     /** The requested mode is retained even when a particular stream needs a safe fallback. */
     var decoderMode by mutableStateOf(
@@ -95,6 +126,7 @@ class Settings(context: Context) {
     fun updateSpeedUnit(value: String) { speedUnit = value; prefs.edit().putString("speedUnit", value).apply() }
 
     companion object {
+        private const val FEED_QUALITY_PREFIX = "feedVideoQuality/"
         const val MPH = "mph"
         const val KMH = "kmh"
 
