@@ -14,6 +14,7 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
     private var started = 0L
     private var frames = 0
     private var slow = 0
+    private var frozen = 0
     private var firstDraws = 0
     private var missedReports = 0
     private var maxNs = 0L
@@ -30,12 +31,16 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
         val deadline = if (Build.VERSION.SDK_INT >= 31) metrics.getMetric(FrameMetrics.DEADLINE) else -1L
         frames++
         if (metrics.getMetric(FrameMetrics.FIRST_DRAW_FRAME) == 1L) firstDraws++
-        else if (duration > (deadline.takeIf { it > 0 } ?: fallbackDeadlineNs)) slow++
+        else {
+            if (duration > (deadline.takeIf { it > 0 } ?: fallbackDeadlineNs)) slow++
+            if (duration >= 700_000_000L) frozen++
+        }
         missedReports += dropped
         maxNs = maxOf(maxNs, duration)
         if (now - started >= 2_000) {
             Log.i("PitwallFrames", "role=$role uptimeMs=$now intervalMs=${now - started} frames=$frames " +
-                "slow=$slow firstDraws=$firstDraws missedReports=$missedReports maxFrameMs=${maxNs / 1_000_000}")
+                "slow=$slow frozen700ms=$frozen firstDraws=$firstDraws missedReports=$missedReports " +
+                "refreshRate=${window.decorView.display?.refreshRate ?: 0f} maxFrameMs=${maxNs / 1_000_000}")
             reset(now)
         }
     }
@@ -48,6 +53,7 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
         started = now
         frames = 0
         slow = 0
+        frozen = 0
         firstDraws = 0
         missedReports = 0
         maxNs = 0L

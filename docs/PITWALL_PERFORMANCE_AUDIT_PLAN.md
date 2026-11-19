@@ -2,6 +2,23 @@
 
 Status: implementation backlog, not a claim of completed fixes or smooth playback.
 
+## Implementation progress (20 November 2026)
+
+The first P0 implementation batch is being delivered on this branch. These are code changes,
+**not device-validated performance wins**. Do not close any P0 issue until its exit criteria
+and both devices have been checked with fresh playback logs.
+
+| Priority | First-batch changes | Verification and remaining work |
+| --- | --- | --- |
+| P0.1 | Replaced the segment-wide fetch/composition lock with per-segment single-flight production, independent bounded foreground/prefetch network lanes, preemptible warmup and bounded cache publication. Added deterministic priority, sharing, cancellation and retry tests. | Await CI; explicitly test seek/close races and compare foreground latency against Build 562 on-device. |
+| P0.2 | Reuse session-owned validated initialization metadata, inspect bounded fragment sample ranges without a per-sample copy, use sized Annex-B buffers and direct sized CMAF sample output, log separate parsing/rewrite/packaging/verification times. Added byte-for-byte fixture comparison. | Await synthetic HEVC/FFmpeg CI; obtain per-segment allocated-byte and GC measurements on-device, profile remaining Annex-B and NAL allocations. |
+| P0.3 | Corrected GL draw versus actual EGL swap timing; separately measured latch time, late Choreographer callbacks and SurfaceTexture timestamp regressions; added trace sections and frame-accounting tests. | BufferQueue producer/consumer cause and physical SurfaceFlinger presentation still require Perfetto/FrameTimeline captures. Do not claim timeouts fixed. |
+| P0.4 | Memoized immutable Android TV tower row formatting/sector work; added explicit frozen-window-frame and display-refresh logs with unit coverage. | Capture a real main-thread/RenderThread trace; compare slow/frozen percentages. Macrobenchmark and remaining UI hotspots are still open. |
+
+Testing note: the handover environment could not download Gradle 8.11.1 because outbound
+access to the distribution host was unavailable. GitHub Actions must run compilation,
+synthetic composition checks and tests before this batch is considered build-verified.
+
 Baseline: `feature/per-feed-adaptive-hevc-quality` at
 `574ccb587a50f174748d1b08ed2283e4b8ed1ecc` (Build 562).
 

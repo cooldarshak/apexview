@@ -1,5 +1,52 @@
 package app.apexview.tiled
 
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutionException
+
+/**
+ * Only one producer owns a numbered segment at a time. Unrelated segments never share a
+ * production lock. The future signals publication into the caller's separately owned cache;
+ * it deliberately does not retain media bytes or outlive its last interested caller.
+ */
+internal class ArchiveSegmentSingleFlight(private val onRegistered: ((Int) -> Unit)? = null) {
+    private class Flight(val finished: CompletableFuture<Unit> = CompletableFuture(), var users: Int = 0)
+    private val lock = Any()
+    private val flights = mutableMapOf<Int, Flight>()
+
+    fun run(number: Int, produce: () -> Unit) {
+        val (flight, producer) = synchronized(lock) {
+            val existing = flights[number]
+            val current = existing ?: Flight().also { flights[number] = it }
+            current.users++
+            current to (existing == null)
+        }
+        try {
+            onRegistered?.invoke(number)
+            if (producer) {
+                try {
+                    produce()
+                    flight.finished.complete(Unit)
+                } catch (failure: Throwable) {
+                    flight.finished.completeExceptionally(failure)
+                }
+            }
+            try {
+                flight.finished.get()
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw interrupted
+            } catch (failed: ExecutionException) {
+                throw requireNotNull(failed.cause)
+            }
+        } finally {
+            synchronized(lock) {
+                flight.users--
+                if (flight.users == 0) flights.remove(number, flight)
+            }
+        }
+    }
+}
+
 /** Immutable metadata only; no sample copies are needed to inspect a composed buffer. */
 internal data class CmafWindowTiming(val startUs: Long, val endUs: Long) {
     fun shifted(offsetUs: Long) = CmafWindowTiming(Math.addExact(startUs, offsetUs), Math.addExact(endUs, offsetUs))

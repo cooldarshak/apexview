@@ -76,6 +76,25 @@ class HevcClearCmafGridComposerTest {
         assertEquals(2, output.fragmentCount)
         assertEquals(100, output.evidence.size)
 
+        // A session validates each exact rendition's init once. Reusing that immutable
+        // metadata must not change a single output byte or weaken fragment checks.
+        val cachedOutput = HevcClearCmafGridComposer.compose(
+            HevcClearCmafGridComposer.Request(
+                feeds = feeds.map { it.copy(validatedInitialization = CmafBoxInspector.inspect(it.initializationSegment)) },
+                outputGrid = HevcOutputGridDimensions(columns = 2, rows = 1),
+                cells = listOf(
+                    HevcTizenGridComposer.CellSelection(0, 0, 0, 0),
+                    HevcTizenGridComposer.CellSelection(1, 0, 1, 0)
+                ),
+                outputTrackId = 9,
+                frameRateNumerator = 25
+            )
+        )
+        assertTrue(output.initializationSegment.contentEquals(cachedOutput.initializationSegment))
+        output.mediaFragments.zip(cachedOutput.mediaFragments).forEach { (actual, cached) ->
+            assertTrue(actual.contentEquals(cached))
+        }
+
         val composedBytes = output.mediaFragments.fold(output.initializationSegment) { acc, fragment ->
             acc + fragment
         }

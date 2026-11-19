@@ -2,8 +2,114 @@ package app.apexview.tiled
 
 import org.junit.Assert.*
 import org.junit.Test
+import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class ArchiveBufferPolicyTest {
+    @Test fun foregroundDoesNotWaitForUnrelatedPrefetch() {
+        val coordinator = ArchiveSegmentSingleFlight()
+        val slowStarted = CountDownLatch(1)
+        val releaseSlow = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val prefetch = pool.submit { coordinator.run(7) {
+                slowStarted.countDown()
+                check(releaseSlow.await(5, TimeUnit.SECONDS))
+            } }
+            assertTrue(slowStarted.await(2, TimeUnit.SECONDS))
+            val foreground = pool.submit { coordinator.run(8) {} }
+            foreground.get(1, TimeUnit.SECONDS)
+            assertFalse(prefetch.isDone)
+            releaseSlow.countDown()
+            prefetch.get(2, TimeUnit.SECONDS)
+        } finally {
+            releaseSlow.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test fun concurrentSameSegmentSharesOneProduction() {
+        val registered = CountDownLatch(4)
+        val coordinator = ArchiveSegmentSingleFlight { registered.countDown() }
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val count = AtomicInteger(0)
+        val pool = Executors.newFixedThreadPool(4)
+        try {
+            val producer = pool.submit { coordinator.run(3) {
+                count.incrementAndGet(); started.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+            } }
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            val joining = (1..3).map { pool.submit { coordinator.run(3) { count.incrementAndGet() } } }
+            assertTrue(registered.await(2, TimeUnit.SECONDS))
+            release.countDown()
+            producer.get(2, TimeUnit.SECONDS)
+            joining.forEach { it.get(2, TimeUnit.SECONDS) }
+            assertEquals(1, count.get())
+        } finally {
+            release.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test fun failureIsSharedAndNextAttemptCanRetry() {
+        val coordinator = ArchiveSegmentSingleFlight()
+        val attempts = AtomicInteger()
+        assertThrows(IOException::class.java) { coordinator.run(2) {
+            attempts.incrementAndGet(); throw IOException("bad fragment")
+        } }
+        coordinator.run(2) { attempts.incrementAndGet() }
+        assertEquals(2, attempts.get())
+    }
+
+    @Test fun seekCancellationAbortsStaleProductionAndAllowsAnotherSegment() {
+        val registered = CountDownLatch(1)
+        val exited = CountDownLatch(1)
+        val coordinator = ArchiveSegmentSingleFlight()
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val obsolete = pool.submit {
+                try {
+                    coordinator.run(3) {
+                        registered.countDown()
+                        Thread.sleep(10_000)
+                    }
+                } finally { exited.countDown() }
+            }
+            assertTrue(registered.await(2, TimeUnit.SECONDS))
+            assertTrue(obsolete.cancel(true))
+            assertTrue(exited.await(2, TimeUnit.SECONDS))
+            // The seek target is unrelated and must be usable without the cancelled producer.
+            pool.submit { coordinator.run(50) {} }.get(2, TimeUnit.SECONDS)
+            // A failed/cancelled attempt does not permanently poison this key.
+            pool.submit { coordinator.run(3) {} }.get(2, TimeUnit.SECONDS)
+        } finally { pool.shutdownNow() }
+    }
+
+    @Test fun unrelatedCallerCompletionDoesNotCancelActiveProduction() {
+        val registered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val coordinator = ArchiveSegmentSingleFlight()
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val active = pool.submit { coordinator.run(11) {
+                registered.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+            } }
+            assertTrue(registered.await(2, TimeUnit.SECONDS))
+            pool.submit { coordinator.run(12) {} }.get(1, TimeUnit.SECONDS)
+            release.countDown()
+            active.get(2, TimeUnit.SECONDS)
+        } finally {
+            release.countDown()
+            pool.shutdownNow()
+        }
+    }
+
     @Test fun readAheadStaysWithinThreeSegmentsAndArchiveEnd() {
         assertEquals(1..2, ArchiveBufferPolicy.warmFollowing(0, 12))
         assertEquals(12..12, ArchiveBufferPolicy.warmFollowing(11, 12))

@@ -47,16 +47,20 @@ internal object HevcAccessUnitInspector {
         sps: HevcParameterSets.SpsMetadata,
         pps: HevcParameterSets.PpsMetadata,
         vps: HevcParameterSets.VpsMetadata? = null,
-        context: String = "HEVC access unit"
+        context: String = "HEVC access unit",
+        sampleOffset: Int = 0,
+        sampleLength: Int = sample.size
     ): Report {
-        ensure(sample.isNotEmpty(), context, "CMAF sample is empty")
-        ensure(sample.size <= MAX_SAMPLE_BYTES, context, "CMAF sample exceeds inspection limit")
+        ensure(sampleOffset >= 0 && sampleLength >= 0 && sampleOffset <= sample.size &&
+            sampleLength <= sample.size - sampleOffset, context, "CMAF sample range is out of bounds")
+        ensure(sampleLength > 0, context, "CMAF sample is empty")
+        ensure(sampleLength <= MAX_SAMPLE_BYTES, context, "CMAF sample exceeds inspection limit")
         ensure(nalLengthSize in 1..4, context, "Unsupported HEVC NAL length size")
         ensure(pps.spsId == sps.spsId, context, "PPS references a different SPS")
         ensure(!sps.spsExtensionPresent && !pps.extensionPresent, context,
             "Parameter-set extensions are outside the supported Tizen stitching profile")
 
-        val nals = splitLengthPrefixed(sample, nalLengthSize, context)
+        val nals = splitLengthPrefixed(sample, sampleOffset, sampleLength, nalLengthSize, context)
         val nalTypes = ArrayList<Int>(nals.size)
         val slices = mutableListOf<SliceRegion>()
         val seenTiles = mutableSetOf<Int>()
@@ -218,23 +222,24 @@ internal object HevcAccessUnitInspector {
         )
     }
 
-    private fun splitLengthPrefixed(sample: ByteArray, lengthSize: Int, context: String): List<ByteArray> {
+    private fun splitLengthPrefixed(sample: ByteArray, start: Int, size: Int, lengthSize: Int, context: String): List<ByteArray> {
         val result = mutableListOf<ByteArray>()
-        var offset = 0
-        while (offset < sample.size) {
-            ensure(sample.size - offset >= lengthSize, context, "Truncated NAL length prefix")
+        var offset = start
+        val endOfSample = start + size
+        while (offset < endOfSample) {
+            ensure(endOfSample - offset >= lengthSize, context, "Truncated NAL length prefix")
             var length = 0L
             repeat(lengthSize) {
                 length = (length shl 8) or (sample[offset++].toLong() and 0xffL)
             }
-            ensure(length >= 2L && length <= (sample.size - offset).toLong(), context,
+            ensure(length >= 2L && length <= (endOfSample - offset).toLong(), context,
                 "Invalid NAL length in CMAF sample")
             val end = Math.addExact(offset, length.toInt())
             result += sample.copyOfRange(offset, end)
             ensure(result.size <= MAX_NAL_UNITS, context, "CMAF sample contains too many NAL units")
             offset = end
         }
-        ensure(offset == sample.size && result.isNotEmpty(), context,
+        ensure(offset == endOfSample && result.isNotEmpty(), context,
             "CMAF sample has no complete length-prefixed NAL units")
         return result
     }

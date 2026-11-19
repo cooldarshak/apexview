@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.Trace
 import android.util.Log
 import android.view.PixelCopy
 import android.view.Choreographer
@@ -206,9 +207,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private val displayFrame = Choreographer.FrameCallback { frameTimeNs ->
         guarded {
             val newVideo = frameDemand.beginFrame()
-            val started = System.nanoTime()
-            draw()
-            pacing.onDisplayFrame(frameTimeNs, System.nanoTime() - started, newVideo)
+            val callbackStarted = System.nanoTime()
+            val timing = draw()
+            if (timing != null) pacing.onDisplayFrame(frameTimeNs, timing.swapNs, newVideo,
+                timing.glDrawNs, callbackStarted)
         }
     }
 
@@ -351,11 +353,13 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                     // swap is blocked. Latch promptly to release the prior codec buffer;
                     // coalesce only the *drawing* onto a Choreographer vsync.
                     check(EGL14.eglMakeCurrent(display, window, window, contextGl)) { "Scene GL context unavailable" }
-                    frames.updateTexImage()
+                    val latchStarted = System.nanoTime()
+                    Trace.beginSection("PitwallTextureLatch")
+                    try { frames.updateTexImage() } finally { Trace.endSection() }
                     frames.getTransformMatrix(transform)
                     hasFrame = true
                     rendered++
-                    pacing.onTextureLatched(System.nanoTime())
+                    pacing.onTextureLatched(System.nanoTime(), System.nanoTime() - latchStarted, frames.timestamp)
                     scheduleDisplayFrame(videoArrived = true)
                 }
             }
@@ -364,13 +368,21 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         post { if (!released && input === surface) player?.setVideoSurface(surface) }
     }
 
-    private fun draw() {
-        val model = scene ?: return
-        if (window == EGL14.EGL_NO_SURFACE || !EGL14.eglMakeCurrent(display, window, window, contextGl)) return
+    private data class DrawTiming(val glDrawNs: Long, val swapNs: Long)
+
+    private fun draw(): DrawTiming? {
+        val model = scene ?: return null
+        if (window == EGL14.EGL_NO_SURFACE || !EGL14.eglMakeCurrent(display, window, window, contextGl)) return null
+        val drawStarted = System.nanoTime()
+        Trace.beginSection("PitwallGlDraw")
         GLES20.glViewport(0, 0, outputWidth, outputHeight)
         GLES20.glClearColor(0f, 0f, 0f, 1f); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        if (hasFrame) drawVideo(model)
-        check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" }
+        try { if (hasFrame) drawVideo(model) } finally { Trace.endSection() }
+        val swapStarted = System.nanoTime()
+        Trace.beginSection("PitwallEglSwap")
+        try { check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" } }
+        finally { Trace.endSection() }
+        val swapCompleted = System.nanoTime()
         if (hasFrame && !firstFrameReported) {
             firstFrameReported = true
             post { if (!released) onFirstFrame() }
@@ -382,9 +394,14 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 "pacingLatched=${metrics.latched} pacingPresented=${metrics.presented} " +
                 "callbackGaps45ms=${metrics.callbackGaps} displayGaps45ms=${metrics.displayGaps} " +
                 "slowSwaps18ms=${metrics.slowSwaps} maxCallbackGapMs=${metrics.maxCallbackGapMs} " +
-                "maxDisplayGapMs=${metrics.maxDisplayGapMs} maxSwapMs=${metrics.maxSwapMs}")
+                "maxDisplayGapMs=${metrics.maxDisplayGapMs} maxSwapMs=${metrics.maxSwapMs} " +
+                "slowDraws18ms=${metrics.slowDraws} maxGlDrawMs=${metrics.maxDrawMs} " +
+                "slowLatches18ms=${metrics.slowLatches} maxLatchMs=${metrics.maxLatchMs} " +
+                "maxVsyncCallbackDelayMs=${metrics.maxVsyncCallbackDelayMs} " +
+                "surfaceTimestampRegressions=${metrics.surfaceTimestampRegressions} physicalPresentation=NOT_MEASURED")
             lastLogNs = now
         }
+        return DrawTiming(swapStarted - drawStarted, swapCompleted - swapStarted)
     }
 
     private fun drawVideo(model: VideoScene) {

@@ -20,7 +20,9 @@ internal object HevcClearCmafGridComposer {
     data class Feed(
         val initializationSegment: ByteArray,
         val mediaFragments: List<ByteArray>,
-        val label: String
+        val label: String,
+        /** Validated once against this session's owned initialization bytes, never a different rendition. */
+        val validatedInitialization: CmafBoxInspector.Report? = null,
     )
 
     data class Request(
@@ -42,11 +44,16 @@ internal object HevcClearCmafGridComposer {
         val displayHeight: Int,
         val sampleCount: Int,
         val fragmentCount: Int,
-        val evidence: List<HevcTizenGridComposer.SliceEvidence>
+        val evidence: List<HevcTizenGridComposer.SliceEvidence>,
+        val parseMs: Long = 0,
+        val rewriteMs: Long = 0,
+        val packageMs: Long = 0,
     )
 
     private data class SourceSample(
         val bytes: ByteArray,
+        val offset: Int,
+        val length: Int,
         val duration: Long,
         val compositionOffset: Long,
         val flags: Long
@@ -88,7 +95,9 @@ internal object HevcClearCmafGridComposer {
             "Output fragment sequence number is invalid"
         }
 
+        val started = System.nanoTime()
         val parsedFeeds = request.feeds.mapIndexed { index, feed -> parseFeed(feed, index) }
+        val parsedAt = System.nanoTime()
         val first = parsedFeeds.first()
         val composed = HevcTizenGridComposer.composeAnnexBStreams(
             feedStreams = parsedFeeds.map { it.annexB },
@@ -99,6 +108,7 @@ internal object HevcClearCmafGridComposer {
             outputNalLengthSize = first.config.nalLengthSize,
             includeAnnexBOutput = false
         )
+        val rewrittenAt = System.nanoTime()
         require(composed.pictures.size == first.fragments.sumOf { it.samples.size }) {
             "Composed picture count does not match the CMAF sample sequence"
         }
@@ -160,7 +170,10 @@ internal object HevcClearCmafGridComposer {
             displayHeight = composed.displayHeight,
             sampleCount = composed.pictures.size,
             fragmentCount = outputFragments.size,
-            evidence = composed.pictures.flatMap { it.evidence }
+            evidence = composed.pictures.flatMap { it.evidence },
+            parseMs = (parsedAt - started) / 1_000_000L,
+            rewriteMs = (rewrittenAt - parsedAt) / 1_000_000L,
+            packageMs = (System.nanoTime() - rewrittenAt) / 1_000_000L,
         )
     }
 
@@ -176,7 +189,7 @@ internal object HevcClearCmafGridComposer {
     )
 
     private fun parseFeed(feed: Feed, feedIndex: Int): ParsedFeed {
-        val initReport = CmafBoxInspector.inspect(feed.initializationSegment)
+        val initReport = feed.validatedInitialization ?: CmafBoxInspector.inspect(feed.initializationSegment)
         require(initReport.errors.isEmpty()) {
             "Feed ${feed.label} init segment is invalid: ${initReport.errors.joinToString("; ")}"
         }
@@ -200,10 +213,15 @@ internal object HevcClearCmafGridComposer {
             config.sps.size == 1 && config.pps.size == 1) {
             "Feed ${feed.label} must have one valid VPS/SPS/PPS triplet"
         }
-        val rawParameterSets = extractParameterSets(feed.initializationSegment, config.nalLengthSize)
+        val rawParameterSets = if (feed.validatedInitialization != null &&
+            config.rawVpsNals.size == 1 && config.rawSpsNals.size == 1 && config.rawPpsNals.size == 1) {
+            config.rawVpsNals + config.rawSpsNals + config.rawPpsNals
+        } else extractParameterSets(feed.initializationSegment, config.nalLengthSize)
         val fragments = mutableListOf<SourceFragment>()
         val metadata = mutableListOf<CmafBoxInspector.FragmentMetadata>()
-        val annexB = ByteArrayOutputStream()
+        val expectedLength = feed.mediaFragments.sumOf { it.size.toLong() } +
+            rawParameterSets.sumOf { it.size.toLong() + 4 }
+        val annexB = ByteArrayOutputStream(expectedLength.coerceIn(32L, Int.MAX_VALUE.toLong()).toInt())
         rawParameterSets.forEach { appendAnnexB(annexB, it) }
 
         feed.mediaFragments.forEachIndexed { fragmentIndex, bytes ->
@@ -242,7 +260,9 @@ internal object HevcClearCmafGridComposer {
                     sps = config.sps.single(),
                     pps = config.pps.single(),
                     context = "Feed " + feed.label + " fragment " + fragmentIndex +
-                        " sample " + sampleIndex
+                        " sample " + sampleIndex,
+                    sampleOffset = sample.offset,
+                    sampleLength = sample.length
                 )
                 accessUnit.nalUnits.forEach { appendAnnexB(annexB, it) }
             }
@@ -350,7 +370,7 @@ internal object HevcClearCmafGridComposer {
                 "trun sample $index differs from independently inspected timing metadata"
             }
             samples += SourceSample(
-                bytes.copyOfRange(cursor.toInt(), end.toInt()),
+                bytes, cursor.toInt(), size.toInt(),
                 duration, compositionOffset, sampleFlags
             )
             cursor = end
@@ -474,7 +494,7 @@ internal object HevcClearCmafGridComposer {
     }
 
     private fun appendAnnexB(out: ByteArrayOutputStream, nal: ByteArray) {
-        out.write(byteArrayOf(0, 0, 0, 1))
+        out.write(0); out.write(0); out.write(0); out.write(1)
         out.write(nal)
     }
 

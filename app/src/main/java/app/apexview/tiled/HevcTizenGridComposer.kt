@@ -517,22 +517,29 @@ internal object HevcTizenGridComposer {
     }
 
     private fun lengthPrefix(nals: List<ByteArray>, lengthSize: Int): ByteArray {
-        val output = ByteArrayOutputStream()
         val maxLength = if (lengthSize == 4) 0xffff_ffffL else (1L shl (lengthSize * 8)) - 1L
-        nals.forEach { nal ->
+        val totalBytes = nals.fold(0L) { count, nal ->
             require(nal.isNotEmpty() && nal.size.toLong() <= maxLength) {
                 "NAL size exceeds the configured CMAF length-prefix field"
             }
-            for (shift in (lengthSize - 1) downTo 0) {
-                output.write((nal.size ushr (shift * 8)) and 0xff)
-            }
-            output.write(nal)
+            Math.addExact(count, lengthSize.toLong() + nal.size)
         }
-        return output.toByteArray()
+        require(totalBytes <= Int.MAX_VALUE) { "Composed CMAF sample exceeds array capacity" }
+        val output = ByteArray(totalBytes.toInt())
+        var cursor = 0
+        nals.forEach { nal ->
+            for (shift in (lengthSize - 1) downTo 0) {
+                output[cursor++] = ((nal.size ushr (shift * 8)) and 0xff).toByte()
+            }
+            nal.copyInto(output, cursor)
+            cursor += nal.size
+        }
+        check(cursor == output.size)
+        return output
     }
 
     private fun writeAnnexB(output: ByteArrayOutputStream, nal: ByteArray) {
-        output.write(byteArrayOf(0, 0, 0, 1))
+        output.write(0); output.write(0); output.write(0); output.write(1)
         output.write(nal)
     }
 

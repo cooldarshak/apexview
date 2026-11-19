@@ -44,13 +44,22 @@ internal class HevcArchiveVodSession(
                 val initialization: ByteArray, val report: CmafBoxInspector.Report)
     private data class Group(val startUs: Long, val durationUs: Long, val indexes: List<Int>)
     private val groups = align(inputs, clockLabel)
+    // Re-parse each exact owned initialization ONCE, not once per 5.76-second segment.
+    // The initial read also checks that these immutable reports correspond to the bytes we own.
+    private val validatedInitializations = inputs.map { input -> CmafBoxInspector.inspect(input.initialization).also {
+            require(it.errors.isEmpty() && it.tracks.size == 1) { "Invalid archive source initialization" }
+        }
+    }
     private val cache = LinkedHashMap<Int, ByteArray>(4, 0.75f, true)
     private val cacheLock = Any()
-    private val composeLock = Any()
-    private var cachedMixedAtlas: HevcMixedArchiveAtlasPlan.Plan? = null
-    // A seek needs one fragment from each camera. Run those independent I/O requests
-    // concurrently, bounded to four requests even for larger selections.
+    private val production = ArchiveSegmentSingleFlight()
+    @Volatile private var cachedMixedAtlas: HevcMixedArchiveAtlasPlan.Plan? = null
+    // Never queue foreground network requests behind speculative prefetch I/O. Each lane is
+    // bounded to four per-feed requests and seek cancellation interrupts the warm lane.
     private val fetchers = Executors.newFixedThreadPool(inputs.size.coerceIn(1, 4)) { r -> Thread(r, "ApexviewVodFetch").apply { isDaemon = true } }
+    private val prefetchFetchers = Executors.newFixedThreadPool(inputs.size.coerceIn(1, 4)) { r ->
+        Thread(r, "ApexviewVodPrefetchNet").apply { isDaemon = true }
+    }
     private val warmer = Executors.newSingleThreadExecutor { r -> Thread(r, "ApexviewVodWarm").apply { isDaemon = true } }
     private val warmLock = Any()
     private var warmActiveNumber: Int? = null
@@ -181,17 +190,22 @@ internal class HevcArchiveVodSession(
     }
 
     private fun composeOrRead(number: Int): ByteArray {
-        // A warm task may be composing a later segment. Let the playback thread take its
-        // already-composed bytes without waiting for unrelated network or HEVC work.
-        synchronized(cacheLock) { checkOpen(); cache[number]?.copyOf() }?.let { return it }
-        return composeOrReadSerialized(number)
+        // The cache lock guards only ownership/publication, not I/O or HEVC work. A foreground
+        // request joins an in-flight warmup for the SAME segment and preempts unrelated warmups.
+        while (true) {
+            synchronized(cacheLock) { checkOpen(); cache[number]?.copyOf() }?.let { return it }
+            production.run(number) {
+                // The previous flight could have finished between the cache check and registration.
+                if (synchronized(cacheLock) { checkOpen(); !cache.containsKey(number) }) composeAndPublish(number)
+            }
+            synchronized(cacheLock) { checkOpen(); cache[number]?.copyOf() }?.let { return it }
+            // An unrelated concurrently completed segment may have evicted this bounded entry.
+        }
     }
 
-    private fun composeOrReadSerialized(number: Int): ByteArray = synchronized(composeLock) {
+    private fun composeAndPublish(number: Int) {
         checkOpen()
         require(number in groups.indices) { "Archive segment is outside the finite timeline" }
-        val cached = synchronized(cacheLock) { cache[number]?.copyOf() }
-        if (cached != null) return@synchronized cached
         val started = System.nanoTime()
         val batches = mutableListOf<List<ByteArray>>()
         try {
@@ -217,7 +231,9 @@ internal class HevcArchiveVodSession(
             }
             val mixed = mixedInputs.any { it.sps.width != sourceSps.width || it.sps.height != sourceSps.height }
             val mixedAtlas = if (mixed) requireNotNull(cachedMixedAtlas ?: HevcMixedArchiveAtlasPlan.choose(mixedInputs,
-                maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT)?.also { cachedMixedAtlas = it }) {
+                maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT)?.also { candidate ->
+                    synchronized(cacheLock) { checkOpen(); if (cachedMixedAtlas == null) cachedMixedAtlas = candidate }
+                }) {
                 "Selected source resolutions have incompatible HEVC tile geometry for one decoder"
             } else null
             val atlas = if (mixedAtlas == null) requireNotNull(HevcArchiveAtlasPlan.choose(inputs.size, sourceSps.width, sourceSps.height,
@@ -235,7 +251,11 @@ internal class HevcArchiveVodSession(
                     (slot % atlas.columns) * columns + col, (slot / atlas.columns) * rows + row)
             } } }
             val ownedInits = synchronized(cacheLock) { checkOpen(); inputs.map { it.initialization.copyOf() } }
-            val composingFeeds = inputs.mapIndexed { i, input -> HevcClearCmafGridComposer.Feed(ownedInits[i], batches.map { it[i] }, input.label) }
+            val validated = validatedInitializations
+            val composingFeeds = inputs.mapIndexed { i, input -> HevcClearCmafGridComposer.Feed(
+                ownedInits[i], batches.map { it[i] }, input.label, validated[i]) }
+            checkOpen()
+            val compositionStarted = System.nanoTime()
             val composed = try { if (inputs.size == 1) HevcClearCmafGridComposer.passThrough(composingFeeds.single())
                 else HevcClearCmafGridComposer.compose(HevcClearCmafGridComposer.Request(
                 composingFeeds,
@@ -244,6 +264,9 @@ internal class HevcArchiveVodSession(
                 frameRateNumerator = (trackScale / divisor).toInt(), frameRateDenominator = (step / divisor).toInt()))
             } finally { ownedInits.forEach { it.fill(0) } }
             try {
+                checkOpen()
+                val compositionMs = (System.nanoTime() - compositionStarted) / 1_000_000L
+                val verificationStarted = System.nanoTime()
                 val report = CmafBoxInspector.inspect(composed.initializationSegment)
                 val outputTrack = report.tracks.single()
                 // Container sync flags are insufficient proof of random access. The clear
@@ -256,6 +279,8 @@ internal class HevcArchiveVodSession(
                 }
                 val last = CmafBoxInspector.inspect(composed.mediaFragments.last(), report).fragments.single()
                 val offset = requireNotNull(last.baseDecodeTimeTicks) - scaleUs(groups[number].startUs, trackScale)
+                checkOpen()
+                val verificationMs = (System.nanoTime() - verificationStarted) / 1_000_000L
                 synchronized(cacheLock) {
                     checkOpen()
                     if (initialization == null) {
@@ -284,14 +309,16 @@ internal class HevcArchiveVodSession(
                         require(initialization!!.contentEquals(composed.initializationSegment)) { "Archive representation changed its initialization" }
                         require(abs(requireNotNull(presentationOffsetTicks) - offset) <= 1L) { "Archive decode timestamps differ from the VOD timeline" }
                     }
+                    // The cache gets its own buffer; the composer's buffer is wiped in finally.
                     val output = composed.mediaFragments.last().copyOf()
                     cache.put(number, output)?.fill(0)
                     while (cache.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) cache.remove(cache.keys.first())?.fill(0)
                     val worker = if (Thread.currentThread().name == "ApexviewVodWarm") "PREFETCH" else "PLAYBACK"
                     android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs " +
-                        "composeMs=${(System.nanoTime() - started) / 1_000_000L - fetchMs} durationMs=${groups[number].durationUs / 1000L} " +
+                        "composeMs=$compositionMs verifyMs=$verificationMs totalMs=${(System.nanoTime() - started) / 1_000_000L} " +
+                        "parseMs=${composed.parseMs} rewriteMs=${composed.rewriteMs} packageMs=${composed.packageMs} " +
+                        "outputBytes=${output.size} durationMs=${groups[number].durationUs / 1000L} " +
                         "worker=$worker clock=PLAYER_REQUEST cache=${cache.size}")
-                    output.copyOf()
                 }
             } finally {
                 composed.initializationSegment.fill(0)
@@ -308,11 +335,12 @@ internal class HevcArchiveVodSession(
     }
 
     private fun fetch(number: Int): List<ByteArray> {
+        val lane = if (Thread.currentThread().name == "ApexviewVodWarm") prefetchFetchers else fetchers
         val retained = mutableListOf<ByteArray>()
         val aborted = java.util.concurrent.atomic.AtomicBoolean(false)
         val futures = mutableListOf<Future<ByteArray>>()
         try {
-        inputs.forEachIndexed { i, input -> futures += fetchers.submit<ByteArray> {
+        inputs.forEachIndexed { i, input -> futures += lane.submit<ByteArray> {
             checkOpen()
             val segment = input.playlist.segments[groups[number].indexes[i]]
             require(!segment.hasGapTag && segment.fullSegmentEncryptionKeyUri == null) { "Unsupported HLS gap or full-segment encryption" }
@@ -404,6 +432,7 @@ internal class HevcArchiveVodSession(
         closed = true
         synchronized(warmLock) { warmTask?.cancel(true); warmer.shutdownNow() }
         fetchers.shutdownNow()
+        prefetchFetchers.shutdownNow()
         synchronized(cacheLock) {
             initialization?.fill(0); initialization = null; cache.values.forEach { it.fill(0) }; cache.clear()
             inputs.forEach { it.initialization.fill(0) }

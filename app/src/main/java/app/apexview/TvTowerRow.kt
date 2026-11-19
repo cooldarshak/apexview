@@ -25,24 +25,12 @@ internal fun TvTowerRow(
     speedUnit: String, highlight: Boolean, rowHeight: Dp, onClick: () -> Unit,
 ) {
     val paint = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
-    val name = driver?.tla ?: number
-    val lastLap = when {
-        state.retired -> "OUT"
-        state.inPit -> "PIT"
-        else -> state.lastLap?.time?.ifBlank { "–" } ?: "–"
+    // A tower sample can be republished while this driver's fields stay identical. Keep the
+    // formatted text, synthesized strip cells and accessibility description across those draws.
+    val content = remember(number, driver?.tla, state, tyre, kmh, gear, speedUnit) {
+        TowerRowText.prepare(driver?.tla ?: number, state, tyre, kmh, gear, speedUnit)
     }
-    val bestLap = state.bestLap?.time?.ifBlank { "–" } ?: "–"
-    val position = state.position?.toString() ?: "–"
-    val interval = state.ahead ?: "–"
-    val leader = state.toLeader ?: "–"
-    val gearText = gear?.let { if (it == 0) "N" else it.toString() } ?: "–"
-    val speed = kmh?.let { speedIn(it, speedUnit).toString() } ?: "–"
-    val sectors = (0..2).map { state.towerSector(it) }
-    val description = buildString {
-        append("Position $position, $name, gear $gearText, $speed $speedUnit. Last $lastLap, best $bestLap. Interval $interval, leader $leader.")
-        sectors.forEachIndexed { index, sector -> sector?.time?.takeIf { it.isNotBlank() }?.let { append(" S${index + 1} $it.") } }
-        tyre?.let { append(" ${it.compound}, ${it.laps} laps.") }
-    }
+    val (name, lastLap, bestLap, position, interval, leader, gearText, speed, sectors, description) = content
     Canvas(Modifier.fillMaxWidth().height(rowHeight).tvFocusRing().clickable(onClick = onClick)
         .semantics { contentDescription = description }.clipToBounds()) {
         val canvas = drawContext.canvas.nativeCanvas
@@ -124,6 +112,38 @@ internal fun TvTowerRow(
             }
         } finally {
             canvas.restoreToCount(save)
+        }
+    }
+}
+
+/** Immutable text work shared by the drawing and accessibility passes. */
+internal data class TowerRowText(
+    val name: String, val lastLap: String, val bestLap: String, val position: String,
+    val interval: String, val leader: String, val gearText: String, val speed: String,
+    val sectors: List<SectorCell?>, val description: String,
+) {
+    companion object {
+        fun prepare(name: String, state: CardState, tyre: Tyre?, kmh: Int?, gear: Int?, speedUnit: String): TowerRowText {
+            val lastLap = when {
+                state.retired -> "OUT"
+                state.inPit -> "PIT"
+                else -> state.lastLap?.time?.ifBlank { "–" } ?: "–"
+            }
+            val bestLap = state.bestLap?.time?.ifBlank { "–" } ?: "–"
+            val position = state.position?.toString() ?: "–"
+            val interval = state.ahead ?: "–"
+            val leader = state.toLeader ?: "–"
+            val gearText = gear?.let { if (it == 0) "N" else it.toString() } ?: "–"
+            val speed = kmh?.let { speedIn(it, speedUnit).toString() } ?: "–"
+            val sectors = (0..2).map(state::towerSector)
+            val description = buildString {
+                append("Position $position, $name, gear $gearText, $speed $speedUnit. Last $lastLap, best $bestLap. Interval $interval, leader $leader.")
+                sectors.forEachIndexed { index, sector ->
+                    sector?.time?.takeIf { it.isNotBlank() }?.let { append(" S${index + 1} $it.") }
+                }
+                tyre?.let { append(" ${it.compound}, ${it.laps} laps.") }
+            }
+            return TowerRowText(name, lastLap, bestLap, position, interval, leader, gearText, speed, sectors, description)
         }
     }
 }

@@ -1,0 +1,21 @@
+package app.apexview
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class TowerRowTextTest {
+    @Test fun preparesStableVisualAndAccessibilityTextWithoutChangingSpeedUnits() {
+        val state = CardState(position = 1, sectors = listOf(null, null, null),
+            lapSectors = listOf(null, null, null), runningMs = null, lastLap = null,
+            gap = null, inPit = true)
+        val first = TowerRowText.prepare("VER", state, null, 200, 8, Settings.KMH)
+        val second = TowerRowText.prepare("VER", state, null, 200, 8, Settings.KMH)
+        assertEquals(first, second)
+        assertEquals("PIT", first.lastLap)
+        assertEquals("200", first.speed)
+        assertEquals("8", first.gearText)
+        assertTrue(first.description.contains("Position 1, VER"))
+        assertTrue(first.description.contains("200 ${Settings.KMH}"))
+    }
+}
