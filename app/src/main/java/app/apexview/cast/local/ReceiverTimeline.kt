@@ -4,6 +4,11 @@ package app.apexview.cast.local
 internal object ReceiverTimeline {
     fun position(originMs: Long?, windowOffsetMs: Long, positionMs: Long): Long =
         if (originMs == null) positionMs else Math.addExact(originMs, Math.addExact(windowOffsetMs, positionMs))
+    fun windowSeek(targetMs: Long, originMs: Long?, windowOffsetMs: Long, durationMs: Long): Long {
+        val windowPosition = if (originMs == null) targetMs else Math.subtractExact(targetMs, Math.addExact(originMs, windowOffsetMs))
+        return seek(windowPosition, durationMs)
+    }
+
     fun restorePosition(remoteBaseUtcMs: Long?, remotePositionMs: Long, localWindowUtcMs: Long?): Long =
         if (remoteBaseUtcMs != null && localWindowUtcMs != null) Math.subtractExact(Math.addExact(remoteBaseUtcMs, remotePositionMs), localWindowUtcMs).coerceAtLeast(0)
         else remotePositionMs

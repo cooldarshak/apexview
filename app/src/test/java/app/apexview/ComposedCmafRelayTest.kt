@@ -51,6 +51,9 @@ class ComposedCmafRelayTest {
         assertEquals(50_000L, app.apexview.cast.local.ReceiverTimeline.restorePosition(null, 50_000, 83_000))
         assertEquals(100L, app.apexview.cast.local.ReceiverTimeline.seek(500, 100))
         assertEquals(500L, app.apexview.cast.local.ReceiverTimeline.seek(500, -1))
+        assertEquals(1_500L, app.apexview.cast.local.ReceiverTimeline.windowSeek(9_000, 7_000, 500, 2_000))
+        assertEquals(0L, app.apexview.cast.local.ReceiverTimeline.windowSeek(6_000, 7_000, 500, 2_000))
+        assertEquals(2_000L, app.apexview.cast.local.ReceiverTimeline.windowSeek(15_000, 7_000, 500, 2_000))
     }
     @Test fun receiverLicensingAcceptsContentIdentifiersAndRejectsCredentialInjection() {
         val request = ReceiverLicenseRequest(1234, listOf(1033, 1034, 1035), 1033)

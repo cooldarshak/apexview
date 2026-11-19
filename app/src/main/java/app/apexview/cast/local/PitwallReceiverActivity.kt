@@ -191,18 +191,24 @@ class PitwallReceiverActivity : ComponentActivity() {
                         FcastProtocol.PAUSE -> { desiredPlaying = false; player?.pause() }
                         FcastProtocol.RESUME -> { desiredPlaying = true; player?.play() }
                         FcastProtocol.STOP -> stopPlayback()
-                        FcastProtocol.SEEK -> player?.seekTo((number(body, "time", 0.0, 604800.0) * 1000).toLong())
+                        FcastProtocol.SEEK -> player?.let { current ->
+                            val target = (number(body, "time", 0.0, 604800.0) * 1000).toLong()
+                            val origin = streamMetadata()?.getLong("originMs")
+                            current.seekTo(ReceiverTimeline.windowSeek(target, origin, windowOffsetMs(current), current.duration))
+                        }
                         FcastProtocol.SET_SPEED -> { desiredSpeed = number(body, "speed", 0.25, 4.0).toFloat(); player?.setPlaybackSpeed(desiredSpeed) }
                         FcastProtocol.SET_VOLUME -> { desiredVolume = number(body, "volume", 0.0, 1.0).toFloat(); player?.volume = desiredVolume }
                         FcastProtocol.TIMING -> if (timingPeer && body != null) {
-                            try { timingState.accept(body, playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId").orEmpty()) }
+                            try { timingState.accept(body, playbackId()) }
                             catch (error: Exception) { Log.w("PitwallReceiver", "Timing display message rejected: ${error.javaClass.simpleName}") }
                             return // The periodic playback update carries the clock independently of overlay updates.
                         }
                         FcastProtocol.SCENE -> {
-                            require(pitwallPeer && scene != null && body != null)
+                            require(pitwallPeer && body != null)
+                            val loadId = body.optString("playbackId")
+                            if (loadId.isNotEmpty() && loadId != playbackId()) return
+                            val old = scene ?: return // The incoming PLAY already carries its first layout.
                             val decoded = CastSceneProtocol.decode(body)
-                            val old = scene!!
                             val next = if (isDirectPlayback()) decoded.copy(atlasWidth = old.atlasWidth, atlasHeight = old.atlasHeight,
                                 atlasColumns = 1, sourceCodedWidth = old.sourceCodedWidth, sourceCodedHeight = old.sourceCodedHeight,
                                 sourceDisplayWidth = old.sourceDisplayWidth, sourceDisplayHeight = old.sourceDisplayHeight) else decoded
@@ -214,7 +220,12 @@ class PitwallReceiverActivity : ComponentActivity() {
                     sendPlayback()
                 }
             }
-        } catch (error: Exception) { fail(error.message ?: "Invalid receiver message") }
+        } catch (error: Exception) {
+            val loadId = if (packet.opcode == FcastProtocol.PLAY) {
+                body?.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId").orEmpty()
+            } else playbackId()
+            fail(error.message ?: "Invalid receiver message", loadId)
+        }
     }
 
     private fun number(body: JSONObject?, key: String, min: Double, max: Double): Double =
@@ -376,7 +387,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         status = if (scene == null) "Playing on this TV" else "Playing ${scene!!.sources} feeds in the phone layout"
         Log.i("PitwallReceiver", "SCENE_RENDERING_CONFIRMED sources=${scene?.sources ?: 1} videoDecoders=$decoderCount")
         if (pitwallPeer) connection?.send(FcastProtocol.RENDERING, JSONObject().put("sources", scene?.sources ?: 1)
-            .put("playbackId", playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId").orEmpty()))
+            .put("playbackId", playbackId()))
     }
     private fun showReceiverControls() {
         controlsVisible = true
@@ -389,14 +400,17 @@ class PitwallReceiverActivity : ComponentActivity() {
         direct || (model != null && model.sources == 1 && model.windows.size == 1 &&
             model.atlasWidth == model.sourceDisplayWidth && model.atlasHeight == model.sourceDisplayHeight)
 
+    private fun playbackId() = playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId").orEmpty()
     private fun isDirectPlayback() = playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optBoolean("pitwallDirect") == true
     private fun streamMetadata() = playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallStream")
+    private fun windowOffsetMs(current: ExoPlayer): Long =
+        if (current.currentTimeline.isEmpty) 0L else current.currentTimeline
+            .getWindow(current.currentMediaItemIndex, Timeline.Window()).positionInFirstPeriodMs
+
     private fun controllerPosition(): Long {
         val current = player ?: return 0
-        if (isDirectPlayback()) return current.currentPosition
-        val info = streamMetadata() ?: return current.currentPosition
-        val offset = if (current.currentTimeline.isEmpty) 0L else current.currentTimeline.getWindow(current.currentMediaItemIndex, Timeline.Window()).positionInFirstPeriodUs / 1000
-        return ReceiverTimeline.position(info.getLong("originMs"), offset, current.currentPosition)
+        val origin = streamMetadata()?.getLong("originMs") ?: return current.currentPosition
+        return ReceiverTimeline.position(origin, windowOffsetMs(current), current.currentPosition)
     }
     private fun controllerSeek(targetMs: Long) {
         if (streamMetadata() != null) connection?.send(FcastProtocol.UI_CONTROL, JSONObject().put("action", "seek").put("time", targetMs / 1000.0))
@@ -440,9 +454,11 @@ class PitwallReceiverActivity : ComponentActivity() {
         scene = null; playData = null; renderingReported = false
         status = "Ready. Choose this TV from Cast on your phone."
     }
-    private fun fail(reason: String) {
+    private fun fail(reason: String, loadId: String = playbackId()) {
         val safe = DiagnosticRedaction.redact(reason).take(200)
-        connection?.send(FcastProtocol.ERROR, JSONObject().put("message", safe))
+        connection?.send(FcastProtocol.ERROR, JSONObject().put("message", safe).apply {
+            if (loadId.isNotEmpty()) put("playbackId", loadId)
+        })
         stopPlayback(); pending = null; status = safe
         Log.w("PitwallReceiver", safe)
     }

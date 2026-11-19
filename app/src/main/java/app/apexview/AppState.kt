@@ -613,6 +613,7 @@ class AppState(
                     }
                 }
                 protocol.ERROR -> {
+                    if (body?.has("playbackId") == true && body.optString("playbackId") != localLoadId) return
                     castPreparationJob?.cancel(); castPreparationJob = null
                     releaseCastRelay(); castBusy = false
                     castStatus = DiagnosticRedaction.redact(body?.optString("message") ?: "TV playback failed").take(220)
@@ -624,9 +625,11 @@ class AppState(
             localConnection?.close()
         }
     }
-    private fun loadLocalCastMedia(relay: app.apexview.cast.SceneCastRelay) {
+    private fun loadLocalCastMedia(
+        relay: app.apexview.cast.SceneCastRelay,
+        scene: JSONObject = castVideoScene(relay.session) ?: throw IOException("The phone layout is not ready."),
+    ) {
         val link = localConnection ?: throw IOException("TV disconnected during preparation")
-        val scene = castVideoScene(relay.session) ?: throw IOException("The phone layout is not ready. Keep the player open and retry casting.")
         val time = castFramePositionMs.coerceAtLeast(0L)
         localLoadId = java.util.UUID.randomUUID().toString()
         castSceneConfirmed = false
@@ -763,6 +766,10 @@ class AppState(
         val clockTile = castTiles.firstOrNull { it.id == bigTileId }
             ?: castTiles.firstOrNull { it.audible }
             ?: castTiles.first()
+        val selection = castTiles.map { it.id to it.feed.sourceStream.profileLabel }
+        val usingLocalReceiver = localChosen
+        val originalConnection = localConnection
+        val originalGoogleReceiver = googleCastRemoteClient
         castBusy = true; castStatus = "Preparing ${castTiles.size} feed${if (castTiles.size == 1) "" else "s"} for the TV…"
         message = castStatus
         val generation = ++castPreparationGeneration
@@ -771,7 +778,7 @@ class AppState(
             var relay: app.apexview.cast.SceneCastRelay? = null
             var ownedSession: app.apexview.tiled.HevcArchiveVodSession? = null
             try {
-                val expectedLabels = castTiles.map { it.feed.sourceStream.profileLabel }.toSet()
+                val expectedLabels = selection.map { it.second }.toSet()
                 val activeComposition = singleDecoderScenePlayer?.archiveSessionForCast()
                     ?.takeIf { it.sourceLabels.toSet() == expectedLabels && it.sourceLabels.size == expectedLabels.size && it.sourceDisplayHeight >= 720 }
                 val session = activeComposition ?: run {
@@ -806,11 +813,18 @@ class AppState(
                     }
                     relay!!.validateAudio()
                 }
-                if ((localChosen && (!localReady || localConnection == null)) || (!localChosen && googleCastRemoteClient == null))
-                    throw kotlinx.coroutines.CancellationException("Cast session ended during setup")
+                val layout = if (usingLocalReceiver || usesLayoutCastReceiver) awaitCastLayout { castVideoScene(session) } else null
+                val stillConnected = if (usingLocalReceiver) {
+                    localChosen && localReady && originalConnection != null && localConnection === originalConnection
+                } else {
+                    !localChosen && originalGoogleReceiver != null && googleCastRemoteClient === originalGoogleReceiver
+                }
+                if (!stillConnected) throw kotlinx.coroutines.CancellationException("Cast session ended during setup")
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                 if (generation != castPreparationGeneration) throw kotlinx.coroutines.CancellationException("Stale cast preparation")
-                require(tiles.map { it.id to it.feed.sourceStream.profileLabel } == castTiles.map { it.id to it.feed.sourceStream.profileLabel }) { "Feed selection changed during preparation; retry casting" }
+                require(tiles.map { it.id to it.feed.sourceStream.profileLabel } == selection) {
+                    "Feed selection changed during preparation"
+                }
                 castRelay?.takeIf { it !== relay }?.let { retiredCastRelays += it }
                 castRelay = relay
                 directCast = null
@@ -820,9 +834,10 @@ class AppState(
                     else "Casting ${session.sourceDisplayHeight}p sources. This build uses the standard receiver, which shows the encoded grid; the phone layout needs the registered Pitwall receiver."
                 message = castStatus
                 castTiles.forEach { it.feed.setAudible(false) }
-                if (localChosen) loadLocalCastMedia(relay!!) else loadGoogleCastMedia(relay!!)
+                if (localChosen) loadLocalCastMedia(requireNotNull(relay), requireNotNull(layout))
+                else loadGoogleCastMedia(requireNotNull(relay), layout)
             } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
-                if (castRelay === relay) releaseCastRelay()
+                if (relay != null && castRelay === relay) releaseCastRelay()
                 relay?.close(); castStatus = "The selected feeds could not be composed for the TV in time."; message = castStatus
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 relay?.close()
@@ -833,7 +848,7 @@ class AppState(
                     if (castTiles.size == 1) prepareDirectCast(castTiles.single()) else prepareNativeComposedCast(castTiles)
                     return@launch
                 }
-                if (castRelay === relay) releaseCastRelay()
+                if (relay != null && castRelay === relay) releaseCastRelay()
                 relay?.close()
                 android.util.Log.w("PitwallCast", DiagnosticRedaction.redact(error.stackTraceToString()))
                 castStatus = (error.message ?: "Unable to prepare the selected feeds for casting").replace(Regex("https?://\\S+"), "[URL]").take(240)
@@ -845,11 +860,13 @@ class AppState(
             }
         }
     }
-    private fun loadGoogleCastMedia(relay: app.apexview.cast.SceneCastRelay) {
+    private fun loadGoogleCastMedia(
+        relay: app.apexview.cast.SceneCastRelay,
+        layoutScene: JSONObject? = if (usesLayoutCastReceiver) castVideoScene(relay.session) else null,
+    ) {
         val client = googleCastRemoteClient ?: return
         val url = relay.googleCastMediaUrl
         if (googleCastLoadedUrl == url) return
-        val layoutScene = if (usesLayoutCastReceiver) castVideoScene(relay.session) else null
         if (usesLayoutCastReceiver && layoutScene == null) {
             failGoogleCastLoad("The phone video layout is not ready. Keep the player open and reconnect Cast.")
             return
@@ -966,18 +983,18 @@ class AppState(
                     if (!castBusy && android.os.SystemClock.elapsedRealtime() >= castRetryAfter) prepareFullSceneCast(true)
                 } else if (castSceneConfirmed) {
                     directCastScene(state)?.let { model ->
-                        if (model.toString() != previous) { localConnection?.send(app.apexview.cast.local.FcastProtocol.SCENE, model); previous = model.toString() }
+                        val text = model.toString()
+                        if (text != previous) { sendLocalCastScene(model); previous = text }
                     }
-                    if (localTimingSupported) runCatching { timing.messages(localLoadId).forEach { localConnection?.send(app.apexview.cast.local.FcastProtocol.TIMING, it) } }
-                        .onFailure { android.util.Log.w("PitwallCast", "Timing state update rejected: ${it.javaClass.simpleName}") }
                 }
+                publishLocalCastTiming(timing, state.contentId)
                 kotlinx.coroutines.delay(100)
             }
         }
     }
     private fun directCastScene(state: DirectCast): JSONObject? {
         if (canvasW <= 0 || canvasH <= 0) return null
-        val tile = tiles.singleOrNull()?.takeIf { it.id == state.tileId } ?: return null
+        val tile = tiles.singleOrNull()?.takeIf { it.id == state.tileId && it.w > 0f && it.h > 0f } ?: return null
         return app.apexview.cast.CastSceneProtocol.encode(app.apexview.scene.VideoScene(canvasW, canvasH, 1920, 1080, 1,
             listOf(app.apexview.scene.VideoWindow(tile.id, 0, tile.x, tile.y, tile.w, tile.h, tile.z)), 1, 1920, 1080, 1920, 1080))
     }
@@ -998,6 +1015,7 @@ class AppState(
         val dashOffset = if (live && localWindowUtc != null && windowUtc != null) localWindowUtc - windowOffset - windowUtc else -windowOffset
         val hlsOffset = windowUtc?.let { -it } ?: clock.wallClockMs()?.let { clock.player.currentPosition - it } ?: 0L
         val audio = selected.firstOrNull { it.audible } ?: selected.first()
+        val selection = selected.map { it.id to it.feed.sourceStream.profileLabel }
         castBusy = true; castStatus = "Preparing complete HD feeds and protected audio for the TV…"; message = castStatus
         val generation = ++castPreparationGeneration
         castRetryAfter = android.os.SystemClock.elapsedRealtime() + 5_000
@@ -1019,15 +1037,18 @@ class AppState(
                 kotlinx.coroutines.withTimeout(60_000) {
                     while (!next.ready) { next.update(targetMs); if (!next.ready) kotlinx.coroutines.delay(250) }
                 }
+                val layout = awaitCastLayout { nativeCastScene(next) }
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                 require(localConnection?.socket === socket && generation == castPreparationGeneration &&
-                    selected.map { it.id to it.feed.sourceStream.profileLabel } == tiles.map { it.id to it.feed.sourceStream.profileLabel }) { "Cast selection or connection changed during preparation" }
+                    selection == tiles.map { it.id to it.feed.sourceStream.profileLabel }) {
+                    "Cast selection or connection changed during preparation"
+                }
+                loadNativeComposedCast(next, selected, targetMs, layout)
                 nativeCastPump?.cancel(); nativeCastPump = null
                 nativeComposedCast?.let { retiredNativeCasts += it }
                 castRelay?.let { retiredCastRelays += it }; castRelay = null
                 nativeComposedCast = next; directCast = null; owned = null
                 if (preparingNativeCast === next) preparingNativeCast = null
-                loadNativeComposedCast(next, selected, targetMs)
                 nativeCastPump = scope.launch {
                     try {
                         while (nativeComposedCast === next) {
@@ -1042,7 +1063,7 @@ class AppState(
                         }
                     }
                 }
-                startNativeCastSceneUpdates(next)
+                startNativeCastSceneUpdates(next, selected.first().contentId)
             } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
                 if (generation == castPreparationGeneration) { castStatus = "HD protected feeds did not become ready in time. Retry casting."; message = castStatus }
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
@@ -1058,23 +1079,41 @@ class AppState(
             }
         }
     }
+    private suspend fun awaitCastLayout(current: () -> JSONObject?): JSONObject =
+        kotlinx.coroutines.withTimeoutOrNull(2_500L) {
+            var layout = current()
+            while (layout == null) {
+                kotlinx.coroutines.delay(50)
+                layout = current()
+            }
+            layout
+        } ?: throw IOException("The phone layout is not ready. Keep the player open and retry casting.")
+
+    private fun castWindows(labels: List<String>): List<app.apexview.scene.VideoWindow>? {
+        if (canvasW <= 0 || canvasH <= 0 || tiles.size != labels.size) return null
+        val windows = tiles.mapNotNull { tile ->
+            val source = labels.indexOf(tile.feed.sourceStream.profileLabel)
+            val saved = protectedCompositionBounds[tile]
+            val width = saved?.w ?: tile.w
+            val height = saved?.h ?: tile.h
+            if (source < 0 || width <= 0 || height <= 0) null
+            else app.apexview.scene.VideoWindow(tile.id, source, saved?.x ?: tile.x, saved?.y ?: tile.y,
+                width, height, saved?.z ?: tile.z)
+        }
+        return windows.takeIf { it.map { window -> window.source }.distinct().size == labels.size }
+    }
+
     private fun nativeCastScene(session: app.apexview.cast.NativeComposedCastSession): JSONObject? {
         val geometry = session.geometry ?: return null
-        if (canvasW <= 0 || canvasH <= 0) return null
-        val windows = tiles.mapNotNull { tile ->
-            val source = session.sourceLabels.indexOf(tile.feed.sourceStream.profileLabel)
-            val saved = protectedCompositionBounds[tile]
-            val x = saved?.x ?: tile.x; val y = saved?.y ?: tile.y
-            val w = saved?.w ?: tile.w; val h = saved?.h ?: tile.h; val z = saved?.z ?: tile.z
-            if (source < 0 || w <= 0 || h <= 0) null else app.apexview.scene.VideoWindow(tile.id, source, x, y, w, h, z)
-        }
-        if (windows.size != session.sourceLabels.size) return null
+        val windows = castWindows(session.sourceLabels) ?: return null
         return app.apexview.cast.CastSceneProtocol.encode(app.apexview.scene.VideoScene(canvasW, canvasH,
             session.width, session.height, session.sourceLabels.size, windows, geometry.atlasColumns,
             geometry.codedWidth, geometry.codedHeight, geometry.displayWidth, geometry.displayHeight))
     }
-    private fun loadNativeComposedCast(session: app.apexview.cast.NativeComposedCastSession, selected: List<Tile>, targetMs: Long) {
-        val layout = nativeCastScene(session) ?: throw IOException("The phone window layout is not ready")
+
+    private fun loadNativeComposedCast(
+        session: app.apexview.cast.NativeComposedCastSession, selected: List<Tile>, targetMs: Long, layout: JSONObject,
+    ) {
         val channels = selected.map { requireNotNull(it.channel.channelId) }
         val audible = selected.firstOrNull { it.audible } ?: selected.first()
         val license = app.apexview.cast.local.ReceiverLicenseRequest(selected.first().contentId, channels, requireNotNull(audible.channel.channelId))
@@ -1092,7 +1131,18 @@ class AppState(
         if (!playing) localConnection?.send(app.apexview.cast.local.FcastProtocol.PAUSE)
         castStatus = "TV is authorizing its licence and preparing one decoder. Waiting for its first frame…"; message = castStatus
     }
-    private fun startNativeCastSceneUpdates(session: app.apexview.cast.NativeComposedCastSession) {
+    private fun sendLocalCastScene(model: JSONObject) {
+        localConnection?.send(app.apexview.cast.local.FcastProtocol.SCENE, model.put("playbackId", localLoadId))
+    }
+
+    private fun publishLocalCastTiming(timing: app.apexview.cast.CastTimingPublisher, contentId: Long?) {
+        if (!localChosen || !localTimingSupported || !castSceneConfirmed || leaderTile()?.contentId != contentId) return
+        runCatching {
+            timing.messages(localLoadId).forEach { localConnection?.send(app.apexview.cast.local.FcastProtocol.TIMING, it) }
+        }.onFailure { android.util.Log.w("PitwallCast", "Timing display update failed: ${it.javaClass.simpleName}") }
+    }
+
+    private fun startNativeCastSceneUpdates(session: app.apexview.cast.NativeComposedCastSession, contentId: Long) {
         castSceneJob?.cancel()
         castSceneJob = scope.launch {
             val timing = app.apexview.cast.CastTimingPublisher(context, this@AppState)
@@ -1102,25 +1152,19 @@ class AppState(
                     if (!castBusy && android.os.SystemClock.elapsedRealtime() >= castRetryAfter) prepareFullSceneCast(true)
                 } else if (castSceneConfirmed) {
                     nativeCastScene(session)?.let { model ->
-                        if (model.toString() != previous) { localConnection?.send(app.apexview.cast.local.FcastProtocol.SCENE, model); previous = model.toString() }
+                        val text = model.toString()
+                        if (text != previous) { sendLocalCastScene(model); previous = text }
                     }
-                    if (localTimingSupported) runCatching { timing.messages(localLoadId).forEach { localConnection?.send(app.apexview.cast.local.FcastProtocol.TIMING, it) } }
-                        .onFailure { android.util.Log.w("PitwallCast", "Timing state update rejected: ${it.javaClass.simpleName}") }
                 }
+                publishLocalCastTiming(timing, contentId)
                 kotlinx.coroutines.delay(100)
             }
         }
     }
 
     private fun castVideoScene(session: app.apexview.tiled.HevcArchiveVodSession): JSONObject? {
-        if (canvasW <= 0 || canvasH <= 0) return null
         val labels = session.sourceLabels
-        val windows = tiles.mapNotNull { tile ->
-            val source = labels.indexOf(tile.feed.sourceStream.profileLabel)
-            if (source < 0 || tile.w <= 0 || tile.h <= 0) null else
-                app.apexview.scene.VideoWindow(tile.id, source, tile.x, tile.y, tile.w, tile.h, tile.z)
-        }
-        if (windows.size != labels.size) return null
+        val windows = castWindows(labels) ?: return null
         return app.apexview.cast.CastSceneProtocol.encode(app.apexview.scene.VideoScene(
             canvasW, canvasH, session.width, session.height, labels.size, windows,
             session.atlasColumns, session.sourceCodedWidth, session.sourceCodedHeight,
@@ -1130,6 +1174,7 @@ class AppState(
 
     private fun startCastSceneUpdates(relay: app.apexview.cast.SceneCastRelay) {
         castSceneJob?.cancel()
+        val contentId = leaderTile()?.contentId
         castSceneJob = scope.launch {
             var last = ""
             var loops = 0
@@ -1138,24 +1183,20 @@ class AppState(
                 if (tiles.map { it.feed.sourceStream.profileLabel }.toSet() != relay.session.sourceLabels.toSet()) {
                     // Keep the old relay alive and the phone stopped until replacement is ready.
                     if (!castBusy && android.os.SystemClock.elapsedRealtime() >= castRetryAfter) prepareFullSceneCast(true)
-                    kotlinx.coroutines.delay(500L)
-                    continue
                 }
                 val scene = castVideoScene(relay.session)
                 if (scene != null) {
                     val text = scene.toString()
                     if (text != last || loops % (if (localChosen && localTimingSupported) 50 else 10) == 0) {
                         runCatching {
-                            if (localChosen && castSceneConfirmed) localConnection?.send(app.apexview.cast.local.FcastProtocol.SCENE, scene)
+                            if (localChosen && castSceneConfirmed) sendLocalCastScene(scene)
                             else if (usesLayoutCastReceiver) googleCastSession?.sendMessage(app.apexview.cast.CastSceneProtocol.NAMESPACE,
                                 JSONObject().put("type", "scene").put("scene", scene).toString())
                         }.onFailure { android.util.Log.w("PitwallCast", "Scene send failed: ${it.javaClass.simpleName}") }
                         if (!localChosen || castSceneConfirmed) last = text
                     }
                 }
-                if (localChosen && localTimingSupported && castSceneConfirmed) runCatching {
-                    timing.messages(localLoadId).forEach { localConnection?.send(app.apexview.cast.local.FcastProtocol.TIMING, it) }
-                }.onFailure { android.util.Log.w("PitwallCast", "Timing display update failed: ${it.javaClass.simpleName}") }
+                publishLocalCastTiming(timing, contentId)
                 if (++loops == (if (localChosen && localTimingSupported) 150 else 30) && !castSceneConfirmed) {
                     castStatus = "TV has not confirmed layout rendering. Check the TV receiver screen and retry casting."
                     message = castStatus
@@ -5302,8 +5343,10 @@ class AppState(
                                 applyVideoBudget()
                             }
                         }
-                    } catch (e: IOException) {
-                        android.util.Log.w("PitwallVideo", "Single-channel offer unavailable after removing a feed.")
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        android.util.Log.w("PitwallVideo", "Single-channel offer unavailable after removing a feed: ${error.javaClass.simpleName}")
                     }
                 }
             }
