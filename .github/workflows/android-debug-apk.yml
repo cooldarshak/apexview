@@ -81,15 +81,15 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --no-install-recommends -y automake autoconf libtool pkg-config build-essential yasm
-          git clone --depth 1 https://github.com/ultravideo/kvazaar.git "$RUNNER_TEMP/kvazaar"
-          cd "$RUNNER_TEMP/kvazaar"
-          ./autogen.sh
-          ./configure --prefix=/usr/local
-          make -j2
-          sudo make install
-          sudo ldconfig
-          kvazaar --version
+          source_dir="$RUNNER_TEMP/kvazaar"
+          git init "$source_dir"
+          git -C "$source_dir" fetch --depth 1 https://github.com/ultravideo/kvazaar.git c997f08c805bd7ec82233654e417e06fe7c83cba
+          git -C "$source_dir" checkout --detach FETCH_HEAD
+          cmake -S "$source_dir" -B "$source_dir/ci-build" -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -DGIT_SUBMODULE=OFF
+          cmake --build "$source_dir/ci-build" --target kvazaar-bin --parallel 2
+          "$source_dir/src/kvazaar" --version
+          echo "$source_dir/src" >> "$GITHUB_PATH"
 
       - name: Generate and validate synthetic HEVC feed pair
         run: |
