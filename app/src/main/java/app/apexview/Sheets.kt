@@ -316,6 +316,7 @@ fun SettingsScreen(app: AppState) {
                 "Track map",
                 footer = "How far the map runs behind the picture. F1 stamps its video about 7 seconds after its timing data.",
             ) {
+                SwitchRow("Select driver dots", app.settings.mapDriverSelection, app.settings::updateMapDriverSelection)
                 SettingRow("Timing offset", "%+.0f s".format(app.mapOffsetMs / 1000f))
                 SettingRow("Reset to −7 s", onClick = { app.nudgeMapOffset(-7_000L - app.mapOffsetMs) })
             }

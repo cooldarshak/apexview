@@ -3765,7 +3765,7 @@ class AppState(
      */
     fun targetForMap(tile: Tile) {
         // The pit circle's cars choose its driver rather than an onboard.
-        if (timing == null || mapMode == MapMode.OFF || mapMode == MapMode.PIT || isMainTile(tile)) return
+        if (!settings.mapDriverSelection || timing == null || mapMode == MapMode.OFF || mapMode == MapMode.PIT || isMainTile(tile)) return
         targetTile = if (targetTile === tile) null else tile
         targetCount++
     }
@@ -4597,7 +4597,9 @@ class AppState(
         return minOf(TOWER_MIN_WIDTH_DP * density, maxWidth * 0.8f)..maxWidth
     }
 
-    internal val tvTowerWidthPx get() = tvTowerWidthShare * canvasW
+    internal fun tvTowerWidthFor(width: Float) = width * tvTowerWidthShare
+
+    internal val tvTowerWidthPx get() = tvTowerWidthFor(canvasW)
 
     fun updateTowerWidth(widthPx: Float) {
         if (tvLandscapeLayout && canvasW > 0f) {
@@ -4812,6 +4814,10 @@ class AppState(
     fun arrangeBy(tile: Tile, dx: Float, dy: Float, dw: Float) {
         // A finger on the map moves the map only, whatever is under it.
         if (mapGrabbed) return
+        if (tvLandscapeLayout) {
+            if (tile.id == bigTileId && dw != 0f) updateTowerWidth(tvTowerWidthPx - dw)
+            return
+        }
         val raw = (arrangeRaw ?: Box16(tile.x, tile.y, tile.w)).let { it.copy(x = it.x + dx, y = it.y + dy, w = it.w + dw) }
         arrangeRaw = raw
         if (!snapMode || canvasW <= 0f) {
@@ -4837,6 +4843,10 @@ class AppState(
     fun endArrange() {
         arrangeRaw = null
         arrangeOthers = emptyList()
+        if (tvLandscapeLayout) {
+            storeTowerPanel()
+            return
+        }
         handPlaced = true
         if (trackLogoAnchored) placeMapIfNeeded(canvasW, canvasH)
         saveWatch()

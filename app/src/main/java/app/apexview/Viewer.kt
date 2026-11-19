@@ -902,8 +902,8 @@ internal fun PlaybackVideoCanvas(app: AppState, width: Float, height: Float) {
 
 private fun tvStartupSlot(app: AppState, width: Float, height: Float): Slot? =
     if (app.layoutMode == LayoutMode.TV && width > height && !app.laptopActive &&
-        app.tiles.size == 1 && app.singleDecoderScenePlayer == null
-    ) Layouts.tvSingleLandscapeSlot(width, height) else null
+        app.tiles.singleOrNull()?.hasLayoutSlot == false && app.singleDecoderScenePlayer == null
+    ) Layouts.tvSingleLandscapeSlot(width, height, width - app.tvTowerWidthFor(width)) else null
 
 private fun clock(ms: Long): String {
     val s = ms / 1000
@@ -1012,7 +1012,7 @@ private fun TileView(
         )
 
         // Tapped as the feed the next car picked on the map replaces: a soft light runs round it.
-        val targeted = app.targetTile === tile
+        val targeted = app.settings.mapDriverSelection && app.targetTile === tile
         LaunchedEffect(app.targetCount, targeted) {
             if (targeted) {
                 delay(TARGET_MS)
@@ -1124,10 +1124,30 @@ private fun TileView(
             }
         }
 
-        AnimatedVisibility(app.chromeVisible && app.arranging, Modifier.align(Alignment.BottomEnd), enter = fadeIn(fade), exit = fadeOut(fade)) {
+        val tvMainResize = app.tvLandscapeLayout && tile.id == app.bigTileIdForUi
+        AnimatedVisibility(app.chromeVisible && app.arranging && (!app.tvLandscapeLayout || tvMainResize),
+            Modifier.align(Alignment.BottomEnd), enter = fadeIn(fade), exit = fadeOut(fade)) {
+            var remoteResize by remember { mutableStateOf(false) }
+            val remoteHandle = if (tvMainResize && app.isTv) Modifier
+                .onKeyEvent { event ->
+                    if (!remoteResize || (event.key != Key.DirectionLeft && event.key != Key.DirectionRight)) return@onKeyEvent false
+                    if (event.type == KeyEventType.KeyDown) {
+                        val step = with(density) { 16.dp.toPx() }
+                        val delta = if (event.key == Key.DirectionRight) step else -step
+                        app.updateTowerWidth(app.tvTowerWidthPx - delta)
+                        app.finishTowerResize()
+                        app.showChrome()
+                    }
+                    true
+                }
+                .onFocusChanged { if (!it.isFocused) remoteResize = false }
+                .pressable(scaleTo = 1f) { remoteResize = !remoteResize }
+                .semantics { contentDescription = if (remoteResize) "Resize main video with Left or Right" else "Resize main video" }
+            else Modifier
             Box(
                 Modifier
                     .size(44.dp)
+                    .then(remoteHandle)
                     .pointerInput(tile.id) {
                         detectDragGestures(
                             onDragStart = { app.beginArrange(tile) },
@@ -1547,7 +1567,7 @@ private fun LayoutSheet(app: AppState) {
             Text(
                 when {
                     app.layoutMode == LayoutMode.TV ->
-                        "Video uses the left area. Unlock the layout to move or resize the timing tower in the sidebar."
+                        "Unlock the layout to resize the main video. The timing tower uses the remaining width."
                     app.layoutMode == LayoutMode.TILE_TEST ->
                         "Choose exactly two feeds from the same F1 session. The feed picker opens so you can select them manually. The app compares their HEVC tile parameters and reports whether the current 2×1 test assembler accepts them. Normal playback remains unchanged."
                     app.layoutMode == LayoutMode.SINGLE_DECODER_TEST ->
@@ -1732,6 +1752,7 @@ private fun MapSheet(app: AppState) {
                         )
                     }
                 }
+                SwitchRow("Select driver dots", app.settings.mapDriverSelection, app.settings::updateMapDriverSelection)
                 Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("Timing", style = Type.headline)

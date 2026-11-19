@@ -200,8 +200,7 @@ internal fun rememberTvMapTime(read: () -> Long): Long {
 
 @Composable
 internal fun rememberMapRenderTime(app: AppState): Long {
-    if (app.isTv) return rememberTvMapTime { app.mapTimeMs() ?: 0L }
-    var now by remember { mutableLongStateOf(0L) }
+    var now by remember(app) { mutableLongStateOf(app.mapTimeMs() ?: 0L) }
     LaunchedEffect(app) {
         var lastPublishedFrameMs = Long.MIN_VALUE
         while (true) {
@@ -257,6 +256,7 @@ internal fun CarTargets(
     onTap: (String) -> Unit = app::showOnboard,
     onHold: (String) -> Unit = { app.pitDriver = if (app.pitDriver == it) null else it },
 ) {
+    if (!app.settings.mapDriverSelection) return
     val target = 44.dp
     val half = with(LocalDensity.current) { target.toPx() / 2 }
     if (app.isTv) {
@@ -593,7 +593,9 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
             cars.map { it.number to timing.geometry.progress(it.x, it.y) })
     }
     TrackDrawingContent(timing, width, height, turn, app.mapOpacity, app.mapDotSizeDp, app.mapLabelSizeSp,
-        now, cars, stop, timing.flags.at(now)) { targets -> CarTargets(app, targets) }
+        now, cars, stop, timing.flags.at(now), targets = if (app.settings.mapDriverSelection) {
+            { targets -> CarTargets(app, targets) }
+        } else null)
 }
 
 /** Pure current-state rendering, shared with the LAN receiver without replay-history parsing. */
@@ -601,7 +603,7 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
 internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Float, turn: Float,
     opacity: Float, dotSizeDp: Float, labelSizeSp: Float, now: Long, currentCars: List<Car>,
     stop: PitStopNow?, flags: FlagPicture, leader: String? = null,
-    targets: @Composable (List<Pair<String, Offset>>) -> Unit = {},
+    targets: (@Composable (List<Pair<String, Offset>>) -> Unit)? = null,
 ) {
     val density = LocalDensity.current
     val fit = remember(timing.outline, width, height, turn, density) {
@@ -695,7 +697,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
             safetyCar?.let { drawSafetyCar(it, 10.dp.toPx(), scLabel) }
         }
     }
-    targets(cars.map { (car, p) -> car.number to p })
+    targets?.invoke(cars.map { (car, p) -> car.number to p })
 }
 
 private val FlagYellow = Color(0xFFFFD60A)
@@ -903,9 +905,10 @@ fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, i
             cars.map { it.number to timing.geometry.progress(it.x, it.y) })
     }
     EdgeDrawingContent(timing, width, height, inset, screenCornerRadius, app.mapOpacity, now,
-        cars, stop, timing.flags.at(now), dotSizeDp = app.mapDotSizeDp, labelSizeSp = app.mapLabelSizeSp) {
-        targets -> CarTargets(app, targets)
-    }
+        cars, stop, timing.flags.at(now), dotSizeDp = app.mapDotSizeDp, labelSizeSp = app.mapLabelSizeSp,
+        targets = if (app.settings.mapDriverSelection) {
+            { targets -> CarTargets(app, targets) }
+        } else null)
 }
 
 @Composable
@@ -913,7 +916,7 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     screenCornerRadius: Float, opacity: Float, now: Long, currentCars: List<Car>,
     stop: PitStopNow?, flags: FlagPicture, leader: String? = null,
     dotSizeDp: Float, labelSizeSp: Float,
-    targets: @Composable (List<Pair<String, Offset>>) -> Unit = {},
+    targets: (@Composable (List<Pair<String, Offset>>) -> Unit)? = null,
 ) {
     val fallback = with(LocalDensity.current) { 24.dp.toPx() }
     // The screen's own corner radius. Up to 0.15 it was concentric (half the inset smaller),
@@ -1017,7 +1020,7 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
         }
         safetyCar?.let { drawSafetyCar(ribbon.point(it), 7.5.dp.toPx(), scLabel) }
     }
-    targets(cars.map { (car, f) -> car.number to ribbon.point(f) })
+    targets?.invoke(cars.map { (car, f) -> car.number to ribbon.point(f) })
 }
 
 /**

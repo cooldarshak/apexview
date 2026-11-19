@@ -184,11 +184,14 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
     LaunchedEffect(app, timing) {
         while (true) {
             val now = app.mapTimeMs() ?: 0L
-            val rows = timing.laps.mapNotNull { (number, laps) ->
-                laps.at(now, includeRunningTime = false)?.let { number to it }
-            }.sortedBy { it.second.position ?: 99 }
-            sample = TowerSample(rows, towerSessionHeader(timing, now), timing.tyres.mapValues { it.value.at(now) },
-                timing.speeds.mapValues { it.value.kmhAt(now) to it.value.gearAt(now) })
+            val speeds = timing.speeds
+            sample = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val rows = timing.laps.mapNotNull { (number, laps) ->
+                    laps.at(now, includeRunningTime = false)?.let { number to it }
+                }.sortedBy { it.second.position ?: 99 }
+                TowerSample(rows, towerSessionHeader(timing, now), timing.tyres.mapValues { it.value.at(now) },
+                    speeds.mapValues { it.value.kmhAt(now) to it.value.gearAt(now) })
+            }
             delay(if (app.isTv) 250L else 500L)
         }
     }

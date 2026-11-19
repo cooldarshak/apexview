@@ -53,6 +53,14 @@ class Settings(context: Context) {
         private set
     var showStats by mutableStateOf(prefs.getBoolean("showStats", false))
         private set
+    var mapDriverSelection by mutableStateOf(prefs.getBoolean("mapDriverSelection", true))
+        private set
+
+    fun updateMapDriverSelection(value: Boolean) {
+        mapDriverSelection = value
+        prefs.edit().putBoolean("mapDriverSelection", value).apply()
+    }
+
     /** Live races: a note near the end offering to vote for Driver of the Day. */
     var votePrompt by mutableStateOf(prefs.getBoolean("votePrompt", true))
         private set

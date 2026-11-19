@@ -266,6 +266,19 @@ class LayoutsTest {
     }
 
     @Test
+    fun tvSidebarAndSingleFeedTradeWidthAtSixteenByNine() {
+        val width = 1920f
+        val height = 1080f
+        for (share in listOf(0.20f, 0.34f, 0.60f)) {
+            val plan = Layouts.withCombinedOverlays(
+                LayoutMode.TV, 1, width, height, OverlayLayoutMode.DOCKED, tvTowerWidth = width * share,
+            )
+            assertEquals(plan.tower.x, plan.slots.single().w, 0.1f)
+            assertEquals(width, plan.slots.single().w + plan.tower.w, 0.1f)
+        }
+    }
+
+    @Test
     fun trackerStartsOverTheLogoAndCanMovePastTheRightEdgeOfTheVideo() {
         for (mode in listOf(LayoutMode.TV, LayoutMode.FEATURED, LayoutMode.GRID)) {
             val main = if (mode == LayoutMode.TV) Layouts.tvSingleLandscapeSlot(2316f, 1080f)

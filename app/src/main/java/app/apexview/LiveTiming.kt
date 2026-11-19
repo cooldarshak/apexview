@@ -741,6 +741,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             progress("Archive session resolved: $path · type=$type")
             val driverTask = async { parseDrivers(JSONObject(fetchStage(path + "DriverList.json"))) }
             val heartbeatTask = async { parseStreamStart(fetchStage(path + "Heartbeat.jsonStream")) }
+            val positionClock = CompletableDeferred<Long?>()
+            var partialClock: Long? = null
             var partialTracks: Map<String, DriverTrack> = emptyMap()
             var partialOutline = FloatArray(0)
             var partialHistory = DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
@@ -784,7 +786,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 onPartial(SessionTiming(
                     type = type, drivers = drivers, tracks = partialTracks,
                     states = partialHistory.states.states, outline = partialOutline,
-                    hasStartFinish = false, corners = emptyList(), startUtcMs = initialStart,
+                    hasStartFinish = false, corners = emptyList(), startUtcMs = partialClock ?: initialStart,
                     circuitKey = ref.circuitKey, laps = partialHistory.laps, radioBase = BASE + path,
                 ).apply { archivePartial = true })
             }
@@ -807,40 +809,52 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                             }
                         }
                         open(topic).bufferedReader().use { reader ->
-                            val initialStart = heartbeatTask.await()
-                            fun parseFull(source: java.io.BufferedReader): PositionParseReport = source.useLines { lines ->
+                            val heartbeatStart = heartbeatTask.await()
+                            val firstLines = reader.lineSequence().take(100).onEach { job.ensureActive() }.toList()
+                            val positionStart = positionsStreamStart(firstLines.joinToString("\n"))
+                            positionClock.complete(positionStart)
+                            val initialStart = positionStart
+                                ?.takeIf { abs(it - heartbeatStart) > STREAM_START_SLACK_MS } ?: heartbeatStart
+                            fun parseFull(lines: Sequence<String>): PositionParseReport {
                                 var lastPreviewAt = -1_000L
                                 var previewOutline = FloatArray(0)
                                 var lastTraceAt = -1_000L
                                 var publishedThrough: Long? = null
-                                parsePositionLines(lines, { job.ensureActive() }, report) { builders ->
-                                    val now = android.os.SystemClock.elapsedRealtime()
-                                    val target = targetUtc(initialStart)
-                                    if (now - lastPreviewAt < 400 || publishedThrough?.let { target <= it - 10_000 } == true) {
-                                        return@parsePositionLines
-                                    }
-                                    val snapshot = builders.mapValues { it.value.build() }
-                                    val covering = snapshot.values.filter { it.at(target) != null }
-                                    if (covering.isEmpty()) return@parsePositionLines
-                                    if (previewOutline.isEmpty()) {
-                                        previewOutline = availableCircuit.get()?.outline ?: FloatArray(0)
-                                        if (previewOutline.isEmpty() && now - lastTraceAt >= 750) {
-                                            previewOutline = traceOutline(builders.values.toList())
-                                            lastTraceAt = now
+                                val thread = android.os.Process.myTid()
+                                val previousPriority = android.os.Process.getThreadPriority(thread)
+                                try {
+                                    android.os.Process.setThreadPriority(thread, android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                                    return parsePositionLines(lines, { job.ensureActive() }, report) { builders ->
+                                        val now = android.os.SystemClock.elapsedRealtime()
+                                        val target = targetUtc(initialStart)
+                                        if (now - lastPreviewAt < 400 || publishedThrough?.let { target <= it - 10_000 } == true) {
+                                            return@parsePositionLines
                                         }
+                                        val snapshot = builders.mapValues { it.value.build() }
+                                        val covering = snapshot.values.filter { it.at(target) != null }
+                                        if (covering.isEmpty()) return@parsePositionLines
+                                        if (previewOutline.isEmpty()) {
+                                            previewOutline = availableCircuit.get()?.outline ?: FloatArray(0)
+                                            if (previewOutline.isEmpty() && now - lastTraceAt >= 750) {
+                                                previewOutline = traceOutline(builders.values.toList())
+                                                lastTraceAt = now
+                                            }
+                                        }
+                                        if (previewOutline.size < 8) return@parsePositionLines
+                                        lastPreviewAt = now
+                                        publishedThrough = covering.maxOf { it.endMs }
+                                        val outline = previewOutline
+                                        report("position preview targetUtcMs=$target cars=${covering.size} throughUtcMs=$publishedThrough")
+                                        launch { publishTracks(snapshot, outline, initialStart) }
                                     }
-                                    if (previewOutline.size < 8) return@parsePositionLines
-                                    lastPreviewAt = now
-                                    publishedThrough = covering.maxOf { it.endMs }
-                                    val outline = previewOutline
-                                    report("position preview targetUtcMs=$target cars=${covering.size} throughUtcMs=$publishedThrough")
-                                    launch { publishTracks(snapshot, outline, initialStart) }
+                                } finally {
+                                    android.os.Process.setThreadPriority(thread, previousPriority)
                                 }
                             }
                             val offset = targetUtc(initialStart) - initialStart
                             if (positionScratchDir == null || offset < 180_000L) {
                                 report("single-pass position decode offsetMs=$offset")
-                                return@traceStage parseFull(reader)
+                                return@traceStage parseFull(firstLines.asSequence() + reader.lineSequence())
                             }
                             val spool = java.io.File.createTempFile("replay-positions-", ".stream", positionScratchDir)
                             try {
@@ -854,13 +868,11 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                         writer.newLine()
                                         return line
                                     }
-                                    val firstLines = reader.lineSequence().take(100).map(::copy).toList()
-                                    val probe = positionsStreamStart(firstLines.joinToString("\n")) ?: initialStart
-                                    val wanted = ReplayPositionWindow(targetUtc(initialStart) - probe)
+                                    val wanted = ReplayPositionWindow(targetUtc(initialStart) - initialStart)
                                     // Bound startup work to a few minutes of positions near the replay clock.
                                     // Copy the remaining data through to disk for seeks and full history.
                                     report("streaming position window targetMs=${wanted.targetMs}")
-                                    val incoming = firstLines.asSequence() + reader.lineSequence().map(::copy)
+                                    val incoming = (firstLines.asSequence() + reader.lineSequence()).map(::copy)
                                     val records = incoming.iterator()
                                     val window = sequence {
                                         while (records.hasNext()) {
@@ -868,7 +880,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                             val prefix = streamPrefixLength(line)
                                             if (prefix >= line.length) continue
                                             val offset = streamOffsetMs(line, prefix)
-                                            if (wanted.retarget(targetUtc(initialStart) - probe)) {
+                                            if (wanted.retarget(targetUtc(initialStart) - initialStart)) {
                                                 report("retargeted position window offsetMs=$offset targetMs=${wanted.targetMs}")
                                             }
                                             if (offset > wanted.lastMs) break
@@ -908,14 +920,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                     report("position window available cars=${initial.tracks.size} outlinePoints=${outline.size / 2}")
                                     while (records.hasNext()) records.next()
                                 }
-                                val thread = android.os.Process.myTid()
-                                val previousPriority = android.os.Process.getThreadPriority(thread)
-                                try {
-                                    android.os.Process.setThreadPriority(thread, android.os.Process.THREAD_PRIORITY_BACKGROUND)
-                                    parseFull(spool.bufferedReader())
-                                } finally {
-                                    android.os.Process.setThreadPriority(thread, previousPriority)
-                                }
+                                spool.bufferedReader().useLines { parseFull(it) }
                             } finally {
                                 spool.delete()
                             }
@@ -926,10 +931,18 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 } catch (e: Exception) {
                     progress("PARSE FAIL positions · ${e.javaClass.simpleName}: ${e.message}")
                     PositionParseReport(emptyMap(), 0, 0, 0, 0)
+                } finally {
+                    positionClock.complete(null)
                 }
             }
             val historyTask = async(Dispatchers.IO) {
                 val primaryPreview = CompletableDeferred<Unit>()
+                val heartbeatStart = heartbeatTask.await()
+                val initialStart = withTimeoutOrNull(4_000L) { positionClock.await() }
+                    ?.takeIf { abs(it - heartbeatStart) > STREAM_START_SLACK_MS } ?: heartbeatStart
+                if (initialStart != heartbeatStart) {
+                    checkpoint("tower-clock", "position clock correctionMs=${initialStart - heartbeatStart}")
+                }
                 val timingTask = async {
                     val topic = path + "TimingData.jsonStream"
                     val started = android.os.SystemClock.elapsedRealtime()
@@ -937,7 +950,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     checkpoint("tower-download", "opening HTTP stream")
                     try {
                         open(topic).bufferedReader().use { reader ->
-                            val start = heartbeatTask.await()
+                            val start = initialStart
                             val text = StringBuilder()
                             val lines = reader.lineSequence().map { line ->
                                 job.ensureActive()
@@ -956,6 +969,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                 val elapsed = android.os.SystemClock.elapsedRealtime() - started
                                 checkpoint("tower-preview", "drivers=${preview.history.laps.size} throughUtcMs=${preview.throughUtcMs} elapsedMs=$elapsed")
                                 withContext(Dispatchers.Main) {
+                                    partialClock = initialStart
                                     partialHistory = preview.history
                                     publishTopics()
                                 }
@@ -986,7 +1000,6 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 }
                 val timingStream = timingTask.await()
                 val timingF1Stream = timingF1Task.await()
-                val initialStart = heartbeatTask.await()
                 val history = if (timingStream == null) {
                     progress("TimingData unavailable; timing tower history could not be loaded")
                     DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
@@ -1011,6 +1024,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                             publishedTarget = target
                                             val snapshot = DriverTimingParse(laps, accumulator.finish())
                                             launch(Dispatchers.Main) {
+                                                partialClock = initialStart
                                                 partialHistory = snapshot
                                                 publishTopics()
                                             }
@@ -1032,10 +1046,11 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     }
                 }
                 withContext(Dispatchers.Main) {
+                    partialClock = initialStart
                     partialHistory = history
                     publishTopics()
                 }
-                timingStream to history
+                Triple(timingStream, history, initialStart)
             }
             val drivers = driverTask.await()
             val initialStart = heartbeatTask.await()
@@ -1071,11 +1086,11 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             }
             progress(if (tracks.isEmpty()) "Track positions unavailable; loading timing history…" else "Track map available · loading timing history…")
 
-            val (timingStream, initialHistory) = historyTask.await()
+            val (timingStream, initialHistory, historyStart) = historyTask.await()
             // Heartbeat anchors the stream clock. Some sessions have bad offsets; the cars' own
             // timestamps win when they disagree with it by more than a minute.
             val streamStart = positionReport.streamStart?.takeIf { abs(it - initialStart) > STREAM_START_SLACK_MS } ?: initialStart
-            val clockShift = streamStart - initialStart
+            val clockShift = streamStart - historyStart
             val history = if (clockShift == 0L) {
                 initialHistory
             } else {
