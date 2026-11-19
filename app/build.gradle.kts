@@ -97,10 +97,11 @@ android {
         unitTests.isReturnDefaultValues = true
         unitTests.isIncludeAndroidResources = true
         unitTests.all {
-            // Robolectric fetches android-all-instrumented at test runtime, outside Gradle's
-            // dependency resolver. Use Maven Central's canonical endpoint to avoid repo1 429s.
-            it.systemProperty("robolectric.dependency.repo.url", "https://repo.maven.apache.org/maven2")
-            it.systemProperty("robolectric.dependency.repo.id", "mavenCentral")
+            // Robolectric fetches android-all-instrumented outside Gradle's resolver. CI
+            // runners can receive HTTP 429 from both Maven Central endpoints. Use Google's
+            // documented mirror of Maven Central for these runtime-only test SDK jars.
+            it.systemProperty("robolectric.dependency.repo.url", "https://maven-central.storage-download.googleapis.com/maven2")
+            it.systemProperty("robolectric.dependency.repo.id", "googleMavenCentralMirror")
         }
     }
 
