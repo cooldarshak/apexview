@@ -15,6 +15,8 @@ class ArchiveBufferPolicyTest {
         assertTrue(ArchiveBufferPolicy.preemptWarmup(88, cached = false, active = null))
         assertFalse(ArchiveBufferPolicy.preemptWarmup(41, cached = false, active = 41))
         assertFalse(ArchiveBufferPolicy.preemptWarmup(88, cached = true, active = 41))
+        assertTrue(ArchiveBufferPolicy.preemptWarmup(88, cached = true, active = 41, seek = true))
+        assertFalse(ArchiveBufferPolicy.preemptWarmup(41, cached = true, active = 41, seek = true))
     }
 
     @Test fun anExpiredPreflightWindowCannotReplaceThePlayingSources() {

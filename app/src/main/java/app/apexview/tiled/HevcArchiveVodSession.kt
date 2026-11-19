@@ -123,7 +123,7 @@ internal class HevcArchiveVodSession(
     /** Stop stale warm-ahead work as soon as a user seeks to a different fragment. */
     fun prioritizeSeek(positionMs: Long) {
         val target = segmentAt(positionMs.coerceAtLeast(0) * 1000L)
-        preemptUnrelatedWarmup(target)
+        preemptUnrelatedWarmup(target, seek = true)
     }
 
     fun segment(number: Int): ByteArray {
@@ -155,11 +155,11 @@ internal class HevcArchiveVodSession(
         return bytes
     }
 
-    private fun preemptUnrelatedWarmup(number: Int) {
+    private fun preemptUnrelatedWarmup(number: Int, seek: Boolean = false) {
         val cached = synchronized(cacheLock) { checkOpen(); cache.containsKey(number) }
         synchronized(warmLock) {
             if (warmTask?.isDone == false && ArchiveBufferPolicy.preemptWarmup(
-                    number, cached, warmActiveNumber)) {
+                    number, cached, warmActiveNumber, seek)) {
                 warmTask?.cancel(true)
             }
         }

@@ -28,12 +28,12 @@ internal object ArchiveBufferPolicy {
     }
 
     /**
-     * An uncached playback/seek request outranks warming a DIFFERENT fragment.
-     * A request for the fragment currently being composed should share that result.
-     * Cache hits must never discard useful background work.
+     * Uncached playback outranks an unrelated warmup, while normal cache hits leave it
+     * running. An explicit seek also cancels stale work even if the target is cached.
+     * Work already composing the requested segment is shared instead of cancelled.
      */
-    fun preemptWarmup(requested: Int, cached: Boolean, active: Int?): Boolean =
-        !cached && active != requested
+    fun preemptWarmup(requested: Int, cached: Boolean, active: Int?, seek: Boolean = false): Boolean =
+        (seek || !cached) && active != requested
 
     /** Keep the segment containing the audio clock plus two following segments. */
     fun maximumLeadUs(candidates: List<ArchiveDashSegmentSelector.Candidate>, positionUs: Long): Long {
