@@ -12,6 +12,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.contentDescription
@@ -40,8 +42,13 @@ internal fun TvTowerRow(
         tyre?.compound, tyre?.laps) {
         TowerAccessibilitySummary.prepare(name, state, tyre)
     }
+    // The decoder TextureView refreshes around 50 fps, but the tower state changes only
+    // a few times per second. Rasterize each visible row to its own bounded hardware
+    // layer so an unchanged row is composited as one texture instead of replaying dozens
+    // of Skia text/rounded-rect/circle operations for every video frame.
     Canvas(Modifier.fillMaxWidth().height(rowHeight).tvFocusRing().clickable(onClick = onClick)
-        .semantics { contentDescription = accessibleSummary }.clipToBounds()) {
+        .semantics { contentDescription = accessibleSummary }.clipToBounds()
+        .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)) {
         val canvas = drawContext.canvas.nativeCanvas
         // Match the column widths used by TowerHeader. Drawing in dp keeps phone-supplied
         // panel scaling and the user's font-scale setting effective on the Cast receiver.

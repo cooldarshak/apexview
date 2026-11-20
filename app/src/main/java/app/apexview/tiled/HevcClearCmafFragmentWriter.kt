@@ -19,11 +19,76 @@ internal object HevcClearCmafFragmentWriter {
         val sampleFlags: Long
     )
 
+    /** Rewritten HEVC NALs kept separate until the final CMAF buffer is allocated. */
+    data class NalSample(
+        val nals: List<ByteArray>,
+        val durationTicks: Long,
+        val compositionTimeOffsetTicks: Long,
+        val sampleFlags: Long
+    )
+
+    private class EncodedSample(
+        val size: Int,
+        val durationTicks: Long,
+        val compositionTimeOffsetTicks: Long,
+        val sampleFlags: Long,
+        val writePayload: (ByteBuffer) -> Unit
+    )
+
     fun write(
         trackId: Long,
         sequenceNumber: Long,
         baseDecodeTimeTicks: Long,
         samples: List<Sample>,
+        sourceTrackEncrypted: Boolean,
+        sourceFragmentHasEncryptionMetadata: Boolean
+    ): ByteArray = writePrepared(
+        trackId, sequenceNumber, baseDecodeTimeTicks,
+        samples.map { sample -> EncodedSample(sample.data.size, sample.durationTicks,
+            sample.compositionTimeOffsetTicks, sample.sampleFlags) { output -> output.put(sample.data) } },
+        sourceTrackEncrypted, sourceFragmentHasEncryptionMetadata
+    )
+
+    /** Directly prefix validated HEVC NALs into mdat without full-size per-picture copies. */
+    fun writeNalSamples(
+        trackId: Long,
+        sequenceNumber: Long,
+        baseDecodeTimeTicks: Long,
+        samples: List<NalSample>,
+        nalLengthSize: Int,
+        sourceTrackEncrypted: Boolean,
+        sourceFragmentHasEncryptionMetadata: Boolean
+    ): ByteArray {
+        require(nalLengthSize in 1..4) { "NAL length-prefix size must be between 1 and 4" }
+        val maxNalSize = if (nalLengthSize == 4) 0xffff_ffffL else (1L shl (8 * nalLengthSize)) - 1L
+        val encoded = samples.map { sample ->
+            require(sample.nals.isNotEmpty()) { "An output sample must contain a rewritten HEVC NAL" }
+            val size = sample.nals.fold(0L) { bytes, nal ->
+                require(nal.isNotEmpty() && nal.size.toLong() <= maxNalSize) {
+                    "HEVC NAL exceeds the configured length prefix"
+                }
+                Math.addExact(bytes, nalLengthSize.toLong() + nal.size)
+            }
+            require(size <= Int.MAX_VALUE) { "CMAF sample exceeds array capacity" }
+            EncodedSample(size.toInt(), sample.durationTicks, sample.compositionTimeOffsetTicks,
+                sample.sampleFlags) { output ->
+                sample.nals.forEach { nal ->
+                    for (shift in (nalLengthSize - 1) downTo 0) {
+                        output.put(((nal.size ushr (shift * 8)) and 0xff).toByte())
+                    }
+                    output.put(nal)
+                }
+            }
+        }
+        return writePrepared(trackId, sequenceNumber, baseDecodeTimeTicks, encoded,
+            sourceTrackEncrypted, sourceFragmentHasEncryptionMetadata)
+    }
+
+    private fun writePrepared(
+        trackId: Long,
+        sequenceNumber: Long,
+        baseDecodeTimeTicks: Long,
+        samples: List<EncodedSample>,
         sourceTrackEncrypted: Boolean,
         sourceFragmentHasEncryptionMetadata: Boolean
     ): ByteArray {
@@ -40,7 +105,7 @@ internal object HevcClearCmafFragmentWriter {
 
         var mediaBytes = 0L
         samples.forEachIndexed { index, sample ->
-            require(sample.data.isNotEmpty()) { "Sample $index is empty" }
+            require(sample.size > 0) { "Sample $index is empty" }
             require(sample.durationTicks in 1..UINT32_MAX) {
                 "Sample $index duration is outside the supported uint32 range"
             }
@@ -50,7 +115,7 @@ internal object HevcClearCmafFragmentWriter {
             require(sample.sampleFlags in 0..UINT32_MAX) {
                 "Sample $index flags are outside uint32 range"
             }
-            mediaBytes = Math.addExact(mediaBytes, sample.data.size.toLong())
+            mediaBytes = Math.addExact(mediaBytes, sample.size.toLong())
         }
         require(mediaBytes <= Int.MAX_VALUE - 8L) { "mdat payload exceeds the supported box size" }
 
@@ -89,18 +154,18 @@ internal object HevcClearCmafFragmentWriter {
         output.put('d'.code.toByte())
         output.put('a'.code.toByte())
         output.put('t'.code.toByte())
-        samples.forEach { sample -> output.put(sample.data) }
+        samples.forEach { sample -> sample.writePayload(output) }
         check(output.position() == result.size) { "CMAF sample payload did not fill its validated size" }
         return result
     }
 
-    private fun buildTrun(samples: List<Sample>, dataOffset: Int): ByteArray {
+    private fun buildTrun(samples: List<EncodedSample>, dataOffset: Int): ByteArray {
         val payload = ByteArrayOutputStream(8 + samples.size * 16)
         payload.write(uint32(samples.size.toLong()))
         payload.write(uint32(dataOffset.toLong()))
         samples.forEach { sample ->
             payload.write(uint32(sample.durationTicks))
-            payload.write(uint32(sample.data.size.toLong()))
+            payload.write(uint32(sample.size.toLong()))
             payload.write(uint32(sample.sampleFlags))
             payload.write(uint32(sample.compositionTimeOffsetTicks.toInt().toLong() and UINT32_MAX))
         }

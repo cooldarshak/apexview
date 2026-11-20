@@ -62,7 +62,13 @@ internal class HevcArchiveVodSession(
     private val prefetchFetchers = Executors.newFixedThreadPool(inputs.size.coerceIn(1, 4)) { r ->
         Thread(r, "ApexviewVodPrefetchNet").apply { isDaemon = true }
     }
-    private val warmer = Executors.newSingleThreadExecutor { r -> Thread(r, "ApexviewVodWarm").apply { isDaemon = true } }
+    // The speculative HEVC rewrite can consume hundreds of milliseconds of CPU and trigger
+    // young GC while the player, SurfaceTexture and UI need their regular frame deadlines.
+    // Foreground misses still compose on the requesting thread; only warm-ahead yields CPU.
+    private val warmer = Executors.newSingleThreadExecutor { r -> Thread({
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+        r.run()
+    }, "ApexviewVodWarm").apply { isDaemon = true } }
     private val warmLock = Any()
     private var warmActiveNumber: Int? = null
     @Volatile private var warmTask: Future<*>? = null
@@ -269,6 +275,7 @@ internal class HevcArchiveVodSession(
                 firstOutputSequenceNumber = anchor + 1L,
                 frameRateNumerator = (trackScale / divisor).toInt(), frameRateDenominator = (step / divisor).toInt()))
             } finally { ownedInits.forEach { it.fill(0) } }
+            var publishedFragment: ByteArray? = null
             try {
                 checkOpen()
                 val compositionMs = (System.nanoTime() - compositionStarted) / 1_000_000L
@@ -318,9 +325,12 @@ internal class HevcArchiveVodSession(
                         require(initialization!!.contentEquals(composed.initializationSegment)) { "Archive representation changed its initialization" }
                         require(abs(requireNotNull(presentationOffsetTicks) - offset) <= 1L) { "Archive decode timestamps differ from the VOD timeline" }
                     }
-                    // The cache gets its own buffer; the composer's buffer is wiped in finally.
-                    val output = composed.mediaFragments.last().copyOf()
+                    // Transfer the final owned fragment to the cache. Returning it to the
+                    // DataSource still makes a defensive copy, but this publication must not
+                    // allocate another multi-megabyte buffer just to wipe the original.
+                    val output = composed.mediaFragments.last()
                     cache.put(number, output)?.fill(0)
+                    publishedFragment = output
                     while (cache.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) cache.remove(cache.keys.first())?.fill(0)
                     val worker = if (Thread.currentThread().name == "ApexviewVodWarm") "PREFETCH" else "PLAYBACK"
                     val allocatedDuringProduction = allocatedAtStart?.let { first ->
@@ -341,7 +351,7 @@ internal class HevcArchiveVodSession(
                 }
             } finally {
                 composed.initializationSegment.fill(0)
-                composed.mediaFragments.forEach { it.fill(0) }
+                composed.mediaFragments.forEach { if (it !== publishedFragment) it.fill(0) }
             }
         } catch (error: Exception) {
             if (error is ProtectedArchiveBackendRequired) throw error

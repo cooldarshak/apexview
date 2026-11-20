@@ -10,6 +10,63 @@ import org.junit.Test
 
 class HevcClearCmafFragmentWriterTest {
     @Test
+    fun writesNalSlicesByteForByteLikeMaterializedSamplesWithoutAllocatingAnIntermediatePayload() {
+        val nalsBySample = listOf(
+            listOf(ByteArray(1024 * 1024 + 3) { (it * 19).toByte() }, byteArrayOf(0x26, 0x01)),
+            listOf(byteArrayOf(0x02, 0x03, 0x04), ByteArray(170_003) { (it * 7).toByte() })
+        )
+        for (prefixSize in 1..4) {
+            // Small samples exercise every permitted NAL prefix; the 4-byte profile
+            // additionally proves that multi-megabyte HEVC slices are copied only once.
+            val nals = if (prefixSize == 4) nalsBySample else nalsBySample.map { sample ->
+                sample.map { it.copyOf(minOf(it.size, 57)) }
+            }
+            val nalSamples = nals.mapIndexed { index, units ->
+                HevcClearCmafFragmentWriter.NalSample(units, 3600L, if (index == 0) 0L else -120L,
+                    if (index == 0) 0x02000000L else 0x01010000L)
+            }
+            val direct = HevcClearCmafFragmentWriter.writeNalSamples(
+                7, 12, 90_000, nalSamples, prefixSize, false, false)
+            val materialized = HevcClearCmafFragmentWriter.write(
+                7, 12, 90_000, nalSamples.map { sample ->
+                    val total = sample.nals.sumOf { prefixSize + it.size }
+                    val buffer = ByteBuffer.allocate(total)
+                    sample.nals.forEach { nal ->
+                        for (shift in (prefixSize - 1) downTo 0) {
+                            buffer.put(((nal.size ushr (shift * 8)) and 0xff).toByte())
+                        }
+                        buffer.put(nal)
+                    }
+                    HevcClearCmafFragmentWriter.Sample(buffer.array(), sample.durationTicks,
+                        sample.compositionTimeOffsetTicks, sample.sampleFlags)
+                }, false, false)
+            assertArrayEquals("NAL streaming must preserve every CMAF byte for $prefixSize-byte prefixes",
+                materialized, direct)
+            assertEquals(listOf(3600L, 3600L), CmafBoxInspector.inspect(direct).fragments.single()
+                .sampleTimings.map { it.durationTicks })
+        }
+    }
+
+    @Test
+    fun directNalWriterRejectsOverflowingNalLengthsAndEncryptedInputs() {
+        val nals = listOf(HevcClearCmafFragmentWriter.NalSample(
+            listOf(byteArrayOf(0x26, 0x01)), 3600, 0, 0x02000000L))
+        assertRejected("length prefix") {
+            HevcClearCmafFragmentWriter.writeNalSamples(1, 1, 0, nals, 0, false, false)
+        }
+        assertRejected("length prefix") {
+            HevcClearCmafFragmentWriter.writeNalSamples(1, 1, 0,
+                listOf(nals.single().copy(nals = listOf(ByteArray(256)))), 1, false, false)
+        }
+        assertRejected("protected") {
+            HevcClearCmafFragmentWriter.writeNalSamples(1, 1, 0, nals, 4, true, false)
+        }
+        assertRejected("encryption metadata") {
+            HevcClearCmafFragmentWriter.writeNalSamples(1, 1, 0, nals, 4, false, true)
+        }
+    }
+
+    @Test
     fun writesLargeSamplesDirectlyToOneContiguousMdatWithoutChangingInput() {
         val first = ByteArray(1024 * 1024 + 3) { (it * 17).toByte() }
         val second = ByteArray(768 * 1024 + 7) { (it * 31).toByte() }

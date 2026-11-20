@@ -116,7 +116,8 @@ internal object HevcClearCmafGridComposer {
                 frameRateNumerator = request.frameRateNumerator,
                 frameRateDenominator = request.frameRateDenominator,
                 outputNalLengthSize = first.config.nalLengthSize,
-                includeAnnexBOutput = false
+                includeAnnexBOutput = false,
+                emitSampleData = false
             )
         } finally {
             // The grid composer creates owned rewritten samples and picture identities.
@@ -151,45 +152,52 @@ internal object HevcClearCmafGridComposer {
             )
         )
 
-        val outputFragments = mutableListOf<ByteArray>()
-        var pictureOffset = 0
-        parsedFeeds.first().fragments.forEachIndexed { fragmentIndex, sourceFragment ->
-            checkNotInterrupted()
-            val count = sourceFragment.samples.size
-            val outputSamples = sourceFragment.samples.mapIndexed { sampleIndex, sourceSample ->
-                val picture = composed.pictures[pictureOffset + sampleIndex]
-                HevcClearCmafFragmentWriter.Sample(
-                    data = picture.sampleData,
-                    durationTicks = sourceSample.duration,
-                    compositionTimeOffsetTicks = sourceSample.compositionOffset,
-                    sampleFlags = sourceSample.flags
+        try {
+            val outputFragments = mutableListOf<ByteArray>()
+            var pictureOffset = 0
+            parsedFeeds.first().fragments.forEachIndexed { fragmentIndex, sourceFragment ->
+                checkNotInterrupted()
+                val count = sourceFragment.samples.size
+                val outputSamples = sourceFragment.samples.mapIndexed { sampleIndex, sourceSample ->
+                    val picture = composed.pictures[pictureOffset + sampleIndex]
+                    HevcClearCmafFragmentWriter.NalSample(
+                        nals = picture.vclNals,
+                        durationTicks = sourceSample.duration,
+                        compositionTimeOffsetTicks = sourceSample.compositionOffset,
+                        sampleFlags = sourceSample.flags
+                    )
+                }
+                outputFragments += HevcClearCmafFragmentWriter.writeNalSamples(
+                    trackId = request.outputTrackId,
+                    sequenceNumber = Math.addExact(request.firstOutputSequenceNumber, fragmentIndex.toLong()),
+                    baseDecodeTimeTicks = sourceFragment.baseDecodeTime,
+                    samples = outputSamples,
+                    nalLengthSize = first.config.nalLengthSize,
+                    sourceTrackEncrypted = false,
+                    sourceFragmentHasEncryptionMetadata = false
                 )
+                pictureOffset += count
             }
-            outputFragments += HevcClearCmafFragmentWriter.write(
-                trackId = request.outputTrackId,
-                sequenceNumber = Math.addExact(request.firstOutputSequenceNumber, fragmentIndex.toLong()),
-                baseDecodeTimeTicks = sourceFragment.baseDecodeTime,
-                samples = outputSamples,
-                sourceTrackEncrypted = false,
-                sourceFragmentHasEncryptionMetadata = false
-            )
-            pictureOffset += count
-        }
 
-        return Output(
-            initializationSegment = init,
-            mediaFragments = outputFragments,
-            codedWidth = composed.codedWidth,
-            codedHeight = composed.codedHeight,
-            displayWidth = composed.displayWidth,
-            displayHeight = composed.displayHeight,
-            sampleCount = composed.pictures.size,
-            fragmentCount = outputFragments.size,
-            evidence = composed.pictures.flatMap { it.evidence },
-            parseMs = (parsedAt - started) / 1_000_000L,
-            rewriteMs = (rewrittenAt - parsedAt) / 1_000_000L,
-            packageMs = (System.nanoTime() - rewrittenAt) / 1_000_000L,
-        )
+            return Output(
+                initializationSegment = init,
+                mediaFragments = outputFragments,
+                codedWidth = composed.codedWidth,
+                codedHeight = composed.codedHeight,
+                displayWidth = composed.displayWidth,
+                displayHeight = composed.displayHeight,
+                sampleCount = composed.pictures.size,
+                fragmentCount = outputFragments.size,
+                evidence = composed.pictures.flatMap { it.evidence },
+                parseMs = (parsedAt - started) / 1_000_000L,
+                rewriteMs = (rewrittenAt - parsedAt) / 1_000_000L,
+                packageMs = (System.nanoTime() - rewrittenAt) / 1_000_000L,
+            )
+        } finally {
+            // The final CMAF fragments own their copied bytes; no full rewritten HEVC
+            // sample buffers need to survive this call, including on exception paths.
+            composed.pictures.forEach { picture -> picture.vclNals.forEach { it.fill(0) } }
+        }
     }
 
     private fun sequence(

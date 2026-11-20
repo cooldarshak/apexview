@@ -94,7 +94,10 @@ internal object HevcTizenGridComposer {
         outputNalLengthSize: Int = 4,
         // CMAF callers already have length-prefixed pictures. Rebuilding a second full
         // Annex-B stream doubles peak output memory and allocation pressure for no benefit.
-        includeAnnexBOutput: Boolean = true
+        includeAnnexBOutput: Boolean = true,
+        // A CMAF writer can prefix these verified rewritten NALs directly into its final
+        // fragment buffer. Do not first build a full-size intermediate sample per picture.
+        emitSampleData: Boolean = true
     ): Result {
         require(feedStreams.size >= 2) { "At least two independent source feeds are required" }
         require(outputNalLengthSize in 1..4) { "Output NAL length size must be between 1 and 4" }
@@ -278,10 +281,10 @@ internal object HevcTizenGridComposer {
             ComposedPicture(
                 frameIndex = frameIndex,
                 fullPoc = feeds.first().pictureIdentities[frameIndex].pictureOrderCount,
-                sampleData = lengthPrefix(vclOutput, outputNalLengthSize),
-                // CMAF has already copied these NALs into the sample data, so retaining
-                // every rewritten slice would double the live video payload in memory.
-                vclNals = if (includeAnnexBOutput) vclOutput else emptyList(),
+                sampleData = if (emitSampleData) lengthPrefix(vclOutput, outputNalLengthSize) else ByteArray(0),
+                // Exactly one payload representation survives. CMAF owns the slice arrays
+                // until its final moof+mdat buffer has been written and can wipe them.
+                vclNals = if (includeAnnexBOutput || !emitSampleData) vclOutput else emptyList(),
                 evidence = evidence
             )
         }
