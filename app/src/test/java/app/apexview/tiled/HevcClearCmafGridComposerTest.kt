@@ -12,6 +12,29 @@ import org.junit.Test
 
 class HevcClearCmafGridComposerTest {
     @Test
+    fun sizesBoundedAnnexBSamplesWithoutCopyingWholeFragments() {
+        val twoBytePrefixes = byteArrayOf(77, 0, 3, 11, 22, 33, 0, 2, 44, 55, 88)
+        assertEquals(13, HevcClearCmafGridComposer.annexBSizeForSample(
+            twoBytePrefixes, offset = 1, sampleLength = 9, lengthSize = 2))
+        assertEquals(13, HevcClearCmafGridComposer.annexBSizeForSample(
+            byteArrayOf(2, 11, 12, 3, 13, 14, 15), 0, 7, 1))
+        assertEquals(6, HevcClearCmafGridComposer.annexBSizeForSample(
+            byteArrayOf(0, 0, 2, 9, 10), 0, 5, 3))
+        assertEquals(6, HevcClearCmafGridComposer.annexBSizeForSample(
+            byteArrayOf(0, 0, 0, 2, 9, 10), 0, 6, 4))
+    }
+
+    @Test
+    fun rejectsMalformedLengthPrefixesAndOutOfBoundsSamples() {
+        fun invalid(bytes: ByteArray, offset: Int, length: Int, prefix: Int) =
+            runCatching { HevcClearCmafGridComposer.annexBSizeForSample(bytes, offset, length, prefix) }.isFailure
+        assertTrue(invalid(byteArrayOf(0, 4, 9, 10), 0, 4, 2))
+        assertTrue(invalid(byteArrayOf(0), 0, 1, 2))
+        assertTrue(invalid(byteArrayOf(0, 2, 9, 10), 2, 3, 2))
+        assertTrue(invalid(byteArrayOf(0, 2, 9, 10), 0, 4, 5))
+    }
+
+    @Test
     fun composesTwoTimedClearCmafFeedsIntoOneGridTrack() {
         val fixtureDir = System.getenv("APEXVIEW_HEVC_FIXTURE_DIR")
             ?.takeIf { it.isNotBlank() }?.let(::File)

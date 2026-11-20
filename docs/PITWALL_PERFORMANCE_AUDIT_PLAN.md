@@ -40,7 +40,35 @@ require a successful sustained playback trace.
 Build 564 caught one additional eager check: `HevcArchiveVodSession.align()` rejected any
 future `EXT-X-GAP` or incompatible source duration while constructing the full timeline.
 Keep those chunks addressable in the finite MPD and let the per-request fetch reject only the actual invalid chunk. The
-synthetic gap regression exposed this before the device retest; a follow-up CI build is required.
+synthetic gap regression exposed this before the device retest. Build 565 passed CI and
+produced the installable APK; the S22 Ultra subsequently played composed streams, so the
+previous whole-playlist start failure is no longer reproduced in this capture.
+
+### Build 565 real-device performance report (20 November 2026)
+
+`pitwall-20261120-031400-400.log.txt` shows successful S22 Ultra playback with one active
+`c2.qti.hevc.decoder` and two test setups. Two feeds resolved to 1080p + 360p (coded
+1920x1088 + 960x544), producing a 1920x1632 atlas. Four feeds resolved to **two** 1080p
+sources plus **two** 360p sources (960x544 coded), producing a 2880x2176 atlas of
+6,266,880 pixels, about 50% larger than Build 562's four-feed coded atlas. This is not
+a matched-quality speed comparison. Four-feed playback had 780 slow window frames out of
+1,150 (67.8%) in the measured active interval, two frozen frames, worst 928 ms,
+63 grouped SurfaceTexture producer timeouts, and 57 GCs reclaiming about 3.1 GB
+cumulatively in roughly 35 seconds. The compositor usually produced 5.76 seconds of media
+within 2.6–3.3 seconds; one segment took 4.55 seconds. Renderer counters typically latched
+roughly 250 frames/5 seconds after startup with rare >45ms gaps, but physical presentation
+remains **unmeasured**. The phone reported both 60 and 120 Hz, neither an integer multiple
+of the source's 50 fps. Media3 dropped-frame counts do not contradict the visible stutter.
+
+Next P0.2 follow-up batch (not yet device validated): remove the oversized
+`ByteArrayOutputStream` plus `toByteArray()` duplicate on every source CMAF-to-Annex-B
+conversion by sizing an owned array from validated sample boundaries, retaining complete
+per-sample NAL/HEVC validation and zeroing on errors. Add unit tests for short length
+prefixes, bounded ranges and malformed NAL lengths. Record process-wide allocated bytes
+and GC count during each segment so the next log can correlate allocation with composition.
+These counters include concurrent work and cannot be attributed solely to the compositor.
+P0.3/P0.4 and real-device pacing remain open; neither a green build nor this memory
+change establishes smooth playback.
 
 Baseline: `feature/per-feed-adaptive-hevc-quality` at
 `574ccb587a50f174748d1b08ed2283e4b8ed1ecc` (Build 562).

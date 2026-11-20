@@ -209,6 +209,10 @@ internal class HevcArchiveVodSession(
         checkOpen()
         require(number in groups.indices) { "Archive segment is outside the finite timeline" }
         val started = System.nanoTime()
+        // ART process-wide counters include concurrent player/UI allocation; this is a
+        // diagnostic upper bound during production, not thread-exclusive compositor bytes.
+        val allocatedAtStart = android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
+        val gcAtStart = android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
         val batches = mutableListOf<List<ByteArray>>()
         try {
             val anchor = number
@@ -316,9 +320,19 @@ internal class HevcArchiveVodSession(
                     cache.put(number, output)?.fill(0)
                     while (cache.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) cache.remove(cache.keys.first())?.fill(0)
                     val worker = if (Thread.currentThread().name == "ApexviewVodWarm") "PREFETCH" else "PLAYBACK"
+                    val allocatedDuringProduction = allocatedAtStart?.let { first ->
+                        android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
+                            ?.let { (it - first).coerceAtLeast(0L) }
+                    }
+                    val gcDuringProduction = gcAtStart?.let { first ->
+                        android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
+                            ?.let { (it - first).coerceAtLeast(0L) }
+                    }
                     android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs " +
                         "composeMs=$compositionMs verifyMs=$verificationMs totalMs=${(System.nanoTime() - started) / 1_000_000L} " +
                         "parseMs=${composed.parseMs} rewriteMs=${composed.rewriteMs} packageMs=${composed.packageMs} " +
+                        "processAllocBytesDuringSegment=${allocatedDuringProduction ?: -1L} " +
+                        "processGcDuringSegment=${gcDuringProduction ?: -1L} " +
                         "outputBytes=${output.size} durationMs=${groups[number].durationUs / 1000L} " +
                         "worker=$worker clock=PLAYER_REQUEST cache=${cache.size}")
                 }

@@ -1,6 +1,5 @@
 package app.apexview.tiled
 
-import java.io.ByteArrayOutputStream
 import java.io.InterruptedIOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -76,13 +75,17 @@ internal object HevcClearCmafGridComposer {
     /** A single clear source needs no stitching. Keep its bytes, after the same protection/syntax checks. */
     fun passThrough(feed: Feed): Output {
         val parsed = parseFeed(feed, 0)
-        val sps = parsed.config.sps.single()
-        require(HevcBitstream.splitAnnexB(parsed.annexB).first { it.type in 0..31 }.type in 16..21) {
-            "A standalone replay segment must begin with an IRAP picture"
+        try {
+            val sps = parsed.config.sps.single()
+            require(HevcBitstream.splitAnnexB(parsed.annexB).first { it.type in 0..31 }.type in 16..21) {
+                "A standalone replay segment must begin with an IRAP picture"
+            }
+            return Output(feed.initializationSegment.copyOf(), feed.mediaFragments.map { it.copyOf() },
+                sps.width, sps.height, sps.displayWidth, sps.displayHeight,
+                parsed.fragments.sumOf { it.samples.size }, parsed.fragments.size, emptyList())
+        } finally {
+            parsed.annexB.fill(0)
         }
-        return Output(feed.initializationSegment.copyOf(), feed.mediaFragments.map { it.copyOf() },
-            sps.width, sps.height, sps.displayWidth, sps.displayHeight,
-            parsed.fragments.sumOf { it.samples.size }, parsed.fragments.size, emptyList())
     }
 
     fun compose(request: Request): Output {
@@ -96,18 +99,30 @@ internal object HevcClearCmafGridComposer {
         }
 
         val started = System.nanoTime()
-        val parsedFeeds = request.feeds.mapIndexed { index, feed -> parseFeed(feed, index) }
+        val parsedFeeds = ArrayList<ParsedFeed>(request.feeds.size)
+        try {
+            request.feeds.forEachIndexed { index, feed -> parsedFeeds += parseFeed(feed, index) }
+        } catch (error: Throwable) {
+            parsedFeeds.forEach { it.annexB.fill(0) }
+            throw error
+        }
         val parsedAt = System.nanoTime()
         val first = parsedFeeds.first()
-        val composed = HevcTizenGridComposer.composeAnnexBStreams(
-            feedStreams = parsedFeeds.map { it.annexB },
-            grid = request.outputGrid,
-            cells = request.cells,
-            frameRateNumerator = request.frameRateNumerator,
-            frameRateDenominator = request.frameRateDenominator,
-            outputNalLengthSize = first.config.nalLengthSize,
-            includeAnnexBOutput = false
-        )
+        val composed = try {
+            HevcTizenGridComposer.composeAnnexBStreams(
+                feedStreams = parsedFeeds.map { it.annexB },
+                grid = request.outputGrid,
+                cells = request.cells,
+                frameRateNumerator = request.frameRateNumerator,
+                frameRateDenominator = request.frameRateDenominator,
+                outputNalLengthSize = first.config.nalLengthSize,
+                includeAnnexBOutput = false
+            )
+        } finally {
+            // The grid composer creates owned rewritten samples and picture identities.
+            // Source Annex-B streams must not survive the synchronous composition call.
+            parsedFeeds.forEach { it.annexB.fill(0) }
+        }
         val rewrittenAt = System.nanoTime()
         require(composed.pictures.size == first.fragments.sumOf { it.samples.size }) {
             "Composed picture count does not match the CMAF sample sequence"
@@ -219,11 +234,6 @@ internal object HevcClearCmafGridComposer {
         } else extractParameterSets(feed.initializationSegment, config.nalLengthSize)
         val fragments = mutableListOf<SourceFragment>()
         val metadata = mutableListOf<CmafBoxInspector.FragmentMetadata>()
-        val expectedLength = feed.mediaFragments.sumOf { it.size.toLong() } +
-            rawParameterSets.sumOf { it.size.toLong() + 4 }
-        val annexB = ByteArrayOutputStream(expectedLength.coerceIn(32L, Int.MAX_VALUE.toLong()).toInt())
-        rawParameterSets.forEach { appendAnnexB(annexB, it) }
-
         feed.mediaFragments.forEachIndexed { fragmentIndex, bytes ->
             checkNotInterrupted()
             val report = CmafBoxInspector.inspect(bytes, priorInitialization = initReport)
@@ -251,32 +261,86 @@ internal object HevcClearCmafGridComposer {
                 "Feed ${feed.label} fragment $fragmentIndex has incomplete sample timing"
             }
             val parsed = parseFragmentSamples(bytes, fragmentMetadata)
-            parsed.samples.forEachIndexed { sampleIndex, sample ->
-                checkNotInterrupted()
-                val accessUnit = HevcAccessUnitInspector.inspectLengthPrefixedSample(
-                    sample = sample.bytes,
-                    nalLengthSize = config.nalLengthSize,
-                    vps = config.vps.single(),
-                    sps = config.sps.single(),
-                    pps = config.pps.single(),
-                    context = "Feed " + feed.label + " fragment " + fragmentIndex +
-                        " sample " + sampleIndex,
-                    sampleOffset = sample.offset,
-                    sampleLength = sample.length
-                )
-                accessUnit.nalUnits.forEach { appendAnnexB(annexB, it) }
-            }
             fragments += parsed
             metadata += fragmentMetadata
         }
 
-        val extractedSampleCount = fragments.sumOf { it.samples.size }
-        require(metadata.sumOf { it.sampleCount } == extractedSampleCount) {
-            "Feed ${feed.label} CMAF fragment sample counts are inconsistent"
+        // A CMAF fragment's moof/mdat overhead is not part of its NAL payload. Reserving
+        // whole-fragment sizes in ByteArrayOutputStream and then calling toByteArray()
+        // duplicated each large source bitstream, often four times per composed segment.
+        // All fragment sample boundaries are validated above, so allocate the exact Annex-B
+        // size once. hvcC normally specifies four-byte length fields, requiring no rescan.
+        val annexBSize = exactAnnexBSize(rawParameterSets, fragments, config.nalLengthSize)
+        val annexB = ByteArray(annexBSize)
+        var written = 0
+        try {
+            rawParameterSets.forEach { written = appendAnnexB(annexB, written, it) }
+            fragments.forEachIndexed { fragmentIndex, parsed ->
+                parsed.samples.forEachIndexed { sampleIndex, sample ->
+                    checkNotInterrupted()
+                    val accessUnit = HevcAccessUnitInspector.inspectLengthPrefixedSample(
+                        sample = sample.bytes,
+                        nalLengthSize = config.nalLengthSize,
+                        vps = config.vps.single(),
+                        sps = config.sps.single(),
+                        pps = config.pps.single(),
+                        context = "Feed " + feed.label + " fragment " + fragmentIndex +
+                            " sample " + sampleIndex,
+                        sampleOffset = sample.offset,
+                        sampleLength = sample.length
+                    )
+                    accessUnit.nalUnits.forEach { written = appendAnnexB(annexB, written, it) }
+                }
+            }
+            check(written == annexB.size) { "HEVC Annex-B payload size changed during validation" }
+
+            val extractedSampleCount = fragments.sumOf { it.samples.size }
+            require(metadata.sumOf { it.sampleCount } == extractedSampleCount) {
+                "Feed ${feed.label} CMAF fragment sample counts are inconsistent"
+            }
+            return ParsedFeed(track, config, rawParameterSets, fragments, metadata, annexB)
+        } catch (error: Throwable) {
+            annexB.fill(0)
+            throw error
         }
-        return ParsedFeed(
-            track, config, rawParameterSets, fragments, metadata, annexB.toByteArray()
-        )
+    }
+
+    private fun exactAnnexBSize(
+        parameterSets: List<ByteArray>,
+        fragments: List<SourceFragment>,
+        nalLengthSize: Int
+    ): Int {
+        require(nalLengthSize in 1..4) { "Unsupported HEVC NAL length prefix" }
+        var size = parameterSets.fold(0L) { sum, nal -> Math.addExact(sum, nal.size.toLong() + 4) }
+        fragments.forEach { fragment ->
+            fragment.samples.forEach { sample ->
+                checkNotInterrupted()
+                size = Math.addExact(size, annexBSizeForSample(
+                    sample.bytes, sample.offset, sample.length, nalLengthSize).toLong())
+            }
+        }
+        require(size <= Int.MAX_VALUE) { "HEVC Annex-B bitstream exceeds array capacity" }
+        return size.toInt()
+    }
+
+    /** Exact output bytes for a bounded CMAF sample, including converted start codes. */
+    internal fun annexBSizeForSample(bytes: ByteArray, offset: Int, sampleLength: Int, lengthSize: Int): Int {
+        require(lengthSize in 1..4 && offset >= 0 && sampleLength >= 0 && offset <= bytes.size &&
+            sampleLength <= bytes.size - offset) { "Invalid CMAF sample range or NAL length size" }
+        if (lengthSize == 4) return sampleLength // The full inspector validates each NAL below.
+        val end = Math.addExact(offset, sampleLength)
+        var pos = offset
+        var count = 0
+        while (pos < end) {
+            require(end - pos >= lengthSize) { "Truncated HEVC NAL length prefix" }
+            var nalLength = 0L
+            repeat(lengthSize) { nalLength = (nalLength shl 8) or (bytes[pos++].toLong() and 0xff) }
+            require(nalLength >= 2 && nalLength <= end - pos) { "Invalid HEVC NAL length" }
+            pos += nalLength.toInt()
+            count++
+            require(count <= 4096) { "Too many HEVC NAL units in a CMAF sample" }
+        }
+        return Math.addExact(sampleLength, Math.multiplyExact(count, 4 - lengthSize))
     }
 
     private fun parseFragmentSamples(
@@ -493,9 +557,12 @@ internal object HevcClearCmafGridComposer {
         return ((nal[2].toInt() ushr 7) and 1) != 0
     }
 
-    private fun appendAnnexB(out: ByteArrayOutputStream, nal: ByteArray) {
-        out.write(0); out.write(0); out.write(0); out.write(1)
-        out.write(nal)
+    private fun appendAnnexB(out: ByteArray, offset: Int, nal: ByteArray): Int {
+        val end = Math.addExact(offset, Math.addExact(nal.size, 4))
+        check(end <= out.size) { "HEVC Annex-B payload exceeds its validated size" }
+        out[offset] = 0; out[offset + 1] = 0; out[offset + 2] = 0; out[offset + 3] = 1
+        nal.copyInto(out, offset + 4)
+        return end
     }
 
     private fun readU24(buffer: ByteBuffer): Int =
