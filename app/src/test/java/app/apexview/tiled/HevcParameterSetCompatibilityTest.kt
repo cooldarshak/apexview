@@ -123,15 +123,17 @@ class HevcParameterSetCompatibilityTest {
                 base.pps.copy(tileColumnWidthsInCtbs = listOf(wide),
                     tileRowHeightsInCtbs = listOf(high)))
 
-        // The previous first-valid search chose a 6x10-CTB column (60 CTBs).
-        // A 10x4-CTB row is equally valid but decodes only 40 CTBs.
+        // Both layouts satisfy row/column tile geometry, unlike arbitrary
+        // mixed-size pictures. The first-valid 2x3 shape uses 11x10 CTBs;
+        // a 3x2 shape requires only 16x6 CTBs.
         val plan = HevcMixedArchiveAtlasPlan.choose(
-            listOf(source(6, 2), source(2, 4), source(2, 4)),
+            listOf(source(6, 4), source(5, 4), source(5, 4),
+                source(5, 2), source(6, 2)),
             maximumWidth = 512, maximumHeight = 512)
         assertNotNull(plan)
-        assertEquals(320, plan!!.codedWidth)
-        assertEquals(128, plan.codedHeight)
-        assertEquals(3, plan.cells.size)
+        assertEquals(512, plan!!.codedWidth)
+        assertEquals(192, plan.codedHeight)
+        assertEquals(6, plan.cells.size)
     }
 
     @Test fun rejectsDifferentCtbSizeBitDepthChromaAndProfileConstraints() {

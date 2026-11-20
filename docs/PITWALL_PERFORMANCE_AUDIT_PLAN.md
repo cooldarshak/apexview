@@ -20,7 +20,7 @@ allocation and adds direct bounded CMAF NAL-range inspection/writing to avoid
 another full-slice copy per picture. It replaces imperceptibly rounded mini-sector bars with cheaper
 rectangles, and searches bounded, conforming atlas alternatives by actual
 coded pixel area rather than first valid cell count. The atlas test includes
-a valid 60-to-40 CTB-area example, not a claim that actual F1 layouts shrink.
+a conforming 110-to-96 CTB-area example, not a claim that actual F1 layouts shrink.
 
 **Still open:** install the new signed build on S22 Ultra, compare matched
 50fps four-feed playback for GC/allocations and physical SurfaceFlinger
