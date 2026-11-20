@@ -235,14 +235,14 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private val pacing = SceneFramePacing()
     private val cadenceGate = SceneFrameCadenceGate()
     private var displayClock: Choreographer? = null
-    private val displayFrame = Choreographer.FrameCallback { frameTimeNs ->
-        guarded {
+    private val displayFrame: Choreographer.FrameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNs: Long) = guarded {
             val callbackStarted = System.nanoTime()
             if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
                     frameTimeNs, scene?.sourceFrameRate ?: 0.0, selectedDisplayHz)) {
                 pacing.onPacingDeferred()
                 Trace.beginSection("PitwallPacingDefer")
-                try { displayClock?.postFrameCallback(displayFrame) } finally { Trace.endSection() }
+                try { displayClock?.postFrameCallback(this) } finally { Trace.endSection() }
                 return@guarded
             }
             val newVideo = frameDemand.beginFrame()

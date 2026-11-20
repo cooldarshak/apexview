@@ -128,6 +128,12 @@ consumer-ownership diagnosis.
 
 Current follow-up implementation, pending GitHub Actions and device testing:
 
+Build 568 failed at `:app:compileDebugKotlin`: Kotlin inferred a recursive
+type for the new self-reposting Choreographer callback. A follow-up explicitly
+declares its `Choreographer.FrameCallback` type. This is a compiler fix, not
+a measured runtime improvement; the corrected build must pass CI before
+installation.
+
 - **P0.2:** Avoid full-NAL duplication in hot HEVC slice-header inspection
   and rewriting. Read NAL header fields without cloning, decode only an
   initial bounded RBSP header prefix (with a complete-prefix fallback for
