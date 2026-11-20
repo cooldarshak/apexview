@@ -400,7 +400,16 @@ internal class HevcArchiveVodSession(
             }
             bytes
         } }
-            val result = futures.map { it.get(25, TimeUnit.SECONDS) }
+            val result = futures.mapIndexed { index, future ->
+                try { future.get(25, TimeUnit.SECONDS) }
+                catch (timeout: java.util.concurrent.TimeoutException) {
+                    // Never include the F1 URL or credential-bearing request headers.
+                    android.util.Log.w("ApexviewSingleDecoder", "ARCHIVE_VOD_FETCH_TIMEOUT " +
+                        "segment=$number feed=${inputs[index].label} timeoutMs=25000 " +
+                        "worker=${if (lane === prefetchFetchers) "PREFETCH" else "PLAYBACK"}")
+                    throw timeout
+                }
+            }
             checkOpen()
             return result
         } catch (error: Exception) {

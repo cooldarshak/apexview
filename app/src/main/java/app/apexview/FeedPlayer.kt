@@ -662,8 +662,15 @@ class FeedPlayer(
                 wasCanceled: Boolean,
             ) {
                 val seek = observedLoads[loadEventInfo.loadTaskId] ?: return
+                // Media3's wrapper alone hid the distinction between a timeout and an HTTP
+                // rejection in device logs. Emit only exception types / status, never URLs.
+                val causes = generateSequence(error as Throwable) { it.cause }.take(8).toList()
+                val root = causes.last().javaClass.simpleName
+                val status = causes.filterIsInstance<androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException>()
+                    .firstOrNull()?.responseCode
                 logLoad("load-error", loadEventInfo, mediaLoadData, seek,
-                    " error=${error.javaClass.simpleName} canceled=$wasCanceled")
+                    " error=${error.javaClass.simpleName} root=$root" +
+                        (status?.let { " httpStatus=$it" } ?: "") + " canceled=$wasCanceled")
                 if (wasCanceled) observedLoads.remove(loadEventInfo.loadTaskId)
             }
 

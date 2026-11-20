@@ -345,6 +345,8 @@ class AppState(
     val observedActiveVideoDecoders get() = tiles.sumOf { it.feed.activeVideoDecoderCount }
     private var f1DashCapture: CmafCaptureLifecycle? = null
     private var protectedCompositionHost: Tile? = null
+    /** One original feed stays visible if the composed archive is still preparing or fails. */
+    private var singleDecoderFallbackTileId: Int? = null
     private var protectedCompositionAudioMaster: Tile? = null
     private var nativeArchiveTiles by mutableStateOf<List<Tile>>(emptyList())
     val settings = Settings(context)
@@ -1382,8 +1384,10 @@ class AppState(
         decoderMode = settings.decoderMode
         if (settings.decoderMode == DecoderMode.SINGLE) {
             singleDecoderFailure = reason
-            tiles.forEach { it.feed.player.playWhenReady = false }
+            val preview = tiles.firstOrNull { it.audible } ?: tiles.firstOrNull()
+            singleDecoderFallbackTileId = preview?.id
             applyVideoBudget()
+            tiles.forEach { it.feed.player.playWhenReady = playing && it === preview }
         }
         message = reason
     }
@@ -1412,6 +1416,7 @@ class AppState(
         if (mode == DecoderMode.MULTIPLE) {
             singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
             singleDecoderFailure = null
+            singleDecoderFallbackTileId = null
         } else if (tiles.size > 1 && !singleDecoderSceneActive) {
             tiles.forEach { it.feed.player.playWhenReady = false }
             applyVideoBudget()
@@ -1430,6 +1435,7 @@ class AppState(
 
     fun chooseDecoderMode(mode: DecoderMode) {
         if (mode == DecoderMode.MULTIPLE) {
+            singleDecoderFallbackTileId = null
             stopProtectedCompositionPresentation()
             decoderMode = mode
             tiles.forEach { it.feed.clearProtectedCompositionVideoRole(); it.feed.player.playWhenReady = playing }
@@ -1513,7 +1519,9 @@ class AppState(
             return
         }
         if (singleDecoderVideoRole(settings.decoderMode, tiles.size, false, browsing) != null) {
-            val owner = protectedCompositionHost
+            // A failed/slow archive preflight must not turn a working source into a black
+            // screen. The fallback is exactly one native video decoder, never all feeds.
+            val owner = protectedCompositionHost ?: tiles.firstOrNull { it.id == singleDecoderFallbackTileId }
             tiles.forEach { tile ->
                 tile.coolingOff = false; tile.heldForDecoder = false; tile.heldForSpeed = false
                 tile.feed.setProtectedCompositionVideoRole(singleDecoderVideoRole(settings.decoderMode, tiles.size, tile === owner, browsing) == true,
@@ -2692,6 +2700,14 @@ class AppState(
         var failure: String? = null
         var useExistingBackend = false
         var retryableFailure = false
+        fun resumeNativeFallback() {
+            if (replacingActiveScene || settings.decoderMode != DecoderMode.SINGLE || host !in tiles) return
+            singleDecoderFallbackTileId = host.id
+            applyVideoBudget()
+            selected.forEach { it.feed.player.playWhenReady = playing && it === host }
+            android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_NATIVE_FALLBACK feed=${host.feed.sourceStream.profileLabel} " +
+                "activeSourceVideos=1 reason=COMPOSITION_NOT_READY")
+        }
         fun diagnostic() {
             if (f1DashCapture != null && f1DashCapture !== capture) return
             singleDecoderDiagnostic = buildString {
@@ -2726,14 +2742,14 @@ class AppState(
                 applyVideoBudget()
             }
             decoderMode = settings.decoderMode
-            if (settings.decoderMode == DecoderMode.SINGLE) selected.forEach { it.feed.player.playWhenReady = false }
+            if (settings.decoderMode == DecoderMode.SINGLE) resumeNativeFallback()
             layoutRequest++
         }
         val probePositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
         selected.forEach { android.util.Log.i("ApexviewPlaybackOffer", it.feed.sourceStream.offerDiagnostic) }
-        // Enforce the selected decoder budget immediately, including while validation runs.
-        if (!replacingActiveScene) selected.forEach { it.feed.player.playWhenReady = false }
-        applyVideoBudget()
+        // While network preflight runs, keep exactly one native source playable. The
+        // single composed decoder takes ownership only after the output is validated.
+        if (!replacingActiveScene) resumeNativeFallback() else applyVideoBudget()
         archiveCompositionStarting = true
         message = SINGLE_DECODER_ACTIVATING
         diagnostic()
@@ -2779,6 +2795,7 @@ class AppState(
                         // Stopped originals perform no downloads and cannot move its clock.
                         selected.forEach { it.feed.suspendForArchiveComposition(); it.feed.setAudible(false) }
                         host.feed.startArchiveVodPlayback(session, handoffPositionMs, playing)
+                        singleDecoderFallbackTileId = null
                         transferred = true
                         archiveCompositionStarting = false
                         host.feed.setAudible(!mutedAll && !castingActive)
@@ -2834,6 +2851,7 @@ class AppState(
                 throw cancelled
             } catch (error: Exception) {
                 failure = (error.message ?: error.javaClass.simpleName).replace(Regex("https?://\\S+"), "[URL]").take(400)
+                val failedAt = phase
                 phase = "FAILED"
                 retryableFailure = when (error) {
                     is app.apexview.tiled.ArchiveVodMediaException -> error.retryable
@@ -2849,10 +2867,15 @@ class AppState(
                     // one-decoder scene. Its existing atlas and media session remain live.
                     android.util.Log.i("ApexviewSingleDecoder", "QUALITY_PREFLIGHT_FAILED_PREVIOUS_SCENE_RETAINED")
                 } else {
-                    selected.forEach { it.feed.player.playWhenReady = false }; applyVideoBudget()
+                    if (settings.decoderMode == DecoderMode.SINGLE) resumeNativeFallback()
+                    else { selected.forEach { it.feed.player.playWhenReady = false }; applyVideoBudget() }
                 }
-                message = "Single decoder failed: $failure. Use Retry or select Multiple decoders in Settings."
-                android.util.Log.w("ApexviewSingleDecoder", "ARCHIVE_VOD_FAILED reason=$failure")
+                message = "Single decoder could not start: $failure. " +
+                    (if (singleDecoderFallbackTileId != null && !singleDecoderSceneActive)
+                        "Showing one feed while you retry."
+                    else "Use Retry or select Multiple decoders in Settings.")
+                android.util.Log.w("ApexviewSingleDecoder", "ARCHIVE_VOD_FAILED stage=$failedAt " +
+                    "retryable=$retryableFailure fallback=${singleDecoderFallbackTileId != null} reason=$failure")
             } finally {
                 if (f1DashCapture === capture) {
                     archiveCompositionStarting = false
@@ -5725,7 +5748,11 @@ class AppState(
             else googleCastRemoteClient?.let { remote -> if (playing) remote.play() else remote.pause() }
             if (castPlaybackHandedOff) { showChrome(); return }
         }
-        if (archiveCompositionStarting) { showChrome(); return }
+        if (archiveCompositionStarting) {
+            tiles.firstOrNull { it.id == singleDecoderFallbackTileId }?.feed?.player?.playWhenReady = playing
+            showChrome()
+            return
+        }
         // In the pop-out, only the shown feed and the audio keep playing (see setPip).
         val shown = if (inPip) pipTile() else null
         tiles.filter { !singleDecoderSceneActive || it === protectedCompositionHost }.forEach {

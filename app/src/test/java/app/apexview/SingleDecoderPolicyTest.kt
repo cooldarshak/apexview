@@ -5,12 +5,21 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class SingleDecoderPolicyTest {
-    @Test fun sourcePlayersCannotDecodeWhileSingleDecoderIsStartingOrHasFailed() {
+    @Test fun noSourcePlayerMayDecodeWithoutAnExplicitCompositionOrFallbackOwner() {
         for (count in listOf(2, 4, 24)) {
             val enabled = (0 until count).count {
                 singleDecoderVideoRole(DecoderMode.SINGLE, count, isComposedHost = false, browsing = false) == true
             }
             assertEquals(0, enabled)
+        }
+    }
+
+    @Test fun aNativeFallbackOwnerStillRespectsTheOneDecoderLimit() {
+        for (count in listOf(2, 4, 24)) {
+            val preview = count - 1
+            assertEquals(1, (0 until count).count { index ->
+                singleDecoderVideoRole(DecoderMode.SINGLE, count, isComposedHost = index == preview, browsing = false) == true
+            })
         }
     }
 
