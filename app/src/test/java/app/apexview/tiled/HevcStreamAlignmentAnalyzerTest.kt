@@ -56,6 +56,22 @@ class HevcStreamAlignmentAnalyzerTest {
         assertTrue(!report.referencesAligned)
     }
 
+    @Test
+    fun acceptsValidEmulationPreventionByteAtBoundedSliceInspectionBoundary() {
+        val idr = nal(20, idrSlice())
+        // The 128-byte VCL inspection window covers nal[2]..nal[129].
+        // A valid 00 00 03 01 sequence happens to straddle its final byte.
+        val padding = ByteArray(127 - idr.size) { 0x7f }
+        val extendedIdr = idr + padding + byteArrayOf(0, 0, 3, 1, 0x7f)
+        assertEquals(3, extendedIdr[129].toInt())
+        val annexB = listOf(
+            nal(33, spsBits()), nal(34, ppsBits()), extendedIdr,
+            nal(1, pSlice(1, referenceCount = 1))
+        ).fold(ByteArray(0)) { out, n -> out + byteArrayOf(0, 0, 0, 1) + n }
+
+        assertEquals(listOf(0L, 1L), HevcStreamAlignmentAnalyzer.analyze(annexB).map { it.poc })
+    }
+
     private fun stream(vararg pSlices: ByteArray): ByteArray =
         streamWithIdrNoOutputPriorPictures(true, *pSlices)
 

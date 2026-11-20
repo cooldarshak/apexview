@@ -208,7 +208,17 @@ internal object HevcStreamAlignmentAnalyzer {
         val header = HevcBitstream.readNalHeader(nal)
         require(header.type == nalType)
         // Picture PPS id is in the first few bytes. Do not copy the encoded VCL payload.
-        val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal, 2, minOf(nal.size - 2, 128)))
+        // The 128-byte inspection window may end exactly on 00 00 03 (an HEVC
+        // emulation-prevention byte), while the following byte still exists in
+        // this NAL. Include that following byte so the bounded EBSP validator
+        // doesn't mistake a valid partial window for a truncated full NAL.
+        var prefixBytes = minOf(nal.size - 2, 128)
+        val end = 2 + prefixBytes
+        if (end < nal.size && prefixBytes >= 3 &&
+            nal[end - 3] == 0.toByte() && nal[end - 2] == 0.toByte() && nal[end - 1] == 3.toByte()) {
+            prefixBytes++
+        }
+        val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal, 2, prefixBytes))
         bits.readBit() // first_slice_segment_in_pic_flag
         if (nalType in 16..23) bits.readBit() // no_output_of_prior_pics_flag
         val ppsId = bits.readUnsignedExpGolomb()

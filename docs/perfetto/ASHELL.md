@@ -31,16 +31,31 @@ If `curl` is not available, open that URL in your phone browser and save the
 file as `/sdcard/Download/pitwall-50fps.cfg` instead. The config must be
 downloaded **after** the updated branch has been pushed.
 
-Then, while the **four feeds are already playing**:
+Then, while the **four feeds are already playing**, stream Perfetto's binary
+output to a file opened by the shell. This avoids Android's restriction on
+letting the Perfetto process itself open files in `/sdcard/Download`:
 
 ```sh
-cat /sdcard/Download/pitwall-50fps.cfg | perfetto --txt -c - -o /sdcard/Download/pitwall-next-50fps.perfetto-trace
+cat /sdcard/Download/pitwall-50fps.cfg | perfetto --txt -c - -o - > /sdcard/Download/pitwall-next-50fps.perfetto-trace
 ```
+
+If a previously downloaded config fails with `Unexpected value 'LID_MAIN'`,
+replace that invalid enum with `LID_DEFAULT` (the main log buffer) before
+running the command above:
+
+```sh
+sed -i 's/LID_MAIN/LID_DEFAULT/g' /sdcard/Download/pitwall-50fps.cfg
+```
+
+Keep a space after `-o` and use the full `.perfetto-trace` filename. This
+corrects the config parse error but does not by itself establish that every
+Perfetto producer is supported by the device.
 
 This should run for **60 seconds** and return to the aShell prompt. The actual
 trace must contain `android.surfaceflinger.frametimeline`. The file could be
 hundreds of MB; wait for it to finish before sharing it. If `perfetto` refuses
-to write directly to Download, try the system trace directory:
+to stream to the shell's output file, try the system trace directory. Give it a
+new name if a previous capture already exists:
 
 ```sh
 cat /sdcard/Download/pitwall-50fps.cfg | perfetto --txt -c - -o /data/misc/perfetto-traces/pitwall-next-50fps.perfetto-trace
