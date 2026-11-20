@@ -962,73 +962,82 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     val stopText = remember(stopLine) { stopLine?.let { measurer.label(it, 13.sp) } }
 
     val line = remember(ribbon) { ribbon.path() }
-    Canvas(Modifier.fillMaxSize().graphicsLayer {
-        alpha = opacity
-        compositingStrategy = CompositingStrategy.ModulateAlpha
-    }) {
-        drawPath(line, Color.Black.copy(alpha = 0.5f), style = Stroke(6.dp.toPx()))
-        drawPath(line, Color.White.copy(alpha = 0.5f), style = Stroke(2.dp.toPx()))
-        drawFlags(flags, line, sectors, 2.5.dp.toPx(), pulse)
-        drawSectorGlyphs(flags, sectors, 12.dp.toPx()) { f -> ribbon.point(f) + ribbon.inward(f) * 12.dp.toPx() }
-        // Above the bottom of the loop, clear of the car names that sit inside it.
-        drawCaption(flags, caption, width / 2, height - inset / 2 - 56.dp.toPx(), pulse)
-        stopText?.let { text ->
-            val above = caption?.let { it.size.height + 6.dp.toPx() } ?: 0f
-            drawText(text, topLeft = Offset(width / 2 - text.size.width / 2f, height - inset / 2 - 56.dp.toPx() - above - text.size.height))
-        }
-
-        fun tick(f: Float, length: Float, stroke: Float) {
-            val p = ribbon.point(f)
-            val n = ribbon.inward(f)
-            drawLine(Color.White, p - n * length, p + n * length, stroke)
-        }
-
-        fun mark(f: Float, chequered: Boolean, label: TextLayoutResult) {
-            val p = ribbon.point(f)
-            val n = ribbon.inward(f)
-            drawLineMark(p, n, Offset(-n.y, n.x), 8.dp.toPx(), chequered)
-            val at = p + n * MARK_LABEL_DP.dp.toPx()
-            drawText(label, topLeft = at - Offset(label.size.width / 2f, label.size.height / 2f))
-        }
-        // Where the START and FINISH labels sit along the loop, and how wide they are: car names
-        // keep out of their way.
-        val taken = mutableListOf<Pair<Float, Float>>()
+    // Track outline, turn glyphs and start/finish marks are independent of the moving cars.
+    // Give them a separate retained Compose draw layer, as the regular map already does.
+    val taken = remember(ribbon, marks, finishLabel, startLabel, timing.hasStartFinish) {
+        val marksTaken = mutableListOf<Pair<Float, Float>>()
         if (timing.hasStartFinish) {
-            mark(0f, chequered = true, finishLabel)
-            taken += 0f to finishLabel.size.width.toFloat()
+            marksTaken += 0f to finishLabel.size.width.toFloat()
             marks.start?.takeIf { !marks.together }?.let {
-                mark(it, chequered = false, startLabel)
-                taken += it * ribbon.perimeter to startLabel.size.width.toFloat()
+                marksTaken += it * ribbon.perimeter to startLabel.size.width.toFloat()
             }
         }
-        turns.forEach { (f, label) ->
-            tick(f, 4.dp.toPx(), 1.dp.toPx())
-            val p = ribbon.point(f) + ribbon.inward(f) * 13.dp.toPx()
-            drawText(label, topLeft = p - Offset(label.size.width / 2f, label.size.height / 2f), alpha = 0.7f)
-        }
+        marksTaken
+    }
+    val circuit: DrawScope.() -> Unit = remember(ribbon, line, turns, marks, finishLabel,
+        startLabel, timing.hasStartFinish) {
+        {
+            drawPath(line, Color.Black.copy(alpha = 0.5f), style = Stroke(6.dp.toPx()))
+            drawPath(line, Color.White.copy(alpha = 0.5f), style = Stroke(2.dp.toPx()))
 
-        // Labels step further inward when cars bunch up, so a pack stays readable.
-        stop?.let { drawPitStop(it, Color(timing.drivers[it.number]?.color ?: android.graphics.Color.WHITE), pitLabel, ribbon::point) }
-        val lastAt = FloatArray(3) { -Float.MAX_VALUE }
-        cars.forEach { (car, f) ->
-            val p = ribbon.point(f)
-            val radius = dotSizeDp.dp.toPx()
-            val alpha = drawCar(timing, car, p, radius)
-            if (car.number == stop?.number) drawCircle(Color.White, radius + 4.dp.toPx(), p, style = Stroke(2.dp.toPx()))
-            val label = names[car.number] ?: return@forEach
-            val along = f * ribbon.perimeter
-            val gap = label.size.width + 6.dp.toPx()
-            // The first level a mark label sits on is out where one is close by.
-            val nearMark = taken.any { (at, w) ->
-                val d = abs(along - at).let { minOf(it, ribbon.perimeter - it) }
-                d < (w + label.size.width) / 2 + 4.dp.toPx()
+            fun mark(f: Float, chequered: Boolean, label: TextLayoutResult) {
+                val p = ribbon.point(f)
+                val n = ribbon.inward(f)
+                drawLineMark(p, n, Offset(-n.y, n.x), 8.dp.toPx(), chequered)
+                val at = p + n * MARK_LABEL_DP.dp.toPx()
+                drawText(label, topLeft = at - Offset(label.size.width / 2f, label.size.height / 2f))
             }
-            val level = (0 until 3).firstOrNull { (it > 0 || !nearMark) && along - lastAt[it] > gap } ?: 2
-            lastAt[level] = along
-            val at = p + ribbon.inward(f) * (14 + level * 13).dp.toPx()
-            drawText(label, topLeft = at - Offset(label.size.width / 2f, label.size.height / 2f), alpha = alpha)
+            if (timing.hasStartFinish) {
+                mark(0f, chequered = true, finishLabel)
+                marks.start?.takeIf { !marks.together }?.let { mark(it, chequered = false, startLabel) }
+            }
+            turns.forEach { (f, label) ->
+                val p = ribbon.point(f)
+                val n = ribbon.inward(f)
+                drawLine(Color.White, p - n * 4.dp.toPx(), p + n * 4.dp.toPx(), 1.dp.toPx())
+                val at = p + n * 13.dp.toPx()
+                drawText(label, topLeft = at - Offset(label.size.width / 2f, label.size.height / 2f), alpha = 0.7f)
+            }
         }
-        safetyCar?.let { drawSafetyCar(ribbon.point(it), 7.5.dp.toPx(), scLabel) }
+    }
+    Box(Modifier.fillMaxSize()) {
+        val layer = Modifier.fillMaxSize().graphicsLayer {
+            alpha = opacity
+            compositingStrategy = CompositingStrategy.ModulateAlpha
+        }
+        Canvas(layer, onDraw = circuit)
+        Canvas(layer) {
+            drawFlags(flags, line, sectors, 2.5.dp.toPx(), pulse)
+            drawSectorGlyphs(flags, sectors, 12.dp.toPx()) { f -> ribbon.point(f) + ribbon.inward(f) * 12.dp.toPx() }
+            // Above the bottom of the loop, clear of the car names that sit inside it.
+            drawCaption(flags, caption, width / 2, height - inset / 2 - 56.dp.toPx(), pulse)
+            stopText?.let { text ->
+                val above = caption?.let { it.size.height + 6.dp.toPx() } ?: 0f
+                drawText(text, topLeft = Offset(width / 2 - text.size.width / 2f, height - inset / 2 - 56.dp.toPx() - above - text.size.height))
+            }
+
+            // Labels step further inward when cars bunch up, so a pack stays readable.
+            stop?.let { drawPitStop(it, Color(timing.drivers[it.number]?.color ?: android.graphics.Color.WHITE), pitLabel, ribbon::point) }
+            val lastAt = FloatArray(3) { -Float.MAX_VALUE }
+            cars.forEach { (car, f) ->
+                val p = ribbon.point(f)
+                val radius = dotSizeDp.dp.toPx()
+                val alpha = drawCar(timing, car, p, radius)
+                if (car.number == stop?.number) drawCircle(Color.White, radius + 4.dp.toPx(), p, style = Stroke(2.dp.toPx()))
+                val label = names[car.number] ?: return@forEach
+                val along = f * ribbon.perimeter
+                val gap = label.size.width + 6.dp.toPx()
+                val nearMark = taken.any { (at, w) ->
+                    val d = abs(along - at).let { minOf(it, ribbon.perimeter - it) }
+                    d < (w + label.size.width) / 2 + 4.dp.toPx()
+                }
+                val level = (0 until 3).firstOrNull { (it > 0 || !nearMark) && along - lastAt[it] > gap } ?: 2
+                lastAt[level] = along
+                val at = p + ribbon.inward(f) * (14 + level * 13).dp.toPx()
+                drawText(label, topLeft = at - Offset(label.size.width / 2f, label.size.height / 2f), alpha = alpha)
+            }
+            safetyCar?.let { drawSafetyCar(ribbon.point(it), 7.5.dp.toPx(), scLabel) }
+        }
     }
     targets?.invoke(cars.map { (car, f) -> car.number to ribbon.point(f) })
 }

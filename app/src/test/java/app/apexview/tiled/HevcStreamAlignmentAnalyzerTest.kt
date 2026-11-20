@@ -22,6 +22,17 @@ class HevcStreamAlignmentAnalyzerTest {
     }
 
     @Test
+    fun reusingSplitNalUnitsPreservesEveryPictureSignature() {
+        val stream = stream(pSlice(1, referenceCount = 1), pSlice(2, referenceCount = 2))
+        val nals = HevcBitstream.splitAnnexB(stream)
+        val before = nals.map { it.bytes }
+        val original = HevcStreamAlignmentAnalyzer.analyze(stream)
+        val reused = HevcStreamAlignmentAnalyzer.analyzeNalUnits(nals)
+        assertEquals(original, reused)
+        assertTrue(nals.indices.all { nals[it].bytes === before[it] })
+    }
+
+    @Test
     fun rejectsPictureIdentityMismatchEvenWhenPocAndReferencesMatch() {
         val feedA = streamWithIdrNoOutputPriorPictures(
             true, pSlice(1, referenceCount = 1), pSlice(2, referenceCount = 2)

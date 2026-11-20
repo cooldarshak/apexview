@@ -31,6 +31,21 @@ class RuntimeLogTests(unittest.TestCase):
         self.assertEqual(result["active_decoders"], ["1"])
         self.assertTrue(result["four_feed_prepared"])
 
+    def test_reports_steady_cmaf_allocations_without_startup_warmup(self):
+        log = "\n".join(
+            "I ARCHIVE_VOD_SEGMENT number={} processAllocBytesDuringSegment={} "
+            "processGcDuringSegment={} composeMs={} rewriteMs={} outputBytes=9000".format(
+                index, allocation, gc, compose, compose - 10)
+            for index, allocation, gc, compose in [
+                (1, 630_000_000, 19, 1200), (2, 535_000_000, 17, 1100),
+                (3, 386_000_000, 11, 950), (4, 150_000_000, 4, 500),
+                (5, 160_000_000, 3, 550), (6, 170_000_000, 4, 600)])
+        result = summarize(log)
+        self.assertEqual(result["archive_segments_total"], 6)
+        self.assertEqual(result["archive_segments_steady"], 3)
+        self.assertEqual(result["archive_alloc_median_bytes"], 160_000_000)
+        self.assertEqual(result["archive_gc_median"], 4)
+
 
 if __name__ == "__main__":
     unittest.main()

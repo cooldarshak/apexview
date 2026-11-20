@@ -184,12 +184,21 @@ private fun TowerTextScale(app: AppState, content: @Composable () -> Unit) {
     )
 }
 
-private data class TowerSample(
+internal data class TowerSample(
     val rows: List<Pair<String, CardState>>,
     val header: TowerSessionHeaderData,
     val tyres: Map<String, Tyre?>,
     val speeds: Map<String, Pair<Int?, Int?>>,
-)
+) {
+    /** A new polling epoch should not invalidate every visible row if the pixels are unchanged. */
+    fun visuallyEquals(other: TowerSample): Boolean = rows == other.rows &&
+        header == other.header && speeds == other.speeds &&
+        tyres.size == other.tyres.size && tyres.all { (number, tyre) ->
+            val candidate = other.tyres[number]
+            other.tyres.containsKey(number) && tyre?.compound == candidate?.compound &&
+                tyre?.laps == candidate?.laps
+        }
+}
 
 /** Live running order. The screen follows the same delayed picture clock as the map. */
 @Composable
@@ -200,13 +209,17 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
         while (true) {
             val now = app.mapTimeMs() ?: 0L
             val speeds = timing.speeds
-            sample = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            val next = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                android.os.Trace.beginSection("PitwallTowerSampleBuild")
+                try {
                 val rows = timing.laps.mapNotNull { (number, laps) ->
                     laps.at(now, includeRunningTime = false)?.let { number to it }
                 }.sortedBy { it.second.position ?: 99 }
                 TowerSample(rows, towerSessionHeader(timing, now), timing.tyres.mapValues { it.value.at(now) },
                     speeds.mapValues { it.value.kmhAt(now) to it.value.gearAt(now) })
+                } finally { android.os.Trace.endSection() }
             }
+            if (sample?.visuallyEquals(next) != true) sample = next
             delay(if (app.isTv) 250L else 500L)
         }
     }

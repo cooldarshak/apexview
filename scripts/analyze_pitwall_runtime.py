@@ -9,6 +9,7 @@ Use logs from the same device, scene, feed resolutions, clock and sample duratio
 import argparse
 import re
 from pathlib import Path
+from statistics import median
 
 
 def fields(line):
@@ -44,6 +45,7 @@ def summarize(text):
     failures = 0
     active_decoders = set()
     four_feed_prepared = False
+    segments = []
     for line in text.splitlines():
         f = fields(line)
         if "PitwallFrames:" in line and f.get("role") == "player":
@@ -66,10 +68,17 @@ def summarize(text):
             drawn += as_int(f.get("pacingPresented"))
         if "ARCHIVE_VOD_PREPARED feeds=4" in line:
             four_feed_prepared = True
+        if "ARCHIVE_VOD_SEGMENT " in line:
+            segments.append({key: as_int(f.get(key)) for key in (
+                "number", "processAllocBytesDuringSegment", "processGcDuringSegment",
+                "parseMs", "rewriteMs", "packageMs", "composeMs", "outputBytes")})
         if "ARCHIVE_VOD_FAILED" in line or "event=load-error" in line:
             failures += 1
         if "F1_COMPOSITION_PLAYBACK" in line and "stage=ACTIVE" in line:
             active_decoders.add(f.get("activeVideoDecoders", "unknown"))
+    # First three segments include player warmup, HTTP cache fill and codec startup.
+    # Report them separately so they cannot distort steady-state allocation claims.
+    steady = segments[3:]
     return {
         "frames": frames,
         "slow": slow,
@@ -85,6 +94,13 @@ def summarize(text):
         "failures": failures,
         "active_decoders": sorted(active_decoders),
         "four_feed_prepared": four_feed_prepared,
+        "archive_segments_total": len(segments),
+        "archive_segments_steady": len(steady),
+        "archive_alloc_median_bytes": int(median(s["processAllocBytesDuringSegment"] for s in steady)) if steady else None,
+        "archive_gc_median": median(s["processGcDuringSegment"] for s in steady) if steady else None,
+        "archive_compose_median_ms": median(s["composeMs"] for s in steady) if steady else None,
+        "archive_rewrite_median_ms": median(s["rewriteMs"] for s in steady) if steady else None,
+        "archive_output_median_bytes": int(median(s["outputBytes"] for s in steady)) if steady else None,
     }
 
 

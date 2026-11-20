@@ -44,11 +44,11 @@ internal fun TvTowerRow(
     }
     // The decoder TextureView refreshes around 50 fps, but the tower state changes only
     // a few times per second. Rasterize each visible row to its own bounded hardware
-    // layer so an unchanged row is composited as one texture instead of replaying dozens
-    // of Skia text/rounded-rect/circle operations for every video frame.
+    // layer so an unchanged row is composited instead of replaying dozens of drawing ops.
+    // ModulateAlpha retains the layer but avoids an extra offscreen framebuffer allocation.
     Canvas(Modifier.fillMaxWidth().height(rowHeight).tvFocusRing().clickable(onClick = onClick)
         .semantics { contentDescription = accessibleSummary }.clipToBounds()
-        .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)) {
+        .graphicsLayer(compositingStrategy = CompositingStrategy.ModulateAlpha)) {
         val canvas = drawContext.canvas.nativeCanvas
         // Match the column widths used by TowerHeader. Drawing in dp keeps phone-supplied
         // panel scaling and the user's font-scale setting effective on the Cast receiver.

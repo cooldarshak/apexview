@@ -60,12 +60,15 @@ internal data class HevcFrameAlignmentReport(
  * This is analysis only: the input streams remain separate, and no VCL payload is combined.
  */
 internal object HevcStreamAlignmentAnalyzer {
-    fun analyze(annexB: ByteArray): List<HevcFrameSignature> {
+    fun analyze(annexB: ByteArray): List<HevcFrameSignature> =
+        analyzeNalUnits(HevcBitstream.splitAnnexB(annexB))
+
+    /** Reuse an already validated split. Cloning VCL NALs a second time can cost tens of MB per segment. */
+    internal fun analyzeNalUnits(nals: List<HevcBitstream.NalUnit>): List<HevcFrameSignature> {
         val spsById = mutableMapOf<Int, HevcParameterSets.SpsMetadata>()
         val ppsById = mutableMapOf<Int, HevcParameterSets.PpsMetadata>()
         val pocTracker = HevcPocTracker()
         val frames = mutableListOf<FrameBuilder>()
-        val nals = HevcBitstream.splitAnnexB(annexB)
         var sawCodedPicture = false
         var afterEndOfSequence = false
 

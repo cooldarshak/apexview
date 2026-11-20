@@ -347,7 +347,9 @@ internal object HevcTizenGridComposer {
             "Source feed $index uses temporal motion vector prediction (TMVP), unsupported by the F1 Tizen stitching profile"
         }
 
-        val signatures = HevcStreamAlignmentAnalyzer.analyze(annexB)
+        // The analyzer and tile locator inspect the same immutable NAL payloads. Re-splitting
+        // Annex-B here cloned every large VCL NAL (and doubled peak young-generation pressure).
+        val signatures = HevcStreamAlignmentAnalyzer.analyzeNalUnits(nals)
         val pictureNals = mutableListOf<MutableList<ByteArray>>()
         var current: MutableList<ByteArray>? = null
         nals.filter { it.type in 0..31 }.forEach { nal ->

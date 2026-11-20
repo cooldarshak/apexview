@@ -92,3 +92,35 @@ Repeat the same replay at the same quality and refresh mode in this order:
 For each test report how it looks to you: smooth / occasional judder /
 continuous jitter / freezes, along with the actual feed resolutions. Do not
 assume scene texture callback counts equal physically presented video frames.
+
+## Reproducible comparison, performed after receiving the traces
+
+Use `scripts/analyze_pitwall_overlay_ab.py` on the analysis computer (`pip
+install perfetto`). It reads real Perfetto scheduler slices, named overlay
+traces and **app** FrameTimeline data. Windows use seconds relative to the
+first scheduler event in the trace, **not** the video time or wall-clock time.
+Only select steady intervals, excluding toggle and startup transitions.
+
+```sh
+python scripts/analyze_pitwall_overlay_ab.py pitwall-overlay-ab.perfetto-trace \
+  --window OFF:5:19 --window MAP:21:35 \
+  --window BOTH:37:53 --window TOWER:55:59
+```
+
+The intervals above are only an example. Select actual on/off boundaries in
+the captured trace; never use those example numbers blindly for a new capture.
+For separate 60-second traces, run the tool against each trace separately and
+compare like-for-like steady windows. Verify equal source resolutions, decoded
+video FPS, 120 Hz mode, single decoder and similar device temperature first.
+
+To track CMAF GC without confusing initial warmup with steady playback:
+
+```sh
+python scripts/analyze_pitwall_runtime.py pitwall-app-export.log.txt --build 1.0.583
+```
+
+Replace `1.0.583` with the **installed** version. The analyzer ignores the
+first three segment compositions when reporting steady median allocations,
+GC counts, compose and rewrite time. App deadline misses, codec throughput,
+GL submission and physical video presentation are different metrics. A green
+CI build or fewer app deadline misses alone is not a video smoothness PASS.
