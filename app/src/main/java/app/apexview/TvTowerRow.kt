@@ -45,10 +45,13 @@ internal fun TvTowerRow(
     // The decoder TextureView refreshes around 50 fps, but the tower state changes only
     // a few times per second. Rasterize each visible row to its own bounded hardware
     // layer so an unchanged row is composited instead of replaying dozens of drawing ops.
-    // ModulateAlpha retains the layer but avoids an extra offscreen framebuffer allocation.
+    // Restore Offscreen after the Build 583 ModulateAlpha experiment coincided with
+    // 86.8% tower-only app deadline misses (43.5% in the Build 582 baseline) and
+    // substantially longer RenderThread command flushing. Recheck on device.
+    // Retain the independent snapshot-deduplication fix from Build 583.
     Canvas(Modifier.fillMaxWidth().height(rowHeight).tvFocusRing().clickable(onClick = onClick)
         .semantics { contentDescription = accessibleSummary }.clipToBounds()
-        .graphicsLayer(compositingStrategy = CompositingStrategy.ModulateAlpha)) {
+        .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)) {
         val canvas = drawContext.canvas.nativeCanvas
         // Match the column widths used by TowerHeader. Drawing in dp keeps phone-supplied
         // panel scaling and the user's font-scale setting effective on the Cast receiver.
