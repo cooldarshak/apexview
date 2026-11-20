@@ -16,7 +16,8 @@ RenderThread had 5,194 `Drawing` slices averaging 8.46ms, 21.80s nested in
 operations, and 225,126 ellipse operations. These overlapping/nested CPU
 measurements must **not** be added together. It also showed high GC activity.
 The subsequent code candidate removes a duplicate owned HEVC NAL payload
-allocation, replaces imperceptibly rounded mini-sector bars with cheaper
+allocation and adds direct bounded CMAF NAL-range inspection/writing to avoid
+another full-slice copy per picture. It replaces imperceptibly rounded mini-sector bars with cheaper
 rectangles, and searches bounded, conforming atlas alternatives by actual
 coded pixel area rather than first valid cell count. The atlas test includes
 a valid 60-to-40 CTB-area example, not a claim that actual F1 layouts shrink.

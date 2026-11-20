@@ -11,6 +11,9 @@ package app.apexview.tiled
  * The CMAF layer must reject protected samples before this inspector is called.
  */
 internal object HevcAccessUnitInspector {
+    /** Bounded range into the caller's CMAF sample. Never retain past its ownership lifetime. */
+    data class NalRange(val offset: Int, val length: Int)
+
     data class SourceTile(
         val index: Int,
         val column: Int,
@@ -30,6 +33,7 @@ internal object HevcAccessUnitInspector {
 
     data class Report(
         val nalUnits: List<ByteArray>,
+        val nalUnitRanges: List<NalRange>,
         val nalUnitTypes: List<Int>,
         val slices: List<SliceRegion>,
         val pictureIdentity: HevcPictureIdentityCompatibility.PictureIdentity,
@@ -49,7 +53,8 @@ internal object HevcAccessUnitInspector {
         vps: HevcParameterSets.VpsMetadata? = null,
         context: String = "HEVC access unit",
         sampleOffset: Int = 0,
-        sampleLength: Int = sample.size
+        sampleLength: Int = sample.size,
+        retainNalUnits: Boolean = true
     ): Report {
         ensure(sampleOffset >= 0 && sampleLength >= 0 && sampleOffset <= sample.size &&
             sampleLength <= sample.size - sampleOffset, context, "CMAF sample range is out of bounds")
@@ -70,7 +75,7 @@ internal object HevcAccessUnitInspector {
 
         nals.forEachIndexed { nalIndex, nal ->
             val nalHeader = try {
-                HevcBitstream.readNalHeader(nal)
+                HevcBitstream.readNalHeader(sample, nal.offset, nal.length)
             } catch (error: Exception) {
                 fail(context, "NAL " + nalIndex + " has an invalid HEVC header: " +
                     (error.message ?: error.javaClass.simpleName))
@@ -83,16 +88,16 @@ internal object HevcAccessUnitInspector {
             when (nalHeader.type) {
                 32 -> {
                     ensure(vps != null, context, "In-band VPS has no matching hvcC VPS")
-                    ensure(HevcParameterSets.parseVps(nal) == vps, context,
+                    ensure(HevcParameterSets.parseVps(sample.copyOfRange(nal.offset, nal.offset + nal.length)) == vps, context,
                         "In-band VPS differs from hvcC")
                 }
-                33 -> ensure(HevcParameterSets.parseSps(nal) == sps, context,
+                33 -> ensure(HevcParameterSets.parseSps(sample.copyOfRange(nal.offset, nal.offset + nal.length)) == sps, context,
                     "In-band SPS differs from hvcC")
-                34 -> ensure(HevcParameterSets.parsePps(nal, sps) == pps, context,
+                34 -> ensure(HevcParameterSets.parsePps(sample.copyOfRange(nal.offset, nal.offset + nal.length), sps) == pps, context,
                     "In-band PPS differs from hvcC")
                 in 0..31 -> {
                     val slice = try {
-                        HevcSliceHeaderParser.parse(nal, sps, pps)
+                        HevcSliceHeaderParser.parseRange(sample, nal.offset, nal.length, sps, pps)
                     } catch (error: Exception) {
                         fail(context, "NAL " + nalIndex + " slice header is unsupported: " +
                             (error.message ?: error.javaClass.simpleName))
@@ -157,7 +162,12 @@ internal object HevcAccessUnitInspector {
         val pocLsb = firstSlice.picOrderCntLsb ?: 0
 
         return Report(
-            nalUnits = nals,
+            // Legacy inspector callers still receive independent, owned NAL bytes.
+            // The CMAF assembler uses only ranges, avoiding a full slice copy per frame.
+            nalUnits = if (retainNalUnits) nals.map {
+                sample.copyOfRange(it.offset, it.offset + it.length)
+            } else emptyList(),
+            nalUnitRanges = nals,
             nalUnitTypes = nalTypes,
             slices = slices,
             pictureIdentity = identity,
@@ -222,8 +232,8 @@ internal object HevcAccessUnitInspector {
         )
     }
 
-    private fun splitLengthPrefixed(sample: ByteArray, start: Int, size: Int, lengthSize: Int, context: String): List<ByteArray> {
-        val result = mutableListOf<ByteArray>()
+    private fun splitLengthPrefixed(sample: ByteArray, start: Int, size: Int, lengthSize: Int, context: String): List<NalRange> {
+        val result = mutableListOf<NalRange>()
         var offset = start
         val endOfSample = start + size
         while (offset < endOfSample) {
@@ -235,7 +245,7 @@ internal object HevcAccessUnitInspector {
             ensure(length >= 2L && length <= (endOfSample - offset).toLong(), context,
                 "Invalid NAL length in CMAF sample")
             val end = Math.addExact(offset, length.toInt())
-            result += sample.copyOfRange(offset, end)
+            result += NalRange(offset, length.toInt())
             ensure(result.size <= MAX_NAL_UNITS, context, "CMAF sample contains too many NAL units")
             offset = end
         }

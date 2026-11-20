@@ -287,9 +287,12 @@ internal object HevcClearCmafGridComposer {
                         context = "Feed " + feed.label + " fragment " + fragmentIndex +
                             " sample " + sampleIndex,
                         sampleOffset = sample.offset,
-                        sampleLength = sample.length
+                        sampleLength = sample.length,
+                        retainNalUnits = false
                     )
-                    accessUnit.nalUnits.forEach { written = appendAnnexB(annexB, written, it) }
+                    accessUnit.nalUnitRanges.forEach { nal ->
+                        written = appendAnnexB(annexB, written, sample.bytes, nal.offset, nal.length)
+                    }
                 }
             }
             check(written == annexB.size) { "HEVC Annex-B payload size changed during validation" }
@@ -562,6 +565,18 @@ internal object HevcClearCmafGridComposer {
         check(end <= out.size) { "HEVC Annex-B payload exceeds its validated size" }
         out[offset] = 0; out[offset + 1] = 0; out[offset + 2] = 0; out[offset + 3] = 1
         nal.copyInto(out, offset + 4)
+        return end
+    }
+
+    /** Copy the already validated NAL directly from its CMAF backing array. */
+    private fun appendAnnexB(out: ByteArray, offset: Int, sample: ByteArray,
+                             nalOffset: Int, nalLength: Int): Int {
+        require(nalOffset >= 0 && nalLength >= 2 && nalOffset <= sample.size &&
+            nalLength <= sample.size - nalOffset) { "HEVC NAL range is out of bounds" }
+        val end = Math.addExact(offset, Math.addExact(nalLength, 4))
+        check(offset >= 0 && end <= out.size) { "HEVC Annex-B payload exceeds its validated size" }
+        out[offset] = 0; out[offset + 1] = 0; out[offset + 2] = 0; out[offset + 3] = 1
+        sample.copyInto(out, offset + 4, nalOffset, nalOffset + nalLength)
         return end
     }
 

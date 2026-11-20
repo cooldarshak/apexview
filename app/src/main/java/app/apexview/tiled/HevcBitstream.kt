@@ -58,10 +58,15 @@ internal object HevcBitstream {
         }
     }
 
-    fun readNalHeader(nal: ByteArray): NalHeader {
-        require(nal.size >= 2) { "HEVC NAL header requires two bytes" }
-        val first = nal[0].toInt() and 0xff
-        val second = nal[1].toInt() and 0xff
+    fun readNalHeader(nal: ByteArray): NalHeader = readNalHeader(nal, 0, nal.size)
+
+    /** Inspect a validated NAL range without cloning its full CABAC payload. */
+    fun readNalHeader(nal: ByteArray, offset: Int, length: Int): NalHeader {
+        require(offset >= 0 && length >= 2 && offset <= nal.size && length <= nal.size - offset) {
+            "HEVC NAL header range is out of bounds"
+        }
+        val first = nal[offset].toInt() and 0xff
+        val second = nal[offset + 1].toInt() and 0xff
         require((first and 0x80) == 0) { "forbidden_zero_bit must be zero" }
         val temporalIdPlus1 = second and 0x07
         require(temporalIdPlus1 != 0) { "nuh_temporal_id_plus1 must not be zero" }

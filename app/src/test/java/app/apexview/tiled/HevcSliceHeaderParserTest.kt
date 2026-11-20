@@ -19,6 +19,22 @@ class HevcSliceHeaderParserTest {
     }
 
     @Test
+    fun parsesLargeSliceFromBoundedBackingArrayWithoutOwningWholePayload() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)
+        val largeNal = nal(1, pSliceBits()) + ByteArray(900_000) { 0x55.toByte() }
+        val backing = byteArrayOf(0x66, 0x77) + largeNal + byteArrayOf(0x44)
+        assertEquals(HevcSliceHeaderParser.parse(largeNal, sps, pps),
+            HevcSliceHeaderParser.parseRange(backing, 2, largeNal.size, sps, pps))
+        try {
+            HevcSliceHeaderParser.parseRange(backing, backing.size - 2, largeNal.size, sps, pps)
+            throw AssertionError("Out-of-bounds NAL range must be rejected")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message!!.contains("out of bounds"))
+        }
+    }
+
+    @Test
     fun rejectsReservedVclNalTypesAndTemporalLayersOutsideSpsLimit() {
         val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
         val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)
@@ -372,6 +388,27 @@ class HevcSliceHeaderParserTest {
         assertEquals(1, report.sourceTileCount)
         assertTrue(report.fullFrameSingleSlice)
         assertTrue(report.independentSliceEligible)
+    }
+
+    @Test
+    fun clearCmafInspectorCanReturnValidatedNalRangesWithoutFullSliceCopies() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits(tilesEnabled = false)), sps)
+        val slice = nal(1, pSliceBits(tilesEnabled = false)) + ByteArray(900_000) { 0x55.toByte() }
+        val sample = byteArrayOf(0x66, 0x77) + lengthPrefixedSample(slice) + byteArrayOf(0x44)
+        val legacy = HevcAccessUnitInspector.inspectLengthPrefixedSample(sample, 4, sps, pps,
+            sampleOffset = 2, sampleLength = sample.size - 3)
+        val ranged = HevcAccessUnitInspector.inspectLengthPrefixedSample(sample, 4, sps, pps,
+            sampleOffset = 2, sampleLength = sample.size - 3, retainNalUnits = false)
+        assertEquals(legacy.slices, ranged.slices)
+        assertEquals(legacy.pictureIdentity, ranged.pictureIdentity)
+        assertEquals(0, ranged.nalUnits.size)
+        assertEquals(1, ranged.nalUnitRanges.size)
+        assertEquals(6, ranged.nalUnitRanges.single().offset)
+        assertEquals(slice.size, ranged.nalUnitRanges.single().length)
+        assertEquals(slice.size, legacy.nalUnits.single().size)
+        sample[6] = 0x44
+        assertEquals(slice[0], legacy.nalUnits.single()[0])
     }
 
     @Test
