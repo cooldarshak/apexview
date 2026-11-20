@@ -1,11 +1,38 @@
 package app.apexview.tiled
 
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HevcClearCmafFragmentWriterTest {
+    @Test
+    fun writesLargeSamplesDirectlyToOneContiguousMdatWithoutChangingInput() {
+        val first = ByteArray(1024 * 1024 + 3) { (it * 17).toByte() }
+        val second = ByteArray(768 * 1024 + 7) { (it * 31).toByte() }
+        val samples = listOf(
+            HevcClearCmafFragmentWriter.Sample(first, 3600, 0, 0x02000000),
+            HevcClearCmafFragmentWriter.Sample(second, 3600, -3600, 0x01010000)
+        )
+        val result = HevcClearCmafFragmentWriter.write(1, 17, 90000, samples, false, false)
+
+        val bytes = ByteBuffer.wrap(result).order(ByteOrder.BIG_ENDIAN)
+        val moofSize = bytes.getInt(0)
+        assertEquals("moof", String(result, 4, 4, Charsets.US_ASCII))
+        assertEquals(first.size + second.size + 8, bytes.getInt(moofSize))
+        assertEquals("mdat", String(result, moofSize + 4, 4, Charsets.US_ASCII))
+        assertEquals(moofSize + 8 + first.size + second.size, result.size)
+        assertArrayEquals(first, result.copyOfRange(moofSize + 8, moofSize + 8 + first.size))
+        assertArrayEquals(second, result.copyOfRange(moofSize + 8 + first.size, result.size))
+        assertEquals(listOf(first.size.toLong(), second.size.toLong()),
+            CmafBoxInspector.inspect(result).fragments.single().sampleTimings.map { it.sampleSizeBytes })
+        assertEquals((1024 * 1024 + 3 - 1).let { (it * 17).toByte() }, first.last())
+        assertEquals((768 * 1024 + 7 - 1).let { (it * 31).toByte() }, second.last())
+    }
+
     @Test
     fun buildsClearMediaFragmentWithExactSampleTimingAndFlags() {
         val samples = listOf(

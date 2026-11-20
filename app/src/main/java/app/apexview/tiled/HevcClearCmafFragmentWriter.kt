@@ -54,10 +54,6 @@ internal object HevcClearCmafFragmentWriter {
         }
         require(mediaBytes <= Int.MAX_VALUE - 8L) { "mdat payload exceeds the supported box size" }
 
-        val samplePayload = ByteArrayOutputStream(mediaBytes.toInt())
-        samples.forEach { sample -> samplePayload.write(sample.data) }
-        val mediaData = samplePayload.toByteArray()
-
         val mfhd = fullBox("mfhd", 0, 0, uint32(sequenceNumber))
         // default-base-is-moof plus explicit sample_description_index=1.
         val tfhd = fullBox("tfhd", 0, 0x020002,
@@ -77,8 +73,25 @@ internal object HevcClearCmafFragmentWriter {
         require(moof.size.toLong() + 8L == dataOffset) {
             "CMAF moof size changed while resolving sample data offset"
         }
-        val mdat = box("mdat", mediaData)
-        return moof + mdat
+        // Samples are already owned by the HEVC composer. Building mdat via a
+        // ByteArrayOutputStream, toByteArray(), box() and moof + mdat allocated
+        // four additional full-size payloads for every archive segment.
+        // Write straight into the only output buffer instead; the bytes and
+        // trun data_offset are identical, and no encrypted input is accepted.
+        val totalBytes = Math.addExact(Math.addExact(moof.size.toLong(), 8L), mediaBytes)
+        require(totalBytes <= Int.MAX_VALUE) { "Composed CMAF fragment exceeds the supported buffer size" }
+        val result = ByteArray(totalBytes.toInt())
+        moof.copyInto(result)
+        val output = ByteBuffer.wrap(result).order(ByteOrder.BIG_ENDIAN)
+        output.position(moof.size)
+        output.putInt((mediaBytes + 8L).toInt())
+        output.put('m'.code.toByte())
+        output.put('d'.code.toByte())
+        output.put('a'.code.toByte())
+        output.put('t'.code.toByte())
+        samples.forEach { sample -> output.put(sample.data) }
+        check(output.position() == result.size) { "CMAF sample payload did not fill its validated size" }
+        return result
     }
 
     private fun buildTrun(samples: List<Sample>, dataOffset: Int): ByteArray {
