@@ -8,7 +8,7 @@ checks bitstream correctness; it does **not** establish on-screen smoothness.
 
 1. Install the newest signed CI APK over the installed version. Keep **Single Decoder**
    selected. Open the F1 replay, choose one primary 1080p plus three secondary feeds
-   capped at 480p, and enable the timing tower and tracker map. Confirm the *actual*
+   capped at 540p where available, and enable the timing tower and tracker map. Confirm the *actual*
    HLS/coded source sizes in the normal Pitwall diagnostics.
 2. Leave the replay running for 30 seconds so the decoder and buffers stabilize.
 3. Connect ADB, then run from the repository root:
@@ -18,9 +18,9 @@ checks bitstream correctness; it does **not** establish on-screen smoothness.
    adb pull /data/misc/perfetto-traces/pitwall-50fps.perfetto-trace .
    ```
 
-   The first command runs for 60 seconds. The earlier 64MiB configuration
-   retained only 20.7s of a 60s S22 trace; the checked-in configuration now
-   reserves a 192MiB ftrace buffer and up to 384MiB for the file. On
+   The first command runs for 60 seconds. Build 573's 64MiB on-device capture
+   retained only 17.7s of a 60s S22 trace; the checked-in configuration now
+   reserves a 256MiB ftrace buffer and up to 480MiB for the file. On
    lower-memory TVs reduce the capture duration first if collection fails.
    If your build does not support the
    SurfaceFlinger layers/FrameTimeline data source, query supported sources with
@@ -30,6 +30,8 @@ checks bitstream correctness; it does **not** establish on-screen smoothness.
    Android version, replay/session, chosen feeds and actual dimensions, caps,
    display's **active** Hz, battery temperature and whether the phone was charging.
    Do not upload F1 tokens, HLS URLs, cookies, or entitlement material.
+   If testing entirely on your phone, see `docs/perfetto/ASHELL.md` for
+   `perfetto` and `logcat` commands with **no `adb` executable required**.
 5. Open the trace in [Perfetto UI](https://ui.perfetto.dev). Inspect the app's main
    thread, RenderThread, ApexviewSingleScene, MediaCodec threads, compositor and
    SurfaceFlinger; correlate `PitwallCodecPtsMs` and `PitwallCodecPlannedReleaseMs`
@@ -46,6 +48,11 @@ checks bitstream correctness; it does **not** establish on-screen smoothness.
      --baseline baseline-frame-timeline.csv \
      --candidate candidate-frame-timeline.csv
    ```
+
+   For cumulative app-log counts and to avoid mixing two builds appended to the
+   same file, run `python3 scripts/analyze_pitwall_runtime.py your-log.txt
+   --build 1.0.573`. A valid A/B test must still isolate the same steady-state
+   layout interval rather than compare an entire mixed-layout session.
 
    Record each result alongside matching `SINGLE_DECODER_SCENE`,
    `SCENE_CODEC_RELEASE`, `PitwallFrames`, composition, allocation and GC logs.

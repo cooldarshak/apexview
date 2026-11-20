@@ -29,7 +29,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -109,27 +108,38 @@ fun LaptopPanel(app: AppState, timing: SessionTiming?, modifier: Modifier) {
 @Composable
 fun SessionCountdown(app: AppState, timing: SessionTiming, style: TextStyle, modifier: Modifier = Modifier) {
     if (timing.isRace) return
-    var now by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(Unit) {
+    // The picture clock has sub-second precision, but the visible countdown changes only
+    // once per second (or when a flag pauses it). Do the cheap clock lookup frequently
+    // without invalidating Compose and its accessibility tree four times per second.
+    var display by remember(app, timing) { mutableStateOf<CountdownDisplay?>(null) }
+    LaunchedEffect(app, timing) {
         while (true) {
-            now = app.mapTimeMs() ?: 0L
+            display = countdownDisplay(timing, app.mapTimeMs())
             delay(250)
         }
     }
-    if (now == 0L) return
-    val reading = timing.clock.at(now) ?: return
+    val shown = display ?: return
+    Text(
+        shown.text,
+        style = style.copy(color = if (shown.running) Ink.primary else Ink.secondary, fontFeatureSettings = "tnum"),
+        maxLines = 1,
+        modifier = modifier,
+    )
+}
+
+/** Immutable display state: identical quarter-second samples do not trigger recomposition. */
+internal data class CountdownDisplay(val text: String, val running: Boolean)
+
+internal fun countdownDisplay(timing: SessionTiming, now: Long?): CountdownDisplay? {
+    if (timing.isRace || now == null || now == 0L) return null
+    val reading = timing.clock.at(now) ?: return null
     val flag = timing.finishedUtc
-    if (reading.remainingMs == 0L && flag != null && now >= flag) return
+    if (reading.remainingMs == 0L && flag != null && now >= flag) return null
     val seconds = (reading.remainingMs + 999) / 1000
     val time = if (seconds >= 3600) "%d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60)
     else "%d:%02d".format(seconds / 60, seconds % 60)
     val part = reading.part?.takeIf { timing.showsPushLaps }?.let { (if (timing.name.contains("Sprint", ignoreCase = true)) "SQ" else "Q") + it + " " }.orEmpty()
-    Text(
-        part + time,
-        style = style.copy(color = if (reading.running) Ink.primary else Ink.secondary, fontFeatureSettings = "tnum"),
-        maxLines = 1,
-        modifier = modifier,
-    )
+    return CountdownDisplay(part + time, reading.running)
 }
 
 /**
@@ -255,20 +265,12 @@ internal fun TimingTowerContents(
                     items(rows, key = { it.first }) { (number, state) ->
                         val kmh = speeds[number]?.first
                         val gear = speeds[number]?.second
-                        if (television) {
-                            TvTowerRow(timing.drivers[number], number, state, tyres[number], kmh, gear,
-                                speedUnit, number == onTop, rowHeight) { onDriver(number) }
-                        } else TowerRow(
-                            timing = timing,
-                            number = number,
-                            state = state,
-                            tyre = tyres[number],
-                            kmh = kmh,
-                            gear = gear,
-                            speedUnit = speedUnit,
-                            highlight = number == onTop,
-                            rowHeight = rowHeight,
-                        ) { onDriver(number) }
+                        // Use the same single-Canvas row on phone and TV. The previous phone
+                        // branch built hundreds of nested Text/Row/Canvas layout nodes on each
+                        // timing sample. The native row preserves the broadcast columns,
+                        // clickable driver, tyre and sectors, and one TalkBack semantics node.
+                        TvTowerRow(timing.drivers[number], number, state, tyres[number], kmh, gear,
+                            speedUnit, number == onTop, rowHeight) { onDriver(number) }
                     }
                 }
                 if (rows.isNotEmpty()) {

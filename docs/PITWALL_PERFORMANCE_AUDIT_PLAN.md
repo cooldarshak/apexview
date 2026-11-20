@@ -2,6 +2,49 @@
 
 Status: implementation backlog, not a claim of completed fixes or smooth playback.
 
+## Build 573 device trace and next UI batch (20 November 2026)
+
+The S22 Ultra replay log contains two appended captures: 1.0.572 (archive
+startup failures) followed by **1.0.573** (successful two- and four-feed
+playback). Do not attribute failures from the older appended session to 573.
+The successful four-feed scene used a 1920x2176 HEVC atlas, a single hardware
+`c2.qti.hevc.decoder`, first rendered picture, and roughly 50 decoder texture
+frames/s. During a 160s four-feed interval its HWUI logs had 4843 slow frames
+out of 8464 (57.2%), no freezes over 700ms, and 187 grouped BufferQueue
+warnings (1.17/s). App-side decode/GL throughput **does not prove physical
+50fps presentation**.
+
+The supplied Build 573 Perfetto trace preserved just 17.7s and changed from
+TV to Featured layout during the window. SurfaceFlinger had 627 on-time,
+426 late, and 11 dropped frames; the app's main layer was late in 806 of
+811 actual frames. `checkForSemanticsChanges` averaged 9.43ms over 190
+calls (was 34.8ms over 133 calls in Build 569), while `Recomposer:recompose`
+ran 536 times, averaging 4.32ms. Main-thread traversal occasionally exceeded
+190ms, and some measure/layout intervals exceeded 150ms. Decoder callback,
+texture latch, GL draw and EGL swap averaged only ~0.78/0.47/0.58/0.85ms,
+so a whole decoder or HEVC rewrite is **not** supported by the current data.
+The unequal and mixed-layout samples do not establish a controlled A/B win.
+
+This follow-up change set targets **UI invalidation** first: use the already
+proven single-Canvas native tower row on phone as well as TV (preserving
+selection and merged TalkBack semantics); update the session countdown only
+when its displayed seconds/flag state changes; supply tests for both; and add
+a reproducible runtime log parser. Do not label these optimizations a smooth
+playback fix until the new device logs and physical FrameTimeline confirm it.
+
+The remaining BufferQueue warnings involve multiple SurfaceTexture queues,
+including decoder and output surfaces. A 0ms timeout warning is not sufficient
+to identify a blocked consumer. Preserve the one-decoder compositor and record
+queue owners, timestamps, codec texture progress and SF app/display presents
+before considering a buffer-policy or SurfaceView rewrite.
+
+The next 60s S22 sample must use `docs/perfetto/pitwall-50fps.cfg` (256MiB
+main buffer + 48MiB secondary), verify the actual trace buffer sizes rather
+than inadvertently recording another default 64MiB trace, and keep four feeds
+plus tower/map in TV layout **without switching layout**. The detailed no-PC
+command sequence is in `docs/perfetto/ASHELL.md`. Follow with overlays-off,
+tower-only and map-only isolates, then 1-decoder seek/audio and TCL TV tests.
+
 ## Build 569 Perfetto findings and next performance batch (20 November 2026)
 
 This batch follows the S22 Ultra `pitwall-50fps.perfetto-trace` with four active

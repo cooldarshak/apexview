@@ -3,6 +3,8 @@ package app.apexview
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -75,5 +77,28 @@ class TowerAccessibilitySummaryTest {
         rule.waitForIdle()
         rule.onNodeWithContentDescription(description).assertExists().performClick()
         assertEquals(2, clicked)
+    }
+
+    @Test fun phoneTowerScreenUsesTheCanvasRowWithOneAccessibleDriverAction() {
+        val session = SessionTiming("Qualifying", mapOf("44" to DriverInfo("44", "HAM", android.graphics.Color.RED)),
+            emptyMap(), emptyMap(), floatArrayOf(), false, emptyList(), 0L)
+        val description = TowerAccessibilitySummary.prepare("HAM", state, Tyre("SOFT", 6))
+        var clicked = 0
+        rule.setContent {
+            Box(androidx.compose.ui.Modifier.size(420.dp, 220.dp)) {
+                TimingTowerContents(
+                    timing = session, rows = listOf("44" to state),
+                    header = TowerSessionHeaderData("QUALIFYING", "TRACK CLEAR", androidx.compose.ui.graphics.Color.Green, "Q1 1:22", emptyList()),
+                    tyres = mapOf("44" to Tyre("SOFT", 6)), speeds = mapOf("44" to (200 to 8)),
+                    onTop = "44", speedUnit = Settings.KMH, tvLayout = false,
+                    onDriver = { clicked++ },
+                )
+            }
+        }
+        rule.onNodeWithContentDescription(description).assertExists().performClick()
+        assertEquals(1, clicked)
+        // Speed is painted into one Canvas, not exposed as hundreds of individual
+        // dynamic Text semantics nodes while playing at 50 fps.
+        rule.onAllNodesWithText("200", useUnmergedTree = true).assertCountEquals(0)
     }
 }
