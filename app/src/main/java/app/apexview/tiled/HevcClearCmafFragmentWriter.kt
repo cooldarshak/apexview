@@ -59,7 +59,7 @@ internal object HevcClearCmafFragmentWriter {
         sourceTrackEncrypted: Boolean,
         sourceFragmentHasEncryptionMetadata: Boolean
     ): ByteArray {
-        require(nalLengthSize in 1..4) { "NAL length-prefix size must be between 1 and 4" }
+        require(nalLengthSize in 1..4) { "NAL length prefix size must be between 1 and 4" }
         val maxNalSize = if (nalLengthSize == 4) 0xffff_ffffL else (1L shl (8 * nalLengthSize)) - 1L
         val encoded = samples.map { sample ->
             require(sample.nals.isNotEmpty()) { "An output sample must contain a rewritten HEVC NAL" }
