@@ -134,6 +134,7 @@ class HevcParameterSetCompatibilityTest {
         assertEquals(512, plan!!.codedWidth)
         assertEquals(192, plan.codedHeight)
         assertEquals(6, plan.cells.size)
+        assertTrue(plan.evaluatedShapes > 1)
     }
 
     @Test fun rejectsDifferentCtbSizeBitDepthChromaAndProfileConstraints() {

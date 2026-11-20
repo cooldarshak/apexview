@@ -21,6 +21,9 @@ another full-slice copy per picture. It replaces imperceptibly rounded mini-sect
 rectangles, and searches bounded, conforming atlas alternatives by actual
 coded pixel area rather than first valid cell count. The atlas test includes
 a conforming 110-to-96 CTB-area example, not a claim that actual F1 layouts shrink.
+The atlas selection logs evaluated shapes, failed grid validations and whether
+its bounded search hit its work cap; an incomplete bounded search is never
+reported as a proven global optimum.
 
 **Still open:** install the new signed build on S22 Ultra, compare matched
 50fps four-feed playback for GC/allocations and physical SurfaceFlinger

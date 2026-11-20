@@ -16,6 +16,9 @@ internal object HevcMixedArchiveAtlasPlan {
         val sourceRects: List<SourceRect>,
         val codedWidth: Int,
         val codedHeight: Int,
+        val evaluatedShapes: Int = 0,
+        val rejectedGridValidations: Int = 0,
+        val searchBudgetLimited: Boolean = false,
     )
 
     private data class Tile(val feed: Int, val index: Int, val col: Int, val row: Int,
@@ -49,15 +52,24 @@ internal object HevcMixedArchiveAtlasPlan {
             })
         }
         if (all.sumOf { it.tiles.size } > 24) return null
+        val availableTiles = all.flatMap { it.tiles }
         // Every tile must be independently decodable and share the coding tools of the
         // output PPS. Source dimensions and source tile counts may differ.
         val anchor = all.first().tiles.first().sourceCell
-        if (all.flatMap { it.tiles }.any {
+        if (availableTiles.any {
             !HevcSourceCellCompatibility.compareCodingParameters(anchor, it.sourceCell).compatible
         }) return null
         val minimumCells = all.sumOf { it.tiles.size }
         val minimumColumns = all.maxOf { it.cols }
         val minimumRows = all.maxOf { it.rows }
+        // Bounds for the remaining unplaced feeds are used at every recursive
+        // node. Precompute them rather than allocating all.drop(index) lists.
+        val remainingColumns = IntArray(all.size + 1)
+        val remainingRows = IntArray(all.size + 1)
+        for (i in all.indices.reversed()) {
+            remainingColumns[i] = remainingColumns[i + 1] + all[i].cols
+            remainingRows[i] = remainingRows[i + 1] + all[i].rows
+        }
         // Every output row and column must be established by a real source tile;
         // the filler may repeat a tile only after that geometry is known.
         val maximumColumns = minOf(8, maximumWidth / ctb, all.sumOf { it.cols })
@@ -74,10 +86,14 @@ internal object HevcMixedArchiveAtlasPlan {
         // validated coded picture areas before choosing the output atlas.
         var best: Plan? = null
         var bestArea = Long.MAX_VALUE
+        var evaluatedShapes = 0
+        var rejectedGridValidations = 0
+        var searchBudgetLimited = false
         val sourceAreaLowerBound = sources.sumOf {
             it.sps.width.toLong() * it.sps.height.toLong()
         }
         for ((columns, rows) in candidates) {
+            evaluatedShapes++
             val placed = arrayOfNulls<Tile>(columns * rows)
             val rowCtbs = IntArray(rows)
             val colCtbs = IntArray(columns)
@@ -98,9 +114,8 @@ internal object HevcMixedArchiveAtlasPlan {
                 val width = colPixels.sum()
                 val height = rowPixels.sum()
                 if (width > maximumWidth || height > maximumHeight) return null
-                val available = all.flatMap { it.tiles }
                 val complete = placed.mapIndexed { slot, tile ->
-                    tile ?: available.firstOrNull { valid(it, slot % columns, slot / columns) } ?: return null
+                    tile ?: availableTiles.firstOrNull { valid(it, slot % columns, slot / columns) } ?: return null
                 }
                 val grid = HevcOutputGridDimensions(columns, rows)
                 val selected = complete.mapIndexed { slot, tile ->
@@ -110,7 +125,10 @@ internal object HevcMixedArchiveAtlasPlan {
                     HevcOutputCellPlacement(tile.sourceCell, slot % columns, slot / columns)
                 })
                 if (!checked.compatible || checked.geometry == null ||
-                    checked.geometry.codedWidth != width || checked.geometry.codedHeight != height) return null
+                    checked.geometry.codedWidth != width || checked.geometry.codedHeight != height) {
+                    rejectedGridValidations++
+                    return null
+                }
                 val rects = sources.indices.map { feed ->
                     val (x, y) = origin[feed] ?: return null
                     SourceRect(colCtbs.take(x).sum() * ctb, rowCtbs.take(y).sum() * ctb,
@@ -125,8 +143,8 @@ internal object HevcMixedArchiveAtlasPlan {
                 // remaining source placements can only increase this area.
                 val occupiedArea = colPixels.sum().toLong() * rowPixels.sum().toLong()
                 if (occupiedArea >= bestArea) return
-                if (colCtbs.count { it == 0 } > all.drop(index).sumOf { it.cols } ||
-                    rowCtbs.count { it == 0 } > all.drop(index).sumOf { it.rows }) return
+                if (colCtbs.count { it == 0 } > remainingColumns[index] ||
+                    rowCtbs.count { it == 0 } > remainingRows[index]) return
                 if (index == all.size) {
                     finish()?.let { plan ->
                         val area = plan.codedWidth.toLong() * plan.codedHeight.toLong()
@@ -161,10 +179,13 @@ internal object HevcMixedArchiveAtlasPlan {
                 }
             }
             search(0)
+            if (attempts > 50_000) searchBudgetLimited = true
             // The input pictures cannot occupy less than their own coded area
             // without overlapping pixels, so this bound is globally optimal.
             if (bestArea <= sourceAreaLowerBound) break
         }
-        return best
+        return best?.copy(evaluatedShapes = evaluatedShapes,
+            rejectedGridValidations = rejectedGridValidations,
+            searchBudgetLimited = searchBudgetLimited)
     }
 }

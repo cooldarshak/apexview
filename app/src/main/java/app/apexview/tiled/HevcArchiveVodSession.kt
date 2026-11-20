@@ -310,7 +310,10 @@ internal class HevcArchiveVodSession(
                             "mixed=$mixed sourceCoded=${sourceSps.width}x${sourceSps.height} " +
                             "sourceDisplay=${sourceSps.displayWidth}x${sourceSps.displayHeight} ctb=${sourceSps.ctbSize} " +
                             "decodedPixels=$decodedPixels uniqueSourcePixels=$uniqueSourcePixels " +
-                            "atlasExtraPixels=${decodedPixels - uniqueSourcePixels}")
+                            "atlasExtraPixels=${decodedPixels - uniqueSourcePixels} " +
+                            "atlasShapesEvaluated=${mixedAtlas?.evaluatedShapes ?: 0} " +
+                            "atlasGridValidationsRejected=${mixedAtlas?.rejectedGridValidations ?: 0} " +
+                            "atlasSearchBudgetLimited=${mixedAtlas?.searchBudgetLimited ?: false}")
                     } else {
                         require(initialization!!.contentEquals(composed.initializationSegment)) { "Archive representation changed its initialization" }
                         require(abs(requireNotNull(presentationOffsetTicks) - offset) <= 1L) { "Archive decode timestamps differ from the VOD timeline" }
