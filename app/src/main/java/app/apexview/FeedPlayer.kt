@@ -206,6 +206,8 @@ class FeedPlayer(
     private var firstFrameLogged = false
     private var seekSequence = 0
     private var pendingSeekAtMs: Long? = null
+    private var lastSampleUptimeMs = 0L
+    private var lastSamplePositionMs = 0L
 
     private fun playbackEvent(event: String, detail: String) {
         if (DiagnosticLogs.recording) {
@@ -216,10 +218,23 @@ class FeedPlayer(
     internal fun logPlaybackSample() {
         val counters = player.videoDecoderCounters
         counters?.ensureUpdated()
+        val uptime = android.os.SystemClock.elapsedRealtime()
+        val position = player.currentPosition
+        val sampleIntervalMs = if (lastSampleUptimeMs > 0L) uptime - lastSampleUptimeMs else 0L
+        val positionDeltaMs = if (lastSampleUptimeMs > 0L) position - lastSamplePositionMs else 0L
+        val clockDifferenceMs = if (sampleIntervalMs > 0L && player.isPlaying) {
+            positionDeltaMs - (sampleIntervalMs * player.playbackParameters.speed).toLong()
+        } else 0L
+        lastSampleUptimeMs = uptime
+        lastSamplePositionMs = position
         playbackEvent("sample", "positionMs=${player.currentPosition} bufferedMs=${player.bufferedPosition} " +
             "state=${player.playbackState} playing=${player.isPlaying} decoder=${activeVideoDecoderName ?: "none"} " +
             "rendered=${counters?.renderedOutputBufferCount ?: 0} dropped=${counters?.droppedBufferCount ?: 0} " +
-            "skipped=${counters?.skippedOutputBufferCount ?: 0} maxConsecutiveDrops=${counters?.maxConsecutiveDroppedBufferCount ?: 0}")
+            "skipped=${counters?.skippedOutputBufferCount ?: 0} maxConsecutiveDrops=${counters?.maxConsecutiveDroppedBufferCount ?: 0} " +
+            "sampleIntervalMs=$sampleIntervalMs mediaPositionDeltaMs=$positionDeltaMs " +
+            "mediaClockProgressionDifferenceMs=$clockDifferenceMs playbackSpeed=${player.playbackParameters.speed} " +
+            "audioFormat=${player.audioFormat?.sampleMimeType ?: "none"} " +
+            "audioHardwareClock=NOT_MEASURED")
     }
     var activeVideoDecoderCount by mutableStateOf(0)
         private set
@@ -562,6 +577,14 @@ class FeedPlayer(
 
             override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long) {
                 playbackEvent("drops", "frames=$droppedFrames intervalMs=$elapsedMs positionMs=${eventTime.currentPlaybackPositionMs}")
+            }
+
+            override fun onVideoFrameProcessingOffset(
+                eventTime: AnalyticsListener.EventTime, totalProcessingOffsetUs: Long, frameCount: Int,
+            ) {
+                if (frameCount > 0) playbackEvent("codec-frame-processing", "frames=$frameCount " +
+                    "meanOffsetUs=${totalProcessingOffsetUs / frameCount} totalOffsetUs=$totalProcessingOffsetUs " +
+                    "positionMs=${eventTime.currentPlaybackPositionMs} physicalPresentation=NOT_MEASURED")
             }
 
             override fun onSurfaceSizeChanged(eventTime: AnalyticsListener.EventTime, width: Int, height: Int) {

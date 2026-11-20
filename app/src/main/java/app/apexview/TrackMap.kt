@@ -179,6 +179,9 @@ internal fun rememberMapTime(app: AppState): Long {
  * Publish map state at 30 Hz, while the video continues on its own playback/surface clock.
  */
 internal const val MAP_RENDER_INTERVAL_MS = 33L
+// At 60/120 Hz, sleep until close to the next 33 ms overlay tick instead of
+// registering a Choreographer callback on every single display vsync.
+internal const val MAP_FRAME_WAIT_MS = 30L
 
 /** Sample at most 31 times/second, even on 60/120 Hz displays. Recover from clock resets. */
 internal fun isOverlaySampleDue(frameMs: Long, lastFrameMs: Long): Boolean =
@@ -210,6 +213,7 @@ internal fun rememberMapRenderTime(app: AppState): Long {
                     lastPublishedFrameMs = frameMs
                 }
             }
+            delay(MAP_FRAME_WAIT_MS)
         }
     }
     return now
@@ -585,7 +589,10 @@ private class LineMarks(timing: SessionTiming) {
 @Composable
 private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, height: Float, turn: Float) {
     val now = rememberMapRenderTime(app)
-    val cars = carsAt(timing, now)
+    val cars = remember(timing, now) {
+        android.os.Trace.beginSection("PitwallMapCars")
+        try { carsAt(timing, now) } finally { android.os.Trace.endSection() }
+    }
     val stop = app.pitDriver?.let { driver ->
         pitStopNow(rememberPitBasis(app, timing, now), driver,
             cars.map { it.number to timing.geometry.progress(it.x, it.y) })
@@ -897,7 +904,10 @@ internal class Ribbon(
 @Composable
 fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, inset: Float, screenCornerRadius: Float) {
     val now = rememberMapRenderTime(app)
-    val cars = carsAt(timing, now)
+    val cars = remember(timing, now) {
+        android.os.Trace.beginSection("PitwallEdgeCars")
+        try { carsAt(timing, now) } finally { android.os.Trace.endSection() }
+    }
     val stop = app.pitDriver?.let { driver ->
         pitStopNow(rememberPitBasis(app, timing, now), driver,
             cars.map { it.number to timing.geometry.progress(it.x, it.y) })
@@ -931,7 +941,7 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     val names = remember(timing.drivers, labelSizeSp, measurer) {
         timing.drivers.mapValues { measurer.label(it.value.tla, labelSizeSp.sp) }
     }
-    val turns = remember(timing) {
+    val turns = remember(timing, measurer) {
         timing.corners.map { timing.geometry.progress(it.x, it.y) to measurer.label("T${it.number}", 8.sp, bold = false) }
     }
     val marks = remember(timing, timing.startLine) { LineMarks(timing) }

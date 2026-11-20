@@ -12,8 +12,8 @@ and both devices have been checked with fresh playback logs.
 | --- | --- | --- |
 | P0.1 | Replaced the segment-wide fetch/composition lock with per-segment single-flight production, independent bounded foreground/prefetch network lanes, preemptible warmup and bounded cache publication. Added deterministic priority, sharing, cancellation and retry tests. | Await CI; explicitly test seek/close races and compare foreground latency against Build 562 on-device. |
 | P0.2 | Reuse session-owned validated initialization metadata, inspect bounded fragment sample ranges without a per-sample copy, use sized Annex-B buffers and direct sized CMAF sample output, log separate parsing/rewrite/packaging/verification times. Added byte-for-byte fixture comparison. | Await synthetic HEVC/FFmpeg CI; obtain per-segment allocated-byte and GC measurements on-device, profile remaining Annex-B and NAL allocations. |
-| P0.3 | Corrected GL draw versus actual EGL swap timing; separately measured latch time, late Choreographer callbacks and SurfaceTexture timestamp regressions; added trace sections and frame-accounting tests. | BufferQueue producer/consumer cause and physical SurfaceFlinger presentation still require Perfetto/FrameTimeline captures. Do not claim timeouts fixed. |
-| P0.4 | Memoized immutable Android TV tower row formatting/sector work; added explicit frozen-window-frame and display-refresh logs with unit coverage. | Capture a real main-thread/RenderThread trace; compare slow/frozen percentages. Macrobenchmark and remaining UI hotspots are still open. |
+| P0.3 | Corrected GL draw versus actual EGL swap timing; independently measure decoder SurfaceTexture timestamps, callback/latch cadence, Choreographer video/all-frame cadence, EGL context bind/latch/draw/swap distributions, codec frame-processing offsets, and selected versus available display refresh modes. Fixed-bin histograms distinguish 16.7/20/25 ms cadence without per-frame logging. Added regression tests. | Physical presentation remains **unmeasured**; BufferQueue cause needs Perfetto/FrameTimeline producer-consumer investigation and on-device 50 fps cadence verification. A 50 fps source on 120 Hz cannot evenly map frames unless the display changes mode. Do not claim timeout root cause fixed. |
+| P0.4 | Memoized immutable TV tower row formatting/sector work, avoided sampling the phone map on every 120 Hz display vsync (preserving approximately 30 Hz), cached source positions per map sample, and added window jank distributions and HWUI layout/draw/sync/command/swap/GPU breakdown. Map and tower trace sections expose Compose hotspots in Perfetto. | Device-test whether the changes reduce slow/frozen window frames; isolate expensive calls using trace. No Macrobenchmark or proof of solved main-thread contention yet. |
 
 Testing note: the handover environment could not download Gradle 8.11.1 because outbound
 access to the distribution host was unavailable. GitHub Actions must run compilation,
@@ -69,6 +69,36 @@ and GC count during each segment so the next log can correlate allocation with c
 These counters include concurrent work and cannot be attributed solely to the compositor.
 P0.3/P0.4 and real-device pacing remain open; neither a green build nor this memory
 change establishes smooth playback.
+
+### Build 566 follow-up diagnostics and current P0.3/P0.4 batch
+
+Build 566 passed CI with the signed APK, but the S22 Ultra log
+`pitwall-20261120-034433-315.log.txt` still shows severe perceptible stutter.
+For the sustained four-feed interval with one 1080p and three 360p sources
+(1920x2176 coded atlas, 4,177,920 pixels), roughly 2,027 of 3,135
+window frames were slow (64.7%). There were 54 grouped BufferQueue timeout
+events and 61 GCs reclaiming roughly 3.19 GB cumulatively in about 82 seconds.
+The scene latched roughly 250 frames per five seconds, and its sampled
+GL draw/swap durations were usually short, but these counts are **not**
+SurfaceFlinger physical presentations. This is directionally better than
+Build 562's 75.8% slow UI frames but is not a matched-duration comparison.
+The earlier portion used two 1080p and two 360p sources, a much larger
+2880x2176 atlas, so its performance must be analyzed separately.
+
+The next instrumentation batch adds fixed-size per-stage distributions,
+Android 16 FrameTimeline vsync IDs, display-mode changes and available modes,
+codec-frame processing offsets, media-position-versus-elapsed-time progression,
+and Perfetto annotations for map/tower work. Media3 position progression is
+**not** an independent hardware audio timestamp; GPU submission is **not** GPU
+completion; scene Choreographer callbacks are **not** physical presentation.
+Do not claim these instrumentation changes resolve stutter until tested.
+
+Device acceptance: compare matched feed dimensions and duration against Build
+566 for at least 5-10 minutes; record actual selected/supported refresh modes
+and codec source timestamps, event and vsync histograms, window-frame stage
+breakdown, BufferQueue timeout rates, allocations/GC, buffering, audio drift,
+and separate SurfaceFlinger FrameTimeline/Perfetto frames. Retest with tower
+and map both enabled and disabled and both phone and TCL Android TV.
 
 Baseline: `feature/per-feed-adaptive-hevc-quality` at
 `574ccb587a50f174748d1b08ed2283e4b8ed1ecc` (Build 562).

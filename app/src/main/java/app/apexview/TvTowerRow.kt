@@ -2,6 +2,7 @@ package app.apexview
 
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.os.Trace
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,7 +29,9 @@ internal fun TvTowerRow(
     // A tower sample can be republished while this driver's fields stay identical. Keep the
     // formatted text, synthesized strip cells and accessibility description across those draws.
     val content = remember(number, driver?.tla, state, tyre, kmh, gear, speedUnit) {
-        TowerRowText.prepare(driver?.tla ?: number, state, tyre, kmh, gear, speedUnit)
+        Trace.beginSection("PitwallTowerTextPrepare")
+        try { TowerRowText.prepare(driver?.tla ?: number, state, tyre, kmh, gear, speedUnit) }
+        finally { Trace.endSection() }
     }
     val (name, lastLap, bestLap, position, interval, leader, gearText, speed, sectors, description) = content
     Canvas(Modifier.fillMaxWidth().height(rowHeight).tvFocusRing().clickable(onClick = onClick)
@@ -38,6 +41,9 @@ internal fun TvTowerRow(
         // panel scaling and the user's font-scale setting effective on the Cast receiver.
         val unit = minOf(density, size.width / 361f)
         if (unit <= 0 || size.height <= 0) return@Canvas
+        // Perfetto-only sections avoid a log or allocation per row at 25-30 Hz.
+        val tracing = Trace.isEnabled()
+        if (tracing) Trace.beginSection("PitwallTowerRowDraw")
         val height = size.height / unit
         val mid = height / 2
         val upper = height * .29f
@@ -112,6 +118,7 @@ internal fun TvTowerRow(
             }
         } finally {
             canvas.restoreToCount(save)
+            if (tracing) Trace.endSection()
         }
     }
 }

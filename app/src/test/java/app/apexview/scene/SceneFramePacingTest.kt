@@ -70,4 +70,27 @@ class SceneFramePacingTest {
         stats.onTextureLatched(2_000_000_000L, surfaceTimestampNs = 100_000_000L)
         assertEquals(0, stats.snapshotAndReset().surfaceTimestampRegressions)
     }
+
+    @Test fun recordsSourceCadenceSeparatelyFromChoreographerAndCpuStages() {
+        val stats = SceneFramePacing()
+        val start = 1_000_000_000L
+        repeat(5) { i ->
+            val sourceTime = start + i * 20_000_000L
+            stats.onTextureLatched(sourceTime, 2_000_000L, sourceTime, eglBindNs = 1_000_000L)
+            // 120Hz frame callbacks with some 50fps frames displayed on 16.7/25ms slots.
+            stats.onDisplayFrame(start + i * 25_000_000L, 3_000_000L,
+                newVideo = i != 2, drawNs = 4_000_000L,
+                callbackStartNs = start + i * 25_000_000L + 2_000_000L)
+        }
+        val report = stats.snapshotAndReset()
+        assertEquals(4L, report.textureTimestampIntervals.bins[2])
+        assertEquals(4L, report.callbackIntervals.bins[2])
+        assertEquals(2L, report.displayIntervals.bins[3])
+        assertEquals(1L, report.displayIntervals.bins[5])
+        assertEquals(1L, report.noNewVideoDraws)
+        assertEquals(5L, report.glDrawDurations.count)
+        assertEquals(5L, report.eglSwapDurations.count)
+        assertEquals(5L, report.callbackDelays.count)
+        assertEquals(0L, stats.snapshotAndReset().latched)
+    }
 }

@@ -1,6 +1,7 @@
 package app.apexview.scene
 
 import android.content.Context
+import android.hardware.display.DisplayManager
 import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.opengl.EGL14
@@ -22,6 +23,7 @@ import android.view.Window
 import android.view.Surface
 import android.view.TextureView
 import app.apexview.cast.BakedCastLiveSession
+import app.apexview.DisplayCadence
 import androidx.media3.exoplayer.ExoPlayer
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -35,6 +37,32 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private val thread = HandlerThread("ApexviewSingleScene").apply { start() }
     private val gl = Handler(thread.looper)
     private val main = Handler(Looper.getMainLooper())
+    private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+    private var previousModeSignature: String? = null
+    private val modeListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            if (rootView.display?.displayId == displayId) logDisplayMode("mode-changed")
+        }
+    }
+
+    private fun logDisplayMode(reason: String) {
+        val actualDisplay = rootView.display ?: return
+        val mode = actualDisplay.mode
+        val sourceFps = scene?.sourceFrameRate ?: 0.0
+        val signature = "${actualDisplay.displayId}:${mode.modeId}:${mode.refreshRate}:$sourceFps"
+        if (signature == previousModeSignature) return
+        previousModeSignature = signature
+        // An available mode is not a selected mode; setFrameRate() is only advice to SurfaceFlinger.
+        val available = actualDisplay.supportedModes.joinToString(",") {
+            "${it.modeId}:${it.physicalWidth}x${it.physicalHeight}@${it.refreshRate}"
+        }
+        Log.i("ApexviewSingleDecoder", "SCENE_DISPLAY_MODE reason=$reason displayId=${actualDisplay.displayId} " +
+            "activeMode=${mode.modeId} activeHz=${mode.refreshRate} sourceFps=$sourceFps " +
+            "integerRefreshMultiple=${DisplayCadence.exactMultiple(mode.refreshRate, sourceFps)} " +
+            "supportedModes=$available physicalPresentation=NOT_MEASURED")
+    }
     private var player: ExoPlayer? = null
     @Volatile private var scene: VideoScene? = null
     @Volatile private var released = false
@@ -248,6 +276,18 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
 
     init { surfaceTextureListener = this; isOpaque = true }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        displayManager.registerDisplayListener(modeListener, main)
+        logDisplayMode("attach")
+    }
+
+    override fun onDetachedFromWindow() {
+        displayManager.unregisterDisplayListener(modeListener)
+        previousModeSignature = null
+        super.onDetachedFromWindow()
+    }
+
     fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene) {
         val changed = scene != nextScene
         scene = nextScene
@@ -256,7 +296,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             player = nextPlayer
             input?.let { nextPlayer.setVideoSurface(it) }
         }
-        if (changed) gl.post { guarded { applyOutputFrameRateHint(); scheduleDisplayFrame() } }
+        if (changed) {
+            main.post { if (!released) logDisplayMode("source-changed") }
+            gl.post { guarded { applyOutputFrameRateHint(); scheduleDisplayFrame() } }
+        }
     }
 
     override fun onSurfaceTextureAvailable(output: SurfaceTexture, width: Int, height: Int) {
@@ -352,14 +395,17 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                     // A decoder can exhaust its output BufferQueue while the EGL display
                     // swap is blocked. Latch promptly to release the prior codec buffer;
                     // coalesce only the *drawing* onto a Choreographer vsync.
+                    val bindStarted = System.nanoTime()
                     check(EGL14.eglMakeCurrent(display, window, window, contextGl)) { "Scene GL context unavailable" }
+                    val eglBindNs = System.nanoTime() - bindStarted
                     val latchStarted = System.nanoTime()
                     Trace.beginSection("PitwallTextureLatch")
                     try { frames.updateTexImage() } finally { Trace.endSection() }
                     frames.getTransformMatrix(transform)
                     hasFrame = true
                     rendered++
-                    pacing.onTextureLatched(System.nanoTime(), System.nanoTime() - latchStarted, frames.timestamp)
+                    val latchedAt = System.nanoTime()
+                    pacing.onTextureLatched(latchedAt, latchedAt - latchStarted, frames.timestamp, eglBindNs)
                     scheduleDisplayFrame(videoArrived = true)
                 }
             }
@@ -398,7 +444,18 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 "slowDraws18ms=${metrics.slowDraws} maxGlDrawMs=${metrics.maxDrawMs} " +
                 "slowLatches18ms=${metrics.slowLatches} maxLatchMs=${metrics.maxLatchMs} " +
                 "maxVsyncCallbackDelayMs=${metrics.maxVsyncCallbackDelayMs} " +
-                "surfaceTimestampRegressions=${metrics.surfaceTimestampRegressions} physicalPresentation=NOT_MEASURED")
+                "surfaceTimestampRegressions=${metrics.surfaceTimestampRegressions} " +
+                "drawsWithoutNewVideo=${metrics.noNewVideoDraws} " +
+                "callbackIntervalsBins13_19_23_30_45_100=${metrics.callbackIntervals.compact()} " +
+                "sourceTimestampBins13_19_23_30_45_100=${metrics.textureTimestampIntervals.compact()} " +
+                "videoVsyncBins13_19_23_30_45_100=${metrics.displayIntervals.compact()} " +
+                "allVsyncBins13_19_23_30_45_100=${metrics.allVsyncIntervals.compact()} " +
+                "eglBindMaxMs=${metrics.eglBindDurations.maxMs.toInt()} " +
+                "latchP95UpperMs=${metrics.latchDurations.percentileUpperMs(95)} " +
+                "glSubmitP95UpperMs=${metrics.glDrawDurations.percentileUpperMs(95)} " +
+                "eglSwapP95UpperMs=${metrics.eglSwapDurations.percentileUpperMs(95)} " +
+                "choreographerDelayP95UpperMs=${metrics.callbackDelays.percentileUpperMs(95)} " +
+                "gpuSubmitNotGpuCompletion=true physicalPresentation=NOT_MEASURED")
             lastLogNs = now
         }
         return DrawTiming(swapStarted - drawStarted, swapCompleted - swapStarted)
