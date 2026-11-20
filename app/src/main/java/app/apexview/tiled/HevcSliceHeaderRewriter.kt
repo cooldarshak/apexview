@@ -20,7 +20,7 @@ internal object HevcSliceHeaderRewriter {
 
     private data class ClearRbsp(
         val bytes: ByteArray,
-        val sourceOffsets: IntArray
+        val sourceTailOffset: Int
     )
 
     fun rewrite(
@@ -78,13 +78,13 @@ internal object HevcSliceHeaderRewriter {
             "Destination CTB address exceeds the output picture"
         }
 
-        val clearRbsp = decodeClearPrefix(nal, clearNalBytes)
-        val rbsp = clearRbsp.bytes
         require(parsed.bitsConsumed % 8 == 0) { "Source slice header is not byte aligned" }
         val sourceHeaderBytes = parsed.bitsConsumed / 8
-        require(sourceHeaderBytes + 2 < rbsp.size) {
-            "At least three clear CABAC bytes are required after the slice header"
-        }
+        // Only the slice header and three CABAC bytes are needed here. An all-clear
+        // video NAL may be hundreds of kilobytes, so never allocate or box an RBSP
+        // byte and source-offset entry for the entire compressed picture.
+        val clearRbsp = decodeClearPrefix(nal, clearNalBytes, sourceHeaderBytes + 3)
+        val rbsp = clearRbsp.bytes
         require(parsed.sourceAddressEndBit <= parsed.entryPointFieldStartBit &&
             parsed.entryPointFieldStartBit <= parsed.entryPointFieldEndBit &&
             parsed.entryPointFieldEndBit <= parsed.alignmentStartBit) {
@@ -144,17 +144,17 @@ internal object HevcSliceHeaderRewriter {
         while (writer.bitCount % 8 != 0) writer.writeBit(0)
         val outputHeaderRbsp = writer.toByteArray()
 
-        val firstTwoCabacBytes = rbsp.copyOfRange(sourceHeaderBytes, sourceHeaderBytes + 2)
         val thirdCabacByte = rbsp[sourceHeaderBytes + 2].toInt() and 0xff
-        val escapedHeaderAndPayloadPrefix = escapeRbsp(
-            outputHeaderRbsp + firstTwoCabacBytes,
-            thirdCabacByte
-        )
-        val sourceTailOffset = clearRbsp.sourceOffsets[sourceHeaderBytes + 2]
+        val headerAndCabac = ByteArray(outputHeaderRbsp.size + 2)
+        outputHeaderRbsp.copyInto(headerAndCabac)
+        rbsp.copyInto(headerAndCabac, outputHeaderRbsp.size, sourceHeaderBytes, sourceHeaderBytes + 2)
+        val escapedHeaderAndPayloadPrefix = escapeRbsp(headerAndCabac, thirdCabacByte)
+        val sourceTailOffset = clearRbsp.sourceTailOffset
         require(sourceTailOffset in 2 until nal.size) { "CABAC tail is outside the source NAL" }
-        val outputNal = nal.copyOfRange(0, 2) +
-            escapedHeaderAndPayloadPrefix +
-            nal.copyOfRange(sourceTailOffset, nal.size)
+        val outputNal = ByteArray(2 + escapedHeaderAndPayloadPrefix.size + nal.size - sourceTailOffset)
+        nal.copyInto(outputNal, 0, 0, 2)
+        escapedHeaderAndPayloadPrefix.copyInto(outputNal, 2)
+        nal.copyInto(outputNal, 2 + escapedHeaderAndPayloadPrefix.size, sourceTailOffset)
 
         return Result(
             nal = outputNal,
@@ -236,9 +236,13 @@ internal object HevcSliceHeaderRewriter {
         ) { "Output PPS changes source slice-header semantics" }
     }
 
-    private fun decodeClearPrefix(nal: ByteArray, clearNalBytes: Int): ClearRbsp {
-        val decoded = ArrayList<Byte>(clearNalBytes - 2)
-        val offsets = ArrayList<Int>(clearNalBytes - 2)
+    private fun decodeClearPrefix(nal: ByteArray, clearNalBytes: Int, requiredBytes: Int): ClearRbsp {
+        require(requiredBytes in 3..clearNalBytes - 2) {
+            "At least three clear CABAC bytes are required after the slice header"
+        }
+        val decoded = ByteArray(requiredBytes)
+        var decodedCount = 0
+        var tailOffset = -1
         var zeroCount = 0
         var index = 2
         while (index < clearNalBytes) {
@@ -253,28 +257,37 @@ internal object HevcSliceHeaderRewriter {
                 index++
                 continue
             }
-            decoded += nal[index]
-            offsets += index
+            if (decodedCount < requiredBytes) {
+                decoded[decodedCount] = nal[index]
+                if (decodedCount == requiredBytes - 1) tailOffset = index
+            }
+            decodedCount++
             zeroCount = if (value == 0) zeroCount + 1 else 0
             index++
         }
-        return ClearRbsp(decoded.toByteArray(), offsets.toIntArray())
+        require(decodedCount >= requiredBytes) {
+            "At least three clear CABAC bytes are required after the slice header"
+        }
+        return ClearRbsp(decoded, tailOffset)
     }
 
     private fun escapeRbsp(rbsp: ByteArray, nextRbspByte: Int): ByteArray {
-        val out = ArrayList<Byte>(rbsp.size + 8)
+        // A short header may contain multiple prevention bytes, but does not need
+        // boxed ArrayList<Byte> growth and conversion on every video frame.
+        val out = ByteArray(rbsp.size + (rbsp.size / 2) + 2)
+        var written = 0
         var zeroCount = 0
         rbsp.forEach { byte ->
             val value = byte.toInt() and 0xff
             if (zeroCount >= 2 && value <= 3) {
-                out += 3.toByte()
+                out[written++] = 3.toByte()
                 zeroCount = 0
             }
-            out += byte
+            out[written++] = byte
             zeroCount = if (value == 0) zeroCount + 1 else 0
         }
-        if (zeroCount >= 2 && nextRbspByte in 0..3) out += 3.toByte()
-        return out.toByteArray()
+        if (zeroCount >= 2 && nextRbspByte in 0..3) out[written++] = 3.toByte()
+        return out.copyOf(written)
     }
 
     private fun ceilLog2(value: Int): Int {
@@ -283,12 +296,18 @@ internal object HevcSliceHeaderRewriter {
     }
 
     private class BitWriter {
-        private val bits = ArrayList<Int>()
-        val bitCount: Int get() = bits.size
+        private var bytes = ByteArray(64)
+        var bitCount: Int = 0
+            private set
 
         fun writeBit(value: Int) {
             require(value == 0 || value == 1)
-            bits += value
+            if (bitCount / 8 >= bytes.size) bytes = bytes.copyOf(bytes.size * 2)
+            if (value != 0) {
+                val index = bitCount / 8
+                bytes[index] = (bytes[index].toInt() or (1 shl (7 - bitCount % 8))).toByte()
+            }
+            bitCount++
         }
 
         fun writeBits(value: Int, count: Int) {
@@ -317,11 +336,7 @@ internal object HevcSliceHeaderRewriter {
 
         fun toByteArray(): ByteArray {
             require(bitCount % 8 == 0) { "Output slice header must be byte aligned" }
-            return ByteArray(bitCount / 8) { byteIndex ->
-                var value = 0
-                for (bit in 0 until 8) value = (value shl 1) or bits[byteIndex * 8 + bit]
-                value.toByte()
-            }
+            return bytes.copyOf(bitCount / 8)
         }
     }
 }

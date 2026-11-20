@@ -73,6 +73,19 @@ class SceneFramePacingTest {
         assertEquals(0, stats.snapshotAndReset().surfaceTimestampRegressions)
     }
 
+    @Test fun glQueueProbeIsReportedSeparatelyFromActualDecodeAndDisplayCadence() {
+        val stats = SceneFramePacing()
+        stats.onGlQueueProbe(2_000_000L)
+        stats.onGlQueueProbe(54_000_000L)
+        val report = stats.snapshotAndReset()
+        assertEquals(2L, report.glQueueDelays.count)
+        assertEquals(54.0, report.glQueueDelays.maxMs, 0.001)
+        assertEquals(100, report.glQueueDelays.percentileUpperMs(95))
+        assertEquals(0L, report.latched)
+        assertEquals(0L, report.presented)
+        assertEquals(0L, stats.snapshotAndReset().glQueueDelays.count)
+    }
+
     @Test fun recordsSourceCadenceSeparatelyFromChoreographerAndCpuStages() {
         val stats = SceneFramePacing()
         val start = 1_000_000_000L

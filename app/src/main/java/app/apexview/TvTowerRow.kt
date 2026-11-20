@@ -34,9 +34,14 @@ internal fun TvTowerRow(
         try { TowerRowText.prepare(driver?.tla ?: number, state, tyre, kmh, gear, speedUnit) }
         finally { Trace.endSection() }
     }
-    val (name, lastLap, bestLap, position, interval, leader, gearText, speed, sectors, description) = content
+    val (name, lastLap, bestLap, position, interval, leader, gearText, speed, sectors) = content
+    val accessibleSummary = remember(name, state.position, state.inPit, state.retired,
+        state.lastLap?.time, state.bestLap?.time, state.ahead, state.toLeader,
+        tyre?.compound, tyre?.laps) {
+        TowerAccessibilitySummary.prepare(name, state, tyre)
+    }
     Canvas(Modifier.fillMaxWidth().height(rowHeight).tvFocusRing().clickable(onClick = onClick)
-        .semantics { contentDescription = description }.clipToBounds()) {
+        .semantics { contentDescription = accessibleSummary }.clipToBounds()) {
         val canvas = drawContext.canvas.nativeCanvas
         // Match the column widths used by TowerHeader. Drawing in dp keeps phone-supplied
         // panel scaling and the user's font-scale setting effective on the Cast receiver.

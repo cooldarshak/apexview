@@ -53,6 +53,26 @@ class HevcSliceHeaderRewriterTest {
     }
 
     @Test
+    fun rewritesLargeAllClearNalWithoutCloningItsCabacTail() {
+        val sourceSps = HevcParameterSets.parseSps(nal(33, spsBits(1920, 1080)))
+        val outputSps = HevcParameterSets.parseSps(nal(33, spsBits(3840, 1080)))
+        val sourcePps = HevcParameterSets.parsePps(nal(34, ppsBits(0, tiles = false)), sourceSps)
+        val outputPps = HevcParameterSets.parsePps(nal(34, ppsBits(1, tiles = true)), outputSps)
+        val cabac = ByteArray(128 * 1024) { index ->
+            if (index % 193 in 10..12) 0 else (index % 251).toByte()
+        }
+        val sourceNal = nal(1, pSliceBits() + byteArrayOf(0x12, 0x34, 0x56) + cabac)
+        val rewritten = HevcSliceHeaderRewriter.rewrite(
+            sourceNal, sourceSps, sourcePps, outputSps, outputPps, destinationAddress = 30
+        )
+        val outputHeader = HevcSliceHeaderParser.parse(rewritten.nal, outputSps, outputPps)
+        assertEquals(30, outputHeader.sliceSegmentAddress)
+        assertTrue(rewritten.copiedTailBytes > 128 * 1024)
+        assertArrayEquals(sourceNal.copyOfRange(rewritten.sourceTailOffset, sourceNal.size),
+            rewritten.nal.copyOfRange(rewritten.nal.size - rewritten.copiedTailBytes, rewritten.nal.size))
+    }
+
+    @Test
     fun preservesTizenStylePerSliceDeblockingOverrideWhenRewritingCellHeader() {
         val sourceSps = HevcParameterSets.parseSps(nal(33, spsBits(1920, 1080)))
         val outputSps = HevcParameterSets.parseSps(nal(33, spsBits(3840, 1080)))

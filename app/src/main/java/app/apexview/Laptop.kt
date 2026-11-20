@@ -45,6 +45,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -402,6 +407,13 @@ fun TowerRow(
     val teamColor = driver?.color?.let { Color(it) } ?: Color.White
     val last = state.lastLap
     val best = state.bestLap
+    // Hundreds of fast-changing Text semantics nodes previously forced a full
+    // accessibility-tree diff on nearly every timing sample. Keep one actionable
+    // row summary; do not recompute it for speed, gear or micro-sector changes.
+    val summary = remember(driver?.tla, number, state.position, state.inPit, state.retired,
+        last?.time, best?.time, state.ahead, state.toLeader, tyre?.compound, tyre?.laps) {
+        TowerAccessibilitySummary.prepare(driver?.tla ?: number, state, tyre)
+    }
     Row(
         Modifier
             .height(rowHeight)
@@ -414,7 +426,12 @@ fun TowerRow(
                     else -> Color.Transparent
                 }
             )
-            .pressable(scaleTo = 0.99f, onClick = onClick),
+            .pressable(scaleTo = 0.99f, onClick = onClick)
+            .clearAndSetSemantics {
+                contentDescription = summary
+                role = Role.Button
+                onClick(label = "Open driver details") { onClick(); true }
+            },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(Modifier.width(64.dp), verticalAlignment = Alignment.CenterVertically) {

@@ -2,6 +2,62 @@
 
 Status: implementation backlog, not a claim of completed fixes or smooth playback.
 
+## Build 569 Perfetto findings and next performance batch (20 November 2026)
+
+This batch follows the S22 Ultra `pitwall-50fps.perfetto-trace` with four active
+feeds (one 1080p plus three 540p coded renditions), one hardware HEVC decoder
+and 120 Hz output. A 64MiB trace buffer preserved only the final **20.7s** of
+the requested 60s, so percentages below describe the retained window, not an
+entire session. The device has no selectable 50/100 Hz mode. The expected
+16.7/25ms 120 Hz mapping of 50 fps sources does **not** excuse additional
+blocked decoder output, repeated late frames or multi-frame UI stalls.
+
+| S22 trace metric (retained 20.7s) | Observed | Scope and caution |
+| --- | ---: | --- |
+| SurfaceFlinger display frames | 930 | 663 on-time (71.3%), 253 late (27.2%), 14 dropped (1.5%); not unique video pictures |
+| App surface late frames | 767 of 768 | FrameTimeline app surface; separate from physical decoder-output cadence |
+| Compose semantics changes | 133 calls, ~4.63s total | Mean 34.8ms, max ~206ms; nested accessibility-event work ~4.43s |
+| Recompositions | 378 calls, ~2.19s total | Significant UI work, but cannot assign every frame miss exclusively to Compose |
+| Video texture callbacks | 1,013, mean ~0.97ms | GL handler, roughly 49/s; not a physical presentation count |
+| Texture latch / GL draw / EGL swap | ~0.56 / 0.78 / 1.16ms mean | Fast CPU-side stages, not proof that GPU fences are always ready |
+| BufferQueue producer timeouts | ~44 occurrences | ~2.1/s in the retained window; owner/cause not established |
+| App garbage collections | 50 reported | 38 young + 12 other; aggregate allocation order ~500–550MB |
+
+The same physical-format data was not recorded in older builds, so there is
+**no valid percentage-point before/after claim yet**. Earlier build 567/569
+log-only comparisons remained around 70–71% slow HWUI frames and significant
+producer timeouts. The user's small visible improvement is plausible, but
+remaining stutter is consistent with this trace.
+
+Implementation now being tested (CI and device result pending):
+
+1. **P0.4 accessibility:** flatten each phone timing-row subtree to one
+   TalkBack-readable, clickable semantic summary; keep live rendered cells
+   and TV focus behavior. TV row summaries also no longer change on every
+   speed/gear/micro-sector sample. Add Compose and pure-unit regression tests.
+2. **P0.2 allocation:** replace per-byte boxed lists and offsets for all-clear
+   slice NALs with a bounded primitive RBSP header prefix; preserve all-clear
+   emulation-prevention checks, CABAC bitstream and exact tail copying in a
+   single output allocation. Add large-NAL regression coverage.
+3. **P0.3 decoder output:** raise the existing one GL/latch thread to Android
+   display priority, add low-rate queue-wait probes and fixed-bin p95/max
+   telemetry. No new decoder, output surface or context is introduced.
+   This is a scheduling hypothesis, **not proof of resolved BufferQueue waits**.
+4. **50fps evidence:** enlarge the Perfetto capture buffer, check in an
+   official-schema FrameTimeline query, offline baseline/candidate comparison
+   script and tests. Distinguish surface present from video texture frames.
+5. **Release gate:** run Kotlin/Robolectric, synthetic HEVC and independent
+   FFmpeg decoding in GitHub Actions, produce a persistent-key signed APK,
+   then obtain matched ten-minute phone and TCL TV logs plus physical
+   SurfaceFlinger timelines. No physical 50fps success can be asserted in CI.
+
+The five-item delivery requirement is: (a) all regression tests; (b) one
+hardware HEVC decoder/selected video track; (c) updated evidence plan;
+(d) green CI and matching in-place signing; (e) matched, quantified
+before/after on-device frame cadence, BufferQueue rate, UI/jank and GC.
+Items (b) and (e) must be **reconfirmed after installing the new build**;
+maintaining the invariant in source is not device verification.
+
 ## Implementation progress (20 November 2026)
 
 The first P0 implementation batch is being delivered on this branch. These are code changes,

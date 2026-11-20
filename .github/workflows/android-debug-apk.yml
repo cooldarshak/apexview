@@ -10,6 +10,7 @@ on:
       - feature/hevc-stitching-poc
       - feature/continuous-baked-scene-cast
       - feature/per-feed-adaptive-hevc-quality
+      - feature/pitwall-performance-audit-plan
   workflow_dispatch:
 
 permissions:
@@ -72,6 +73,9 @@ jobs:
 
       - name: Verify the encoded full-scene HEVC sample
         run: python3 tools/validate_hevc_full_scene.py --output "$RUNNER_TEMP/pitwall-full-scene.mp4"
+
+      - name: Validate physical FrameTimeline comparison tool
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
       - name: Upload the full-scene playback sample
         uses: actions/upload-artifact@v4

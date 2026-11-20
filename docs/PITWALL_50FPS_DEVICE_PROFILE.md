@@ -18,7 +18,11 @@ checks bitstream correctness; it does **not** establish on-screen smoothness.
    adb pull /data/misc/perfetto-traces/pitwall-50fps.perfetto-trace .
    ```
 
-   The first command runs for 60 seconds. If your build does not support the
+   The first command runs for 60 seconds. The earlier 64MiB configuration
+   retained only 20.7s of a 60s S22 trace; the checked-in configuration now
+   reserves a 192MiB ftrace buffer and up to 384MiB for the file. On
+   lower-memory TVs reduce the capture duration first if collection fails.
+   If your build does not support the
    SurfaceFlinger layers/FrameTimeline data source, query supported sources with
    `adb shell perfetto --query` and remove only unavailable data sources.
 4. Immediately export the app's Pitwall diagnostics log and capture `adb logcat -d`
@@ -32,6 +36,21 @@ checks bitstream correctness; it does **not** establish on-screen smoothness.
    counters with `PitwallTextureLatch`, `PitwallGlDraw`, `PitwallEglSwap`,
    `PitwallPacingDefer`, `PitwallTowerRowDraw`, `PitwallTowerTextPrepare`, and
    `PitwallMapCars`/`PitwallEdgeCars` slices.
+6. In Perfetto UI, paste `docs/perfetto/frame_timeline_export.sql` in the
+   Query tab and export as `baseline-frame-timeline.csv`. Repeat on the new
+   build as `candidate-frame-timeline.csv` with the same feeds/refresh mode.
+   Run:
+
+   ```sh
+   python3 scripts/analyze_pitwall_frames.py \
+     --baseline baseline-frame-timeline.csv \
+     --candidate candidate-frame-timeline.csv
+   ```
+
+   Record each result alongside matching `SINGLE_DECODER_SCENE`,
+   `SCENE_CODEC_RELEASE`, `PitwallFrames`, composition, allocation and GC logs.
+   The report explicitly separates SurfaceFlinger display slots from app
+   surfaces and **cannot prove unique video-picture presentation at 50fps**.
 
 The regular log's `SCENE_CODEC_RELEASE` histogram describes **planned codec-buffer
 release**, `sourceTimestampBins...` describes the decoder texture timestamps,
@@ -40,6 +59,11 @@ HWUI window frames. None alone measures **physical presentation**. FrameTimeline
 actual SurfaceFlinger display frames are the physical-presentation evidence. The
 `videoDrawPacingDeferrals` counter reports when an 8ms scene draw was delayed to
 the next vsync; repeated very long intervals after deferral would be a regression.
+`glQueueP95UpperMs`, `glQueueMaxMs` and `glQueueProbeSamples` report the
+enqueue-to-execution delay of a low-rate main-to-GL handler probe. A high
+delay suggests GL handler congestion; a low delay does not rule out codec
+producer stalls, GPU fence waits or UI accessibility work. Probe posting may
+also be late if the main thread is blocked, which is measured independently.
 
 ## Attribute an actual 50 fps stutter
 

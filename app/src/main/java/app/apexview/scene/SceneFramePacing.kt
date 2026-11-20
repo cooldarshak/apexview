@@ -30,6 +30,7 @@ internal class SceneFramePacing {
         val glDrawDurations: TimingBuckets.Snapshot,
         val eglSwapDurations: TimingBuckets.Snapshot,
         val callbackDelays: TimingBuckets.Snapshot,
+        val glQueueDelays: TimingBuckets.Snapshot,
     )
 
     private var lastCallbackNs = 0L
@@ -61,6 +62,10 @@ internal class SceneFramePacing {
     private val glDrawDurations = TimingBuckets()
     private val eglSwapDurations = TimingBuckets()
     private val callbackDelays = TimingBuckets()
+    private val glQueueDelays = TimingBuckets()
+
+    /** Measures handler enqueue-to-run delay, not SurfaceFlinger presentation latency. */
+    fun onGlQueueProbe(delayNs: Long) { glQueueDelays.record(delayNs) }
 
     fun onTextureLatched(nowNs: Long, latchDurationNs: Long = 0L, surfaceTimestampNs: Long = 0L,
                          eglBindNs: Long = 0L, callbackArrivalNs: Long = nowNs) {
@@ -124,7 +129,7 @@ internal class SceneFramePacing {
             displayIntervals.snapshotAndReset(), allVsyncIntervals.snapshotAndReset(),
             eglBindDurations.snapshotAndReset(), latchDurations.snapshotAndReset(),
             glDrawDurations.snapshotAndReset(), eglSwapDurations.snapshotAndReset(),
-            callbackDelays.snapshotAndReset())
+            callbackDelays.snapshotAndReset(), glQueueDelays.snapshotAndReset())
         // Retain timestamps so a boundary between windows does not hide a long stall.
         latched = 0; presented = 0; callbackGaps = 0; displayGaps = 0; slowSwaps = 0
         slowDraws = 0; slowLatches = 0

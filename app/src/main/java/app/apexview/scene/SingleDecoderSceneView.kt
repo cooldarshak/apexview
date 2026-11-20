@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.Process
 import android.os.Trace
 import android.util.Log
 import android.view.PixelCopy
@@ -34,9 +35,20 @@ import java.nio.ByteOrder
  * This renderer is used only for verified CLEAR media. Protected video keeps its secure path.
  */
 internal class SingleDecoderSceneView(context: Context) : TextureView(context), TextureView.SurfaceTextureListener {
-    private val thread = HandlerThread("ApexviewSingleScene").apply { start() }
+    // BufferQueue backpressure can grow while the decoder texture waits for this
+    // handler to run. Display priority helps latch callbacks without making the
+    // UI thread do any GL work or introducing a second decoder/context.
+    private val thread = HandlerThread("ApexviewSingleScene", Process.THREAD_PRIORITY_DISPLAY).apply { start() }
     private val gl = Handler(thread.looper)
     private val main = Handler(Looper.getMainLooper())
+    private val glQueueProbe = object : Runnable {
+        override fun run() {
+            if (released || !isAttachedToWindow) return
+            val postedAtNs = System.nanoTime()
+            gl.post { if (!released) pacing.onGlQueueProbe(System.nanoTime() - postedAtNs) }
+            main.postDelayed(this, 250L)
+        }
+    }
     private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private var previousModeSignature: String? = null
     @Volatile private var selectedDisplayHz = 0f
@@ -290,11 +302,14 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        main.removeCallbacks(glQueueProbe)
+        main.post(glQueueProbe)
         displayManager.registerDisplayListener(modeListener, main)
         logDisplayMode("attach")
     }
 
     override fun onDetachedFromWindow() {
+        main.removeCallbacks(glQueueProbe)
         displayManager.unregisterDisplayListener(modeListener)
         previousModeSignature = null
         super.onDetachedFromWindow()
@@ -336,6 +351,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     fun release() {
         if (released) return
         released = true
+        main.removeCallbacks(glQueueProbe)
         input?.let { player?.clearVideoSurface(it) }
         player = null
         surfaceTextureListener = null
@@ -473,6 +489,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 "glSubmitP95UpperMs=${metrics.glDrawDurations.percentileUpperMs(95)} " +
                 "eglSwapP95UpperMs=${metrics.eglSwapDurations.percentileUpperMs(95)} " +
                 "choreographerDelayP95UpperMs=${metrics.callbackDelays.percentileUpperMs(95)} " +
+                "glQueueProbeSamples=${metrics.glQueueDelays.count} " +
+                "glQueueP95UpperMs=${metrics.glQueueDelays.percentileUpperMs(95)} " +
+                "glQueueMaxMs=${metrics.glQueueDelays.maxMs.toInt()} " +
+                "glThreadPriority=DISPLAY " +
                 "gpuSubmitNotGpuCompletion=true physicalPresentation=NOT_MEASURED")
             lastLogNs = now
         }
