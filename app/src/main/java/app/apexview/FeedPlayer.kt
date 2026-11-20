@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import android.media.MediaCodecInfo as PlatformMediaCodecInfo
 import android.media.MediaCodecList
+import android.media.MediaFormat
+import android.os.Trace
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.compose.runtime.getValue
@@ -24,6 +26,7 @@ import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
 import androidx.media3.exoplayer.drm.DummyExoMediaDrm
@@ -404,6 +407,31 @@ class FeedPlayer(
             .setLoadControl(loadControl)
             .setTrackSelector(sourceTrackSelector)
             .build()
+        val codecReleaseTiming = CodecReleaseTiming()
+        var lastCodecReleaseLogNs = 0L
+        player.setVideoFrameMetadataListener(object : VideoFrameMetadataListener {
+            override fun onVideoFrameAboutToBeRendered(
+                presentationTimeUs: Long, releaseTimeNs: Long, format: Format, mediaFormat: MediaFormat?
+            ) {
+                if (!DiagnosticLogs.recording || archiveVodSession == null) return
+                val now = System.nanoTime()
+                codecReleaseTiming.record(presentationTimeUs, releaseTimeNs, now)
+                if (Trace.isEnabled()) {
+                    Trace.setCounter("PitwallCodecPtsMs", presentationTimeUs / 1000L)
+                    Trace.setCounter("PitwallCodecPlannedReleaseMs", releaseTimeNs / 1_000_000L)
+                }
+                if (now - lastCodecReleaseLogNs >= 5_000_000_000L) {
+                    val sample = codecReleaseTiming.snapshotAndReset()
+                    Log.i("ApexviewSingleDecoder", "SCENE_CODEC_RELEASE frames=${sample.frames} " +
+                        "ptsBins13_19_23_30_45_100=${sample.ptsIntervals.compact()} " +
+                        "plannedReleaseBins13_19_23_30_45_100=${sample.plannedReleaseIntervals.compact()} " +
+                        "plannedLeadP95UpperMs=${sample.plannedReleaseLead.percentileUpperMs(95)} " +
+                        "callbacksAfterReleaseTime=${sample.callbacksAfterPlannedRelease} " +
+                        "physicalPresentation=NOT_MEASURED")
+                    lastCodecReleaseLogNs = now
+                }
+            }
+        })
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             // Only the currently audible tile needs an audio decoder. Setting volume to zero
             // still makes Media3 open an AAC decoder for every muted tile, which wastes codec

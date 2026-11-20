@@ -70,7 +70,7 @@ internal object HevcAccessUnitInspector {
 
         nals.forEachIndexed { nalIndex, nal ->
             val nalHeader = try {
-                HevcBitstream.parseNalHeader(nal)
+                HevcBitstream.readNalHeader(nal)
             } catch (error: Exception) {
                 fail(context, "NAL " + nalIndex + " has an invalid HEVC header: " +
                     (error.message ?: error.javaClass.simpleName))

@@ -100,6 +100,64 @@ breakdown, BufferQueue timeout rates, allocations/GC, buffering, audio drift,
 and separate SurfaceFlinger FrameTimeline/Perfetto frames. Retest with tower
 and map both enabled and disabled and both phone and TCL Android TV.
 
+### Build 567 measured follow-up and active P0.2/P0.3/P0.4 improvements
+
+The S22 Ultra Build 567 capture `pitwall-20261120-042038-942.log.txt`
+**does not establish smooth playback**. With four feeds at 1080p + three
+360p actual renditions, 73.2% of HWUI window frames were slow, 21.7% took
+longer than 45ms, BufferQueue timeouts still occurred at about 1.08/s and
+GC ran at about 0.64/s. Median HEVC composition was about 1.34 seconds
+per 5.76-second segment, with about 601 MB of process-wide allocations
+observed per overlapping composition window. The same capture's 1080p +
+three 540p run had about 70.4% slow frames, BufferQueue timeouts about
+0.94/s, GC about 1.12/s and median composition 1.59 seconds. These
+allocation values include other threads and are not composer-only bytes.
+For comparable Build 566 playback the earlier log had about 1.45
+BufferQueue timeout events/s and GC 0.72/s, but these rates vary with
+thermal/network conditions and do not demonstrate a solved cause.
+
+The display's selected 120 Hz mode has no corresponding 50/100 Hz mode;
+its 50 fps decoder texture timestamps follow an expected mixture of 16.7
+and 25ms. Scene video-display callbacks additionally had too-short ~8.3ms
+and long ~33ms intervals, so the extra judder is not explained by normal
+120Hz 3:2 pulldown alone. EGL submission and swap were comparatively quick;
+the HWUI RenderThread's command issuance remained a significant cost.
+Physical SurfaceFlinger presentation and hardware audio clock are not yet
+measured, and `dequeuedCount=21 acquiredCount=1` is **not** a proven
+consumer-ownership diagnosis.
+
+Current follow-up implementation, pending GitHub Actions and device testing:
+
+- **P0.2:** Avoid full-NAL duplication in hot HEVC slice-header inspection
+  and rewriting. Read NAL header fields without cloning, decode only an
+  initial bounded RBSP header prefix (with a complete-prefix fallback for
+  unusually long valid headers), and eliminate another stream-alignment
+  header copy. Retain CMAF fragment and HEVC validation. Add malformed
+  range and byte-ownership regression tests.
+- **P0.3:** Add a bounded, display-only 50fps/90-165Hz draw cadence gate
+  to prevent too-early 8ms Choreographer scene-draw bursts; codec
+  `SurfaceTexture.updateTexImage()` remains immediate to release BufferQueue
+  resources. Track explicit pacing deferrals and codec presentation-time/
+  planned release-time histograms independently from latches, GL and HWUI;
+  run seek/TV/anti-starvation unit tests. This is a hypothesis to test,
+  not a proven fix for repeated BufferQueue timeouts.
+- **P0.4:** Cache measured text widths per TV tower row (bounded by size,
+  text and bold typeface), and memoize unchanged track-map projection and
+  ribbon-progress calculation. Retain all overlay features, update rates,
+  resizing and TV focus controls; add bounded-cache regression tests.
+- **Evidence capture:** Check in `docs/perfetto/pitwall-50fps.cfg` and
+  `docs/PITWALL_50FPS_DEVICE_PROFILE.md` with a reproducible 60-second
+  scheduler/CPU/RenderThread/MediaCodec/BufferQueue/SurfaceFlinger
+  FrameTimeline capture and controlled 5-10-minute A/B test matrix.
+  A device trace is still required to resolve the buffer owner and measure
+  physical presentation; a CI green check cannot substitute for this.
+
+Reference work compared official Android Performance Samples for
+Macrobenchmark/Perfetto, Now in Android for stable Compose state patterns
+and Android TV Samples for remote-focus flows. Androidify and other
+Material Expressive demos are design references, not evidence for a
+playback-performance rewrite. No Material 3 migration is included in P0.
+
 Baseline: `feature/per-feed-adaptive-hevc-quality` at
 `574ccb587a50f174748d1b08ed2283e4b8ed1ecc` (Build 562).
 

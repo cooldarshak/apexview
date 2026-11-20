@@ -20,6 +20,9 @@ internal class SceneFrameDemand {
         return true
     }
 
+    /** Leave both flags unchanged when the vsync pacing gate postpones a draw. */
+    fun hasPendingVideo(): Boolean = callbackScheduled && videoPending
+
     /** Consume the latest decoder image once, even when several notifications arrived. */
     fun beginFrame(): Boolean {
         check(callbackScheduled) { "Scene frame was not requested" }

@@ -83,7 +83,25 @@ internal object HevcSliceHeaderParser {
         pps: HevcParameterSets.PpsMetadata,
         clearNalBytes: Int = nal.size
     ): SliceHeader {
-        val header = HevcBitstream.parseNalHeader(nal)
+        // CABAC slice data can be megabytes long; the syntactic header is normally tiny.
+        // Retry with the entire clear prefix when a legitimate unusually long header needs it.
+        val prefix = minOf(clearNalBytes, 8194)
+        if (prefix == clearNalBytes) return parseWithin(nal, sps, pps, clearNalBytes, prefix)
+        return try {
+            parseWithin(nal, sps, pps, clearNalBytes, prefix)
+        } catch (_: IllegalArgumentException) {
+            parseWithin(nal, sps, pps, clearNalBytes, clearNalBytes)
+        }
+    }
+
+    private fun parseWithin(
+        nal: ByteArray,
+        sps: HevcParameterSets.SpsMetadata,
+        pps: HevcParameterSets.PpsMetadata,
+        clearNalBytes: Int,
+        parsePrefixBytes: Int
+    ): SliceHeader {
+        val header = HevcBitstream.readNalHeader(nal)
         require(header.type in 0..21) {
             "Reserved or unsupported HEVC VCL NAL type ${header.type}"
         }
@@ -105,7 +123,7 @@ internal object HevcSliceHeaderParser {
             "PPS init_qp_minus26 exceeds the range for the SPS luma bit depth"
         }
 
-        val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal.copyOfRange(2, clearNalBytes)))
+        val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal, 2, parsePrefixBytes - 2))
         val initialBits = bits.bitsRemaining
         fun consumed() = initialBits - bits.bitsRemaining
 

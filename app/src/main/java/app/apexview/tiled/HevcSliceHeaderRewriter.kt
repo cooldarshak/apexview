@@ -33,7 +33,7 @@ internal object HevcSliceHeaderRewriter {
         clearNalBytes: Int = nal.size,
         loopFilterAcrossSlicesOverride: Boolean? = null
     ): Result {
-        val nalHeader = HevcBitstream.parseNalHeader(nal)
+        val nalHeader = HevcBitstream.readNalHeader(nal)
         require(nalHeader.type in 0..21) { "Unsupported VCL NAL type" }
         require(nalHeader.layerId == 0) { "Non-zero HEVC layers are not supported" }
         require(sourcePps.spsId == sourceSps.spsId) { "Source PPS/SPS identity mismatch" }

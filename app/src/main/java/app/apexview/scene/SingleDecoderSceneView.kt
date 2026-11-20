@@ -39,6 +39,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private val main = Handler(Looper.getMainLooper())
     private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private var previousModeSignature: String? = null
+    @Volatile private var selectedDisplayHz = 0f
     private val modeListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = Unit
         override fun onDisplayRemoved(displayId: Int) = Unit
@@ -50,6 +51,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private fun logDisplayMode(reason: String) {
         val actualDisplay = rootView.display ?: return
         val mode = actualDisplay.mode
+        selectedDisplayHz = mode.refreshRate
         val sourceFps = scene?.sourceFrameRate ?: 0.0
         val signature = "${actualDisplay.displayId}:${mode.modeId}:${mode.refreshRate}:$sourceFps"
         if (signature == previousModeSignature) return
@@ -231,14 +233,24 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var lastLogNs = 0L
     private val frameDemand = SceneFrameDemand()
     private val pacing = SceneFramePacing()
+    private val cadenceGate = SceneFrameCadenceGate()
     private var displayClock: Choreographer? = null
     private val displayFrame = Choreographer.FrameCallback { frameTimeNs ->
         guarded {
-            val newVideo = frameDemand.beginFrame()
             val callbackStarted = System.nanoTime()
+            if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
+                    frameTimeNs, scene?.sourceFrameRate ?: 0.0, selectedDisplayHz)) {
+                pacing.onPacingDeferred()
+                Trace.beginSection("PitwallPacingDefer")
+                try { displayClock?.postFrameCallback(displayFrame) } finally { Trace.endSection() }
+                return@guarded
+            }
+            val newVideo = frameDemand.beginFrame()
             val timing = draw()
-            if (timing != null) pacing.onDisplayFrame(frameTimeNs, timing.swapNs, newVideo,
-                timing.glDrawNs, callbackStarted)
+            if (timing != null) {
+                if (newVideo) cadenceGate.onVideoDraw(frameTimeNs)
+                pacing.onDisplayFrame(frameTimeNs, timing.swapNs, newVideo, timing.glDrawNs, callbackStarted)
+            }
         }
     }
 
@@ -392,6 +404,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         frames.setOnFrameAvailableListener({
             guarded {
                 if (decoderTexture === frames && !released) {
+                    val callbackStarted = System.nanoTime()
+                    Trace.beginSection("PitwallDecoderFrameCallback")
+                    try {
                     // A decoder can exhaust its output BufferQueue while the EGL display
                     // swap is blocked. Latch promptly to release the prior codec buffer;
                     // coalesce only the *drawing* onto a Choreographer vsync.
@@ -405,8 +420,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                     hasFrame = true
                     rendered++
                     val latchedAt = System.nanoTime()
-                    pacing.onTextureLatched(latchedAt, latchedAt - latchStarted, frames.timestamp, eglBindNs)
+                    pacing.onTextureLatched(latchedAt, latchedAt - latchStarted, frames.timestamp,
+                        eglBindNs, callbackArrivalNs = callbackStarted)
                     scheduleDisplayFrame(videoArrived = true)
+                    } finally { Trace.endSection() }
                 }
             }
         }, gl)
@@ -446,6 +463,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 "maxVsyncCallbackDelayMs=${metrics.maxVsyncCallbackDelayMs} " +
                 "surfaceTimestampRegressions=${metrics.surfaceTimestampRegressions} " +
                 "drawsWithoutNewVideo=${metrics.noNewVideoDraws} " +
+                "videoDrawPacingDeferrals=${metrics.pacingDeferrals} " +
                 "callbackIntervalsBins13_19_23_30_45_100=${metrics.callbackIntervals.compact()} " +
                 "sourceTimestampBins13_19_23_30_45_100=${metrics.textureTimestampIntervals.compact()} " +
                 "videoVsyncBins13_19_23_30_45_100=${metrics.displayIntervals.compact()} " +
@@ -492,6 +510,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private fun destroy() {
         displayClock?.removeFrameCallback(displayFrame)
         frameDemand.reset()
+        cadenceGate.reset()
         pacing.reset()
         stopBakedCastOnGl()
         saveClip()

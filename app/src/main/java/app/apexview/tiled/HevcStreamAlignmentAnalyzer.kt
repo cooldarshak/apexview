@@ -205,9 +205,10 @@ internal object HevcStreamAlignmentAnalyzer {
     }
 
     private fun readSlicePpsId(nal: ByteArray, nalType: Int): Int {
-        val header = HevcBitstream.parseNalHeader(nal)
+        val header = HevcBitstream.readNalHeader(nal)
         require(header.type == nalType)
-        val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal.copyOfRange(2, nal.size)))
+        // Picture PPS id is in the first few bytes. Do not copy the encoded VCL payload.
+        val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal, 2, minOf(nal.size - 2, 128)))
         bits.readBit() // first_slice_segment_in_pic_flag
         if (nalType in 16..23) bits.readBit() // no_output_of_prior_pics_flag
         val ppsId = bits.readUnsignedExpGolomb()

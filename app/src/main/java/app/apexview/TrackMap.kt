@@ -635,7 +635,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
     fun lapPoint(f: Float) = timing.geometry.pointAt(f).let { g -> fit.map(g[0], g[1]) }
     val sectors = remember(fit, timing.marshalSectors) { sectorPaths(timing, ::lapPoint) }
     val scLabel = remember { measurer.label("SC", 8.sp) }
-    val cars = currentCars.map { it to fit.map(it.x, it.y) }
+    val cars = remember(fit, currentCars) { currentCars.map { it to fit.map(it.x, it.y) } }
     val pitLabel = remember { measurer.label("PIT", 8.sp) }
     val stopLine = stop?.let { pitStopLine(timing, it) } ?: noPositionsLine(timing, now)
     val stopText = remember(stopLine) { stopLine?.let { measurer.label(it, 13.sp) } }
@@ -949,7 +949,9 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     val startLabel = remember { measurer.label("START", 8.sp) }
     val sectors = remember(ribbon, timing) { sectorPaths(timing, ribbon::point) }
     val scLabel = remember { measurer.label("SC", 7.sp) }
-    val cars = currentCars.map { car -> car to timing.geometry.progress(car.x, car.y) }.sortedBy { it.second }
+    val cars = remember(timing.geometry, currentCars) {
+        currentCars.map { car -> car to timing.geometry.progress(car.x, car.y) }.sortedBy { it.second }
+    }
     val pulse = rememberPulse(flags.track.ending)
     val caption = rememberCaption(measurer, flags, now)
     val safetyCar = if (!flags.track.safetyCar) null else (leader ?: leaderAt(timing, now))

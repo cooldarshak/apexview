@@ -20,6 +20,7 @@ internal class SceneFramePacing {
         val maxVsyncCallbackDelayMs: Long,
         val surfaceTimestampRegressions: Long,
         val noNewVideoDraws: Long,
+        val pacingDeferrals: Long,
         val callbackIntervals: TimingBuckets.Snapshot,
         val textureTimestampIntervals: TimingBuckets.Snapshot,
         val displayIntervals: TimingBuckets.Snapshot,
@@ -31,7 +32,7 @@ internal class SceneFramePacing {
         val callbackDelays: TimingBuckets.Snapshot,
     )
 
-    private var lastLatchNs = 0L
+    private var lastCallbackNs = 0L
     private var lastPresentNs = 0L
     private var latched = 0L
     private var presented = 0L
@@ -49,6 +50,7 @@ internal class SceneFramePacing {
     private var lastSurfaceTimestampNs = 0L
     private var surfaceTimestampRegressions = 0L
     private var noNewVideoDraws = 0L
+    private var pacingDeferrals = 0L
     private var lastVsyncNs = 0L
     private val callbackIntervals = TimingBuckets()
     private val textureTimestampIntervals = TimingBuckets()
@@ -61,14 +63,14 @@ internal class SceneFramePacing {
     private val callbackDelays = TimingBuckets()
 
     fun onTextureLatched(nowNs: Long, latchDurationNs: Long = 0L, surfaceTimestampNs: Long = 0L,
-                         eglBindNs: Long = 0L) {
-        if (lastLatchNs > 0 && nowNs > lastLatchNs) {
-            callbackIntervals.record(nowNs - lastLatchNs)
-            val gapMs = (nowNs - lastLatchNs) / 1_000_000L
+                         eglBindNs: Long = 0L, callbackArrivalNs: Long = nowNs) {
+        if (lastCallbackNs > 0 && callbackArrivalNs > lastCallbackNs) {
+            callbackIntervals.record(callbackArrivalNs - lastCallbackNs)
+            val gapMs = (callbackArrivalNs - lastCallbackNs) / 1_000_000L
             maxCallbackGapMs = maxOf(maxCallbackGapMs, gapMs)
             if (gapMs > 45) callbackGaps++
         }
-        lastLatchNs = nowNs
+        lastCallbackNs = callbackArrivalNs
         latched++
         val latchMs = latchDurationNs.coerceAtLeast(0L) / 1_000_000L
         latchDurations.record(latchDurationNs)
@@ -112,11 +114,13 @@ internal class SceneFramePacing {
         presented++
     }
 
+    fun onPacingDeferred() { pacingDeferrals++ }
+
     fun snapshotAndReset(): Snapshot {
         val result = Snapshot(latched, presented, callbackGaps, displayGaps, slowSwaps,
             slowDraws, slowLatches, maxCallbackGapMs, maxDisplayGapMs, maxSwapMs,
             maxDrawMs, maxLatchMs, maxVsyncCallbackDelayMs, surfaceTimestampRegressions,
-            noNewVideoDraws, callbackIntervals.snapshotAndReset(), textureTimestampIntervals.snapshotAndReset(),
+            noNewVideoDraws, pacingDeferrals, callbackIntervals.snapshotAndReset(), textureTimestampIntervals.snapshotAndReset(),
             displayIntervals.snapshotAndReset(), allVsyncIntervals.snapshotAndReset(),
             eglBindDurations.snapshotAndReset(), latchDurations.snapshotAndReset(),
             glDrawDurations.snapshotAndReset(), eglSwapDurations.snapshotAndReset(),
@@ -125,13 +129,14 @@ internal class SceneFramePacing {
         latched = 0; presented = 0; callbackGaps = 0; displayGaps = 0; slowSwaps = 0
         slowDraws = 0; slowLatches = 0
         noNewVideoDraws = 0
+        pacingDeferrals = 0
         maxCallbackGapMs = 0; maxDisplayGapMs = 0; maxSwapMs = 0
         maxDrawMs = 0; maxLatchMs = 0; maxVsyncCallbackDelayMs = 0; surfaceTimestampRegressions = 0
         return result
     }
 
     fun reset() {
-        lastLatchNs = 0; lastPresentNs = 0; lastSurfaceTimestampNs = 0; lastVsyncNs = 0
+        lastCallbackNs = 0; lastPresentNs = 0; lastSurfaceTimestampNs = 0; lastVsyncNs = 0
         snapshotAndReset()
     }
 }

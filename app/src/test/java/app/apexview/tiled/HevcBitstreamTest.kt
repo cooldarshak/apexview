@@ -32,6 +32,27 @@ class HevcBitstreamTest {
         assertArrayEquals(byteArrayOf(0x00, 0x00, 0x01, 0x7f), HevcBitstream.ebspToRbsp(ebsp))
     }
 
+    @Test fun boundedEmulationPreventionMatchesOwnedSliceAndRejectsMalformedRanges() {
+        val stream = byteArrayOf(0x55, 0x00, 0x00, 0x03, 0x02, 0x77)
+        assertArrayEquals(byteArrayOf(0, 0, 2), HevcBitstream.ebspToRbsp(stream, 1, 4))
+        assertArrayEquals(HevcBitstream.ebspToRbsp(stream.copyOfRange(1, 5)),
+            HevcBitstream.ebspToRbsp(stream, 1, 4))
+        assertThrows(IllegalArgumentException::class.java) { HevcBitstream.ebspToRbsp(stream, 5, 2) }
+        assertThrows(IllegalArgumentException::class.java) {
+            HevcBitstream.ebspToRbsp(byteArrayOf(0, 0, 3), 0, 3)
+        }
+    }
+
+    @Test fun headerViewDoesNotCopyNALButOwnedParserStillDoes() {
+        val hugeNal = ByteArray(500_000)
+        hugeNal[0] = 0x26
+        hugeNal[1] = 0x01
+        assertEquals(19, HevcBitstream.readNalHeader(hugeNal).type)
+        val owned = HevcBitstream.parseNalHeader(hugeNal)
+        hugeNal[2] = 99
+        assertEquals(0, owned.bytes[2].toInt())
+    }
+
     @Test fun readsBitsAndUnsignedExpGolomb() {
         val reader = HevcBitReader(byteArrayOf(0b1010_0110.toByte()))
         assertEquals(1, reader.readBit())

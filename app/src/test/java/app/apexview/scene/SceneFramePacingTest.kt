@@ -13,6 +13,7 @@ class SceneFramePacingTest {
         stats.onDisplayFrame(start, 5_000_000L, newVideo = true)
         stats.onDisplayFrame(start + 16_000_000L, 25_000_000L, newVideo = false)
         stats.onDisplayFrame(start + 80_000_000L, 5_000_000L, newVideo = true)
+        stats.onPacingDeferred()
 
         val window = stats.snapshotAndReset()
         assertEquals(3, window.latched)
@@ -23,6 +24,7 @@ class SceneFramePacingTest {
         assertEquals(60, window.maxCallbackGapMs)
         assertEquals(80, window.maxDisplayGapMs)
         assertEquals(25, window.maxSwapMs)
+        assertEquals(1, window.pacingDeferrals)
 
         assertEquals(0, stats.snapshotAndReset().latched)
         stats.reset()

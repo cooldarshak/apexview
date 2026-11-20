@@ -8,6 +8,17 @@ import org.junit.Test
 
 class HevcSliceHeaderParserTest {
     @Test
+    fun aLargeClearSliceKeepsTheSameValidatedHeaderWithoutParsingCabacPayload() {
+        val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
+        val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)
+        val shortNal = nal(1, pSliceBits())
+        val longNal = shortNal + ByteArray(1_000_000) { 0x55.toByte() }
+        val expected = HevcSliceHeaderParser.parse(shortNal, sps, pps)
+        val actual = HevcSliceHeaderParser.parse(longNal, sps, pps)
+        assertEquals(expected, actual)
+    }
+
+    @Test
     fun rejectsReservedVclNalTypesAndTemporalLayersOutsideSpsLimit() {
         val sps = HevcParameterSets.parseSps(nal(33, spsBits()))
         val pps = HevcParameterSets.parsePps(nal(34, ppsBits()), sps)

@@ -16,6 +16,9 @@ internal object HevcBitstream {
         val temporalIdPlus1: Int,
     )
 
+    /** Header fields only: inspecting a multi-megabyte VCL NAL must not clone its payload. */
+    data class NalHeader(val type: Int, val layerId: Int, val temporalIdPlus1: Int)
+
     /**
      * Splits an Annex-B byte stream into NAL units. Both 3-byte and 4-byte start codes are accepted.
      * Leading/trailing zero bytes are tolerated; empty NAL units and invalid HEVC headers fail.
@@ -52,7 +55,7 @@ internal object HevcBitstream {
         }
     }
 
-    fun parseNalHeader(nal: ByteArray): NalUnit {
+    fun readNalHeader(nal: ByteArray): NalHeader {
         require(nal.size >= 2) { "HEVC NAL header requires two bytes" }
         val first = nal[0].toInt() and 0xff
         val second = nal[1].toInt() and 0xff
@@ -61,22 +64,35 @@ internal object HevcBitstream {
         require(temporalIdPlus1 != 0) { "nuh_temporal_id_plus1 must not be zero" }
         val type = (first ushr 1) and 0x3f
         val layerId = ((first and 0x01) shl 5) or (second ushr 3)
-        return NalUnit(nal.copyOf(), type, layerId, temporalIdPlus1)
+        return NalHeader(type, layerId, temporalIdPlus1)
+    }
+
+    /** Keep the original owned-byte contract for clients that need a standalone NAL. */
+    fun parseNalHeader(nal: ByteArray): NalUnit {
+        val header = readNalHeader(nal)
+        return NalUnit(nal.copyOf(), header.type, header.layerId, header.temporalIdPlus1)
     }
 
     /**
      * Removes HEVC emulation-prevention bytes from an EBSP payload.
      * The input must not include the two-byte NAL header.
      */
-    fun ebspToRbsp(ebsp: ByteArray): ByteArray {
-        val out = ByteArray(ebsp.size)
+    fun ebspToRbsp(ebsp: ByteArray): ByteArray = ebspToRbsp(ebsp, 0, ebsp.size)
+
+    /** Read a validated range directly, without allocating an intermediate copyOfRange(). */
+    fun ebspToRbsp(ebsp: ByteArray, offset: Int, length: Int): ByteArray {
+        require(offset >= 0 && length >= 0 && offset <= ebsp.size && length <= ebsp.size - offset) {
+            "HEVC EBSP range is out of bounds"
+        }
+        val out = ByteArray(length)
         var written = 0
         var zeroCount = 0
-        var i = 0
-        while (i < ebsp.size) {
+        var i = offset
+        val end = offset + length
+        while (i < end) {
             val value = ebsp[i].toInt() and 0xff
             if (zeroCount >= 2 && value == 0x03) {
-                require(i + 1 < ebsp.size) { "Emulation-prevention byte at end of payload" }
+                require(i + 1 < end) { "Emulation-prevention byte at end of payload" }
                 val next = ebsp[i + 1].toInt() and 0xff
                 require(next <= 0x03) { "Invalid emulation-prevention sequence" }
                 zeroCount = 0
@@ -87,7 +103,7 @@ internal object HevcBitstream {
             zeroCount = if (value == 0) zeroCount + 1 else 0
             i++
         }
-        return out.copyOf(written)
+        return if (written == length) out else out.copyOf(written)
     }
 }
 

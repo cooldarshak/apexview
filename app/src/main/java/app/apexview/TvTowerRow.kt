@@ -26,6 +26,7 @@ internal fun TvTowerRow(
     speedUnit: String, highlight: Boolean, rowHeight: Dp, onClick: () -> Unit,
 ) {
     val paint = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
+    val widthCache = remember { TowerTextWidthCache() }
     // A tower sample can be republished while this driver's fields stay identical. Keep the
     // formatted text, synthesized strip cells and accessibility description across those draws.
     val content = remember(number, driver?.tla, state, tyre, kmh, gear, speedUnit) {
@@ -56,7 +57,7 @@ internal fun TvTowerRow(
             paint.textSize = minOf(fontSize * fontScale, height * .61f)
             paint.textAlign = if (centered) Paint.Align.CENTER else Paint.Align.LEFT
             paint.textScaleX = 1f
-            val measured = paint.measureText(text)
+            val measured = widthCache.width(text, paint.textSize, bold) { paint.measureText(text) }
             if (measured > width) paint.textScaleX = width / measured
             canvas.drawText(text, x, y - (paint.ascent() + paint.descent()) / 2f, paint)
         }

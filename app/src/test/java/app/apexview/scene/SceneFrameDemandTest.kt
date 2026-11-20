@@ -7,8 +7,10 @@ class SceneFrameDemandTest {
     @Test fun severalCodecCallbacksNeedOnlyOneDisplayFrame() {
         val frames = SceneFrameDemand()
         assertTrue(frames.videoArrived())
+        assertTrue(frames.hasPendingVideo())
         repeat(12) { assertFalse(frames.videoArrived()) }
         assertTrue(frames.beginFrame())
+        assertFalse(frames.hasPendingVideo())
         assertTrue(frames.videoArrived())
         assertTrue(frames.beginFrame())
     }
