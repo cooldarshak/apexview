@@ -349,6 +349,9 @@ internal class HevcArchiveVodSession(
         require(discontinuities.distinct().size == 1) {
             "Archive segment $number crosses incompatible feed discontinuities"
         }
+        require(inputs.indices.all { i ->
+            abs(inputs[i].playlist.segments[groups[number].indexes[i]].durationUs - groups[number].durationUs) <= 1_000L
+        }) { "Archive segment $number has incompatible source durations" }
         inputs.forEachIndexed { i, input -> futures += lane.submit<ByteArray> {
             checkOpen()
             val segment = input.playlist.segments[groups[number].indexes[i]]
@@ -518,8 +521,9 @@ internal class HevcArchiveVodSession(
                     }
                 }
                 if (indexes.indices.any { i -> indexes[i] < 0 || abs(starts[i][indexes[i]] - reference.relativeStartTimeUs) > 250_000 }) null else {
-                    val segments = inputs.indices.map { inputs[it].playlist.segments[indexes[it]] }
-                    require(segments.all { abs(it.durationUs - reference.durationUs) <= 1_000L && !it.hasGapTag }) { "Archive feeds have incompatible segment durations or gaps" }
+                    // Preserve the finite timeline even if a future chunk is unavailable or
+                    // has an incompatible duration. Fetch validates each requested chunk;
+                    // an unrelated later bad chunk must not block a valid replay start.
                     Group(reference.relativeStartTimeUs, reference.durationUs, indexes)
                 }
             }.also { groups ->

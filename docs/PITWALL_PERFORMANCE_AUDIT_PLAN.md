@@ -37,6 +37,11 @@ incompatible representation/decoder-period transition still fails closed, and se
 cross-period playback remains open work. The device's BufferQueue/slow-frame issues still
 require a successful sustained playback trace.
 
+Build 564 caught one additional eager check: `HevcArchiveVodSession.align()` rejected any
+future `EXT-X-GAP` or incompatible source duration while constructing the full timeline.
+Keep those chunks addressable in the finite MPD and let the per-request fetch reject only the actual invalid chunk. The
+synthetic gap regression exposed this before the device retest; a follow-up CI build is required.
+
 Baseline: `feature/per-feed-adaptive-hevc-quality` at
 `574ccb587a50f174748d1b08ed2283e4b8ed1ecc` (Build 562).
 
