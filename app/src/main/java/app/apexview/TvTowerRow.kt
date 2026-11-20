@@ -109,8 +109,11 @@ internal fun TvTowerRow(
                 val halfBar = minOf(3f, upper * .7f)
                 repeat(count) { i ->
                     paint.color = segmentColor(values.getOrNull(i) ?: 0).toArgb()
-                    canvas.drawRoundRect(left + i * step, upper - halfBar, left + (i + 1) * step - gap,
-                        upper + halfBar, .7f, .7f, paint)
+                    // A subpixel 0.7px corner generated a costly rounded-rect GPU op
+                    // for every mini-sector on every tower refresh. These tiny bars
+                    // look the same as rects at their actual display size.
+                    canvas.drawRect(left + i * step, upper - halfBar,
+                        left + (i + 1) * step - gap, upper + halfBar, paint)
                 }
                 label(sector?.time?.ifBlank { "–" } ?: "–", left + 21f, lower, 8f, 41f,
                     lapColor(sector?.pace), centered = true)

@@ -53,6 +53,19 @@ class HevcBitstreamTest {
         assertEquals(0, owned.bytes[2].toInt())
     }
 
+    @Test fun splitRetainsOwnedLargeNalPayloadAndIndependentHeaderMetadata() {
+        val stream = ByteArray(900_000) { 0x55.toByte() }
+        stream[0] = 0; stream[1] = 0; stream[2] = 0; stream[3] = 1
+        stream[4] = 0x26; stream[5] = 0x01
+        val units = HevcBitstream.splitAnnexB(stream)
+        assertEquals(1, units.size)
+        assertEquals(19, units.single().type)
+        assertEquals(stream.size - 4, units.single().bytes.size)
+        assertArrayEquals(stream.copyOfRange(4, stream.size), units.single().bytes)
+        stream[6] = 0x33
+        assertEquals(0x55, units.single().bytes[2].toInt() and 0xff)
+    }
+
     @Test fun readsBitsAndUnsignedExpGolomb() {
         val reader = HevcBitReader(byteArrayOf(0b1010_0110.toByte()))
         assertEquals(1, reader.readBit())

@@ -111,6 +111,29 @@ class HevcParameterSetCompatibilityTest {
         assertEquals(8, plan.cells.size)
     }
 
+    @Test fun mixedAtlasChoosesSmallestCodedAreaNotFirstValidCellCount() {
+        val base = fixture(tilesEnabled = false)
+        val common = base.sps.copy(ctbSize = 32, log2CtbSize = 5)
+        fun source(wide: Int, high: Int): HevcMixedArchiveAtlasPlan.Source =
+            HevcMixedArchiveAtlasPlan.Source(base.vps,
+                common.copy(width = wide * 32, height = high * 32,
+                    displayWidth = wide * 32, displayHeight = high * 32,
+                    picWidthInCtbs = wide, picHeightInCtbs = high,
+                    conformanceWindowBottom = 0),
+                base.pps.copy(tileColumnWidthsInCtbs = listOf(wide),
+                    tileRowHeightsInCtbs = listOf(high)))
+
+        // The previous first-valid search chose a 6x10-CTB column (60 CTBs).
+        // A 10x4-CTB row is equally valid but decodes only 40 CTBs.
+        val plan = HevcMixedArchiveAtlasPlan.choose(
+            listOf(source(6, 2), source(2, 4), source(2, 4)),
+            maximumWidth = 512, maximumHeight = 512)
+        assertNotNull(plan)
+        assertEquals(320, plan!!.codedWidth)
+        assertEquals(128, plan.codedHeight)
+        assertEquals(3, plan.cells.size)
+    }
+
     @Test fun rejectsDifferentCtbSizeBitDepthChromaAndProfileConstraints() {
         val f = fixture(tilesEnabled = false)
 

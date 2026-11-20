@@ -51,7 +51,10 @@ internal object HevcBitstream {
             while (end > payloadStart && stream[end - 1] == 0.toByte()) end--
             require(end - payloadStart >= 2) { "Truncated or empty HEVC NAL unit" }
             val bytes = stream.copyOfRange(payloadStart, end)
-            parseNalHeader(bytes)
+            // The split already owns these bytes. parseNalHeader() deliberately clones
+            // a caller's NAL, which would duplicate every multi-megabyte slice again.
+            val header = readNalHeader(bytes)
+            NalUnit(bytes, header.type, header.layerId, header.temporalIdPlus1)
         }
     }
 

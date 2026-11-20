@@ -58,12 +58,25 @@ internal object HevcMixedArchiveAtlasPlan {
         val minimumCells = all.sumOf { it.tiles.size }
         val minimumColumns = all.maxOf { it.cols }
         val minimumRows = all.maxOf { it.rows }
-        val candidates = (minimumColumns..minOf(8, maximumWidth / ctb)).flatMap { columns ->
-            (minimumRows..minOf(8, maximumHeight / ctb)).mapNotNull { rows ->
+        // Every output row and column must be established by a real source tile;
+        // the filler may repeat a tile only after that geometry is known.
+        val maximumColumns = minOf(8, maximumWidth / ctb, all.sumOf { it.cols })
+        val maximumRows = minOf(8, maximumHeight / ctb, all.sumOf { it.rows })
+        val candidates = (minimumColumns..maximumColumns).flatMap { columns ->
+            (minimumRows..maximumRows).mapNotNull { rows ->
                 if (columns * rows !in minimumCells..24) null else columns to rows
             }
         }.sortedWith(compareBy<Pair<Int, Int>> { it.first * it.second }.thenBy { it.first })
 
+        // Cell count alone is not a proxy for HEVC decoder workload. A tall,
+        // narrow valid grid can contain far more coded pixels than a wider one.
+        // Keep the existing bounded search per shape, but compare the *actual*
+        // validated coded picture areas before choosing the output atlas.
+        var best: Plan? = null
+        var bestArea = Long.MAX_VALUE
+        val sourceAreaLowerBound = sources.sumOf {
+            it.sps.width.toLong() * it.sps.height.toLong()
+        }
         for ((columns, rows) in candidates) {
             val placed = arrayOfNulls<Tile>(columns * rows)
             val rowCtbs = IntArray(rows)
@@ -106,9 +119,24 @@ internal object HevcMixedArchiveAtlasPlan {
                 return Plan(grid, selected, rects, width, height)
             }
 
-            fun search(index: Int): Plan? {
-                if (++attempts > 50_000) return null
-                if (index == all.size) return finish()
+            fun search(index: Int) {
+                if (++attempts > 50_000) return
+                // Every occupied row/column has fixed coded dimensions; any
+                // remaining source placements can only increase this area.
+                val occupiedArea = colPixels.sum().toLong() * rowPixels.sum().toLong()
+                if (occupiedArea >= bestArea) return
+                if (colCtbs.count { it == 0 } > all.drop(index).sumOf { it.cols } ||
+                    rowCtbs.count { it == 0 } > all.drop(index).sumOf { it.rows }) return
+                if (index == all.size) {
+                    finish()?.let { plan ->
+                        val area = plan.codedWidth.toLong() * plan.codedHeight.toLong()
+                        if (area < bestArea) {
+                            best = plan
+                            bestArea = area
+                        }
+                    }
+                    return
+                }
                 val feed = all[index]
                 for (top in 0..rows - feed.rows) for (left in 0..columns - feed.cols) {
                     if (feed.tiles.any { tile ->
@@ -123,7 +151,7 @@ internal object HevcMixedArchiveAtlasPlan {
                         if (rowCtbs[y] == 0) { rowCtbs[y] = tile.ctbsHigh; rowPixels[y] = tile.pixelsHigh; changed += columns + y }
                     }
                     origin[index] = left to top
-                    search(index + 1)?.let { return it }
+                    search(index + 1)
                     origin[index] = null
                     feed.tiles.forEach { tile -> placed[(top + tile.row) * columns + left + tile.col] = null }
                     changed.forEach { changedIndex ->
@@ -131,10 +159,12 @@ internal object HevcMixedArchiveAtlasPlan {
                         else { rowCtbs[changedIndex - columns] = 0; rowPixels[changedIndex - columns] = 0 }
                     }
                 }
-                return null
             }
-            search(0)?.let { return it }
+            search(0)
+            // The input pictures cannot occupy less than their own coded area
+            // without overlapping pixels, so this bound is globally optimal.
+            if (bestArea <= sourceAreaLowerBound) break
         }
-        return null
+        return best
     }
 }

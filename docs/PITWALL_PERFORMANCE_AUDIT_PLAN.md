@@ -2,6 +2,31 @@
 
 Status: implementation backlog, not a claim of completed fixes or smooth playback.
 
+## Build 576 verified, next P0/P1.1 candidate (20 November 2026)
+
+Build 576 passed GitHub Actions including Kotlin unit tests, independent HEVC
+decoder/pixel checks and signed APK assembly. Its CMAF fragment writer now
+constructs the final `moof`/`mdat` array directly instead of materializing
+three additional fragment-sized copies. This eliminates a source of allocation
+churn but has **not yet been measured on a phone**.
+
+The S22 Ultra 92-second trace identifies substantial UI/GPU submission work:
+RenderThread had 5,194 `Drawing` slices averaging 8.46ms, 21.80s nested in
+`flush commands`, 236,281 rounded-rectangle operations, 294,172 text
+operations, and 225,126 ellipse operations. These overlapping/nested CPU
+measurements must **not** be added together. It also showed high GC activity.
+The subsequent code candidate removes a duplicate owned HEVC NAL payload
+allocation, replaces imperceptibly rounded mini-sector bars with cheaper
+rectangles, and searches bounded, conforming atlas alternatives by actual
+coded pixel area rather than first valid cell count. The atlas test includes
+a valid 60-to-40 CTB-area example, not a claim that actual F1 layouts shrink.
+
+**Still open:** install the new signed build on S22 Ultra, compare matched
+50fps four-feed playback for GC/allocations and physical SurfaceFlinger
+cadence, and isolate recurring BufferQueue timeouts before changing codec
+or EGL surface ownership. Repeat on TCL TV. P0.3 frame scheduling, P0.4
+rendering and P1.1 atlas **exit criteria are not passed** by CI alone.
+
 ## Build 573 device trace and next UI batch (20 November 2026)
 
 The S22 Ultra replay log contains two appended captures: 1.0.572 (archive
