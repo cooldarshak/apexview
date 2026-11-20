@@ -19,6 +19,24 @@ Testing note: the handover environment could not download Gradle 8.11.1 because 
 access to the distribution host was unavailable. GitHub Actions must run compilation,
 synthetic composition checks and tests before this batch is considered build-verified.
 
+### Build 563 device report and follow-up (20 November 2026)
+
+Build 563 passed GitHub Actions, including independently decoded CMAF fixtures and signed APK
+assembly. It has **not** passed real-device playback: the S22 Ultra log
+`pitwall-20261120-015021-044.log.txt` shows two `ARCHIVE_VOD_FAILED` events before any
+composed segments. The failure comes from `F1HlsFeedCapture.prepareVod()` rejecting an
+entire HLS replay playlist when *any* segment has a gap, discontinuity or changed `EXT-X-MAP`,
+even when that segment is unrelated to the requested start position.
+
+Follow-up implementation (awaiting CI/device retest): load/validate initialization for the
+actual requested segment; validate gaps, protection and aligned discontinuities per fetched
+segment; permit a rotated `EXT-X-MAP` only when its source bytes exactly match the session's
+validated initialization; retain CMAF fragment, IRAP and decode-offset checks. Added tests
+for unrelated future gaps/discontinuities and genuinely changed initialization bytes. A real
+incompatible representation/decoder-period transition still fails closed, and seamless
+cross-period playback remains open work. The device's BufferQueue/slow-frame issues still
+require a successful sustained playback trace.
+
 Baseline: `feature/per-feed-adaptive-hevc-quality` at
 `574ccb587a50f174748d1b08ed2283e4b8ed1ecc` (Build 562).
 

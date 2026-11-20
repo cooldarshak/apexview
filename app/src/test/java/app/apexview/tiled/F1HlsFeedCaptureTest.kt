@@ -18,6 +18,53 @@ import java.nio.ByteBuffer
 
 @RunWith(RobolectricTestRunner::class)
 class F1HlsFeedCaptureTest {
+    @Test fun unrelatedFutureDiscontinuityAndGapDoNotRejectTheCurrentReplayPeriod() = runBlocking {
+        val original = network(2)
+        val changed = original.files.mapValues { (uri, data) ->
+            if (uri.endsWith("video.m3u8")) data.toString(Charsets.UTF_8).replace(
+                "#EXTINF:1.0,\ns1.m4s", "#EXT-X-DISCONTINUITY\n#EXT-X-GAP\n#EXTINF:1.0,\ns1.m4s"
+            ).toByteArray() else data
+        }
+        val network = Network(changed)
+        val capture = F1HlsFeedCapture(network.factory)
+        val session = capture.prepareVod(feeds(2), 100, "channel-0")
+        try {
+            assertEquals(2, session.sourceLabels.size)
+            assertTrue(session.segment(0).isNotEmpty())
+            assertTrue(network.requested.none { it.endsWith("s1.m4s") })
+            try { session.segment(1); fail("A requested HLS gap must fail closed") }
+            catch (expected: ArchiveVodMediaException) {
+                assertTrue(expected.reason.contains("gap", ignoreCase = true))
+            }
+        } finally { session.close(); capture.reset() }
+    }
+
+    @Test fun changedMapIsCheckedAtUseAndMustMatchTheValidatedInitializationExactly() = runBlocking {
+        val original = network(2)
+        val changed = original.files.toMutableMap()
+        for (i in 0..1) {
+            val playlistUri = "https://media.test/f$i/video.m3u8"
+            changed[playlistUri] = changed.getValue(playlistUri).toString(Charsets.UTF_8).replace(
+                "#EXTINF:1.0,\ns1.m4s", "#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"rotated-init.mp4\"\n#EXTINF:1.0,\ns1.m4s"
+            ).toByteArray()
+            changed["https://media.test/f$i/rotated-init.mp4"] =
+                changed.getValue("https://media.test/f$i/init.mp4").copyOf().apply {
+                    this[lastIndex] = (this[lastIndex].toInt() xor 1).toByte()
+                }
+        }
+        val network = Network(changed)
+        val capture = F1HlsFeedCapture(network.factory)
+        val session = capture.prepareVod(feeds(2), 100, "channel-0")
+        try {
+            try { session.segment(1); fail("Changed init bytes must never be fed under the old decoder configuration") }
+            catch (expected: ArchiveVodMediaException) {
+                assertTrue(expected.reason, expected.reason.contains("initialization changed"))
+                assertFalse(expected.retryable)
+            }
+            assertTrue(network.requested.any { it.endsWith("rotated-init.mp4") })
+        } finally { session.close(); capture.reset() }
+    }
+
     private class Network(val files: Map<String, ByteArray>) {
         val requested = java.util.Collections.synchronizedList(mutableListOf<String>())
         var beforeOpen: ((DataSpec) -> Unit)? = null

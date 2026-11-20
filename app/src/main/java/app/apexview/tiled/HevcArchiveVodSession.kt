@@ -41,7 +41,8 @@ internal class HevcArchiveVodSession(
     val audioUris: Map<String, Uri> = emptyMap(),
 ) : AutoCloseable {
     class Input(val label: String, val playlist: HlsMediaPlaylist, val format: Format?,
-                val initialization: ByteArray, val report: CmafBoxInspector.Report)
+                val initialization: ByteArray, val report: CmafBoxInspector.Report,
+                val initializationMap: HlsMediaPlaylist.Segment)
     private data class Group(val startUs: Long, val durationUs: Long, val indexes: List<Int>)
     private val groups = align(inputs, clockLabel)
     // Re-parse each exact owned initialization ONCE, not once per 5.76-second segment.
@@ -51,6 +52,7 @@ internal class HevcArchiveVodSession(
         }
     }
     private val cache = LinkedHashMap<Int, ByteArray>(4, 0.75f, true)
+    private val compatibleMaps = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val cacheLock = Any()
     private val production = ArchiveSegmentSingleFlight()
     @Volatile private var cachedMixedAtlas: HevcMixedArchiveAtlasPlan.Plan? = null
@@ -340,14 +342,36 @@ internal class HevcArchiveVodSession(
         val aborted = java.util.concurrent.atomic.AtomicBoolean(false)
         val futures = mutableListOf<Future<ByteArray>>()
         try {
+        val discontinuities = inputs.mapIndexed { i, input ->
+            val segment = input.playlist.segments[groups[number].indexes[i]]
+            input.playlist.discontinuitySequence + segment.relativeDiscontinuitySequence
+        }
+        require(discontinuities.distinct().size == 1) {
+            "Archive segment $number crosses incompatible feed discontinuities"
+        }
         inputs.forEachIndexed { i, input -> futures += lane.submit<ByteArray> {
             checkOpen()
             val segment = input.playlist.segments[groups[number].indexes[i]]
             require(!segment.hasGapTag && segment.fullSegmentEncryptionKeyUri == null) { "Unsupported HLS gap or full-segment encryption" }
             val map = requireNotNull(segment.initializationSegment) { "Archive segment has no CMAF map" }
-            val expectedMap = requireNotNull(input.playlist.segments.first().initializationSegment)
-            require(map.url == expectedMap.url && map.byteRangeOffset == expectedMap.byteRangeOffset && map.byteRangeLength == expectedMap.byteRangeLength) {
-                "Archive initialization changes mid-session"
+            require(map.fullSegmentEncryptionKeyUri == null) { "Encrypted HLS initialization is unsupported" }
+            val expected = input.initializationMap
+            if (map.url != expected.url || map.byteRangeOffset != expected.byteRangeOffset ||
+                map.byteRangeLength != expected.byteRangeLength) {
+                // A producer may rotate the EXT-X-MAP URI across a VOD discontinuity without
+                // changing its bytes. Allow only exact equality with our validated init.
+                val identity = "$i:${map.url}:${map.byteRangeOffset}:${map.byteRangeLength}"
+                if (!compatibleMaps.contains(identity)) {
+                    val alternate = reader.read(UriUtil.resolveToUri(input.playlist.baseUri, map.url),
+                        2 * 1024 * 1024, map.byteRangeOffset, map.byteRangeLength).bytes
+                    try {
+                        require(alternate.contentEquals(input.initialization)) {
+                            "Archive initialization changed at segment $number; a new decoder period is required"
+                        }
+                        checkOpen()
+                        compatibleMaps.add(identity)
+                    } finally { alternate.fill(0) }
+                }
             }
             val bytes = reader.read(UriUtil.resolveToUri(input.playlist.baseUri, segment.url), 8 * 1024 * 1024,
                 segment.byteRangeOffset, segment.byteRangeLength).bytes
@@ -437,6 +461,7 @@ internal class HevcArchiveVodSession(
             initialization?.fill(0); initialization = null; cache.values.forEach { it.fill(0) }; cache.clear()
             inputs.forEach { it.initialization.fill(0) }
         }
+        compatibleMaps.clear()
     }
 
     private fun checkOpen() { if (closed || Thread.currentThread().isInterrupted) throw IOException("Archive VOD session closed") }

@@ -62,14 +62,21 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         try { return withContext(Dispatchers.IO) {
             require(feeds.size in 1..app.apexview.AppState.MAX_SINGLE_DECODER_FEEDS && feeds.map { it.label }.distinct().size == feeds.size)
             val perFeed = mapArchiveFeedsBounded(feeds) { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }
-            val (selected, playlists, inits) = loadFittingVod(perFeed, preferredHeight, minimumHeight, preferredHeights)
-            playlists.forEach { playlist ->
-                val firstMap = requireNotNull(playlist.segments.first().initializationSegment) { "HLS archive has no CMAF initialization" }
-                require(playlist.segments.all { segment -> segment.initializationSegment?.let {
-                    it.url == firstMap.url && it.byteRangeOffset == firstMap.byteRangeOffset && it.byteRangeLength == firstMap.byteRangeLength
-                } == true && segment.relativeDiscontinuitySequence == 0 && !segment.hasGapTag }) {
-                    "Archive changes CMAF initialization, crosses a discontinuity or contains a gap"
+            val (selected, playlists, inits) = loadFittingVod(perFeed, preferredHeight, minimumHeight,
+                positionMs, clockLabel, preferredHeights)
+            val probeIndexes = probeSegmentIndexes(selected, playlists, positionMs, clockLabel)
+            playlists.forEachIndexed { index, playlist ->
+                val active = playlist.segments[probeIndexes[index]]
+                require(!active.hasGapTag && active.initializationSegment != null) {
+                    "Selected archive segment is a gap or has no CMAF initialization"
                 }
+                // Reject invalid media at the requested position, not a different HLS period
+                // that happens to exist hours later in the complete VOD playlist.
+                val gapCount = playlist.segments.count { it.hasGapTag }
+                val discontinuityCount = playlist.segments.count { it.relativeDiscontinuitySequence != active.relativeDiscontinuitySequence }
+                android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_PLAYLIST_BOUNDARIES " +
+                    "feed=${selected[index].feed.label} probe=${probeIndexes[index]} segments=${playlist.segments.size} " +
+                    "remoteGaps=$gapCount differentDiscontinuitySegments=$discontinuityCount verification=PER_SEGMENT")
             }
             val indexedOffers = selected.mapIndexed { index, offer -> index to offer }
             require(playlists.none { it.tags.any { tag -> tag.startsWith("#EXT-X-KEY:") && !tag.contains("METHOD=NONE") } }) {
@@ -110,7 +117,8 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             val selectableAudioUris = if (audio == null) audioUris else audioUris + (clockLabel to audio)
             var session: HevcArchiveVodSession? = null
             val owned = selected.mapIndexed { i, offer -> HevcArchiveVodSession.Input(offer.feed.label, playlists[i], offer.format,
-                inits[i].bytes.copyOf(), inits[i].report) }
+                inits[i].bytes.copyOf(), inits[i].report,
+                requireNotNull(playlists[i].segments[probeIndexes[i]].initializationSegment)) }
             try {
                 session = HevcArchiveVodSession(reader, owned, clockLabel, maximumOutputWidth = maximumOutputWidth,
                     audioUri = audio, audioUris = selectableAudioUris)
@@ -131,6 +139,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
 
     private suspend fun loadFittingVod(
         perFeed: List<List<Offer>>, preferredHeight: Int, minimumHeight: Int,
+        positionMs: Long, clockLabel: String,
         preferredHeights: Map<String, Int> = emptyMap(),
     ): Triple<List<Offer>, List<HlsMediaPlaylist>, List<Init>> {
         var offers = perFeed
@@ -147,8 +156,9 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                     "HLS AES-128 full-segment encryption is unsupported; no key is requested"
                 }
             }
+            val probes = probeSegmentIndexes(selected, playlists, positionMs, clockLabel)
             val inits = mapArchiveFeedsBounded(selected.indices.toList()) { i ->
-                loadInit(selected[i], playlists[i], playlists[i].segments.first())
+                loadInit(selected[i], playlists[i], playlists[i].segments[probes[i]])
             }
             val tracks = inits.map { it.report.tracks.singleOrNull { track -> track.handler == "vide" }
                 ?: throw PermanentCaptureException("HLS archive must contain one video track") }
@@ -182,6 +192,19 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 format == null || format.width != declared.width || format.height != declared.height
             } }
             if (offers.any { it.isEmpty() }) throw PermanentCaptureException("No offered HEVC rendition fits the combined archive picture")
+        }
+    }
+
+    /** Pick init segments in the same time window that the finite archive session will probe. */
+    private fun probeSegmentIndexes(
+        selected: List<Offer>, playlists: List<HlsMediaPlaylist>, positionMs: Long, clockLabel: String
+    ): List<Int> {
+        val clockIndex = selected.indexOfFirst { it.feed.label == clockLabel }.coerceAtLeast(0)
+        val usePdt = playlists.all { it.hasProgramDateTime }
+        val targetUs = Math.multiplyExact(positionMs.coerceAtLeast(0L), 1000L)
+        return playlists.mapIndexed { index, playlist ->
+            val offset = if (usePdt) playlist.startTimeUs - playlists[clockIndex].startTimeUs else 0L
+            playlist.segments.indexOfLast { it.relativeStartTimeUs + offset <= targetUs }.coerceAtLeast(0)
         }
     }
 
