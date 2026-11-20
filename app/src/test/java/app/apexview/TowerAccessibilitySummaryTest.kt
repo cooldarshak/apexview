@@ -52,7 +52,9 @@ class TowerAccessibilitySummaryTest {
                 highlight = false, onClick = { clicked++ })
         }
         rule.onNodeWithContentDescription(description).assertExists().performClick()
-        rule.onAllNodesWithText("LAST", useUnmergedTree = true).assertCountEquals(0)
+        // TalkBack reads the merged tree. The unmerged debug tree intentionally
+        // retains child Text nodes even behind clearAndSetSemantics.
+        rule.onAllNodesWithText("LAST", useUnmergedTree = false).assertCountEquals(0)
         rule.runOnIdle { speed = 251 }
         rule.waitForIdle()
         rule.onNodeWithContentDescription(description).assertExists().performClick()
