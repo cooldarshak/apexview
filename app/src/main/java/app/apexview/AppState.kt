@@ -349,6 +349,15 @@ class AppState(
     private var singleDecoderFallbackTileId: Int? = null
     private var protectedCompositionAudioMaster: Tile? = null
     private var nativeArchiveTiles by mutableStateOf<List<Tile>>(emptyList())
+    private data class ProtectedRollingScene(
+        val sourceLabels: List<String>,
+        val layout: app.apexview.tiled.ProtectedHevcSceneGeometry.Layout
+    )
+    private var protectedRollingScene by mutableStateOf<ProtectedRollingScene?>(null)
+    val protectedRollingSceneActive: Boolean
+        get() = protectedRollingScene != null && protectedCompositionHost != null
+    val protectedRollingScenePlayer: FeedPlayer?
+        get() = if (protectedRollingSceneActive) protectedCompositionHost?.feed else null
     val settings = Settings(context)
     var decoderMode by mutableStateOf(settings.decoderMode)
         private set
@@ -1450,6 +1459,31 @@ class AppState(
         message = reason
     }
     fun videoScene(width: Float, height: Float): app.apexview.scene.VideoScene? {
+        val rolling = protectedRollingScene
+        if (protectedRollingSceneActive && rolling != null && width > 0f && height > 0f) {
+            val labels = rolling.sourceLabels
+            val geometry = rolling.layout.geometry
+            val windows = (if (inPip) listOfNotNull(pipTile()) else tiles).mapNotNull { tile ->
+                val sourceIndex = labels.indexOf(tile.feed.sourceStream.profileLabel)
+                if (sourceIndex < 0 || tile.w <= 0f || tile.h <= 0f) null
+                else if (inPip) app.apexview.scene.VideoWindow(
+                    tile.id, sourceIndex, 0f, 0f, width, height, tile.z)
+                else app.apexview.scene.VideoWindow(
+                    tile.id, sourceIndex, tile.x, tile.y, tile.w, tile.h, tile.z)
+            }
+            require(windows.isNotEmpty() &&
+                windows.map { it.source }.distinct().size == windows.size) {
+                "Protected scene window mapping lost its source identity"
+            }
+            return app.apexview.scene.VideoScene(
+                width, height, rolling.layout.atlasWidth, rolling.layout.atlasHeight,
+                labels.size, windows, geometry.atlasColumns, geometry.codedWidth,
+                geometry.codedHeight, geometry.displayWidth, geometry.displayHeight,
+                geometry.mixedSourceRects.map {
+                    app.apexview.scene.VideoSourceRect(it.x, it.y, it.width, it.height)
+                }, rolling.layout.frameRate
+            )
+        }
         val host = singleDecoderScenePlayer ?: return null
         val session = host.archiveSceneSession ?: return null
         val labels = host.archiveSceneLabels
@@ -3162,13 +3196,21 @@ class AppState(
                         // The validated picture covers this position. Hold the audio clock while
                         // actual queued media fills the initial buffer, then resume both together.
                         selectedTiles.forEach { it.feed.player.playWhenReady = false }
+                        val scene = app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
+                            window, labels.size)
+                        protectedRollingScene = ProtectedRollingScene(labels.toList(), scene)
+                        android.util.Log.i("ApexviewSingleDecoder",
+                            "F1_PROTECTED_SCENE_PREPARED atlas=" + scene.atlasWidth + "x" +
+                            scene.atlasHeight + " sources=" + labels.size +
+                            " sourceCrops=" + scene.geometry.mixedSourceRects.size +
+                            " fps=" + scene.frameRate + " layout=" + previousLayout)
                         host.feed.startProtectedComposedPlayback(window, capture.widevinePssh(),
                             clearOutput = capture.clearOutput,
                             startPositionMs = (audioMaster.feed.player.currentPosition - requireNotNull(composedArchiveOriginMs)).coerceAtLeast(0L),
                             playWhenReady = false)
                         archiveCompositionStarting = false
-                        layoutMode = LayoutMode.SINGLE_DECODER_TEST
-                        showProtectedCompositionPresentation(host, selectedTiles, audioMaster)
+                        showProtectedCompositionPresentation(host, selectedTiles,
+                            audioMaster, sceneLayout = true)
                     },
                     restoreSources = ::restore,
                     dispose = { it.zero() },
@@ -3431,6 +3473,7 @@ class AppState(
         f1DashCapture?.reset()
         f1DashCapture = null
         val native = nativeArchiveTiles
+        protectedRollingScene = null
         val resumePositionMs = if (native.isNotEmpty()) protectedCompositionHost?.feed?.player?.currentPosition
             else protectedCompositionAudioMaster?.feed?.player?.currentPosition
         if (restorePlayer) {
@@ -4262,11 +4305,15 @@ class AppState(
     /** Lays the feeds out afresh in [mode]. */
     fun chooseLayout(mode: LayoutMode) {
         mapGrabbed = false
-        if (mode != layoutMode && !singleDecoderSceneActive && !archiveCompositionStarting && (protectedCompositionHost != null || f1DashCaptureJob != null)) {
+        if (mode != layoutMode && !singleDecoderSceneActive && !protectedRollingSceneActive &&
+            !archiveCompositionStarting &&
+            (protectedCompositionHost != null || f1DashCaptureJob != null)) {
             stopProtectedCompositionPresentation()
         }
         if (mode == LayoutMode.SINGLE_DECODER_TEST) { chooseDecoderMode(DecoderMode.SINGLE); return }
         if (mode == LayoutMode.TILE_TEST) {
+            // The explicit inspector replaces composition. Cosmetic layout changes do not.
+            if (protectedRollingSceneActive) stopProtectedCompositionPresentation()
             if (singleDecoderSceneActive) chooseDecoderMode(DecoderMode.MULTIPLE)
             val leader = leaderTile()
             if (leader == null) {
@@ -4299,7 +4346,7 @@ class AppState(
             towerSpot.w = -1f
             towerSpot.h = -1f
         }
-        if (!singleDecoderSceneActive) {
+        if (!singleDecoderSceneActive && !protectedRollingSceneActive) {
             f1DashCaptureJob?.cancel()
             f1DashCaptureJob = null
             f1DashCapture = null
@@ -4387,7 +4434,9 @@ class AppState(
         // Clear a previous screen orientation's reservation before any early-return layout.
         // The combined plan is rebuilt below only when its two feed-clearance switches apply.
         combinedOverlayPlan = null
-        val composed = protectedCompositionHost.takeUnless { singleDecoderSceneActive }
+        val composed = protectedCompositionHost.takeUnless {
+            singleDecoderSceneActive || protectedRollingSceneActive
+        }
         val ordered = composed?.let { listOf(it) } ?: bigFirst()
         if (composed == null) bigTileId = ordered.firstOrNull()?.id
 

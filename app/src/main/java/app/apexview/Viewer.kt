@@ -4,6 +4,7 @@ import android.app.Activity
 import android.graphics.Rect
 import android.view.WindowManager
 import app.apexview.scene.SingleDecoderSceneView
+import app.apexview.scene.ProtectedDecoderSceneView
 import androidx.compose.ui.draw.drawWithContent
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -901,7 +902,8 @@ internal fun PlaybackVideoCanvas(
     captureWindow: android.view.Window? = null, viewerBounds: Rect? = null,
 ) {
     val scene = app.videoScene(width, height)
-    val host = app.singleDecoderScenePlayer
+    val host = app.singleDecoderScenePlayer ?: app.protectedRollingScenePlayer
+    val secureRolling = app.protectedRollingSceneActive && host != null && !host.usesSoftwareDrm
     if (scene != null && host != null) {
         var view by remember { mutableStateOf<SingleDecoderSceneView?>(null) }
         var recordingBounds by remember { mutableStateOf<Rect?>(null) }
@@ -968,11 +970,24 @@ internal fun PlaybackVideoCanvas(
                 delay(80)
             }
         }
-        AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
-            onFailure = app::failSingleDecoderScene
-            onOutputSize = app::reportSceneOutputSize
-            view = this
-        } }, update = { it.bind(host.player, scene) }, onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
+        if (secureRolling) {
+            // L1 must use protected EGL and a secure output SurfaceView. No
+            // ordinary texture/readback fallback is used for protected frames.
+            AndroidView(factory = { context -> ProtectedDecoderSceneView(context).apply {
+                onFailure = app::failSingleDecoderScene
+                onOutputSize = app::reportSceneOutputSize
+            } }, update = { it.bind(host.player, scene) },
+                onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
+        } else {
+            // L3 can sample the decoder's one SurfaceTexture, just as the
+            // existing clear HEVC archive scene does, without extra decoders.
+            AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
+                onFailure = app::failSingleDecoderScene
+                onOutputSize = app::reportSceneOutputSize
+                view = this
+            } }, update = { it.bind(host.player, scene) },
+                onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
+        }
     } else {
         val popped = if (app.inPip) app.pipTile() else null
         app.tiles.filter { !it.protectedCompositionHidden && (popped == null || it === popped) }.forEach { tile ->
@@ -1007,7 +1022,7 @@ private fun TileView(
 ) {
     if (videoOnly && presetSlot == null && !tile.hasLayoutSlot && !app.inPip) return
     val density = LocalDensity.current
-    val presentedFeed = app.singleDecoderScenePlayer ?: tile.feed
+    val presentedFeed = app.singleDecoderScenePlayer ?: app.protectedRollingScenePlayer ?: tile.feed
     if (!videoOnly) LaunchedEffect(tile.id) {
         while (true) {
             tile.feed.refresh()
