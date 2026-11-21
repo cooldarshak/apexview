@@ -45,6 +45,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     private val actual = java.util.concurrent.ConcurrentHashMap<String, ManifestProtocol>()
     private val clearComposition = ClearCmafArchiveComposition(fullPictures = fullPictures)
     private var previousStartUs: Long? = null
+    private val discontinuityGate = HlsDiscontinuityBoundaryGate()
     private var mediaToArchiveOffsetUs: Long? = null
     private var pssh: ByteArray? = null
     var clearOutput: Boolean? = null
@@ -233,8 +234,17 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                     if (previousStartUs == null) CaptureFailure("HLS fragment alignment failure at the archive position", false) else null,
                     "Waiting for the next aligned HLS archive segment")
             val segments = playlists.zip(aligned).map { (playlist, candidate) -> playlist.segments[candidate.number.toInt()] }
-            val discontinuities = playlists.zip(segments).map { (playlist, segment) -> playlist.discontinuitySequence + segment.relativeDiscontinuitySequence }
-            if (discontinuities.distinct().size != 1) throw PermanentCaptureException("HLS feeds cross incompatible discontinuities")
+            // EXT-X-DISCONTINUITY-SEQUENCE is local to each media rendition.
+            // Comparing raw numbers across different feeds falsely rejected aligned
+            // F1 HLS streams. Instead require a synchronized *change* of period
+            // across consecutive captures; PTS/POC/CMAF checks still validate media.
+            val discontinuities = playlists.zip(segments).map { (playlist, segment) ->
+                playlist.discontinuitySequence + segment.relativeDiscontinuitySequence
+            }
+            val labels = selected.map { it.feed.label }
+            if (!discontinuityGate.accepts(labels, discontinuities, aligned.first().absoluteStartUs)) {
+                throw PermanentCaptureException("HLS feeds changed discontinuity periods at different segment boundaries")
+            }
             if (segments.any { it.hasGapTag }) throw PermanentCaptureException("Selected HLS archive segment is marked as a gap")
             if (segments.any { it.fullSegmentEncryptionKeyUri != null || it.initializationSegment?.fullSegmentEncryptionKeyUri != null }) {
                 throw PermanentCaptureException("HLS AES-128 full-segment encryption is unsupported; no key is requested")
@@ -291,6 +301,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 }
                 composeMs = android.os.SystemClock.elapsedRealtime() - composeStartedMs
             } finally { media.forEach { it.fill(0) } }
+            discontinuityGate.commit(labels, discontinuities, aligned.first().absoluteStartUs)
             previousStartUs = aligned.first().absoluteStartUs
             android.util.Log.i("ApexviewSingleDecoder", "HLS_CMAF_CAPTURE feeds=${feeds.size} protection=${if (clear) "CLEAR" else "CBCS"} aligned=PASS composed=${if (clear) clearComposition.hasOutput() else ProtectedHevcLiveComposition.hasOutput(group)} fetchMs=$fetchMs composeMs=$composeMs totalMs=${android.os.SystemClock.elapsedRealtime() - startedMs} archiveClockMs=$positionMs segmentStartUs=${aligned.first().absoluteStartUs}")
             snapshot(group, format, aligned.first().absoluteStartUs, feeds.size)
@@ -309,7 +320,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
 
     fun reset() {
         initializations.values.forEach { it.bytes.fill(0) }; initializations.clear()
-        offers.clear(); vodPlaylists.clear(); actual.clear(); previousStartUs = null; mediaToArchiveOffsetUs = null
+        offers.clear(); vodPlaylists.clear(); actual.clear(); previousStartUs = null; discontinuityGate.reset(); mediaToArchiveOffsetUs = null
         pssh?.fill(0); pssh = null; clearOutput = null; clearComposition.reset()
     }
 

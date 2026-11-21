@@ -31,7 +31,8 @@ internal object HevcSliceHeaderRewriter {
         outputPps: HevcParameterSets.PpsMetadata,
         destinationAddress: Int,
         clearNalBytes: Int = nal.size,
-        loopFilterAcrossSlicesOverride: Boolean? = null
+        loopFilterAcrossSlicesOverride: Boolean? = null,
+        parsedSourceHeader: HevcSliceHeaderParser.SliceHeader? = null
     ): Result {
         val nalHeader = HevcBitstream.readNalHeader(nal)
         require(nalHeader.type in 0..21) { "Unsupported VCL NAL type" }
@@ -64,7 +65,10 @@ internal object HevcSliceHeaderRewriter {
             "Slice-header extensions are not supported"
         }
 
-        val parsed = HevcSliceHeaderParser.parse(nal, sourceSps, sourcePps, clearNalBytes)
+        // The grid composer already validated this same immutable NAL in its single
+        // per-feed parse. Other callers still parse here and retain the full gate.
+        val parsed = parsedSourceHeader
+            ?: HevcSliceHeaderParser.parse(nal, sourceSps, sourcePps, clearNalBytes)
         require(!parsed.dependentSliceSegment) { "Dependent slice segments are not supported" }
         require(parsed.entryPointOffsets.isEmpty()) {
             "Non-zero tile/WPP entry-point offsets are not supported"

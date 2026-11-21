@@ -30,6 +30,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -187,15 +188,28 @@ internal const val MAP_FRAME_WAIT_MS = 30L
 internal fun isOverlaySampleDue(frameMs: Long, lastFrameMs: Long): Boolean =
     lastFrameMs == Long.MIN_VALUE || frameMs < lastFrameMs || frameMs - lastFrameMs >= MAP_RENDER_INTERVAL_MS
 
-/** Sleep between TV samples so the overlays do not request every display frame. */
+/**
+ * Advance car markers on display vsync in even 33 ms steps. A free-running
+ * 40 ms coroutine produced 25 Hz map animation on the TV's 60 Hz display,
+ * causing visibly uneven 2/3-vsync holds. This remains capped at 30 Hz
+ * and does not drive the video decoder or rebuild the static map layer.
+ */
+internal const val TV_MAP_FRAME_INTERVAL_NS = 33_000_000L
+
 @Composable
 internal fun rememberTvMapTime(read: () -> Long): Long {
     val clock by rememberUpdatedState(read)
     var now by remember { mutableLongStateOf(clock()) }
     LaunchedEffect(Unit) {
+        var previous = Long.MIN_VALUE
         while (true) {
-            now = clock()
-            delay(40)
+            withFrameNanos { frameTime ->
+                if (previous == Long.MIN_VALUE || frameTime < previous ||
+                    frameTime - previous >= TV_MAP_FRAME_INTERVAL_NS) {
+                    now = clock()
+                    previous = frameTime
+                }
+            }
         }
     }
     return now

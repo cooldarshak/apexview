@@ -63,7 +63,7 @@ internal object HevcTizenGridComposer {
         val vps: HevcParameterSets.VpsMetadata,
         val sps: HevcParameterSets.SpsMetadata,
         val pps: HevcParameterSets.PpsMetadata,
-        val pictures: List<List<ByteArray>>,
+        val pictures: List<List<LocatedSlice>>,
         val pictureIdentities: List<HevcPictureIdentityCompatibility.PictureIdentity>
     )
 
@@ -176,14 +176,12 @@ internal object HevcTizenGridComposer {
 
         val selectedByFrame = feeds.first().pictures.indices.map { frameIndex ->
             checkNotInterrupted()
-            // A source picture can contribute several source tiles (and may fill an
-            // unused atlas cell). Parse its slices once per frame, not once per cell.
-            val locatedByFeed = mutableMapOf<Int, List<LocatedSlice>>()
+            // Validation and tile lookup were completed once at feed parse. Re-parsing
+            // the same 5.76s worth of slice headers in this per-frame loop was costly
+            // on the TV's 32-bit Amlogic CPU.
             orderedSelections.map { selection ->
                 val feed = feeds[selection.feedIndex]
-                val tiles = locatedByFeed.getOrPut(selection.feedIndex) {
-                    locatePictureTiles(feed, feed.pictures[frameIndex])
-                }
+                val tiles = feed.pictures[frameIndex]
                 val selected = tiles.singleOrNull { it.tileIndex == selection.sourceTileIndex }
                     ?: throw IllegalArgumentException(
                         "Frame $frameIndex feed ${selection.feedIndex} must have exactly one independent slice for tile ${selection.sourceTileIndex}"
@@ -273,7 +271,8 @@ internal object HevcTizenGridComposer {
                     outputPps = outputPps,
                     destinationAddress = outputAddress,
                     clearNalBytes = located.nal.size,
-                    loopFilterAcrossSlicesOverride = filterOverride
+                    loopFilterAcrossSlicesOverride = filterOverride,
+                    parsedSourceHeader = located.header
                 )
                 val verifiedHeader = HevcSliceHeaderParser.parse(
                     rewritten.nal, outputSps, outputPps
@@ -368,24 +367,40 @@ internal object HevcTizenGridComposer {
         // The analyzer and tile locator inspect the same immutable NAL payloads. Re-splitting
         // Annex-B here cloned every large VCL NAL (and doubled peak young-generation pressure).
         val signatures = HevcStreamAlignmentAnalyzer.analyzeNalUnits(nals)
-        val pictureNals = mutableListOf<MutableList<ByteArray>>()
-        var current: MutableList<ByteArray>? = null
+        val pictures = mutableListOf<MutableList<LocatedSlice>>()
+        var current: MutableList<LocatedSlice>? = null
         nals.filter { it.type in 0..31 }.forEach { nal ->
+            // Parse and validate every source tile just once. Keep the trusted header
+            // beside its original immutable NAL bytes for all later composition stages.
             val header = HevcSliceHeaderParser.parse(nal.bytes, sps, pps)
             if (header.firstSliceSegmentInPicture) {
-                current?.let { pictureNals += it }
+                current?.let { pictures += it }
                 current = mutableListOf()
             }
             val picture = current
                 ?: throw IllegalArgumentException("Source feed $index has a continuation slice before its first slice")
-            picture += nal.bytes
+            require(!header.dependentSliceSegment) { "Dependent source slice segments are not supported" }
+            require(header.entryPointOffsets.isEmpty()) {
+                "A source slice spans multiple tiles or carries unsupported entry-point offsets"
+            }
+            val tile = tileAtAddress(sps, pps, header.sliceSegmentAddress)
+            require(tile.startAddress == header.sliceSegmentAddress) {
+                "Source slice does not begin at a complete tile boundary"
+            }
+            require(header.firstSliceSegmentInPicture == (header.sliceSegmentAddress == 0)) {
+                "Source first-slice flag does not match its CTB address"
+            }
+            require(picture.none { it.tileIndex == tile.index }) {
+                "Source picture contains multiple independent slices in tile ${tile.index}"
+            }
+            picture += LocatedSlice(nal.bytes, header, tile.index, tile.startAddress)
         }
-        current?.let { pictureNals += it }
-        require(pictureNals.size == signatures.size && signatures.isNotEmpty()) {
+        current?.let { pictures += it }
+        require(pictures.size == signatures.size && signatures.isNotEmpty()) {
             "Source feed $index picture grouping disagrees with the POC analyzer"
         }
-        val identities = pictureNals.mapIndexed { frameIndex, picture ->
-            val firstHeader = HevcSliceHeaderParser.parse(picture.first(), sps, pps)
+        val identities = pictures.mapIndexed { frameIndex, picture ->
+            val firstHeader = picture.first().header
             require(!firstHeader.dependentSliceSegment) {
                 "Source feed $index frame $frameIndex begins with a dependent slice"
             }
@@ -395,7 +410,7 @@ internal object HevcTizenGridComposer {
         }
         return ParsedFeed(
             vpsUnits.first().bytes, spsUnits.first().bytes, ppsUnits.first().bytes,
-            vps, sps, pps, pictureNals, identities
+            vps, sps, pps, pictures, identities
         )
     }
 
