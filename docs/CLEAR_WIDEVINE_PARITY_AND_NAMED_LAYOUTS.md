@@ -10,8 +10,8 @@ Validation: existing GitHub Actions Android tests, source audit, prior real S22 
 |---|---|---|---|
 | Manifest source | Clear HLS CMAF with finite index | Actual HLS/DASH resolved and encryption verified | Separate by source metadata |
 | DRM | Unencrypted samples | Widevine authorized; CBCS KID/IV and encrypted bytes retained | Separate by necessity |
-| Feed network requests | Bounded parallel foreground and warmup lanes | HLS offers, playlists, init, media use bounded parallel lanes up to 4 | Implemented |
-| Composition scheduling | Foreground on demand, low-priority speculative HEVC warmup | Dedicated background-priority HEVC composition worker, independent of HLS IO | Implemented |
+| Feed network requests | Bounded parallel foreground and warmup lanes | HLS offers, playlists, init, media use bounded parallel lanes up to 4; DASH feed requests likewise parallelized | Implemented |
+| Composition scheduling | Foreground on demand, low-priority speculative HEVC warmup | Dedicated background-priority HEVC composition workers for HLS and DASH, independent of per-feed IO | Implemented |
 | Future fragment scheduling | Single-flight and bounded cache, two speculative fragments; seek preempts | Bounded three-fragment clock-driven window with POC/CBCS continuity | Equivalent bounded intent, different seek semantics |
 | Initialization and metadata | Cached verified CMAF initialization | Cached per-feed init; reused verified fragment inspections where unchanged | Implemented |
 | Mixed atlas | Cached HEVC geometry per VOD session | Cached atlas planner keyed by verified HEVC parameter fingerprints | Implemented |
@@ -20,7 +20,7 @@ Validation: existing GitHub Actions Android tests, source audit, prior real S22 
 | Video decoding | One hardware HEVC MediaCodec | One hardware HEVC decoder, authorized Widevine where required | Preserved |
 | Video GPU | One GLS external texture on TextureView for finite clear and Cast | One external texture on SurfaceView, with protected EGL for L1 | Purposefully different output surface |
 | Frame pacing | Choreographer, SceneFrameDemand, SceneFrameCadenceGate and SceneFramePacing | Same pacing and coalescing reused, SurfaceTexture latched immediately to relieve BufferQueue | Implemented |
-| Performance metrics | ARCHIVE_VOD_SEGMENT, SINGLE_DECODER_SCENE | HLS_CMAF_CAPTURE, PROTECTED_CMAF_SEGMENT, PROTECTED_ATLAS_PLAN, SURFACE_DECODER_SCENE | Implemented |
+| Performance metrics | ARCHIVE_VOD_SEGMENT, SINGLE_DECODER_SCENE | HLS_CMAF_CAPTURE, PROTECTED_CMAF_SEGMENT, PROTECTED_ATLAS_PLAN, DASH_CMAF_CAPTURE, SURFACE_DECODER_SCENE | Implemented |
 | Seek and controls | Finite random access and prefetch invalidation | Recompose sliding protected window at target without forcing GRID mode | Correct per backend |
 | Timing tower and track map | Retained UI | Same overlay engine | Retained |
 
