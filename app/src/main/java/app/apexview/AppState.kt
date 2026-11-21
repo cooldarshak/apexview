@@ -4571,6 +4571,26 @@ class AppState(
         message = "Saved '${preset.name}' with ${tiles.size} feeds, track map and timing tower."
     }
 
+    /** Portable, credential-free JSON copy for anyone whose Android backup is off. */
+    fun exportNamedLayouts(): String = NamedLayoutPresets.encode(namedLayouts)
+
+    /** Merge presets from a prior installation without changing today's playback.
+     * Duplicated IDs overwrite only their corresponding saved layout. */
+    fun importNamedLayouts(raw: String) {
+        val recovered = runCatching {
+            require(raw.length < 1_000_000)
+            val root = JSONObject(raw)
+            require(root.getInt("version") == 1 && root.has("presets"))
+            NamedLayoutPresets.parse(raw)
+        }.getOrElse { message = "Not a valid Pitwall layout backup"; return }
+        if (recovered.isEmpty()) { message = "This backup contains no saved layouts"; return }
+        val merged = (namedLayouts.filterNot { old ->
+            recovered.any { it.id == old.id }
+        } + recovered).take(NamedLayoutPresets.MAX_ITEMS)
+        persistNamedLayouts(merged)
+        message = "Restored ${recovered.size} named layouts. Feed positions, map and tower are included."
+    }
+
     fun renameNamedLayout(id: String, name: String) {
         val clean = name.trim()
         if (!NamedLayoutPresets.validName(clean)) {

@@ -82,6 +82,8 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.VideoLibrary
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
@@ -1684,6 +1686,31 @@ private fun VideoQualitySheet(app: AppState) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LayoutSheet(app: AppState) {
+    val backupContext = LocalContext.current
+    val exportLayouts = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                requireNotNull(backupContext.contentResolver.openOutputStream(uri)).use { stream ->
+                    stream.write(app.exportNamedLayouts().toByteArray(Charsets.UTF_8))
+                }
+            }.onSuccess { app.message = "Saved layout backup" }
+                .onFailure { app.message = "Could not export layouts: ${it.javaClass.simpleName}" }
+        }
+    }
+    val importLayouts = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                requireNotNull(backupContext.contentResolver.openInputStream(uri)).use { stream ->
+                    stream.bufferedReader().use { it.readText() }
+                }
+            }.onSuccess { app.importNamedLayouts(it) }
+                .onFailure { app.message = "Could not open layout backup: ${it.javaClass.simpleName}" }
+        }
+    }
     var nameDialog by remember { mutableStateOf(false) }
     var nameValue by remember { mutableStateOf("") }
     var editingId by remember { mutableStateOf<String?>(null) }
@@ -1824,7 +1851,20 @@ private fun LayoutSheet(app: AppState) {
                     }
                 }
             }
-            Text("Android backup can restore these presets after reinstall when device backup and restore are enabled. Keep the same app signing key; local-only data cannot be guaranteed to survive uninstall without a completed cloud/device backup.",
+            Text("Layout backups", style = Type.headline,
+                modifier = Modifier.padding(top = 20.dp))
+            Row(Modifier.padding(top = 10.dp).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SecondaryButton("Export layouts") {
+                    runCatching { exportLayouts.launch("pitwall-layouts.json") }
+                        .onFailure { app.message = "File export is unavailable on this device" }
+                }
+                SecondaryButton("Import layouts") {
+                    runCatching { importLayouts.launch(arrayOf("application/json", "text/*")) }
+                        .onFailure { app.message = "File import is unavailable on this device" }
+                }
+            }
+            Text("Android Auto Backup restores named layouts when the device's backup and restore service is enabled. Exporting a copy is additional protection if cloud backup is disabled. No F1 credentials or Widevine keys are included.",
                 style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
 
             Column(Modifier.padding(top = 20.dp).clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(vertical = 4.dp)) {
