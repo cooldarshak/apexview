@@ -2,6 +2,7 @@ package app.apexview.tiled
 
 import java.io.ByteArrayOutputStream
 import java.io.File
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -225,6 +226,108 @@ class ProtectedHevcPictureComposerTest {
         }
         assertTrue(error.message!!.contains("selected sample IV identity differs"))
         assertFalse(feeds.any { it.pocTracker.hasReferenceAnchor })
+    }
+
+
+    /**
+     * Build 629 Las Vegas failure: CBCS may start immediately after the aligned HEVC
+     * slice header. The earlier three-clear-CABAC-byte requirement rejected this
+     * otherwise structurally inspectable stream before any protected video playback.
+     */
+    @Test fun composesOpaqueCbcsCabacTailWithZeroOneOrTwoClearCabacBytes() {
+        val source = fixture()
+        val iv = ByteArray(16) { 0x35 }
+        for (clearCabacCount in 0..2) {
+            val protected = protectCabacAfterClearHeader(source, clearCabacCount)
+            val originalLayout = ProtectedHevcSampleLayout.inspect(
+                protected.sample, 4, protected.ranges
+            )
+            val originalAu = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(
+                protected.sample, originalLayout, protected.sps, protected.pps, protected.vps
+            )
+            assertTrue(originalAu.slices.all { it.clearCabacBytes == clearCabacCount })
+            assertTrue(originalAu.slices.all { it.readyForCurrentHeaderRewriter })
+            val sourceTile = originalLayout.nals.first()
+            val tailStart = requireNotNull(originalAu.slices.first().firstOpaqueCabacByteOffset)
+            val sourceTail = protected.sample.copyOfRange(
+                sourceTile.nalOffset + tailStart, sourceTile.nalOffset + sourceTile.nalLength
+            )
+            val feeds = (0..3).map { index ->
+                feed(protected, "opaque-$index", index + 1L, 0, 0,
+                    listOf(0, 2, 4, 6)[index], iv, 0L)
+            }
+            val composed = ProtectedHevcPictureComposer.compose(
+                feeds, protected.sps, protected.pps,
+                context = "synthetic CBCS protected CABAC boundary"
+            )
+            val outputLayout = ProtectedHevcSampleLayout.inspect(
+                composed.sampleBytes, composed.nalLengthSize, composed.subsampleRanges
+            )
+            assertEquals(4, outputLayout.nals.size)
+            assertEquals(sourceTail.size.toLong() * 4L, composed.encryptedByteCount -
+                clearCabacCount.toLong() * 4L)
+            outputLayout.nals.forEach { nal ->
+                assertArrayEquals(sourceTail,
+                    composed.sampleBytes.copyOfRange(
+                        nal.nalOffset + nal.nalLength - sourceTail.size,
+                        nal.nalOffset + nal.nalLength
+                    ))
+                assertTrue(nal.protectionRanges.last().let {
+                    !it.isClear && it.endExclusive == nal.nalLength
+                })
+            }
+            val inspected = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(
+                composed.sampleBytes, outputLayout, protected.sps, protected.pps
+            )
+            assertEquals(4, inspected.slices.size)
+            assertEquals(setOf(0, 1, 2, 3),
+                inspected.slices.map { it.tile.index }.toSet())
+        }
+    }
+
+    @Test fun opaqueCabacSpliceMatchesClearRewriterByteForByte() {
+        val original = fixture()
+        val protected = protectCabacAfterClearHeader(original, 0)
+        val inputLayout = ProtectedHevcSampleLayout.inspect(protected.sample, 4, protected.ranges)
+        val inputAu = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(
+            protected.sample, inputLayout, protected.sps, protected.pps, protected.vps
+        )
+        val sourceNal = inputLayout.nals.first()
+        val rawNal = protected.sample.copyOfRange(
+            sourceNal.nalOffset, sourceNal.nalOffset + sourceNal.nalLength
+        )
+        val headerEnd = requireNotNull(inputAu.slices.first().firstOpaqueCabacByteOffset)
+        val allClear = HevcSliceHeaderRewriter.rewrite(
+            rawNal, protected.sps, protected.pps, protected.sps, protected.pps,
+            destinationAddress = 2, clearNalBytes = rawNal.size
+        )
+        val opaque = HevcSliceHeaderRewriter.rewrite(
+            rawNal, protected.sps, protected.pps, protected.sps, protected.pps,
+            destinationAddress = 2, clearNalBytes = headerEnd,
+            preserveOpaqueCabacTail = true
+        )
+        assertEquals(headerEnd, opaque.sourceTailOffset)
+        assertEquals(0, opaque.reencodedClearPayloadBytes)
+        assertArrayEquals(allClear.nal, opaque.nal)
+    }
+
+    private fun protectCabacAfterClearHeader(
+        source: Fixture, extraClearCabacBytes: Int
+    ): Fixture {
+        val layout = ProtectedHevcSampleLayout.inspect(source.sample, 4, source.ranges)
+        val accessUnit = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(
+            source.sample, layout, source.sps, source.pps, source.vps
+        )
+        val ranges = layout.nals.map { nal ->
+            val slice = accessUnit.slices.single { it.nalIndex == nal.index }
+            val headerEnd = requireNotNull(slice.firstOpaqueCabacByteOffset)
+            val clearNalBytes = headerEnd + extraClearCabacBytes
+            require(clearNalBytes < nal.nalLength)
+            CmafBoxInspector.SubsampleEncryptionRange(
+                4 + clearNalBytes, (nal.nalLength - clearNalBytes).toLong()
+            )
+        }
+        return source.copy(ranges = ranges)
     }
 
     private data class Fixture(

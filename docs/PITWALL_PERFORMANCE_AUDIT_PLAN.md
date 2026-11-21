@@ -1,5 +1,31 @@
 # Pitwall TV: playback performance audit and implementation plan
 
+## Build 629 protected CABAC splice follow-up (21 November 2026)
+
+Build 629's S22 Ultra log confirms that the Build 627 protected init signalling failure
+is cleared, but protected Las Vegas qualification still fails before composed decoding:
+`REAL_PROTECTED_SINGLE_SENC_PREFLIGHT` reports 288 aligned pictures with matching
+CBCS metadata, followed by `F1_COMPOSITION_FAILED` at POC 0 because feed 0
+`channel-1033` does not expose three clear CABAC bytes. The active protected tile
+rewriter expected three clear CABAC bytes even when the encrypted tail begins
+immediately after the complete clear aligned slice header.
+
+The coordinated follow-up introduces a guarded header-only splice for these CBCS
+samples. It copies the entire opaque CABAC EBSP suffix unchanged, retains its
+CENC/CBCS protection ranges and validates the nonzero HEVC byte-alignment terminator
+on both source and rewritten headers. Existing three-clear-byte reconstruction
+remains unchanged for its eligible inputs. Synthetic tile-feed tests cover 0/1/2
+clear CABAC bytes, unchanged suffix bytes, output tile identity and comparison to
+a fully clear rewrite. Source DRM metadata and all pre-existing fail-closed encryption
+checks remain mandatory. This does not prove that a protected composite can be
+decoded by the real hardware, and does not establish map/tower graphics sign-off.
+
+The supplied 22:14 trace spans device-uptime 414066.196–414100.147 s,
+and includes the protected failure at device-uptime ~414076.895 s. There is no
+successful protected composed playback in that interval. The app log also reports
+496 UI frames, 239 slow frames, three frozen >700ms, and max 1507ms frame.
+These are startup/failure-window measurements rather than steady-playback figures.
+
 ## Build 627 protected-init correction and graphics acceptance
 
 See [Build 627 engineering diagnosis](BUILD_627_VEGAS_AND_OVERLAY_DIAGNOSIS.md).

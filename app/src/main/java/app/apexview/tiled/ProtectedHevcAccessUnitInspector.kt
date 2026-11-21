@@ -39,11 +39,14 @@ internal object ProtectedHevcAccessUnitInspector {
         val tile: SourceTile,
         val clearCabacBytes: Int,
         /** NAL-relative EBSP offset of the third clear CABAC byte, or null when unavailable. */
-        val thirdClearCabacByteOffset: Int?
+        val thirdClearCabacByteOffset: Int?,
+        /** First source CABAC EBSP byte. Only valid when the preceding aligned header ends
+         * on a nonzero clear byte; encrypted payload remains untouched. */
+        val firstOpaqueCabacByteOffset: Int?
     ) {
         val readyForCurrentHeaderRewriter: Boolean
-            get() = clearCabacBytes >= REQUIRED_CLEAR_CABAC_BYTES &&
-                thirdClearCabacByteOffset != null
+            get() = (clearCabacBytes >= REQUIRED_CLEAR_CABAC_BYTES &&
+                thirdClearCabacByteOffset != null) || firstOpaqueCabacByteOffset != null
     }
 
     data class Report(
@@ -210,6 +213,14 @@ internal object ProtectedHevcAccessUnitInspector {
                         "Parsed slice header is not byte aligned")
                     val rbspOffsets = clearRbspByteOffsets(clearPrefix, context, mapped.index)
                     val cabacBytes = (rbspOffsets.size - headerRbspBytes).coerceAtLeast(0)
+                    val opaqueCabacStart = rbspOffsets.getOrNull(headerRbspBytes - 1)
+                        ?.let { lastHeaderEbspOffset ->
+                            (lastHeaderEbspOffset + 1).takeIf { tailStart ->
+                                tailStart > 2 && tailStart < mapped.nalLength &&
+                                    tailStart <= mapped.clearNalPrefixBytes &&
+                                    clearPrefix[tailStart - 1] != 0.toByte()
+                            }
+                        }
                     slices += SliceRegion(
                         nalIndex = mapped.index,
                         header = slice,
@@ -217,7 +228,8 @@ internal object ProtectedHevcAccessUnitInspector {
                         clearCabacBytes = cabacBytes,
                         thirdClearCabacByteOffset = rbspOffsets.getOrNull(
                             headerRbspBytes + REQUIRED_CLEAR_CABAC_BYTES - 1
-                        )
+                        ),
+                        firstOpaqueCabacByteOffset = opaqueCabacStart
                     )
                 }
                 in 35..40 -> Unit // AUD, EOS, EOB, filler and SEI: only the clear NAL header is inspected.

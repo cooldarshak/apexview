@@ -53,8 +53,9 @@ internal object ProtectedHevcSliceHeaderRewriter {
             "$context: access-unit inspection does not match the selected NAL layout"
         }
         require(slice.readyForCurrentHeaderRewriter) {
-            "$context: NAL $nalIndex does not expose the three clear CABAC bytes required by the rewriter"
+            "$context: NAL $nalIndex lacks both a complete clear slice header and a safe CABAC splice"
         }
+        val opaqueCabacTail = slice.clearCabacBytes < 3
         require(mapped.protectionRanges.isNotEmpty()) {
             "$context: NAL $nalIndex has no detailed clear/encrypted byte map"
         }
@@ -72,19 +73,23 @@ internal object ProtectedHevcSliceHeaderRewriter {
             outputPps = outputPps,
             destinationAddress = destinationAddress,
             clearNalBytes = mapped.clearNalPrefixBytes,
-            loopFilterAcrossSlicesOverride = loopFilterAcrossSlicesOverride
+            loopFilterAcrossSlicesOverride = loopFilterAcrossSlicesOverride,
+            preserveOpaqueCabacTail = opaqueCabacTail
         )
 
-        require(rewritten.sourceTailOffset == slice.thirdClearCabacByteOffset) {
-            "$context: slice rewriter's clear-tail boundary differs from the protected access-unit inspection"
+        val expectedTailOffset = if (opaqueCabacTail) slice.firstOpaqueCabacByteOffset
+            else slice.thirdClearCabacByteOffset
+        require(rewritten.sourceTailOffset == expectedTailOffset) {
+            "$context: slice rewriter's CABAC splice differs from the protected access-unit inspection"
         }
+        val sourceMapResume = rewritten.sourceTailOffset + if (opaqueCabacTail) 0 else 1
         require(rewritten.sourceTailOffset >= 2 &&
-            rewritten.sourceTailOffset < mapped.clearNalPrefixBytes &&
-            rewritten.sourceTailOffset + 1 <= sourceNal.size) {
-            "$context: copied CABAC tail does not begin at a verified clear byte"
+            rewritten.sourceTailOffset < sourceNal.size &&
+            sourceMapResume <= mapped.clearNalPrefixBytes) {
+            "$context: copied CABAC tail does not begin at a verified header boundary"
         }
-        require(isFullyClear(mapped.protectionRanges, 0, rewritten.sourceTailOffset + 1)) {
-            "$context: rewritten CABAC prefix crosses into encrypted bytes"
+        require(isFullyClear(mapped.protectionRanges, 0, sourceMapResume)) {
+            "$context: rewritten clear header crosses into encrypted bytes"
         }
 
         val outputTailOffset = rewritten.nal.size - rewritten.copiedTailBytes
@@ -130,11 +135,10 @@ internal object ProtectedHevcSliceHeaderRewriter {
             outputCoveredUntil = Math.addExact(outputCoveredUntil, length)
         }
 
-        // The rewritten header, its first two CABAC bytes, and the copied third CABAC byte are
-        // all clear. The byte following that third CABAC byte is where source protection mapping
-        // resumes, shifted by the header rewrite's size delta.
-        appendRange(0, outputTailOffset + 1, isClear = true)
-        val sourceMapResume = rewritten.sourceTailOffset + 1
+        // For the three-CABAC-byte path, the copied third byte remains clear. For a
+        // header-only rewrite, preserve *every* source CABAC byte and its CBCS protection
+        // classification, including encrypted bytes immediately after byte_alignment().
+        appendRange(0, outputTailOffset + if (opaqueCabacTail) 0 else 1, isClear = true)
         mapped.protectionRanges.forEach { range ->
             val intersectionStart = maxOf(sourceMapResume, range.offset)
             val intersectionEnd = minOf(sourceNal.size, range.endExclusive)

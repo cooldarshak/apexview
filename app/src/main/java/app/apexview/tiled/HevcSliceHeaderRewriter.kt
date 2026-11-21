@@ -32,7 +32,9 @@ internal object HevcSliceHeaderRewriter {
         destinationAddress: Int,
         clearNalBytes: Int = nal.size,
         loopFilterAcrossSlicesOverride: Boolean? = null,
-        parsedSourceHeader: HevcSliceHeaderParser.SliceHeader? = null
+        parsedSourceHeader: HevcSliceHeaderParser.SliceHeader? = null,
+        /** Preserve opaque CBCS CABAC bytes when only the byte-aligned slice header is clear. */
+        preserveOpaqueCabacTail: Boolean = false
     ): Result {
         val nalHeader = HevcBitstream.readNalHeader(nal)
         require(nalHeader.type in 0..21) { "Unsupported VCL NAL type" }
@@ -87,7 +89,12 @@ internal object HevcSliceHeaderRewriter {
         // Only the slice header and three CABAC bytes are needed here. An all-clear
         // video NAL may be hundreds of kilobytes, so never allocate or box an RBSP
         // byte and source-offset entry for the entire compressed picture.
-        val clearRbsp = decodeClearPrefix(nal, clearNalBytes, sourceHeaderBytes + 3)
+        // A protected sample may expose exactly the slice header and no CABAC bytes.
+        // In that case only re-escape the verified clear header. Its byte_alignment()
+        // terminal byte is nonzero on both sides, so the opaque EBSP tail cannot have an
+        // emulation-prevention sequence straddling the splice boundary.
+        val requiredClearRbspBytes = sourceHeaderBytes + if (preserveOpaqueCabacTail) 0 else 3
+        val clearRbsp = decodeClearPrefix(nal, clearNalBytes, requiredClearRbspBytes)
         val rbsp = clearRbsp.bytes
         require(parsed.sourceAddressEndBit <= parsed.entryPointFieldStartBit &&
             parsed.entryPointFieldStartBit <= parsed.entryPointFieldEndBit &&
@@ -148,12 +155,36 @@ internal object HevcSliceHeaderRewriter {
         while (writer.bitCount % 8 != 0) writer.writeBit(0)
         val outputHeaderRbsp = writer.toByteArray()
 
-        val thirdCabacByte = rbsp[sourceHeaderBytes + 2].toInt() and 0xff
-        val headerAndCabac = ByteArray(outputHeaderRbsp.size + 2)
-        outputHeaderRbsp.copyInto(headerAndCabac)
-        rbsp.copyInto(headerAndCabac, outputHeaderRbsp.size, sourceHeaderBytes, sourceHeaderBytes + 2)
-        val escapedHeaderAndPayloadPrefix = escapeRbsp(headerAndCabac, thirdCabacByte)
-        val sourceTailOffset = clearRbsp.sourceTailOffset
+        val sourceTailOffset: Int
+        val escapedHeaderAndPayloadPrefix: ByteArray
+        val reencodedCabacBytes: Int
+        if (preserveOpaqueCabacTail) {
+            // Do not inspect or re-escape any byte of the protected CABAC data. The final
+            // byte of an aligned HEVC slice header contains alignment_bit_equal_to_one.
+            // Consequently it cannot be 0x00, before or after the header rewrite.
+            sourceTailOffset = Math.addExact(clearRbsp.sourceTailOffset, 1)
+            require(sourceTailOffset in 3 until nal.size &&
+                sourceTailOffset <= clearNalBytes &&
+                nal[sourceTailOffset - 1] != 0.toByte() &&
+                outputHeaderRbsp.isNotEmpty() && outputHeaderRbsp.last() != 0.toByte()) {
+                "Opaque CABAC splice requires complete clear byte-aligned slice headers"
+            }
+            escapedHeaderAndPayloadPrefix = escapeRbsp(outputHeaderRbsp, -1)
+            require(escapedHeaderAndPayloadPrefix.isNotEmpty() &&
+                escapedHeaderAndPayloadPrefix.last() != 0.toByte()) {
+                "Re-escaped slice header is not safe for an opaque CABAC splice"
+            }
+            reencodedCabacBytes = 0
+        } else {
+            val thirdCabacByte = rbsp[sourceHeaderBytes + 2].toInt() and 0xff
+            val headerAndCabac = ByteArray(outputHeaderRbsp.size + 2)
+            outputHeaderRbsp.copyInto(headerAndCabac)
+            rbsp.copyInto(headerAndCabac, outputHeaderRbsp.size,
+                sourceHeaderBytes, sourceHeaderBytes + 2)
+            escapedHeaderAndPayloadPrefix = escapeRbsp(headerAndCabac, thirdCabacByte)
+            sourceTailOffset = clearRbsp.sourceTailOffset
+            reencodedCabacBytes = 2
+        }
         require(sourceTailOffset in 2 until nal.size) { "CABAC tail is outside the source NAL" }
         val outputNal = ByteArray(2 + escapedHeaderAndPayloadPrefix.size + nal.size - sourceTailOffset)
         nal.copyInto(outputNal, 0, 0, 2)
@@ -167,7 +198,7 @@ internal object HevcSliceHeaderRewriter {
             outputHeaderBytes = outputHeaderRbsp.size,
             sourceTailOffset = sourceTailOffset,
             copiedTailBytes = nal.size - sourceTailOffset,
-            reencodedClearPayloadBytes = 2
+            reencodedClearPayloadBytes = reencodedCabacBytes
         )
     }
 
@@ -241,7 +272,7 @@ internal object HevcSliceHeaderRewriter {
     }
 
     private fun decodeClearPrefix(nal: ByteArray, clearNalBytes: Int, requiredBytes: Int): ClearRbsp {
-        require(requiredBytes in 3..clearNalBytes - 2) {
+        require(requiredBytes in 1..clearNalBytes - 2) {
             "At least three clear CABAC bytes are required after the slice header"
         }
         val decoded = ByteArray(requiredBytes)
