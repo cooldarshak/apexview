@@ -211,12 +211,30 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
 
     suspend fun captureAtPosition(group: String, feeds: List<F1DashFeedCapture.Feed>, positionMs: Long, live: Boolean = false, followLiveEdge: Boolean = true): F1DashFeedCapture.Snapshot = withContext(Dispatchers.IO) {
         var format: Format? = null
+        var stage = "source-manifests"
         val startedMs = android.os.SystemClock.elapsedRealtime()
         try {
             require(feeds.size in 2..6 && feeds.map { it.label }.distinct().size == feeds.size)
             val perFeed = feeds.map { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }
-            val selected = chooseCommon(perFeed, preferredHeight = maximumHeight.takeIf { it <= 1080 }, minimumHeight = minimumCaptureHeight)
+            stage = "per-feed-hevc-rendition"
+            // Protected HLS is not DASH. Its old chooseCommon() discarded the user's
+            // independent quality choices before the mixed HEVC composer ever ran.
+            // Read real preferences from the F1ArchiveFeedCapture.Feed objects, with
+            // AUTO capped by the authorized maximum. Keep the original common route
+            // intact when all feeds request the same source quality.
+            val heights = feeds.associate { feed ->
+                feed.label to (feed.preferredHeight?.takeIf { it > 0 } ?: maximumHeight)
+            }
+            val individual = heights.values.distinct().size > 1
+            val selected = if (individual) chooseIndividual(perFeed, heights, maximumHeight, minimumCaptureHeight)
+                else chooseCommon(perFeed, preferredHeight = maximumHeight.takeIf { it <= 1080 },
+                    minimumHeight = minimumCaptureHeight)
             format = selected.first().format
+            android.util.Log.i("ApexviewSingleDecoder", "REAL_HLS_RENDITIONS policy=${if (individual) "PER_FEED" else "COMMON"} " +
+                selected.joinToString(", ") { offer ->
+                    "${offer.feed.label}=${offer.format?.width ?: 0}x${offer.format?.height ?: 0}"
+                } + " protectedValidation=MANDATORY decoderCount=ONE")
+            stage = "video-playlists"
             val playlists = coroutineScope { selected.map { offer -> async { loadMedia(offer) } }.awaitAll() }
             if (!live && playlists.any { !it.hasEndTag }) throw PermanentCaptureException("HLS single-decoder archive capture requires complete replay playlists")
             val useProgramTime = playlists.all { it.hasProgramDateTime }
@@ -249,11 +267,19 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             if (segments.any { it.fullSegmentEncryptionKeyUri != null || it.initializationSegment?.fullSegmentEncryptionKeyUri != null }) {
                 throw PermanentCaptureException("HLS AES-128 full-segment encryption is unsupported; no key is requested")
             }
+            stage = "cmaf-init"
             val inits = selected.indices.map { i -> loadInit(selected[i], playlists[i], segments[i]) }
-            val tracks = inits.map { it.report.tracks.singleOrNull { track -> track.handler == "vide" }
-                ?: throw PermanentCaptureException("HLS CMAF initialization must contain exactly one video track") }
-            if (tracks.any { it.hevcConfiguration == null }) throw PermanentCaptureException("HLS CMAF has no supported HEVC video configuration")
-            require(tracks.all { it.hevcConfiguration!!.sps.single().displayHeight >= minimumCaptureHeight }) { "Actual source feed is below the required HD resolution" }
+            val tracks = inits.mapIndexed { index, init ->
+                init.report.tracks.singleOrNull { track -> track.handler == "vide" }
+                    ?: throw PermanentCaptureException("${selected[index].feed.label}: HLS initialization needs exactly one video track")
+            }
+            tracks.forEachIndexed { index, track ->
+                val sps = track.hevcConfiguration?.sps?.singleOrNull()
+                    ?: throw PermanentCaptureException("${selected[index].feed.label}: HLS video initialization lacks one valid HEVC SPS")
+                if (sps.displayHeight < minimumCaptureHeight) {
+                    throw PermanentCaptureException("${selected[index].feed.label}: actual HEVC source is below ${minimumCaptureHeight}p")
+                }
+            }
             val clear = tracks.all { !it.encrypted }
             if (!clear && tracks.any { !it.encrypted || it.protectionScheme != "cbcs" }) {
                 throw PermanentCaptureException("HLS composition needs all-clear HEVC or compatible CBCS HEVC; mixed protection is unsupported")
@@ -268,6 +294,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             if (!clear) selected.zip(inits).forEach { (offer, init) ->
                 ProtectedHevcLiveComposition.recordCmafResponse(group, offer.feed.label, init.bytes, init.report)
             }
+            stage = "cmaf-fragment-download"
             val media = mutableListOf<ByteArray>()
             val fetchStartedMs = android.os.SystemClock.elapsedRealtime()
             var fetchMs = 0L
@@ -281,12 +308,29 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 }
                 fetchMs = android.os.SystemClock.elapsedRealtime() - fetchStartedMs
                 val composeStartedMs = android.os.SystemClock.elapsedRealtime()
+                stage = "video-fragment-clock"
                 if (mediaToArchiveOffsetUs == null) {
-                    val firstFragment = CmafBoxInspector.inspect(media.first(), inits.first().report).fragments
-                        .first { it.trackId == tracks.first().trackId }
-                    mediaToArchiveOffsetUs = aligned.first().absoluteStartUs - CmafWindowTiming.ticksToUs(
-                        requireNotNull(firstFragment.baseDecodeTimeTicks), requireNotNull(tracks.first().timescale))
+                    val inspected = CmafBoxInspector.inspect(media.first(), inits.first().report)
+                    if (inspected.errors.isNotEmpty()) {
+                        throw PermanentCaptureException("${selected.first().feed.label}: initial CMAF media fragment failed structural inspection")
+                    }
+                    // Do not let .first(predicate) silently throw NoSuchElementException
+                    // when the genuine media segment does not refer to the video's init
+                    // track. Report the actual fragment IDs rather than guessing.
+                    val firstFragment = inspected.fragments.firstOrNull { it.trackId == tracks.first().trackId }
+                        ?: throw PermanentCaptureException(
+                            "${selected.first().feed.label}: video fragment track mismatch " +
+                                "initTrack=${tracks.first().trackId} mediaTracks=${inspected.fragments.map { it.trackId }.distinct()} " +
+                                "fragments=${inspected.fragments.size}"
+                        )
+                    val decodeTicks = firstFragment.baseDecodeTimeTicks
+                        ?: throw PermanentCaptureException("${selected.first().feed.label}: video fragment has no base decode time")
+                    val timescale = tracks.first().timescale
+                        ?: throw PermanentCaptureException("${selected.first().feed.label}: video track timescale is missing")
+                    mediaToArchiveOffsetUs = aligned.first().absoluteStartUs -
+                        CmafWindowTiming.ticksToUs(decodeTicks, timescale)
                 }
+                stage = if (clear) "clear-hevc-tile-composition" else "cbcs-hevc-tile-composition"
                 if (clear) {
                     clearComposition.compose(selected.mapIndexed { index, offer ->
                         HevcClearCmafGridComposer.Feed(inits[index].bytes, listOf(media[index]), offer.feed.label)
@@ -307,9 +351,22 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             snapshot(group, format, aligned.first().absoluteStartUs, feeds.size)
         } catch (cancelled: CancellationException) { throw cancelled
         } catch (error: Exception) {
-            val failure = CaptureFailure.from(if (error is IllegalArgumentException || error is IllegalStateException)
-                PermanentCaptureException("HLS CMAF validation failed: ${error.message?.replace(Regex("https?://\\S+"), "[URL]")?.take(240)}") else error)
-            snapshot(group, format, null, 0, failure)
+            // Real F1 troubleshooting needs the failing production location, not
+            // "Capture validation failed (NoSuchElementException)". Log only an
+            // application stack frame and bounded safe metadata: no URLs, keys,
+            // PSSH, cookies, or encrypted bytes are ever written to the log.
+            val origin = error.stackTrace.firstOrNull { it.className.startsWith("app.apexview.") }
+            val at = origin?.let { "${it.className.substringAfterLast('.')}/${it.methodName}:${it.lineNumber}" } ?: "unknown"
+            android.util.Log.e("ApexviewSingleDecoder",
+                "REAL_HLS_CAPTURE_FAILURE stage=$stage origin=$at type=${error.javaClass.simpleName} " +
+                    "feeds=${feeds.size} outputProtection=${if (clearOutput == true) "CLEAR" else if (clearOutput == false) "CBCS" else "UNVERIFIED"}")
+            val normalized = if (error is IllegalArgumentException || error is IllegalStateException ||
+                error is NoSuchElementException) {
+                PermanentCaptureException("HLS CMAF stage=$stage origin=$at: " +
+                    (error.message?.replace(Regex("https?://\\S+"), "[URL]")?.take(130)
+                        ?: error.javaClass.simpleName))
+            } else error
+            snapshot(group, format, null, 0, CaptureFailure.from(normalized))
         }
     }
 
