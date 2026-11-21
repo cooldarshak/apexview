@@ -2978,14 +2978,14 @@ class AppState(
                 if (selectedTiles.size > 4) 540 else 720)
         } else composedQuality.targetHeight.takeIf { it > 0 } ?: 2160
         val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty(),
-            maximumHeight = maxHeight, fullPictures = true)
+            maximumHeight = maxHeight, fullPictures = mixedRequested)
         android.util.Log.i("ApexviewSingleDecoder", "F1_PROTECTED_MIXED_PREFLIGHT requested=" +
             PerFeedQualityPolicy.description(labels, selectedQualities) +
             " maxSourceHeight=$maxHeight fullPictures=true cbcsGate=REQUIRED")
         val evidence = "content=$contentId attempt=${attempt + 1} feeds=${feeds.size}"
         android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_START $evidence path=rolling maxSourceHeight=$maxHeight tclG09=${isTclG09()}")
         f1DashCapture = capture
-        ProtectedHevcLiveComposition.selectFeeds(group, labels, fullPictures = true)
+        ProtectedHevcLiveComposition.selectFeeds(group, labels, fullPictures = mixedRequested)
         val startup = ArchiveCompositionStartup()
         var lastSnapshot: F1DashFeedCapture.Snapshot? = null
         var releasedCount = 0
