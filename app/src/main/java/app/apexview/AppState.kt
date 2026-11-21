@@ -4577,6 +4577,11 @@ class AppState(
     }
 
     /** Portable, credential-free JSON copy for anyone whose Android backup is off. */
+    internal fun reportLayoutMessage(text: String) {
+        message = text
+        showChrome()
+    }
+
     fun exportNamedLayouts(): String = NamedLayoutPresets.encode(namedLayouts)
 
     /** Merge presets from a prior installation without changing today's playback.

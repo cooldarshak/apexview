@@ -1695,8 +1695,8 @@ private fun LayoutSheet(app: AppState) {
                 requireNotNull(backupContext.contentResolver.openOutputStream(uri)).use { stream ->
                     stream.write(app.exportNamedLayouts().toByteArray(Charsets.UTF_8))
                 }
-            }.onSuccess { app.message = "Saved layout backup" }
-                .onFailure { app.message = "Could not export layouts: ${it.javaClass.simpleName}" }
+            }.onSuccess { app.reportLayoutMessage("Saved layout backup") }
+                .onFailure { app.reportLayoutMessage("Could not export layouts: ${it.javaClass.simpleName}") }
         }
     }
     val importLayouts = rememberLauncherForActivityResult(
@@ -1708,7 +1708,7 @@ private fun LayoutSheet(app: AppState) {
                     stream.bufferedReader().use { it.readText() }
                 }
             }.onSuccess { app.importNamedLayouts(it) }
-                .onFailure { app.message = "Could not open layout backup: ${it.javaClass.simpleName}" }
+                .onFailure { app.reportLayoutMessage("Could not open layout backup: ${it.javaClass.simpleName}") }
         }
     }
     var nameDialog by remember { mutableStateOf(false) }
@@ -1857,11 +1857,11 @@ private fun LayoutSheet(app: AppState) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SecondaryButton("Export layouts") {
                     runCatching { exportLayouts.launch("pitwall-layouts.json") }
-                        .onFailure { app.message = "File export is unavailable on this device" }
+                        .onFailure { app.reportLayoutMessage("File export is unavailable on this device") }
                 }
                 SecondaryButton("Import layouts") {
                     runCatching { importLayouts.launch(arrayOf("application/json", "text/*")) }
-                        .onFailure { app.message = "File import is unavailable on this device" }
+                        .onFailure { app.reportLayoutMessage("File import is unavailable on this device") }
                 }
             }
             Text("Android Auto Backup restores named layouts when the device's backup and restore service is enabled. Exporting a copy is additional protection if cloud backup is disabled. No F1 credentials or Widevine keys are included.",
