@@ -3,7 +3,7 @@
 ## Build 627 protected-init correction and graphics acceptance
 
 See [Build 627 engineering diagnosis](BUILD_627_VEGAS_AND_OVERLAY_DIAGNOSIS.md).
-The Vegas protected composition refusal was traced to invalid `List<ByteArray> == List<ByteArray>` identity comparison of unchanged CBCS protection boxes. Preserve bytewise protection checks and add real writer regression coverage. Hardware acceptance remains **PENDING**, independently of CI.
+The Vegas protected composition refusal was traced to invalid `List<ByteArray> == List<ByteArray>` identity comparison of unchanged CBCS protection boxes. Preserve bytewise protection checks and add real writer regression coverage. Hardware acceptance remains **PENDING**, independently of CI. Raw Build 627 Perfetto protobuf evidence indicates widespread app-surface late-presentation and BufferQueue stuffing flags; see the linked analysis for exact trace windows and counts.
 
 ---
 

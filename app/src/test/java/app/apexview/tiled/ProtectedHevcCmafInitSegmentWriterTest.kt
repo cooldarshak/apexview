@@ -25,7 +25,7 @@ class ProtectedHevcCmafInitSegmentWriterTest {
         assertTrue(assertThrows(IllegalArgumentException::class.java) {
             ProtectedHevcCmafInitSegmentWriter.requireProtectedSignallingPreserved(
                 original, modified, "mutated CBCS defaults")
-        }.message!!.contains("tenc box 0 contents changed"))
+        }.message!!.contains("sinf box 0 contents changed"))
         val modifiedPssh = original.copyOf()
         modifiedPssh[modifiedPssh.lastIndex] = 1
         assertTrue(assertThrows(IllegalArgumentException::class.java) {

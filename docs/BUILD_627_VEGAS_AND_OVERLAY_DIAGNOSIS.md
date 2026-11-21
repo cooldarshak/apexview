@@ -29,3 +29,40 @@ Sampled VOD segments allocated about 49-184 MiB each, and SurfaceTexture timeout
 ## Sign-off
 
 Map/tower: NOT SIGNED OFF. Protected one-decoder: NOT SIGNED OFF. Source-level first-failure gate corrected, but real secure decode, key provisioning, receiver Cast, GPU/FrameTimeline, device UI and physically presented 50fps remain to be verified separately. Do not weaken tests or tell user to test an intermediate build.
+
+## Three Perfetto FrameTimeline traces, correlated to app uptime
+
+The three raw files were decoded from their Perfetto protobuf FrameTimelineEvent
+packets. Start/end are computed from the actual packet timestamps, converted
+using the application's monotonic uptime mapping, not just upload filenames.
+
+| Trace filename suffix | Local time IST | What is captured |
+|---|---|---|
+| 21-09-51 | 21:09:18.3–21:09:56.4 | Four-feed clear archive video, map and tower |
+| 21-11-06 | 21:10:09.3–21:11:11.6 | Pause/resume and archive playback |
+| 21-11-51 | 21:11:26.2–21:11:56.9 | Protected Vegas initialization and refusal |
+
+For the Pitwall application's \`ActualSurfaceFrameStart\` FrameTimeline records:
+
+| Trace | Pitwall app frames | PRESENT_LATE | App deadline missed bit | Buffer stuffing bit |
+|---|---:|---:|---:|---:|
+| 21-09-51 | 2,283 | 2,261 (99.0%) | 892 | 1,802 |
+| 21-11-06 | 3,537 | 3,297 (93.2%) | 1,433 | 1,974 |
+| 21-11-51 | 483 | 480 (99.4%) | 206 | 398 |
+
+The two jank-bit columns overlap; they are not mutually exclusive.
+These are **application surface** timing records, not independently measured
+video-decoder physical presents. Do not report them as 50fps dropped-video
+percentages. The 120Hz display, pause, transitions and preflight are
+confounders; a controlled steady-playback surface-present analysis is still
+needed for acceptance. The high BufferQueue stuffing flag rate is real
+independent evidence of presentation pressure and is not an overlay-specific
+causal attribution. Native Overlay RenderNode tests and low average CPU
+work do not overturn this failing/uncertain physical presentation evidence.
+
+### CI test expectation correction
+
+An intentional mutation to a \`tenc\` box also changes its parent \`sinf\`
+byte sequence, which is inspected earlier. Assert that the enclosing \`sinf\`
+comparison catches it. Preserve the independent source parsing and CBCS
+defaults consistency verification. Do not weaken either gate.
