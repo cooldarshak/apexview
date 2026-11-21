@@ -49,6 +49,8 @@ internal object ProtectedHevcComposedDashPackageBuilder {
         presentationTimeOffsetTicks: Long,
         availabilityStartTimeMs: Long,
         clearOutput: Boolean = false,
+        /** Transfer ONLY an independently detached OutputWindow into the live publisher. */
+        takeOwnership: Boolean = false,
     ): Package {
         val init = window.initializationSegment
         require(init.isNotEmpty()) { "Protected composed init segment is empty" }
@@ -102,7 +104,7 @@ internal object ProtectedHevcComposedDashPackageBuilder {
         val timeline = StringBuilder()
         val urls = StringBuilder()
         val resources = linkedMapOf<String, ByteArray>()
-        resources["init.mp4"] = init.copyOf()
+        resources["init.mp4"] = if (takeOwnership) init else init.copyOf()
 
         window.fragments.forEachIndexed { index, fragment ->
             require(fragment.sequenceNumber in 1..UINT32_MAX &&
@@ -160,7 +162,7 @@ internal object ProtectedHevcComposedDashPackageBuilder {
             )
             val name = "segment-${fragment.sequenceNumber}.m4s"
             urls.append("""<SegmentURL media="$name"/>""")
-            resources[name] = fragment.mediaFragment.copyOf()
+            resources[name] = if (takeOwnership) fragment.mediaFragment else fragment.mediaFragment.copyOf()
         }
 
         val first = window.fragments.first()
@@ -488,6 +490,7 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
         widevinePssh: ByteArray?
     ) {
         check(!released) { "Protected live DASH source is released" }
+        var transferred = false
         try {
             val first = window.fragments.firstOrNull()
                 ?: throw IllegalArgumentException("No protected output fragments are available")
@@ -517,10 +520,15 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
                 presentationTimeOffsetTicks = requireNotNull(presentationTimeOffsetTicks),
                 availabilityStartTimeMs = requireNotNull(availabilityStartTimeMs),
                 clearOutput = clearOutput,
+                takeOwnership = true,
             )
+            // No multi-MB copies between validated window and Media3 package.
+            // Once published, the resource store is its sole owner and securely
+            // zeroes the buffers only when the last reader releases a lease.
             resources.replace(next)
+            transferred = true
         } finally {
-            window.zero()
+            if (!transferred) window.zero()
         }
     }
 
