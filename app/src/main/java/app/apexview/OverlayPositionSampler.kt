@@ -78,7 +78,9 @@ internal class OverlayPositionSampler(
     private val timing: SessionTiming,
     private val probe: OverlayPerformanceProbe? = null,
 ) {
-    private data class Entry(val id: String, val cursor: OverlayPositionCursor)
+    private class Entry(val id: String, val cursor: OverlayPositionCursor) {
+        var previousCar: Car? = null
+    }
     private val entries = timing.tracks.map { (id, track) ->
         Entry(id, OverlayPositionCursor(track))
     }
@@ -103,16 +105,19 @@ internal class OverlayPositionSampler(
         // Channel order remains identical to SessionTiming.tracks iteration order.
         // Reuse unchanged Car objects so a stationary dot is not invalidated.
         var changed = 0
-        for ((index, entry) in entries.withIndex()) {
+        for (entry in entries) {
             if (timing.laps[entry.id]?.retiredAt(atMs) == true) continue
             if (!entry.cursor.sample(atMs)) continue
             val state = timing.states[entry.id]?.at(atMs) ?: LapState.UNKNOWN
-            val old = previous.getOrNull(index)?.takeIf { it.number == entry.id }
+            // The published list is compacted when earlier drivers retire or
+            // leave position history, so its indices cannot key source drivers.
+            val old = entry.previousCar
             val car = if (old != null && old.x == entry.cursor.x && old.y == entry.cursor.y && old.state == state)
                 old else {
                     changed++
                     Car(entry.id, entry.cursor.x, entry.cursor.y, state)
                 }
+            entry.previousCar = car
             next.add(car)
         }
         val currentSeeks = entries.sumOf { it.cursor.seekCount }
