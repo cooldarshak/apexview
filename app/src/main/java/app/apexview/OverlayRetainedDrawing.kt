@@ -42,18 +42,43 @@ internal class OverlayRecordingValidity {
  * style, timing fields or pixel dimensions change. The drawing fallback uses
  * the exact same Android Canvas commands when hardware acceleration is off.
  */
+/**
+ * The base region includes the full-width highlight; sectors and tyres never
+ * draw beyond their narrow column bounds. Physical pixel bounds intentionally
+ * overlap by ~1dp at edges so antialiasing and font scaling cannot clip labels.
+ */
+internal data class TowerRegionBounds(val left: Int, val right: Int) {
+    val width: Int get() = right - left
+}
+internal fun towerRegionBounds(region: Int, rowWidthPx: Int, unit: Float): TowerRegionBounds {
+    require(region in 0..2 && rowWidthPx > 0 && unit > 0f)
+    if (region == 0) return TowerRegionBounds(0, rowWidthPx)
+    val from = if (region == 1) 199f else 329f
+    val to = if (region == 1) 333f else 363f
+    val left = kotlin.math.floor(from * unit).toInt().coerceIn(0, rowWidthPx - 1)
+    val right = kotlin.math.ceil(to * unit).toInt().coerceIn(left + 1, rowWidthPx)
+    return TowerRegionBounds(left, right)
+}
+
 internal class RetainedTowerRenderNode {
     val node = RenderNode("PitwallTowerRow")
     val validity = OverlayRecordingValidity()
-    fun beginIfChanged(key: Any, width: Int, height: Int): AndroidCanvas? {
+    fun beginIfChanged(key: Any, width: Int, height: Int,
+        left: Int = 0, right: Int = width
+    ): AndroidCanvas? {
+        require(left >= 0 && right > left && right <= width && height > 0)
         // Android can evict a RenderNode's display list while the row is offscreen.
         // Never replay a vanished list: refresh it even when the visual key is stable.
         if (!validity.needsRecord(key, width, height) && node.hasDisplayList()) {
             validity.markReplayed()
             return null
         }
-        node.setPosition(0, 0, width, height)
-        return node.beginRecording(width, height)
+        node.setPosition(left, 0, right, height)
+        return node.beginRecording(right - left, height).also {
+            // Keep existing drawing coordinates in full-row physical pixels,
+            // while retaining only the dirty region's actual native bounds.
+            it.translate(-left.toFloat(), 0f)
+        }
     }
     fun finish(key: Any, width: Int, height: Int) {
         node.endRecording()
