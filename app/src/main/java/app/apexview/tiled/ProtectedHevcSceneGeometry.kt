@@ -13,7 +13,8 @@ internal object ProtectedHevcSceneGeometry {
         val frameRate: Double
     )
 
-    fun fromWindow(window: ProtectedHevcLiveComposition.OutputWindow, feeds: Int): Layout {
+    fun fromWindow(window: ProtectedHevcLiveComposition.OutputWindow, feeds: Int,
+                   clearOutput: Boolean = false): Layout {
         require(feeds in 2..6) { "Protected scene requires two to six feeds" }
         val report = CmafBoxInspector.inspect(window.initializationSegment)
         require(report.errors.isEmpty() && report.initializationSegmentPresent &&
@@ -21,9 +22,12 @@ internal object ProtectedHevcSceneGeometry {
             "Protected scene initialization must be independently validated CMAF"
         }
         val track = report.tracks.single()
-        require(track.handler == "vide" && track.encrypted &&
-            track.protectionScheme == "cbcs") {
-            "Protected scene requires authorized CBCS video"
+        require(track.handler == "vide" && (if (clearOutput) {
+            !track.encrypted && track.protectionScheme == null
+        } else {
+            track.encrypted && track.protectionScheme == "cbcs"
+        })) {
+            "Composed scene protection mode does not match the initialized HEVC track"
         }
         val width = requireNotNull(track.width)
         val height = requireNotNull(track.height)

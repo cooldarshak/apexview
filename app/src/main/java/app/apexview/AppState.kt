@@ -3197,7 +3197,7 @@ class AppState(
                         // actual queued media fills the initial buffer, then resume both together.
                         selectedTiles.forEach { it.feed.player.playWhenReady = false }
                         val scene = app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
-                            window, labels.size)
+                            window, labels.size, clearOutput = capture.clearOutput)
                         protectedRollingScene = ProtectedRollingScene(labels.toList(), scene)
                         android.util.Log.i("ApexviewSingleDecoder",
                             "F1_PROTECTED_SCENE_PREPARED atlas=" + scene.atlasWidth + "x" +
@@ -3254,7 +3254,7 @@ class AppState(
                         // Capture source rectangles before publishing zeroes the window;
                         // refresh only scene metadata, never add another decoder.
                         val nextLayout = app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
-                            updated, labels.size)
+                            updated, labels.size, clearOutput = capture.clearOutput)
                         host.feed.publishProtectedComposedOutput(updated, capture.widevinePssh())
                         if (protectedRollingScene?.layout != nextLayout) {
                             protectedRollingScene = ProtectedRollingScene(labels.toList(), nextLayout)
