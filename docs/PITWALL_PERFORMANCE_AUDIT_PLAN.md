@@ -3,6 +3,96 @@
 Status: active implementation and hardware validation; progress audited through Build 598 (21 November 2026). Original requirements below remain open until their stated exit criteria pass.
 
 
+## P0.4 integrated overlay-engine redesign — 21 November 2026
+
+**Implementation branch:** feature/pitwall-performance-audit-plan. This is a
+single, coordinated source commit and a single CI gate, not sequential small
+APKs. **Status before device test:** implementation and regression suite
+prepared; **physical smoothness and Cast parity are not yet accepted**.
+
+### Architectural goal and compatibility contract
+
+Retain the existing Compose layouts/controls, Canvas drawing vocabulary,
+Media3/GLES video ownership and Pitwall Cast protocol. Separate relatively
+slow timing-source changes from high-frequency car animation and avoid
+rebuilding identical timing snapshots. All values remain driven by the
+authorized F1 timing clock. Do not introduce another Surface, decoder,
+PixelCopy operation, proprietary SDK or a second F1 timing provider.
+
+- New **OverlayPositionSampler** owns one independent cursor per driver and
+  advances through genuine F1 position arrays in source chronological order.
+  Continuous video frames use a bounded forward cursor; large seeks and
+  backward seeks use binary search. The contract exactly preserves
+  DriverTrack.atOrFirst's leading position, end-of-data disappearance, >5 s
+  gap handling and interpolation. Each publication is immutable and owned
+  by its display or Cast sender, never shared across threads. Existing
+  driver selection, PIT long-press, TV D-pad hit targets, dot sizes and lap
+  colour state continue using the original Car/drawing interfaces.
+- New **OverlayVertexIndex** builds a balanced, immutable nearest-circuit-
+  vertex index once per session outline. TrackGeometry.nearestIndex no
+  longer linearly scans every circuit vertex for each moving car. Distance
+  and equal-distance tie behavior match the original exhaustive search.
+  TrackGeometry.pointAt uses bounded distance binary search while
+  preserving exact corner/direction semantics. Both track and edge map
+  still render via the same static/dynamic Canvas layers, preserving
+  marshal sectors, flags, start/finish and driver abbreviations.
+- New **OverlayTowerSampler** reuses the previous immutable CardState
+  when the lap snapshot index has not changed, without freezing fresh
+  speed, gear, tyre, position, sector, lap, flag, countdown or weather
+  data. It publishes the SAME TowerSample instance if pixels/fields
+  are unchanged. Existing single-Canvas TvTowerRow, Offscreen hardware
+  layers, talkback summary, focus, scrolling, text-size/opacity/resize
+  controls and complete three-sector mini-sector strips remain unchanged.
+- **Pitwall Cast compatibility:** CastTimingPublisher owns its own
+  OverlayPositionSampler following the receiver's video clock. It keeps
+  CastTimingProtocol v1 frames, 200ms position future endpoints, table
+  wire format and CastTimingReceiver decoding/TrackDrawingContent/
+  TimingTowerContents completely unchanged. Live geometry, maps and
+  towers still draw from the same visual functions as phone. No
+  downgrade to 1-feed or separate per-camera decoder fallback.
+- **No per-frame logging:** OverlayPerformanceProbe reports aggregate
+  fixed-bin latency histograms every five seconds. Probe owners distinguish
+  phone track/edge position sampling; track/edge static and dynamic draws;
+  phone/TV tower snapshots and visible tower-row draw; and the Cast
+  sender's position sampler. Each OVERLAY_5S line includes sample count,
+  mean entities, changed objects/rows, seek resets, mean microseconds,
+  p95 bucket bound and max microseconds. No camera positions, driver IDs,
+  F1 account information, URLs, encryption metadata or raw packets are
+  logged. Existing Perfetto trace markers remain.
+
+### Integration and regression checklist
+
+| Category | Tests / evidence | Must remain true |
+| --- | --- | --- |
+| Position model | OverlayPositionSamplerTest | Same positions/states/order vs carsAt and DriverTrack.atOrFirst over dense 50fps samples, forward/backward seek, gaps, start/end boundary and stationary dot identity |
+| Circuit geometry | OverlayGeometryParityTest | Indexed nearest vertex exactly matches exhaustive search over thousands of random locations and equal-distance ties; pointAt coordinates/directions remain equivalent |
+| Tower model | OverlayTowerSamplerTest and TowerSampleVisualTest | Identical timing rows share state; speed/gear, pit status, tyre age, S1/S2/S3 mini-sector sequence and backward seek invalidate as appropriate |
+| Diagnostics | OverlayPerformanceProbeTest | Bounded memory, low-rate 5-second reports, no per-frame log storm or sensitive positional values |
+| Pitwall Cast | CastTimingProtocolTest with sender/receiver timeline parity, existing Cast tests | No protocol version, geometry, wire fields, source interpolation, focus, audio/clock or receiver API regression |
+| Android CI | Kotlin/JVM/HEVC independent decoder and signed APK workflows | Tests pass, no hidden multi-decoder fallback, persistent signing preserved |
+| Real S22 Ultra | 10 min with four actual F1 feeds; OVERLAY_5S, Perfetto FrameTimeline, GC, BufferQueue, codec/GL cadence | Each overlay incurs clearly measured incremental CPU/frame cost, correct timing/video sync, no loss of controls |
+| Real TCL 55C655 | single feed + map+tower, then two/four feeds, ten-minute tests with D-pad, seek, lock/resize and Cast receiver | No laggy/frozen marker or tower updates, focus/selection intact, one video decoder |
+| Cast receiver | Real Pitwall Cast from S22 to TCL with tower/map, selected commentary and seek/pause | Receiver positions, table rows and video clock agree; correct geometry and no additional receiver decoders |
+
+### Explicit scope and next hardware gate
+
+This initial retained-data and geometry batch is intentionally **not**
+labelled a completed RenderNode/GLES renderer replacement. The existing
+static-circuit Canvas layer and hardware-tower row layers are already
+retained, and this batch reduces CPU-side data rebuilds without altering
+their visuals. An alternate native RenderNode recording path may be
+benchmarked later against the current Canvas implementation; do not ship
+one based on unmeasured assumptions.
+
+**Acceptance remains unmet until real-device results:** compare the
+overlay OFF, map only, tower only, both ON states on the same feed quality,
+layout and device mode. Distinguish UI app-frame deadlines from actual
+video pictures presented. Keep the established Build 585 video-only miss
+rate as a separate baseline and do not claim that this overlay batch fixes
+video-only scheduling or physical 50fps output.
+
+---
+
 ## Current progress ledger: Build 598 (21 November 2026)
 
 **Baseline:** Build 562, commit 574ccb587a50f174748d1b08ed2283e4b8ed1ecc.

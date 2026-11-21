@@ -25,7 +25,8 @@ import kotlin.math.abs
 @Composable
 internal fun TvTowerRow(
     driver: DriverInfo?, number: String, state: CardState, tyre: Tyre?, kmh: Int?, gear: Int?,
-    speedUnit: String, highlight: Boolean, rowHeight: Dp, onClick: () -> Unit,
+    speedUnit: String, highlight: Boolean, rowHeight: Dp,
+    drawProbe: OverlayPerformanceProbe? = null, onClick: () -> Unit,
 ) {
     val paint = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
     val widthCache = remember { TowerTextWidthCache() }
@@ -52,6 +53,7 @@ internal fun TvTowerRow(
     Canvas(Modifier.fillMaxWidth().height(rowHeight).tvFocusRing().clickable(onClick = onClick)
         .semantics { contentDescription = accessibleSummary }.clipToBounds()
         .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)) {
+        val startedNs = System.nanoTime()
         val canvas = drawContext.canvas.nativeCanvas
         // Match the column widths used by TowerHeader. Drawing in dp keeps phone-supplied
         // panel scaling and the user's font-scale setting effective on the Cast receiver.
@@ -138,6 +140,7 @@ internal fun TvTowerRow(
         } finally {
             canvas.restoreToCount(save)
             if (tracing) Trace.endSection()
+            drawProbe?.record(System.nanoTime() - startedNs, 1, 1)
         }
     }
 }

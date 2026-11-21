@@ -249,6 +249,11 @@ internal fun TimingTowerContents(
             LocalDensity provides Density(baseDensity.density * contentScale, baseDensity.fontScale)
         ) {
             val listState = rememberLazyListState()
+            // One bounded histogram for the entire visible tower, not one log per row.
+            // Same renderer and probe contract on phone and Pitwall Cast receiver.
+            val rowDrawProbe = remember(television) {
+                OverlayPerformanceProbe(if (television) "tv-tower-row-draw" else "phone-tower-row-draw")
+            }
             val scrollHint by remember(listState, rows.size) {
                 derivedStateOf {
                     val visible = listState.layoutInfo.visibleItemsInfo
@@ -283,7 +288,7 @@ internal fun TimingTowerContents(
                         // timing sample. The native row preserves the broadcast columns,
                         // clickable driver, tyre and sectors, and one TalkBack semantics node.
                         TvTowerRow(timing.drivers[number], number, state, tyres[number], kmh, gear,
-                            speedUnit, number == onTop, rowHeight) { onDriver(number) }
+                            speedUnit, number == onTop, rowHeight, rowDrawProbe) { onDriver(number) }
                     }
                 }
                 if (rows.isNotEmpty()) {

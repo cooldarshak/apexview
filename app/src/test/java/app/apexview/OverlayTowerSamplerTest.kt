@@ -1,0 +1,94 @@
+package app.apexview
+
+import org.junit.Assert.*
+import org.junit.Test
+
+class OverlayTowerSamplerTest {
+    private val s1 = DriverLaps.Snapshot(
+        position = 2, sectors = listOf(
+            SectorCell("", Pace.NONE, listOf(2048, 2049, 0)),
+            null, null
+        ), lapSectors = emptyList(), lastLap = null, gap = "+1.000",
+        inPit = false, toLeader = "+1.000", ahead = "+0.500"
+    )
+    private val s2 = DriverLaps.Snapshot(
+        position = 1, sectors = listOf(
+            SectorCell("28.900", Pace.PURPLE, listOf(2049, 2049, 2048)),
+            SectorCell("", Pace.NONE, listOf(2048, 0, 0)), null
+        ), lapSectors = emptyList(), lastLap = SectorCell("1:30.000", Pace.GREEN),
+        gap = null, inPit = false, toLeader = null, ahead = null,
+        bestLap = SectorCell("1:29.500", Pace.PURPLE)
+    )
+
+    private fun timing() = SessionTiming(
+        type = "Race",
+        drivers = mapOf("44" to DriverInfo("44", "HAM", 0xFF22CCAA.toInt())),
+        tracks = emptyMap(),
+        states = emptyMap(),
+        outline = floatArrayOf(0f, 0f, 1f, 0f, 1f, 1f),
+        hasStartFinish = true, corners = emptyList(), startUtcMs = 1_000L,
+        laps = mapOf("44" to DriverLaps(
+            longArrayOf(1_000L, 2_000L), listOf(s1, s2), longArrayOf()
+        )),
+        tyres = mapOf("44" to TyreLog(
+            longArrayOf(1_000L, 3_000L), listOf(Tyre("SOFT", 5), Tyre("MEDIUM", 1))
+        ))
+    ).also {
+        it.speeds = mapOf("44" to SpeedLog(
+            longArrayOf(1_000L, 1_600L, 2_500L),
+            shortArrayOf(260, 270, 288), 3, shortArrayOf(6, 7, 8)
+        ))
+    }
+
+    @Test fun unchangedIntervalsShareSnapshotAndAllRowsByIdentity() {
+        val sampler = OverlayTowerSampler(timing())
+        val first = sampler.sample(1_100L)
+        val same = sampler.sample(1_200L)
+        assertSame("no new Compose snapshot for unchanged values", first, same)
+        assertSame(first.rows.single().second, same.rows.single().second)
+        assertSame(same, sampler.sample(1_200L))
+    }
+
+    @Test fun speedGearLapTyreAndSectorChangesNeverGetSuppressed() {
+        val sampler = OverlayTowerSampler(timing())
+        val initial = sampler.sample(1_100L)
+        val changedSpeed = sampler.sample(1_700L)
+        assertNotSame(initial, changedSpeed)
+        assertEquals(270, changedSpeed.speeds.getValue("44").first)
+        assertEquals(7, changedSpeed.speeds.getValue("44").second)
+        assertSame(initial.rows.single().second, changedSpeed.rows.single().second)
+        val changedLap = sampler.sample(2_100L)
+        assertEquals(1, changedLap.rows.single().second.position)
+        assertEquals("28.900", changedLap.rows.single().second.sectors[0]?.time)
+        assertEquals(listOf(2049, 2049, 2048),
+            changedLap.rows.single().second.towerSector(0)?.segments)
+        assertEquals(listOf(2048, 0, 0),
+            changedLap.rows.single().second.towerSector(1)?.segments)
+        assertEquals("1:29.500", changedLap.rows.single().second.bestLap?.time)
+        val changedTyre = sampler.sample(3_100L)
+        assertEquals("MEDIUM", changedTyre.tyres.getValue("44")?.compound)
+        assertEquals(1, changedTyre.tyres.getValue("44")?.laps)
+    }
+
+    @Test fun lateSpeedDataWhileVideoIsPausedStillUpdatesTheTower() {
+        val timing = timing()
+        val sampler = OverlayTowerSampler(timing)
+        val before = sampler.sample(1_100L)
+        timing.speeds = mapOf("44" to SpeedLog(
+            longArrayOf(1_000L), shortArrayOf(299), 1, shortArrayOf(8)
+        ))
+        val after = sampler.sample(1_100L)
+        assertNotSame("same clock must not hide an updated timing topic", before, after)
+        assertEquals(299, after.speeds.getValue("44").first)
+        assertEquals(8, after.speeds.getValue("44").second)
+    }
+
+    @Test fun backwardSeekRestoresOldLapAndOldTyres() {
+        val sampler = OverlayTowerSampler(timing())
+        sampler.sample(3_100L)
+        val earlier = sampler.sample(1_200L)
+        assertEquals(2, earlier.rows.single().second.position)
+        assertEquals("SOFT", earlier.tyres.getValue("44")?.compound)
+        assertEquals(260, earlier.speeds.getValue("44").first)
+    }
+}

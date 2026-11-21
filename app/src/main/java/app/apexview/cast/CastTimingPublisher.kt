@@ -24,6 +24,8 @@ internal class CastTimingPublisher(private val context: Context, private val app
     private var sourceTiming: SessionTiming? = null
     private var geometry: JSONObject? = null
     private var lastFrameAt = Long.MIN_VALUE
+    private var mapSamplerOwner: SessionTiming? = null
+    private var mapSampler: OverlayPositionSampler? = null
 
     fun messages(playbackId: String): List<JSONObject> {
         val elapsed = android.os.SystemClock.elapsedRealtime()
@@ -34,6 +36,8 @@ internal class CastTimingPublisher(private val context: Context, private val app
             lastPlaybackId = playbackId
             rowsText = ""
             lastTableUtc = Long.MIN_VALUE
+            mapSamplerOwner = null
+            mapSampler = null
         }
         if (resend) lastFullSnapshotAt = elapsed
         val timing = app.timing
@@ -77,7 +81,16 @@ internal class CastTimingPublisher(private val context: Context, private val app
                 .put("id", rowsId).put("rows", rows)
         }
         val basis = if (timing != null && (app.mapMode == MapMode.PIT || app.pitDriver != null)) pitBasis(timing, now) else null
-        val cars = if (app.mapMode != MapMode.OFF) timing?.let { carsAt(it, now) }.orEmpty() else emptyList()
+        // Exactly the same per-driver cursor and gap rules as the native track
+        // map. This is sender-owned; receiver never shares mutable cursor state.
+        if (timing !== mapSamplerOwner) {
+            mapSamplerOwner = timing
+            mapSampler = timing?.let {
+                OverlayPositionSampler(it, OverlayPerformanceProbe("pitwall-cast-sender-position"))
+            }
+        }
+        val cars = if (app.mapMode != MapMode.OFF && timing != null)
+            requireNotNull(mapSampler).sample(now) else emptyList()
         val stop = basis?.let { pitStopNow(it, app.pitDriver, cars.map { car -> car.number to timing!!.geometry.progress(car.x, car.y) }) }
         val circle = if (app.mapMode == MapMode.PIT && timing != null && basis != null) pitCircleData(app, timing, now, basis) else null
         if (resend) android.util.Log.i("PitwallCast", "TIMING_SAMPLE positionMs=$position utc=$now " +

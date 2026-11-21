@@ -64,6 +64,30 @@ class CastTimingProtocolTest {
         assertEquals(50f, state.carsAt(9000).single().x, 0f)
     }
 
+    @Test fun pitwallCastSenderUsesExactNativeOverlayPositionsAfterSeekAndAtLatePackets() {
+        val source = timing()
+        val sampler = OverlayPositionSampler(source)
+        val decoded = CastTimingProtocol.decodeFrame(frame(CastTimingProtocol.geometry(source).getString("id")))
+        val sourceClock = listOf(1_000L, 1_020L, 1_100L, 1_180L, 1_200L, 1_080L)
+        for (utc in sourceClock) {
+            val native = sampler.sample(utc).single()
+            val legacy = carsAt(source, utc).single()
+            val receiver = decoded.carsAt(5_000L + utc - 1_000L).single()
+            assertEquals(legacy.x, native.x, .00001f)
+            assertEquals(legacy.y, native.y, .00001f)
+            assertEquals(native.x, receiver.x, .00001f)
+            assertEquals(native.y, receiver.y, .00001f)
+            assertEquals(native.number, receiver.number)
+        }
+        // Real Cast packet structure is unchanged by the native sampler refactor.
+        val packet = frame(CastTimingProtocol.geometry(source).getString("id"))
+        assertTrue(packet.has("cars"))
+        assertTrue(packet.has("rows"))
+        assertTrue(packet.has("mapMode"))
+        assertTrue(packet.has("tower"))
+        assertTrue(packet.has("onTop"))
+    }
+
     @Test fun independentEmptyTopicsAndHideUpdatesDoNotEraseTheOtherPanel() {
         val geo = CastTimingProtocol.geometry(timing())
         val j = frame(geo.getString("id")).put("cars", JSONArray()).put("mapMode", "OFF").put("map", JSONObject.NULL)

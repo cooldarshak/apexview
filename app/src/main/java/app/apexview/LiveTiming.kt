@@ -173,6 +173,9 @@ class TrackFlags(
 class TrackGeometry(val outline: FloatArray) {
     private val n = outline.size / 2
     private val along = FloatArray(n)
+    // Exact nearest-point queries now use a retained balanced spatial index.
+    // The result is identical to the prior linear scan, including vertex ties.
+    private val vertexIndex = OverlayVertexIndex(outline)
     val length: Float
 
     /**
@@ -195,17 +198,7 @@ class TrackGeometry(val outline: FloatArray) {
     private fun dist(a: Int, b: Int) =
         hypot(outline[a * 2] - outline[b * 2], outline[a * 2 + 1] - outline[b * 2 + 1])
 
-    fun nearestIndex(x: Float, y: Float): Int {
-        var best = 0
-        var bestD = Float.MAX_VALUE
-        for (i in 0 until n) {
-            val dx = outline[i * 2] - x
-            val dy = outline[i * 2 + 1] - y
-            val d = dx * dx + dy * dy
-            if (d < bestD) { bestD = d; best = i }
-        }
-        return best
-    }
+    fun nearestIndex(x: Float, y: Float): Int = vertexIndex.nearest(x, y)
 
     /**
      * The point [f] of the way round the lap (0..1 from the loop's first point) and the unit
@@ -214,19 +207,24 @@ class TrackGeometry(val outline: FloatArray) {
     fun pointAt(f: Float): FloatArray {
         if (n < 2 || length == 0f) return floatArrayOf(0f, 0f, 1f, 0f)
         val target = f.mod(1f) * length
-        for (i in 0 until n) {
-            val j = (i + 1) % n
-            val end = if (j == 0) length else along[j]
-            if (target <= end || j == 0) {
-                val span = end - along[i]
-                val k = if (span == 0f) 0f else ((target - along[i]) / span).coerceIn(0f, 1f)
-                val ax = outline[i * 2]; val ay = outline[i * 2 + 1]
-                val bx = outline[j * 2]; val by = outline[j * 2 + 1]
-                val len = hypot(bx - ax, by - ay).coerceAtLeast(0.001f)
-                return floatArrayOf(ax + (bx - ax) * k, ay + (by - ay) * k, (bx - ax) / len, (by - ay) / len)
-            }
+        // First segment whose ending distance >= target, including exact vertex
+        // boundaries. Preserve the old normal/direction at corners.
+        var low = 1
+        var high = n
+        while (low < high) {
+            val mid = (low + high) ushr 1
+            val end = if (mid == n) length else along[mid]
+            if (end < target) low = mid + 1 else high = mid
         }
-        return floatArrayOf(outline[0], outline[1], 1f, 0f)
+        val i = (low - 1).coerceIn(0, n - 1)
+        val j = (i + 1) % n
+        val end = if (j == 0) length else along[j]
+        val span = end - along[i]
+        val k = if (span == 0f) 0f else ((target - along[i]) / span).coerceIn(0f, 1f)
+        val ax = outline[i * 2]; val ay = outline[i * 2 + 1]
+        val bx = outline[j * 2]; val by = outline[j * 2 + 1]
+        val len = hypot(bx - ax, by - ay).coerceAtLeast(0.001f)
+        return floatArrayOf(ax + (bx - ax) * k, ay + (by - ay) * k, (bx - ax) / len, (by - ay) / len)
     }
 
     /** Projected onto the nearest segment, so the value moves smoothly between outline points. */
@@ -235,7 +233,9 @@ class TrackGeometry(val outline: FloatArray) {
         val i = nearestIndex(x, y)
         var best = along[i]
         var bestD = Float.MAX_VALUE
-        for (j in listOf((i - 1 + n) % n, i)) {
+        // Avoid allocating a two-element list for every car-position projection.
+        for (side in 0..1) {
+            val j = if (side == 0) (i - 1 + n) % n else i
             val k = (j + 1) % n
             val ax = outline[j * 2]; val ay = outline[j * 2 + 1]
             val bx = outline[k * 2]; val by = outline[k * 2 + 1]

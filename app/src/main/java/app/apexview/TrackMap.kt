@@ -603,9 +603,12 @@ private class LineMarks(timing: SessionTiming) {
 @Composable
 private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, height: Float, turn: Float) {
     val now = rememberMapRenderTime(app)
+    val sampler = remember(timing) {
+        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-track-position"))
+    }
     val cars = remember(timing, now) {
         android.os.Trace.beginSection("PitwallMapCars")
-        try { carsAt(timing, now) } finally { android.os.Trace.endSection() }
+        try { sampler.sample(now) } finally { android.os.Trace.endSection() }
     }
     val stop = app.pitDriver?.let { driver ->
         pitStopNow(rememberPitBasis(app, timing, now), driver,
@@ -649,6 +652,8 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
     fun lapPoint(f: Float) = timing.geometry.pointAt(f).let { g -> fit.map(g[0], g[1]) }
     val sectors = remember(fit, timing.marshalSectors) { sectorPaths(timing, ::lapPoint) }
     val scLabel = remember { measurer.label("SC", 8.sp) }
+    val staticProbe = remember(fit) { OverlayPerformanceProbe("track-static-draw") }
+    val dynamicProbe = remember(fit) { OverlayPerformanceProbe("track-car-flag-draw") }
     val cars = remember(fit, currentCars) { currentCars.map { it to fit.map(it.x, it.y) } }
     val pitLabel = remember { measurer.label("PIT", 8.sp) }
     val stopLine = stop?.let { pitStopLine(timing, it) } ?: noPositionsLine(timing, now)
@@ -697,8 +702,13 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
             alpha = opacity
             compositingStrategy = CompositingStrategy.ModulateAlpha
         }
-        Canvas(layer, onDraw = circuit)
         Canvas(layer) {
+            val start = System.nanoTime()
+            circuit()
+            staticProbe.record(System.nanoTime() - start, timing.corners.size, 0)
+        }
+        Canvas(layer) {
+            val start = System.nanoTime()
             drawFlags(flags, path, sectors, 3.5.dp.toPx(), pulse)
             drawSectorGlyphs(flags, sectors, 14.dp.toPx()) { f -> lapPoint(f).let { p -> p + outward(p, Offset(width / 2, height / 2)) * 18.dp.toPx() } }
             drawCaption(flags, caption, width / 2, height - 4.dp.toPx(), pulse)
@@ -714,6 +724,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
                 names[car.number]?.let { drawText(it, topLeft = Offset(p.x + r + minOf(3.dp.toPx(), r), p.y - it.size.height / 2f), alpha = alpha) }
             }
             safetyCar?.let { drawSafetyCar(it, 10.dp.toPx(), scLabel) }
+            dynamicProbe.record(System.nanoTime() - start, cars.size, cars.size)
         }
     }
     targets?.invoke(cars.map { (car, p) -> car.number to p })
@@ -918,9 +929,12 @@ internal class Ribbon(
 @Composable
 fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, inset: Float, screenCornerRadius: Float) {
     val now = rememberMapRenderTime(app)
+    val sampler = remember(timing) {
+        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-edge-position"))
+    }
     val cars = remember(timing, now) {
         android.os.Trace.beginSection("PitwallEdgeCars")
-        try { carsAt(timing, now) } finally { android.os.Trace.endSection() }
+        try { sampler.sample(now) } finally { android.os.Trace.endSection() }
     }
     val stop = app.pitDriver?.let { driver ->
         pitStopNow(rememberPitBasis(app, timing, now), driver,
@@ -976,6 +990,8 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     val stopText = remember(stopLine) { stopLine?.let { measurer.label(it, 13.sp) } }
 
     val line = remember(ribbon) { ribbon.path() }
+    val staticProbe = remember(ribbon) { OverlayPerformanceProbe("edge-static-draw") }
+    val dynamicProbe = remember(ribbon) { OverlayPerformanceProbe("edge-car-flag-draw") }
     // Track outline, turn glyphs and start/finish marks are independent of the moving cars.
     // Give them a separate retained Compose draw layer, as the regular map already does.
     val taken = remember(ribbon, marks, finishLabel, startLabel, timing.hasStartFinish) {
@@ -1019,8 +1035,13 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
             alpha = opacity
             compositingStrategy = CompositingStrategy.ModulateAlpha
         }
-        Canvas(layer, onDraw = circuit)
         Canvas(layer) {
+            val start = System.nanoTime()
+            circuit()
+            staticProbe.record(System.nanoTime() - start, timing.corners.size, 0)
+        }
+        Canvas(layer) {
+            val start = System.nanoTime()
             drawFlags(flags, line, sectors, 2.5.dp.toPx(), pulse)
             drawSectorGlyphs(flags, sectors, 12.dp.toPx()) { f -> ribbon.point(f) + ribbon.inward(f) * 12.dp.toPx() }
             // Above the bottom of the loop, clear of the car names that sit inside it.
@@ -1051,6 +1072,7 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
                 drawText(label, topLeft = at - Offset(label.size.width / 2f, label.size.height / 2f), alpha = alpha)
             }
             safetyCar?.let { drawSafetyCar(ribbon.point(it), 7.5.dp.toPx(), scLabel) }
+            dynamicProbe.record(System.nanoTime() - start, cars.size, cars.size)
         }
     }
     targets?.invoke(cars.map { (car, f) -> car.number to ribbon.point(f) })

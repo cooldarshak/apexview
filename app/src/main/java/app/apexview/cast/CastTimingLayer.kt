@@ -25,6 +25,11 @@ import kotlin.math.roundToInt
 @Composable
 internal fun CastTimingLayer(state: CastTimingReceiver, canvasWidth: Float, canvasHeight: Float, positionMs: () -> Long,
                              onDriver: (String, Boolean) -> Unit, onDrawn: (Int, Int) -> Unit) {
+    // Counts are read in draw, not composition. Pitwall Cast's packet/UI contract
+    // is unchanged; this records receiver-specific render costs every five seconds.
+    val drawProbe = remember(state) {
+        app.apexview.OverlayPerformanceProbe("pitwall-cast-receiver-overlay-draw")
+    }
     val counts by remember(state) {
         derivedStateOf(structuralEqualityPolicy()) {
             val frame = state.frame
@@ -44,8 +49,10 @@ internal fun CastTimingLayer(state: CastTimingReceiver, canvasWidth: Float, canv
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val scale = constraints.maxWidth / canvasWidth
         Box(Modifier.fillMaxSize().drawWithContent {
+            val startedNs = System.nanoTime()
             drawContent()
             val (rows, cars) = counts
+            drawProbe.record(System.nanoTime() - startedNs, rows + cars, rows + cars)
             onDrawn(rows, cars)
         }) {
             ReceiverTower(state, scale, onDriver)
