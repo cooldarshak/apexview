@@ -22,7 +22,7 @@ class TowerRegionVisualKeysTest {
         speed: Int = 267, gear: Int = 7, highlighted: Boolean = false
     ): TowerRegionVisualKeys = towerRegionVisualKeys(
         driver, state,
-        TowerRowText.prepare(driver.tla, state, tyre, speed, gear, Settings.KMH),
+        TowerRowText.prepare(driver.tla, state, speed, gear, Settings.KMH),
         tyre, highlighted, 2f, 1f
     )
     @Test fun speedAndGearChangesInvalidateOnlyTheBaseRegion() {
