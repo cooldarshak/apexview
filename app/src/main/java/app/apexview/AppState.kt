@@ -4439,6 +4439,7 @@ class AppState(
     }
 
     private fun namedOverlaySnapshot() = JSONObject()
+        .put("layoutMode", layoutMode.name)
         .put("mapMode", mapMode.name)
         .put("mapOpen", mapMode != MapMode.OFF)
         .put("mapReserve", mapReserve).put("mapLocked", mapLocked)
@@ -4446,6 +4447,12 @@ class AppState(
         .put("mapLabelSize", mapLabelSizeSp).put("mapOffsetMs", mapOffsetMs)
         .put("mapPanel", if (activeMapPanel.placed && canvasW > 0f && canvasH > 0f)
             JSONObject(activeMapPanel.toJson(canvasW, canvasH, mapOpacity)) else JSONObject.NULL)
+        .put("standardMapPanel", if (mapPanel.placed && canvasW > 0f && canvasH > 0f)
+            JSONObject(mapPanel.toJson(canvasW, canvasH, mapOpacity)) else JSONObject.NULL)
+        .put("logoMapPanel", if (logoMapPanel.placed && canvasW > 0f && canvasH > 0f)
+            JSONObject(logoMapPanel.toJson(canvasW, canvasH, mapOpacity)) else JSONObject.NULL)
+        .put("laptopMapPanel", if (laptopMapPanel.placed && canvasW > 0f && canvasH > 0f)
+            JSONObject(laptopMapPanel.toJson(canvasW, canvasH, mapOpacity)) else JSONObject.NULL)
         .put("towerOpen", towerOpen).put("towerReserve", towerReserve)
         .put("towerLocked", towerLocked).put("towerOpacity", towerOpacity)
         .put("towerFontScale", towerFontScale)
@@ -4482,6 +4489,8 @@ class AppState(
         }.getOrDefault(overlayLayoutMode)
         snapMode = json.optBoolean("snap", snapMode)
         mapPanel.placed = false
+        logoMapPanel.placed = false
+        laptopMapPanel.placed = false
         towerSpot.x = -1f; towerSpot.y = -1f
         towerSpot.w = -1f; towerSpot.h = -1f
         tvLayoutMapNeedsDefault = false
@@ -4507,11 +4516,16 @@ class AppState(
     /** Apply a saved preset without restarting a live, clear, or protected decoder. */
     private fun activateNamedLayout(preset: NamedLayoutPreset) {
         activeNamedLayoutId = preset.id
-        // A custom named TV layout keeps the TV reserves and geometry rather
-        // than silently losing the associated tower/map after it is loaded.
-        layoutMode = LayoutMode.CUSTOM
+        // Keep the originating TV / grid / featured layout behavior as
+        // well as its exact saved source and overlay geometry.
+        val snapshot = JSONObject(preset.overlaySnapshot)
+        layoutMode = runCatching {
+            LayoutMode.valueOf(snapshot.optString("layoutMode", LayoutMode.CUSTOM.name))
+        }.getOrDefault(LayoutMode.CUSTOM).takeUnless {
+            it == LayoutMode.TILE_TEST || it == LayoutMode.SINGLE_DECODER_TEST
+        } ?: LayoutMode.CUSTOM
         pendingNamedLayout = preset
-        applyNamedOverlay(JSONObject(preset.overlaySnapshot))
+        applyNamedOverlay(snapshot)
         handPlaced = false
         layoutRequest++
         android.util.Log.i("PitwallLayout", "NAMED_LAYOUT_APPLY feeds=${preset.feedCount} " +
@@ -4576,7 +4590,8 @@ class AppState(
         defaultNamedLayoutId = preset.id
         defaultLayoutMode = LayoutMode.CUSTOM
         activeNamedLayoutId = preset.id
-        layoutMode = LayoutMode.CUSTOM
+        // Saving a TV layout must not suddenly switch it into CUSTOM or
+        // make the map and timing tower adopt different docking semantics.
         message = "Saved '${preset.name}' with ${tiles.size} feeds, track map and timing tower."
     }
 
@@ -4656,12 +4671,23 @@ class AppState(
         val positions = preset.layout.slots(width, height)
         bigFirst().zip(positions).forEach { (tile, slot) -> tile.place(slot) }
         val snapshot = JSONObject(preset.overlaySnapshot)
-        snapshot.optJSONObject("mapPanel")?.let {
-            activeMapPanel.restore(it.toString(), width, height)?.let { opacity ->
-                mapOpacity = opacity.coerceIn(0.2f, 1f)
-            }
-            storeMapPanel()
+        // The on-track logo map, floating map and laptop map have
+        // independent positioning lifecycles. Preserving only the active
+        // one broke layouts when switching orientations or modes.
+        snapshot.optJSONObject("standardMapPanel")?.let {
+            mapPanel.restore(it.toString(), width, height)
         }
+        snapshot.optJSONObject("logoMapPanel")?.let {
+            logoMapPanel.restore(it.toString(), width, height)
+        }
+        snapshot.optJSONObject("laptopMapPanel")?.let {
+            laptopMapPanel.restore(it.toString(), width, height)
+        }
+        snapshot.optJSONObject("mapPanel")?.let {
+            if (!activeMapPanel.placed) activeMapPanel.restore(it.toString(), width, height)
+                ?.let { opacity -> mapOpacity = opacity.coerceIn(0.2f, 1f) }
+        }
+        if (activeMapPanel.placed) storeMapPanel()
         snapshot.optJSONObject("towerPanel")?.let { area ->
             val x = area.optDouble("x", -1.0).toFloat()
             val y = area.optDouble("y", -1.0).toFloat()
