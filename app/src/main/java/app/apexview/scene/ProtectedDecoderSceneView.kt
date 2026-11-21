@@ -28,7 +28,11 @@ import java.nio.ByteOrder
  * No framebuffer readback, screenshot, decrypted samples or insecure output fallback exists.
  */
 internal class ProtectedDecoderSceneView(context: Context, private val protectedOutput: Boolean = true) : SurfaceView(context), SurfaceHolder.Callback {
-    private val thread = HandlerThread("PitwallSecureScene").apply { start() }
+    // Prioritize video surface latching above archive composition and Compose
+    // overlay work; this is one GL output thread, never another video decoder.
+    private val thread = HandlerThread(
+        "PitwallSecureScene", android.os.Process.THREAD_PRIORITY_DISPLAY
+    ).apply { start() }
     private val gl = Handler(thread.looper)
     private var player: ExoPlayer? = null
     @Volatile private var scene: VideoScene? = null
@@ -76,7 +80,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             player = nextPlayer
             input?.let { nextPlayer.setVideoSurface(it) }
         }
-        if (changed) gl.post { guarded { draw() } }
+        if (changed) gl.post { guarded {
+            decoderTexture?.setDefaultBufferSize(nextScene.atlasWidth, nextScene.atlasHeight)
+            draw()
+        } }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
