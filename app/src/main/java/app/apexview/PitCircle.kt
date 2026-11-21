@@ -147,7 +147,9 @@ internal class PitCircleData(val referenceMs: Long, val ring: List<OnCircle>, va
     val lap: Int?, val greenCount: Int, val lossMs: Long, val laneStops: Int?, val hasSavedLoss: Boolean,
     val gapsToLeader: Boolean, val condition: TrackCondition)
 
-internal fun pitCircleData(app: AppState, timing: SessionTiming, now: Long, basis: PitBasis): PitCircleData? {
+internal fun pitCircleData(app: AppState, timing: SessionTiming, now: Long, basis: PitBasis,
+    positionedCars: List<Car> = carsAt(timing, now),
+): PitCircleData? {
     val flags = timing.flags.at(now)
     val leader = basis.leader
     val leaderLaps = leader?.let { timing.laps[it] }
@@ -163,7 +165,7 @@ internal fun pitCircleData(app: AppState, timing: SessionTiming, now: Long, basi
     // Cars in the pit lane ride the inner arc; one there far longer than a stop has stopped.
     val inLane = mutableMapOf<String, Float>()
     val ring = mutableListOf<OnCircle>()
-    val placed = carsAt(timing, now)
+    val placed = positionedCars
     placed.forEach { car ->
         val laps = timing.laps[car.number]
         val since = laps?.inPitSince(now)
@@ -220,7 +222,14 @@ internal fun pitCircleData(app: AppState, timing: SessionTiming, now: Long, basi
 @Composable
 private fun PitCircle(app: AppState, timing: SessionTiming, width: Float, height: Float) {
     val now = rememberMapTime(app)
-    val data = pitCircleData(app, timing, now, rememberPitBasis(app, timing, now))
+    // The pit circle is still paced by its 30 Hz business/timing clock, not
+    // interpolated beyond source data. Reuse the same parity-tested
+    // chronological cursor as the track and edge maps.
+    val sampler = remember(timing) {
+        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-pit-circle-position"))
+    }
+    val positionedCars = remember(timing, now) { sampler.sample(now) }
+    val data = pitCircleData(app, timing, now, rememberPitBasis(app, timing, now), positionedCars)
     val (centre, radius) = pitCircleFrame(app, with(LocalDensity.current) { LABEL_ROOM.toPx() })
     PitCircleDrawing(timing, data, width, height, centre, radius, app.mapOpacity) { targets ->
         CarTargets(app, targets, onTap = { number -> app.pitDriver = if (app.pitDriver == number) null else number })
