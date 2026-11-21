@@ -107,7 +107,9 @@ internal class F1DashFeedCapture(
 
     private val compositionDispatcher: ExecutorCoroutineDispatcher = Executors.newSingleThreadExecutor { task ->
         Thread({
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            // Active rolling composition is playback-critical: prefer it over
+            // speculative warmup, but below UI and the display-priority GL thread.
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT + 2)
             task.run()
         }, "PitwallDashHevcComposition").apply { isDaemon = true }
     }.asCoroutineDispatcher()
