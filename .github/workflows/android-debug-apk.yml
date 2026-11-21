@@ -265,7 +265,9 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect
           script: |
-            set -euo pipefail
+            # android-emulator-runner executes this block with /bin/sh, not bash.
+            # Keep instrumentation failure fatal without relying on pipefail.
+            set -eu
             adb wait-for-device
             test -s app/build/outputs/apk/debug/app-debug.apk
             test -s app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
@@ -273,7 +275,8 @@ jobs:
             adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
             adb shell am instrument -w -e class app.apexview.OverlayRetainedRenderNodeAndroidTest \
               app.apexview_custom.test/androidx.test.runner.AndroidJUnitRunner \
-              | tee "$RUNNER_TEMP/pitwall-rendernode-instrumentation.txt"
+              > "$RUNNER_TEMP/pitwall-rendernode-instrumentation.txt" 2>&1
+            cat "$RUNNER_TEMP/pitwall-rendernode-instrumentation.txt"
             grep -q 'OK (2 tests)' "$RUNNER_TEMP/pitwall-rendernode-instrumentation.txt"
 
       - name: Upload native RenderNode instrumentation report
