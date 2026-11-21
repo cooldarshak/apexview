@@ -308,7 +308,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 // One bounded, read-only profile for every *real* selected rendition
                 // before any individual compatibility gate can stop the capture.
                 // Only structural metadata is logged, never media bytes, IVs or KIDs.
-                selected.indices.forEach { index ->
+                val fragmentProfiles = selected.indices.map { index ->
                     val initVideo = inits[index].report.tracks.singleOrNull { it.handler == "vide" }
                     val profile = CmafBoxInspector.inspect(media[index], inits[index].report)
                     val videoFragment = profile.fragments.singleOrNull {
@@ -337,6 +337,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                             "samples=${videoFragment?.sampleCount ?: 0} " +
                             "sampleDescriptionIndex=${videoFragment?.sampleDescriptionIndex} " +
                             "inspectionErrors=${profile.errors.size}")
+                    profile
                 }
                 stage = "real-hev1-parameter-validation"
                 val resolvedReports = selected.indices.map { index ->
@@ -447,7 +448,12 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                     } else {
                         selected.forEachIndexed { index, offer ->
                             coroutineContext.ensureActive()
-                            val report = CmafBoxInspector.inspect(media[index], resolvedReports[index])
+                            // The already-validated real CMAF report is reused
+                            // unless in-band HEV1 resolution changed the init's
+                            // codec configuration; that case demands reinspection.
+                            val report = if (resolvedReports[index] === inits[index].report)
+                                fragmentProfiles[index]
+                            else CmafBoxInspector.inspect(media[index], resolvedReports[index])
                             if (report.errors.isNotEmpty()) throw PermanentCaptureException("${offer.feed.label}: invalid HLS CMAF fragment")
                             ProtectedHevcLiveComposition.recordCmafResponse(group, offer.feed.label, media[index], report)
                         }
