@@ -27,7 +27,7 @@ import java.nio.ByteOrder
  * Protected buffers remain inside a protected EGL context and secure output SurfaceView.
  * No framebuffer readback, screenshot, decrypted samples or insecure output fallback exists.
  */
-internal class ProtectedDecoderSceneView(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
+internal class ProtectedDecoderSceneView(context: Context, private val protectedOutput: Boolean = true) : SurfaceView(context), SurfaceHolder.Callback {
     private val thread = HandlerThread("PitwallSecureScene").apply { start() }
     private val gl = Handler(thread.looper)
     private var player: ExoPlayer? = null
@@ -54,7 +54,19 @@ internal class ProtectedDecoderSceneView(context: Context) : SurfaceView(context
     private var rendered = 0L
     private var lastLogNs = 0L
 
-    init { setSecure(true); holder.addCallback(this) }
+    private var lastPresentedAtNs = 0L
+    private var lastSourceTimestampNs = 0L
+    private var intervalPresented = 0L
+    private var intervalLongGaps = 0L
+    private var intervalSwapsOver18ms = 0L
+    private var intervalLongestGapMs = 0L
+    private var intervalLongestSwapMs = 0L
+    private var intervalSourceTimestampRegressions = 0L
+
+    init {
+        if (protectedOutput) setSecure(true)
+        holder.addCallback(this)
+    }
 
     fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene) {
         val changed = scene != nextScene
@@ -92,22 +104,50 @@ internal class ProtectedDecoderSceneView(context: Context) : SurfaceView(context
         destroy()
         display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         check(EGL14.eglInitialize(display, IntArray(2), 0, IntArray(2), 1)) { "EGL initialization failed" }
-        check(EGL14.eglQueryString(display, EGL14.EGL_EXTENSIONS)?.split(' ')?.contains("EGL_EXT_protected_content") == true) {
-            "This TV does not support protected GPU layout rendering at its active Widevine level"
+        if (protectedOutput) check(EGL14.eglQueryString(display, EGL14.EGL_EXTENSIONS)
+            ?.split(' ')?.contains("EGL_EXT_protected_content") == true) {
+            "This device does not support protected GPU layout rendering at its active Widevine level"
         }
         val configs = arrayOfNulls<EGLConfig>(1)
         val count = IntArray(1)
         check(EGL14.eglChooseConfig(display, intArrayOf(EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
             EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
             EGL14.EGL_ALPHA_SIZE, 8, EGL14.EGL_NONE), 0, configs, 0, 1, count, 0) && count[0] > 0) { "No GLES2 configuration" }
+        val eglContextAttributes = if (protectedOutput) intArrayOf(
+            EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, 0x32C0, EGL14.EGL_TRUE,
+            EGL14.EGL_NONE
+        ) else intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE)
+        val eglSurfaceAttributes = if (protectedOutput) intArrayOf(
+            0x32C0, EGL14.EGL_TRUE, EGL14.EGL_NONE
+        ) else intArrayOf(EGL14.EGL_NONE)
         contextGl = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT,
-            intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, 0x32C0, EGL14.EGL_TRUE, EGL14.EGL_NONE), 0)
-        window = EGL14.eglCreateWindowSurface(display, configs[0], output, intArrayOf(0x32C0, EGL14.EGL_TRUE, EGL14.EGL_NONE), 0)
-        check(EGL14.eglMakeCurrent(display, window, window, contextGl)) { "Unable to bind scene output" }
-        check(GLES20.glGetString(GLES20.GL_EXTENSIONS)?.split(' ')?.contains("GL_EXT_protected_textures") == true) {
-            "Protected texture sampling is unavailable; secure video was not redirected to an ordinary surface"
+            eglContextAttributes, 0)
+        window = EGL14.eglCreateWindowSurface(display, configs[0], output,
+            eglSurfaceAttributes, 0)
+        check(EGL14.eglMakeCurrent(display, window, window, contextGl)) {
+            "Unable to bind scene output"
         }
-        Log.i("PitwallReceiver", "SECURE_EGL_READY protectedContext=true protectedSurface=true")
+        if (protectedOutput) check(GLES20.glGetString(GLES20.GL_EXTENSIONS)
+            ?.split(' ')?.contains("GL_EXT_protected_textures") == true) {
+            "Protected texture sampling is unavailable; no insecure output fallback is permitted"
+        }
+        // SurfaceView has a SurfaceFlinger layer independent of the app's HWUI
+        // RenderThread. Compose tower/map jank must never stall video presentation.
+        // EGL swaps are paced by the native surface instead of a second
+        // Choreographer+TextureView pass through the app window.
+        if (!protectedOutput && android.os.Build.VERSION.SDK_INT >= 30) {
+            val frameRate = SceneFrameRatePolicy.hint(scene?.sourceFrameRate ?: 0.0)
+            if (frameRate > 0f) runCatching {
+                output.setFrameRate(frameRate,
+                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                    Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS)
+            }.onFailure {
+                Log.w("ApexviewSingleDecoder",
+                    "SURFACE_SCENE_FPS_HINT_UNAVAILABLE " + it.javaClass.simpleName)
+            }
+        }
+        Log.i("ApexviewSingleDecoder", "SURFACE_SCENE_EGL_READY protected=$protectedOutput " +
+            "outputLayer=SurfaceView compositor=SurfaceFlinger layoutFramesIndependentOfHWUI=true")
         fun shader(type: Int, code: String): Int {
             val id = GLES20.glCreateShader(type)
             GLES20.glShaderSource(id, code); GLES20.glCompileShader(id)
@@ -137,7 +177,16 @@ internal class ProtectedDecoderSceneView(context: Context) : SurfaceView(context
         frames.setOnFrameAvailableListener({
             guarded {
                 if (decoderTexture === frames && !released) {
-                    frames.updateTexImage(); frames.getTransformMatrix(transform); hasFrame = true; rendered++
+                    frames.updateTexImage()
+                    val timestamp = frames.timestamp
+                    if (lastSourceTimestampNs > 0L && timestamp > 0L &&
+                        timestamp < lastSourceTimestampNs) {
+                        intervalSourceTimestampRegressions++
+                    }
+                    if (timestamp > 0L) lastSourceTimestampNs = timestamp
+                    frames.getTransformMatrix(transform)
+                    hasFrame = true
+                    rendered++
                     draw()
                 }
             }
@@ -169,15 +218,43 @@ internal class ProtectedDecoderSceneView(context: Context) : SurfaceView(context
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             }
         }
+        val swapStartedNs = System.nanoTime()
         check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" }
+        val swapEndedNs = System.nanoTime()
+        if (hasFrame) {
+            val swapMs = (swapEndedNs - swapStartedNs) / 1_000_000L
+            intervalLongestSwapMs = maxOf(intervalLongestSwapMs, swapMs)
+            if (swapMs > 18L) intervalSwapsOver18ms++
+            if (lastPresentedAtNs > 0L) {
+                val gapMs = (swapEndedNs - lastPresentedAtNs) / 1_000_000L
+                intervalLongestGapMs = maxOf(intervalLongestGapMs, gapMs)
+                if (gapMs > 45L) intervalLongGaps++
+            }
+            lastPresentedAtNs = swapEndedNs
+            intervalPresented++
+        }
         if (hasFrame && !firstFrameReported) {
             firstFrameReported = true
             post { if (!released) onFirstFrame() }
         }
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
-            Log.i("ApexviewSingleDecoder", "SINGLE_DECODER_SCENE output=${outputWidth}x$outputHeight inputTextures=1 outputViews=1 sources=${model.sources} windows=${model.windows.size} frames=$rendered")
+            Log.i("ApexviewSingleDecoder", "SURFACE_DECODER_SCENE " +
+                "protected=$protectedOutput output=${outputWidth}x$outputHeight " +
+                "inputTextures=1 outputViews=1 sources=${model.sources} " +
+                "windows=${model.windows.size} decoderFrames=$rendered " +
+                "intervalPresented=$intervalPresented intervalGaps45ms=$intervalLongGaps " +
+                "intervalSwapsOver18ms=$intervalSwapsOver18ms " +
+                "maxGapMs=$intervalLongestGapMs maxSwapMs=$intervalLongestSwapMs " +
+                "sourceTimestampRegressions=$intervalSourceTimestampRegressions " +
+                "physicalPresentation=NOT_MEASURED")
             lastLogNs = now
+            intervalPresented = 0
+            intervalLongGaps = 0
+            intervalSwapsOver18ms = 0
+            intervalLongestGapMs = 0
+            intervalLongestSwapMs = 0
+            intervalSourceTimestampRegressions = 0
         }
     }
 
@@ -195,6 +272,8 @@ internal class ProtectedDecoderSceneView(context: Context) : SurfaceView(context
         decoderTexture?.setOnFrameAvailableListener(null)
         input?.release(); input = null
         decoderTexture?.release(); decoderTexture = null; hasFrame = false
+        lastPresentedAtNs = 0L
+        lastSourceTimestampNs = 0L
         if (display != EGL14.EGL_NO_DISPLAY) {
             if (program != 0) GLES20.glDeleteProgram(program)
             if (texture != 0) GLES20.glDeleteTextures(1, intArrayOf(texture), 0)

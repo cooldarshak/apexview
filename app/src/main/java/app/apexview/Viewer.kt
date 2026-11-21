@@ -970,17 +970,24 @@ internal fun PlaybackVideoCanvas(
                 delay(80)
             }
         }
-        if (secureRolling) {
-            // L1 must use protected EGL and a secure output SurfaceView. No
-            // ordinary texture/readback fallback is used for protected frames.
-            AndroidView(factory = { context -> ProtectedDecoderSceneView(context).apply {
-                onFailure = app::failSingleDecoderScene
-                onOutputSize = app::reportSceneOutputSize
-            } }, update = { it.bind(host.player, scene) },
-                onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
+        if (app.protectedRollingSceneActive) {
+            // Rolling composition is one decoded atlas, but uses an independent
+            // SurfaceFlinger video layer. TextureView composition depends on
+            // main-window HWUI frames; a busy tower/map was visibly stalling
+            // the 50fps video even while the decoder rendered every frame.
+            // L1 always uses protected EGL; only authorized L3 may use normal
+            // EGL and the nonsecure video output surface.
+            androidx.compose.runtime.key(secureRolling) {
+                AndroidView(factory = { context ->
+                    ProtectedDecoderSceneView(context, protectedOutput = secureRolling).apply {
+                        onFailure = app::failSingleDecoderScene
+                        onOutputSize = app::reportSceneOutputSize
+                    }
+                }, update = { it.bind(host.player, scene) },
+                    onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
+            }
         } else {
-            // L3 can sample the decoder's one SurfaceTexture, just as the
-            // existing clear HEVC archive scene does, without extra decoders.
+            // Keep finite clear-archive scene/capture behavior unchanged.
             AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
                 onFailure = app::failSingleDecoderScene
                 onOutputSize = app::reportSceneOutputSize
