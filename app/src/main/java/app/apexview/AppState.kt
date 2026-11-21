@@ -4609,12 +4609,12 @@ class AppState(
                     if (legacy.boxes.size != count) continue
                     val landscape = suffix == "L"
                     if ((legacy.aspect > 1f) != landscape) continue
-                    val id = "migrated-" + count + "-" + if (landscape) "L" else "P"
+                    val id = "migrated-" + count + "-" + (if (landscape) "L" else "P")
                     if (namedLayouts.any { it.id == id }) continue
                     val snapshot = JSONObject(namedOverlaySnapshot())
                         .put("layoutMode", LayoutMode.CUSTOM.name).toString()
                     add(NamedLayoutPreset(id,
-                        "Previous " + count + "-feed " + if (landscape) "landscape layout" else "portrait layout",
+                        "Previous " + count + "-feed " + (if (landscape) "landscape layout" else "portrait layout"),
                         count, landscape, legacy, snapshot, System.currentTimeMillis()))
                 }
             }
