@@ -26,3 +26,19 @@ fi
 # Some instrumentation failures return shell exit 0, so require the runner's
 # explicit all-tests-passed footer rather than trusting the adb exit code alone.
 grep -q 'OK (2 tests)' "$report"
+
+# Gate the rolling L3 scene's independent SurfaceFlinger pixels with
+# synthetic, unprotected HEVC. Never capture protected F1 video.
+surface_report="${RUNNER_TEMP:?}/pitwall-surface-scene-instrumentation.txt"
+if adb shell am instrument -w \
+    -e class app.apexview.scene.SurfaceDecoderSceneInstrumentationTest \
+    app.apexview_custom.test/androidx.test.runner.AndroidJUnitRunner \
+    > "$surface_report" 2>&1; then
+  cat "$surface_report"
+else
+  cat "$surface_report"
+  exit 1
+fi
+grep -q 'OK (1 test)' "$surface_report"
+cat "$surface_report" >> "$report"
+
