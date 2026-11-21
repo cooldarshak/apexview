@@ -55,8 +55,13 @@ class LiveOverlayWiringTest(unittest.TestCase):
     def test_native_rendernode_instrumentation_is_run_in_ci(self):
         workflow = (ROOT / ".github/workflows/android-debug-apk.yml").read_text(encoding="utf-8")
         self.assertIn("reactivecircus/android-emulator-runner@v2", workflow)
-        self.assertIn("Enable KVM acceleration for Android instrumentation", workflow)
-        self.assertIn("test -r /dev/kvm && test -w /dev/kvm", workflow)
+        # Hosted runners may omit /dev/kvm. The emulator must still execute the
+        # native test with TCG, rather than fail before launching or skip tests.
+        self.assertIn("Select Android emulator acceleration", workflow)
+        self.assertIn("disable-linux-hw-accel: auto", workflow)
+        self.assertIn("ANDROID_I_WANT_MY_TCG=yes", workflow)
+        self.assertIn("if [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then", workflow)
+        self.assertNotIn('echo "::error::The Android emulator requires accessible KVM', workflow)
         self.assertIn("OverlayRetainedRenderNodeAndroidTest", workflow)
         self.assertIn("am instrument", workflow)
 
