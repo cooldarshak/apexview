@@ -64,20 +64,20 @@ internal class RetainedTowerRenderNode {
     val node = RenderNode("PitwallTowerRow")
     val validity = OverlayRecordingValidity()
     fun beginIfChanged(key: Any, width: Int, height: Int,
-        left: Int = 0, right: Int = width
+        region: Int = 0, unit: Float = 1f
     ): AndroidCanvas? {
-        require(left >= 0 && right > left && right <= width && height > 0)
-        // Android can evict a RenderNode's display list while the row is offscreen.
-        // Never replay a vanished list: refresh it even when the visual key is stable.
+        // Android may evict lists while rows are scrolled off-screen.
         if (!validity.needsRecord(key, width, height) && node.hasDisplayList()) {
             validity.markReplayed()
             return null
         }
-        node.setPosition(left, 0, right, height)
-        return node.beginRecording(right - left, height).also {
-            // Keep existing drawing coordinates in full-row physical pixels,
-            // while retaining only the dirty region's actual native bounds.
-            it.translate(-left.toFloat(), 0f)
+        // Calculate bounds only when re-recording: steady 50/60 Hz replay
+        // must not allocate region descriptors per driver per frame.
+        val bounds = towerRegionBounds(region, width, unit)
+        node.setPosition(bounds.left, 0, bounds.right, height)
+        return node.beginRecording(bounds.width, height).also {
+            // Use the original full-row coordinates in a bounded native node.
+            it.translate(-bounds.left.toFloat(), 0f)
         }
     }
     fun finish(key: Any, width: Int, height: Int) {
