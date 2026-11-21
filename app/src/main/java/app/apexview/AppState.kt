@@ -2443,9 +2443,19 @@ class AppState(
     private var replayPreviewWrite: kotlinx.coroutines.Job? = null
 
     private fun saveReplayPreview(contentId: Long, positionMs: Long) {
-        val archive = timing?.takeIf { timingContentId == contentId && !it.live && !it.archivePartial } ?: return
+        // A TCL TV can spend minutes parsing complete replay histories. As soon as
+        // both overlays have genuine samples at the playhead, persist that bounded
+        // partial window. Otherwise every replay re-open starts from zero because
+        // a full archive load may never finish before the viewer changes session.
+        val archive = timing?.takeIf {
+            timingContentId == contentId && !it.live && it.outline.size >= 8 &&
+                it.tracks.isNotEmpty() && it.laps.isNotEmpty()
+        } ?: return
         val playhead = replayPlayhead(contentId, positionMs)
         val videoUtc = playhead.videoUtcMs ?: return
+        val targetUtc = videoUtc + playhead.offsetMs
+        if (archive.tracks.values.none { it.at(targetUtc) != null } ||
+            archive.laps.values.none { it.at(targetUtc)?.position != null }) return
         if (replayPreviewContent == contentId &&
             replayPreviewPosition?.let { abs(positionMs - it) < 25_000L } == true
         ) return
@@ -3757,6 +3767,13 @@ class AppState(
                                     if (timingContentId == contentId) {
                                         showTiming(partial)
                                         inspectPlayback()
+                                        // Cache the actual replay window once the independently
+                                        // parsed map and timing tower both have usable data.
+                                        // The remainder of the archive continues loading.
+                                        if (partial.tracks.isNotEmpty() && partial.laps.isNotEmpty() &&
+                                            partial.outline.size >= 8) {
+                                            saveReplayPreview(contentId, playhead.get().positionMs)
+                                        }
                                         recordTimingDiagnostic(
                                             "Partial data: drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
                                                 "cars=${partial.tracks.size}, outlinePoints=${partial.outline.size / 2} " +

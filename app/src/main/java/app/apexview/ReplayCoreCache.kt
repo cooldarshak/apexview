@@ -118,7 +118,10 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
 
     fun writePreview(session: SessionTiming, positionMs: Long, utcMs: Long, checkActive: () -> Unit): Boolean {
         val path = session.radioBase.removePrefix(LiveTimingArchive.BASE)
-        if (path == session.radioBase || path.isBlank() || session.live || session.archivePartial) return false
+        // A progressive archive snapshot is safe for a bounded restart preview only
+        // when the tracks and tower contain actual data at the target UTC.
+        // The checks below enforce that, including for archivePartial snapshots.
+        if (path == session.radioBase || path.isBlank() || session.live) return false
         if (session.tracks.values.none { it.at(utcMs) != null } ||
             session.laps.values.none { it.at(utcMs)?.position != null }
         ) return false

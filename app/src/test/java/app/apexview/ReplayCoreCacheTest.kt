@@ -61,6 +61,9 @@ class ReplayCoreCacheTest {
             source.hasStartFinish, emptyList(), source.startUtc, laps = source.laps,
             radioBase = LiveTimingArchive.BASE + source.path,
         )
+        // An initial progressive archive already has genuine map/tower samples;
+        // it must be restart-cacheable without waiting minutes for full history.
+        timing.archivePartial = true
         assertTrue(cache.writePreview(timing, targetPosition, targetUtc) {})
         val preview = requireNotNull(cache.readPreview(targetPosition + 20_000L) {})
         assertEquals(track.at(targetUtc), preview.tracks.getValue("16").at(targetUtc))
