@@ -62,8 +62,12 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("ANDROID_I_WANT_MY_TCG=yes", workflow)
         self.assertIn("if [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then", workflow)
         self.assertNotIn('echo "::error::The Android emulator requires accessible KVM', workflow)
-        self.assertIn("OverlayRetainedRenderNodeAndroidTest", workflow)
-        self.assertIn("am instrument", workflow)
+        self.assertIn("script: bash scripts/run_rendernode_instrumentation.sh", workflow)
+        script = (ROOT / "scripts/run_rendernode_instrumentation.sh").read_text(encoding="utf-8")
+        self.assertIn("OverlayRetainedRenderNodeAndroidTest", script)
+        self.assertIn("am instrument", script)
+        self.assertIn("grep -q 'OK (2 tests)'", script)
+        self.assertIn("test -s", script)
 
 if __name__ == "__main__":
     unittest.main()

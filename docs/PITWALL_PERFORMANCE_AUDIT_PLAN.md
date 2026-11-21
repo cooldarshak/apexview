@@ -5,6 +5,15 @@ Status: active implementation and hardware validation; progress audited through 
 
 ## Build 621–624 GitHub Actions failure root cause and corrective CI gate (21 November 2026)
 
+**Build 626 correction:** the emulator reached boot-completed, so KVM selection
+is no longer the blocker on that runner. The runner executes its custom
+`script:` value with `/bin/sh -c` and did not preserve the multi-line
+`if/then/fi` block; it failed with an unexpected end-of-file before running
+instrumentation. The native command sequence is now a separately checked-in
+Bash script invoked by **one** action script command. It captures the Android
+test report, prints failures and checks the explicit `OK (2 tests)` footer.
+Source-wiring tests assert the script is called and still runs both tests.
+
 Four failing runs had different causes, all before native overlay acceptance: 621
 could not boot an emulator without KVM; 622 failed unit-test Kotlin compilation
 (subsequent runs passed the unchanged suite); 623 booted the emulator but

@@ -276,25 +276,9 @@ jobs:
           disable-linux-hw-accel: auto
           emulator-boot-timeout: 900
           emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -no-metrics
-          script: |
-            # The action executes this with /bin/sh, not bash.
-            # Keep both emulator and instrumentation failures fatal and visible.
-            set -eu
-            adb wait-for-device
-            test -s app/build/outputs/apk/debug/app-debug.apk
-            test -s app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-            adb install -r app/build/outputs/apk/debug/app-debug.apk
-            adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-            result="$RUNNER_TEMP/pitwall-rendernode-instrumentation.txt"
-            if adb shell am instrument -w -e class app.apexview.OverlayRetainedRenderNodeAndroidTest \
-                app.apexview_custom.test/androidx.test.runner.AndroidJUnitRunner \
-                > "$result" 2>&1; then
-              cat "$result"
-            else
-              cat "$result"
-              exit 1
-            fi
-            grep -q 'OK (2 tests)' "$result"
+          # Emulator runner passes 'script' to /bin/sh -c; keep it one command.
+          script: bash scripts/run_rendernode_instrumentation.sh
+
       - name: Upload native RenderNode instrumentation report
         if: always()
         uses: actions/upload-artifact@v4
