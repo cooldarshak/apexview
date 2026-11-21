@@ -258,6 +258,90 @@ class ProtectedHevcCmafInitSegmentWriterTest {
         assertTrue(xml.contains("urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"))
     }
 
+
+    @Test fun protectedRollingSceneMapsFourCameraCropsIntoWidescreenWindows() {
+        val directory = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+        assumeTrue("Generated HEVC fixture is required", !directory.isNullOrBlank())
+        val file = File(directory!!, "source_tiled_2x2.hevc")
+        assumeTrue("Generated HEVC fixture is missing", file.isFile)
+        val nals = HevcBitstream.splitAnnexB(file.readBytes())
+        val vps = nals.first { it.type == 32 }.bytes
+        val sps = nals.first { it.type == 33 }.bytes
+        val pps = nals.first { it.type == 34 }.bytes
+        val v = HevcParameterSets.parseVps(vps)
+        val s = HevcParameterSets.parseSps(sps)
+        val p = HevcParameterSets.parsePps(pps, s)
+        val config = HevcOutputParameterSetWriter.generate(
+            vps, sps, pps, HevcOutputParameterSetWriter.Request(
+                v.vpsId, s.spsId, p.ppsId, s.width, s.height,
+                requireNotNull(p.tileColumnWidthsInCtbs),
+                requireNotNull(p.tileRowHeightsInCtbs),
+                requireNotNull(p.loopFilterAcrossTiles), 25
+            ))
+        val clear = HevcClearCmafInitSegmentWriter.write(
+            HevcClearCmafInitSegmentWriter.Request(7L, 90_000L, config))
+        val protected = ProtectedHevcCmafInitSegmentWriter.rewrite(
+            protectInit(clear, "hev1"), config)
+        val track = CmafBoxInspector.inspect(protected).tracks.single()
+        val atlasWidth = requireNotNull(track.width)
+        val atlasHeight = requireNotNull(track.height)
+        val w = atlasWidth / 2
+        val h = atlasHeight / 2
+        val rects = listOf(
+            HevcMixedArchiveAtlasPlan.SourceRect(0, 0, w, h),
+            HevcMixedArchiveAtlasPlan.SourceRect(w, 0, w, h),
+            HevcMixedArchiveAtlasPlan.SourceRect(0, h, w, h),
+            HevcMixedArchiveAtlasPlan.SourceRect(w, h, w, h)
+        )
+        val initial = ProtectedHevcLiveComposition.OutputWindow(
+            initializationSegment = protected,
+            fragments = listOf(ProtectedHevcLiveComposition.OutputFragment(
+                sequenceNumber = 1L, mediaFragment = byteArrayOf(),
+                timescale = 90_000L, baseDecodeTimeTicks = 0L,
+                durationTicks = 518_400L, sampleCount = 288,
+                width = atlasWidth, height = atlasHeight,
+                alignmentOffsetsMillis = emptyMap()
+            )),
+            sourceGeometry = ProtectedHevcLiveComposition.SourceGeometry(
+                w, h, w, h, 2, 2, rects
+            )
+        )
+        val mixed = ProtectedHevcSceneGeometry.fromWindow(initial, 4)
+        assertEquals(50.0, mixed.frameRate, 0.001)
+        assertEquals(rects, mixed.geometry.mixedSourceRects)
+        val windows = listOf(
+            app.apexview.scene.VideoWindow(1, 0, 0f, 0f, 1240f, 1080f, 1f),
+            app.apexview.scene.VideoWindow(2, 1, 1240f, 0f, 300f, 360f, 2f),
+            app.apexview.scene.VideoWindow(3, 2, 1240f, 360f, 300f, 360f, 3f),
+            app.apexview.scene.VideoWindow(4, 3, 1240f, 720f, 300f, 360f, 4f)
+        )
+        val scene = app.apexview.scene.VideoScene(
+            1920f, 1080f, mixed.atlasWidth, mixed.atlasHeight,
+            4, windows, mixed.geometry.atlasColumns, w, h, w, h,
+            rects.map { app.apexview.scene.VideoSourceRect(it.x, it.y, it.width, it.height) },
+            mixed.frameRate
+        )
+        val quads = scene.quads()
+        assertEquals(4, quads.size)
+        assertEquals(windows.map { it.id }, quads.map { it.id })
+        assertTrue(quads.map { it.texture.toList() }.distinct().size == 4)
+        // With equal-quality source tiles, the placement is instead derived
+        // from the verified output PPS and remains one-window-per-source.
+        val equal = ProtectedHevcSceneGeometry.fromWindow(initial.copy(sourceGeometry = null), 4)
+        assertEquals(4, equal.geometry.mixedSourceRects.size)
+        assertEquals(2, equal.geometry.atlasColumns)
+        assertEquals(50.0, equal.frameRate, 0.001)
+        initial.zero()
+    }
+
+    @Test fun protectedSceneRejectsUnknownOrInvalidAtlasMapping() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ProtectedHevcSceneGeometry.fromWindow(
+                ProtectedHevcLiveComposition.OutputWindow(
+                    ByteArray(0), emptyList()), 4)
+        }
+    }
+
     private fun drmBoxes(): ByteArray =
         box("moov", box("sinf", box("schi", box("tenc",
             byteArrayOf(1, 0, 0, 0, 0, 0x19, 1, 16) + ByteArray(16) { 17.toByte() })))) +
