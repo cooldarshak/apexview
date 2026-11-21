@@ -204,22 +204,22 @@ internal data class TowerSample(
 @Composable
 private fun TimingTower(app: AppState, timing: SessionTiming) {
     LaunchedEffect(timing) { app.loadSpeeds(timing) }
-    var sample by remember { mutableStateOf<TowerSample?>(null) }
+    // Session-scoped worker owns the immutable display snapshots. Keep heavy
+    // sampling off main, and do not publish unchanged frames to Compose.
+    var sample by remember(timing) { mutableStateOf<TowerSample?>(null) }
     LaunchedEffect(app, timing) {
+        val sampler = OverlayTowerSampler(timing, OverlayPerformanceProbe("phone-tv-tower-sample"))
         while (true) {
             val now = app.mapTimeMs() ?: 0L
+            // Capture mutable Compose state on main before entering the worker.
+            // Newly loaded speed data must still appear at a paused playhead.
             val speeds = timing.speeds
             val next = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
                 android.os.Trace.beginSection("PitwallTowerSampleBuild")
-                try {
-                val rows = timing.laps.mapNotNull { (number, laps) ->
-                    laps.at(now, includeRunningTime = false)?.let { number to it }
-                }.sortedBy { it.second.position ?: 99 }
-                TowerSample(rows, towerSessionHeader(timing, now), timing.tyres.mapValues { it.value.at(now) },
-                    speeds.mapValues { it.value.kmhAt(now) to it.value.gearAt(now) })
-                } finally { android.os.Trace.endSection() }
+                try { sampler.sample(now, speeds) }
+                finally { android.os.Trace.endSection() }
             }
-            if (sample?.visuallyEquals(next) != true) sample = next
+            if (sample !== next) sample = next
             delay(if (app.isTv) 250L else 500L)
         }
     }
