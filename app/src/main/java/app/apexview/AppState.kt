@@ -3214,7 +3214,12 @@ class AppState(
                             scene.atlasHeight + " sources=" + labels.size +
                             " sourceCrops=" + scene.geometry.mixedSourceRects.size +
                             " fps=" + scene.frameRate + " layout=" + previousLayout)
-                        host.feed.startProtectedComposedPlayback(window, capture.widevinePssh(),
+                        // ArchiveCompositionStartup disposes the preflight
+                        // window after replaceHost returns, even on success.
+                        // Transfer a detached owner into the live DASH source;
+                        // otherwise the startup cleanup would zero actively
+                        // leased Media3 fragments after our zero-copy publisher.
+                        host.feed.startProtectedComposedPlayback(window.detached(), capture.widevinePssh(),
                             clearOutput = capture.clearOutput,
                             startPositionMs = (audioMaster.feed.player.currentPosition - requireNotNull(composedArchiveOriginMs)).coerceAtLeast(0L),
                             playWhenReady = false)

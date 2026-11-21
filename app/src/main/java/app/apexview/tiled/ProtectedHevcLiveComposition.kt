@@ -55,6 +55,14 @@ internal object ProtectedHevcLiveComposition {
         val fragments: List<OutputFragment>,
         val sourceGeometry: SourceGeometry? = null,
     ) {
+        /** Only the startup handoff needs a second owner: its startup
+         * coordinator unconditionally clears the preflight-owned window. */
+        fun detached() = OutputWindow(
+            initializationSegment.copyOf(),
+            fragments.map(OutputFragment::detached),
+            sourceGeometry
+        )
+
         fun zero() {
             initializationSegment.fill(0)
             fragments.forEach(OutputFragment::zero)
