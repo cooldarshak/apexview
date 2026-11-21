@@ -138,9 +138,13 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         if (!protectedOutput && android.os.Build.VERSION.SDK_INT >= 30) {
             val frameRate = SceneFrameRatePolicy.hint(scene?.sourceFrameRate ?: 0.0)
             if (frameRate > 0f) runCatching {
-                output.setFrameRate(frameRate,
-                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
-                    Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS)
+                if (android.os.Build.VERSION.SDK_INT >= 31) {
+                    output.setFrameRate(frameRate,
+                        Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                        Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS)
+                } else {
+                    output.setFrameRate(frameRate, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+                }
             }.onFailure {
                 Log.w("ApexviewSingleDecoder",
                     "SURFACE_SCENE_FPS_HINT_UNAVAILABLE " + it.javaClass.simpleName)
