@@ -12,6 +12,38 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class OverlayRetainedRenderNodeAndroidTest {
+    @Test fun threeNativeRegionsAreIndependentlyInvalidatedAcrossFrameReplays() {
+        val layers = RetainedTowerRowLayers()
+        val keys = Array(3) { Any() }
+        try {
+            layers.regions.forEachIndexed { index, retained ->
+                val first = retained.beginIfChanged(keys[index], 722, 68,
+                    index, 2f)
+                assertNotNull("region $index must record on first frame", first)
+                first!!.drawColor(Color.BLUE)
+                retained.finish(keys[index], 722, 68)
+                assertTrue(retained.node.hasDisplayList())
+                repeat(10) {
+                    assertNull("unchanged region $index must reuse its display list",
+                        retained.beginIfChanged(keys[index], 722, 68, index, 2f))
+                }
+                assertEquals(1L, retained.validity.recordings)
+                assertEquals(10L, retained.validity.replays)
+            }
+            val sector = layers.regions[1]
+            val changedSector = Any()
+            val redraw = sector.beginIfChanged(changedSector, 722, 68, 1, 2f)
+            assertNotNull(redraw)
+            redraw!!.drawColor(Color.GREEN)
+            sector.finish(changedSector, 722, 68)
+            assertEquals(2L, sector.validity.recordings)
+            assertEquals(1L, layers.regions[0].validity.recordings)
+            assertEquals(1L, layers.regions[2].validity.recordings)
+        } finally {
+            layers.discard()
+        }
+    }
+
     @Test fun retainedTowerNodeRecordsAndReplaysUntilVisualKeyOrSizeChanges() {
         val node = RetainedTowerRenderNode()
         val first = Any()
