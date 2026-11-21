@@ -1,5 +1,24 @@
 # Pitwall TV: playback performance audit and implementation plan
 
+## Coordinated clear/Widevine optimization and named layout library
+
+The current branch shares bounded parallel source acquisition, low-priority
+HEVC composition, cached HEVC metadata/atlas geometry, rolling CMAF media
+ownership, 50fps frame demand/pacing, and CPU/memory/GC diagnostics across
+clear and protected playback. The encrypted CBCS/Widevine composer and
+finite-clear seek scheduler remain intentionally distinct to preserve
+security and valid fragment continuity.
+
+The driver timing card now uses a compact version on narrow onboard
+windows in every layout. Named layouts save video/map/tower geometry,
+support load/rename/delete/default and JSON import/export, and migrate
+old arrangements. Android Auto Backup restore depends on the system
+backup transport and is not guaranteed after uninstall.
+
+Full side-by-side implementation audit:
+docs/CLEAR_WIDEVINE_PARITY_AND_NAMED_LAYOUTS.md.
+Real licensed F1 playback and physical 50fps/overlay sign-off remain open.
+
 ## Build 643 severe lag: independent video surface and bounded CMAF read memory
 
 Real device log: one hardware HEVC decoder and four correct source crops,
