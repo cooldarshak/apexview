@@ -1,5 +1,68 @@
 # Pitwall TV: playback performance audit and implementation plan
 
+Status: active implementation and hardware validation; progress audited through Build 598 (21 November 2026). Original requirements below remain open until their stated exit criteria pass.
+
+
+## Current progress ledger: Build 598 (21 November 2026)
+
+**Baseline:** Build 562, commit 574ccb587a50f174748d1b08ed2283e4b8ed1ecc.
+**Current functional baseline:** Build 598, commit 635d0eb7bc46aa666c8807024432231849254c16, on feature/pitwall-performance-audit-plan. GitHub compare: 37 commits ahead of Build 562, zero behind. [Build 598 CI passed](https://github.com/cooldarshak/apexview/actions/runs/44895371508).
+
+**Overall status: active, NOT completed.** Real clear four-feed, mixed-resolution one-decoder playback has been demonstrated on a Samsung Galaxy S22 Ultra. This does not establish protected/CBCS four-feed playback, smooth physical presentation, native TCL TV playback, or multifeed casting. Do not describe a green CI run as device acceptance.
+
+**Status vocabulary:** *Device demonstrated* means the specific behavior appears in an actual F1 session log, not that the full performance/endurance exit criterion passed. *Implemented, not accepted* means code and CI checks exist but device acceptance is outstanding. *Partial/failing* means significant gaps or observed device failures. *Pending* means no completion evidence.
+
+### Original P0–P2 plan: achieved versus pending
+
+| Plan item | Progress made in the branch | Status / remaining acceptance |
+| --- | --- | --- |
+| **P0.1 segment prioritization and single-flight** | ArchiveSegmentSingleFlight, separate bounded foreground/prefetch fetch lanes, seek/close cancellation and cache ownership code; unit tests. | **Implemented, not accepted.** Need matched foreground latency, p95 prefetch-blocking, seek-race and warm/cold tests on devices. |
+| **P0.2 allocations / HEVC composition** | Direct/sized CMAF fragment writers, bounded NAL/Annex-B handling, fewer staging copies, parsed slice-header reuse and instrumentation (Builds 576–585). **Build 585 phone:** process-wide median 147.3 MB allocation, four GCs and 555.5 ms composition per 5.76 s segment. | **Partial.** No allocation-stack attribution or controlled p95/GC reduction proof; large churn remains. Independent decode/bitstream checks pass CI but do not satisfy the performance gate. |
+| **P0.3 codec, BufferQueue and 50 fps presentation** | Diagnostics split callback, texture latch, GL draw, actual EGL swap, display modes and FrameTimeline; display-priority GL handling. Real clear playback retains one Qualcomm HEVC decoder. | **Partial/failing.** BufferQueue timeouts remain unexplained. Unique video-picture physical presentation, p95/p99 cadence and A/V drift are not established by decoder counters. |
+| **P0.4 timing tower/map/UI jank** | Canvas/layer, accessibility, sampling, cached geometry, vsync-aligned TV marker animation, trace probes and progressive timing cache; Build 584 reversed a tower-layer regression. | **Partial/failing.** Build 585 phone app-frame deadline misses: OFF 42.7%, tower 53.4%, map 53.0%, both Featured 59.4%, both TV layout 62.6% (different trace windows/layouts, not controlled causal A/B). Goal of fewer than 5% slow UI frames / zero steady freezes is not met. |
+| **P1.1 minimize coded atlas area** | Bounded search for lowest-area conforming tile arrangement, CTB geometry checks and tests; real 1920×2176 and 2880×2176 atlas configurations seen. | **Implemented, not accepted.** No matched real-device proof of minimum coded work, decoder load reduction or sustained advantage. |
+| **P1.2 refresh matching** | Active and available mode logs, frame-rate hints, cadence metrics. S22 trace selected 120 Hz without exact 50/100 Hz mode. | **Partial.** No documented refresh-mode improvement or physical 50 fps acceptance; 50 fps on 120 Hz has uneven cadence even with a healthy player. |
+| **P1.3 per-feed quality and thermal** | Saved per-feed caps and actual HLS rendition reporting; mixed-resolution clear atlas; protected-source rendition and tile planning. Real 480p cap can yield 640×360; 540p source can yield 960×540. | **Partial.** Clear quality selection works, but full quality-switch/endurance/thermal policy and encrypted independent-resolution playback are not accepted. Do not silently lower source quality. |
+| **P2.1 continuous Google/Pitwall Cast** | Rolling CMAF/HLS relay, baked-scene/audio plumbing, local receiver, HLS discontinuity fixes, controller/overlay messages. A phone-to-TV single-feed qualifying session with map and tower **reportedly worked**. Clear-frame Cast still uses PixelCopy rather than proposed direct EGL encoder input. | **Partial/failing.** Multifeed casting with map/tower was reported failing. Four-feed receiver playback, synchronized commentary, Google Cast, pause/seek endurance and protected receivers remain unverified. |
+| **P2.2 split AppState** | Source policy, capture and composition helpers extracted. | **Pending major refactor.** Playback/timing/Cast lifecycles remain strongly coupled in AppState; no completed coordinator ownership separation. |
+| **P2.3 signed update and repository** | GitHub produces signed in-place-installable debug builds. | **Partial.** app/build.gradle.kts still names mikeyyy0/apexview as UPDATE_REPO rather than cooldarshak/apexview; confirm intended update source, then correct and test upgrades. |
+| **P2.4 security** | Authorization, Widevine, secure surfaces and relay boundaries preserved. | **Partial.** AndroidManifest still enables global usesCleartextTraffic=true; scope LAN access and verify credential/log protections without DRM bypass. |
+| **P2.5 TV, overlays, D-pad** | Layouts/focus/tower/map controls implemented, with marker-pacing and timing-cache changes. | **Partial/failing device gate.** TCL 55C655 direct native multifeed, map/tower single-feed and smooth marker/D-pad behavior not accepted on Build 598. Earlier TV captures showed major startup/composition lag. |
+| **P2.6 CI, instrumentation, benchmarks** | Build 598 GitHub Actions green, Kotlin/JVM tests, synthetic HEVC and independent FFmpeg/pixel checks, signed APK plus Android-test APK assembled. | **CI achieved, device acceptance pending.** Workflow assembles but does not show executing Android instrumentation on a device; no reproducible real-phone+TV ten-minute performance/Macrobenchmark gate. |
+| **P2.7 language decision** | Kotlin + Media3 + GLES retained, no speculative Rust/NDK/Vulkan replacement. | **Retained as planned.** Any native rewrite requires profiler evidence and a measured prototype first. |
+
+### Protected F1 CMAF: additional work arising after the original plan
+
+| Pipeline stage | Real progress | Acceptance |
+| --- | --- | --- |
+| Same-channel offer routing | Authorized HLS/DASH alternatives and verification; HLS is not automatically clear, a license URL alone is not proof of encrypted samples. | Implemented, source offer type varies; reason for variation unestablished. |
+| Source rendition and mixed geometry | Builds 591–593 added protected mixed-source atlas and fixed the real HLS rendition selector (the DASH-only selector was insufficient). | Code/CI; actual protected composed output not verified. |
+| HEV1 initialization | Build 594 recovers VPS/SPS/PPS from fully clear in-band NALs where an encrypted hev1 init lacks them. Real F1 capture moved through this stage. | Real parsing reached; does not prove protected playback. |
+| CBCS sample groups and subsample records | Build 595 differentiates unrelated sample groups from encryption-changing seig; preserves KID, IV, CBCS pattern and subsample checks. | Real capture progressed to later stage; cross-feed crypto feasibility open. |
+| POC and IDR epochs | Builds 597–598 make alignment AND picture-composer proof epoch/fragment/ordinal aware, avoiding POC-only duplicate-picture lookup. | Implemented/CI; successful encrypted decoder handoff still absent. |
+| Cross-feed encryption compatibility | Build 598 adds production-wide coding/atlas/CBCS/key preflight and separate per-picture IV validation. | **Critical open gate.** Different actual effective KIDs/IVs may make a single protected output sample impossible without an alternative authorized architecture; never bypass protection gates. |
+
+### What the real F1 evidence DOES and DOES NOT verify
+
+- **Phone clear multiview:** User-provided pitwall-20261121-100011-791.log.txt confirms Build 598 with four feeds, 1920×1080 main plus three 960×540 actual visible sources in one run (other configurations also tested), atlas 1920×2176, approximately 50 fps, one c2.qti.hevc.decoder, one selected video track, one scene input texture and one output view, first frame rendered, tower and track map on. Last sampled run showed 1,527 rendered video frames and zero Media3-reported drops. **Real F1 playback demonstrated**, but captured period is about 90 seconds, not ten minutes; the log explicitly states cast=false. Media3 drop count does not show physical presentation.
+- **Different F1 offers, same content:** In that log, the Build 595 attempt at about 15:30 received SDR_HD_CMAFWV (encrypted), while Build 598 at about 16:18 received SDR_HD_CMAF (clear) for content 1000010439. The clear success does **not** establish protected-path success or explain why the F1 API returned a different offer.
+- **Other clear atlases:** 2880×2176 playback/preparation is recorded. A 3840×2176 source arrangement reached first frame but was not shown in a matched sustained test.
+- **Phone performance baseline:** Build 585 real Perfetto traces remain the quantified OFF/map/tower/both comparison. The Build 598 playback success is **not** a new matched, physical presentation trace.
+- **TCL native:** No Build 598 passing four-feed native/overlay endurance capture. Earlier native TV single feed plus overlays and protected multi-feed had stalls, corruption or excessive composition time.
+- **Casting:** Single-feed plus baked overlays reportedly played through qualifying on the TV; four-feed Cast plus overlays and audio synchronization is still open.
+
+### Revised acceptance-driven delivery sequence
+
+1. **A. Real stream feasibility and source selection.** On one authorized session, record the actual selected per-feed renditions and offer type, effective HEVC sets, fragment/POC/IRAP epochs and source-wide CBCS/KID/IV compatibility using only safe diagnostics. Require actual composed encrypted first frame and sustained one-decoder playback before marking protected support done. If independent encrypted camera samples are unmergeable, document that architecture blocker, not another validation bypass.
+2. **B. Close P0 phone smoothness in one coordinated batch.** Ten-minute four-feed run with tower+map and controlled OFF/tower/map/both isolates at fixed source/thermal conditions. Measure real SurfaceFlinger/FrameTimeline presentation, slow/frozen frames, RenderThread/Compose, allocations/GC by site, segment request p95/p99, BufferQueue ownership, audio clock and seek. Keep goal of fewer than 5% slow frames and no steady-state freezes.
+3. **C. Native TCL TV end-to-end.** Test single feed with both overlays, then two and four feeds, one video decoder/secure surfaces where required, 5.76 s segment production, cold timing data, D-pad/focus/sliders, audio/seek and continuous playback. A phone success is not a TV success.
+4. **D. Cast end-to-end.** Validate both Pitwall Cast and Google Cast at four feeds with the actual tower/map and commentary, correct windows, one receiver decoder, play/pause/seek and sustained A/V sync. Improve the clear PixelCopy encoding path only with captured throughput evidence and without changing protected screenshot rules.
+5. **E. Product and release hardening.** Run Android instrumentation and Macrobenchmark on hardware, signed update-in-place verification, release source/cleartext review, coordinator refactor and regression matrix. Preserve all layouts/features. Publish grouped, reviewed changes rather than isolated unverified claims.
+
+**Definition of done:** physical-phone AND TCL real F1 endurance, one composed HEVC video/Media3 player/hardware decoder, actual independent feed quality, smooth 50 fps presentation, synchronized audio, working timing/map/D-pad, separate end-to-end Cast, legitimate F1 entitlement/Widevine preserved. A green build, first frame, clear stream replacing protected stream, or short playback is not enough.
+
+---
+
 Status: implementation backlog, not a claim of completed fixes or smooth playback.
 
 ## Build 576 verified, next P0/P1.1 candidate (20 November 2026)
