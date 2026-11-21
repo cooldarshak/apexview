@@ -216,6 +216,48 @@ class ProtectedHevcCmafInitSegmentWriterTest {
         }
     }
 
+
+    @Test fun pitwallCastEncryptedAudioCencRetainsItsOwnDefaultKid() {
+        // Pitwall Cast audio reuses the same MPD protection helper. A strict video-only
+        // requirement would break the encrypted soun/enca representation.
+        val tenc = box("tenc", byteArrayOf(0, 0, 0, 0, 0, 1, 16) +
+            ByteArray(16) { 35.toByte() })
+        val sinf = box("sinf",
+            box("frma", ascii("mp4a")) +
+            box("schm", byteArrayOf(0, 0, 0, 0) + ascii("cenc") + u32(0x00010000)) +
+            box("schi", tenc))
+        val audioEntry = box("enca", ByteArray(28) + sinf)
+        val stsd = box("stsd", byteArrayOf(0, 0, 0, 0) + u32(1) + audioEntry)
+        val tkhd = box("tkhd",
+            byteArrayOf(0, 0, 0, 7) + u32(0) + u32(0) + u32(7) + u32(0) + ByteArray(60))
+        val mdhd = box("mdhd",
+            byteArrayOf(0, 0, 0, 0) + u32(0) + u32(0) +
+            u32(90_000) + u32(0) + ByteArray(4))
+        val hdlr = box("hdlr", byteArrayOf(0, 0, 0, 0) + u32(0) +
+            ascii("soun") + ByteArray(12))
+        val trak = box("trak", tkhd + box("mdia", mdhd + hdlr +
+            box("minf", box("stbl", stsd))))
+        val trex = box("trex", byteArrayOf(0, 0, 0, 0) +
+            u32(7) + u32(1) + u32(0) + u32(0) + u32(0))
+        val init = box("ftyp", ascii("iso6") + u32(0) + ascii("iso6cmfc")) +
+            box("moov", trak + box("mvex", trex))
+        val inspected = CmafBoxInspector.inspect(init)
+        assertTrue(inspected.errors.toString(), inspected.errors.isEmpty())
+        assertTrue(inspected.initializationSegmentPresent)
+        assertEquals("soun", inspected.tracks.single().handler)
+        assertEquals("cenc", inspected.tracks.single().protectionScheme)
+        val uuid = "edef8ba979d64acea3c827dcd51d21ed"
+            .chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val pssh = box("pssh", byteArrayOf(0, 0, 0, 0) + uuid + u32(0))
+        val xml = ProtectedHevcComposedDashPackageBuilder.protectionXml(
+            init, pssh, "cenc"
+        )
+        assertTrue(xml.contains("value=\"cenc\""))
+        assertTrue(xml.contains(
+            "cenc:default_KID=\"23232323-2323-2323-2323-232323232323\""))
+        assertTrue(xml.contains("urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"))
+    }
+
     private fun drmBoxes(): ByteArray =
         box("moov", box("sinf", box("schi", box("tenc",
             byteArrayOf(1, 0, 0, 0, 0, 0x19, 1, 16) + ByteArray(16) { 17.toByte() })))) +

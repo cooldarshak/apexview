@@ -1,5 +1,40 @@
 # Pitwall TV: playback performance audit and implementation plan
 
+## Build 632 protected DASH handoff failure and coordinated correction (21 November 2026)
+
+Build 632's Las Vegas qualifying protected four-feed capture has now been inspected
+alongside the fresh 22:39:55 Perfetto trace. This is a new confirmed defect beyond the
+earlier encrypted-slice header work. At 22:39:15.717 all 288 pictures pass CBCS
+key/IV/shape identity and encrypted-byte preservation checks. The stream is
+successfully composed, but at 22:39:16.855 the composed DASH source rejects
+the rewritten init: "Protected init tenc defaults are invalid", repeated three times.
+
+Source audit found the cause. The CMAF inspector correctly parses version-1 tenc:
+FullBox version/flags, reserved, CBCS pattern, default_isProtected, IV size,
+default_KID. The separate DASH default-KID reader omitted the reserved field,
+so a common CBCS 0x19 pattern was treated as isProtected and failed validation.
+Both version 0 and version 1 need the reserved field. The MPD builder now checks
+the raw defaults against the independently validated CMAF track and verifies
+the extracted KID fingerprint before emitting cenc:default_KID.
+
+Regressions now cover real synthetic HEVC init rewrite through version 0 and 1
+tenc, protected media fragments, Widevine PSSH, full DASH manifest generation
+and the actual Media3 DASH manifest parser. Cast's encrypted audio path shares
+the same helper, so the parser retains support for its single encrypted audio
+track and cenc scheme, covered by a separate synthetic audio init regression.
+
+The trace records 1,175 actual Pitwall app surface frames with PresentType
+PRESENT_LATE and 1,001 with BufferQueue stuffing. The app's own 27 frame windows
+record 2,009 frames, 757 slow (37.7%), three frozen and max 1,143 ms at 120 Hz.
+The capture includes startup and one-feed fallback, not successful four-feed
+protected playback. Map and timing tower graphics acceptance remains OPEN.
+
+CBCS independent-sub-sample cipher chains are required to preserve the same
+sample IV and crypto pattern with each source encrypted range; those checks
+remain mandatory, and ciphertext is not decrypted or re-encrypted.
+Real hardware Widevine + one-decoder first frame, four-feed playback stability,
+Cast parity and overlay smoothness remain UNVERIFIED by CI.
+
 ## Build 629 protected CABAC splice follow-up (21 November 2026)
 
 Build 629's S22 Ultra log confirms that the Build 627 protected init signalling failure
