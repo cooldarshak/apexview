@@ -148,7 +148,7 @@ internal class PitCircleData(val referenceMs: Long, val ring: List<OnCircle>, va
     val gapsToLeader: Boolean, val condition: TrackCondition)
 
 internal fun pitCircleData(app: AppState, timing: SessionTiming, now: Long, basis: PitBasis,
-    positionedCars: List<Car> = carsAt(timing, now),
+    positionedCars: List<Car>? = null,
 ): PitCircleData? {
     val flags = timing.flags.at(now)
     val leader = basis.leader
@@ -165,7 +165,7 @@ internal fun pitCircleData(app: AppState, timing: SessionTiming, now: Long, basi
     // Cars in the pit lane ride the inner arc; one there far longer than a stop has stopped.
     val inLane = mutableMapOf<String, Float>()
     val ring = mutableListOf<OnCircle>()
-    val placed = positionedCars
+    val placed = positionedCars ?: carsAt(timing, now)
     placed.forEach { car ->
         val laps = timing.laps[car.number]
         val since = laps?.inPitSince(now)
