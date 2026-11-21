@@ -464,7 +464,7 @@ internal class F1DashFeedCapture(
             val composeMs = android.os.SystemClock.elapsedRealtime() - composedStarted
             android.util.Log.i("ApexviewSingleDecoder",
                 "DASH_CMAF_CAPTURE feeds=${feeds.size} protection=CBCS " +
-                "archive=$archive ioParallel=true compositionWorker=BACKGROUND " +
+                "archive=$archive ioParallel=true compositionWorker=BELOW_UI_PRIORITY " +
                 "fetchMs=$fetchMs composeMs=$composeMs " +
                 "sourceBytes=${owned.sumOf { it?.size?.toLong() ?: 0L }}")
             return labels

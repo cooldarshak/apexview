@@ -477,7 +477,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 }
                 android.util.Log.i("ApexviewSingleDecoder", "HLS_CMAF_CAPTURE feeds=${feeds.size} protection=${if (clear) "CLEAR" else "CBCS"} aligned=PASS composed=${if (clear) clearComposition.hasOutput() else ProtectedHevcLiveComposition.hasOutput(group)} fetchMs=$fetchMs composeMs=$composeMs totalMs=${android.os.SystemClock.elapsedRealtime() - startedMs} archiveClockMs=$positionMs segmentStartUs=${aligned.first().absoluteStartUs} " +
                     "processAllocBytesDuringSegment=${allocated ?: -1L} processGcDuringSegment=${collections ?: -1L} " +
-                    "sourceBytes=${media.sumOf { it.size.toLong() }} ioConcurrency=4 compositionWorker=BACKGROUND")
+                    "sourceBytes=${media.sumOf { it.size.toLong() }} ioConcurrency=4 compositionWorker=BELOW_UI_PRIORITY")
                 snapshot(group, format, aligned.first().absoluteStartUs, feeds.size)
             } finally { media.forEach { it.fill(0) } }
         } catch (cancelled: CancellationException) { throw cancelled
