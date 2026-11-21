@@ -3,6 +3,68 @@
 Status: active implementation and hardware validation; progress audited through Build 598 (21 November 2026). Original requirements below remain open until their stated exit criteria pass.
 
 
+
+## Post-Build 602 overlay engineering review and acceptance gate (21 November 2026)
+
+**Baseline:** Build 602, commit `a855001247f675a49ae1471b12305a80920f9f2d`.
+**Branch:** `feature/pitwall-performance-audit-plan`.
+**Current status:** additional code corrections and automated regression tests implemented.
+**NOT device accepted:** CI and real S22 Ultra / TCL acceptance must be reported separately.
+No external company, including Google, has performed a code review or approved this app.
+
+### Source audit findings and fixes
+
+| Source finding in Build 602 | Corrective implementation | Regression evidence |
+| --- | --- | --- |
+| `Laptop.kt` live TimingTower still rebuilt cards, speeds and tyre maps every 250/500 ms; the previously implemented `OverlayTowerSampler` was **unused** | Wire one session-scoped sampler directly into TimingTower's background worker. Publish only changed immutable TowerSamples. Reset display sample on session changes; capture updated speed-map snapshots on the main thread before worker handoff | `OverlayTowerSamplerTest`, `TowerSampleVisualTest`, existing Compose accessibility tests |
+| The same `OverlayPositionSampler` advanced through independently scheduled 30 Hz UI and 60 Hz map drawing clocks. Build 602 reported frequent seek resets despite normal forward playback | Give track and edge hit-target timelines independent sampler cursors from their draw-phase timelines. Preserve exact track/cast position and gap rules | `OverlayPositionSamplerTest`, `OverlayGeometryParityTest` |
+| Position identity reused `previous.getOrNull(sourceIndex)`, which becomes wrong when the published list skips a leading driver | Cache the previous immutable Car **per source entry**, not by compacted display index. Unchanged following drivers retain stable identity | `OverlayPositionSamplerTest.droppedLeadingDriverDoesNotInvalidateUnchangedFollowingDriver` |
+| Each of the three native RenderNodes occupied the complete row width, even when only sectors or tyres changed | Keep full-width base layer for highlight; record sectors and tyres in narrow conservative physical bounds with full-row coordinate translation. Calculate bounds only on dirty recording, not steady frame replay. Software Canvas fallback unchanged | `OverlayRetainedDrawingTest.nativeRegionBoundsCoverExistingColumnsWithoutThreeFullRowLists`, native instrumentation RenderNode tests |
+| Hardware measurements absent for the new integration | Preserve five-second `OVERLAY_5S` fixed-bin probes. New owners: `phone-tv-tower-sample`, `phone-track-draw-position`, `phone-edge-draw-position`; unchanged trace labels around tower snapshot and map composition | Build logs and Perfetto trace from device, **pending** |
+
+### Non-negotiable visual and feature contract
+
+Maintain every previously supported map mode (normal, edge, pit circle), identical car positions,
+retirement/gap rules, 44dp selection/focus targets, labels, sector and tyre colours, all three
+mini-sector strips, remote D-pad, driver-selection actions, panel resize/move/rotation, lock,
+opacity, text sizing, pause, seek and reverse. Keep original authorized subscription/DRM,
+single HEVC decoder, commentary sync, Pitwall Cast timing protocol and sender/receiver
+connections. No second player, additional video surface, screenshot of protected content,
+proprietary SDK or alternate timing provider.
+
+### Measurable engineering acceptance, NOT a code-completion percentage
+
+1. **Automated green gate:** the newest full workflow on the resulting branch must pass
+   Kotlin unit tests, independent synthetic HEVC validation, Cast protocol tests,
+   `assembleDebug` and `assembleDebugAndroidTest`. A CI pass alone does not prove graphics.
+2. **Profile the same 10-minute archive** on S22 Ultra with identical feed sizes, quality,
+   layout and refresh settings in 4 conditions: overlays OFF, map-only, tower-only and both ON.
+   Use non-tracing runs alongside Perfetto runs to quantify instrumentation overhead.
+   Compare to Build 602 and (separately) Build 585 video-only measurements.
+3. **Overlay acceptance:** position seek resets should be zero during steady forward playback
+   (except genuine replay seeks/discontinuities); static circuit re-records should stay zero
+   between map/layout changes; unchanged tower records should be replayed. Track p95 and max
+   by `OVERLAY_5S` owner; identify and investigate every repeatable >16ms overlay spike
+   rather than declaring it a GPU stall solely from CPU timers.
+4. **Visual parity:** compare Build 602 and the new build in all three map modes, selected and
+   retired drivers, yellow/VSC/SC/red flags, active/restarting session, lap/gear/speed/tyre
+   changes, sector strips and accessibility. Verify touch and D-pad hit-target positions
+   when map moves and resizes; verify opacity and text placement on both devices.
+5. **UI/physical presentation:** independent `FrameTimeline`/SurfaceFlinger actual
+   presented-video cadence and app UI deadline data are necessary. Target fewer than 5%
+   slow app UI frames with both overlays on in a stable representative session, and
+   no sustained freezes. Map/tower CPU timers do **not** establish physical 50fps.
+6. **TCL 55C655 and Pitwall Cast:** ten-minute local playback and Cast receiver checks
+   with map/tower, selected commentary, seek/pause, focus/resize/lock, and decoder count.
+   Cast wire format remains v1. Hardware sign-off stays **PENDING** until observed.
+
+**Scope separation:** the November 21 trace also showed segment allocation/GC pressure,
+SurfaceTexture buffer timeouts, quality-change restart and UI slow frames with overlays
+disabled. These broader pipeline issues remain separate P0/P1 investigations. Do not
+claim that overlay corrections alone fix protected playback, buffer backpressure,
+physical presentation or video-only stuttering.
+
+
 ## P0.4 integrated overlay-engine redesign — 21 November 2026
 
 **Implementation branch:** feature/pitwall-performance-audit-plan. This is a
