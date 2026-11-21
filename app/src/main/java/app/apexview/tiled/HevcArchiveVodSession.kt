@@ -346,7 +346,8 @@ internal class HevcArchiveVodSession(
                         "parseMs=${composed.parseMs} rewriteMs=${composed.rewriteMs} packageMs=${composed.packageMs} " +
                         "processAllocBytesDuringSegment=${allocatedDuringProduction ?: -1L} " +
                         "processGcDuringSegment=${gcDuringProduction ?: -1L} " +
-                        "outputBytes=${output.size} durationMs=${groups[number].durationUs / 1000L} " +
+                        "outputBytes=${output.size} sourceAnnexBBytesAvoided=${composed.sourceAnnexBBytesAvoided} " +
+                        "durationMs=${groups[number].durationUs / 1000L} " +
                         "worker=$worker clock=PLAYER_REQUEST cache=${cache.size}")
                 }
             } finally {

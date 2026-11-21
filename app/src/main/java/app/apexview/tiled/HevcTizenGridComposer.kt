@@ -100,10 +100,29 @@ internal object HevcTizenGridComposer {
         emitSampleData: Boolean = true
     ): Result {
         require(feedStreams.size >= 2) { "At least two independent source feeds are required" }
+        return composeNalUnits(feedStreams.map { HevcBitstream.splitAnnexB(it) }, grid, cells,
+            frameRateNumerator, frameRateDenominator, outputNalLengthSize,
+            includeAnnexBOutput, emitSampleData)
+    }
+
+    /**
+     * The CMAF caller owns validated NAL bytes already. Accept those directly rather than
+     * allocating a second full Annex-B bitstream and splitting it into duplicate NAL arrays.
+     * All picture, parameter-set, tile and slice compatibility checks are shared below.
+     */
+    internal fun composeNalUnits(
+        feedNals: List<List<HevcBitstream.NalUnit>>,
+        grid: HevcOutputGridDimensions,
+        cells: List<CellSelection>,
+        frameRateNumerator: Int = 50,
+        frameRateDenominator: Int = 1,
+        outputNalLengthSize: Int = 4,
+        includeAnnexBOutput: Boolean = true,
+        emitSampleData: Boolean = true
+    ): Result {
+        require(feedNals.size >= 2) { "At least two independent source feeds are required" }
         require(outputNalLengthSize in 1..4) { "Output NAL length size must be between 1 and 4" }
-        val feeds = feedStreams.mapIndexed { index, bytes ->
-            parseFeed(index, bytes)
-        }
+        val feeds = feedNals.mapIndexed { index, nals -> parseFeed(index, nals) }
         val first = feeds.first()
         require(feeds.all { it.pictures.size == first.pictures.size }) {
             "Source feeds contain different coded-picture counts"
@@ -313,8 +332,7 @@ internal object HevcTizenGridComposer {
         )
     }
 
-    private fun parseFeed(index: Int, annexB: ByteArray): ParsedFeed {
-        val nals = HevcBitstream.splitAnnexB(annexB)
+    private fun parseFeed(index: Int, nals: List<HevcBitstream.NalUnit>): ParsedFeed {
         require(nals.all { it.layerId == 0 }) {
             "Source feed $index contains a non-zero HEVC layer ID"
         }
