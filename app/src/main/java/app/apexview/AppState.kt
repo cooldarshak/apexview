@@ -3249,8 +3249,20 @@ class AppState(
                     val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
                     lastSnapshot = snapshot
                     snapshot.failure?.takeUnless { it.retryable }?.let { throw IOException(it.reason) }
-                    if (snapshot.capturedFeeds > 0) capture.outputWindow(group)?.let {
-                        host.feed.publishProtectedComposedOutput(it, capture.widevinePssh())
+                    if (snapshot.capturedFeeds > 0) capture.outputWindow(group)?.let { updated ->
+                        // A rolling adaptive rendition can change atlas geometry.
+                        // Capture source rectangles before publishing zeroes the window;
+                        // refresh only scene metadata, never add another decoder.
+                        val nextLayout = app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
+                            updated, labels.size)
+                        host.feed.publishProtectedComposedOutput(updated, capture.widevinePssh())
+                        if (protectedRollingScene?.layout != nextLayout) {
+                            protectedRollingScene = ProtectedRollingScene(labels.toList(), nextLayout)
+                            android.util.Log.i("ApexviewSingleDecoder",
+                                "F1_PROTECTED_SCENE_GEOMETRY_CHANGED atlas=" +
+                                nextLayout.atlasWidth + "x" + nextLayout.atlasHeight +
+                                " sourceCrops=" + nextLayout.geometry.mixedSourceRects.size)
+                        }
                     }
                     if (composedArchiveFillingBuffer && ArchiveBufferPolicy.ready(snapshot.outputTiming,
                             Math.multiplyExact(audioMaster.feed.player.currentPosition.coerceAtLeast(0L), 1000L),
