@@ -1,5 +1,24 @@
 # Pitwall TV: playback performance audit and implementation plan
 
+## Build 637: real one-decoder protected playback achieved; scene presentation was broken
+
+Device log and screenshot show actual four-source CBCS media decoded into
+one 1920x2176 hardware HEVC picture at 50fps, 975 rendered frames by
+23:05:55, no reported decoder drops. The app incorrectly treated the
+tall tile atlas as one ordinary video, hid other visual windows and
+forced the diagnostic layout. Layout changes then deliberately cancelled
+the protected rolling capture and reverted to source streams, matching
+the 23:05:56 codec/timeline discontinuity. Repeated BufferQueue
+timeouts also block rendering sign-off.
+
+The existing one-decoder GPU source-cropped scene renderer is now
+wired into the protected rolling path with independently validated
+atlas rectangles and frame rate, secure EGL for L1, unchanged authorized
+L3 handling, stable original TV layout and rolling rendition updates.
+No HEVC/DRM bypass or extra video decoder was introduced. A full
+analysis is in docs/BUILD_637_PROTECTED_SCENE_DIAGNOSIS.md.
+Hardware graphics sign-off and Cast parity remain OPEN.
+
 ## Build 632 protected DASH handoff failure and coordinated correction (21 November 2026)
 
 Build 632's Las Vegas qualifying protected four-feed capture has now been inspected
