@@ -152,6 +152,81 @@ class ProtectedHevcPictureComposerTest {
         }
     }
 
+    @Test fun protectedAtlasAcceptsValidatedCellPlacementWithoutChangingCiphertext() {
+        val f = fixture()
+        val plan = requireNotNull(HevcMixedArchiveAtlasPlan.choose(
+            List(2) { HevcMixedArchiveAtlasPlan.Source(f.vps, f.sps, f.pps) }))
+        val source = File(System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")!!, "source_tiled_2x2.hevc")
+        val nals = HevcBitstream.splitAnnexB(source.readBytes())
+        val sourceCols = requireNotNull(f.pps.tileColumnWidthsInCtbs)
+        val sourceRows = requireNotNull(f.pps.tileRowHeightsInCtbs)
+        val outputCols = (0 until plan.grid.columns).map { column ->
+            plan.cells.filter { it.outputColumn == column }
+                .map { sourceCols[it.sourceTileIndex % sourceCols.size] }.distinct().single()
+        }
+        val outputRows = (0 until plan.grid.rows).map { row ->
+            plan.cells.filter { it.outputRow == row }
+                .map { sourceRows[it.sourceTileIndex / sourceCols.size] }.distinct().single()
+        }
+        val output = HevcOutputParameterSetWriter.generate(
+            nals.single { it.type == 32 }.bytes, nals.single { it.type == 33 }.bytes,
+            nals.single { it.type == 34 }.bytes,
+            HevcOutputParameterSetWriter.Request(f.vps.vpsId, f.sps.spsId, f.pps.ppsId,
+                plan.codedWidth, plan.codedHeight, outputCols, outputRows,
+                requireNotNull(f.pps.loopFilterAcrossTiles), 25, uncroppedOutputPicture = true))
+        val sps = HevcParameterSets.parseSps(output.sps)
+        val pps = HevcParameterSets.parsePps(output.pps, sps)
+        val iv = ByteArray(16) { 17 }
+        val feeds = (0..1).map { index ->
+            feed(f, "mixed-$index", index + 1L, 0, 0, 0, iv, 0)
+        }
+        val result = ProtectedHevcPictureComposer.compose(
+            feeds, sps, pps, mixedCells = plan.cells)
+        assertEquals(plan.cells.size, result.contributions.size)
+        assertEquals(result.contributions.map { it.destinationAddress }.toSet().size,
+            result.contributions.size)
+        assertEquals(plan.cells.size.toLong(), result.encryptedByteCount)
+        val layout = ProtectedHevcSampleLayout.inspect(
+            result.sampleBytes, 4, result.subsampleRanges)
+        val inspection = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(
+            result.sampleBytes, layout, sps, pps)
+        assertEquals(plan.cells.size, inspection.slices.size)
+        assertEquals(plan.cells.size, inspection.slices.map { it.tile.index }.distinct().size)
+    }
+
+    @Test fun protectedMixedAtlasStillRejectsDifferentEncryptedIvIdentity() {
+        val f = fixture()
+        val plan = requireNotNull(HevcMixedArchiveAtlasPlan.choose(
+            List(2) { HevcMixedArchiveAtlasPlan.Source(f.vps, f.sps, f.pps) }))
+        val sourceCols = requireNotNull(f.pps.tileColumnWidthsInCtbs)
+        val sourceRows = requireNotNull(f.pps.tileRowHeightsInCtbs)
+        val cols = (0 until plan.grid.columns).map { column ->
+            plan.cells.filter { it.outputColumn == column }
+                .map { sourceCols[it.sourceTileIndex % sourceCols.size] }.distinct().single()
+        }
+        val rows = (0 until plan.grid.rows).map { row ->
+            plan.cells.filter { it.outputRow == row }
+                .map { sourceRows[it.sourceTileIndex / sourceCols.size] }.distinct().single()
+        }
+        val source = File(System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")!!, "source_tiled_2x2.hevc")
+        val nals = HevcBitstream.splitAnnexB(source.readBytes())
+        val output = HevcOutputParameterSetWriter.generate(
+            nals.single { it.type == 32 }.bytes, nals.single { it.type == 33 }.bytes,
+            nals.single { it.type == 34 }.bytes,
+            HevcOutputParameterSetWriter.Request(f.vps.vpsId, f.sps.spsId, f.pps.ppsId,
+                plan.codedWidth, plan.codedHeight, cols, rows,
+                requireNotNull(f.pps.loopFilterAcrossTiles), 25, uncroppedOutputPicture = true))
+        val sps = HevcParameterSets.parseSps(output.sps)
+        val pps = HevcParameterSets.parsePps(output.pps, sps)
+        val feeds = listOf(feed(f, "a", 1, 0, 0, 0, ByteArray(16) { 1 }, 0),
+            feed(f, "b", 2, 0, 0, 0, ByteArray(16) { 2 }, 0))
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            ProtectedHevcPictureComposer.compose(feeds, sps, pps, mixedCells = plan.cells)
+        }
+        assertTrue(error.message!!.contains("selected sample IV identity differs"))
+        assertFalse(feeds.any { it.pocTracker.hasReferenceAnchor })
+    }
+
     private data class Fixture(
         val sample: ByteArray,
         val ranges: List<CmafBoxInspector.SubsampleEncryptionRange>,

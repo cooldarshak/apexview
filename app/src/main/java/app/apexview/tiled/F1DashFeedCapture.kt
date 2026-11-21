@@ -52,6 +52,8 @@ internal class F1DashFeedCapture(
     data class Feed(
         val label: String,
         val manifestUrl: String,
+        /** Per-feed resolution ceiling. Null retains the existing common-rendition selection. */
+        val preferredHeight: Int? = null,
     )
 
     data class Snapshot(
@@ -136,12 +138,10 @@ internal class F1DashFeedCapture(
             val loaded = coroutineScope {
                 feeds.map { feed -> async { loadFeed(feed) } }.awaitAll()
             }
-            val chosenSize = chooseCommonHevcSize(loaded)
-                ?: throw PermanentCaptureException("F1 feeds do not expose a common HEVC rendition at or below ${maximumVideoHeight}p")
-            val selected = loaded.map { item ->
-                item.copy(
-                    representation = item.representationFor(chosenSize.first, chosenSize.second)
-                )
+            val chosen = chooseRequestedRepresentations(loaded)
+            val chosenSize = chosen.first().format.let { it.width to it.height }
+            val selected = loaded.zip(chosen).map { (item, representation) ->
+                item.copy(representation = representation)
             }
             val selectedWithIndexes = selected.map { item ->
                 val index = item.representation.index
@@ -284,10 +284,9 @@ internal class F1DashFeedCapture(
             val loaded = coroutineScope {
                 feeds.map { feed -> async { loadFeed(feed, playbackPositionMs) } }.awaitAll()
             }
-            val chosenSize = chooseCommonHevcSize(loaded)
-                ?: throw PermanentCaptureException("Archive feeds do not expose a common HEVC rendition at or below ${maximumVideoHeight}p")
-            val selectedWithIndexes = loaded.map { item ->
-                val representation = item.representationFor(chosenSize.first, chosenSize.second)
+            val chosen = chooseRequestedRepresentations(loaded)
+            val chosenSize = chosen.first().format.let { it.width to it.height }
+            val selectedWithIndexes = loaded.zip(chosen).map { (item, representation) ->
                 val index = representation.index
                     ?: throw PermanentCaptureException("${item.feed.label}: archive DASH representation has no in-manifest segment index")
                 val init = representation.initializationUri
@@ -541,6 +540,38 @@ internal class F1DashFeedCapture(
             initializationUri = init,
             periodDurationUs = manifest.getPeriodDurationUs(periodIndex),
         )
+    }
+
+    /**
+     * Keep real user-selected resolutions for protected feeds. Merely selecting a rendition
+     * is not permission to stitch ciphertext: the downstream composer independently
+     * checks source HEVC tiles, KID, IV and every encrypted subsample range.
+     */
+    private fun chooseRequestedRepresentations(feeds: List<LoadedFeed>): List<Representation> {
+        val caps = feeds.map { it.feed.preferredHeight?.takeIf { cap -> cap > 0 } }
+        if (caps.distinct().size <= 1) {
+            val common = chooseCommonHevcSize(feeds)
+                ?: throw PermanentCaptureException("Selected feeds expose no common HEVC rendition within the decoder atlas")
+            return feeds.map { it.representationFor(common.first, common.second) }
+        }
+        val selected = feeds.map { loaded ->
+            val cap = minOf(maximumVideoHeight,
+                loaded.feed.preferredHeight?.takeIf { it > 0 } ?: maximumVideoHeight)
+            loaded.period.adaptationSets
+                .filter { it.type == C.TRACK_TYPE_VIDEO || it.representations.any(::isHevc) }
+                .flatMap { it.representations }
+                .filter(::isHevc)
+                .filter { it.format.width > 0 &&
+                    it.format.height in maxOf(1, minimumVideoHeight)..cap }
+                .maxWithOrNull(compareBy<Representation> { it.format.height }
+                    .thenBy { it.format.width }.thenBy { it.format.bitrate })
+                ?: throw PermanentCaptureException("${loaded.feed.label}: no authorized HEVC rendition at or below ${cap}p")
+        }
+        android.util.Log.i("ApexviewSingleDecoder", "PROTECTED_SOURCE_RENDITIONS " +
+            selected.mapIndexed { index, rep ->
+                "${feeds[index].feed.label}=${rep.format.width}x${rep.format.height}"
+            }.joinToString(", ") + " cbcsGate=REQUIRED decoderCount=ONE")
+        return selected
     }
 
     private fun chooseCommonHevcSize(feeds: List<LoadedFeed>): Pair<Int, Int>? {

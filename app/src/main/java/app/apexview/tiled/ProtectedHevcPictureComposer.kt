@@ -78,6 +78,8 @@ internal object ProtectedHevcPictureComposer {
         alignmentProof: HevcPictureSequenceAligner.Result? = null,
         /** Null retains the tile-selection POC. A value preserves every tile of each feed. */
         fullPictureColumns: Int? = null,
+        /** Mixed full-frame layout verified against the same source-cell model as clear VOD. */
+        mixedCells: List<HevcTizenGridComposer.CellSelection>? = null,
     ): Result {
         require(feeds.size in MIN_FEEDS..MAX_FEEDS) {
             "$context: between $MIN_FEEDS and $MAX_FEEDS protected feeds are supported"
@@ -98,7 +100,10 @@ internal object ProtectedHevcPictureComposer {
         }
         val expectedTileStarts = outputTileStarts(outputSps, outputPps)
         require(expectedTileStarts != null) { "$context: output PPS tile geometry is incomplete" }
-        if (fullPictureColumns == null) {
+        require(mixedCells == null || fullPictureColumns == null) {
+            "$context: conflicting protected tile placement plans"
+        }
+        if (fullPictureColumns == null && mixedCells == null) {
             require(expectedTileStarts.size == feeds.size) {
                 "$context: output PPS tile count must exactly match the selected feed count"
             }
@@ -106,7 +111,14 @@ internal object ProtectedHevcPictureComposer {
                 feeds.map { it.destinationAddress }.toSet() == expectedTileStarts) {
                 "$context: each output tile must receive exactly one selected feed"
             }
-        } else require(fullPictureColumns in 1..feeds.size) { "$context: invalid full-picture column count" }
+        } else if (fullPictureColumns != null) require(fullPictureColumns in 1..feeds.size) {
+            "$context: invalid full-picture column count"
+        } else requireNotNull(mixedCells).let { cells ->
+            require(cells.isNotEmpty() && cells.size == expectedTileStarts.size &&
+                cells.map { it.outputColumn to it.outputRow }.distinct().size == cells.size) {
+                "$context: mixed tile placements do not cover the output grid"
+            }
+        }
 
         val prepared = feeds.mapIndexed { index, input ->
             prepareFeed(input, "feed $index (" + input.feedId + ")", context)
@@ -118,7 +130,8 @@ internal object ProtectedHevcPictureComposer {
 
         prepared.drop(1).forEachIndexed { index, candidate ->
             val label = "feed " + (index + 1) + " (" + candidate.input.feedId + ")"
-            require(candidate.input.track.width == first.input.track.width &&
+            require(mixedCells != null ||
+                candidate.input.track.width == first.input.track.width &&
                 candidate.input.track.height == first.input.track.height) {
                 "$context: $label source picture dimensions differ"
             }
@@ -145,7 +158,39 @@ internal object ProtectedHevcPictureComposer {
         }
 
         data class Placement(val feed: PreparedFeed, val slice: ProtectedHevcAccessUnitInspector.SliceRegion, val address: Int)
-        val placements = if (fullPictureColumns == null) prepared.map { Placement(it, it.selectedSlice, it.input.destinationAddress) }
+        val placements = if (mixedCells != null) {
+            val cols = requireNotNull(outputPps.tileColumnWidthsInCtbs)
+            val rows = requireNotNull(outputPps.tileRowHeightsInCtbs)
+            require(mixedCells.size == cols.size * rows.size) {
+                "$context: mixed output tile grid is incomplete"
+            }
+            prepared.forEach { feed ->
+                val sourceCols = requireNotNull(feed.pps.tileColumnWidthsInCtbs)
+                val sourceRows = requireNotNull(feed.pps.tileRowHeightsInCtbs)
+                require(feed.accessUnit.slices.size == sourceCols.size * sourceRows.size &&
+                    feed.accessUnit.slices.map { it.tile.index }.toSet() ==
+                        (0 until sourceCols.size * sourceRows.size).toSet() &&
+                    feed.accessUnit.slices.all { it.readyForCurrentHeaderRewriter }) {
+                    "$context: mixed source requires every independent clear-header tile"
+                }
+            }
+            mixedCells.map { cell ->
+                require(cell.feedIndex in prepared.indices &&
+                    cell.outputColumn in cols.indices && cell.outputRow in rows.indices) {
+                    "$context: mixed source/output tile index is invalid"
+                }
+                val feed = prepared[cell.feedIndex]
+                val slice = feed.accessUnit.slices.singleOrNull { it.tile.index == cell.sourceTileIndex }
+                    ?: throw IllegalArgumentException("$context: missing protected source tile")
+                val address = rows.take(cell.outputRow).sum() * outputSps.picWidthInCtbs +
+                    cols.take(cell.outputColumn).sum()
+                require(slice.tile.widthInCtbs == cols[cell.outputColumn] &&
+                    slice.tile.heightInCtbs == rows[cell.outputRow]) {
+                    "$context: protected source tile geometry differs from the output PPS"
+                }
+                Placement(feed, slice, address)
+            }.sortedBy { it.address }
+        } else if (fullPictureColumns == null) prepared.map { Placement(it, it.selectedSlice, it.input.destinationAddress) }
         else {
             val columns = fullPictureColumns
             val rows = (feeds.size + columns - 1) / columns

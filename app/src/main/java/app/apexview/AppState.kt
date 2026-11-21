@@ -1181,18 +1181,11 @@ class AppState(
             message = "Protected multiview casting needs two to six explicit F1 channels from one session."
             return
         }
-        // Clear VOD uses the actual per-feed qualities. Native protected Cast uses
-        // one common rendition until mixed CBCS subsample rewriting is validated.
+        // Native Cast uses the same independently validated mixed protected atlas.
+        // No decoder is allocated by the phone's protected CMAF capture.
         val selectedQualities = selected.map(::qualityFor)
-        val commonQuality = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities)
-        if (commonQuality == null) {
-            castStatus = PerFeedQualityPolicy.MIXED_UNSUPPORTED
-            message = castStatus
-            android.util.Log.w("PitwallCast", "CAST_PROTECTED_MIXED_QUALITY_REJECT requested=" +
-                PerFeedQualityPolicy.description(selected.map { it.feed.sourceStream.profileLabel }, selectedQualities) +
-                " savedPreferences=UNCHANGED")
-            return
-        }
+        val mixedRequested = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) == null
+        val commonQuality = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) ?: VideoQuality.AUTO
         val socket = localConnection?.socket ?: return
         val clock = leaderTile()?.feed ?: selected.first().feed
         val live = selected.any { it.contentId in knownLiveContentIds || it.feed.player.isCurrentMediaItemLive }
@@ -1214,10 +1207,12 @@ class AppState(
                     .setAllowCrossProtocolRedirects(true).setDefaultRequestProperties(mapOf(
                         "ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
                 owned = app.apexview.cast.NativeComposedCastSession(
-                    selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel, it.feed.sourceStream.url) },
+                    selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel, it.feed.sourceStream.url,
+                        if (mixedRequested) qualityFor(it).targetHeight else null) },
                     userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty(), factory,
                     socket.localAddress.hostAddress!!, socket.inetAddress,
-                    commonQuality.targetHeight.takeIf { it > 0 } ?: 720, settings.commentary,
+                    if (mixedRequested) selectedQualities.maxOf { it.targetHeight }.takeIf { it > 0 } ?: 1080
+                        else commonQuality.targetHeight.takeIf { it > 0 } ?: 720, settings.commentary,
                     live, if (live) 0L else clock.player.duration.takeIf { it > 0 } ?: durationMs,
                     dashOffset, hlsOffset, audio.feed.sourceStream.profileLabel, liveEdge, windowUtc)
                 val next = requireNotNull(owned)
@@ -1296,7 +1291,8 @@ class AppState(
         val windows = castWindows(session.sourceLabels) ?: return null
         return app.apexview.cast.CastSceneProtocol.encode(app.apexview.scene.VideoScene(canvasW, canvasH,
             session.width, session.height, session.sourceLabels.size, windows, geometry.atlasColumns,
-            geometry.codedWidth, geometry.codedHeight, geometry.displayWidth, geometry.displayHeight))
+            geometry.codedWidth, geometry.codedHeight, geometry.displayWidth, geometry.displayHeight,
+            geometry.mixedSourceRects.map { app.apexview.scene.VideoSourceRect(it.x, it.y, it.width, it.height) }))
     }
 
     private fun loadNativeComposedCast(
@@ -2961,36 +2957,35 @@ class AppState(
             return
         }
         val selectedQualities = selectedTiles.map(::qualityFor)
-        // Do not silently turn a requested 1080p+540p layout into 540p+540p.
-        // Encrypted mixed-resolution CBCS has not yet passed protected-subsample
-        // validation. A requested mixed layout must fail clearly, with no new decoder.
-        val composedQuality = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities)
-        if (composedQuality == null) {
-            singleDecoderFailure = PerFeedQualityPolicy.MIXED_UNSUPPORTED
-            message = singleDecoderFailure
-            android.util.Log.w("ApexviewSingleDecoder", "F1_PROTECTED_MIXED_QUALITY_REJECT " +
-                PerFeedQualityPolicy.description(labels, selectedQualities) +
-                " verifiedClearHls=UNAVAILABLE savedPreferences=UNCHANGED")
-            return
-        }
+        val mixedRequested = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) == null
+        val composedQuality = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) ?: VideoQuality.AUTO
+        // Do not reject different preference labels without looking at the actual
+        // protected video. Preserve each requested source resolution; independently
+        // validate SPS/PPS tiles and matching CBCS IV/KID before player handoff.
         val feeds = selectedTiles.zip(labels).map { (tile, label) ->
-            F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url)
+            F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url,
+                if (mixedRequested) qualityFor(tile).targetHeight else null)
         }
         val host = selectedTiles.firstOrNull { !it.audible } ?: selectedTiles.first()
         val audioMaster = selectedTiles.firstOrNull { it !== host && it.audible }
             ?: selectedTiles.first { it !== host }
         val group = "archive-content-$contentId-${java.util.UUID.randomUUID()}"
         f1DashCaptureJob?.cancel()
-        val maxHeight = if (isTclG09()) {
+        val maxHeight = if (mixedRequested) selectedQualities.maxOf { it.targetHeight }
+            .takeIf { it > 0 } ?: 1080
+        else if (isTclG09()) {
             minOf(composedQuality.targetHeight.takeIf { it > 0 } ?: 720,
                 if (selectedTiles.size > 4) 540 else 720)
         } else composedQuality.targetHeight.takeIf { it > 0 } ?: 2160
         val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty(),
-            maximumHeight = maxHeight)
+            maximumHeight = maxHeight, fullPictures = true)
+        android.util.Log.i("ApexviewSingleDecoder", "F1_PROTECTED_MIXED_PREFLIGHT requested=" +
+            PerFeedQualityPolicy.description(labels, selectedQualities) +
+            " maxSourceHeight=$maxHeight fullPictures=true cbcsGate=REQUIRED")
         val evidence = "content=$contentId attempt=${attempt + 1} feeds=${feeds.size}"
         android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_START $evidence path=rolling maxSourceHeight=$maxHeight tclG09=${isTclG09()}")
         f1DashCapture = capture
-        ProtectedHevcLiveComposition.selectFeeds(group, labels)
+        ProtectedHevcLiveComposition.selectFeeds(group, labels, fullPictures = true)
         val startup = ArchiveCompositionStartup()
         var lastSnapshot: F1DashFeedCapture.Snapshot? = null
         var releasedCount = 0

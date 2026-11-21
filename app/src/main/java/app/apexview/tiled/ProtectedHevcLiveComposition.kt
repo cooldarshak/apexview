@@ -62,7 +62,8 @@ internal object ProtectedHevcLiveComposition {
     }
 
     data class SourceGeometry(val codedWidth: Int, val codedHeight: Int, val displayWidth: Int,
-                              val displayHeight: Int, val atlasColumns: Int, val atlasRows: Int)
+                              val displayHeight: Int, val atlasColumns: Int, val atlasRows: Int,
+                              val mixedSourceRects: List<HevcMixedArchiveAtlasPlan.SourceRect> = emptyList())
 
     private data class BufferedPicture(
         val picture: HevcPictureSequenceAligner.PictureSample,
@@ -642,25 +643,65 @@ internal object ProtectedHevcLiveComposition {
             "active F1 source tile geometry is invalid"
         }
 
-        val atlas = if (session.fullPictures) requireNotNull(HevcArchiveAtlasPlan.choose(session.labels.size,
+        val configs = session.labels.map { label ->
+            requireNotNull(session.feeds.getValue(label).track?.hevcConfiguration) {
+                "Protected HEVC configuration is unavailable for $label"
+            }
+        }
+        val mixedSizes = configs.map { it.sps.single().width to it.sps.single().height }
+            .distinct().size > 1
+        require(!mixedSizes || session.fullPictures) {
+            "Protected mixed-resolution composition requires complete source pictures"
+        }
+        val mixedPlan = if (mixedSizes) requireNotNull(HevcMixedArchiveAtlasPlan.choose(
+            configs.map { c ->
+                HevcMixedArchiveAtlasPlan.Source(c.vps.single(), c.sps.single(), c.pps.single())
+            }, maximumWidth = 4096, maximumHeight = HevcArchiveAtlasPlan.MAX_CODED_HEIGHT
+        )) {
+            "Protected source tiles cannot form a conforming mixed-resolution HEVC atlas"
+        } else null
+        val atlas = if (session.fullPictures && mixedPlan == null) requireNotNull(HevcArchiveAtlasPlan.choose(session.labels.size,
             spsMetadata.picWidthInCtbs * ctbSize, spsMetadata.picHeightInCtbs * ctbSize, 4096, 2160)) {
             "Complete source pictures exceed the supported TV atlas dimensions; choose a lower HD rendition or fewer feeds"
         } else null
-        val gridColumns = atlas?.columns ?: when (session.labels.size) {
+        val gridColumns = mixedPlan?.grid?.columns ?: atlas?.columns ?: when (session.labels.size) {
             2 -> 2; 3 -> 3; 4 -> 2; 5 -> 5; 6 -> 3
             else -> throw IllegalArgumentException("unsupported live composition feed count")
         }
-        val gridRows = atlas?.rows ?: (session.labels.size + gridColumns - 1) / gridColumns
+        val gridRows = mixedPlan?.grid?.rows ?: atlas?.rows ?: (session.labels.size + gridColumns - 1) / gridColumns
         val sourceColumns = ppsMetadata.tileColumnWidthsInCtbs
         val sourceRows = ppsMetadata.tileRowHeightsInCtbs
-        val outputColumns = if (session.fullPictures) List(gridColumns) { sourceColumns }.flatten() else List(gridColumns) { tileWidthInCtbs }
-        val outputRows = if (session.fullPictures) List(gridRows) { sourceRows }.flatten() else List(gridRows) { tileHeightInCtbs }
+        // Each mixed output cell inherits CTB width and height from its own independent
+        // source tile. The existing source-cell planner validates cross-feed geometry.
+        fun widthOf(cell: HevcTizenGridComposer.CellSelection): Int {
+            val cols = requireNotNull(configs[cell.feedIndex].pps.single().tileColumnWidthsInCtbs)
+            return cols[cell.sourceTileIndex % cols.size]
+        }
+        fun heightOf(cell: HevcTizenGridComposer.CellSelection): Int {
+            val pps = configs[cell.feedIndex].pps.single()
+            val cols = requireNotNull(pps.tileColumnWidthsInCtbs)
+            val rows = requireNotNull(pps.tileRowHeightsInCtbs)
+            return rows[cell.sourceTileIndex / cols.size]
+        }
+        val outputColumns = if (mixedPlan != null) (0 until gridColumns).map { column ->
+            mixedPlan.cells.filter { it.outputColumn == column }.map(::widthOf).distinct().single()
+        } else if (session.fullPictures) List(gridColumns) { sourceColumns }.flatten() else List(gridColumns) { tileWidthInCtbs }
+        val outputRows = if (mixedPlan != null) (0 until gridRows).map { row ->
+            mixedPlan.cells.filter { it.outputRow == row }.map(::heightOf).distinct().single()
+        } else if (session.fullPictures) List(gridRows) { sourceRows }.flatten() else List(gridRows) { tileHeightInCtbs }
         val cellWidthInCtbs = if (session.fullPictures) spsMetadata.picWidthInCtbs else tileWidthInCtbs
         val cellHeightInCtbs = if (session.fullPictures) spsMetadata.picHeightInCtbs else tileHeightInCtbs
-        val outputWidth = Math.multiplyExact(Math.multiplyExact(gridColumns, cellWidthInCtbs), ctbSize)
-        val outputHeight = Math.multiplyExact(Math.multiplyExact(gridRows, cellHeightInCtbs), ctbSize)
+        val outputWidth = mixedPlan?.codedWidth ?:
+            Math.multiplyExact(Math.multiplyExact(gridColumns, cellWidthInCtbs), ctbSize)
+        val outputHeight = mixedPlan?.codedHeight ?:
+            Math.multiplyExact(Math.multiplyExact(gridRows, cellHeightInCtbs), ctbSize)
+        require(outputColumns.sum() * ctbSize == outputWidth &&
+            outputRows.sum() * ctbSize == outputHeight) {
+            "Protected mixed atlas coded dimensions differ from its tile grid"
+        }
         session.sourceGeometry = if (session.fullPictures) SourceGeometry(cellWidthInCtbs * ctbSize,
-            cellHeightInCtbs * ctbSize, spsMetadata.displayWidth, spsMetadata.displayHeight, gridColumns, gridRows) else null
+            cellHeightInCtbs * ctbSize, spsMetadata.displayWidth, spsMetadata.displayHeight, gridColumns, gridRows,
+            mixedPlan?.sourceRects.orEmpty()) else null
         val frameRate = deriveFrameRate(firstHevc, spsMetadata)
         val outputParameters = HevcOutputParameterSetWriter.generate(
             sourceVpsNal = sourceVps,
@@ -677,18 +718,20 @@ internal object ProtectedHevcLiveComposition {
                 loopFilterAcrossTilesEnabled =
                     requireNotNull(ppsMetadata.loopFilterAcrossTiles),
                 frameRateNumerator = frameRate.first,
-                frameRateDenominator = frameRate.second
+                frameRateDenominator = frameRate.second,
+                uncroppedOutputPicture = mixedPlan != null
             )
         )
         val outputSps = HevcParameterSets.parseSps(outputParameters.sps)
         val outputPps = HevcParameterSets.parsePps(outputParameters.pps, outputSps)
         val outputSignature = listOf(
-            firstState.representationSignature,
+            session.labels.map { session.feeds.getValue(it).representationSignature },
             session.labels.size,
             session.sourceTileIndices,
             session.fullPictures,
             outputWidth,
             outputHeight,
+            mixedPlan?.cells,
             outputParameters.vps.contentHashCode(),
             outputParameters.sps.contentHashCode(),
             outputParameters.pps.contentHashCode()
@@ -706,7 +749,10 @@ internal object ProtectedHevcLiveComposition {
             session.lastComposedMasterSequenceOrdinal = -1L
         }
 
-        val outputTileStarts = buildList {
+        val outputTileStarts = if (mixedPlan != null) mixedPlan.cells.map { cell ->
+            outputRows.take(cell.outputRow).sum() * outputSps.picWidthInCtbs +
+                outputColumns.take(cell.outputColumn).sum()
+        } else buildList {
             repeat(gridRows) { row ->
                 repeat(gridColumns) { column ->
                     add(row * cellHeightInCtbs * outputSps.picWidthInCtbs + column * cellWidthInCtbs)
@@ -758,7 +804,8 @@ internal object ProtectedHevcLiveComposition {
                     outputNalLengthSize = 4,
                     context = "Live protected F1 picture POC " + match.fullPictureOrderCount,
                     alignmentProof = proof,
-                    fullPictureColumns = if (session.fullPictures) gridColumns else null,
+                    fullPictureColumns = if (session.fullPictures && mixedPlan == null) gridColumns else null,
+                    mixedCells = mixedPlan?.cells,
                 )
                 outputBytesToClear += composed.sampleBytes
                 val masterBuffered = session.feeds.getValue(masterFeedId).picturesByOrdinal[
