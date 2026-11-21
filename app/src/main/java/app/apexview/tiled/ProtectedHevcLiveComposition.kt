@@ -464,13 +464,24 @@ internal object ProtectedHevcLiveComposition {
                 initializationSegment = initBytes,
                 mediaFragment = bytes,
                 sampleIndices = selectedIndices,
-                context = "F1 protected feed " + state.label
+                context = "F1 protected feed " + state.label,
+                validatedConfiguration = hevc
             ) { fragmentInfo, sample ->
                 if (visited == 0) {
-                    require(fragmentInfo.track.trackId == activeTrack.trackId &&
-                        fragmentInfo.track.hevcConfiguration?.parameterSetFingerprints ==
-                            hevc.parameterSetFingerprints) {
-                        "media fragment does not match the captured active HEVC representation"
+                    val actual = fragmentInfo.track
+                    val original = requireNotNull(actual.hevcConfiguration)
+                    val baseParametersAgree =
+                        original.parameterSetFingerprints == hevc.parameterSetFingerprints
+                    // HEV1 can carry verified VPS/SPS/PPS in-band instead of hvcC.
+                    // Encryption metadata still comes from the real CMAF and must agree.
+                    val verifiedInband = actual.originalFormat == "hev1" &&
+                        original.sps.size != 1 &&
+                        actual.trackEncryption == activeTrack.trackEncryption &&
+                        actual.protectionScheme == activeTrack.protectionScheme &&
+                        original.nalLengthSize == hevc.nalLengthSize
+                    require(actual.trackId == activeTrack.trackId &&
+                        (baseParametersAgree || verifiedInband)) {
+                        "media fragment does not match the captured verified HEVC representation"
                     }
                 }
                 visited++

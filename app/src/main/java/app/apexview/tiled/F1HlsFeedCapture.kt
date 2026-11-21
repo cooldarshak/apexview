@@ -269,44 +269,96 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             }
             stage = "cmaf-init"
             val inits = selected.indices.map { i -> loadInit(selected[i], playlists[i], segments[i]) }
-            val tracks = inits.mapIndexed { index, init ->
-                init.report.tracks.singleOrNull { track -> track.handler == "vide" }
-                    ?: throw PermanentCaptureException("${selected[index].feed.label}: HLS initialization needs exactly one video track")
-            }
-            tracks.forEachIndexed { index, track ->
-                val sps = track.hevcConfiguration?.sps?.singleOrNull()
-                    ?: throw PermanentCaptureException("${selected[index].feed.label}: HLS video initialization lacks one valid HEVC SPS")
-                if (sps.displayHeight < minimumCaptureHeight) {
-                    throw PermanentCaptureException("${selected[index].feed.label}: actual HEVC source is below ${minimumCaptureHeight}p")
-                }
-            }
-            val clear = tracks.all { !it.encrypted }
-            if (!clear && tracks.any { !it.encrypted || it.protectionScheme != "cbcs" }) {
-                throw PermanentCaptureException("HLS composition needs all-clear HEVC or compatible CBCS HEVC; mixed protection is unsupported")
-            }
-            if (clearOutput != null && clearOutput != clear) throw PermanentCaptureException("HLS archive protection changed during composition")
-            clearOutput = clear
-            if (clear && playlists.any { playlist -> playlist.tags.any { it.startsWith("#EXT-X-KEY:") && !it.contains("METHOD=NONE") } }) {
-                throw PermanentCaptureException("HLS declares encryption but its selected CMAF track is clear")
-            }
-            segments.forEach { rememberPssh(it.drmInitData) }
-            selected.forEach { it.master?.sessionKeyDrmInitData?.forEach(::rememberPssh) }
-            if (!clear) selected.zip(inits).forEach { (offer, init) ->
-                ProtectedHevcLiveComposition.recordCmafResponse(group, offer.feed.label, init.bytes, init.report)
-            }
-            stage = "cmaf-fragment-download"
+            // In hev1, a valid encrypted HEVC track can carry VPS/SPS/PPS in its
+            // media samples rather than in hvcC. Fetch the real selected fragment
+            // before judging that representation. Bound memory and clear all bytes.
             val media = mutableListOf<ByteArray>()
             val fetchStartedMs = android.os.SystemClock.elapsedRealtime()
             var fetchMs = 0L
             var composeMs = 0L
             try {
-                // Serial, bounded segment reads reduce the peak memory load on Android TVs.
-                selected.zip(segments).forEach { (offer, segment) ->
+                stage = "cmaf-fragment-download"
+                selected.indices.forEach { index ->
                     coroutineContext.ensureActive()
-                    media += reader.read(UriUtil.resolveToUri(playlists[selected.indexOf(offer)].baseUri, segment.url),
-                        MAX_MEDIA_BYTES, segment.byteRangeOffset, segment.byteRangeLength).bytes
+                    val segment = segments[index]
+                    media += reader.read(
+                        UriUtil.resolveToUri(playlists[index].baseUri, segment.url),
+                        MAX_MEDIA_BYTES, segment.byteRangeOffset, segment.byteRangeLength
+                    ).bytes
                 }
                 fetchMs = android.os.SystemClock.elapsedRealtime() - fetchStartedMs
+                stage = "real-hev1-parameter-validation"
+                val resolvedReports = selected.indices.map { index ->
+                    val original = inits[index].report
+                    val video = original.tracks.singleOrNull { it.handler == "vide" }
+                        ?: throw PermanentCaptureException(
+                            "${selected[index].feed.label}: initialization has no unambiguous video track"
+                        )
+                    val hevc = video.hevcConfiguration
+                    if (video.encrypted && video.originalFormat == "hev1" && hevc != null &&
+                        (hevc.vps.size != 1 || hevc.sps.size != 1 || hevc.pps.size != 1)) {
+                        Hev1InbandParameterSetRecovery.resolve(
+                            selected[index].feed.label,
+                            inits[index].bytes, media[index], original
+                        )
+                    } else original
+                }
+                val tracks = resolvedReports.mapIndexed { index, init ->
+                    init.tracks.singleOrNull { it.handler == "vide" }
+                        ?: throw PermanentCaptureException(
+                            "${selected[index].feed.label}: CMAF init must have exactly one video track"
+                        )
+                }
+                tracks.forEachIndexed { index, track ->
+                    val config = track.hevcConfiguration
+                    android.util.Log.i("ApexviewSingleDecoder",
+                        "REAL_CMAF_HEVC_INIT feed=${selected[index].feed.label} " +
+                            "entry=${track.sampleEntry ?: "none"} original=${track.originalFormat ?: "none"} " +
+                            "encrypted=${track.encrypted} configuration=${config != null} " +
+                            "parsed=${config?.vps?.size ?: 0}/${config?.sps?.size ?: 0}/${config?.pps?.size ?: 0} " +
+                            "raw=${config?.vpsCount ?: 0}/${config?.spsCount ?: 0}/${config?.ppsCount ?: 0} " +
+                            "errors=${config?.parameterSetErrors?.size ?: 0}")
+                    val sps = config?.sps?.singleOrNull()
+                        ?: throw PermanentCaptureException(
+                            "${selected[index].feed.label}: HEVC parameter sets are incomplete " +
+                                "(hvcC=${config != null}, parsed VPS/SPS/PPS=" +
+                                "${config?.vps?.size ?: 0}/${config?.sps?.size ?: 0}/${config?.pps?.size ?: 0}, " +
+                                "raw=${config?.vpsCount ?: 0}/${config?.spsCount ?: 0}/${config?.ppsCount ?: 0})"
+                        )
+                    require(config.vps.size == 1 && config.pps.size == 1 &&
+                        config.parameterSetErrors.isEmpty()) {
+                        "${selected[index].feed.label}: HEVC VPS/PPS validation failed"
+                    }
+                    if (sps.displayHeight < minimumCaptureHeight) {
+                        throw PermanentCaptureException(
+                            "${selected[index].feed.label}: actual HEVC source is below ${minimumCaptureHeight}p"
+                        )
+                    }
+                }
+                val clear = tracks.all { !it.encrypted }
+                if (!clear && tracks.any { !it.encrypted || it.protectionScheme != "cbcs" }) {
+                    throw PermanentCaptureException(
+                        "HLS composition needs all-clear HEVC or compatible CBCS HEVC; mixed protection is unsupported"
+                    )
+                }
+                if (clearOutput != null && clearOutput != clear) {
+                    throw PermanentCaptureException("HLS archive protection changed during composition")
+                }
+                clearOutput = clear
+                if (clear && playlists.any { playlist ->
+                        playlist.tags.any { it.startsWith("#EXT-X-KEY:") && !it.contains("METHOD=NONE") }
+                    }) {
+                    throw PermanentCaptureException(
+                        "HLS declares encryption but its selected CMAF track is clear"
+                    )
+                }
+                segments.forEach { rememberPssh(it.drmInitData) }
+                selected.forEach { it.master?.sessionKeyDrmInitData?.forEach(::rememberPssh) }
+                if (!clear) selected.indices.forEach { index ->
+                    ProtectedHevcLiveComposition.recordCmafResponse(
+                        group, selected[index].feed.label, inits[index].bytes, resolvedReports[index]
+                    )
+                }
                 val composeStartedMs = android.os.SystemClock.elapsedRealtime()
                 stage = "video-fragment-clock"
                 if (mediaToArchiveOffsetUs == null) {
@@ -337,18 +389,18 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                     })
                 } else {
                     selected.forEachIndexed { index, offer ->
-                        val report = CmafBoxInspector.inspect(media[index], inits[index].report)
+                        val report = CmafBoxInspector.inspect(media[index], resolvedReports[index])
                         if (report.errors.isNotEmpty()) throw PermanentCaptureException("${offer.feed.label}: invalid HLS CMAF fragment")
                         ProtectedHevcLiveComposition.recordCmafResponse(group, offer.feed.label, media[index], report)
                     }
                     ProtectedHevcLiveComposition.rejectionReason(group)?.let { throw PermanentCaptureException("HLS HEVC/CMAF composition rejected: $it") }
                 }
                 composeMs = android.os.SystemClock.elapsedRealtime() - composeStartedMs
+                discontinuityGate.commit(labels, discontinuities, aligned.first().absoluteStartUs)
+                previousStartUs = aligned.first().absoluteStartUs
+                android.util.Log.i("ApexviewSingleDecoder", "HLS_CMAF_CAPTURE feeds=${feeds.size} protection=${if (clear) "CLEAR" else "CBCS"} aligned=PASS composed=${if (clear) clearComposition.hasOutput() else ProtectedHevcLiveComposition.hasOutput(group)} fetchMs=$fetchMs composeMs=$composeMs totalMs=${android.os.SystemClock.elapsedRealtime() - startedMs} archiveClockMs=$positionMs segmentStartUs=${aligned.first().absoluteStartUs}")
+                snapshot(group, format, aligned.first().absoluteStartUs, feeds.size)
             } finally { media.forEach { it.fill(0) } }
-            discontinuityGate.commit(labels, discontinuities, aligned.first().absoluteStartUs)
-            previousStartUs = aligned.first().absoluteStartUs
-            android.util.Log.i("ApexviewSingleDecoder", "HLS_CMAF_CAPTURE feeds=${feeds.size} protection=${if (clear) "CLEAR" else "CBCS"} aligned=PASS composed=${if (clear) clearComposition.hasOutput() else ProtectedHevcLiveComposition.hasOutput(group)} fetchMs=$fetchMs composeMs=$composeMs totalMs=${android.os.SystemClock.elapsedRealtime() - startedMs} archiveClockMs=$positionMs segmentStartUs=${aligned.first().absoluteStartUs}")
-            snapshot(group, format, aligned.first().absoluteStartUs, feeds.size)
         } catch (cancelled: CancellationException) { throw cancelled
         } catch (error: Exception) {
             // Real F1 troubleshooting needs the failing production location, not

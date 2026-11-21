@@ -87,9 +87,14 @@ internal object ProtectedHevcCmafSampleExtractor {
         mediaFragment: ByteArray,
         sampleIndices: Set<Int>,
         context: String = "Protected F1 CMAF extraction",
+        /** Only for hev1 media when the SPS/PPS/VPS have been verified as fully clear in-band NALs. */
+        validatedConfiguration: CmafBoxInspector.HevcConfiguration? = null,
+        /** In-band discovery only. It never relaxes CBCS metadata/subsample checks. */
+        discoverHev1ParameterSets: Boolean = false,
         onSample: (ExtractedFragmentInfo, ExtractedSample) -> Unit
     ): ExtractedFragmentInfo = visitSamples(
-        initializationSegment, mediaFragment, sampleIndices, context, onSample
+        initializationSegment, mediaFragment, sampleIndices, context, validatedConfiguration,
+        discoverHev1ParameterSets, onSample
     )
 
     private fun visitSamples(
@@ -97,6 +102,8 @@ internal object ProtectedHevcCmafSampleExtractor {
         mediaFragment: ByteArray,
         sampleIndices: Set<Int>,
         context: String,
+        validatedConfiguration: CmafBoxInspector.HevcConfiguration? = null,
+        discoverHev1ParameterSets: Boolean = false,
         onSample: (ExtractedFragmentInfo, ExtractedSample) -> Unit
     ): ExtractedFragmentInfo {
         require(initializationSegment.isNotEmpty()) { "$context: active init segment is empty" }
@@ -147,10 +154,35 @@ internal object ProtectedHevcCmafSampleExtractor {
         val hevc = requireNotNull(track.hevcConfiguration) {
             "$context: active video track has no hvcC HEVC configuration"
         }
-        require(hevc.parameterSetErrors.isEmpty() && hevc.vps.size == 1 &&
-            hevc.sps.size == 1 && hevc.pps.size == 1 &&
-            hevc.parameterSetFingerprints.isNotEmpty()) {
-            "$context: active hvcC must contain one completely parsed VPS/SPS/PPS triplet"
+        val complete = hevc.parameterSetErrors.isEmpty() &&
+            hevc.vps.size == 1 && hevc.sps.size == 1 && hevc.pps.size == 1 &&
+            hevc.parameterSetFingerprints.isNotEmpty()
+        val missing = hevc.sps.size != 1 || hevc.vps.size != 1 || hevc.pps.size != 1
+        if (!complete) {
+            // The actual hvcC, track identity and CENC metadata are still parsed from
+            // the original init. An hev1 sample can carry fully clear VPS/SPS/PPS NALs.
+            // Discovery never parses encrypted bytes. A caller-supplied configuration
+            // must have been verified against these same clear in-band NALs.
+            require(track.originalFormat == "hev1" && missing &&
+                (discoverHev1ParameterSets || validatedConfiguration != null)) {
+                "$context: active hvcC lacks a complete HEVC parameter-set triplet"
+            }
+            validatedConfiguration?.let { candidate ->
+                require(candidate.vps.size == 1 && candidate.sps.size == 1 &&
+                    candidate.pps.size == 1 && candidate.parameterSetErrors.isEmpty() &&
+                    candidate.nalLengthSize == hevc.nalLengthSize &&
+                    candidate.rawVpsNals.size == 1 && candidate.rawSpsNals.size == 1 &&
+                    candidate.rawPpsNals.size == 1) {
+                    "$context: validated hev1 in-band parameter sets are incomplete"
+                }
+                fun matches(original: List<ByteArray>, resolved: List<ByteArray>): Boolean =
+                    original.all { source -> resolved.any { it.contentEquals(source) } }
+                require(matches(hevc.rawVpsNals, candidate.rawVpsNals) &&
+                    matches(hevc.rawSpsNals, candidate.rawSpsNals) &&
+                    matches(hevc.rawPpsNals, candidate.rawPpsNals)) {
+                    "$context: in-band parameter sets conflict with active hvcC"
+                }
+            }
         }
 
         val mediaReport = CmafBoxInspector.inspect(mediaFragment, priorInitialization = initReport)
