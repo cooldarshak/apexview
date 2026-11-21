@@ -606,19 +606,24 @@ private class LineMarks(timing: SessionTiming) {
 @Composable
 private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, height: Float, turn: Float) {
     val now = rememberMapRenderTime(app)
-    val sampler = remember(timing) {
+    // Hit targets and 60 Hz drawing use separate chronological cursors.
+    // Alternating their clocks in one cursor caused unnecessary seek resets.
+    val hitSampler = remember(timing) {
         OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-track-position"))
+    }
+    val drawSampler = remember(timing) {
+        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-track-draw-position"))
     }
     val cars = remember(timing, now) {
         android.os.Trace.beginSection("PitwallMapCars")
-        try { sampler.sample(now) } finally { android.os.Trace.endSection() }
+        try { hitSampler.sample(now) } finally { android.os.Trace.endSection() }
     }
     // The screen clock is read ONLY by the foreground Canvas draw lambda.
     // Its updates invalidate drawing without recomposing the map subtree.
     val drawClock = rememberOverlayDrawClock(timing, { app.mapTimeMs() ?: 0L },
         "phone-map-motion-clock")
-    val motion = remember(timing, sampler, drawClock) {
-        OverlayMotionSource(drawClock, sampler::sample)
+    val motion = remember(timing, drawSampler, drawClock) {
+        OverlayMotionSource(drawClock, drawSampler::sample)
     }
     val stop = app.pitDriver?.let { driver ->
         pitStopNow(rememberPitBasis(app, timing, now), driver,
@@ -1010,17 +1015,20 @@ internal class Ribbon(
 @Composable
 fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, inset: Float, screenCornerRadius: Float) {
     val now = rememberMapRenderTime(app)
-    val sampler = remember(timing) {
+    val hitSampler = remember(timing) {
         OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-edge-position"))
+    }
+    val drawSampler = remember(timing) {
+        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-edge-draw-position"))
     }
     val cars = remember(timing, now) {
         android.os.Trace.beginSection("PitwallEdgeCars")
-        try { sampler.sample(now) } finally { android.os.Trace.endSection() }
+        try { hitSampler.sample(now) } finally { android.os.Trace.endSection() }
     }
     val drawClock = rememberOverlayDrawClock(timing, { app.mapTimeMs() ?: 0L },
         "phone-map-motion-clock")
-    val motion = remember(timing, sampler, drawClock) {
-        OverlayMotionSource(drawClock, sampler::sample)
+    val motion = remember(timing, drawSampler, drawClock) {
+        OverlayMotionSource(drawClock, drawSampler::sample)
     }
     val stop = app.pitDriver?.let { driver ->
         pitStopNow(rememberPitBasis(app, timing, now), driver,
