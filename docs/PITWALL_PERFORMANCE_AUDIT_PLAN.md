@@ -3,9 +3,35 @@
 Status: active implementation and hardware validation; progress audited through Build 598 (21 November 2026). Original requirements below remain open until their stated exit criteria pass.
 
 
+## Build 621–624 GitHub Actions failure root cause and corrective CI gate (21 November 2026)
+
+Four failing runs had different causes, all before native overlay acceptance: 621
+could not boot an emulator without KVM; 622 failed unit-test Kotlin compilation
+(subsequent runs passed the unchanged suite); 623 booted the emulator but
+invoked POSIX /bin/sh with unsupported `set -o pipefail`; 624 aborted at a
+mandatory KVM preflight despite passing JVM, Cast, HEVC, APK and AndroidTest APK
+assembly. The Android graphics code was **not** established as failing.
+
+**Integrated correction:** Keep the instrumentation test mandatory and its
+report uploaded. Detect an accessible /dev/kvm and use hardware acceleration
+when available; when the GitHub-hosted runner has none, opt in to Android
+emulator software TCG and allow the runner's automatic acceleration selection.
+Use API 29, the minimum RenderNode API, with a lightweight Pixel 2 profile,
+900-second boot cap, and a POSIX-safe instrumentation script that prints
+test output before returning a nonzero status on failure. The application and
+instrumentation APKs are built regardless of an emulator-host failure.
+No CI test is skipped, marked advisory, or silently interpreted as passing.
+
+A green emulator test verifies native **RenderNode recording/replay semantics**,
+not hardware GPU speed, physical 50fps frame presentation, Widevine L1, or
+TCL-specific acceleration. Those acceptance gates remain pending until tested
+on the target devices.
+
+---
+
 ## Consolidated post-620 renderer and Cast integration correction (21 November 2026)
 
-**Current integration status:** source changes staged for the next combined GitHub Actions run.
+**Current integration status:** code integrated; CI and physical-device acceptance are reported separately.
 This does not constitute phone or TV performance acceptance, a Google review,
 or a verified protected-video rendering benchmark.
 

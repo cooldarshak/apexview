@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       PITWALL_CAST_RECEIVER_ID: ${{ vars.PITWALL_CAST_RECEIVER_ID }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -239,46 +239,62 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --no-daemon assembleDebug assembleDebugAndroidTest
 
-      - name: Enable KVM acceleration for Android instrumentation
+      # This runner may not expose /dev/kvm (nested virtualization is not guaranteed).
+      # Do not fail an otherwise successful APK build before the tests even start.
+      # Emulator Runner's 'auto' uses KVM when accessible and TCG otherwise.
+      - name: Select Android emulator acceleration
         if: steps.assemble_apks.outcome == 'success'
         run: |
-          set -euo pipefail
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          test -r /dev/kvm && test -w /dev/kvm || {
-            echo "::error::The Android emulator requires accessible KVM for reliable native GPU tests."
-            exit 1
-          }
+          set -eu
+          if [ -c /dev/kvm ]; then
+            sudo chmod a+rw /dev/kvm || true
+          fi
+          if [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo 'RENDERNODE_EMULATOR_ACCEL=KVM' >> "$GITHUB_ENV"
+            echo 'Android instrumentation: KVM acceleration available.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Emulator 37.3+ requires explicit opt-in for software CPU emulation.
+            echo 'ANDROID_I_WANT_MY_TCG=yes' >> "$GITHUB_ENV"
+            echo 'RENDERNODE_EMULATOR_ACCEL=TCG' >> "$GITHUB_ENV"
+            echo 'Android instrumentation: software TCG fallback, not a GPU performance benchmark.' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Execute native RenderNode recording and replay instrumentation
         if: steps.assemble_apks.outcome == 'success'
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
+          # RenderNode is available from API 29. Use the smallest supported
+          # platform to make unaccelerated emulation on hosted Linux viable.
+          api-level: 29
           target: google_apis
           arch: x86_64
-          profile: pixel_6
+          profile: pixel_2
           cores: 2
           ram-size: 2048M
           heap-size: 256M
           disable-animations: true
-          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect
+          disable-linux-hw-accel: auto
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -no-metrics
           script: |
-            # android-emulator-runner executes this block with /bin/sh, not bash.
-            # Keep instrumentation failure fatal without relying on pipefail.
+            # The action executes this with /bin/sh, not bash.
+            # Keep both emulator and instrumentation failures fatal and visible.
             set -eu
             adb wait-for-device
             test -s app/build/outputs/apk/debug/app-debug.apk
             test -s app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
             adb install -r app/build/outputs/apk/debug/app-debug.apk
             adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-            adb shell am instrument -w -e class app.apexview.OverlayRetainedRenderNodeAndroidTest \
-              app.apexview_custom.test/androidx.test.runner.AndroidJUnitRunner \
-              > "$RUNNER_TEMP/pitwall-rendernode-instrumentation.txt" 2>&1
-            cat "$RUNNER_TEMP/pitwall-rendernode-instrumentation.txt"
-            grep -q 'OK (2 tests)' "$RUNNER_TEMP/pitwall-rendernode-instrumentation.txt"
-
+            result="$RUNNER_TEMP/pitwall-rendernode-instrumentation.txt"
+            if adb shell am instrument -w -e class app.apexview.OverlayRetainedRenderNodeAndroidTest \
+                app.apexview_custom.test/androidx.test.runner.AndroidJUnitRunner \
+                > "$result" 2>&1; then
+              cat "$result"
+            else
+              cat "$result"
+              exit 1
+            fi
+            grep -q 'OK (2 tests)' "$result"
       - name: Upload native RenderNode instrumentation report
         if: always()
         uses: actions/upload-artifact@v4
