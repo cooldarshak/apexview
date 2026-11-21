@@ -88,7 +88,7 @@ private fun running(ms: Long): String {
  * the picture the same way the map does. The caller sets its width.
  */
 @Composable
-fun DriverCard(app: AppState, timing: SessionTiming, number: String, name: String?, modifier: Modifier = Modifier) {
+fun DriverCard(app: AppState, timing: SessionTiming, number: String, name: String?, modifier: Modifier = Modifier, compact: Boolean = false) {
     val laps = timing.laps[number] ?: return
     val now = rememberMapTime(app)
     val state = laps.at(now) ?: return
@@ -111,7 +111,34 @@ fun DriverCard(app: AppState, timing: SessionTiming, number: String, name: Strin
             .background(Color.Black.copy(alpha = 0.72f))
     ) {
         Box(Modifier.width(4.dp).fillMaxHeight().background(team))
-        Column(Modifier.padding(start = 8.dp, end = 10.dp, top = 6.dp, bottom = 7.dp)) {
+        if (compact) {
+            // Narrow featured/TV picture windows need the same driver's
+            // position, number, surname and lap clock without the 250dp
+            // broadcast card covering most of the onboard.
+            Column(
+                Modifier.weight(1f).padding(start = 5.dp, end = 5.dp, top = 3.dp, bottom = 3.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    state.position?.let {
+                        Text("$it", style = digits.copy(color = Color.Black,
+                            fontSize = 9.sp, fontWeight = FontWeight.Bold),
+                            modifier = Modifier.clip(RoundedCornerShape(2.dp))
+                                .background(Color.White).padding(horizontal = 3.dp))
+                        Spacer(Modifier.width(3.dp))
+                    }
+                    Text(number, style = digits.copy(color = team,
+                        fontSize = 10.sp, fontWeight = FontWeight.Bold))
+                    Spacer(Modifier.width(3.dp))
+                    Text(surname, style = digits.copy(fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold), maxLines = 1,
+                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                }
+                clock?.let { (value, color) ->
+                    Text(value, style = digits.copy(color = color, fontSize = 10.sp),
+                        maxLines = 1, overflow = TextOverflow.Clip)
+                }
+            }
+        } else Column(Modifier.padding(start = 8.dp, end = 10.dp, top = 6.dp, bottom = 7.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 state.position?.let {
                     Text(

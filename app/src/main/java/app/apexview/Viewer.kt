@@ -82,6 +82,9 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.VideoLibrary
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
@@ -1128,13 +1131,17 @@ private fun TileView(
         val number = tile.channel.racingNumber?.toString()
         val timing = app.timing
         val tileWidth = with(density) { tile.w.toDp() }
-        if (number != null && timing != null && timing.laps.isNotEmpty() && tileWidth >= CARD_MIN_TILE) {
+        if (number != null && timing != null && timing.laps.isNotEmpty()) {
+            val narrow = tileWidth < CARD_MIN_TILE
             DriverCard(
                 app, timing, number, tile.channel.driverName,
                 Modifier
                     .align(Alignment.BottomStart)
-                    .padding(start = CARD_MARGIN, bottom = if (app.settings.showStats) 28.dp else CARD_MARGIN)
-                    .width(minOf(CARD_MAX_WIDTH, tileWidth - CARD_MARGIN * 2)),
+                    .padding(start = if (narrow) 4.dp else CARD_MARGIN,
+                        bottom = if (app.settings.showStats) 28.dp else if (narrow) 4.dp else CARD_MARGIN)
+                    .width(minOf(CARD_MAX_WIDTH,
+                        (tileWidth - if (narrow) 8.dp else CARD_MARGIN * 2).coerceAtLeast(1.dp))),
+                compact = narrow,
             )
         }
         if (number != null && timing != null && !app.arranging) {
@@ -1677,6 +1684,47 @@ private fun VideoQualitySheet(app: AppState) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LayoutSheet(app: AppState) {
+    var nameDialog by remember { mutableStateOf(false) }
+    var nameValue by remember { mutableStateOf("") }
+    var editingId by remember { mutableStateOf<String?>(null) }
+    var deleteId by remember { mutableStateOf<String?>(null) }
+    if (nameDialog) {
+        AlertDialog(
+            onDismissRequest = { nameDialog = false },
+            title = { Text(if (editingId == null) "Save named layout" else "Rename layout") },
+            text = {
+                OutlinedTextField(
+                    value = nameValue,
+                    onValueChange = { if (it.length <= 48) nameValue = it },
+                    label = { Text("Layout name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (nameValue.trim().isNotEmpty()) {
+                        val id = editingId
+                        if (id == null) app.saveNamedLayout(nameValue)
+                        else app.renameNamedLayout(id, nameValue)
+                        nameDialog = false
+                    }
+                }) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { nameDialog = false }) { Text("Cancel") } }
+        )
+    }
+    deleteId?.let { id ->
+        AlertDialog(
+            onDismissRequest = { deleteId = null },
+            title = { Text("Delete saved layout?") },
+            text = { Text("This removes the named preset, including its map and tower positions.") },
+            confirmButton = {
+                TextButton(onClick = { app.deleteNamedLayout(id); deleteId = null }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { deleteId = null }) { Text("Cancel") } }
+        )
+    }
     ModalBottomSheet(
         onDismissRequest = { app.layoutSheetOpen = false },
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -1729,13 +1777,55 @@ private fun LayoutSheet(app: AppState) {
                 modifier = Modifier.padding(top = 10.dp),
             )
             Row(Modifier.padding(top = 16.dp)) {
-                SecondaryButton("Save this layout") { app.saveLayoutAsDefault(); app.layoutSheetOpen = false }
+                SecondaryButton("Save as named layout") {
+                    editingId = null
+                    nameValue = "My layout ${app.namedLayouts.size + 1}"
+                    nameDialog = true
+                }
             }
             Text(
-                "Every stream with $n feed${if (n == 1) "" else "s"} will start with this arrangement, including the tower and map. Main + strip and Grid stay as they are.",
+                "Save as many named arrangements as needed, including video positions, the track map and timing tower. A saved layout can be loaded or set as the default for its feed count and orientation.",
                 style = Type.footnote,
                 modifier = Modifier.padding(top = 8.dp),
             )
+            if (app.namedLayouts.isNotEmpty()) {
+                Text("Saved layouts", style = Type.headline,
+                    modifier = Modifier.padding(top = 20.dp))
+                app.namedLayouts.forEach { preset ->
+                    val compatible = preset.feedCount == n &&
+                        preset.landscape == (app.canvasSize.first > app.canvasSize.second)
+                    Column(
+                        Modifier.fillMaxWidth().padding(top = 10.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Ink.background).padding(12.dp)
+                    ) {
+                        Text(preset.name +
+                            if (preset.id == app.defaultNamedLayoutId) " · Default" else "",
+                            style = Type.subhead)
+                        Text("${preset.feedCount} feeds · ${if (preset.landscape) "Landscape" else "Portrait"}" +
+                            if (compatible) "" else " · Open a matching layout to load",
+                            style = Type.footnote)
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                                .padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            if (compatible) SecondaryButton("Load") {
+                                app.loadNamedLayout(preset.id)
+                            }
+                            SecondaryButton("Default") { app.makeNamedLayoutDefault(preset.id) }
+                            SecondaryButton("Rename") {
+                                editingId = preset.id
+                                nameValue = preset.name
+                                nameDialog = true
+                            }
+                            SecondaryButton("Delete") { deleteId = preset.id }
+                        }
+                    }
+                }
+            }
+            Text("Android backup can restore these presets after reinstall when device backup and restore are enabled. Keep the same app signing key; local-only data cannot be guaranteed to survive uninstall without a completed cloud/device backup.",
+                style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
 
             Column(Modifier.padding(top = 20.dp).clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(vertical = 4.dp)) {
                 SwitchRow("Laptop mode when half-folded", app.laptopEnabled, app::chooseLaptop)
