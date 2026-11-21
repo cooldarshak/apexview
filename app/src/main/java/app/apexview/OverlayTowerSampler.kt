@@ -16,10 +16,10 @@ internal class OverlayTowerSampler(
     private var lastMs = Long.MIN_VALUE
     private var lastSpeedSource: Map<String, SpeedLog>? = null
 
-    fun sample(now: Long): TowerSample {
+    fun sample(now: Long, speedSource: Map<String, SpeedLog> = timing.speeds): TowerSample {
         // Speeds can finish loading while video is paused at the SAME time.
         // A clock-only cache would freeze newly available gear/speed values.
-        if (last != null && now == lastMs && lastSpeedSource === timing.speeds)
+        if (last != null && now == lastMs && lastSpeedSource === speedSource)
             return requireNotNull(last)
         val started = System.nanoTime()
         val rows = ArrayList<Pair<String, CardState>>(timing.laps.size)
@@ -45,8 +45,8 @@ internal class OverlayTowerSampler(
             tyres[number] = if (old != null && tyre != null &&
                 old.compound == tyre.compound && old.laps == tyre.laps) old else tyre
         }
-        val speeds = HashMap<String, Pair<Int?, Int?>>(timing.speeds.size)
-        timing.speeds.forEach { (number, log) ->
+        val speeds = HashMap<String, Pair<Int?, Int?>>(speedSource.size)
+        speedSource.forEach { (number, log) ->
             val speed = log.kmhAt(now)
             val gear = log.gearAt(now)
             val old = last?.speeds?.get(number)
@@ -64,7 +64,7 @@ internal class OverlayTowerSampler(
         val published = if (same) previous!! else candidate
         last = published
         lastMs = now
-        lastSpeedSource = timing.speeds
+        lastSpeedSource = speedSource
         probe?.record(System.nanoTime() - started, rows.size, changedRows)
         return published
     }
