@@ -92,8 +92,10 @@ internal fun TvTowerRow(
         // only contains its own column commands.
         for (region in 0..2) {
             val retainedRegion = retained.regions[region]
+            val bounds = if (hardware) towerRegionBounds(region, pixelWidth, unit) else null
             val recorded = if (hardware)
-                retainedRegion.beginIfChanged(fieldKeys[region], pixelWidth, pixelHeight)
+                retainedRegion.beginIfChanged(fieldKeys[region], pixelWidth, pixelHeight,
+                    requireNotNull(bounds).left, bounds.right)
             else destination
             if (recorded != null) {
                 changedRegions++
