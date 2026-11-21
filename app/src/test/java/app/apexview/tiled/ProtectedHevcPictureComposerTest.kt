@@ -264,8 +264,8 @@ class ProtectedHevcPictureComposerTest {
                 composed.sampleBytes, composed.nalLengthSize, composed.subsampleRanges
             )
             assertEquals(4, outputLayout.nals.size)
-            assertEquals(sourceTail.size.toLong() * 4L, composed.encryptedByteCount -
-                clearCabacCount.toLong() * 4L)
+            assertEquals((sourceTail.size - clearCabacCount).toLong() * 4L,
+                composed.encryptedByteCount)
             outputLayout.nals.forEach { nal ->
                 assertArrayEquals(sourceTail,
                     composed.sampleBytes.copyOfRange(
