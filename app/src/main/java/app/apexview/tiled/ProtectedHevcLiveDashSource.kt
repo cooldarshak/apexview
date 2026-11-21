@@ -228,7 +228,7 @@ internal object ProtectedHevcComposedDashPackageBuilder {
     /** Shared by the untouched CMAF audio representation in the local receiver manifest. */
     internal fun protectionXml(init: ByteArray, widevinePssh: ByteArray?, scheme: String = "cbcs"): String {
         require(scheme in setOf("cenc", "cbcs"))
-        val defaultKid = readDefaultKid(init)
+        val defaultKid = readDefaultKid(init, scheme)
         val pssh = findWidevinePssh(init) ?: normalizeWidevinePssh(widevinePssh)
         requireNotNull(pssh) { "Widevine PSSH is missing from the source initialization" }
         val encoded = Base64.getEncoder().encodeToString(pssh)
@@ -242,18 +242,20 @@ internal object ProtectedHevcComposedDashPackageBuilder {
      * track. In both tenc versions a reserved byte precedes isProtected; version 1
      * also contains a CBCS crypt/skip pattern. Never read the pattern as isProtected.
      */
-    internal fun readDefaultKid(init: ByteArray): String {
+    internal fun readDefaultKid(init: ByteArray, scheme: String = "cbcs"): String {
         val report = CmafBoxInspector.inspect(init)
         require(report.errors.isEmpty() && report.initializationSegmentPresent) {
             "Protected DASH initialization is not a validated CMAF init"
         }
-        val track = report.tracks.singleOrNull { it.handler == "vide" }
-            ?: throw IllegalArgumentException("Protected DASH requires exactly one video track")
+        // This method is also used by the untouched CMAF audio representation
+        // on Pitwall Cast. Its only track may be encrypted 'enca' with scheme 'cenc'.
+        val track = report.tracks.singleOrNull { it.encrypted }
+            ?: throw IllegalArgumentException("Protected DASH requires one encrypted track")
         val verified = requireNotNull(track.trackEncryption) {
             "Protected DASH init is missing validated tenc defaults"
         }
-        require(track.encrypted && track.sampleEntry == "encv" &&
-            track.protectionScheme == "cbcs" && verified.defaultIsProtected &&
+        require(scheme in setOf("cenc", "cbcs") &&
+            track.protectionScheme == scheme && verified.defaultIsProtected &&
             verified.defaultKidIdentity != null) {
             "Protected DASH init does not contain one verified CBCS key identity"
         }
