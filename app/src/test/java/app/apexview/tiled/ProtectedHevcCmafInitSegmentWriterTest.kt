@@ -209,7 +209,7 @@ class ProtectedHevcCmafInitSegmentWriterTest {
                 .single().representations.single().format
             assertEquals("video/hevc", format.sampleMimeType)
             assertEquals("cbcs", format.drmInitData?.schemeType)
-            assertTrue(format.drmInitData?.schemeDatas?.isNotEmpty() == true)
+            assertTrue((format.drmInitData?.schemeDataCount ?: 0) > 0)
         } finally {
             pkg.zero()
             window.zero()
