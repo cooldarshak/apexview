@@ -22,6 +22,10 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
+import java.util.concurrent.Executors
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.util.concurrent.CancellationException
@@ -101,6 +105,12 @@ internal class F1DashFeedCapture(
             )
         )
 
+    private val compositionDispatcher: ExecutorCoroutineDispatcher = Executors.newSingleThreadExecutor { task ->
+        Thread({
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            task.run()
+        }, "PitwallDashHevcComposition").apply { isDaemon = true }
+    }.asCoroutineDispatcher()
     private val actualProtocols = java.util.concurrent.ConcurrentHashMap<String, ManifestProtocol>()
     private val initializationByLabel = java.util.concurrent.ConcurrentHashMap<String, InitState>()
     @Volatile private var latestWidevinePssh: ByteArray? = null
@@ -203,35 +213,7 @@ internal class F1DashFeedCapture(
                 )
             }
 
-            val media = coroutineScope {
-                selectedWithIndexes.zip(aligned).map { (item, segment) ->
-                    async {
-                        val bytes = readBounded(
-                            item,
-                            item.index.getSegmentUrl(segment.number),
-                            MAX_MEDIA_FRAGMENT_BYTES,
-                            "media fragment"
-                        )
-                        val init = initializationByLabel[item.feed.label]
-                            ?: throw PermanentCaptureException("${item.feed.label}: source initialization was not captured")
-                        try {
-                            val report = CmafBoxInspector.inspect(bytes, init.report)
-                            if (report.errors.isNotEmpty() || report.initializationSegmentPresent ||
-                                report.fragments.none { it.trackId == init.report.tracks.singleOrNull { t -> t.handler == "vide" }?.trackId }) {
-                                throw PermanentCaptureException(
-                                    "${item.feed.label}: invalid F1 video fragment: " +
-                                        report.errors.joinToString("; ").take(180)
-                                )
-                            }
-                            ProtectedHevcLiveComposition.recordCmafResponse(group, item.feed.label, bytes, report)
-                            item.feed.label
-                        } finally {
-                            // Also clear successful siblings when another feed fails/cancels.
-                            bytes.fill(0)
-                        }
-                    }
-                }.awaitAll()
-            }
+            val media = captureAlignedMedia(group, selectedWithIndexes, aligned, archive = false)
             lastCapturedSegmentStartUs = aligned.first().absoluteStartUs
 
             Snapshot(
@@ -358,37 +340,7 @@ internal class F1DashFeedCapture(
                     failure = if (previous == null) CaptureFailure("Fragment alignment failure at the current archive position", false) else null,
                 )
 
-            val media = coroutineScope {
-                selectedWithIndexes.zip(aligned).map { (item, segment) ->
-                    async {
-                        val bytes = readBounded(
-                            item,
-                            item.index.getSegmentUrl(segment.number),
-                            MAX_MEDIA_FRAGMENT_BYTES,
-                            "archive media fragment"
-                        )
-                        val init = initializationByLabel[item.feed.label]
-                            ?: throw PermanentCaptureException("${item.feed.label}: archive initialization was not captured")
-                        try {
-                            val report = CmafBoxInspector.inspect(bytes, init.report)
-                            if (report.errors.isNotEmpty() || report.initializationSegmentPresent ||
-                                report.fragments.none {
-                                    it.trackId == init.report.tracks.singleOrNull { track -> track.handler == "vide" }?.trackId
-                                }) {
-                                throw PermanentCaptureException(
-                                    "${item.feed.label}: invalid archive HEVC fragment: " +
-                                        report.errors.joinToString("; ").take(180)
-                                )
-                            }
-                            ProtectedHevcLiveComposition.recordCmafResponse(group, item.feed.label, bytes, report)
-                            item.feed.label
-                        } finally {
-                            // Also clear successful siblings when another feed fails/cancels.
-                            bytes.fill(0)
-                        }
-                    }
-                }.awaitAll()
-            }
+            val media = captureAlignedMedia(group, selectedWithIndexes, aligned, archive = true)
             ProtectedHevcLiveComposition.rejectionReason(group)?.let {
                 throw PermanentCaptureException("HEVC/CMAF composition rejected: $it")
             }
@@ -460,6 +412,65 @@ internal class F1DashFeedCapture(
         }
     }
 
+    private suspend fun captureAlignedMedia(
+        group: String,
+        feeds: List<LoadedFeed>,
+        aligned: List<SegmentCandidate>,
+        archive: Boolean
+    ): List<String> {
+        require(feeds.size == aligned.size)
+        val owned = arrayOfNulls<ByteArray>(feeds.size)
+        val started = android.os.SystemClock.elapsedRealtime()
+        try {
+            // Network requests run concurrently without blocking the global
+            // encrypted-composition critical section or video display thread.
+            coroutineScope {
+                feeds.indices.map { index ->
+                    async {
+                        val feed = feeds[index]
+                        owned[index] = readBounded(
+                            feed, feed.index.getSegmentUrl(aligned[index].number),
+                            MAX_MEDIA_FRAGMENT_BYTES,
+                            if (archive) "archive media fragment" else "media fragment"
+                        )
+                    }
+                }.awaitAll()
+            }
+            val fetchMs = android.os.SystemClock.elapsedRealtime() - started
+            val composedStarted = android.os.SystemClock.elapsedRealtime()
+            val labels = withContext(compositionDispatcher) {
+                feeds.indices.map { index ->
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    val feed = feeds[index]
+                    val bytes = requireNotNull(owned[index])
+                    val init = initializationByLabel[feed.feed.label]
+                        ?: throw PermanentCaptureException(
+                            "${feed.feed.label}: source initialization was not captured")
+                    val report = CmafBoxInspector.inspect(bytes, init.report)
+                    if (report.errors.isNotEmpty() || report.initializationSegmentPresent ||
+                        report.fragments.none { fragment ->
+                            fragment.trackId == init.report.tracks
+                                .singleOrNull { it.handler == "vide" }?.trackId
+                        }) throw PermanentCaptureException(
+                            "${feed.feed.label}: invalid F1 HEVC fragment: " +
+                            report.errors.joinToString("; ").take(180))
+                    ProtectedHevcLiveComposition.recordCmafResponse(
+                        group, feed.feed.label, bytes, report)
+                    feed.feed.label
+                }
+            }
+            val composeMs = android.os.SystemClock.elapsedRealtime() - composedStarted
+            android.util.Log.i("ApexviewSingleDecoder",
+                "DASH_CMAF_CAPTURE feeds=${feeds.size} protection=CBCS " +
+                "archive=$archive ioParallel=true compositionWorker=BACKGROUND " +
+                "fetchMs=$fetchMs composeMs=$composeMs " +
+                "sourceBytes=${owned.sumOf { it?.size?.toLong() ?: 0L }}")
+            return labels
+        } finally {
+            owned.forEach { it?.fill(0) }
+        }
+    }
+
     /** Defensive copy of the selected DASH representation's Widevine initialization data. */
     fun widevinePssh(): ByteArray? = latestWidevinePssh?.copyOf()
 
@@ -483,6 +494,7 @@ internal class F1DashFeedCapture(
         lastCapturedSegmentStartUs = null
         latestWidevinePssh?.fill(0)
         latestWidevinePssh = null
+        compositionDispatcher.close()
     }
 
     private suspend fun loadFeed(feed: Feed, playbackPositionMs: Long? = null): LoadedFeed = withContext(Dispatchers.IO) {
