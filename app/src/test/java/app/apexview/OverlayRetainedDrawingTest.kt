@@ -36,6 +36,25 @@ class OverlayRetainedDrawingTest {
         assertTrue(circuit.needsRecord(geometry, 400, 310))
     }
 
+    @Test fun nativeRegionBoundsCoverExistingColumnsWithoutThreeFullRowLists() {
+        for (rowWidth in listOf(181, 361, 722, 1083)) {
+            for (density in listOf(0.5f, 1f, 2f, 3f)) {
+                val unit = minOf(density, rowWidth / 361f)
+                val base = towerRegionBounds(0, rowWidth, unit)
+                val sectors = towerRegionBounds(1, rowWidth, unit)
+                val tyres = towerRegionBounds(2, rowWidth, unit)
+                assertEquals(TowerRegionBounds(0, rowWidth), base)
+                assertTrue(sectors.left <= 202f * unit)
+                assertTrue(sectors.right >= 330f * unit)
+                assertTrue(tyres.left <= 331f * unit)
+                assertTrue(tyres.right >= 361f * unit || tyres.right == rowWidth)
+                assertTrue(sectors.right >= tyres.left)
+                assertTrue(sectors.width < rowWidth)
+                assertTrue(tyres.width < rowWidth)
+            }
+        }
+    }
+
     @Test fun drawClockSchedulesDrawOnlyRefreshForSixtyAndOneTwentyHertz() {
         for (hz in listOf(50, 60, 120)) {
             val interval = 1_000_000_000L / hz
