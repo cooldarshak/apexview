@@ -18,6 +18,9 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
+import java.util.concurrent.Executors
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.io.ByteArrayInputStream
@@ -44,6 +47,12 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     private val initializations = java.util.concurrent.ConcurrentHashMap<String, Init>()
     private val actual = java.util.concurrent.ConcurrentHashMap<String, ManifestProtocol>()
     private val clearComposition = ClearCmafArchiveComposition(fullPictures = fullPictures)
+    private val compositionDispatcher: ExecutorCoroutineDispatcher = Executors.newSingleThreadExecutor { task ->
+        Thread({
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            task.run()
+        }, "PitwallCmafComposition").apply { isDaemon = true }
+    }.asCoroutineDispatcher()
     private var previousStartUs: Long? = null
     private val discontinuityGate = HlsDiscontinuityBoundaryGate()
     private var mediaToArchiveOffsetUs: Long? = null
@@ -215,7 +224,10 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         val startedMs = android.os.SystemClock.elapsedRealtime()
         try {
             require(feeds.size in 2..6 && feeds.map { it.label }.distinct().size == feeds.size)
-            val perFeed = feeds.map { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }
+            // Keep network lanes bounded and independent of the single GL video thread.
+            val perFeed = mapArchiveFeedsBounded(feeds) { feed ->
+                offers.getOrPut(feed.label) { loadOffers(feed) }
+            }
             stage = "per-feed-hevc-rendition"
             // Protected HLS is not DASH. Its old chooseCommon() discarded the user's
             // independent quality choices before the mixed HEVC composer ever ran.
@@ -268,20 +280,26 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 throw PermanentCaptureException("HLS AES-128 full-segment encryption is unsupported; no key is requested")
             }
             stage = "cmaf-init"
-            val inits = selected.indices.map { i -> loadInit(selected[i], playlists[i], segments[i]) }
+            // Init metadata is immutable by rendition; the ConcurrentHashMap cache
+            // prevents repeated CMAF parsing when the sliding window advances.
+            val inits = mapArchiveFeedsBounded(selected.indices.toList()) { i ->
+                loadInit(selected[i], playlists[i], segments[i])
+            }
             // In hev1, a valid encrypted HEVC track can carry VPS/SPS/PPS in its
             // media samples rather than in hvcC. Fetch the real selected fragment
             // before judging that representation. Bound memory and clear all bytes.
-            val media = mutableListOf<ByteArray>()
+            // Indexed owned storage ensures cancellation still zeroes successfully
+            // fetched fragments when a different feed fails. Avoid serial I/O.
+            val media = MutableList(selected.size) { ByteArray(0) }
             val fetchStartedMs = android.os.SystemClock.elapsedRealtime()
             var fetchMs = 0L
             var composeMs = 0L
             try {
                 stage = "cmaf-fragment-download"
-                selected.indices.forEach { index ->
+                mapArchiveFeedsBounded(selected.indices.toList(), concurrency = 4) { index ->
                     coroutineContext.ensureActive()
                     val segment = segments[index]
-                    media += reader.read(
+                    media[index] = reader.read(
                         UriUtil.resolveToUri(playlists[index].baseUri, segment.url),
                         MAX_MEDIA_BYTES, segment.byteRangeOffset, segment.byteRangeLength
                     ).bytes
@@ -416,17 +434,25 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                         CmafWindowTiming.ticksToUs(decodeTicks, timescale)
                 }
                 stage = if (clear) "clear-hevc-tile-composition" else "cbcs-hevc-tile-composition"
-                if (clear) {
-                    clearComposition.compose(selected.mapIndexed { index, offer ->
-                        HevcClearCmafGridComposer.Feed(inits[index].bytes, listOf(media[index]), offer.feed.label)
-                    })
-                } else {
-                    selected.forEachIndexed { index, offer ->
-                        val report = CmafBoxInspector.inspect(media[index], resolvedReports[index])
-                        if (report.errors.isNotEmpty()) throw PermanentCaptureException("${offer.feed.label}: invalid HLS CMAF fragment")
-                        ProtectedHevcLiveComposition.recordCmafResponse(group, offer.feed.label, media[index], report)
+                // Both clear and CBCS composition are CPU-bound. Neither should
+                // run on the IO/network dispatcher that schedules later fragments.
+                // A single priority-lowered worker per capture preserves CBCS
+                // sample ordering, avoids blocking the UI and never opens a
+                // second decoder or decrypts encrypted payloads.
+                withContext(compositionDispatcher) {
+                    if (clear) {
+                        clearComposition.compose(selected.mapIndexed { index, offer ->
+                            HevcClearCmafGridComposer.Feed(inits[index].bytes, listOf(media[index]), offer.feed.label)
+                        })
+                    } else {
+                        selected.forEachIndexed { index, offer ->
+                            coroutineContext.ensureActive()
+                            val report = CmafBoxInspector.inspect(media[index], resolvedReports[index])
+                            if (report.errors.isNotEmpty()) throw PermanentCaptureException("${offer.feed.label}: invalid HLS CMAF fragment")
+                            ProtectedHevcLiveComposition.recordCmafResponse(group, offer.feed.label, media[index], report)
+                        }
+                        ProtectedHevcLiveComposition.rejectionReason(group)?.let { throw PermanentCaptureException("HLS HEVC/CMAF composition rejected: $it") }
                     }
-                    ProtectedHevcLiveComposition.rejectionReason(group)?.let { throw PermanentCaptureException("HLS HEVC/CMAF composition rejected: $it") }
                 }
                 composeMs = android.os.SystemClock.elapsedRealtime() - composeStartedMs
                 discontinuityGate.commit(labels, discontinuities, aligned.first().absoluteStartUs)
@@ -464,6 +490,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         initializations.values.forEach { it.bytes.fill(0) }; initializations.clear()
         offers.clear(); vodPlaylists.clear(); actual.clear(); previousStartUs = null; discontinuityGate.reset(); mediaToArchiveOffsetUs = null
         pssh?.fill(0); pssh = null; clearOutput = null; clearComposition.reset()
+        compositionDispatcher.close()
     }
 
     private fun snapshot(group: String, format: Format?, startUs: Long?, count: Int, failure: CaptureFailure? = null, detail: String? = null) =
