@@ -32,6 +32,51 @@ class VideoSceneTest {
         assertTrue(quads.last().texture[2] < 0.5f)
     }
 
+
+    @Test fun protectedVegas1920By2176AtlasKeepsFourTVWindowsInWidescreenPositions() {
+        // Build 637 decoded all four cameras into 1920x2176 but mistakenly
+        // showed that tall coded atlas as the one video viewport. The GL
+        // renderer must instead use source rectangles for the existing UI
+        // layout, preserving the actual decoder SPS size unchanged.
+        val canvasWidth = 2316f
+        val canvasHeight = 1080f
+        val slots = Layouts.withCombinedOverlays(
+            LayoutMode.TV, 4, canvasWidth, canvasHeight, OverlayLayoutMode.DOCKED
+        ).slots
+        assertEquals(4, slots.size)
+        val originalWindows = slots.mapIndexed { index, slot ->
+            VideoWindow(index + 10, index, slot.x, slot.y, slot.w, slot.h, index.toFloat())
+        }
+        val src = listOf(
+            VideoSourceRect(0, 0, 1920, 1080),
+            VideoSourceRect(0, 1088, 960, 540),
+            VideoSourceRect(960, 1088, 960, 540),
+            VideoSourceRect(0, 1632, 960, 540)
+        )
+        fun scene(windows: List<VideoWindow>) = VideoScene(
+            canvasWidth, canvasHeight, 1920, 2176, 4, windows,
+            atlasColumns = 2, sourceCodedWidth = 1920,
+            sourceCodedHeight = 1088, sourceDisplayWidth = 1920,
+            sourceDisplayHeight = 1080, sourceRects = src, sourceFrameRate = 50.0
+        )
+        val quads = scene(originalWindows).quads()
+        assertEquals(4, quads.size)
+        assertEquals(originalWindows.map { it.id }, quads.map { it.id })
+        assertEquals(src.size, quads.map { it.texture.toList() }.distinct().size)
+        assertEquals(slots.first().x * 2 / canvasWidth - 1,
+            quads.first().positions[0], 0.0001f)
+        val moved = originalWindows.reversed().mapIndexed { i, win ->
+            win.copy(x = (i * 60).toFloat(), y = (i * 90).toFloat(),
+                z = (4 - i).toFloat())
+        }
+        val reconfigured = scene(moved).quads()
+        assertEquals(4, reconfigured.size)
+        assertEquals(
+            quads.associateBy { it.id }.mapValues { it.value.texture.toList() },
+            reconfigured.associateBy { it.id }.mapValues { it.value.texture.toList() }
+        )
+    }
+
     @Test fun sourceEdgesCannotSamplePixelsFromAnAdjacentCamera() {
         val scene = VideoScene(1920f, 1080f, 2880, 540, 3,
             (0..2).map { VideoWindow(it, it, 0f, 0f, 960f, 540f, it.toFloat()) })
