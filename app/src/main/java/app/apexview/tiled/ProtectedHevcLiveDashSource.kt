@@ -411,8 +411,73 @@ internal object ProtectedHevcComposedDashPackageBuilder {
  * defensive copies, so retiring the old rolling window cannot zero bytes being read by Media3.
  */
 @OptIn(UnstableApi::class)
+
+/**
+ * Bounded immutable resource generations. A Media3 DataSource borrows an
+ * already validated package buffer rather than cloning an entire encrypted
+ * CMAF fragment on every read. Old generations are zeroed only after the last
+ * reader closes, so live manifest rotation cannot corrupt an in-flight read.
+ *
+ * The owner never exposes mutable buffers outside the private DataSource.
+ * No copy is decrypted, no licence is touched, and all retired media bytes
+ * are erased when their readers finish.
+ */
+internal class ProtectedDashResourceStore {
+    private class Generation(
+        val value: ProtectedHevcComposedDashPackageBuilder.Package,
+        var users: Int = 0,
+        var retired: Boolean = false
+    )
+    private var current: Generation? = null
+
+    class Lease internal constructor(
+        val bytes: ByteArray,
+        private val onClose: () -> Unit
+    ) : AutoCloseable {
+        private var closed = false
+
+        @Synchronized override fun close() {
+            if (!closed) {
+                closed = true
+                onClose()
+            }
+        }
+    }
+
+    @Synchronized fun replace(next: ProtectedHevcComposedDashPackageBuilder.Package) {
+        val prior = current
+        current = Generation(next)
+        if (prior != null) retire(prior)
+    }
+
+    @Synchronized fun acquire(name: String): Lease? {
+        val generation = current ?: return null
+        val bytes = generation.value.resources[name] ?: return null
+        check(!generation.retired) { "Cannot acquire a retired protected DASH generation" }
+        generation.users++
+        return Lease(bytes) {
+            synchronized(this) {
+                check(generation.users > 0) { "Protected DASH lease was released twice" }
+                generation.users--
+                if (generation.retired && generation.users == 0) generation.value.zero()
+            }
+        }
+    }
+
+    @Synchronized fun close() {
+        current?.let(::retire)
+        current = null
+    }
+
+    private fun retire(generation: Generation) {
+        if (generation.retired) return
+        generation.retired = true
+        if (generation.users == 0) generation.value.zero()
+    }
+}
+
 internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = false) {
-    private var currentPackage: ProtectedHevcComposedDashPackageBuilder.Package? = null
+    private val resources = ProtectedDashResourceStore()
     private var presentationTimeOffsetTicks: Long? = null
     private var availabilityStartTimeMs: Long? = null
     private var released = false
@@ -453,9 +518,7 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
                 availabilityStartTimeMs = requireNotNull(availabilityStartTimeMs),
                 clearOutput = clearOutput,
             )
-            val previous = currentPackage
-            currentPackage = next
-            previous?.zero()
+            resources.replace(next)
         } finally {
             window.zero()
         }
@@ -469,19 +532,17 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
     fun release() {
         if (released) return
         released = true
-        currentPackage?.zero()
-        currentPackage = null
+        resources.close()
     }
 
-    @Synchronized
-    private fun copyResource(name: String): ByteArray? =
-        currentPackage?.resources?.get(name)?.copyOf()
+    private fun acquireResource(name: String): ProtectedDashResourceStore.Lease? =
+        resources.acquire(name)
 
     @OptIn(UnstableApi::class)
     private class ProtectedResourceDataSource(
         private val owner: ProtectedHevcLiveDashSource
     ) : DataSource {
-        private var currentBytes: ByteArray? = null
+        private var currentLease: ProtectedDashResourceStore.Lease? = null
         private var currentPosition = 0
         private var endPosition = 0
         private var currentUri: Uri? = null
@@ -492,25 +553,29 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
         override fun open(dataSpec: DataSpec): Long {
             val name = dataSpec.uri.lastPathSegment
                 ?: throw IOException("Protected composed DASH request has no resource name")
-            val bytes = owner.copyResource(name)
+            val acquired = owner.acquireResource(name)
                 ?: throw IOException("Protected composed DASH resource is not in the live window: $name")
-            val start = dataSpec.position
-            if (start < 0L || start > bytes.size.toLong()) {
-                bytes.fill(0)
-                throw EOFException("Protected composed byte range starts outside $name")
+            try {
+                val bytes = acquired.bytes
+                val start = dataSpec.position
+                if (start < 0L || start > bytes.size.toLong()) {
+                    throw EOFException("Protected composed byte range starts outside $name")
+                }
+                val available = bytes.size.toLong() - start
+                val requested = if (dataSpec.length == C.LENGTH_UNSET.toLong()) available else dataSpec.length
+                if (requested < 0L || requested > available || requested > Int.MAX_VALUE.toLong()) {
+                    throw EOFException("Protected composed byte range exceeds $name")
+                }
+                currentLease?.close()
+                currentLease = acquired
+                currentPosition = start.toInt()
+                endPosition = currentPosition + requested.toInt()
+                currentUri = dataSpec.uri
+                return requested
+            } catch (failure: Throwable) {
+                acquired.close()
+                throw failure
             }
-            val available = bytes.size.toLong() - start
-            val requested = if (dataSpec.length == C.LENGTH_UNSET.toLong()) available else dataSpec.length
-            if (requested < 0L || requested > available || requested > Int.MAX_VALUE.toLong()) {
-                bytes.fill(0)
-                throw EOFException("Protected composed byte range exceeds $name")
-            }
-            currentBytes?.fill(0)
-            currentBytes = bytes
-            currentPosition = start.toInt()
-            endPosition = currentPosition + requested.toInt()
-            currentUri = dataSpec.uri
-            return requested
         }
 
         @Throws(IOException::class)
@@ -519,7 +584,7 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
                 throw IndexOutOfBoundsException("Invalid protected DASH read bounds")
             }
             if (length == 0) return 0
-            val bytes = currentBytes ?: throw IOException("Protected DASH data source is not open")
+            val bytes = currentLease?.bytes ?: throw IOException("Protected DASH data source is not open")
             if (currentPosition >= endPosition) return C.RESULT_END_OF_INPUT
             val count = minOf(length, endPosition - currentPosition)
             bytes.copyInto(buffer, offset, currentPosition, currentPosition + count)
@@ -532,8 +597,8 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
         override fun getResponseHeaders(): Map<String, List<String>> = emptyMap()
 
         override fun close() {
-            currentBytes?.fill(0)
-            currentBytes = null
+            currentLease?.close()
+            currentLease = null
             currentPosition = 0
             endPosition = 0
             currentUri = null
