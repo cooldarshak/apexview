@@ -132,14 +132,28 @@ internal object ProtectedHevcCmafInitSegmentWriter {
             parsedOutput.pps.singleOrNull() == outputPps) {
             "$context: output hvcC does not contain the requested grid parameter sets"
         }
-        require(rawBoxes(source, "sinf") == rawBoxes(result, "sinf") &&
-            rawBoxes(source, "tenc") == rawBoxes(result, "tenc") &&
-            rawBoxes(source, "pssh") == rawBoxes(result, "pssh")) {
-            "$context: sinf, tenc or pssh signalling changed during protected init rewrite"
-        }
+        requireProtectedSignallingPreserved(source, result, context)
         return result
     }
 
+    /** Compare captured DRM boxes by their raw bytes, not ByteArray object identity. */
+    internal fun requireProtectedSignallingPreserved(
+        source: ByteArray, rewritten: ByteArray, context: String
+    ) {
+        for (type in listOf("sinf", "tenc", "pssh")) {
+            val before = rawBoxes(source, type)
+            val after = rawBoxes(rewritten, type)
+            require(before.size == after.size) {
+                "$context: $type box count changed during protected init rewrite " +
+                    "(before=${before.size}, after=${after.size})"
+            }
+            before.indices.forEach { index ->
+                require(before[index].contentEquals(after[index])) {
+                    "$context: $type box $index contents changed during protected init rewrite"
+                }
+            }
+        }
+    }
     private fun handlerType(data: ByteArray, box: Box): String {
         val p = payload(data, box)
         require(p.remaining() >= 12) { "Truncated hdlr" }

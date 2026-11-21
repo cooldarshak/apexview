@@ -1,5 +1,12 @@
 # Pitwall TV: playback performance audit and implementation plan
 
+## Build 627 protected-init correction and graphics acceptance
+
+See [Build 627 engineering diagnosis](BUILD_627_VEGAS_AND_OVERLAY_DIAGNOSIS.md).
+The Vegas protected composition refusal was traced to invalid `List<ByteArray> == List<ByteArray>` identity comparison of unchanged CBCS protection boxes. Preserve bytewise protection checks and add real writer regression coverage. Hardware acceptance remains **PENDING**, independently of CI.
+
+---
+
 Status: active implementation and hardware validation; progress audited through Build 598 (21 November 2026). Original requirements below remain open until their stated exit criteria pass.
 
 
