@@ -1,5 +1,30 @@
 # Pitwall TV: playback performance audit and implementation plan
 
+## Build 643 severe lag: independent video surface and bounded CMAF read memory
+
+Real device log: one hardware HEVC decoder and four correct source crops,
+but a TextureView ties the rolling L3 composed scene to a severely
+janky app UI. During active playback the GL scene latches ~240–250 frames
+per five seconds, while its output presents only ~200–230. At the same
+time the main UI shows 300–994ms frames, massive GC activity and
+frequent BufferQueue timeout logs. Capture workers take ~1.9–3.3s
+composing a new fragment. Sliding-window player-position discontinuities
+can be legitimate relative-timeline rebases, and are **not** treated
+as proof of a seek bug.
+
+Correction: reuse the established SurfaceView scene path for authorized
+Widevine L3, with an independent SurfaceFlinger output layer.
+L1 retains strict protected EGL/secure SurfaceView. No second player,
+codec or DRM workaround. Reduce in-flight media buffer allocations using
+zeroizing lease-backed CMAF resource generations; retain old generations
+until their last Media3 reader closes. Add resource lifetime tests,
+clear synthetic SurfaceView PixelCopy instrumentation and video pacing
+logs. This is stream-agnostic, not keyed to Vegas/Sao Paulo IDs.
+
+Full evidence and limitations:
+docs/BUILD_643_LAG_AND_SURFACE_RENDERING_DIAGNOSIS.md.
+Phone/TV graphics sign-off remains OPEN.
+
 ## Build 637: real one-decoder protected playback achieved; scene presentation was broken
 
 Device log and screenshot show actual four-source CBCS media decoded into
