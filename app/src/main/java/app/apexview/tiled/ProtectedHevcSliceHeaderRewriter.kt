@@ -138,12 +138,13 @@ internal object ProtectedHevcSliceHeaderRewriter {
         // For the three-CABAC-byte path, the copied third byte remains clear. For a
         // header-only rewrite, preserve *every* source CABAC byte and its CBCS protection
         // classification, including encrypted bytes immediately after byte_alignment().
-        appendRange(0, outputTailOffset + if (opaqueCabacTail) 0 else 1, isClear = true)
+        val outputMapResume = outputTailOffset + if (opaqueCabacTail) 0 else 1
+        appendRange(0, outputMapResume, isClear = true)
         mapped.protectionRanges.forEach { range ->
             val intersectionStart = maxOf(sourceMapResume, range.offset)
             val intersectionEnd = minOf(sourceNal.size, range.endExclusive)
             if (intersectionStart < intersectionEnd) {
-                val outputOffset = outputTailOffset + 1 +
+                val outputOffset = outputMapResume +
                     (intersectionStart - sourceMapResume)
                 appendRange(
                     offset = outputOffset,
