@@ -123,13 +123,20 @@ private fun ReceiverMap(timing: SessionTiming, frame: CastTimingProtocol.Frame, 
                         onDriver: (String, Boolean) -> Unit) {
     val position = if (frame.mapMode == MapMode.PIT) frame.positionMs else rememberTvMapTime(positionMs)
     val cars = frame.carsAt(position)
+    // Same draw-only motion clock as the local map; the existing Cast frame,
+    // delayed motion endpoints, focus and interaction sampling are untouched.
+    val drawClock = rememberOverlayDrawClock(timing, positionMs, "pitwall-cast-map-motion-clock")
+    val motion = remember(frame, drawClock) {
+        OverlayMotionSource(drawClock, frame::carsAt)
+    }
     fun panel(p: CastTimingProtocol.Panel) = Modifier
         .offset { IntOffset((p.x * scale).roundToInt(), (p.y * scale).roundToInt()) }
         .requiredSize((p.width / frame.density).dp, (p.height / frame.density).dp)
     if (frame.mapMode == MapMode.EDGE) {
         EdgeDrawingContent(timing, canvasWidth * scale, canvasHeight * scale,
             with(density) { 30.dp.toPx() }, 0f, frame.mapOpacity, frame.utcMs + position - frame.positionMs,
-            cars, frame.stop, frame.flags, frame.leader, frame.dotSize, frame.labelSize) {
+            cars, frame.stop, frame.flags, frame.leader, frame.dotSize, frame.labelSize,
+            motion = motion) {
             targets -> DriverTargets(targets) { onDriver(it, false) }
         }
     }
@@ -145,7 +152,8 @@ private fun ReceiverMap(timing: SessionTiming, frame: CastTimingProtocol.Frame, 
                     frame.mapOpacity) { targets -> DriverTargets(targets) { onDriver(it, true) } }
             } else TrackDrawingContent(timing, p.width * scale, p.height * scale, frame.mapRotation,
                 frame.mapOpacity, frame.dotSize, frame.labelSize, frame.utcMs + position - frame.positionMs,
-                cars, frame.stop, frame.flags, frame.leader) { targets -> DriverTargets(targets) { onDriver(it, false) } }
+                cars, frame.stop, frame.flags, frame.leader,
+                motion = motion) { targets -> DriverTargets(targets) { onDriver(it, false) } }
             if (cars.isEmpty() && frame.message != null) {
                 Text(frame.message, style = Type.footnote, modifier = Modifier.align(Alignment.BottomCenter))
             }

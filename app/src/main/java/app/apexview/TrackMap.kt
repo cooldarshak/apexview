@@ -21,6 +21,9 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.runtime.key
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -610,6 +613,13 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
         android.os.Trace.beginSection("PitwallMapCars")
         try { sampler.sample(now) } finally { android.os.Trace.endSection() }
     }
+    // The screen clock is read ONLY by the foreground Canvas draw lambda.
+    // Its updates invalidate drawing without recomposing the map subtree.
+    val drawClock = rememberOverlayDrawClock(timing, { app.mapTimeMs() ?: 0L },
+        "phone-map-motion-clock")
+    val motion = remember(timing, sampler, drawClock) {
+        OverlayMotionSource(drawClock, sampler::sample)
+    }
     val stop = app.pitDriver?.let { driver ->
         pitStopNow(rememberPitBasis(app, timing, now), driver,
             cars.map { it.number to timing.geometry.progress(it.x, it.y) })
@@ -617,7 +627,7 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
     TrackDrawingContent(timing, width, height, turn, app.mapOpacity, app.mapDotSizeDp, app.mapLabelSizeSp,
         now, cars, stop, timing.flags.at(now), targets = if (app.settings.mapDriverSelection) {
             { targets -> CarTargets(app, targets) }
-        } else null)
+        } else null, motion = motion)
 }
 
 /** Pure current-state rendering, shared with the LAN receiver without replay-history parsing. */
@@ -625,6 +635,7 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
 internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Float, turn: Float,
     opacity: Float, dotSizeDp: Float, labelSizeSp: Float, now: Long, currentCars: List<Car>,
     stop: PitStopNow?, flags: FlagPicture, leader: String? = null,
+    motion: OverlayMotionSource? = null,
     targets: (@Composable (List<Pair<String, Offset>>) -> Unit)? = null,
 ) {
     val density = LocalDensity.current
@@ -652,8 +663,12 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
     fun lapPoint(f: Float) = timing.geometry.pointAt(f).let { g -> fit.map(g[0], g[1]) }
     val sectors = remember(fit, timing.marshalSectors) { sectorPaths(timing, ::lapPoint) }
     val scLabel = remember { measurer.label("SC", 8.sp) }
-    val staticProbe = remember(fit) { OverlayPerformanceProbe("track-static-draw") }
+    val staticProbe = remember(fit) { OverlayPerformanceProbe("track-static-displaylist") }
     val dynamicProbe = remember(fit) { OverlayPerformanceProbe("track-car-flag-draw") }
+    val staticLayer = rememberGraphicsLayer()
+    val staticValidity = remember(staticLayer) { OverlayRecordingValidity() }
+    val eventLayer = rememberGraphicsLayer()
+    val eventValidity = remember(eventLayer) { OverlayRecordingValidity() }
     val cars = remember(fit, currentCars) { currentCars.map { it to fit.map(it.x, it.y) } }
     val pitLabel = remember { measurer.label("PIT", 8.sp) }
     val stopLine = stop?.let { pitStopLine(timing, it) } ?: noPositionsLine(timing, now)
@@ -663,6 +678,12 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
     val safetyCar = if (!flags.track.safetyCar) null else (leader ?: leaderAt(timing, now))
         ?.let { leader -> cars.firstOrNull { it.first.number == leader }?.first }
         ?.let { lapPoint(timing.geometry.progress(it.x, it.y) + SAFETY_CAR_AHEAD) }
+    // Only a changed event/flag/pit marker re-records this middle layer.
+    val eventKey = remember(fit, flags.track, flags.yellow,
+        flags.resumption?.announcedUtc, flags.resumption?.atUtc, flags.resumption?.what,
+        pulse, caption, stop?.number, stop?.carProgress, stop?.ghostProgress,
+        stop?.outBehind, stopText) { Any() }
+    val eventProbe = remember(fit) { OverlayPerformanceProbe("track-event-displaylist") }
 
     // Keep the circuit and its labels in their own recorded layer. Moving cars only redraw
     // the foreground, with no offscreen alpha buffer around the entire track map.
@@ -704,27 +725,87 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
         }
         Canvas(layer) {
             val start = System.nanoTime()
-            circuit()
-            staticProbe.record(System.nanoTime() - start, timing.corners.size, 0)
+            val pixelWidth = size.width.toInt().coerceAtLeast(1)
+            val pixelHeight = size.height.toInt().coerceAtLeast(1)
+            var changed = 0
+            if (staticValidity.needsRecord(circuit, pixelWidth, pixelHeight)) {
+                staticLayer.record(density = this, layoutDirection = layoutDirection,
+                    size = IntSize(pixelWidth, pixelHeight)) { circuit() }
+                staticValidity.markRecorded(circuit, pixelWidth, pixelHeight)
+                changed = 1
+            } else staticValidity.markReplayed()
+            drawLayer(staticLayer)
+            staticProbe.record(System.nanoTime() - start, timing.corners.size, changed)
         }
         Canvas(layer) {
             val start = System.nanoTime()
-            drawFlags(flags, path, sectors, 3.5.dp.toPx(), pulse)
-            drawSectorGlyphs(flags, sectors, 14.dp.toPx()) { f -> lapPoint(f).let { p -> p + outward(p, Offset(width / 2, height / 2)) * 18.dp.toPx() } }
-            drawCaption(flags, caption, width / 2, height - 4.dp.toPx(), pulse)
-            stopText?.let { text ->
-                val above = caption?.let { it.size.height + 6.dp.toPx() } ?: 0f
-                drawText(text, topLeft = Offset(width / 2 - text.size.width / 2f, height - 4.dp.toPx() - above - text.size.height))
+            val w = size.width.toInt().coerceAtLeast(1)
+            val h = size.height.toInt().coerceAtLeast(1)
+            var changed = 0
+            if (eventValidity.needsRecord(eventKey, w, h)) {
+                eventLayer.record(density = this, layoutDirection = layoutDirection,
+                    size = IntSize(w, h)) {
+                    drawFlags(flags, path, sectors, 3.5.dp.toPx(), pulse)
+                    drawSectorGlyphs(flags, sectors, 14.dp.toPx()) { f ->
+                        lapPoint(f).let { p ->
+                            p + outward(p, Offset(width / 2, height / 2)) * 18.dp.toPx()
+                        }
+                    }
+                    drawCaption(flags, caption, width / 2, height - 4.dp.toPx(), pulse)
+                    stopText?.let { text ->
+                        val above = caption?.let { it.size.height + 6.dp.toPx() } ?: 0f
+                        drawText(text, topLeft = Offset(width / 2 - text.size.width / 2f,
+                            height - 4.dp.toPx() - above - text.size.height))
+                    }
+                    stop?.let {
+                        drawPitStop(it, Color(timing.drivers[it.number]?.color
+                            ?: android.graphics.Color.WHITE), pitLabel) { f -> lapPoint(f) }
+                    }
+                }
+                eventValidity.markRecorded(eventKey, w, h)
+                changed = 1
+            } else eventValidity.markReplayed()
+            drawLayer(eventLayer)
+            eventProbe.record(System.nanoTime() - start, timing.marshalSectors.size, changed)
+        }
+        Canvas(layer) {
+            val start = System.nanoTime()
+            // Dynamic car motion reads the video clock in Draw, never Composition.
+            val movingCars = motion?.let { it.carsAt(it.positionMs.value) }
+            if (movingCars != null) {
+                val radius = dotSizeDp.dp.toPx()
+                movingCars.forEach { car ->
+                    val p = fit.map(car.x, car.y)
+                    val alpha = drawCar(timing, car, p, radius)
+                    if (car.number == stop?.number) drawCircle(Color.White, radius + 4.dp.toPx(),
+                        p, style = Stroke(2.dp.toPx()))
+                    names[car.number]?.let {
+                        drawText(it, topLeft = Offset(p.x + radius + minOf(3.dp.toPx(), radius),
+                            p.y - it.size.height / 2f), alpha = alpha)
+                    }
+                }
+                if (flags.track.safetyCar) {
+                    val safetyLeader = leader ?: leaderAt(timing, now)
+                    movingCars.firstOrNull { it.number == safetyLeader }?.let { car ->
+                        val point = lapPoint(timing.geometry.progress(car.x, car.y) + SAFETY_CAR_AHEAD)
+                        drawSafetyCar(point, 10.dp.toPx(), scLabel)
+                    }
+                }
+            } else {
+                cars.forEach { (car, p) ->
+                    val r = dotSizeDp.dp.toPx()
+                    val alpha = drawCar(timing, car, p, r)
+                    if (car.number == stop?.number) drawCircle(Color.White, r + 4.dp.toPx(), p,
+                        style = Stroke(2.dp.toPx()))
+                    names[car.number]?.let {
+                        drawText(it, topLeft = Offset(p.x + r + minOf(3.dp.toPx(), r),
+                            p.y - it.size.height / 2f), alpha = alpha)
+                    }
+                }
+                safetyCar?.let { drawSafetyCar(it, 10.dp.toPx(), scLabel) }
             }
-            stop?.let { drawPitStop(it, Color(timing.drivers[it.number]?.color ?: android.graphics.Color.WHITE), pitLabel) { f -> lapPoint(f) } }
-            cars.forEach { (car, p) ->
-                val r = dotSizeDp.dp.toPx()
-                val alpha = drawCar(timing, car, p, r)
-                if (car.number == stop?.number) drawCircle(Color.White, r + 4.dp.toPx(), p, style = Stroke(2.dp.toPx()))
-                names[car.number]?.let { drawText(it, topLeft = Offset(p.x + r + minOf(3.dp.toPx(), r), p.y - it.size.height / 2f), alpha = alpha) }
-            }
-            safetyCar?.let { drawSafetyCar(it, 10.dp.toPx(), scLabel) }
-            dynamicProbe.record(System.nanoTime() - start, cars.size, cars.size)
+            dynamicProbe.record(System.nanoTime() - start, movingCars?.size ?: cars.size,
+                movingCars?.size ?: cars.size)
         }
     }
     targets?.invoke(cars.map { (car, p) -> car.number to p })
@@ -936,6 +1017,11 @@ fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, i
         android.os.Trace.beginSection("PitwallEdgeCars")
         try { sampler.sample(now) } finally { android.os.Trace.endSection() }
     }
+    val drawClock = rememberOverlayDrawClock(timing, { app.mapTimeMs() ?: 0L },
+        "phone-map-motion-clock")
+    val motion = remember(timing, sampler, drawClock) {
+        OverlayMotionSource(drawClock, sampler::sample)
+    }
     val stop = app.pitDriver?.let { driver ->
         pitStopNow(rememberPitBasis(app, timing, now), driver,
             cars.map { it.number to timing.geometry.progress(it.x, it.y) })
@@ -944,7 +1030,7 @@ fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, i
         cars, stop, timing.flags.at(now), dotSizeDp = app.mapDotSizeDp, labelSizeSp = app.mapLabelSizeSp,
         targets = if (app.settings.mapDriverSelection) {
             { targets -> CarTargets(app, targets) }
-        } else null)
+        } else null, motion = motion)
 }
 
 @Composable
@@ -952,6 +1038,7 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     screenCornerRadius: Float, opacity: Float, now: Long, currentCars: List<Car>,
     stop: PitStopNow?, flags: FlagPicture, leader: String? = null,
     dotSizeDp: Float, labelSizeSp: Float,
+    motion: OverlayMotionSource? = null,
     targets: (@Composable (List<Pair<String, Offset>>) -> Unit)? = null,
 ) {
     val fallback = with(LocalDensity.current) { 24.dp.toPx() }
@@ -988,10 +1075,21 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     val pitLabel = remember { measurer.label("PIT", 7.sp) }
     val stopLine = stop?.let { pitStopLine(timing, it) } ?: noPositionsLine(timing, now)
     val stopText = remember(stopLine) { stopLine?.let { measurer.label(it, 13.sp) } }
+    val eventKey = remember(ribbon, flags.track, flags.yellow,
+        flags.resumption?.announcedUtc, flags.resumption?.atUtc, flags.resumption?.what,
+        pulse, caption, stop?.number, stop?.carProgress, stop?.ghostProgress,
+        stop?.outBehind, stopText) { Any() }
+    val eventProbe = remember(ribbon) { OverlayPerformanceProbe("edge-event-displaylist") }
 
     val line = remember(ribbon) { ribbon.path() }
-    val staticProbe = remember(ribbon) { OverlayPerformanceProbe("edge-static-draw") }
+    val staticProbe = remember(ribbon) { OverlayPerformanceProbe("edge-static-displaylist") }
     val dynamicProbe = remember(ribbon) { OverlayPerformanceProbe("edge-car-flag-draw") }
+    val staticLayer = rememberGraphicsLayer()
+    val staticValidity = remember(staticLayer) { OverlayRecordingValidity() }
+    val eventLayer = rememberGraphicsLayer()
+    val eventValidity = remember(eventLayer) { OverlayRecordingValidity() }
+    val movingProjection = remember(ribbon) { OverlayEdgeProjection() }
+    val reusedCollisionRows = remember(ribbon) { FloatArray(3) }
     // Track outline, turn glyphs and start/finish marks are independent of the moving cars.
     // Give them a separate retained Compose draw layer, as the regular map already does.
     val taken = remember(ribbon, marks, finishLabel, startLabel, timing.hasStartFinish) {
@@ -1037,42 +1135,90 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
         }
         Canvas(layer) {
             val start = System.nanoTime()
-            circuit()
-            staticProbe.record(System.nanoTime() - start, timing.corners.size, 0)
+            val pixelWidth = size.width.toInt().coerceAtLeast(1)
+            val pixelHeight = size.height.toInt().coerceAtLeast(1)
+            var changed = 0
+            if (staticValidity.needsRecord(circuit, pixelWidth, pixelHeight)) {
+                staticLayer.record(density = this, layoutDirection = layoutDirection,
+                    size = IntSize(pixelWidth, pixelHeight)) { circuit() }
+                staticValidity.markRecorded(circuit, pixelWidth, pixelHeight)
+                changed = 1
+            } else staticValidity.markReplayed()
+            drawLayer(staticLayer)
+            staticProbe.record(System.nanoTime() - start, timing.corners.size, changed)
         }
         Canvas(layer) {
             val start = System.nanoTime()
-            drawFlags(flags, line, sectors, 2.5.dp.toPx(), pulse)
-            drawSectorGlyphs(flags, sectors, 12.dp.toPx()) { f -> ribbon.point(f) + ribbon.inward(f) * 12.dp.toPx() }
-            // Above the bottom of the loop, clear of the car names that sit inside it.
-            drawCaption(flags, caption, width / 2, height - inset / 2 - 56.dp.toPx(), pulse)
-            stopText?.let { text ->
-                val above = caption?.let { it.size.height + 6.dp.toPx() } ?: 0f
-                drawText(text, topLeft = Offset(width / 2 - text.size.width / 2f, height - inset / 2 - 56.dp.toPx() - above - text.size.height))
-            }
-
+            val w = size.width.toInt().coerceAtLeast(1)
+            val h = size.height.toInt().coerceAtLeast(1)
+            var changed = 0
+            if (eventValidity.needsRecord(eventKey, w, h)) {
+                eventLayer.record(density = this, layoutDirection = layoutDirection,
+                    size = IntSize(w, h)) {
+                    drawFlags(flags, line, sectors, 2.5.dp.toPx(), pulse)
+                    drawSectorGlyphs(flags, sectors, 12.dp.toPx()) { f ->
+                        ribbon.point(f) + ribbon.inward(f) * 12.dp.toPx()
+                    }
+                    drawCaption(flags, caption, width / 2,
+                        height - inset / 2 - 56.dp.toPx(), pulse)
+                    stopText?.let { text ->
+                        val above = caption?.let { it.size.height + 6.dp.toPx() } ?: 0f
+                        drawText(text, topLeft = Offset(width / 2 - text.size.width / 2f,
+                            height - inset / 2 - 56.dp.toPx() - above - text.size.height))
+                    }
+                    stop?.let {
+                        drawPitStop(it, Color(timing.drivers[it.number]?.color
+                            ?: android.graphics.Color.WHITE), pitLabel, ribbon::point)
+                    }
+                }
+                eventValidity.markRecorded(eventKey, w, h)
+                changed = 1
+            } else eventValidity.markReplayed()
+            drawLayer(eventLayer)
+            eventProbe.record(System.nanoTime() - start, timing.marshalSectors.size, changed)
+        }
+        Canvas(layer) {
+            val start = System.nanoTime()
+            val movingCars = motion?.let { it.carsAt(it.positionMs.value) }
             // Labels step further inward when cars bunch up, so a pack stays readable.
-            stop?.let { drawPitStop(it, Color(timing.drivers[it.number]?.color ?: android.graphics.Color.WHITE), pitLabel, ribbon::point) }
-            val lastAt = FloatArray(3) { -Float.MAX_VALUE }
-            cars.forEach { (car, f) ->
+            reusedCollisionRows.fill(-Float.MAX_VALUE)
+            val lastAt = reusedCollisionRows
+            val motionCount = if (movingCars == null) 0
+                else movingProjection.update(movingCars, timing.geometry)
+            val count = if (movingCars == null) cars.size else motionCount
+            for (index in 0 until count) {
+                val car = if (movingCars == null) cars[index].first
+                    else movingProjection.car(index)
+                val f = if (movingCars == null) cars[index].second
+                    else movingProjection.fraction(index)
                 val p = ribbon.point(f)
                 val radius = dotSizeDp.dp.toPx()
                 val alpha = drawCar(timing, car, p, radius)
-                if (car.number == stop?.number) drawCircle(Color.White, radius + 4.dp.toPx(), p, style = Stroke(2.dp.toPx()))
-                val label = names[car.number] ?: return@forEach
+                if (car.number == stop?.number) drawCircle(Color.White,
+                    radius + 4.dp.toPx(), p, style = Stroke(2.dp.toPx()))
+                val label = names[car.number] ?: continue
                 val along = f * ribbon.perimeter
                 val gap = label.size.width + 6.dp.toPx()
                 val nearMark = taken.any { (at, w) ->
                     val d = abs(along - at).let { minOf(it, ribbon.perimeter - it) }
                     d < (w + label.size.width) / 2 + 4.dp.toPx()
                 }
-                val level = (0 until 3).firstOrNull { (it > 0 || !nearMark) && along - lastAt[it] > gap } ?: 2
+                val level = (0 until 3).firstOrNull {
+                    (it > 0 || !nearMark) && along - lastAt[it] > gap
+                } ?: 2
                 lastAt[level] = along
                 val at = p + ribbon.inward(f) * (14 + level * 13).dp.toPx()
-                drawText(label, topLeft = at - Offset(label.size.width / 2f, label.size.height / 2f), alpha = alpha)
+                drawText(label, topLeft = at - Offset(label.size.width / 2f,
+                    label.size.height / 2f), alpha = alpha)
             }
-            safetyCar?.let { drawSafetyCar(ribbon.point(it), 7.5.dp.toPx(), scLabel) }
-            dynamicProbe.record(System.nanoTime() - start, cars.size, cars.size)
+            if (movingCars != null && flags.track.safetyCar) {
+                val safetyLeader = leader ?: leaderAt(timing, now)
+                movingCars.firstOrNull { it.number == safetyLeader }?.let { car ->
+                    val f = timing.geometry.progress(car.x, car.y) + SAFETY_CAR_AHEAD
+                    drawSafetyCar(ribbon.point(f), 7.5.dp.toPx(), scLabel)
+                }
+            } else safetyCar?.let { drawSafetyCar(ribbon.point(it), 7.5.dp.toPx(), scLabel) }
+            dynamicProbe.record(System.nanoTime() - start, count, count)
         }
     }
     targets?.invoke(cars.map { (car, f) -> car.number to ribbon.point(f) })

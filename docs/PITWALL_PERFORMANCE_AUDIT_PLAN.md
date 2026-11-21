@@ -76,13 +76,11 @@ PixelCopy operation, proprietary SDK or a second F1 timing provider.
 
 ### Explicit scope and next hardware gate
 
-This initial retained-data and geometry batch is intentionally **not**
-labelled a completed RenderNode/GLES renderer replacement. The existing
-static-circuit Canvas layer and hardware-tower row layers are already
-retained, and this batch reduces CPU-side data rebuilds without altering
-their visuals. An alternate native RenderNode recording path may be
-benchmarked later against the current Canvas implementation; do not ship
-one based on unmeasured assumptions.
+**Historical note (Build 600):** this initial retained-data and geometry
+batch did not yet replace the full recording path. The next integrated
+stage below implements explicit retained circuit/flag drawing, RenderNode
+tower regions and draw-phase map motion. Neither source-code stage is
+a substitute for the hardware acceptance gates.
 
 **Acceptance remains unmet until real-device results:** compare the
 overlay OFF, map only, tower only, both ON states on the same feed quality,
@@ -90,6 +88,108 @@ layout and device mode. Distinguish UI app-frame deadlines from actual
 video pictures presented. Keep the established Build 585 video-only miss
 rate as a separate baseline and do not claim that this overlay batch fixes
 video-only scheduling or physical 50fps output.
+
+---
+
+## Integrated full retained-overlay implementation — after Build 600
+
+**Scope:** one coordinated branch commit covering track map, edge map,
+pit-circle static geometry, tower row drawing and Pitwall Cast receiver.
+**Implementation status:** code and tests staged together; record final
+CI/build number on successful Actions completion. **Hardware status:
+not yet accepted**. This section supersedes Build 600's description as
+an *initial* data-sampling-only optimization.
+
+### Map and timing-tower rendering contract
+
+1. **Map motion is a Draw-phase state read, never a 60/120 Hz Composition
+   read.** `rememberOverlayDrawClock` samples the authorized video clock on
+   Choreographer frames with a 60 Hz cap. `OverlayMotionSource` updates
+   only the moving-car Canvas in the map and edge-map. Existing 30 Hz
+   Compose publication is retained for hit targets, live flag captions,
+   pit-stop selection and TV focus. This avoids touching/losing input
+   semantics while stopping the faster motion clock from recomposing
+   the map tree. Playback pause/reverse/seek follows the same clock; no
+   positional guesses are invented across missing timing data.
+2. **Retained map display lists** use `rememberGraphicsLayer` and immutable
+   explicit invalidation tokens. Track and edge maps each have three
+   separate rendering layers: **static circuit**, **flag/pit-event layer**,
+   and **moving cars/driver abbreviations/safety-car**. Circuit drawing
+   instructions are recorded only for changed geometry/density/panel
+   dimensions. Flag/events only re-record for flag/sector/pulse/stop
+   changes; identical new FlagPicture objects do not force a redraw.
+   Opacity/rotation/move/resize remain controlled by the existing
+   graphicsLayer and panels. No screenshots of protected content.
+3. **Edge map** uses a reusable insertion-sorted primitive projection
+   buffer rather than allocating Pair collections and sorted lists for
+   every high-rate redraw. Tie order, collision rows and label offsets
+   match the existing 44dp hit targets and label rules.
+4. **Native RenderNode tower** (API 29+) records each visible tower row
+   into three independently invalidated regions: (a) position, team,
+   speed/gear, lap times and gaps, (b) full S1/S2/S3 mini-sector
+   colours and times, and (c) tyre compound/age. Changing a sector
+   does not re-record speed/gear or tyre. Recorded layers are replayed
+   without re-measuring or drawing those text and bar commands. Native
+   Paint/Android Canvas coordinates and existing Offscreen row isolation
+   are retained. Software fallback executes those **same** commands.
+   Focus ring, touch, D-pad, accessibility and scrolling stay on the
+   existing clickable Compose row.
+5. **Pit-circle** caches dark circuit background and turn/start-finish/
+   inner-lane geometry in separately recorded display lists, with
+   pit-window arc positioned below the outline as before. Dynamic
+   pit-lane dots, gap labels, car selection rings, collision placement,
+   ghost and stop controls remain live. Gap text measurement and
+   collision scratch lists are retained/reused on changes, not
+   reallocated on every draw. Its business-driven pit-window model
+   continues to use the existing 30 Hz timing cadence; no fake
+   interpolation of calculated pit-stop gaps is introduced.
+6. **Pitwall Cast** keeps wire protocol version 1, its multi-step
+   200ms future car samples, timing table, audio/scene integration
+   and existing receiver controls. Receiver map animation now reads
+   the playback clock during Draw, with a **stable geometry owner**
+   so new 200ms Cast packets do not restart the animation coroutine.
+   Sender owns its own position sampler; receiver owns its packet
+   model and retains tower/map rendering using the same functions as
+   the phone. The local decoder count and DRM rules are unchanged.
+7. **Diagnostics** remain low-rate, five-second fixed-memory
+   `OVERLAY_5S` records for `track-static-displaylist`,
+   `track-event-displaylist`, `track-car-flag-draw`,
+   `edge-static-displaylist`, `edge-event-displaylist`,
+   `edge-car-flag-draw`, `pit-circle-displaylist`,
+   `pit-circle-vehicles`, `phone-map-motion-clock`,
+   `pitwall-cast-map-motion-clock`, and
+   `phone/tv-tower-row-draw`. `changed` on cached layers means
+   actually re-recorded regions; zero means display-list replay.
+   Metrics are CPU timing estimates, **not GPU elapsed time or
+   physical SurfaceFlinger presentation evidence**. Existing
+   Perfetto markers remain.
+
+### Mandatory pre-hardware CI regression matrix
+
+| Gate | Regression coverage | Expected result |
+| --- | --- | --- |
+| Re-record correctness | `OverlayRetainedDrawingTest` | Same key+dimensions replay; style, flags, geometry and resize invalidate |
+| Animation scheduler | `OverlayRetainedDrawingTest` | 50/60/120 Hz clock timestamps yield valid ~50-60 Hz draw pacing; backward frame reset accepted |
+| Map edge parity | `OverlayEdgeProjectionTest` | Stable sorted-by-progress order matches legacy with ties/overlaps; reusable buffer grows/shrinks correctly |
+| Tower dirty fields | `TowerRegionVisualKeysTest` | Speed/gear-only, mini-sector-only, tyre-only, highlight/position-only changes invalidate their exact regions |
+| Existing values | `OverlayTowerSamplerTest`, `TowerSampleVisualTest`, `OverlayGeometryParityTest`, `OverlayPositionSamplerTest` | All timing, track, target and seek/data-gap calculations equal the Build 600 source contract |
+| Pitwall Cast protocol | `CastTimingProtocolTest` and all Cast receiver/sender tests | No changed protocol fields, geometry, timestamp interpolation or sender/receiver semantics |
+| APK | GitHub full Android CI, signing, instrumentation APK assembly | Green before user receives a new APK |
+
+### Remaining tests that **require devices**
+
+The user should not be asked for an intermediate synthetic test.
+A green workflow is a **code integration gate**, not the final
+smoothness/visual-equivalence acceptance. After CI is green,
+run one consolidated real-session validation: S22 Ultra four feeds
+with map/tower ON, map/edge/pit-circle and all size/lock/rotation/
+opacity controls, TV focus/D-pad/accessibility, comparison images
+and 10-minute Perfetto/SurfaceFlinger and `OVERLAY_5S` counters.
+Repeat single/two/four feeds on TCL 55C655, then Pitwall Cast with
+tower/map and commentary, seek/pause and receiver decoder count.
+The target remains fewer than 5% slow UI frames with no steady
+freezes, plus independent physically smooth video. No phone-only
+or CI-only evidence can mark those hardware gates complete.
 
 ---
 
