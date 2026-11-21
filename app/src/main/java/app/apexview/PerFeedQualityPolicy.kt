@@ -7,24 +7,14 @@ internal object PerFeedQualityPolicy {
         return qualities.first().takeIf { wanted -> qualities.all { it == wanted } }
     }
 
-    /**
-     * Protected CBCS/DASH composition currently requires one uniform source rendition.
-     * If per-feed choices differ, keep the user's saved choices unchanged and negotiate
-     * the highest shared rendition not exceeding the lowest explicit preference.
-     * AUTO imposes no per-feed ceiling. This does NOT enable mixed-resolution
-     * encrypted slice rewriting or relax any DRM/subsample compatibility check.
-     */
-    fun protectedUniformQuality(qualities: List<VideoQuality>): VideoQuality? {
-        val same = commonDecoderQuality(qualities)
-        if (same != null || qualities.isEmpty()) return same
-        return qualities.filter { it.targetHeight > 0 }
-            .minByOrNull { it.targetHeight } ?: VideoQuality.AUTO
-    }
+    // No hidden source-quality downgrade: encrypted mixed-resolution pictures require
+    // an independent HEVC/CBCS subsample validation before this policy can be extended.
 
     fun description(labels: List<String>, qualities: List<VideoQuality>): String =
         labels.zip(qualities).joinToString(", ") { (name, quality) -> "$name=${quality.label}" }
 
-    const val MIXED_UNSUPPORTED = "Mixed-resolution encrypted HEVC composition has not passed the protected-subsample gate. " +
-        "Clear HEVC archives can use the mixed tile atlas when their source tiles fit. " +
-        "No additional video decoders will be started."
+    const val MIXED_UNSUPPORTED = "This F1 source requires protected HEVC; mixed-resolution protected stitching " +
+        "has not passed the CBCS subsample gate. Your requested qualities were preserved, not downgraded. " +
+        "Select the same quality for these feeds to try protected single-decoder playback. " +
+        "Clear archives can still play mixed resolutions with one decoder."
 }

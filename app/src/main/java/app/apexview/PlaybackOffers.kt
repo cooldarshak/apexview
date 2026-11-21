@@ -67,6 +67,10 @@ internal object PlaybackOffers {
         return offers.distinctBy { it.url }
     }
 
+    /** Same-channel authorized HLS offer; the actual CMAF init must still prove CLEAR. */
+    fun hlsCandidate(offers: List<PlaybackOffer>): PlaybackOffer? =
+        offers.firstOrNull { it.protocol == ManifestProtocol.HLS }
+
     fun preferred(offers: List<PlaybackOffer>, preferDash: Boolean): PlaybackOffer? =
         (if (preferDash) offers.firstOrNull { it.protocol == ManifestProtocol.DASH } else null)
             ?: offers.firstOrNull()

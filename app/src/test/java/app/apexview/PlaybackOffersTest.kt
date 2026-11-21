@@ -27,6 +27,18 @@ class PlaybackOffersTest {
         assertEquals(ManifestProtocol.HLS, PlaybackOffers.preferred(offers, false)!!.protocol)
     }
 
+    @Test fun hlsAlternativeIsKeptEvenWhenDashIsSelected() {
+        val offers = PlaybackOffers.read(JSONObject("""{
+            "variants":[
+                {"url":"https://example.test/channel.mpd", "laURL":"dash-license"},
+                {"url":"https://example.test/channel.m3u8", "laURL":"hls-license"}
+            ]
+        }"""), "DASH", "parent-license")
+        assertEquals(ManifestProtocol.DASH, PlaybackOffers.preferred(offers, true)?.protocol)
+        assertEquals("https://example.test/channel.m3u8", PlaybackOffers.hlsCandidate(offers)?.url)
+        assertNull(PlaybackOffers.hlsCandidate(offers.filter { it.protocol == ManifestProtocol.DASH }))
+    }
+
     @Test fun missingChannelOfferCannotBorrowMetadataOrAnotherChannelsUrl() {
         assertNull(PlaybackOffers.preferred(PlaybackOffers.read(JSONObject("""{
             "metadata":{"url":"https://example.test/other.mpd"},

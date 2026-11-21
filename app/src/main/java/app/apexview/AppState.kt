@@ -759,15 +759,28 @@ class AppState(
             return
         }
         val castQuality = PerFeedQualityPolicy.commonDecoderQuality(castTiles.map(::qualityFor))
-        val verifiedClear = singleDecoderScenePlayer?.archiveSceneSession?.sourceLabels?.toSet() == castTiles.map { it.feed.sourceStream.profileLabel }.toSet()
-        if (verifiedClear && singleDecoderSceneActive && singleDecoderScenePlayer?.hasLoadedDrmKeys != true) {
+        val verifiedClear = singleDecoderSceneActive &&
+            singleDecoderScenePlayer?.archiveSceneSession?.sourceLabels?.toSet() ==
+                castTiles.map { it.feed.sourceStream.profileLabel }.toSet()
+        if (verifiedClear) {
+            // The composed VIDEO track has passed the clear-CMAF gate. Source-player
+            // DRM keys or a licence URL do not retroactively encrypt these samples.
+            // PixelCopy separately refuses a FLAG_SECURE window.
+            android.util.Log.i("PitwallCast", "CAST_SOURCE_ROUTE=VERIFIED_CLEAR_COMPOSED baked=true")
             prepareBakedCast(castTiles)
             return
         }
-        val nativeRequired = castTiles.any { it.contentId in knownLiveContentIds || it.feed.player.isCurrentMediaItemLive ||
-            !verifiedClear && (it.feed.hasLoadedDrmKeys || it.feed.player.videoFormat?.drmInitData != null ||
-                it.feed.player.videoFormat == null && it.feed.sourceStream.licenseUrl != null) }
-        if (localChosen && nativeRequired) {
+        val liveSources = castTiles.any {
+            it.contentId in knownLiveContentIds || it.feed.player.isCurrentMediaItemLive
+        }
+        val sourcePlan = ArchiveCompositionSourcePolicy.select(castTiles.map { it.feed.sourceStream })
+        val nativeRequired = liveSources || castTiles.any {
+            it.feed.hasLoadedDrmKeys || it.feed.player.videoFormat?.drmInitData != null ||
+                it.feed.player.videoFormat == null && it.feed.sourceStream.licenseUrl != null
+        }
+        // Never infer encrypted VIDEO from a licence URL alone. For a replay,
+        // independently inspect the authorized HLS rendition first, if one exists.
+        if (localChosen && (liveSources || nativeRequired && !sourcePlan.mayContainClearArchive)) {
             if (!localWidevineSupported) { message = "Update Pitwall TV on the receiver for protected/live playback."; return }
             if (castTiles.size == 1) prepareDirectCast(castTiles.single()) else prepareNativeComposedCast(castTiles)
             return
@@ -802,7 +815,7 @@ class AppState(
                     val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
                     try {
                         capture.prepareVod(
-                            castTiles.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel, it.feed.sourceStream.url) },
+                            sourcePlan.feeds,
                             castFramePositionMs.coerceAtLeast(0),
                             clockTile.feed.sourceStream.profileLabel,
                             preferredHeight = castQuality?.targetHeight?.takeIf { it > 0 } ?: 720,
@@ -1171,12 +1184,14 @@ class AppState(
         // Clear VOD uses the actual per-feed qualities. Native protected Cast uses
         // one common rendition until mixed CBCS subsample rewriting is validated.
         val selectedQualities = selected.map(::qualityFor)
-        val commonQuality = PerFeedQualityPolicy.protectedUniformQuality(selectedQualities) ?: return
-        if (PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) == null) {
-            android.util.Log.i("PitwallCast", "CAST_PROTECTED_UNIFORM_RENDITION requested=" +
+        val commonQuality = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities)
+        if (commonQuality == null) {
+            castStatus = PerFeedQualityPolicy.MIXED_UNSUPPORTED
+            message = castStatus
+            android.util.Log.w("PitwallCast", "CAST_PROTECTED_MIXED_QUALITY_REJECT requested=" +
                 PerFeedQualityPolicy.description(selected.map { it.feed.sourceStream.profileLabel }, selectedQualities) +
-                " effectiveCap=${commonQuality.label} savedPreferences=UNCHANGED decoderCount=ONE")
-            castStatus = "Protected Cast needs one shared source resolution; using up to ${commonQuality.label} for this session. Your per-feed settings are unchanged."
+                " savedPreferences=UNCHANGED")
+            return
         }
         val socket = localConnection?.socket ?: return
         val clock = leaderTile()?.feed ?: selected.first().feed
@@ -2696,6 +2711,15 @@ class AppState(
             }
             return
         }
+        val sourcePlan = ArchiveCompositionSourcePolicy.select(selected.map { it.feed.sourceStream })
+        // Check the same-channel authorized HLS alternative before handing a replay to
+        // the DASH/CBCS backend. Only its actual CMAF initialization may establish clear.
+        if (!sourcePlan.mayContainClearArchive) {
+            android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_SOURCE_ROUTE=PROTECTED_CMAF " +
+                "reason=NO_AUTHORIZED_HLS_CANDIDATE feeds=${selected.size}")
+            startRollingArchiveSingleDecoderComposition(contentId, attempt)
+            return
+        }
         val composedQuality = PerFeedQualityPolicy.commonDecoderQuality(selected.map { qualityFor(it) })
         val desired = selected.associate { it.feed.sourceStream.profileLabel to qualityFor(it).targetHeight }
         android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_SOURCE_QUALITIES " +
@@ -2778,8 +2802,7 @@ class AppState(
                         val preferredHeight = quality.targetHeight.takeIf { it > 0 }
                             ?: if (selected.size > 4) 270 else if (selected.size > 2) 540 else 720
                         val minimumHeight = if (composedQuality == VideoQuality.P1080) 1080 else 0
-                        val session = capture.prepareVod(selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel,
-                            it.feed.sourceStream.url) }, probePositionMs, host.feed.sourceStream.profileLabel,
+                        val session = capture.prepareVod(sourcePlan.feeds, probePositionMs, host.feed.sourceStream.profileLabel,
                             preferredHeight, settings.commentary, minimumHeight, desired)
                         android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_QUALITY content=$contentId " +
                             "feeds=${selected.size} requested=${PerFeedQualityPolicy.description(desired.keys.toList(), selected.map(::qualityFor))} " +
@@ -2938,15 +2961,17 @@ class AppState(
             return
         }
         val selectedQualities = selectedTiles.map(::qualityFor)
-        val composedQuality = PerFeedQualityPolicy.protectedUniformQuality(selectedQualities)
-            ?: throw IllegalStateException("Protected composition needs at least two selected feeds")
-        if (PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) == null) {
-            // This is a protected/DASH fallback only. The validated clear-HLS archive
-            // path retains full independent 1080p+540p tile composition unchanged.
-            android.util.Log.i("ApexviewSingleDecoder", "F1_PROTECTED_UNIFORM_RENDITION requested=" +
+        // Do not silently turn a requested 1080p+540p layout into 540p+540p.
+        // Encrypted mixed-resolution CBCS has not yet passed protected-subsample
+        // validation. A requested mixed layout must fail clearly, with no new decoder.
+        val composedQuality = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities)
+        if (composedQuality == null) {
+            singleDecoderFailure = PerFeedQualityPolicy.MIXED_UNSUPPORTED
+            message = singleDecoderFailure
+            android.util.Log.w("ApexviewSingleDecoder", "F1_PROTECTED_MIXED_QUALITY_REJECT " +
                 PerFeedQualityPolicy.description(labels, selectedQualities) +
-                " effectiveCap=${composedQuality.label} savedPreferences=UNCHANGED decoderCount=ONE")
-            message = "This source requires a uniform protected HEVC rendition. Using up to ${composedQuality.label} for all feeds without changing your saved qualities."
+                " verifiedClearHls=UNAVAILABLE savedPreferences=UNCHANGED")
+            return
         }
         val feeds = selectedTiles.zip(labels).map { (tile, label) ->
             F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url)

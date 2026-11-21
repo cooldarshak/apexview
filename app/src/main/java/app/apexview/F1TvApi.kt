@@ -131,6 +131,8 @@ data class PlayInfo(
     val requestedPlatform: String = "unknown",
     val playerType: String = "unknown",
     val offerDiagnostic: String = "",
+    /** Alternative from this very same F1 CONTENT/PLAY channel. A URL is NOT proof of clear media. */
+    val authorizedHlsCandidateUrl: String? = null,
 )
 
 /** One play session holding every feed of a content, keyed by channel ID. */
@@ -608,6 +610,7 @@ class F1TvApi(private val userAgent: String, private val chromeMajor: String) {
             requestedPlatform = platform,
             playerType = player,
             offerDiagnostic = diagnostic,
+            authorizedHlsCandidateUrl = PlaybackOffers.hlsCandidate(offers)?.url,
         )
     }
 
