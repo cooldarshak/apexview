@@ -624,32 +624,10 @@ internal object ProtectedHevcLiveComposition {
                 samples = feed.window
             )
         }
-        val proof = HevcPictureSequenceAligner.align(
-            feeds = windows,
-            minimumConsecutivePictures = MIN_ALIGN_PICTURES,
-            context = "Live protected F1 feed alignment"
-        )
-        if (!proof.compatible || !HevcPictureSequenceAligner.isAuthentic(proof)) {
-            session.status = "LIVE_PROTECTED_F1_ALIGNMENT_REJECTED"
-            session.lastFailure = proof.reasons.joinToString("; ").take(220)
-            return
-        }
-
-        val masterFeedId = session.labels.first()
-        val newMatches = proof.matches.filter { match ->
-            val ordinal = match.sampleEvidenceByFeed[masterFeedId]?.sequenceSampleOrdinal
-            ordinal != null && ordinal > session.lastComposedMasterSequenceOrdinal
-        }
-        if (newMatches.isEmpty()) {
-            session.status = "LIVE_PROTECTED_F1_ALIGNMENT_STABLE_NO_NEW_PICTURES"
-            session.lastFailure = null
-            return
-        }
-
-        // Audit the physical single-senc crypto invariant over the *same aligned
-        // pictures* before any expensive HEVC grid rewriting. One protected CMAF
-        // sample has one effective KID / IV / CBCS pattern; mixed identities
-        // cannot be fixed by substituting timestamps or ignoring encryption boxes.
+        // One coordinated preflight on the REAL encrypted F1 source, before alignment
+        // can return early. This checks independent failure dimensions in the same
+        // attempt; we must not require another build just to discover a different
+        // source-wide crypto or HEVC geometry incompatibility.
         val protectionProfiles = session.labels.map { label ->
             requireNotNull(session.feeds.getValue(label).track?.trackEncryption) {
                 "Missing real CBCS track encryption metadata for $label"
@@ -664,6 +642,75 @@ internal object ProtectedHevcLiveComposition {
             it.defaultKidIdentity == masterProtection.defaultKidIdentity &&
                 it.constantIvIdentity == masterProtection.constantIvIdentity
         }
+        val configs = session.labels.map { label ->
+            requireNotNull(session.feeds.getValue(label).track?.hevcConfiguration) {
+                "Protected HEVC configuration is unavailable for $label"
+            }
+        }
+        val codingParametersCompatible = configs.drop(1).all { candidate ->
+            HevcParameterSetCompatibility.compare(
+                configs.first().vps.single(), configs.first().sps.single(),
+                configs.first().pps.single(),
+                candidate.vps.single(), candidate.sps.single(), candidate.pps.single()
+            ).compatible
+        }
+        val mixedSizes = configs.map { it.sps.single().width to it.sps.single().height }
+            .distinct().size > 1
+        val mixedPlan = if (mixedSizes && session.fullPictures) {
+            HevcMixedArchiveAtlasPlan.choose(
+                configs.map { c ->
+                    HevcMixedArchiveAtlasPlan.Source(
+                        c.vps.single(), c.sps.single(), c.pps.single()
+                    )
+                }, maximumWidth = 4096,
+                maximumHeight = HevcArchiveAtlasPlan.MAX_CODED_HEIGHT
+            )
+        } else null
+        val sourceCoded = configs.joinToString(",") {
+            "${it.sps.single().width}x${it.sps.single().height}"
+        }
+        android.util.Log.i("ApexviewSingleDecoder",
+            "REAL_PROTECTED_PIPELINE_AUDIT feeds=${session.labels.size} " +
+                "samples=${windows.joinToString(",") { it.samples.size.toString() }} " +
+                "epochs=${windows.joinToString(",") {
+                    it.samples.map { sample -> sample.irapEpochOrdinal }.distinct().size.toString()
+                }} coded=$sourceCoded " +
+                "tencShapeMatch=$protectionShapeMatches kidMatch=$keyIdentitiesMatch " +
+                "codingToolsMatch=$codingParametersCompatible mixedSizes=$mixedSizes " +
+                "fullPictures=${session.fullPictures} " +
+                "mixedAtlasFit=${if (mixedSizes) mixedPlan != null else "NOT_NEEDED"} " +
+                "ivMatch=AWAITING_PICTURE_ALIGNMENT " +
+                "drmKeysOrIvsLogged=false")
+        val proof = HevcPictureSequenceAligner.align(
+            feeds = windows,
+            minimumConsecutivePictures = MIN_ALIGN_PICTURES,
+            context = "Live protected F1 feed alignment"
+        )
+        if (!proof.compatible || !HevcPictureSequenceAligner.isAuthentic(proof)) {
+            session.status = "LIVE_PROTECTED_F1_ALIGNMENT_REJECTED"
+            session.lastFailure = buildList {
+                addAll(proof.reasons)
+                if (!protectionShapeMatches) add("CBCS default patterns or IV sizes differ")
+                if (!keyIdentitiesMatch) add("source feeds have different protected KIDs")
+                if (!codingParametersCompatible) add("HEVC coding tools differ across sources")
+                if (mixedSizes && mixedPlan == null) add("mixed-resolution atlas has no conforming tile placement")
+            }.joinToString("; ").take(450)
+            return
+        }
+
+        val masterFeedId = session.labels.first()
+        val newMatches = proof.matches.filter { match ->
+            val ordinal = match.sampleEvidenceByFeed[masterFeedId]?.sequenceSampleOrdinal
+            ordinal != null && ordinal > session.lastComposedMasterSequenceOrdinal
+        }
+        if (newMatches.isEmpty()) {
+            session.status = "LIVE_PROTECTED_F1_ALIGNMENT_STABLE_NO_NEW_PICTURES"
+            session.lastFailure = null
+            return
+        }
+
+        // This final, per-picture crypto test uses precisely the sample pairs
+        // attested by the epoch-aware alignment proof, never guessed indices.
         val differentSampleIvCount = newMatches.count { match ->
             val fingerprints = session.labels.map { label ->
                 val ordinal = match.sampleEvidenceByFeed.getValue(label).sequenceSampleOrdinal
@@ -708,23 +755,15 @@ internal object ProtectedHevcLiveComposition {
             "active F1 source tile geometry is invalid"
         }
 
-        val configs = session.labels.map { label ->
-            requireNotNull(session.feeds.getValue(label).track?.hevcConfiguration) {
-                "Protected HEVC configuration is unavailable for $label"
-            }
-        }
-        val mixedSizes = configs.map { it.sps.single().width to it.sps.single().height }
-            .distinct().size > 1
         require(!mixedSizes || session.fullPictures) {
             "Protected mixed-resolution composition requires complete source pictures"
         }
-        val mixedPlan = if (mixedSizes) requireNotNull(HevcMixedArchiveAtlasPlan.choose(
-            configs.map { c ->
-                HevcMixedArchiveAtlasPlan.Source(c.vps.single(), c.sps.single(), c.pps.single())
-            }, maximumWidth = 4096, maximumHeight = HevcArchiveAtlasPlan.MAX_CODED_HEIGHT
-        )) {
+        require(!mixedSizes || mixedPlan != null) {
             "Protected source tiles cannot form a conforming mixed-resolution HEVC atlas"
-        } else null
+        }
+        require(codingParametersCompatible) {
+            "Protected source feeds have incompatible HEVC coding tools; lossless tile stitching is not possible"
+        }
         val atlas = if (session.fullPictures && mixedPlan == null) requireNotNull(HevcArchiveAtlasPlan.choose(session.labels.size,
             spsMetadata.picWidthInCtbs * ctbSize, spsMetadata.picHeightInCtbs * ctbSize, 4096, 2160)) {
             "Complete source pictures exceed the supported TV atlas dimensions; choose a lower HD rendition or fewer feeds"

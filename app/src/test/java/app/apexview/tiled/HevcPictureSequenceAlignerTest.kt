@@ -2,6 +2,7 @@ package app.apexview.tiled
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -165,6 +166,29 @@ class HevcPictureSequenceAlignerTest {
         assertEquals(0L, proof.matches[0].fullPictureOrderCount)
         assertEquals(0L, proof.matches[48].fullPictureOrderCount)
         assertEquals(48L, proof.matches[48].sampleEvidenceByFeed.getValue("channel-0").sequenceSampleOrdinal)
+
+        // Both samples have full POC zero. Protected picture composition must bind
+        // them to their precise fragment/ordinal/IDR epoch, not the numeric POC.
+        val first = HevcPictureSequenceAligner.findMasterMatch(
+            proof, "channel-0", 817_920L, 0, 0L, 0L, 0L
+        )
+        val afterSecondIdr = HevcPictureSequenceAligner.findMasterMatch(
+            proof, "channel-0", 817_920L, 48, 48L, 1L, 0L
+        )
+        assertEquals(proof.matches[0], first)
+        assertEquals(proof.matches[48], afterSecondIdr)
+        assertNull(HevcPictureSequenceAligner.findMasterMatch(
+            proof, "channel-0", 817_920L, 48, 48L, 0L, 0L
+        ))
+        assertNull(HevcPictureSequenceAligner.findMasterMatch(
+            proof, "channel-0", 817_920L, 48, 0L, 1L, 0L
+        ))
+        assertNull(HevcPictureSequenceAligner.findMasterMatch(
+            proof, "channel-0", 800_000L, 48, 48L, 1L, 0L
+        ))
+        assertNull(HevcPictureSequenceAligner.findMasterMatch(
+            proof, "channel-1", 817_920L, 48, 48L, 1L, 0L
+        ))
     }
 
     @Test fun doesNotTreatAnUnverifiedIdrEpochJumpAsNewValidPictureIdentity() {

@@ -476,15 +476,28 @@ internal object ProtectedHevcPictureComposer {
             "$context: alignment proof main-feed offset is invalid"
         }
 
-        val picturePoc = prepared.first().pictureIdentity.pictureOrderCount
-        val matching = proof.matches.filter { it.fullPictureOrderCount == picturePoc }
-        require(matching.size == 1) {
-            "$context: alignment proof does not identify exactly one selected full-POC picture"
-        }
-        val match = matching.single()
-        require(match.masterSampleIndex == prepared.first().input.sampleIndex) {
-            "$context: alignment proof main-feed fragment sample index is stale"
-        }
+        val masterPrepared = prepared.first()
+        val masterInput = masterPrepared.input
+        val picturePoc = masterPrepared.pictureIdentity.pictureOrderCount
+        // The real F1 288-sample CMAF fragments contain IDR resets and therefore
+        // repeated numeric POCs. POC-only proof lookup incorrectly rejects the
+        // second and later epochs even after valid sequence alignment.
+        val match = HevcPictureSequenceAligner.findMasterMatch(
+            proof = proof,
+            feedId = masterInput.feedId,
+            fragmentBaseDecodeTimeTicks = requireNotNull(masterInput.fragmentBaseDecodeTimeTicks) {
+                "$context: selected main-feed CMAF tfdt evidence is missing"
+            },
+            sampleIndex = masterInput.sampleIndex,
+            sequenceSampleOrdinal = requireNotNull(masterInput.sequenceSampleOrdinal) {
+                "$context: selected main-feed global ordinal is missing"
+            },
+            irapEpochOrdinal = masterPrepared.pocTrackerAfter.irapEpochOrdinal,
+            fullPictureOrderCount = picturePoc
+        ) ?: throw IllegalArgumentException(
+            "$context: no unique aligned picture matches the selected fragment, ordinal, " +
+                "IRAP epoch and POC"
+        )
         require(match.sampleIndicesByFeed.keys == feedIdSet &&
             match.sampleEvidenceByFeed.keys == feedIdSet) {
             "$context: alignment proof sample evidence is incomplete or contains unexpected feeds"
@@ -513,10 +526,17 @@ internal object ProtectedHevcPictureComposer {
             require(feed.pictureIdentity == evidence.picture) {
                 "$context: " + input.feedId + " selected full picture identity differs from the alignment proof"
             }
-            require(evidence.irapAnchorPictureOrderCount == anchorPoc &&
+            val masterEvidence = match.sampleEvidenceByFeed.getValue(feedIds.first())
+            require(evidence.irapAnchorPictureOrderCount != null &&
+                masterEvidence.irapAnchorPictureOrderCount != null &&
+                evidence.irapAnchorPictureOrderCount ==
+                    masterEvidence.irapAnchorPictureOrderCount &&
                 feed.pocTrackerAfter.hasIrapAnchor &&
-                feed.pocTrackerAfter.irapAnchorPictureOrderCount == anchorPoc) {
-                "$context: " + input.feedId + " selected sample belongs to a different IRAP POC epoch"
+                feed.pocTrackerAfter.irapAnchorPictureOrderCount ==
+                    evidence.irapAnchorPictureOrderCount &&
+                feed.pocTrackerAfter.irapEpochOrdinal == evidence.irapEpochOrdinal) {
+                "$context: " + input.feedId +
+                    " selected sample does not belong to the verified aligned IRAP epoch"
             }
         }
 

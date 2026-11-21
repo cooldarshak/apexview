@@ -83,6 +83,38 @@ internal object HevcPictureSequenceAligner {
 
     fun isAuthentic(result: Result): Boolean = result.wasIssuedBy(proofIssuer)
 
+    /**
+     * A full POC is NOT a globally unique picture ID. IDR can reset it multiple times
+     * within one real F1 CMAF fragment. Resolve the composer proof by the same
+     * immutable fragment/ordinal/epoch evidence used when the aligner issued it.
+     *
+     * Returning null (including on ambiguous matches) is deliberately fail-closed:
+     * never let a picture from a different IRAP epoch inherit another picture's
+     * timestamp offset or protected sample identity.
+     */
+    fun findMasterMatch(
+        proof: Result,
+        feedId: String,
+        fragmentBaseDecodeTimeTicks: Long,
+        sampleIndex: Int,
+        sequenceSampleOrdinal: Long,
+        irapEpochOrdinal: Long,
+        fullPictureOrderCount: Long
+    ): PictureMatch? {
+        if (!isAuthentic(proof) || !proof.compatible || proof.masterFeedId != feedId) return null
+        return proof.matches.singleOrNull { match ->
+            val evidence = match.sampleEvidenceByFeed[feedId]
+            match.masterSampleIndex == sampleIndex &&
+                match.fullPictureOrderCount == fullPictureOrderCount &&
+                evidence != null &&
+                evidence.sampleIndex == sampleIndex &&
+                evidence.fragmentBaseDecodeTimeTicks == fragmentBaseDecodeTimeTicks &&
+                evidence.sequenceSampleOrdinal == sequenceSampleOrdinal &&
+                evidence.irapEpochOrdinal == irapEpochOrdinal &&
+                evidence.picture.pictureOrderCount == fullPictureOrderCount
+        }
+    }
+
     private fun snapshotPicture(
         picture: HevcPictureIdentityCompatibility.PictureIdentity
     ) = picture.copy(
