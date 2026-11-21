@@ -271,9 +271,9 @@ internal object ProtectedHevcComposedDashPackageBuilder {
             require(box.size >= box.header + 24) { "Protected DASH version-1 tenc is truncated" }
             u8(init, cursor++)
         } else 0
-        val protected = u8(init, cursor++)
+        val isProtected = u8(init, cursor++)
         val ivSize = u8(init, cursor++)
-        require(protected == 1 && ivSize in setOf(0, 8, 16) &&
+        require(isProtected == 1 && ivSize in setOf(0, 8, 16) &&
             verified.version == version && verified.perSampleIvSize == ivSize &&
             verified.cryptByteBlock == (pattern ushr 4) &&
             verified.skipByteBlock == (pattern and 0x0f)) {
