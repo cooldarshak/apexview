@@ -4540,6 +4540,10 @@ class AppState(
             "Could not store the named layout library"
         }
         namedLayouts = items
+        // Ask Android's configured backup transport to capture the durable
+        // credential-free preset changes. Auto Backup remains OS-controlled:
+        // it is not a guarantee of immediate same-device reinstall recovery.
+        runCatching { android.app.backup.BackupManager(context).dataChanged() }
     }
 
     fun saveNamedLayout(name: String) {
@@ -4638,6 +4642,7 @@ class AppState(
         defaultLayoutMode = LayoutMode.CUSTOM
         prefs.edit().putString(PREF_NAMED_DEFAULT, preset.id)
             .putString(PREF_DEFAULT_LAYOUT, LayoutMode.CUSTOM.name).apply()
+        runCatching { android.app.backup.BackupManager(context).dataChanged() }
         message = "'${preset.name}' is now the default for matching sessions"
     }
 
