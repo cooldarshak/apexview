@@ -33,6 +33,11 @@ internal fun PitwallCastSheet(app: AppState) {
             app.localCastDevices.forEach { device -> PrimaryButton(device.name, enabled = !app.castBusy) { app.connectLocalCast(device) } }
             SecondaryButton("Search again") { app.startLocalDiscovery() }
             SecondaryButton("Receive on this device") { app.castPickerOpen = false; app.openTvReceiver() }
+            if (app.castVideoOnlyOffer) {
+                Text("This Google Cast receiver cannot display the native timing tower or track map.",
+                    style = Type.footnote)
+                SecondaryButton("Cast video only (without map or tower)") { app.confirmGoogleVideoOnlyCast() }
+            }
             if (app.castingActive || app.castBusy) SecondaryButton("Stop casting") { app.stopFullSceneCast() }
             if (!app.castBusy && app.tiles.isNotEmpty()) SecondaryButton("Retry casting") { app.retryFullSceneCast() }
             app.castStatus?.let { Text(it, style = Type.footnote) }

@@ -2,7 +2,6 @@ package app.apexview
 
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.rounded.OpenWith
@@ -678,7 +677,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
     val pitLabel = remember { measurer.label("PIT", 8.sp) }
     val stopLine = stop?.let { pitStopLine(timing, it) } ?: noPositionsLine(timing, now)
     val stopText = remember(stopLine) { stopLine?.let { measurer.label(it, 13.sp) } }
-    val pulse = rememberPulse(flags.track.ending)
+    val pulse = rememberOverlayFlagPulse(flags.track.ending)
     val caption = rememberCaption(measurer, flags, now)
     val safetyCar = if (!flags.track.safetyCar) null else (leader ?: leaderAt(timing, now))
         ?.let { leader -> cars.firstOrNull { it.first.number == leader }?.first }
@@ -686,7 +685,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
     // Only a changed event/flag/pit marker re-records this middle layer.
     val eventKey = remember(fit, flags.track, flags.yellow,
         flags.resumption?.announcedUtc, flags.resumption?.atUtc, flags.resumption?.what,
-        pulse, caption, stop?.number, stop?.carProgress, stop?.ghostProgress,
+        caption, stop?.number, stop?.carProgress, stop?.ghostProgress,
         stop?.outBehind, stopText) { Any() }
     val eventProbe = remember(fit) { OverlayPerformanceProbe("track-event-displaylist") }
 
@@ -742,6 +741,18 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
             drawLayer(staticLayer)
             staticProbe.record(System.nanoTime() - start, timing.corners.size, changed)
         }
+        // The transient flag remains BELOW pit annotations and moving cars.
+        // The retained circuit and event lists never re-record for a pulse frame.
+        if (flags.track.ending) {
+            val pulseProbe = remember(fit) { OverlayPerformanceProbe("track-flag-pulse-draw") }
+            Canvas(layer) {
+                val started = System.nanoTime()
+                val alpha = pulse.value
+                drawFlags(flags, path, sectors, 3.5.dp.toPx(), alpha)
+                drawCaption(flags, caption, width / 2, height - 4.dp.toPx(), alpha)
+                pulseProbe.record(System.nanoTime() - started, 1, 1)
+            }
+        }
         Canvas(layer) {
             val start = System.nanoTime()
             val w = size.width.toInt().coerceAtLeast(1)
@@ -750,13 +761,13 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
             if (eventValidity.needsRecord(eventKey, w, h)) {
                 eventLayer.record(density = this, layoutDirection = layoutDirection,
                     size = IntSize(w, h)) {
-                    drawFlags(flags, path, sectors, 3.5.dp.toPx(), pulse)
+                    if (!flags.track.ending) drawFlags(flags, path, sectors, 3.5.dp.toPx(), 1f)
                     drawSectorGlyphs(flags, sectors, 14.dp.toPx()) { f ->
                         lapPoint(f).let { p ->
                             p + outward(p, Offset(width / 2, height / 2)) * 18.dp.toPx()
                         }
                     }
-                    drawCaption(flags, caption, width / 2, height - 4.dp.toPx(), pulse)
+                    if (!flags.track.ending) drawCaption(flags, caption, width / 2, height - 4.dp.toPx(), 1f)
                     stopText?.let { text ->
                         val above = caption?.let { it.size.height + 6.dp.toPx() } ?: 0f
                         drawText(text, topLeft = Offset(width / 2 - text.size.width / 2f,
@@ -933,21 +944,6 @@ private fun rememberCaption(measurer: TextMeasurer, flags: FlagPicture, now: Lon
     return remember(text) { text?.let { measurer.label(it, 15.sp) } }
 }
 
-/** 0.3 to 1 and back, gently, for flags about to go green. */
-@Composable
-private fun rememberPulse(active: Boolean): Float {
-    if (!active) return 1f
-    val pulse by androidx.compose.animation.core.rememberInfiniteTransition(label = "flags").animateFloat(
-        0.3f, 1f,
-        androidx.compose.animation.core.infiniteRepeatable(
-            androidx.compose.animation.core.tween(1100, easing = EaseOut),
-            androidx.compose.animation.core.RepeatMode.Reverse,
-        ),
-        label = "pulse",
-    )
-    return pulse
-}
-
 private fun outward(p: Offset, center: Offset): Offset {
     val d = p - center
     val len = hypot(d.x, d.y)
@@ -1075,7 +1071,7 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     val cars = remember(timing.geometry, currentCars) {
         currentCars.map { car -> car to timing.geometry.progress(car.x, car.y) }.sortedBy { it.second }
     }
-    val pulse = rememberPulse(flags.track.ending)
+    val pulse = rememberOverlayFlagPulse(flags.track.ending)
     val caption = rememberCaption(measurer, flags, now)
     val safetyCar = if (!flags.track.safetyCar) null else (leader ?: leaderAt(timing, now))
         ?.let { leader -> cars.firstOrNull { it.first.number == leader }?.second }
@@ -1085,7 +1081,7 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     val stopText = remember(stopLine) { stopLine?.let { measurer.label(it, 13.sp) } }
     val eventKey = remember(ribbon, flags.track, flags.yellow,
         flags.resumption?.announcedUtc, flags.resumption?.atUtc, flags.resumption?.what,
-        pulse, caption, stop?.number, stop?.carProgress, stop?.ghostProgress,
+        caption, stop?.number, stop?.carProgress, stop?.ghostProgress,
         stop?.outBehind, stopText) { Any() }
     val eventProbe = remember(ribbon) { OverlayPerformanceProbe("edge-event-displaylist") }
 
@@ -1155,6 +1151,17 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
             drawLayer(staticLayer)
             staticProbe.record(System.nanoTime() - start, timing.corners.size, changed)
         }
+        if (flags.track.ending) {
+            val pulseProbe = remember(ribbon) { OverlayPerformanceProbe("edge-flag-pulse-draw") }
+            Canvas(layer) {
+                val started = System.nanoTime()
+                val alpha = pulse.value
+                drawFlags(flags, line, sectors, 2.5.dp.toPx(), alpha)
+                drawCaption(flags, caption, width / 2,
+                    height - inset / 2 - 56.dp.toPx(), alpha)
+                pulseProbe.record(System.nanoTime() - started, 1, 1)
+            }
+        }
         Canvas(layer) {
             val start = System.nanoTime()
             val w = size.width.toInt().coerceAtLeast(1)
@@ -1163,12 +1170,12 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
             if (eventValidity.needsRecord(eventKey, w, h)) {
                 eventLayer.record(density = this, layoutDirection = layoutDirection,
                     size = IntSize(w, h)) {
-                    drawFlags(flags, line, sectors, 2.5.dp.toPx(), pulse)
+                    if (!flags.track.ending) drawFlags(flags, line, sectors, 2.5.dp.toPx(), 1f)
                     drawSectorGlyphs(flags, sectors, 12.dp.toPx()) { f ->
                         ribbon.point(f) + ribbon.inward(f) * 12.dp.toPx()
                     }
-                    drawCaption(flags, caption, width / 2,
-                        height - inset / 2 - 56.dp.toPx(), pulse)
+                    if (!flags.track.ending) drawCaption(flags, caption, width / 2,
+                        height - inset / 2 - 56.dp.toPx(), 1f)
                     stopText?.let { text ->
                         val above = caption?.let { it.size.height + 6.dp.toPx() } ?: 0f
                         drawText(text, topLeft = Offset(width / 2 - text.size.width / 2f,

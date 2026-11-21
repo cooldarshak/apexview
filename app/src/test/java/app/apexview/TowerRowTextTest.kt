@@ -15,7 +15,10 @@ class TowerRowTextTest {
         assertEquals("PIT", first.lastLap)
         assertEquals("200", first.speed)
         assertEquals("8", first.gearText)
-        assertTrue(first.description.contains("Position 1, VER"))
-        assertTrue(first.description.contains("200 ${Settings.KMH}"))
+        // The same visible speed/gear values must not force high-rate TalkBack updates.
+        val accessible = TowerAccessibilitySummary.prepare("VER", state, null)
+        assertTrue(accessible.contains("Position 1, VER"))
+        assertTrue(accessible.contains("In pit"))
+        assertTrue(!accessible.contains("200"))
     }
 }

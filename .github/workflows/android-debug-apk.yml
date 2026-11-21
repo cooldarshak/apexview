@@ -44,6 +44,15 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Report Google Cast overlay receiver capability
+        run: |
+          if [ -z "${PITWALL_CAST_RECEIVER_ID:-}" ]; then
+            echo "::warning::No registered Google Cast layout receiver. Google Cast can show full overlays only with verified clear baked playback. Protected/native overlays need Pitwall Cast on Android TV."
+            echo "Google Cast receiver: standard video-only receiver. Local Pitwall Cast provides protected native overlays." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Google Cast receiver ID configured. The browser layout receiver displays video geometry only; native timing overlays remain Pitwall Cast-only for protected streams." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Set up FFmpeg for HEVC fixtures
         timeout-minutes: 8
         run: |
@@ -229,6 +238,40 @@ jobs:
         run: |
           chmod +x ./gradlew
           ./gradlew --no-daemon assembleDebug assembleDebugAndroidTest
+
+      - name: Execute native RenderNode recording and replay instrumentation
+        if: steps.assemble_apks.outcome == 'success'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          cores: 2
+          ram-size: 2048M
+          heap-size: 256M
+          disable-animations: true
+          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect
+          script: |
+            set -euo pipefail
+            adb wait-for-device
+            test -s app/build/outputs/apk/debug/app-debug.apk
+            test -s app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            adb install -r app/build/outputs/apk/debug/app-debug.apk
+            adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            adb shell am instrument -w -e class app.apexview.OverlayRetainedRenderNodeAndroidTest \
+              app.apexview_custom.test/androidx.test.runner.AndroidJUnitRunner \
+              | tee "$RUNNER_TEMP/pitwall-rendernode-instrumentation.txt"
+            grep -q 'OK (2 tests)' "$RUNNER_TEMP/pitwall-rendernode-instrumentation.txt"
+
+      - name: Upload native RenderNode instrumentation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pitwall-rendernode-instrumentation-report
+          path: ${{ runner.temp }}/pitwall-rendernode-instrumentation.txt
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload debug APK
         if: always() && steps.assemble_apks.outcome == 'success' && env.APK_SIGNING_READY == 'true'

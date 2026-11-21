@@ -235,7 +235,7 @@ internal fun TvTowerRow(
 internal data class TowerRowText(
     val name: String, val lastLap: String, val bestLap: String, val position: String,
     val interval: String, val leader: String, val gearText: String, val speed: String,
-    val sectors: List<SectorCell?>, val description: String,
+    val sectors: List<SectorCell?>,
 ) {
     companion object {
         fun prepare(name: String, state: CardState, tyre: Tyre?, kmh: Int?, gear: Int?, speedUnit: String): TowerRowText {
@@ -251,14 +251,8 @@ internal data class TowerRowText(
             val gearText = gear?.let { if (it == 0) "N" else it.toString() } ?: "–"
             val speed = kmh?.let { speedIn(it, speedUnit).toString() } ?: "–"
             val sectors = (0..2).map(state::towerSector)
-            val description = buildString {
-                append("Position $position, $name, gear $gearText, $speed $speedUnit. Last $lastLap, best $bestLap. Interval $interval, leader $leader.")
-                sectors.forEachIndexed { index, sector ->
-                    sector?.time?.takeIf { it.isNotBlank() }?.let { append(" S${index + 1} $it.") }
-                }
-                tyre?.let { append(" ${it.compound}, ${it.laps} laps.") }
-            }
-            return TowerRowText(name, lastLap, bestLap, position, interval, leader, gearText, speed, sectors, description)
+            // The live TalkBack summary is prepared separately from stable row fields.
+            return TowerRowText(name, lastLap, bestLap, position, interval, leader, gearText, speed, sectors)
         }
     }
 }

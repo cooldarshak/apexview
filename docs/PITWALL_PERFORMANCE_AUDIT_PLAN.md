@@ -3,6 +3,35 @@
 Status: active implementation and hardware validation; progress audited through Build 598 (21 November 2026). Original requirements below remain open until their stated exit criteria pass.
 
 
+## Consolidated post-620 renderer and Cast integration correction (21 November 2026)
+
+**Current integration status:** source changes staged for the next combined GitHub Actions run.
+This does not constitute phone or TV performance acceptance, a Google review,
+or a verified protected-video rendering benchmark.
+
+### Findings and corrections
+
+| Production issue | Integrated correction | How it is tested |
+| --- | --- | --- |
+| Ending SC/VSC flag pulse used `rememberInfiniteTransition` in the composition and put `pulse` into the track/edge event-layer key, causing display-list re-recording for animation | Replace with a 60Hz-capped Choreographer draw-only pulse state. Isolate the dynamic flag outline and caption between cached circuit and event annotations. The retained event list no longer has a pulse dependency; normal flag colour, EaseOut curve and 1100ms reverse timing are retained | `OverlayFlagPulseTest`, `scripts/test_overlay_runtime_wiring.py`, 5s `track-flag-pulse-draw` and `edge-flag-pulse-draw` |
+| `TowerRowText.prepare` generated a detailed `description` string at each text refresh, although live TalkBack semantics came from `TowerAccessibilitySummary` | Keep visible speed, gear, sectors, tyre and row text unchanged. Remove unused duplicate description formatting. Continue stable, focusable, clickable accessibility labels | `TowerRowTextTest`, `TowerAccessibilitySummaryTest`, `scripts/test_overlay_runtime_wiring.py` |
+| Registered Google CAF WebGL receiver renders layouts, not the native timing map/tower; default Google receiver renders only encoded video grid. Previously either could silently omit overlays | Central `CastOverlayDeliveryPolicy` classifies baked clear stream, native Pitwall TV overlays, Google video layout, and Google video grid. If map/tower requested on Google video-only paths, require explicit user opt-in with an alternative to use Pitwall Cast. Preserve video-only mode as a deliberate fallback. Report selected mode in `CAST_OVERLAY_ROUTE` | `CastOverlayDeliveryPolicyTest`, source wiring checks, existing Cast protocol and receiver checks |
+| Protected/live video cannot legally be PixelCopied or baked on the phone with this architecture | Preserve native single-decoder CMAF relay and legitimate TV-side Widevine. In protected/local mode, keep separately drawn synchronized map/tower on Pitwall Cast Android TV; do not mislabel this as a phone-baked picture. Refuse to imply full overlays on a receiver lacking the timing capability | Cast policy tests, receiver timing tests, existing HEVC/DRM checks; real-device acceptance remains open |
+| Native Android RenderNode tests were assembled only | Run `OverlayRetainedRenderNodeAndroidTest` on an Android 35 emulator from the GitHub Actions workflow and upload its output. Failure makes CI red rather than claiming executed graphics tests from APK assembly | GitHub Actions emulator instrument command and report, plus source wiring smoke checks |
+
+### Requirements for real engineering acceptance
+
+- CI must pass the complete JVM/HEVC/Cast suite, source wiring checks, APK assembly **and emulator RenderNode instrument execution**. Emulator tests are not substitutes for actual S22 Ultra or TCL graphics performance.
+- Real S22 Ultra four-feed 10-minute controlled A/B runs: overlays off, map only, tower only, both on, with the same video quality and refresh mode. Compare trace and no-trace sessions and physically presented video frames.
+- During ending SC/VSC flags, event display-list `changed` must remain zero after the flag transition even while `track-flag-pulse-draw`/`edge-flag-pulse-draw` samples advance. Visual flag, caption and stop controls must match the previous build.
+- Validate all three map modes; complete timing rows/mini-sectors; accessibility, focus and TV D-pad; move, resize, rotation, lock, opacity, seek, pause and rejoin.
+- Cast acceptance is separate for **clear baked video+commentary** and **protected native video with receiver-rendered timing**. Google CAF's custom layout receiver is not a full timing renderer. Google default is video-only by deliberate choice. No DRM bypass, no user-visible unsupported feature claims.
+- Segment-allocation pressure, SurfaceTexture buffer timeouts, video-only slow frames and protected playback remain separate, unresolved workstreams. No sign-off claim is valid until device measurements meet the acceptance gates.
+
+---
+
+
+
 
 ## Post-Build 602 overlay engineering review and acceptance gate (21 November 2026)
 

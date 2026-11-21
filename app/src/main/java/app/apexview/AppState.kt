@@ -381,6 +381,17 @@ class AppState(
     val castingActive: Boolean get() = bakedCastSession != null || castRelay != null || nativeComposedCast != null || directCast != null
     var tvCastingMenuOpen by mutableStateOf(false)
     var castPickerOpen by mutableStateOf(false)
+    internal var castVideoOnlyOffer by mutableStateOf(false)
+        private set
+    private var googleVideoOnlyConsent = false
+    /** Explicit opt-in keeps the grid-only fallback without pretending it has overlays. */
+    internal fun confirmGoogleVideoOnlyCast() {
+        if (!castVideoOnlyOffer || localChosen) return
+        googleVideoOnlyConsent = true
+        castVideoOnlyOffer = false
+        castPickerOpen = false
+        startFullSceneCast()
+    }
     internal var localCastDevices by mutableStateOf<List<app.apexview.cast.local.PitwallDevice>>(emptyList())
         private set
     var localCastDiscoveryStatus by mutableStateOf("Looking for Pitwall TVs…")
@@ -699,6 +710,10 @@ class AppState(
     }
     fun onGoogleCastSessionAvailable(session: com.google.android.gms.cast.framework.CastSession) {
         if (localChosen || !googleCastSelected) return
+        if (googleCastSession !== session) {
+            googleVideoOnlyConsent = false
+            castVideoOnlyOffer = false
+        }
         googleCastSession = session
         googleCastRemoteClient?.unregisterCallback(googleRemoteCallback)
         googleCastRemoteClient = session.remoteMediaClient
@@ -728,6 +743,8 @@ class AppState(
         else if (relay != null) loadGoogleCastMedia(relay) else startFullSceneCast()
     }
     fun onGoogleCastSessionEnded() {
+        castVideoOnlyOffer = false
+        googleVideoOnlyConsent = false
         googleCastRemoteClient?.unregisterCallback(googleRemoteCallback)
         googleCastSession = null
         googleCastRemoteClient = null
@@ -762,6 +779,29 @@ class AppState(
         val verifiedClear = singleDecoderSceneActive &&
             singleDecoderScenePlayer?.archiveSceneSession?.sourceLabels?.toSet() ==
                 castTiles.map { it.feed.sourceStream.profileLabel }.toSet()
+        val overlayRoute = app.apexview.cast.CastOverlayDeliveryPolicy.choose(
+            verifiedClear, localChosen, usesLayoutCastReceiver)
+        val overlaysRequested = towerOpen || mapMode != MapMode.OFF
+        android.util.Log.i("PitwallCast", "CAST_OVERLAY_ROUTE=${overlayRoute.name} " +
+            "baked=${overlayRoute.baked} fullOverlays=${overlayRoute.fullOverlays} " +
+            "map=$mapMode tower=$towerOpen")
+        // The CAF browser receiver renders VIDEO layout, not native timing overlays.
+        // Preserve the legacy video-only choice, but never silently omit map/tower.
+        if (app.apexview.cast.CastOverlayDeliveryPolicy.requiresVideoOnlyConsent(
+                overlayRoute, overlaysRequested) && !googleVideoOnlyConsent) {
+            castVideoOnlyOffer = true
+            castStatus = "Google Cast cannot show the map/tower on this stream. " +
+                "Use Pitwall Cast on Android TV for native overlays, or explicitly choose video-only Cast."
+            message = castStatus
+            castPickerOpen = true
+            return
+        }
+        castVideoOnlyOffer = false
+        if (!verifiedClear && localChosen && overlaysRequested && !localTimingSupported) {
+            castStatus = "The Pitwall Cast receiver does not support timing overlays. Update its TV app."
+            message = castStatus
+            return
+        }
         if (verifiedClear) {
             // The composed VIDEO track has passed the clear-CMAF gate. Source-player
             // DRM keys or a licence URL do not retroactively encrypt these samples.
@@ -1121,6 +1161,8 @@ class AppState(
         stopCasting(true)
     }
     private fun stopCasting(resumeLocal: Boolean) {
+        castVideoOnlyOffer = false
+        googleVideoOnlyConsent = false
         ++localConnectionGeneration
         castPreparationJob?.cancel(); castPreparationJob = null
         if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.STOP)

@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -140,4 +141,39 @@ internal class RetainedTowerRowLayers {
         RetainedTowerRenderNode(),
     )
     fun discard() = regions.forEach { it.discard() }
+}
+
+/** Draw-phase flag animation, independently invalidated from the retained flag/event layer. */
+internal const val OVERLAY_FLAG_PULSE_HALF_NS = 1_100_000_000L
+
+internal fun overlayFlagPulseAlpha(elapsedNs: Long): Float {
+    val cycleNs = OVERLAY_FLAG_PULSE_HALF_NS * 2
+    val phase = (elapsedNs.coerceAtLeast(0L) % cycleNs).toFloat() / OVERLAY_FLAG_PULSE_HALF_NS
+    val portion = if (phase <= 1f) phase else 2f - phase
+    return 0.3f + 0.7f * EaseOut.transform(portion)
+}
+
+/** Pass this State into Canvas; read .value only inside the Canvas draw lambda. */
+@Composable
+internal fun rememberOverlayFlagPulse(active: Boolean): State<Float> {
+    val pulse = remember { mutableFloatStateOf(1f) }
+    LaunchedEffect(active) {
+        if (!active) {
+            pulse.floatValue = 1f
+            return@LaunchedEffect
+        }
+        pulse.floatValue = 0.3f
+        var beginning = Long.MIN_VALUE
+        var previous = Long.MIN_VALUE
+        while (true) {
+            withFrameNanos { frame ->
+                if (isOverlayDrawFrameDue(frame, previous)) {
+                    if (beginning == Long.MIN_VALUE) beginning = frame
+                    pulse.floatValue = overlayFlagPulseAlpha(frame - beginning)
+                    previous = frame
+                }
+            }
+        }
+    }
+    return pulse
 }
