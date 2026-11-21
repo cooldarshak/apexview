@@ -37,9 +37,9 @@ internal fun TvTowerRow(
     val currentDensity = LocalDensity.current
     // A tower sample can be republished while this driver's fields stay identical. Keep the
     // formatted text, synthesized strip cells and accessibility description across those draws.
-    val content = remember(number, driver?.tla, state, tyre, kmh, gear, speedUnit) {
+    val content = remember(number, driver?.tla, state, kmh, gear, speedUnit) {
         Trace.beginSection("PitwallTowerTextPrepare")
-        try { TowerRowText.prepare(driver?.tla ?: number, state, tyre, kmh, gear, speedUnit) }
+        try { TowerRowText.prepare(driver?.tla ?: number, state, kmh, gear, speedUnit) }
         finally { Trace.endSection() }
     }
     val (name, lastLap, bestLap, position, interval, leader, gearText, speed, sectors) = content
@@ -238,7 +238,7 @@ internal data class TowerRowText(
     val sectors: List<SectorCell?>,
 ) {
     companion object {
-        fun prepare(name: String, state: CardState, tyre: Tyre?, kmh: Int?, gear: Int?, speedUnit: String): TowerRowText {
+        fun prepare(name: String, state: CardState, kmh: Int?, gear: Int?, speedUnit: String): TowerRowText {
             val lastLap = when {
                 state.retired -> "OUT"
                 state.inPit -> "PIT"

@@ -16,6 +16,9 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("sampler.sample(now, speeds)", laptop)
         self.assertRegex(laptop, r"TimingTowerContents\(timing, visible\.rows")
         self.assertIn("TvTowerRow(timing.drivers[number]", laptop)
+        row = source("TvTowerRow.kt")
+        self.assertIn("remember(number, driver?.tla, state, kmh, gear, speedUnit)", row)
+        self.assertNotIn("remember(number, driver?.tla, state, tyre, kmh, gear, speedUnit)", row)
 
     def test_map_animation_is_draw_phase_and_flags_are_not_recorded_every_frame(self):
         track = source("TrackMap.kt")
@@ -52,6 +55,8 @@ class LiveOverlayWiringTest(unittest.TestCase):
     def test_native_rendernode_instrumentation_is_run_in_ci(self):
         workflow = (ROOT / ".github/workflows/android-debug-apk.yml").read_text(encoding="utf-8")
         self.assertIn("reactivecircus/android-emulator-runner@v2", workflow)
+        self.assertIn("Enable KVM acceleration for Android instrumentation", workflow)
+        self.assertIn("test -r /dev/kvm && test -w /dev/kvm", workflow)
         self.assertIn("OverlayRetainedRenderNodeAndroidTest", workflow)
         self.assertIn("am instrument", workflow)
 
