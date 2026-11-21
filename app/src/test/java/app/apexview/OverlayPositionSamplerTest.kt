@@ -83,6 +83,51 @@ class OverlayPositionSamplerTest {
         }
     }
 
+    @Test fun droppedLeadingDriverDoesNotInvalidateUnchangedFollowingDriver() {
+        // A source track that ends must not shift the identity cache for the
+        // surviving driver. The former implementation indexed a compacted
+        // result list using un-compacted source indices.
+        val source = SessionTiming(
+            type = "Race",
+            drivers = emptyMap(),
+            tracks = linkedMapOf(
+                "1" to DriverTrack(longArrayOf(1_000, 1_200),
+                    floatArrayOf(1f, 1f), floatArrayOf(2f, 2f), 2),
+                "44" to DriverTrack(longArrayOf(1_000, 3_000),
+                    floatArrayOf(10f, 10f), floatArrayOf(20f, 20f), 2),
+            ),
+            states = emptyMap(),
+            outline = floatArrayOf(),
+            hasStartFinish = false, corners = emptyList(), startUtcMs = 1_000L,
+        )
+        val sampler = OverlayPositionSampler(source)
+        assertEquals(listOf("1", "44"), sampler.sample(1_100).map { it.number })
+        val afterRetirement = sampler.sample(1_500)
+        assertEquals(listOf("44"), afterRetirement.map { it.number })
+        val unchanged = sampler.sample(1_600)
+        assertSame("stationary B car must not be recreated after A disappears",
+            afterRetirement.single(), unchanged.single())
+        assertEquals(carsAt(source, 1_600).single().x, unchanged.single().x, 0f)
+    }
+
+    @Test fun independentUiAndDrawTimelinesMatchLegacyDuringInterleavedClockUpdates() {
+        val t = timing()
+        val hitTargets = OverlayPositionSampler(t)
+        val motion = OverlayPositionSampler(t)
+        repeat(90) { frame ->
+            val drawNow = 1_050L + frame * 20L
+            val hitNow = drawNow + 35L
+            val hit = hitTargets.sample(hitNow)
+            val drawn = motion.sample(drawNow)
+            assertEquals(carsAt(t, hitNow).map { it.number to it.x },
+                hit.map { it.number to it.x })
+            assertEquals(carsAt(t, drawNow).map { it.number to it.y },
+                drawn.map { it.number to it.y })
+        }
+        assertEquals("draw sampling remains cached at an unchanged clock",
+            motion.sample(2_830L), motion.sample(2_830L))
+    }
+
     @Test fun stationaryPositionsReUseCarObjectsWithoutSharingMutableCoordinates() {
         val t = timing()
         val sampler = OverlayPositionSampler(t)
