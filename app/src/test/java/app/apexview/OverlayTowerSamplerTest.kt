@@ -99,6 +99,33 @@ class OverlayTowerSamplerTest {
             changed, sampler.sample(1_100L, nextSpeeds))
     }
 
+    @Test fun retainedTowerSamplesPreserveEveryLegacyVisibleFieldAcrossPlaybackAndSeek() {
+        val session = timing()
+        val sampler = OverlayTowerSampler(session)
+        // Includes before-start, pitless racing, gear changes, lap/sector updates,
+        // tyre changes and backward seek. There is no artificial data smoothing.
+        for (now in listOf(500L, 1_100L, 1_700L, 2_100L, 3_100L,
+            2_000L, 1_300L, 3_600L)) {
+            val actual = sampler.sample(now)
+            val reference = TowerSample(
+                rows = session.laps.mapNotNull { (id, laps) ->
+                    laps.at(now, includeRunningTime = false)?.let { id to it }
+                }.sortedBy { it.second.position ?: 99 },
+                header = towerSessionHeader(session, now),
+                tyres = session.tyres.mapValues { it.value.at(now) },
+                speeds = session.speeds.mapValues {
+                    it.value.kmhAt(now) to it.value.gearAt(now)
+                },
+            )
+            assertEquals("timing/sector row parity at $now", reference.rows, actual.rows)
+            assertEquals("flag/lap/countdown header parity at $now", reference.header, actual.header)
+            assertEquals("gear/speed parity at $now", reference.speeds, actual.speeds)
+            assertEquals("tyre/age parity at $now",
+                reference.tyres.mapValues { it.value?.let { tyre -> tyre.compound to tyre.laps } },
+                actual.tyres.mapValues { it.value?.let { tyre -> tyre.compound to tyre.laps } })
+        }
+    }
+
     @Test fun backwardSeekRestoresOldLapAndOldTyres() {
         val sampler = OverlayTowerSampler(timing())
         sampler.sample(3_100L)
