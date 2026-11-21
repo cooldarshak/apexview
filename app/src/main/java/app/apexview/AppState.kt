@@ -1168,10 +1168,15 @@ class AppState(
             message = "Protected multiview casting needs two to six explicit F1 channels from one session."
             return
         }
-        val commonQuality = PerFeedQualityPolicy.commonDecoderQuality(selected.map(::qualityFor))
-        if (commonQuality == null) {
-            message = PerFeedQualityPolicy.MIXED_UNSUPPORTED
-            return
+        // Clear VOD uses the actual per-feed qualities. Native protected Cast uses
+        // one common rendition until mixed CBCS subsample rewriting is validated.
+        val selectedQualities = selected.map(::qualityFor)
+        val commonQuality = PerFeedQualityPolicy.protectedUniformQuality(selectedQualities) ?: return
+        if (PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) == null) {
+            android.util.Log.i("PitwallCast", "CAST_PROTECTED_UNIFORM_RENDITION requested=" +
+                PerFeedQualityPolicy.description(selected.map { it.feed.sourceStream.profileLabel }, selectedQualities) +
+                " effectiveCap=${commonQuality.label} savedPreferences=UNCHANGED decoderCount=ONE")
+            castStatus = "Protected Cast needs one shared source resolution; using up to ${commonQuality.label} for this session. Your per-feed settings are unchanged."
         }
         val socket = localConnection?.socket ?: return
         val clock = leaderTile()?.feed ?: selected.first().feed
@@ -2853,7 +2858,9 @@ class AppState(
                 }
             } catch (backend: app.apexview.tiled.ArchiveVodBackendRequired) {
                 useExistingBackend = true
-                android.util.Log.i("ApexviewSingleDecoder", "Archive requires existing DASH/protected composition backend; sources unchanged")
+                android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_BACKEND_HANDOFF reason=${backend.message ?: "DASH_OR_PROTECTED"} " +
+                    "requested=${PerFeedQualityPolicy.description(selected.map { it.feed.sourceStream.profileLabel }, selected.map(::qualityFor))} " +
+                    "sourceDecodersTouched=${startup.sourceDecodersTouched}")
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 if (startup.sourceDecodersTouched) restore()
                 phase = "CANCELLED"
@@ -2930,13 +2937,16 @@ class AppState(
             applyVideoBudget()
             return
         }
-        val composedQuality = PerFeedQualityPolicy.commonDecoderQuality(selectedTiles.map(::qualityFor))
-        if (composedQuality == null) {
-            singleDecoderFailure = PerFeedQualityPolicy.MIXED_UNSUPPORTED
-            message = singleDecoderFailure
-            android.util.Log.w("ApexviewSingleDecoder", "F1_PROTECTED_MIXED_QUALITY_REJECT " +
-                PerFeedQualityPolicy.description(labels, selectedTiles.map(::qualityFor)))
-            return
+        val selectedQualities = selectedTiles.map(::qualityFor)
+        val composedQuality = PerFeedQualityPolicy.protectedUniformQuality(selectedQualities)
+            ?: throw IllegalStateException("Protected composition needs at least two selected feeds")
+        if (PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) == null) {
+            // This is a protected/DASH fallback only. The validated clear-HLS archive
+            // path retains full independent 1080p+540p tile composition unchanged.
+            android.util.Log.i("ApexviewSingleDecoder", "F1_PROTECTED_UNIFORM_RENDITION requested=" +
+                PerFeedQualityPolicy.description(labels, selectedQualities) +
+                " effectiveCap=${composedQuality.label} savedPreferences=UNCHANGED decoderCount=ONE")
+            message = "This source requires a uniform protected HEVC rendition. Using up to ${composedQuality.label} for all feeds without changing your saved qualities."
         }
         val feeds = selectedTiles.zip(labels).map { (tile, label) ->
             F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url)

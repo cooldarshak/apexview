@@ -15,6 +15,30 @@ class PerFeedQualityPolicyTest {
         assertNull(PerFeedQualityPolicy.commonDecoderQuality(emptyList()))
     }
 
+    @Test fun mixedQualityFallsBackOnlyForProtectedComposition() {
+        val requested = listOf(VideoQuality.P1080, VideoQuality.P540, VideoQuality.P720)
+        assertNull(PerFeedQualityPolicy.commonDecoderQuality(requested))
+        assertEquals(VideoQuality.P540, PerFeedQualityPolicy.protectedUniformQuality(requested))
+        assertEquals(VideoQuality.P720, PerFeedQualityPolicy.protectedUniformQuality(
+            listOf(VideoQuality.P1080, VideoQuality.P720)))
+        assertEquals(VideoQuality.P540, PerFeedQualityPolicy.protectedUniformQuality(
+            listOf(VideoQuality.AUTO, VideoQuality.P540)))
+        assertEquals(VideoQuality.P1080, PerFeedQualityPolicy.protectedUniformQuality(
+            listOf(VideoQuality.AUTO, VideoQuality.P1080)))
+    }
+
+    @Test fun uniformProtectedQualityRetainsOriginalSelection() {
+        assertEquals(VideoQuality.AUTO, PerFeedQualityPolicy.protectedUniformQuality(
+            listOf(VideoQuality.AUTO, VideoQuality.AUTO)))
+        assertEquals(VideoQuality.P1080, PerFeedQualityPolicy.protectedUniformQuality(
+            listOf(VideoQuality.P1080, VideoQuality.P1080)))
+        assertEquals(VideoQuality.P270, PerFeedQualityPolicy.protectedUniformQuality(
+            listOf(VideoQuality.P270, VideoQuality.P1080)))
+        assertNull(PerFeedQualityPolicy.protectedUniformQuality(emptyList()))
+        assertNull(PerFeedQualityPolicy.commonDecoderQuality(
+            listOf(VideoQuality.P1080, VideoQuality.P540)))
+    }
+
     @Test fun qualityPresetsOfferMoreThanTwoHardcodedResolutions() {
         assertEquals(540, VideoQuality.P540.targetHeight)
         assertEquals(360, VideoQuality.P360.targetHeight)
