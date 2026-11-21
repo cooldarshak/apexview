@@ -130,6 +130,94 @@ class HevcPictureSequenceAlignerTest {
         assertTrue(result.reasons.any { it.contains("sample duration, composition offset or random-access flags differ") })
     }
 
+    @Test fun acceptsNinetySixRealWindowShapedPicturesAcrossTwoVerifiedIdrEpochs() {
+        // Build 595 inspected 96 protected HEV1 samples from each of four feeds.
+        // The same full POC can legitimately recur after IDR resets (here at 48).
+        // These are metadata-only regression samples, not fake claims of decoded F1 media.
+        val feeds = (0 until 4).map { feed ->
+            val pictures = (0 until 96).map { index ->
+                val epoch = (index / 48).toLong()
+                val poc = (index % 48).toLong()
+                val dts = 817_920L + index * 1_800L
+                HevcPictureSequenceAligner.PictureSample(
+                    sampleIndex = index,
+                    sequenceSampleOrdinal = index.toLong(),
+                    irapEpochOrdinal = epoch,
+                    irapAnchorPictureOrderCount = 0L,
+                    fragmentBaseDecodeTimeTicks = 817_920L,
+                    timing = CmafBoxInspector.SampleTiming(
+                        decodeTimeTicks = dts,
+                        presentationTimeTicks = dts,
+                        durationTicks = 1800L,
+                        compositionOffsetTicks = 0L,
+                        sampleSizeBytes = 4_000L,
+                        sampleFlags = 0x02000000L
+                    ),
+                    picture = picture(poc)
+                )
+            }
+            HevcPictureSequenceAligner.FeedWindow("channel-${feed}", 90_000L, pictures)
+        }
+        val proof = HevcPictureSequenceAligner.align(feeds)
+        assertTrue(proof.reasons.toString(), proof.compatible)
+        assertEquals(96, proof.matches.size)
+        assertEquals(2, proof.matches.map { it.sampleEvidenceByFeed.getValue("channel-0").irapEpochOrdinal }.distinct().size)
+        assertEquals(0L, proof.matches[0].fullPictureOrderCount)
+        assertEquals(0L, proof.matches[48].fullPictureOrderCount)
+        assertEquals(48L, proof.matches[48].sampleEvidenceByFeed.getValue("channel-0").sequenceSampleOrdinal)
+    }
+
+    @Test fun doesNotTreatAnUnverifiedIdrEpochJumpAsNewValidPictureIdentity() {
+        val original = (0 until 2).map { feed ->
+            HevcPictureSequenceAligner.FeedWindow("feed-$feed", 90_000L,
+                (0 until 6).map { index ->
+                    val dts = 817_920L + index * 1_800L
+                    HevcPictureSequenceAligner.PictureSample(
+                        sampleIndex = index,
+                        sequenceSampleOrdinal = index.toLong(),
+                        irapEpochOrdinal = if (index == 3) 1L else 0L,
+                        irapAnchorPictureOrderCount = 0L,
+                        timing = CmafBoxInspector.SampleTiming(
+                            decodeTimeTicks = dts, presentationTimeTicks = dts,
+                            durationTicks = 1800L, compositionOffsetTicks = 0L,
+                            sampleSizeBytes = 100L, sampleFlags = 0x02000000L),
+                        picture = picture(index.toLong())
+                    )
+                })
+        }
+        val proof = HevcPictureSequenceAligner.align(original)
+        assertFalse(proof.compatible)
+        assertTrue(proof.reasons.toString(), proof.reasons.any {
+            it.contains("unverified or non-monotonic IRAP epoch transition")
+        })
+    }
+
+    @Test fun mismatchOfARepeatedPocBetweenDistinctEpochsCannotPassAsSamePicture() {
+        val base = (0 until 2).map { feed ->
+            HevcPictureSequenceAligner.FeedWindow("f-$feed", 90_000L, (0 until 10).map { index ->
+                val poc = (index % 5).toLong()
+                val dts = 100_000L + index * 1_800L
+                HevcPictureSequenceAligner.PictureSample(
+                    sampleIndex = index, sequenceSampleOrdinal = index.toLong(),
+                    irapEpochOrdinal = (index / 5).toLong(),
+                    irapAnchorPictureOrderCount = 0L,
+                    timing = CmafBoxInspector.SampleTiming(
+                        decodeTimeTicks = dts, presentationTimeTicks = dts,
+                        durationTicks = 1800L, compositionOffsetTicks = 0L,
+                        sampleSizeBytes = 100L, sampleFlags = 0x02000000L),
+                    picture = picture(poc)
+                )
+            })
+        }
+        val changed = base[1].copy(samples = base[1].samples.mapIndexed { index, sample ->
+            if (index == 7) sample.copy(picture = sample.picture.copy(sliceType = 2))
+            else sample
+        })
+        val proof = HevcPictureSequenceAligner.align(listOf(base[0], changed))
+        assertFalse(proof.compatible)
+        assertTrue(proof.reasons.toString(), proof.reasons.any { it.contains("different HEVC picture identity") })
+    }
+
     private fun window(
         id: String,
         scale: Long,

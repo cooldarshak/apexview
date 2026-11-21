@@ -523,12 +523,17 @@ internal class HevcPocTracker {
     var irapAnchorPictureOrderCount: Long? = null
         private set
 
+    /** Monotonic epoch identity. A new IDR legitimately repeats POC 0 in a NEW epoch. */
+    var irapEpochOrdinal: Long = -1L
+        private set
+
     fun reset() {
         previousTid0PocMsb = 0L
         previousTid0PocLsb = 0L
         hasReferenceAnchor = false
         hasIrapAnchor = false
         irapAnchorPictureOrderCount = null
+        irapEpochOrdinal = -1L
     }
 
     /** Creates an isolated working copy so a failed composition cannot advance the live tracker. */
@@ -538,6 +543,7 @@ internal class HevcPocTracker {
         it.hasReferenceAnchor = hasReferenceAnchor
         it.hasIrapAnchor = hasIrapAnchor
         it.irapAnchorPictureOrderCount = irapAnchorPictureOrderCount
+        it.irapEpochOrdinal = irapEpochOrdinal
     }
 
     /** Commits a successfully validated working copy back into this feed's tracker. */
@@ -547,6 +553,7 @@ internal class HevcPocTracker {
         hasReferenceAnchor = snapshot.hasReferenceAnchor
         hasIrapAnchor = snapshot.hasIrapAnchor
         irapAnchorPictureOrderCount = snapshot.irapAnchorPictureOrderCount
+        irapEpochOrdinal = snapshot.irapEpochOrdinal
     }
 
     fun derive(
@@ -563,11 +570,19 @@ internal class HevcPocTracker {
         require(pocLsb.toLong() in 0 until maxPocLsb) { "POC LSB is outside SPS range" }
 
         if (nalUnitType == 19 || nalUnitType == 20) {
-            reset()
+            // An IDR resets *picture order*, not the identity of the sequence epoch.
+            // reset() here used to erase the evidence needed to distinguish two
+            // genuine IDRs in the same CMAF window.
+            previousTid0PocMsb = 0L
+            previousTid0PocLsb = 0L
+            hasReferenceAnchor = false
+            hasIrapAnchor = false
+            irapAnchorPictureOrderCount = null
             if (temporalIdPlus1 == 1) {
                 hasReferenceAnchor = true
                 hasIrapAnchor = true
                 irapAnchorPictureOrderCount = 0L
+                irapEpochOrdinal = Math.addExact(irapEpochOrdinal, 1L)
             }
             return 0L
         }
@@ -603,6 +618,7 @@ internal class HevcPocTracker {
             if (resetPocMsb) {
                 hasIrapAnchor = true
                 irapAnchorPictureOrderCount = poc
+                irapEpochOrdinal = Math.addExact(irapEpochOrdinal, 1L)
             }
         }
         return poc

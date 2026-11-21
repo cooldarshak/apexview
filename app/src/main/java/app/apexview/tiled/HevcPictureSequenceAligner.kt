@@ -20,8 +20,10 @@ internal object HevcPictureSequenceAligner {
         val irapAnchorPictureOrderCount: Long?,
         /** Monotonic ordinal across the complete feed sequence, not just this fragment. */
         val sequenceSampleOrdinal: Long = sampleIndex.toLong(),
+        /** Counts verified IRAP resets. POC values repeat legitimately across different epochs. */
         /** tfdt for the exact CMAF fragment containing this local sample index. */
-        val fragmentBaseDecodeTimeTicks: Long? = null
+        val fragmentBaseDecodeTimeTicks: Long? = null,
+        val irapEpochOrdinal: Long = 0L
     )
 
     data class FeedWindow(
@@ -37,7 +39,8 @@ internal object HevcPictureSequenceAligner {
         val timing: CmafBoxInspector.SampleTiming,
         val picture: HevcPictureIdentityCompatibility.PictureIdentity,
         val irapAnchorPictureOrderCount: Long?,
-        val fragmentBaseDecodeTimeTicks: Long? = null
+        val fragmentBaseDecodeTimeTicks: Long? = null,
+        val irapEpochOrdinal: Long = 0L
     )
 
     data class PictureMatch(
@@ -119,22 +122,34 @@ internal object HevcPictureSequenceAligner {
         val sharedAnchorPoc = requireNotNull(anchorPocs.single())
 
         val master = feeds.first()
+        // Full POC is only unique WITHIN an IRAP decoding epoch. HEVC IDR restarts
+        // PicOrderCntVal, often several times in one real F1 96-picture CMAF window.
+        // Index by verified epoch AND POC, never associateBy(POC) alone.
         val indexes = feeds.drop(1).associate { feed ->
-            feed.feedId to feed.samples.associateBy { it.picture.pictureOrderCount }
+            feed.feedId to feed.samples.associateBy {
+                it.irapEpochOrdinal to it.picture.pictureOrderCount
+            }
         }
         val candidates = mutableListOf<Candidate?>()
         master.samples.forEach { masterSample ->
             val matched = mutableListOf(masterSample)
             var isMatch = true
             feeds.drop(1).forEach { feed ->
-                val candidate = indexes.getValue(feed.feedId)[masterSample.picture.pictureOrderCount]
+                val candidate = indexes.getValue(feed.feedId)[
+                    masterSample.irapEpochOrdinal to masterSample.picture.pictureOrderCount
+                ]
                 if (candidate == null) {
                     isMatch = false
                 } else {
                     val identity = HevcPictureIdentityCompatibility.compare(
                         listOf(masterSample.picture), listOf(candidate.picture)
                     )
-                    if (!identity.compatible) {
+                    if (candidate.irapAnchorPictureOrderCount !=
+                            masterSample.irapAnchorPictureOrderCount) {
+                        isMatch = false
+                        reasons += context + ": feed " + feed.feedId +
+                            " has a different IRAP anchor for epoch " + masterSample.irapEpochOrdinal
+                    } else if (!identity.compatible) {
                         isMatch = false
                         reasons += context + ": feed " + feed.feedId +
                             " has a different HEVC picture identity for POC " +
@@ -244,7 +259,8 @@ internal object HevcPictureSequenceAligner {
                     timing = sample.timing.copy(),
                     picture = snapshotPicture(sample.picture),
                     irapAnchorPictureOrderCount = sample.irapAnchorPictureOrderCount,
-                    fragmentBaseDecodeTimeTicks = sample.fragmentBaseDecodeTimeTicks
+                    fragmentBaseDecodeTimeTicks = sample.fragmentBaseDecodeTimeTicks,
+                    irapEpochOrdinal = sample.irapEpochOrdinal
                 )
             }
             PictureMatch(
@@ -274,13 +290,19 @@ internal object HevcPictureSequenceAligner {
         if (feed.samples.size !in 1..MAX_WINDOW_SAMPLES) {
             reasons += context + ": feed " + feed.feedId + " sample window is outside supported bounds"
         }
-        val duplicatePocs = feed.samples.groupBy { it.picture.pictureOrderCount }
-            .filterValues { it.size > 1 }.keys
-        if (duplicatePocs.isNotEmpty()) {
-            reasons += context + ": feed " + feed.feedId + " has ambiguous duplicate full POCs"
+        val duplicatePocsWithinEpoch = feed.samples.groupBy {
+            it.irapEpochOrdinal to it.picture.pictureOrderCount
+        }.filterValues { it.size > 1 }.keys
+        if (duplicatePocsWithinEpoch.isNotEmpty()) {
+            reasons += context + ": feed " + feed.feedId +
+                " has ambiguous duplicate full POCs within the same IRAP epoch"
         }
-        val anchors = feed.samples.map { it.irapAnchorPictureOrderCount }.distinct()
-        if (anchors.size != 1 || anchors.singleOrNull() == null) {
+        val epochAnchors = feed.samples.groupBy { it.irapEpochOrdinal }.values
+        if (epochAnchors.any { epoch ->
+                epoch.map { it.irapAnchorPictureOrderCount }.distinct().let {
+                    it.size != 1 || it.singleOrNull() == null
+                }
+            }) {
             reasons += context + ": feed " + feed.feedId +
                 " has no consistent verified temporal-id-zero IRAP POC anchor"
         }
@@ -288,6 +310,16 @@ internal object HevcPictureSequenceAligner {
             val previous = feed.samples.getOrNull(index - 1)
             val expectedSequenceOrdinal = previous?.let {
                 runCatching { Math.addExact(it.sequenceSampleOrdinal, 1L) }.getOrNull()
+            }
+            val epochChanged = previous != null &&
+                sample.irapEpochOrdinal != previous.irapEpochOrdinal
+            if (sample.irapEpochOrdinal < 0L ||
+                (previous != null &&
+                    (sample.irapEpochOrdinal < previous.irapEpochOrdinal ||
+                        sample.irapEpochOrdinal > previous.irapEpochOrdinal + 1L)) ||
+                (epochChanged && sample.picture.nalUnitType !in 16..23)) {
+                reasons += context + ": feed " + feed.feedId +
+                    " has an unverified or non-monotonic IRAP epoch transition"
             }
             val sameFragmentAsPrevious = previous != null &&
                 previous.fragmentBaseDecodeTimeTicks == sample.fragmentBaseDecodeTimeTicks

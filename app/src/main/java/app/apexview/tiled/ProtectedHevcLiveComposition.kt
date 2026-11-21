@@ -546,6 +546,7 @@ internal object ProtectedHevcLiveComposition {
                         timing = timing.copy(),
                         picture = pictureIdentity,
                         irapAnchorPictureOrderCount = anchorPoc,
+                        irapEpochOrdinal = workingTracker.irapEpochOrdinal,
                         sequenceSampleOrdinal = currentOrdinal,
                         fragmentBaseDecodeTimeTicks =
                             requireNotNull(fragmentInfo.fragment.baseDecodeTimeTicks)
@@ -578,6 +579,21 @@ internal object ProtectedHevcLiveComposition {
             }
     
     
+            // A real 96-sample F1 window may cross multiple IDRs; duplicate
+            // numeric POCs in distinct epochs must not be called ambiguous.
+            val epochCounts = currentPictures.groupingBy { it.irapEpochOrdinal }.eachCount()
+            val duplicateEpochKeys = currentPictures.groupBy {
+                it.irapEpochOrdinal to it.picture.pictureOrderCount
+            }.count { it.value.size > 1 }
+            val rawDuplicatePocs = currentPictures.size -
+                currentPictures.map { it.picture.pictureOrderCount }.distinct().size
+            android.util.Log.i("ApexviewSingleDecoder",
+                "REAL_PROTECTED_POC_EPOCHS feed=${state.label} samples=${currentPictures.size} " +
+                    "epochs=${epochCounts.size} perEpoch=${epochCounts.values.joinToString(",")} " +
+                    "rawDuplicatePocs=${rawDuplicatePocs} " +
+                    "sameEpochDuplicates=${duplicateEpochKeys} " +
+                    "firstEpoch=${currentPictures.firstOrNull()?.irapEpochOrdinal} " +
+                    "lastEpoch=${currentPictures.lastOrNull()?.irapEpochOrdinal}")
             state.clearWindow()
             state.picturesByOrdinal.putAll(currentBuffers)
             state.window = currentPictures.toList()
@@ -628,6 +644,48 @@ internal object ProtectedHevcLiveComposition {
             session.status = "LIVE_PROTECTED_F1_ALIGNMENT_STABLE_NO_NEW_PICTURES"
             session.lastFailure = null
             return
+        }
+
+        // Audit the physical single-senc crypto invariant over the *same aligned
+        // pictures* before any expensive HEVC grid rewriting. One protected CMAF
+        // sample has one effective KID / IV / CBCS pattern; mixed identities
+        // cannot be fixed by substituting timestamps or ignoring encryption boxes.
+        val protectionProfiles = session.labels.map { label ->
+            requireNotNull(session.feeds.getValue(label).track?.trackEncryption) {
+                "Missing real CBCS track encryption metadata for $label"
+            }
+        }
+        val masterProtection = protectionProfiles.first()
+        val protectionShapeMatches = protectionProfiles.all {
+            it.copy(defaultKidIdentity = null, constantIvIdentity = null) ==
+                masterProtection.copy(defaultKidIdentity = null, constantIvIdentity = null)
+        }
+        val keyIdentitiesMatch = protectionProfiles.all {
+            it.defaultKidIdentity == masterProtection.defaultKidIdentity &&
+                it.constantIvIdentity == masterProtection.constantIvIdentity
+        }
+        val differentSampleIvCount = newMatches.count { match ->
+            val fingerprints = session.labels.map { label ->
+                val ordinal = match.sampleEvidenceByFeed.getValue(label).sequenceSampleOrdinal
+                session.feeds.getValue(label).picturesByOrdinal[ordinal]?.perSampleIvIdentity
+                    ?: if (protectionProfiles[session.labels.indexOf(label)].perSampleIvSize == 0) {
+                        null
+                    } else {
+                        throw IllegalArgumentException(
+                            "Aligned protected sample IV evidence is missing for $label"
+                        )
+                    }
+            }
+            fingerprints.distinct().size != 1
+        }
+        android.util.Log.i("ApexviewSingleDecoder",
+            "REAL_PROTECTED_SINGLE_SENC_PREFLIGHT feeds=${session.labels.size} " +
+                "alignedPictures=${newMatches.size} tencShapeMatches=${protectionShapeMatches} " +
+                "kidMatches=${keyIdentitiesMatch} ivMismatches=${differentSampleIvCount} " +
+                "ciphertextUnchanged=true")
+        require(protectionShapeMatches && keyIdentitiesMatch && differentSampleIvCount == 0) {
+            "Source feeds have incompatible per-feed CBCS keys, IVs or encryption patterns; " +
+                "one protected output sample cannot carry multiple per-tile crypto identities"
         }
 
         val firstState = session.feeds.getValue(masterFeedId)

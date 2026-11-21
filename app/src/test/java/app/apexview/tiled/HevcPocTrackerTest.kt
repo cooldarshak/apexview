@@ -7,6 +7,36 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HevcPocTrackerTest {
+    @Test fun repeatedIdrResetsPocButDoesNotEraseTheVerifiedDecodingEpoch() {
+        val tracker = HevcPocTracker()
+        assertEquals(-1L, tracker.irapEpochOrdinal)
+        assertEquals(0L, tracker.derive(20, 1, 0, 8))
+        assertEquals(0L, tracker.irapEpochOrdinal)
+        assertEquals(1L, tracker.derive(1, 1, 1, 8))
+        val before = tracker.fork()
+        assertEquals(0L, before.irapEpochOrdinal)
+        assertEquals(0L, tracker.derive(20, 1, 0, 8))
+        assertEquals(1L, tracker.irapEpochOrdinal)
+        assertEquals(0L, tracker.irapAnchorPictureOrderCount)
+        assertEquals(1L, tracker.derive(1, 1, 1, 8))
+        assertEquals(1L, tracker.irapEpochOrdinal)
+        assertEquals(0L, before.irapEpochOrdinal)
+        before.commitFrom(tracker)
+        assertEquals(1L, before.irapEpochOrdinal)
+        tracker.reset()
+        assertEquals(-1L, tracker.irapEpochOrdinal)
+    }
+
+    @Test fun freshCraAnchorAlsoStartsANewVerifiedEpoch() {
+        val tracker = HevcPocTracker()
+        assertEquals(10L, tracker.derive(21, 1, 10, 8, noRaslOutputFlag = true))
+        assertEquals(0L, tracker.irapEpochOrdinal)
+        assertEquals(11L, tracker.derive(1, 1, 11, 8))
+        assertEquals(3L, tracker.derive(21, 1, 3, 8, noRaslOutputFlag = true))
+        assertEquals(1L, tracker.irapEpochOrdinal)
+        assertEquals(3L, tracker.irapAnchorPictureOrderCount)
+    }
+
     @Test fun legacyPocDerivationStillSupportsSequencesWithoutAnInitialIrap() {
         val tracker = HevcPocTracker()
         assertEquals(
