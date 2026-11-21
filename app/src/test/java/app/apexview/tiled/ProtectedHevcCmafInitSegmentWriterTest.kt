@@ -1,6 +1,9 @@
 package app.apexview.tiled
 
+import java.io.ByteArrayInputStream
 import java.io.File
+import android.net.Uri
+import androidx.media3.exoplayer.dash.manifest.DashManifestParser
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import org.junit.Assert.assertEquals
@@ -8,8 +11,13 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 /** Regression for Build 627's false CBCS protection metadata mutation alarm. */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [33])
 class ProtectedHevcCmafInitSegmentWriterTest {
     @Test fun equalProtectionBoxesFromIndependentParsesAreAccepted() {
         val original = drmBoxes()
@@ -93,19 +101,136 @@ class ProtectedHevcCmafInitSegmentWriterTest {
         }
     }
 
+
+    @Test fun protectedDashDefaultKidMatchesValidatedTencVersionZeroAndOne() {
+        val directory = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+        assumeTrue("CI must create HEVC synthetic tile fixtures", !directory.isNullOrBlank())
+        val file = File(directory!!, "source_tiled_2x2.hevc")
+        assumeTrue("HEVC fixture missing", file.isFile)
+        val nals = HevcBitstream.splitAnnexB(file.readBytes())
+        val vps = nals.first { it.type == 32 }.bytes
+        val sps = nals.first { it.type == 33 }.bytes
+        val pps = nals.first { it.type == 34 }.bytes
+        val v = HevcParameterSets.parseVps(vps)
+        val s = HevcParameterSets.parseSps(sps)
+        val p = HevcParameterSets.parsePps(pps, s)
+        val params = HevcOutputParameterSetWriter.generate(
+            vps, sps, pps, HevcOutputParameterSetWriter.Request(
+                v.vpsId, s.spsId, p.ppsId, s.width, s.height,
+                requireNotNull(p.tileColumnWidthsInCtbs),
+                requireNotNull(p.tileRowHeightsInCtbs),
+                requireNotNull(p.loopFilterAcrossTiles), 25
+            ))
+        val clear = HevcClearCmafInitSegmentWriter.write(
+            HevcClearCmafInitSegmentWriter.Request(7L, 90_000L, params))
+        for (version in 0..1) {
+            val init = ProtectedHevcCmafInitSegmentWriter.rewrite(
+                protectInit(clear, "hev1", version), params)
+            val track = CmafBoxInspector.inspect(init).tracks.single()
+            assertEquals(version, track.trackEncryption?.version)
+            assertEquals("23232323-2323-2323-2323-232323232323",
+                ProtectedHevcComposedDashPackageBuilder.readDefaultKid(init))
+        }
+    }
+
+    @Test fun protectedCmafFragmentDashPackageAndMedia3ParserAgreeOnCbcsAndPssh() {
+        val directory = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+        assumeTrue("CI must create HEVC synthetic tile fixtures", !directory.isNullOrBlank())
+        val file = File(directory!!, "source_tiled_2x2.hevc")
+        assumeTrue("HEVC fixture missing", file.isFile)
+        val nals = HevcBitstream.splitAnnexB(file.readBytes())
+        val vps = nals.first { it.type == 32 }.bytes
+        val sps = nals.first { it.type == 33 }.bytes
+        val pps = nals.first { it.type == 34 }.bytes
+        val v = HevcParameterSets.parseVps(vps)
+        val s = HevcParameterSets.parseSps(sps)
+        val p = HevcParameterSets.parsePps(pps, s)
+        val params = HevcOutputParameterSetWriter.generate(
+            vps, sps, pps, HevcOutputParameterSetWriter.Request(
+                v.vpsId, s.spsId, p.ppsId, s.width, s.height,
+                requireNotNull(p.tileColumnWidthsInCtbs),
+                requireNotNull(p.tileRowHeightsInCtbs),
+                requireNotNull(p.loopFilterAcrossTiles), 25
+            ))
+        val clear = HevcClearCmafInitSegmentWriter.write(
+            HevcClearCmafInitSegmentWriter.Request(7L, 90_000L, params))
+        val init = ProtectedHevcCmafInitSegmentWriter.rewrite(
+            protectInit(clear, "hev1"), params)
+        val nal = nals.first { it.type in 16..21 }.bytes
+        require(nal.size > 16)
+        val sample = u32(nal.size) + nal
+        val iv = ByteArray(16) { 0x19.toByte() }
+        val media = ProtectedHevcCmafFragmentWriter.write(
+            outputInitializationSegment = init,
+            request = ProtectedHevcCmafFragmentWriter.Request(
+                trackId = 7L, baseDecodeTimeTicks = 900_000L,
+                sequenceNumber = 1L, perSampleIvSize = 16,
+                samples = listOf(ProtectedHevcCmafFragmentWriter.Sample(
+                    sampleBytes = sample,
+                    subsampleRanges = listOf(CmafBoxInspector.SubsampleEncryptionRange(
+                        sample.size - 16, 16L)),
+                    perSampleIvBytes = iv,
+                    perSampleIvIdentity = ProtectedValueFingerprint.fromBytes("iv", iv),
+                    durationTicks = 3_600L, sampleFlags = 0x02000000L,
+                    compositionOffsetTicks = 0L
+                ))
+            ))
+        val outputSps = HevcParameterSets.parseSps(params.sps)
+        val window = ProtectedHevcLiveComposition.OutputWindow(
+            initializationSegment = init,
+            fragments = listOf(ProtectedHevcLiveComposition.OutputFragment(
+                sequenceNumber = 1L, mediaFragment = media, timescale = 90_000L,
+                baseDecodeTimeTicks = 900_000L, durationTicks = 3_600L,
+                sampleCount = 1, width = outputSps.displayWidth,
+                height = outputSps.displayHeight,
+                alignmentOffsetsMillis = emptyMap()
+            ))
+        )
+        val uuid = "edef8ba979d64acea3c827dcd51d21ed"
+            .chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val pssh = box("pssh", byteArrayOf(0, 0, 0, 0) + uuid + u32(0))
+        val pkg = ProtectedHevcComposedDashPackageBuilder.build(
+            window, pssh, 900_000L, 1_795_233_600_000L
+        )
+        try {
+            assertTrue(pkg.manifest.contains(
+                "cenc:default_KID=\"23232323-2323-2323-2323-232323232323\""))
+            assertTrue(pkg.manifest.contains("value=\"cbcs\""))
+            assertTrue(pkg.manifest.contains("urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"))
+            assertEquals(1, pkg.fragmentCount)
+            assertEquals(1, pkg.sampleCount)
+            assertTrue(pkg.resources.getValue("init.mp4").contentEquals(init))
+            assertTrue(pkg.resources.getValue("segment-1.m4s").contentEquals(media))
+            val parsed = DashManifestParser().parse(
+                Uri.parse("https://pitwall.example/manifest.mpd"),
+                ByteArrayInputStream(pkg.manifest.toByteArray(Charsets.UTF_8))
+            )
+            val format = parsed.getPeriod(0).adaptationSets
+                .single().representations.single().format
+            assertEquals("video/hevc", format.sampleMimeType)
+            assertEquals("cbcs", format.drmInitData?.schemeType)
+            assertTrue(format.drmInitData?.schemeDatas?.isNotEmpty() == true)
+        } finally {
+            pkg.zero()
+            window.zero()
+        }
+    }
+
     private fun drmBoxes(): ByteArray =
         box("moov", box("sinf", box("schi", box("tenc",
             byteArrayOf(1, 0, 0, 0, 0, 0x19, 1, 16) + ByteArray(16) { 17.toByte() })))) +
             box("pssh", ByteArray(24))
 
-    private fun protectInit(clear: ByteArray, originalFormat: String): ByteArray {
+    private fun protectInit(clear: ByteArray, originalFormat: String, tencVersion: Int = 1): ByteArray {
+        require(tencVersion in 0..1)
         val stsdType = findType(clear, "stsd")
         val entryStart = stsdType + 12
         val entrySize = readU32(clear, entryStart)
         val end = entryStart + entrySize
         require(end <= clear.size)
-        val tenc = box("tenc", byteArrayOf(1, 0, 0, 0, 0, 0x19, 1, 16) +
-            ByteArray(16) { 35.toByte() })
+        val tenc = box("tenc", byteArrayOf(tencVersion.toByte(), 0, 0, 0, 0) +
+            (if (tencVersion == 1) byteArrayOf(0x19) else byteArrayOf()) +
+            byteArrayOf(1, 16) + ByteArray(16) { 35.toByte() })
         val sinf = box("sinf",
             box("frma", ascii(originalFormat)) +
                 box("schm", byteArrayOf(0, 0, 0, 0) + ascii("cbcs") + u32(0x00010000)) +

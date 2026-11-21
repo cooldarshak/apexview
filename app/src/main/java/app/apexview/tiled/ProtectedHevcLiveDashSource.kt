@@ -237,27 +237,63 @@ internal object ProtectedHevcComposedDashPackageBuilder {
       <ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" value="Widevine"><cenc:pssh>$encoded</cenc:pssh></ContentProtection>"""
     }
 
-    private fun readDefaultKid(init: ByteArray): String {
-        val box = findBox(init, "tenc")
-            ?: throw IllegalArgumentException("Protected init contains no tenc box")
-        val payload = box.start + box.header
-        require(box.size >= box.header + 24) { "Protected init tenc box is truncated" }
-        val version = u8(init, payload)
-        var cursor = payload + 4
-        if (version == 1) cursor++
-        val isProtected = u8(init, cursor++)
-        val ivSize = u8(init, cursor++)
-        require(isProtected == 1 && ivSize in setOf(0, 8, 16)) {
-            "Protected init tenc defaults are invalid"
+    /**
+     * The default_KID in the composed DASH MPD must come from the validated encv
+     * track. In both tenc versions a reserved byte precedes isProtected; version 1
+     * also contains a CBCS crypt/skip pattern. Never read the pattern as isProtected.
+     */
+    internal fun readDefaultKid(init: ByteArray): String {
+        val report = CmafBoxInspector.inspect(init)
+        require(report.errors.isEmpty() && report.initializationSegmentPresent) {
+            "Protected DASH initialization is not a validated CMAF init"
         }
-        require(cursor <= box.start + box.size - 16) { "Protected init tenc KID is truncated" }
-        val bytes = init.copyOfRange(cursor, cursor + 16)
+        val track = report.tracks.singleOrNull { it.handler == "vide" }
+            ?: throw IllegalArgumentException("Protected DASH requires exactly one video track")
+        val verified = requireNotNull(track.trackEncryption) {
+            "Protected DASH init is missing validated tenc defaults"
+        }
+        require(track.encrypted && track.sampleEntry == "encv" &&
+            track.protectionScheme == "cbcs" && verified.defaultIsProtected &&
+            verified.defaultKidIdentity != null) {
+            "Protected DASH init does not contain one verified CBCS key identity"
+        }
+        val box = findBoxes(init, "tenc").singleOrNull()
+            ?: throw IllegalArgumentException("Protected DASH init has no unambiguous tenc box")
+        val payload = box.start + box.header
+        require(box.size >= box.header + 23) { "Protected DASH init tenc is truncated" }
+        val version = u8(init, payload)
+        require(version in 0..1 && (1..3).all { u8(init, payload + it) == 0 }) {
+            "Protected DASH init tenc FullBox is unsupported"
+        }
+        var cursor = payload + 4
+        require(u8(init, cursor++) == 0) { "Protected DASH init tenc reserved byte is invalid" }
+        val pattern = if (version == 1) {
+            require(box.size >= box.header + 24) { "Protected DASH version-1 tenc is truncated" }
+            u8(init, cursor++)
+        } else 0
+        val protected = u8(init, cursor++)
+        val ivSize = u8(init, cursor++)
+        require(protected == 1 && ivSize in setOf(0, 8, 16) &&
+            verified.version == version && verified.perSampleIvSize == ivSize &&
+            verified.cryptByteBlock == (pattern ushr 4) &&
+            verified.skipByteBlock == (pattern and 0x0f)) {
+            "Protected DASH tenc bytes disagree with verified CMAF track defaults"
+        }
+        require(cursor <= box.start + box.size - 16) {
+            "Protected DASH tenc KID is truncated"
+        }
+        val kid = init.copyOfRange(cursor, cursor + 16)
         return try {
-            val hex = bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }
-            "${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-" +
-                "${hex.substring(16, 20)}-${hex.substring(20, 32)}"
+            require(ProtectedValueFingerprint.fromBytes("kid", kid) ==
+                verified.defaultKidIdentity) {
+                "Protected DASH KID differs from verified CMAF track identity"
+            }
+            val hex = kid.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            listOf(hex.substring(0, 8), hex.substring(8, 12),
+                hex.substring(12, 16), hex.substring(16, 20),
+                hex.substring(20, 32)).joinToString("-")
         } finally {
-            bytes.fill(0)
+            kid.fill(0)
         }
     }
 
