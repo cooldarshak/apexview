@@ -222,6 +222,8 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         var format: Format? = null
         var stage = "source-manifests"
         val startedMs = android.os.SystemClock.elapsedRealtime()
+        val gcAtStart = android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
+        val allocatedAtStart = android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
         try {
             require(feeds.size in 2..6 && feeds.map { it.label }.distinct().size == feeds.size)
             // Keep network lanes bounded and independent of the single GL video thread.
@@ -463,7 +465,17 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 composeMs = android.os.SystemClock.elapsedRealtime() - composeStartedMs
                 discontinuityGate.commit(labels, discontinuities, aligned.first().absoluteStartUs)
                 previousStartUs = aligned.first().absoluteStartUs
-                android.util.Log.i("ApexviewSingleDecoder", "HLS_CMAF_CAPTURE feeds=${feeds.size} protection=${if (clear) "CLEAR" else "CBCS"} aligned=PASS composed=${if (clear) clearComposition.hasOutput() else ProtectedHevcLiveComposition.hasOutput(group)} fetchMs=$fetchMs composeMs=$composeMs totalMs=${android.os.SystemClock.elapsedRealtime() - startedMs} archiveClockMs=$positionMs segmentStartUs=${aligned.first().absoluteStartUs}")
+                val allocated = allocatedAtStart?.let { before ->
+                    android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
+                        ?.let { (it - before).coerceAtLeast(0L) }
+                }
+                val collections = gcAtStart?.let { before ->
+                    android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
+                        ?.let { (it - before).coerceAtLeast(0L) }
+                }
+                android.util.Log.i("ApexviewSingleDecoder", "HLS_CMAF_CAPTURE feeds=${feeds.size} protection=${if (clear) "CLEAR" else "CBCS"} aligned=PASS composed=${if (clear) clearComposition.hasOutput() else ProtectedHevcLiveComposition.hasOutput(group)} fetchMs=$fetchMs composeMs=$composeMs totalMs=${android.os.SystemClock.elapsedRealtime() - startedMs} archiveClockMs=$positionMs segmentStartUs=${aligned.first().absoluteStartUs} " +
+                    "processAllocBytesDuringSegment=${allocated ?: -1L} processGcDuringSegment=${collections ?: -1L} " +
+                    "sourceBytes=${media.sumOf { it.size.toLong() }} ioConcurrency=4 compositionWorker=BACKGROUND")
                 snapshot(group, format, aligned.first().absoluteStartUs, feeds.size)
             } finally { media.forEach { it.fill(0) } }
         } catch (cancelled: CancellationException) { throw cancelled

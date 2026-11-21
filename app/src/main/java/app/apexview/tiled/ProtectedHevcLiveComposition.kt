@@ -621,6 +621,9 @@ internal object ProtectedHevcLiveComposition {
     }
 
     private fun tryCompose(session: Session) {
+        val composeStartedNs = System.nanoTime()
+        val allocatedAtStart = android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
+        val gcAtStart = android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
         if (session.feeds.values.any { it.window.size < MIN_ALIGN_PICTURES }) {
             session.status = "WAITING_FOR_FIVE_ALIGNED_PROTECTED_F1_PICTURES"
             return
@@ -1020,6 +1023,20 @@ internal object ProtectedHevcLiveComposition {
             session.composedFragments = Math.addExact(session.composedFragments, 1L)
             session.status = "REAL_PROTECTED_F1_CMAF_COMPOSED_NOT_YET_PLAYED"
             session.lastFailure = null
+            val allocated = allocatedAtStart?.let { before ->
+                android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
+                    ?.let { (it - before).coerceAtLeast(0L) }
+            }
+            val collections = gcAtStart?.let { before ->
+                android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
+                    ?.let { (it - before).coerceAtLeast(0L) }
+            }
+            android.util.Log.i("ApexviewSingleDecoder",
+                "PROTECTED_CMAF_SEGMENT composeMs=${(System.nanoTime() - composeStartedNs) / 1_000_000L} " +
+                "feeds=${session.labels.size} sampleCount=${newOutput.sampleCount} " +
+                "outputBytes=${newOutput.mediaFragment.size} retainedSegments=${session.outputHistory.size} " +
+                "processAllocBytesDuringSegment=${allocated ?: -1L} processGcDuringSegment=${collections ?: -1L} " +
+                "protectedPayloadUnmodified=true")
         } finally {
             outputBytesToClear.forEach { it.fill(0) }
         }
