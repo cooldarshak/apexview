@@ -15,6 +15,8 @@ import android.util.Log
 import android.view.Surface
 import android.view.SurfaceView
 import android.view.SurfaceHolder
+import android.view.Choreographer
+import android.os.Trace
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import androidx.media3.exoplayer.ExoPlayer
@@ -60,6 +62,38 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
 
     private var lastPresentedAtNs = 0L
     private var lastSourceTimestampNs = 0L
+    // Share the same camera-driven, 50fps-aware scheduling and frame metrics
+    // as the clear HEVC archive; the independent SurfaceView remains distinct.
+    private val frameDemand = SceneFrameDemand()
+    private val cadenceGate = SceneFrameCadenceGate()
+    private val pacing = SceneFramePacing()
+    private var displayClock: Choreographer? = null
+    private val displayFrame = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) = guarded {
+            val callbackStartNs = System.nanoTime()
+            val refreshHz = rootView.display?.refreshRate ?: 60f
+            if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
+                frameTimeNanos, scene?.sourceFrameRate ?: 0.0, refreshHz)) {
+                pacing.onPacingDeferred()
+                displayClock?.postFrameCallback(this)
+                return@guarded
+            }
+            val hasNewVideo = frameDemand.beginFrame()
+            val measurement = draw()
+            if (measurement != null) {
+                if (hasNewVideo) cadenceGate.onVideoDraw(frameTimeNanos)
+                pacing.onDisplayFrame(frameTimeNanos, measurement.swapNs,
+                    hasNewVideo, measurement.drawNs, callbackStartNs)
+            }
+        }
+    }
+    private fun scheduleVideoFrame(newVideo: Boolean = false) {
+        val schedule = if (newVideo) frameDemand.videoArrived() else frameDemand.requestDraw()
+        if (schedule) {
+            val clock = displayClock ?: Choreographer.getInstance().also { displayClock = it }
+            clock.postFrameCallback(displayFrame)
+        }
+    }
     private var intervalPresented = 0L
     private var intervalLongGaps = 0L
     private var intervalSwapsOver18ms = 0L
@@ -82,16 +116,16 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }
         if (changed) gl.post { guarded {
             decoderTexture?.setDefaultBufferSize(nextScene.atlasWidth, nextScene.atlasHeight)
-            draw()
+            scheduleVideoFrame()
         } }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        gl.post { guarded { initialize(holder.surface); draw() } }
+        gl.post { guarded { initialize(holder.surface); scheduleVideoFrame() } }
     }
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         outputWidth = width; outputHeight = height; onOutputSize(width, height)
-        gl.post { guarded { draw() } }
+        gl.post { guarded { scheduleVideoFrame() } }
     }
     override fun surfaceDestroyed(holder: SurfaceHolder) { detachOutput() }
     private fun detachOutput() {
@@ -188,8 +222,12 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         frames.setOnFrameAvailableListener({
             guarded {
                 if (decoderTexture === frames && !released) {
-                    frames.updateTexImage()
+                    val latchStartNs = System.nanoTime()
+                    Trace.beginSection("PitwallProtectedSceneLatch")
+                    try { frames.updateTexImage() } finally { Trace.endSection() }
                     val timestamp = frames.timestamp
+                    pacing.onTextureLatched(System.nanoTime(), System.nanoTime() - latchStartNs,
+                        timestamp, callbackArrivalNs = latchStartNs)
                     if (lastSourceTimestampNs > 0L && timestamp > 0L &&
                         timestamp < lastSourceTimestampNs) {
                         intervalSourceTimestampRegressions++
@@ -198,7 +236,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                     frames.getTransformMatrix(transform)
                     hasFrame = true
                     rendered++
-                    draw()
+                    scheduleVideoFrame(newVideo = true)
                 }
             }
         }, gl)
@@ -206,9 +244,12 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         post { if (!released && input === surface) player?.setVideoSurface(surface) }
     }
 
-    private fun draw() {
-        val model = scene ?: return
-        if (window == EGL14.EGL_NO_SURFACE || !EGL14.eglMakeCurrent(display, window, window, contextGl)) return
+    private data class SurfaceFrameTiming(val drawNs: Long, val swapNs: Long)
+
+    private fun draw(): SurfaceFrameTiming? {
+        val model = scene ?: return null
+        if (window == EGL14.EGL_NO_SURFACE || !EGL14.eglMakeCurrent(display, window, window, contextGl)) return null
+        val drawStartNs = System.nanoTime()
         GLES20.glViewport(0, 0, outputWidth, outputHeight)
         GLES20.glClearColor(0f, 0f, 0f, 1f); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         if (hasFrame) {
@@ -230,7 +271,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             }
         }
         val swapStartedNs = System.nanoTime()
-        check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" }
+        Trace.beginSection("PitwallSurfaceSceneSwap")
+        try { check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" } }
+        finally { Trace.endSection() }
         val swapEndedNs = System.nanoTime()
         if (hasFrame) {
             val swapMs = (swapEndedNs - swapStartedNs) / 1_000_000L
@@ -250,6 +293,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
+            val metrics = pacing.snapshotAndReset()
             Log.i("ApexviewSingleDecoder", "SURFACE_DECODER_SCENE " +
                 "protected=$protectedOutput output=${outputWidth}x$outputHeight " +
                 "inputTextures=1 outputViews=1 sources=${model.sources} " +
@@ -258,6 +302,13 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "intervalSwapsOver18ms=$intervalSwapsOver18ms " +
                 "maxGapMs=$intervalLongestGapMs maxSwapMs=$intervalLongestSwapMs " +
                 "sourceTimestampRegressions=$intervalSourceTimestampRegressions " +
+                "pacingLatched=${metrics.latched} pacingPresented=${metrics.presented} " +
+                "callbackGaps45ms=${metrics.callbackGaps} displayGaps45ms=${metrics.displayGaps} " +
+                "slowSwaps18ms=${metrics.slowSwaps} slowDraws18ms=${metrics.slowDraws} " +
+                "maxCallbackGapMs=${metrics.maxCallbackGapMs} " +
+                "maxDisplayGapMs=${metrics.maxDisplayGapMs} maxSwapMs=${metrics.maxSwapMs} " +
+                "videoDrawPacingDeferrals=${metrics.pacingDeferrals} " +
+                "videoVsyncBins13_19_23_30_45_100=${metrics.displayIntervals.compact()} " +
                 "physicalPresentation=NOT_MEASURED")
             lastLogNs = now
             intervalPresented = 0
@@ -267,6 +318,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             intervalLongestSwapMs = 0
             intervalSourceTimestampRegressions = 0
         }
+        return SurfaceFrameTiming(swapStartedNs - drawStartNs,
+            swapEndedNs - swapStartedNs)
     }
 
     private fun guarded(action: () -> Unit) {
@@ -280,6 +333,11 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     }
 
     private fun destroy() {
+        displayClock?.removeFrameCallback(displayFrame)
+        displayClock = null
+        frameDemand.reset()
+        cadenceGate.reset()
+        pacing.reset()
         decoderTexture?.setOnFrameAvailableListener(null)
         input?.release(); input = null
         decoderTexture?.release(); decoderTexture = null; hasFrame = false
