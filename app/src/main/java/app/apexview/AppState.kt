@@ -6343,8 +6343,11 @@ class AppState(
         }
         val restartRollingComposition = composedArchiveOriginMs != null && decoderMode == DecoderMode.SINGLE
         if (composedArchiveOriginMs != null) {
+            // Unlike the finite clear archive, a rolling protected DASH window
+            // must be rebuilt for a distant seek. Keep the actual selected TV,
+            // featured or named arrangement while changing only media ownership.
+            // Resetting to GRID here used to silently discard user layouts.
             stopProtectedCompositionPresentation()
-            layoutMode = LayoutMode.GRID
             singleDecoderDiagnostic = singleDecoderDiagnostic?.replace("Playback: ACTIVE", "Playback: STOPPED FOR SEEK")
         }
         val leader = leaderTile() ?: return
