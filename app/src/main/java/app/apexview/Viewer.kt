@@ -1687,6 +1687,7 @@ private fun VideoQualitySheet(app: AppState) {
 @Composable
 private fun LayoutSheet(app: AppState) {
     val backupContext = LocalContext.current
+    LaunchedEffect(Unit) { app.migrateLegacyLayoutsIfNeeded() }
     val exportLayouts = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
