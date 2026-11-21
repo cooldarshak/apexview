@@ -366,13 +366,14 @@ internal object HevcTizenGridComposer {
 
         // The analyzer and tile locator inspect the same immutable NAL payloads. Re-splitting
         // Annex-B here cloned every large VCL NAL (and doubled peak young-generation pressure).
-        val signatures = HevcStreamAlignmentAnalyzer.analyzeNalUnits(nals)
+        val validatedHeaders = java.util.IdentityHashMap<ByteArray, HevcSliceHeaderParser.SliceHeader>()
         val pictures = mutableListOf<MutableList<LocatedSlice>>()
         var current: MutableList<LocatedSlice>? = null
         nals.filter { it.type in 0..31 }.forEach { nal ->
             // Parse and validate every source tile just once. Keep the trusted header
             // beside its original immutable NAL bytes for all later composition stages.
             val header = HevcSliceHeaderParser.parse(nal.bytes, sps, pps)
+            validatedHeaders[nal.bytes] = header
             if (header.firstSliceSegmentInPicture) {
                 current?.let { pictures += it }
                 current = mutableListOf()
@@ -396,6 +397,10 @@ internal object HevcTizenGridComposer {
             picture += LocatedSlice(nal.bytes, header, tile.index, tile.startAddress)
         }
         current?.let { pictures += it }
+        // The alignment pass still verifies all POC, reference and picture identity
+        // relationships, but consumes those exact validated headers rather than
+        // re-parsing hundreds of multi-kilobyte slice prefixes per segment.
+        val signatures = HevcStreamAlignmentAnalyzer.analyzeNalUnits(nals, validatedHeaders)
         require(pictures.size == signatures.size && signatures.isNotEmpty()) {
             "Source feed $index picture grouping disagrees with the POC analyzer"
         }

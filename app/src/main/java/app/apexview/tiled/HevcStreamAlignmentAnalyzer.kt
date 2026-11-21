@@ -64,7 +64,10 @@ internal object HevcStreamAlignmentAnalyzer {
         analyzeNalUnits(HevcBitstream.splitAnnexB(annexB))
 
     /** Reuse an already validated split. Cloning VCL NALs a second time can cost tens of MB per segment. */
-    internal fun analyzeNalUnits(nals: List<HevcBitstream.NalUnit>): List<HevcFrameSignature> {
+    internal fun analyzeNalUnits(
+        nals: List<HevcBitstream.NalUnit>,
+        prevalidatedSliceHeaders: Map<ByteArray, HevcSliceHeaderParser.SliceHeader> = emptyMap(),
+    ): List<HevcFrameSignature> {
         val spsById = mutableMapOf<Int, HevcParameterSets.SpsMetadata>()
         val ppsById = mutableMapOf<Int, HevcParameterSets.PpsMetadata>()
         val pocTracker = HevcPocTracker()
@@ -84,12 +87,19 @@ internal object HevcStreamAlignmentAnalyzer {
                     ppsById[pps.ppsId] = pps
                 }
                 in 0..31 -> {
-                    val ppsId = readSlicePpsId(nal.bytes, nal.type)
+                    // A compositor can provide the same already-validated header for the
+                    // exact owned NAL object. Independent inspector callers keep the
+                    // original PPS lookup and bounded parse below.
+                    val prevalidated = prevalidatedSliceHeaders[nal.bytes]
+                    val ppsId = prevalidated?.ppsId ?: readSlicePpsId(nal.bytes, nal.type)
                     val pps = ppsById[ppsId]
                         ?: error("Slice references unknown PPS $ppsId")
                     val sps = spsById[pps.spsId]
                         ?: error("PPS ${pps.ppsId} references unknown SPS ${pps.spsId}")
-                    val slice = HevcSliceHeaderParser.parse(nal.bytes, sps, pps)
+                    val slice = prevalidated ?: HevcSliceHeaderParser.parse(nal.bytes, sps, pps)
+                    require(slice.ppsId == pps.ppsId && slice.nalUnitType == nal.type) {
+                        "Cached slice header does not match its active parameter set or NAL"
+                    }
 
                     if (slice.firstSliceSegmentInPicture) {
                         require(!slice.dependentSliceSegment) { "A first slice segment cannot be dependent" }
