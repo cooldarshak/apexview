@@ -1827,6 +1827,16 @@ class AppState(
         defaultLayoutMode == LayoutMode.TV && prefs.getString(PREF_MAP_PANEL, null).isNullOrBlank()
     /** A resumed session's feed boxes by channel, applied at its first layout. */
     private var resumeLayout: Pair<Map<Int, FloatArray>, SavedLayout>? = null
+    /** Named presets are stored in the settings backup domain, never with F1 credentials. */
+    internal var namedLayouts by mutableStateOf(
+        NamedLayoutPresets.parse(prefs.getString(PREF_NAMED_LAYOUTS, null))
+    )
+        private set
+    var defaultNamedLayoutId by mutableStateOf(prefs.getString(PREF_NAMED_DEFAULT, null))
+        private set
+    var activeNamedLayoutId by mutableStateOf<String?>(null)
+        private set
+    private var pendingNamedLayout: NamedLayoutPreset? = null
     /** Every feed silenced at once; the audio choice is kept for when it's turned back on. */
     var mutedAll by mutableStateOf(false)
         private set
@@ -3627,6 +3637,14 @@ class AppState(
                         .putString(PREF_OVERLAY_LAYOUT, OverlayLayoutMode.DOCKED.name)
                         .apply()
                 }
+                // A restored Google/Android backup may contain multiple named
+                // presets. Apply only the matching feed-count + orientation,
+                // otherwise keep the existing built-in/default layout.
+                val desired = namedLayouts.firstOrNull {
+                    it.id == defaultNamedLayoutId && it.feedCount == tiles.size &&
+                        it.landscape == layoutIsLandscape()
+                }
+                if (desired != null) activateNamedLayout(desired)
             }
             // Keep the audio where it was; new feeds start muted. The default feed gets it first.
             setAudio(tiles.firstOrNull { it.audible } ?: tiles.firstOrNull { it.channel.isDefault } ?: tiles.first())
@@ -4317,6 +4335,8 @@ class AppState(
     /** Lays the feeds out afresh in [mode]. */
     fun chooseLayout(mode: LayoutMode) {
         mapGrabbed = false
+        pendingNamedLayout = null
+        activeNamedLayoutId = null
         if (mode != layoutMode && !singleDecoderSceneActive && !protectedRollingSceneActive &&
             !archiveCompositionStarting &&
             (protectedCompositionHost != null || f1DashCaptureJob != null)) {
@@ -4374,7 +4394,9 @@ class AppState(
             towerOpen = true
             overlayLayoutMode = OverlayLayoutMode.DOCKED
             tvLayoutMapNeedsDefault = enteringTvLayout
+            defaultNamedLayoutId = null
             prefs.edit()
+                .remove(PREF_NAMED_DEFAULT)
                 .putString(PREF_DEFAULT_LAYOUT, LayoutMode.TV.name)
                 .putString(PREF_MAP_MODE, MapMode.TRACK.name)
                 .putBoolean(PREF_TOWER, true)
@@ -4388,13 +4410,236 @@ class AppState(
 
     /** The saved arrangement for [n] feeds, if there is one for a screen this shape. */
     fun savedLayout(n: Int): SavedLayout? =
-        SavedLayout.fromJson(prefs.getString(layoutKey(n), null))?.takeIf { canvasW <= 0f || it.fits(canvasW, canvasH) }
+        namedLayouts.firstOrNull { it.id == activeNamedLayoutId &&
+            it.feedCount == n && it.landscape == layoutIsLandscape() }?.layout
+            ?: SavedLayout.fromJson(prefs.getString(layoutKey(n), null))
+                ?.takeIf { canvasW <= 0f || it.fits(canvasW, canvasH) }
 
     /** Saved layouts are kept per way up: sideways ones carry an L (upright ones predate this). */
     private fun layoutKey(n: Int) = PREF_LAYOUT + n + if (canvasW > canvasH) "L" else ""
 
     /** Upright or sideways, in words, for messages. */
-    val wayUp get() = if (canvasW > canvasH) "sideways" else "upright"
+    val wayUp get() = if (layoutIsLandscape()) "sideways" else "upright"
+
+    private fun layoutIsLandscape(): Boolean = if (canvasW > 0f && canvasH > 0f)
+        canvasW > canvasH else context.resources.configuration.orientation ==
+        android.content.res.Configuration.ORIENTATION_LANDSCAPE
+
+    private fun normalizedTower(): JSONObject? {
+        if (canvasW <= 0f || canvasH <= 0f || towerSpot.x < 0f || towerSpot.y < 0f ||
+            towerSpot.w <= 0f || towerSpot.h <= 0f) return null
+        return JSONObject()
+            .put("x", towerSpot.x / canvasW).put("y", towerSpot.y / canvasH)
+            .put("w", towerSpot.w / canvasW).put("h", towerSpot.h / canvasH)
+    }
+
+    private fun namedOverlaySnapshot() = JSONObject()
+        .put("mapMode", mapMode.name)
+        .put("mapOpen", mapMode != MapMode.OFF)
+        .put("mapReserve", mapReserve).put("mapLocked", mapLocked)
+        .put("mapOpacity", mapOpacity).put("mapDotSize", mapDotSizeDp)
+        .put("mapLabelSize", mapLabelSizeSp).put("mapOffsetMs", mapOffsetMs)
+        .put("mapPanel", if (activeMapPanel.placed && canvasW > 0f && canvasH > 0f)
+            JSONObject(activeMapPanel.toJson(canvasW, canvasH, mapOpacity)) else JSONObject.NULL)
+        .put("towerOpen", towerOpen).put("towerReserve", towerReserve)
+        .put("towerLocked", towerLocked).put("towerOpacity", towerOpacity)
+        .put("towerFontScale", towerFontScale)
+        .put("tvTowerWidthShare", tvTowerWidthShare)
+        .put("towerPanel", normalizedTower() ?: JSONObject.NULL)
+        .put("overlayMode", overlayLayoutMode.name)
+        .put("snap", snapMode)
+        .toString()
+
+    private fun applyNamedOverlay(json: JSONObject) {
+        mapMode = runCatching { MapMode.valueOf(json.optString("mapMode", mapMode.name)) }
+            .getOrDefault(mapMode)
+        mapReserve = json.optBoolean("mapReserve", mapReserve)
+        mapLocked = json.optBoolean("mapLocked", mapLocked)
+        mapOpacity = json.optDouble("mapOpacity", mapOpacity.toDouble())
+            .toFloat().coerceIn(0.2f, 1f)
+        mapDotSizeDp = json.optDouble("mapDotSize", mapDotSizeDp.toDouble())
+            .toFloat().coerceIn(MIN_MAP_DOT_SIZE, MAX_MAP_DOT_SIZE)
+        mapLabelSizeSp = json.optDouble("mapLabelSize", mapLabelSizeSp.toDouble())
+            .toFloat().coerceIn(MIN_MAP_LABEL_SIZE, MAX_MAP_LABEL_SIZE)
+        mapOffsetMs = json.optLong("mapOffsetMs", mapOffsetMs)
+        towerOpen = json.optBoolean("towerOpen", towerOpen)
+        towerReserve = json.optBoolean("towerReserve", towerReserve)
+        towerLocked = json.optBoolean("towerLocked", towerLocked)
+        towerOpacity = json.optDouble("towerOpacity", towerOpacity.toDouble())
+            .toFloat().coerceIn(0.2f, 1f)
+        towerFontScale = json.optDouble("towerFontScale", towerFontScale.toDouble())
+            .toFloat().coerceIn(TOWER_MIN_FONT_SCALE, TOWER_MAX_FONT_SCALE)
+        tvTowerWidthShare = json.optDouble("tvTowerWidthShare",
+            tvTowerWidthShare.toDouble()).toFloat().coerceIn(
+            Layouts.tvTowerWidthRange(1f).start, Layouts.tvTowerWidthRange(1f).endInclusive)
+        overlayLayoutMode = runCatching {
+            OverlayLayoutMode.valueOf(json.optString("overlayMode", overlayLayoutMode.name))
+        }.getOrDefault(overlayLayoutMode)
+        snapMode = json.optBoolean("snap", snapMode)
+        mapPanel.placed = false
+        towerSpot.x = -1f; towerSpot.y = -1f
+        towerSpot.w = -1f; towerSpot.h = -1f
+        tvLayoutMapNeedsDefault = false
+        // Save the active settings too, so a new stream sees the same map/tower
+        // before its video/layout is ready. The preset library is separate.
+        prefs.edit()
+            .putString(PREF_MAP_MODE, mapMode.name)
+            .putBoolean(PREF_MAP_RESERVE, mapReserve)
+            .putBoolean(PREF_MAP_LOCKED, mapLocked)
+            .putFloat(PREF_MAP_DOT_SIZE, mapDotSizeDp)
+            .putFloat(PREF_MAP_LABEL_SIZE, mapLabelSizeSp)
+            .putLong(PREF_MAP_OFFSET, mapOffsetMs)
+            .putBoolean(PREF_TOWER, towerOpen)
+            .putBoolean(PREF_TOWER_RESERVE, towerReserve)
+            .putBoolean(PREF_TOWER_LOCKED, towerLocked)
+            .putFloat(PREF_TOWER_OPACITY, towerOpacity)
+            .putFloat(PREF_TOWER_FONT_SCALE, towerFontScale)
+            .putFloat(PREF_TV_TOWER_WIDTH, tvTowerWidthShare)
+            .putString(PREF_OVERLAY_LAYOUT, overlayLayoutMode.name)
+            .putBoolean(PREF_SNAP, snapMode).apply()
+    }
+
+    /** Apply a saved preset without restarting a live, clear, or protected decoder. */
+    private fun activateNamedLayout(preset: NamedLayoutPreset) {
+        activeNamedLayoutId = preset.id
+        // A custom named TV layout keeps the TV reserves and geometry rather
+        // than silently losing the associated tower/map after it is loaded.
+        layoutMode = LayoutMode.CUSTOM
+        pendingNamedLayout = preset
+        applyNamedOverlay(JSONObject(preset.overlaySnapshot))
+        handPlaced = false
+        layoutRequest++
+        android.util.Log.i("PitwallLayout", "NAMED_LAYOUT_APPLY feeds=${preset.feedCount} " +
+            "orientation=${if (preset.landscape) "landscape" else "portrait"} " +
+            "map=${mapMode.name} tower=$towerOpen")
+    }
+
+    fun loadNamedLayout(id: String) {
+        val preset = namedLayouts.firstOrNull { it.id == id }
+        if (preset == null) { message = "That saved layout is unavailable"; return }
+        if (tiles.size != preset.feedCount || layoutIsLandscape() != preset.landscape) {
+            message = "Choose ${preset.feedCount} feeds in ${if (preset.landscape) "landscape" else "portrait"} to load ${preset.name}."
+            return
+        }
+        activateNamedLayout(preset)
+        layoutSheetOpen = false
+        showChrome()
+        message = "Loaded layout: ${preset.name}"
+    }
+
+    private fun persistNamedLayouts(items: List<NamedLayoutPreset>) {
+        val serialized = NamedLayoutPresets.encode(items)
+        // Commit makes settings immediately durable ahead of an uninstall or
+        // Android backup pass. No credentials are stored in this payload.
+        check(prefs.edit().putString(PREF_NAMED_LAYOUTS, serialized).commit()) {
+            "Could not store the named layout library"
+        }
+        namedLayouts = items
+    }
+
+    fun saveNamedLayout(name: String) {
+        val clean = name.trim()
+        if (!NamedLayoutPresets.validName(clean)) {
+            message = "Use a layout name from 1 to 48 characters"; return
+        }
+        if (tiles.isEmpty() || canvasW <= 0f || canvasH <= 0f) {
+            message = "Start a session before saving its layout"; return
+        }
+        val old = namedLayouts.firstOrNull { it.name.equals(clean, true) &&
+            it.feedCount == tiles.size && it.landscape == layoutIsLandscape() }
+        if (namedLayouts.size >= NamedLayoutPresets.MAX_ITEMS && old == null) {
+            message = "You have saved the maximum number of layouts"; return
+        }
+        storeMapPanel()
+        storeTowerPanel()
+        val layout = SavedLayout.of(bigFirst().map { Slot(it.x, it.y, it.w) },
+            canvasW, canvasH)
+        val preset = NamedLayoutPreset(old?.id ?: java.util.UUID.randomUUID().toString(),
+            clean, tiles.size, layoutIsLandscape(), layout,
+            namedOverlaySnapshot(), old?.createdMs ?: System.currentTimeMillis())
+        persistNamedLayouts(if (old == null) namedLayouts + preset else namedLayouts.map {
+            if (it.id == old.id) preset else it
+        })
+        // Retain legacy Save layout compatibility and select the new one as default.
+        prefs.edit().putString(layoutKey(tiles.size), layout.toJson())
+            .putString(PREF_DEFAULT_LAYOUT, LayoutMode.CUSTOM.name)
+            .putString(PREF_NAMED_DEFAULT, preset.id).apply()
+        defaultNamedLayoutId = preset.id
+        defaultLayoutMode = LayoutMode.CUSTOM
+        activeNamedLayoutId = preset.id
+        layoutMode = LayoutMode.CUSTOM
+        message = "Saved '${preset.name}' with ${tiles.size} feeds, track map and timing tower."
+    }
+
+    fun renameNamedLayout(id: String, name: String) {
+        val clean = name.trim()
+        if (!NamedLayoutPresets.validName(clean)) {
+            message = "Use a layout name from 1 to 48 characters"; return
+        }
+        if (namedLayouts.any { it.id != id && it.name.equals(clean, true) &&
+            it.feedCount == namedLayouts.firstOrNull { p -> p.id == id }?.feedCount &&
+            it.landscape == namedLayouts.firstOrNull { p -> p.id == id }?.landscape }) {
+            message = "A layout with this name already exists"; return
+        }
+        if (namedLayouts.none { it.id == id }) return
+        persistNamedLayouts(namedLayouts.map { if (it.id == id) it.copy(name = clean) else it })
+        message = "Renamed layout to $clean"
+    }
+
+    fun deleteNamedLayout(id: String) {
+        val preset = namedLayouts.firstOrNull { it.id == id } ?: return
+        persistNamedLayouts(namedLayouts.filterNot { it.id == id })
+        if (activeNamedLayoutId == id) {
+            activeNamedLayoutId = null
+            pendingNamedLayout = null
+        }
+        if (defaultNamedLayoutId == id) {
+            defaultNamedLayoutId = null
+            defaultLayoutMode = LayoutMode.FEATURED
+            prefs.edit().remove(PREF_NAMED_DEFAULT)
+                .putString(PREF_DEFAULT_LAYOUT, LayoutMode.FEATURED.name).apply()
+        }
+        message = "Deleted saved layout '${preset.name}'"
+    }
+
+    fun makeNamedLayoutDefault(id: String) {
+        val preset = namedLayouts.firstOrNull { it.id == id } ?: return
+        defaultNamedLayoutId = preset.id
+        defaultLayoutMode = LayoutMode.CUSTOM
+        prefs.edit().putString(PREF_NAMED_DEFAULT, preset.id)
+            .putString(PREF_DEFAULT_LAYOUT, LayoutMode.CUSTOM.name).apply()
+        message = "'${preset.name}' is now the default for matching sessions"
+    }
+
+    /** Restore normalized feed and overlay rectangles AFTER built-in layout solvers.
+     * Otherwise TV or reserved panel solvers overwrite a selected preset. */
+    private fun finishNamedLayoutIfPending(width: Float, height: Float) {
+        val preset = pendingNamedLayout ?: return
+        pendingNamedLayout = null
+        if (preset.feedCount != tiles.size || preset.landscape != (width > height) ||
+            width <= 0f || height <= 0f) return
+        val positions = preset.layout.slots(width, height)
+        bigFirst().zip(positions).forEach { (tile, slot) -> tile.place(slot) }
+        val snapshot = JSONObject(preset.overlaySnapshot)
+        snapshot.optJSONObject("mapPanel")?.let {
+            activeMapPanel.restore(it.toString(), width, height)?.let { opacity ->
+                mapOpacity = opacity.coerceIn(0.2f, 1f)
+            }
+            storeMapPanel()
+        }
+        snapshot.optJSONObject("towerPanel")?.let { area ->
+            val x = area.optDouble("x", -1.0).toFloat()
+            val y = area.optDouble("y", -1.0).toFloat()
+            val w = area.optDouble("w", -1.0).toFloat()
+            val h = area.optDouble("h", -1.0).toFloat()
+            if (listOf(x, y, w, h).all { it.isFinite() } &&
+                x >= 0f && y >= 0f && w > 0f && h > 0f) {
+                towerSpot.place(Area(x * width, y * height, w * width, h * height))
+                storeTowerPanel()
+            }
+        }
+        handPlaced = true
+    }
 
     /**
      * Makes the arrangement on screen the one every stream with this many feeds starts in, map
@@ -4437,6 +4682,7 @@ class AppState(
         layoutDone = layoutRequest
         try {
             layOut(width, height)
+            finishNamedLayoutIfPending(width, height)
         } finally {
             glideNextLayout = false
         }
@@ -6248,6 +6494,8 @@ class AppState(
         private const val DAY_MS = 86_400_000L
         private val DAY = java.text.SimpleDateFormat("MMM d", java.util.Locale.getDefault())
         private const val PREF_LAYOUT = "layout"
+        private const val PREF_NAMED_LAYOUTS = "namedLayoutPresetsV1"
+        private const val PREF_NAMED_DEFAULT = "namedLayoutDefaultId"
         private const val PREF_DEFAULT_LAYOUT = "defaultLayout"
         private const val PREF_SNAP = "snap"
         private const val PREF_MAP_PANEL = "mapPanel"

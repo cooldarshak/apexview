@@ -31,7 +31,7 @@ internal data class NamedLayoutPreset(
             val id = json.getString("id").takeIf {
                 it.length in 8..80 && it.all { c -> c.isLetterOrDigit() || c == '-' }
             } ?: return null
-            val name = json.getString("name").trim().takeIf { validName(it) } ?: return null
+            val name = json.getString("name").trim().takeIf { NamedLayoutPresets.validName(it) } ?: return null
             val feeds = json.getInt("feeds").takeIf { it in 1..6 } ?: return null
             val layout = SavedLayout.fromJson(json.getJSONObject("layout").toString())
                 ?.takeIf { it.boxes.size == feeds && it.aspect.isFinite() && it.aspect > 0f }
