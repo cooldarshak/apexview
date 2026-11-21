@@ -160,7 +160,9 @@ internal object CmafBoxInspector {
         val seigSampleGroupDescription: SampleGroupDescriptionMetadata? = null,
         val seigSampleGroupDescriptionStructureComplete: Boolean = true,
         /** Number of entries in stsd. The inspector currently parses entry 1 only. */
-        val sampleDescriptionCount: Int = 1
+        val sampleDescriptionCount: Int = 1,
+        /** Differentiates actual encryption mappings from unrelated 'roll'/'rap ' sbgp. */
+        val seigSampleToGroupPresent: Boolean = false
     )
     data class TrackFragmentDefaults(
         val trackId: Long,
@@ -348,6 +350,18 @@ internal object CmafBoxInspector {
             trackSeigStructureComplete = false
             errors += "Multiple track-level seig sample-group descriptions are not supported"
         }
+        var trackSeigMappingPresent = false
+        all.filter { it.type == "sbgp" }.forEach { box ->
+            try {
+                if (parseSeigSbgp(payload(data, box)) != null) {
+                    trackSeigMappingPresent = true
+                }
+            } catch (e: Exception) {
+                trackSeigMappingPresent = true
+                trackSeigStructureComplete = false
+                errors += "Track-level seig sample-to-group mapping is malformed"
+            }
+        }
         return TrackMetadata(
             trackId, handler, timescale, sampleEntry, original, scheme,
             sampleEntry == "encv" || sampleEntry == "enca" || scheme != null, width, height,
@@ -355,7 +369,8 @@ internal object CmafBoxInspector {
             all.any { it.type == "senc" }, all.any { it.type == "saiz" }, all.any { it.type == "saio" },
             all.any { it.type == "sgpd" }, all.any { it.type == "sbgp" },
             trackSeigDescriptions.singleOrNull(), trackSeigStructureComplete,
-            sampleDescriptionCount = sampleDescriptionCount
+            sampleDescriptionCount = sampleDescriptionCount,
+            seigSampleToGroupPresent = trackSeigMappingPresent
         )
     }
 

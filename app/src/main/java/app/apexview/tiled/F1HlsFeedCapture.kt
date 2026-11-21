@@ -287,6 +287,39 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                     ).bytes
                 }
                 fetchMs = android.os.SystemClock.elapsedRealtime() - fetchStartedMs
+                // One bounded, read-only profile for every *real* selected rendition
+                // before any individual compatibility gate can stop the capture.
+                // Only structural metadata is logged, never media bytes, IVs or KIDs.
+                selected.indices.forEach { index ->
+                    val initVideo = inits[index].report.tracks.singleOrNull { it.handler == "vide" }
+                    val profile = CmafBoxInspector.inspect(media[index], inits[index].report)
+                    val videoFragment = profile.fragments.singleOrNull {
+                        it.trackId == initVideo?.trackId
+                    }
+                    val hvc = initVideo?.hevcConfiguration
+                    android.util.Log.i("ApexviewSingleDecoder",
+                        "REAL_HLS_CMAF_STRUCTURE feed=${selected[index].feed.label} " +
+                            "entry=${initVideo?.sampleEntry ?: "missing"} " +
+                            "original=${initVideo?.originalFormat ?: "missing"} " +
+                            "encrypted=${initVideo?.encrypted} " +
+                            "hvcCParsed=${hvc?.vps?.size ?: 0}/${hvc?.sps?.size ?: 0}/${hvc?.pps?.size ?: 0} " +
+                            "hvcCRaw=${hvc?.vpsCount ?: 0}/${hvc?.spsCount ?: 0}/${hvc?.ppsCount ?: 0} " +
+                            "fragmentCount=${profile.fragments.size} " +
+                            "groupBoxes=${videoFragment?.sampleGroupDescriptionPresent}/" +
+                                "${videoFragment?.sampleToGroupPresent} " +
+                            "seigActive=${videoFragment?.sampleGroupEncryptionPresent} " +
+                            "seigComplete=${videoFragment?.sampleGroupEncryptionStructureComplete} " +
+                            "seigRuns=${videoFragment?.sampleGroupEncryptionMetadata?.runs?.size ?: 0} " +
+                            "senc=${videoFragment?.sampleEncryptionBoxPresent} " +
+                            "sencComplete=${videoFragment?.sampleEncryptionStructureComplete} " +
+                            "auxSaiz=${videoFragment?.sampleAuxiliarySizesPresent} " +
+                            "auxSaio=${videoFragment?.sampleAuxiliaryOffsetsPresent} " +
+                            "auxComplete=${videoFragment?.sampleAuxiliaryInfoStructureComplete} " +
+                            "subsampleComplete=${videoFragment?.sampleEncryptionRangesCoverSamples} " +
+                            "samples=${videoFragment?.sampleCount ?: 0} " +
+                            "sampleDescriptionIndex=${videoFragment?.sampleDescriptionIndex} " +
+                            "inspectionErrors=${profile.errors.size}")
+                }
                 stage = "real-hev1-parameter-validation"
                 val resolvedReports = selected.indices.map { index ->
                     val original = inits[index].report

@@ -146,11 +146,7 @@ internal object ProtectedHevcCmafSampleExtractor {
                 "$context: constant-IV tenc configuration is incomplete"
             }
         }
-        require(!track.sampleGroupDescriptionPresent && !track.sampleToGroupPresent &&
-            track.seigSampleGroupDescription == null &&
-            track.seigSampleGroupDescriptionStructureComplete) {
-            "$context: track-level seig sample-group overrides are not supported"
-        }
+        ProtectedCmafSampleGroupCompatibility.requireTrackSafe(track, context)
         val hevc = requireNotNull(track.hevcConfiguration) {
             "$context: active video track has no hvcC HEVC configuration"
         }
@@ -185,6 +181,10 @@ internal object ProtectedHevcCmafSampleExtractor {
             }
         }
 
+        require(validatedConfiguration == null || !complete ||
+            validatedConfiguration.parameterSetFingerprints == hevc.parameterSetFingerprints) {
+            "$context: supplied HEVC parameter sets disagree with an already complete hvcC"
+        }
         val mediaReport = CmafBoxInspector.inspect(mediaFragment, priorInitialization = initReport)
         require(mediaReport.errors.isEmpty()) {
             "$context: active media fragment is incomplete: " +
@@ -209,10 +209,12 @@ internal object ProtectedHevcCmafSampleExtractor {
         require(fragment.sampleDescriptionIndex == 1L) {
             "$context: media fragment sample-description selection is not the inspected HEVC entry"
         }
-        require(!fragment.sampleGroupDescriptionPresent && !fragment.sampleToGroupPresent &&
-            !fragment.sampleGroupEncryptionPresent && fragment.sampleGroupEncryptionStructureComplete) {
-            "$context: fragment-level sample-group overrides are not supported"
-        }
+        // sgpd/sbgp can describe random-access, roll recovery, or other sample
+        // properties. Only 'seig' changes CBCS defaults. Preserve unrelated
+        // groups; accept active seig only if every effective value equals tenc.
+        ProtectedCmafSampleGroupCompatibility.requireFragmentEquivalent(
+            track, fragment, context
+        )
         require(fragment.sencOverrideIvSize == null && fragment.sencOverrideKidIdentity == null) {
             "$context: PIFF/senc override fields are not supported"
         }
@@ -276,11 +278,15 @@ internal object ProtectedHevcCmafSampleExtractor {
             mediaFragment, moof, mdat, truns.single(), fragment, context
         )
         val selectedIvs = parseSenc(
-            mediaFragment, sencBoxes.single(), encryption.perSampleIvSize,
+            mediaFragment, sencBoxes.single(),
             fragment, sampleIndices, context
         )
 
-        val info = ExtractedFragmentInfo(track, fragment, timescale, baseDecodeTime)
+        // Keep the independently checked original CMAF/CBCS metadata. Only the
+        // missing HEVC codec configuration is resolved from fully clear NALs.
+        val pairedTrack = if (validatedConfiguration == null) track
+            else track.copy(hevcConfiguration = validatedConfiguration)
+        val info = ExtractedFragmentInfo(pairedTrack, fragment, timescale, baseDecodeTime)
         try {
             sampleIndices.sorted().forEach { index ->
                 val range = ranges[index]
@@ -403,7 +409,6 @@ internal object ProtectedHevcCmafSampleExtractor {
     private fun parseSenc(
         data: ByteArray,
         box: Box,
-        ivSize: Int,
         fragment: CmafBoxInspector.FragmentMetadata,
         selectedIndices: Set<Int>,
         context: String
@@ -423,14 +428,18 @@ internal object ProtectedHevcCmafSampleExtractor {
         val result = linkedMapOf<Int, ByteArray>()
         try {
             repeat(fragment.sampleCount) { index ->
+                // The independent CMAF inspector already resolved active seig/tenc
+                // widths. Parse precisely that width and verify a keyed IV identity.
+                val inspected = fragment.sampleEncryptionMetadata[index]
+                val ivSize = inspected.ivSize
+                require(ivSize in setOf(0, 8, 16)) { "$context: invalid effective IV size" }
                 val rawIv = if (ivSize > 0) {
                     require(p.remaining() >= ivSize) { "$context: truncated per-sample IV" }
                     ByteArray(ivSize).also { p.get(it) }
                 } else null
                 try {
                     val ivIdentity = rawIv?.let { ProtectedValueFingerprint.fromBytes("iv", it) }
-                    val inspected = fragment.sampleEncryptionMetadata[index]
-                    require(inspected.ivSize == ivSize && inspected.ivIdentity == ivIdentity) {
+                    require(inspected.ivIdentity == ivIdentity) {
                         "$context: senc IV differs from the independently inspected sample IV identity"
                     }
                     require(p.remaining() >= 2) { "$context: truncated senc subsample count" }

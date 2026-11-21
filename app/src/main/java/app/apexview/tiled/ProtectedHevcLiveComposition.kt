@@ -389,10 +389,9 @@ internal object ProtectedHevcLiveComposition {
                 "active tenc constant-IV configuration is incomplete"
             }
         }
-        require(!track.sampleGroupDescriptionPresent && !track.sampleToGroupPresent &&
-            track.seigSampleGroupDescription == null) {
-            "track-level seig encryption overrides are unsupported"
-        }
+        ProtectedCmafSampleGroupCompatibility.requireTrackSafe(
+            track, "active protected F1 initialization"
+        )
 
         val signature = listOf(
             track.trackId, track.width, track.height, track.timescale,
@@ -470,18 +469,15 @@ internal object ProtectedHevcLiveComposition {
                 if (visited == 0) {
                     val actual = fragmentInfo.track
                     val original = requireNotNull(actual.hevcConfiguration)
-                    val baseParametersAgree =
-                        original.parameterSetFingerprints == hevc.parameterSetFingerprints
-                    // HEV1 can carry verified VPS/SPS/PPS in-band instead of hvcC.
-                    // Encryption metadata still comes from the real CMAF and must agree.
-                    val verifiedInband = actual.originalFormat == "hev1" &&
-                        original.sps.size != 1 &&
+                    // The extractor hands off the verified in-band HEV1 configuration
+                    // with *original* track encryption values, never the unresolved
+                    // source hvcC or an unverified representation.
+                    require(actual.trackId == activeTrack.trackId &&
                         actual.trackEncryption == activeTrack.trackEncryption &&
                         actual.protectionScheme == activeTrack.protectionScheme &&
-                        original.nalLengthSize == hevc.nalLengthSize
-                    require(actual.trackId == activeTrack.trackId &&
-                        (baseParametersAgree || verifiedInband)) {
-                        "media fragment does not match the captured verified HEVC representation"
+                        original.nalLengthSize == hevc.nalLengthSize &&
+                        original.parameterSetFingerprints == hevc.parameterSetFingerprints) {
+                        "media fragment does not match the captured verified HEVC/CBCS representation"
                     }
                 }
                 visited++

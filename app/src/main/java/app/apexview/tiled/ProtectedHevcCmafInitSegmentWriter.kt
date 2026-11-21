@@ -35,10 +35,12 @@ internal object ProtectedHevcCmafInitSegmentWriter {
             sourceTrack.trackEncryption?.defaultIsProtected == true) {
             "$context: source is not a protected CBCS HEVC video track"
         }
-        require(!sourceTrack.sampleGroupDescriptionPresent && !sourceTrack.sampleToGroupPresent &&
-            sourceTrack.seigSampleGroupDescription == null) {
-            "$context: track-level sample-group overrides are not supported"
-        }
+        // The output preserves the original init but does not emit source
+        // fragment-level seig mappings. The inherited default must therefore
+        // describe the same CBCS identity/pattern as tenc.
+        ProtectedCmafSampleGroupCompatibility.requireTrackSafe(
+            sourceTrack, context, outputInitialization = true
+        )
 
         val outputVps = HevcParameterSets.parseVps(output.vps)
         val outputSps = HevcParameterSets.parseSps(output.sps)

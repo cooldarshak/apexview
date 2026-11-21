@@ -297,20 +297,17 @@ internal object ProtectedHevcPictureComposer {
             }
         }
 
-        // This first version deliberately rejects sample-group/PIFF overrides. Their effective
-        // per-sample protection mapping must be resolved before they can be composed safely.
-        require(!track.sampleGroupDescriptionPresent && !track.sampleToGroupPresent &&
-            track.seigSampleGroupDescription == null &&
-            track.seigSampleGroupDescriptionStructureComplete) {
-            "$context: $label track-level sample-group encryption is not supported"
-        }
+        // 'roll' and other generic MP4 groups are not CBCS overrides.
+        // Validate every active 'seig' mapping against the sole output tenc.
+        ProtectedCmafSampleGroupCompatibility.requireTrackSafe(
+            track, "$context: $label"
+        )
         require(fragment.sampleDescriptionIndex == 1L) {
             "$context: $label effective sample-description index is missing or unsupported"
         }
-        require(!fragment.sampleGroupDescriptionPresent && !fragment.sampleToGroupPresent &&
-            !fragment.sampleGroupEncryptionPresent && fragment.sampleGroupEncryptionStructureComplete) {
-            "$context: $label fragment sample-group overrides are not supported"
-        }
+        ProtectedCmafSampleGroupCompatibility.requireFragmentEquivalent(
+            track, fragment, "$context: $label"
+        )
         require(fragment.sencOverrideIvSize == null &&
             fragment.sencOverrideKidIdentity == null) {
             "$context: $label PIFF/senc override fields are not supported"
