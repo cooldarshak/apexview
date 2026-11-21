@@ -120,6 +120,12 @@ internal object ProtectedHevcLiveComposition {
         val fullPictures: Boolean,
     ) {
         var sourceGeometry: SourceGeometry? = null
+        // Equivalent to the clear VOD session's cachedMixedAtlas. These keys
+        // contain ONLY SHA-256 VPS/SPS/PPS fingerprints (never CBCS identities).
+        var mixedAtlasKey: List<List<String>>? = null
+        var mixedAtlas: HevcMixedArchiveAtlasPlan.Plan? = null
+        var outputParametersKey: Pair<List<List<String>>, HevcOutputParameterSetWriter.Request>? = null
+        var outputParameters: HevcOutputParameterSetWriter.Output? = null
         val feeds = labels.associateWith(::FeedState)
         var status: String = "WAITING_FOR_ACTIVE_PROTECTED_INIT_SEGMENTS"
         var outputInitializationSegment: ByteArray? = null
@@ -135,6 +141,10 @@ internal object ProtectedHevcLiveComposition {
             outputInitializationSegment?.fill(0)
             outputInitializationSegment = null
             outputRepresentationSignature = null
+            mixedAtlasKey = null
+            mixedAtlas = null
+            outputParametersKey = null
+            outputParameters = null
             outputHistory.forEach(OutputFragment::zero)
             outputHistory.clear()
             status = "CLEARED"
@@ -656,16 +666,30 @@ internal object ProtectedHevcLiveComposition {
         }
         val mixedSizes = configs.map { it.sps.single().width to it.sps.single().height }
             .distinct().size > 1
+        val profileKey = configs.map { it.parameterSetFingerprints }
+        val stableProfile = profileKey.all { it.isNotEmpty() }
+        val atlasCacheHit = mixedSizes && session.fullPictures && stableProfile &&
+            session.mixedAtlasKey == profileKey && session.mixedAtlas != null
         val mixedPlan = if (mixedSizes && session.fullPictures) {
-            HevcMixedArchiveAtlasPlan.choose(
-                configs.map { c ->
-                    HevcMixedArchiveAtlasPlan.Source(
-                        c.vps.single(), c.sps.single(), c.pps.single()
-                    )
-                }, maximumWidth = 4096,
-                maximumHeight = HevcArchiveAtlasPlan.MAX_CODED_HEIGHT
-            )
+            if (atlasCacheHit) session.mixedAtlas else {
+                val plan = HevcMixedArchiveAtlasPlan.choose(
+                    configs.map { c ->
+                        HevcMixedArchiveAtlasPlan.Source(
+                            c.vps.single(), c.sps.single(), c.pps.single()
+                        )
+                    }, maximumWidth = 4096,
+                    maximumHeight = HevcArchiveAtlasPlan.MAX_CODED_HEIGHT
+                )
+                if (stableProfile && plan != null) {
+                    session.mixedAtlasKey = profileKey
+                    session.mixedAtlas = plan
+                }
+                plan
+            }
         } else null
+        if (mixedSizes && session.fullPictures) android.util.Log.i(
+            "ApexviewSingleDecoder", "PROTECTED_ATLAS_PLAN cacheHit=$atlasCacheHit " +
+                "feeds=${session.labels.size} codedSizes=${configs.map { it.sps.single().width to it.sps.single().height }}")
         val sourceCoded = configs.joinToString(",") {
             "${it.sps.single().width}x${it.sps.single().height}"
         }
@@ -807,11 +831,7 @@ internal object ProtectedHevcLiveComposition {
             cellHeightInCtbs * ctbSize, spsMetadata.displayWidth, spsMetadata.displayHeight, gridColumns, gridRows,
             mixedPlan?.sourceRects.orEmpty()) else null
         val frameRate = deriveFrameRate(firstHevc, spsMetadata)
-        val outputParameters = HevcOutputParameterSetWriter.generate(
-            sourceVpsNal = sourceVps,
-            sourceSpsNal = sourceSps,
-            sourcePpsNal = sourcePps,
-            request = HevcOutputParameterSetWriter.Request(
+        val outputRequest = HevcOutputParameterSetWriter.Request(
                 vpsId = firstHevc.vps.single().vpsId,
                 spsId = spsMetadata.spsId,
                 ppsId = ppsMetadata.ppsId,
@@ -824,8 +844,23 @@ internal object ProtectedHevcLiveComposition {
                 frameRateNumerator = frameRate.first,
                 frameRateDenominator = frameRate.second,
                 uncroppedOutputPicture = mixedPlan != null
-            )
         )
+        val outputParameters = if (stableProfile &&
+            session.outputParametersKey == (profileKey to outputRequest)) {
+            requireNotNull(session.outputParameters)
+        } else {
+            HevcOutputParameterSetWriter.generate(
+                sourceVpsNal = sourceVps,
+                sourceSpsNal = sourceSps,
+                sourcePpsNal = sourcePps,
+                request = outputRequest
+            ).also { output ->
+                if (stableProfile) {
+                    session.outputParametersKey = profileKey to outputRequest
+                    session.outputParameters = output
+                }
+            }
+        }
         val outputSps = HevcParameterSets.parseSps(outputParameters.sps)
         val outputPps = HevcParameterSets.parsePps(outputParameters.pps, outputSps)
         val outputSignature = listOf(
