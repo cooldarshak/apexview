@@ -22,8 +22,25 @@ internal object ProtectedHevcCmafSampleExtractor {
         /** Null when the active tenc uses a constant IV. Must be zeroed by close(). */
         val perSampleIvBytes: ByteArray?
     ) : AutoCloseable {
+        private var sampleOwnershipTransferred = false
+
+        /**
+         * Transfer a fully validated sample buffer directly to the bounded
+         * protected composition window. The extractor still owns/zeros every
+         * other temporary and IV; the receiving BufferedPicture must zero
+         * the transferred sample exactly once when replaced or on failure.
+         *
+         * This is a move of already encrypted bytes, not decryption or access
+         * to Widevine keys. Only the composer can request the transfer.
+         */
+        internal fun takeVerifiedSampleBytes(): ByteArray {
+            check(!sampleOwnershipTransferred) { "Protected CMAF sample was transferred twice" }
+            sampleOwnershipTransferred = true
+            return sampleBytes
+        }
+
         override fun close() {
-            sampleBytes.fill(0)
+            if (!sampleOwnershipTransferred) sampleBytes.fill(0)
             perSampleIvBytes?.fill(0)
         }
     }

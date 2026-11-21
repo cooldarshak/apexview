@@ -571,7 +571,11 @@ internal object ProtectedHevcLiveComposition {
                     )
                     val buffered = BufferedPicture(
                         picture = picture,
-                        sampleBytes = sample.sampleBytes.copyOf(),
+                        // The extractor has already validated the whole CBCS
+                        // range and HEVC picture identity. Transfer ownership
+                        // rather than allocating a second multi-MB copy for
+                        // every single 50fps source sample.
+                        sampleBytes = sample.takeVerifiedSampleBytes(),
                         perSampleIvBytes = sample.perSampleIvBytes?.copyOf(),
                         perSampleIvIdentity = encryption.ivIdentity,
                         track = fragmentInfo.track,
