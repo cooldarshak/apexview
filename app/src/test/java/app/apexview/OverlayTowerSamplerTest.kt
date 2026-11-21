@@ -83,6 +83,22 @@ class OverlayTowerSamplerTest {
         assertEquals(8, after.speeds.getValue("44").second)
     }
 
+    @Test fun capturedSpeedSourcesAvoidFreezingLateDataAtTheSameVideoTime() {
+        val session = timing()
+        val sampler = OverlayTowerSampler(session)
+        val initialSpeeds = session.speeds
+        val first = sampler.sample(1_100L, initialSpeeds)
+        val nextSpeeds = mapOf("44" to SpeedLog(
+            longArrayOf(1_000L), shortArrayOf(312), 1, shortArrayOf(9)
+        ))
+        val changed = sampler.sample(1_100L, nextSpeeds)
+        assertNotSame(first, changed)
+        assertEquals(312, changed.speeds.getValue("44").first)
+        assertEquals(9, changed.speeds.getValue("44").second)
+        assertSame("unchanged subsequent worker polling must reuse the exact display state",
+            changed, sampler.sample(1_100L, nextSpeeds))
+    }
+
     @Test fun backwardSeekRestoresOldLapAndOldTyres() {
         val sampler = OverlayTowerSampler(timing())
         sampler.sample(3_100L)
