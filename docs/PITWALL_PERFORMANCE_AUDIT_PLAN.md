@@ -136,8 +136,11 @@ an *initial* data-sampling-only optimization.
    existing clickable Compose row.
 5. **Pit-circle** caches dark circuit background and turn/start-finish/
    inner-lane geometry in separately recorded display lists, with
-   pit-window arc positioned below the outline as before. Dynamic
-   pit-lane dots, gap labels, car selection rings, collision placement,
+   pit-window arc positioned below the outline as before. The complete
+   retained/static/dynamic circle is composited under ONE parent opacity
+   layer to preserve original overlapping colours and avoid extra
+   offscreen full-panel alpha textures. Dynamic pit-lane dots, gap
+   labels, car selection rings, collision placement,
    ghost and stop controls remain live. Gap text measurement and
    collision scratch lists are retained/reused on changes, not
    reallocated on every draw. Its business-driven pit-window model

@@ -293,8 +293,11 @@ internal fun PitCircleDrawing(timing: SessionTiming, data: PitCircleData?, width
     val sortedRing = remember(ring) { ring.sortedBy { it.at } }
     val taken = remember { ArrayList<Rect>(24) }
 
-    Box(Modifier.fillMaxSize()) {
-    val layer = Modifier.fillMaxSize().graphicsLayer(alpha = opacity)
+    // Apply alpha ONCE to the complete composed circle. Applying it to each
+    // retained sublayer would change overlapping colours and create multiple
+    // full-panel offscreen buffers. Preserve the original single-group blend.
+    Box(Modifier.fillMaxSize().graphicsLayer(alpha = opacity)) {
+    val layer = Modifier.fillMaxSize()
     Canvas(layer) {
         val w = size.width.toInt().coerceAtLeast(1)
         val h = size.height.toInt().coerceAtLeast(1)
