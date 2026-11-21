@@ -92,7 +92,8 @@ internal class CastTimingPublisher(private val context: Context, private val app
         val cars = if (app.mapMode != MapMode.OFF && timing != null)
             requireNotNull(mapSampler).sample(now) else emptyList()
         val stop = basis?.let { pitStopNow(it, app.pitDriver, cars.map { car -> car.number to timing!!.geometry.progress(car.x, car.y) }) }
-        val circle = if (app.mapMode == MapMode.PIT && timing != null && basis != null) pitCircleData(app, timing, now, basis) else null
+        val circle = if (app.mapMode == MapMode.PIT && timing != null && basis != null)
+            pitCircleData(app, timing, now, basis, cars) else null
         if (resend) android.util.Log.i("PitwallCast", "TIMING_SAMPLE positionMs=$position utc=$now " +
             "rows=${rows.length()} cars=${cars.size} trackStart=${timing?.firstTrackUtc} trackEnd=${timing?.lastTrackUtc}")
         val message = CastTimingProtocol.encodeFrame(geometryId, position, now,
