@@ -31,6 +31,9 @@ import androidx.compose.material.icons.rounded.ArrowBackIosNew
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -180,20 +183,26 @@ private fun PickCard(
     val dropping = channel in picker.removing
     // On screen counts as picked until unpicked.
     val picked = channel in picker.selected || (playing && !dropping)
-    val background by animateColorAsState(if (picked) Ink.primary else Ink.surfaceHigh, tween(Motion.PRESS_MS * 2, easing = EaseOut), label = "pick")
-    val onColor = if (picked) Color.Black else Ink.primary
+    val background by animateColorAsState(
+        if (picked) Ink.accent.copy(alpha = 0.30f)
+        else MaterialTheme.colorScheme.surfaceContainerHigh,
+        tween(Motion.PRESS_MS * 2, easing = EaseOut), label = "pick")
     Box(
         modifier
+            .semantics { stateDescription = if (picked) "Selected" else "Not selected" }
             .pressable { app.togglePick(channel) }
-            .clip(Rounded)
+            .clip(RoundedCornerShape(22.dp))
             .background(background)
-            .padding(14.dp)
+            .padding(16.dp)
     ) {
-        Column { content(onColor) }
+        Column { content(Ink.primary) }
         when {
-            playing && !dropping -> Text("On", style = Type.caption.copy(color = Color.Black), modifier = Modifier.align(Alignment.TopEnd))
-            dropping -> Text("Off", style = Type.caption, modifier = Modifier.align(Alignment.TopEnd))
-            picked -> Icon(Icons.Rounded.Check, null, tint = Color.Black, modifier = Modifier.align(Alignment.TopEnd).size(18.dp))
+            playing && !dropping -> Text("On", style = Type.caption,
+                modifier = Modifier.align(Alignment.TopEnd))
+            dropping -> Text("Off", style = Type.caption,
+                modifier = Modifier.align(Alignment.TopEnd))
+            picked -> Icon(Icons.Rounded.Check, "Selected feed", tint = Ink.primary,
+                modifier = Modifier.align(Alignment.TopEnd).size(20.dp))
         }
     }
 }
@@ -232,25 +241,32 @@ internal fun TvCastingMenu(app: AppState) {
 
 @Composable
 private fun Group(title: String, footer: String? = null, content: @Composable () -> Unit) {
-    Text(title, style = Type.subhead.copy(color = Ink.primary, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
-        modifier = Modifier.padding(start = 36.dp, end = 20.dp, top = 28.dp, bottom = 10.dp))
+    Text(title, style = Type.headline.copy(color = Ink.primary, fontWeight = FontWeight.SemiBold),
+        modifier = Modifier.padding(start = 32.dp, end = 20.dp, top = 28.dp, bottom = 12.dp))
     Column(
         Modifier.padding(horizontal = 20.dp).fillMaxWidth()
             .clip(androidx.compose.material3.MaterialTheme.shapes.large)
-            .background(androidx.compose.material3.MaterialTheme.colorScheme.surfaceContainer)
-            .padding(vertical = 6.dp)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .padding(vertical = 8.dp)
     ) { content() }
     footer?.let { Text(it, style = Type.footnote, modifier = Modifier.padding(start = 36.dp, end = 36.dp, top = 8.dp)) }
 }
 
 @Composable
-private fun SettingRow(label: String, value: String? = null, valueColor: Color = Ink.secondary, onClick: (() -> Unit)? = null, modifier: Modifier = Modifier, trailing: @Composable (() -> Unit)? = null) {
+private fun SettingRow(label: String, value: String? = null, valueColor: Color = Ink.secondary,
+    onClick: (() -> Unit)? = null, modifier: Modifier = Modifier, selected: Boolean = false,
+    trailing: @Composable (() -> Unit)? = null,
+) {
     Row(
         modifier
             .fillMaxWidth()
+            .padding(horizontal = 6.dp, vertical = 2.dp)
             .then(if (onClick != null) Modifier.pressable(scaleTo = 0.99f, onClick = onClick) else Modifier)
-            .heightIn(min = 56.dp)
-            .padding(horizontal = 16.dp),
+            .clip(RoundedCornerShape(18.dp))
+            .background(if (selected) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)
+                else Color.Transparent)
+            .heightIn(min = 60.dp)
+            .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, style = Type.body, modifier = Modifier.weight(1f))
@@ -279,7 +295,7 @@ internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> U
 
 @Composable
 private fun ChoiceRow(label: String, chosen: Boolean, onClick: () -> Unit) {
-    SettingRow(label, onClick = onClick) {
+    SettingRow(label, onClick = onClick, selected = chosen) {
         if (chosen) {
             Box(Modifier.size(26.dp).clip(androidx.compose.foundation.shape.CircleShape)
                 .background(Ink.accent), contentAlignment = Alignment.Center) {

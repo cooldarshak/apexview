@@ -8,6 +8,8 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
@@ -584,10 +586,20 @@ class PitwallReceiverActivity : ComponentActivity() {
                     } else AndroidView(factory = { PlayerView(it).apply { standardView = this; player = current; useController = true } },
                         onRelease = { if (standardView === it) standardView = null; it.player = null }, modifier = Modifier.fillMaxSize())
                 }
-            } else Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(18.dp)) {
-                Text(receiverName, style = Type.title1)
-                Text(status, style = Type.body)
-                Text("Keep this screen open. On the phone, tap Cast and choose this TV. No code or paid casting account is needed. Sign in on this TV for protected/live F1 feeds.", style = Type.subhead)
+            } else Column(
+                Modifier.fillMaxWidth().widthIn(max = 680.dp)
+                    .padding(horizontal = 24.dp)
+                    .clip(RoundedCornerShape(32.dp))
+                    .background(Ink.surface)
+                    .padding(36.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+            ) {
+                Text("Pitwall TV", style = Type.largeTitle)
+                Text(receiverName, style = Type.title2)
+                Text(status, style = Type.body, color = Ink.secondary)
+                Text("On your phone, choose Cast and select this TV. Keep the receiver open. Protected and live F1 feeds use the authorized F1 TV account signed in here.",
+                    style = Type.subhead)
                 if (connection != null) SecondaryButton("Disconnect phone") { connection?.close() }
                 SecondaryButton("Exit receiver") { finish() }
             }

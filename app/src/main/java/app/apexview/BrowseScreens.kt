@@ -54,6 +54,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -511,12 +512,15 @@ private fun WeekendSchedule(
 /** The link beside a row's title: white with an arrow, so it reads as something to tap. */
 @Composable
 private fun HeaderAction(label: String, onClick: () -> Unit) {
-    Row(
-        Modifier.pressable(onClick = onClick).padding(start = 12.dp, top = 4.dp, bottom = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier.tvFocusRing().heightIn(min = 48.dp),
+        colors = ButtonDefaults.textButtonColors(contentColor = Ink.primary),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
     ) {
         Text(label, style = Type.headline)
-        Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = Ink.primary, modifier = Modifier.size(24.dp))
+        Icon(Icons.Rounded.ChevronRight, contentDescription = null,
+            modifier = Modifier.size(22.dp))
     }
 }
 
@@ -531,7 +535,7 @@ private fun ScheduleRow(app: AppState, item: CatalogItem) {
         Modifier
             .fillMaxWidth()
             .height(IntrinsicSize.Min)
-            .heightIn(min = 40.dp)
+            .heightIn(min = 68.dp)
             .pressable {
                 when {
                     playable -> app.watch(item)
@@ -539,28 +543,40 @@ private fun ScheduleRow(app: AppState, item: CatalogItem) {
                     else -> Toast.makeText(context, "The ${item.title} replay isn't up yet.", Toast.LENGTH_SHORT).show()
                 }
             }
-            .clip(RoundedCornerShape(4.dp))
-            .background(if (playable) ScheduleReady else Ink.surface),
+            .clip(RoundedCornerShape(18.dp))
+            .background(if (playable) MaterialTheme.colorScheme.surfaceContainerHigh
+                else MaterialTheme.colorScheme.surfaceContainerLow),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Watchable now is lit in red; still to come stays dark and grey.
-        Box(Modifier.width(3.dp).fillMaxHeight().background(if (playable) ScheduleRed else Ink.tertiary))
-        Box(Modifier.width(23.dp).fillMaxHeight().background(if (playable) ScheduleTab else Ink.surfaceHigh), contentAlignment = Alignment.Center) {
-            Text("F1", style = Type.caption.copy(fontSize = 11.sp, color = if (playable) Ink.primary else Ink.secondary, fontWeight = FontWeight.Bold))
+        // The F1 tab, live semantic red and the original session/time remain.
+        Box(Modifier.width(4.dp).fillMaxHeight()
+            .background(if (playable) ScheduleRed else Ink.tertiary))
+        Box(
+            Modifier.padding(start = 12.dp, top = 10.dp, bottom = 10.dp)
+                .size(42.dp).clip(RoundedCornerShape(14.dp))
+                .background(if (playable) ScheduleTab else Ink.surfaceHigh),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("F1", style = Type.subhead.copy(color = Ink.primary,
+                fontWeight = FontWeight.Bold))
         }
         Text(
             item.title,
-            style = Type.footnote.copy(color = if (playable) Ink.primary else Ink.secondary, fontWeight = FontWeight.Medium, lineHeight = 16.sp),
+            style = Type.subhead.copy(
+                color = if (playable) Ink.primary else Ink.secondary,
+                fontWeight = FontWeight.SemiBold,
+            ),
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp, vertical = 4.dp),
+            modifier = Modifier.weight(1f).padding(horizontal = 14.dp, vertical = 12.dp),
         )
-        Box(Modifier.width(1.dp).fillMaxHeight().padding(vertical = 12.dp).background(Ink.tertiary))
-        Box(Modifier.padding(horizontal = 8.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.padding(end = 14.dp), contentAlignment = Alignment.Center) {
             when {
                 item.live -> LiveMark()
-                playable -> Icon(Icons.Rounded.Replay, contentDescription = "Watch", tint = Ink.primary, modifier = Modifier.size(18.dp))
-                else -> Text(time, style = Type.footnote.copy(color = Ink.secondary, fontWeight = FontWeight.SemiBold))
+                playable -> Icon(Icons.Rounded.Replay, contentDescription = "Watch",
+                    tint = Ink.primary, modifier = Modifier.size(22.dp))
+                else -> Text(time, style = Type.footnote.copy(color = Ink.secondary,
+                    fontWeight = FontWeight.SemiBold))
             }
         }
     }
@@ -997,7 +1013,9 @@ private fun PageDots(count: Int, pager: PagerState, modifier: Modifier) {
     Row(modifier, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         repeat(count) { i ->
             val on = pager.currentPage.mod(count) == i
-            Box(Modifier.size(6.dp).clip(CircleShape).background(if (on) Ink.primary else Ink.tertiary))
+            Box(Modifier.width(if (on) 24.dp else 8.dp).height(8.dp)
+                .clip(CircleShape)
+                .background(if (on) Ink.accent else Ink.tertiary.copy(alpha = 0.65f)))
         }
     }
 }

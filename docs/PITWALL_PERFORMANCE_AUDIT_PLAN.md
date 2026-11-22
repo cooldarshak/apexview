@@ -294,6 +294,20 @@ until explicit capability negotiation. Baked Cast PixelCopy is unchanged. Clear 
 retains the separate full-overlay capture. Hardware video, remote TV
 stability, physical Cast marker cadence and accessibility remain OPEN.
 
+### Coordinated Material 3 browsing and TV accessibility refinement
+
+The same release pass also updates session-schedule cards from small square
+40dp rows to 68dp minimum rounded tonal cards with readable labels while
+keeping start times, live states and the F1 identity. The feed selector now
+has distinct dark/red selected states and spoken selection descriptions.
+Grouped settings use tonal surfaces, stronger section labels and a visibly
+selected row. Home pagination uses a red active pill; the TCL receiver's
+idle screen presents its instructions in a centered high-contrast large TV
+panel. These are observable Compose changes using stable Material 3 1.4
+APIs; do not describe them as a finished Google TV/Material 3 Expressive
+sign-off until accessibility, TV remote behavior and actual screenshots
+have been accepted on the devices.
+
 ### Design progress as a separately enforced release gate
 
 Material 3 Expressive coding was not included in the original fourteen
