@@ -21,6 +21,26 @@ class FrameTimelineReportTest(unittest.TestCase):
         self.assertEqual(1, result["display"]["dropped"])
         self.assertEqual(2, result["display_interval_bins"]["<13ms"])
 
+    def test_independent_video_surface_not_attributed_to_ui(self):
+        rows = [self.row(1, 0), self.row(2, 20_000_000)]
+        video = self.row(2, 10_000_000, name="app.apexview_custom")
+        video["layer_name"] = "SurfaceView[app.apexview_custom/app.apexview.MainActivity]"
+        app = self.row(2, 10_000_000, name="app.apexview_custom", status="Late Present")
+        app["layer_name"] = "app.apexview_custom/app.apexview.MainActivity"
+        app["surface_frame_token"] = "22"
+        result = summary(rows + [video, dict(video), app])
+        self.assertEqual(1, result["video"]["frames"])
+        self.assertEqual(0, result["video"]["late"])
+        self.assertEqual(1, result["app"]["late"])
+        self.assertEqual(2, result["display_tokens"])
+
+    def test_textureview_composed_into_ui_window(self):
+        app = self.row(1, 0, name="app.apexview_custom")
+        app["layer_name"] = "TextureView[app.apexview_custom]"
+        result = summary([self.row(1, 0), app])
+        self.assertEqual(0, result["video"]["frames"])
+        self.assertEqual(1, result["app"]["frames"])
+
     def test_empty_or_single_frame_does_not_fabricate_video_fps(self):
         report = summary([self.row(12, 1_000_000)])
         self.assertIsNone(report["display_gap_p95_ms"])

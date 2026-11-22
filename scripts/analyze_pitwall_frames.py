@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Compare exported Perfetto FrameTimeline CSVs from matched playback intervals.
+"""Distinguish Android app UI, SurfaceView video and SF display FrameTimeline.
 
-Export docs/perfetto/frame_timeline_export.sql from ui.perfetto.dev. The physical
-display frames here are NOT decoded video frames. To verify a 50fps feed, compare
-the companion SINGLE_DECODER_SCENE codec/texture/Choreographer cadence logs too.
+A late MainActivity window frame does not establish independent video jank.
+Video layer frames do not establish which F1 camera pixels were displayed;
+correlate actual layer cadence with decoder/latch and audio clocks.
 """
 
 import argparse
@@ -53,11 +53,25 @@ def summary(rows):
 
     display = [row for row in rows if row["process_name"] == "/system/bin/surfaceflinger"
                and row["surface_frame_token"] in ("", "0", None)]
-    app = [row for row in rows if row["process_name"] == "app.apexview_custom"]
-    # Some traces lack a process association for the TextureView layer; the
-    # explicit app layer name is an independently identifiable fallback.
+    # The independent SurfaceView has its own queue. TextureView clear playback
+    # is part of HWUI and must not be fabricated into a separate video layer.
+    def is_video(row):
+        name = row["layer_name"].lower()
+        identified = "surfaceview" in name or "pitwallsecurescene" in name
+        owned = (row["process_name"] == "app.apexview_custom" or
+                 "app.apexview_custom" in name or "pitwall" in name)
+        return identified and owned and row["surface_frame_token"] not in ("", "0", None)
+
+    video = {}
+    for row in rows:
+        if is_video(row):
+            video.setdefault((row["layer_name"], row["surface_frame_token"]), row)
+    video_rows = list(video.values())
+    app = [row for row in rows if row["process_name"] == "app.apexview_custom"
+           and not is_video(row)]
     if not app:
-        app = [row for row in rows if "app.apexview_custom" in row["layer_name"]]
+        app = [row for row in rows if "app.apexview_custom" in row["layer_name"]
+               and not is_video(row)]
 
     # An SF frame can appear more than once in a trace. Use its token to
     # calculate display slots, never count app surfaces as display frames.
@@ -78,7 +92,13 @@ def summary(rows):
                      [(13, "<13ms"), (19, "13-19ms"), (23, "19-23ms"),
                       (30, "23-30ms"), (45, "30-45ms")] if ms < limit), ">=45ms")
         bins[name] += 1
+    video_times = sorted(row["ts"] + row["dur"] for row in video_rows)
+    video_gaps = [(b - a) / 1e6 for a, b in zip(video_times, video_times[1:]) if b >= a]
     return {"display": classify(list(unique_display_rows.values())), "app": classify(app),
+            "video": classify(video_rows),
+            "video_layer_names": sorted({row["layer_name"] for row in video_rows}),
+            "video_gap_p95_ms": percentile(video_gaps, 95),
+            "video_gap_max_ms": max(video_gaps) if video_gaps else None,
             "display_tokens": len(unique_display), "display_interval_bins": bins,
             "display_gap_median_ms": median(gaps) if gaps else None,
             "display_gap_p95_ms": percentile(gaps, 95),
@@ -87,7 +107,7 @@ def summary(rows):
 
 def show(label, metrics):
     print(f"{label}: captured {metrics['sample_span_s']:.1f}s; unique SF display tokens={metrics['display_tokens']}")
-    for category in ("display", "app"):
+    for category in ("display", "app", "video"):
         entry = metrics[category]
         if entry["frames"]:
             print(f"  {category}: frames={entry['frames']}, late={entry['late']} "
@@ -95,6 +115,12 @@ def show(label, metrics):
                   f"({entry['drop_pct']:.1f}%)")
         else:
             print(f"  {category}: no matching FrameTimeline rows (not measured)")
+    if metrics["video_layer_names"]:
+        print("  independent video SurfaceView layers:", ", ".join(metrics["video_layer_names"]))
+        print("  video layer frame gap p95/max ms:",
+              metrics["video_gap_p95_ms"], metrics["video_gap_max_ms"])
+    else:
+        print("  video SurfaceView NOT_MEASURED; clear TextureView is in HWUI")
     print("  SF display slot intervals (not unique video frames):", metrics["display_interval_bins"])
     print(f"  SF slot gap median/p95 ms: {metrics['display_gap_median_ms']}, {metrics['display_gap_p95_ms']}")
 
@@ -108,12 +134,13 @@ def main():
     new = summary(read_timeline(args.candidate))
     show("BASELINE", old)
     show("CANDIDATE", new)
-    for category in ("display", "app"):
+    for category in ("display", "app", "video"):
         a, b = old[category], new[category]
         if a["late_pct"] is not None and b["late_pct"] is not None:
             print(f"  {category} late-present change: {b['late_pct'] - a['late_pct']:+.1f} percentage points")
-    print("IMPORTANT: match device, source renditions, refresh Hz, warmup and interval; "
-          "50fps video presentation and A/V sync are NOT proven by display timelines alone.")
+    print("IMPORTANT: match device, renditions, refresh and steady intervals. "
+          "SurfaceView and app HWUI are distinct, while TextureView belongs to HWUI. "
+          "Camera identity and A/V sync still need decoder/latch/audio evidence.")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
 -- Paste in Perfetto UI's Query tab for each captured session, then export CSV.
--- This includes actual SurfaceFlinger display frames and each app surface.
--- A display frame is NOT a unique decoded video frame; use the scene logs
--- and decoder SurfaceTexture timestamps for the 50fps video-specific side.
+-- Capture actual SurfaceFlinger display frames and app SurfaceView layers.
+-- The main Activity window is HWUI (including clear TextureView scenes).
+-- Protected SurfaceView video frames require independent SurfaceFlinger
+-- classification. Correlate with decoder texture timestamps and audio clock
+-- before asserting camera identity or sustained 50fps presentation.
 SELECT
   ts,
   dur,

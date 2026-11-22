@@ -106,6 +106,16 @@ Source changes following the Build 699 baseline:
   typed `kotlin.compilerOptions.jvmTarget` DSL; this is a build-system
   compatibility correction, not a playback change.
 
+## Independent physical SurfaceView video-layer reporting
+
+- Perfetto FrameTimeline analyzer now reports app UI, independent SurfaceView
+  video layer, and SurfaceFlinger slots separately. Deduplicates video frames
+  by surface token and layer, with video-layer p95/max presentation gaps.
+- Tests prevent MainActivity jank from being misreported as video failure,
+  and keep clear TextureView within the app HWUI window.
+- Actual physical source-frame identity and A/V sync still need independent
+  device traces; a display refresh count cannot prove 50fps HEVC pictures.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**
