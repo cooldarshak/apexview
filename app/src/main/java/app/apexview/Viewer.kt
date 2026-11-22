@@ -910,6 +910,16 @@ internal fun PlaybackVideoCanvas(
     val host = app.singleDecoderScenePlayer ?: app.protectedRollingScenePlayer
     val secureRolling = app.protectedRollingSceneActive && host != null && !host.usesSoftwareDrm
     if (scene != null && host != null) {
+        // This must happen as soon as the composed scene activates, not after
+        // a later user interaction. It also provides direct evidence that the
+        // decoded atlas is routed into the full-canvas compositor.
+        LaunchedEffect(host, scene.sources, scene.atlasWidth, scene.atlasHeight) {
+            android.util.Log.i("ApexviewSingleDecoder",
+                "F1_SCENE_UI_BOUND outputCanvas=${width.toInt()}x${height.toInt()} " +
+                    "atlas=${scene.atlasWidth}x${scene.atlasHeight} " +
+                    "sources=${scene.sources} windows=${scene.windows.size} " +
+                    "renderer=${if (app.protectedRollingSceneActive) "SurfaceView" else "TextureView"}")
+        }
         var view by remember { mutableStateOf<SingleDecoderSceneView?>(null) }
         var recordingBounds by remember { mutableStateOf<Rect?>(null) }
         val bakedSession = app.bakedCastSession

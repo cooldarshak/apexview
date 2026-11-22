@@ -52,6 +52,31 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("PitCircleDrawing(timing", receiver)
         self.assertIn("window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0", source("Viewer.kt"))
 
+    def test_protected_atlas_publishes_only_after_observable_host_is_registered(self):
+        # Build 691 regression, screenshot 2026-11-22 10:55:47: all four
+        # cameras appeared as one raw 1920x2176 atlas in a 165x188 tile.
+        # Compose may skip the canvas subtree if the host field is not State.
+        app = source("AppState.kt")
+        viewer = source("Viewer.kt")
+        self.assertIn("private var protectedCompositionHost by mutableStateOf<Tile?>(null)", app)
+        rolling = app.split("replaceHost = { window ->", 1)[1].split(
+            "restoreSources = ::restore,", 1
+        )[0]
+        self.assertLess(
+            rolling.index("host.feed.startProtectedComposedPlayback("),
+            rolling.index("showProtectedCompositionPresentation(host, selectedTiles,")
+        )
+        self.assertLess(
+            rolling.index("showProtectedCompositionPresentation(host, selectedTiles,"),
+            rolling.index("protectedRollingScene = ProtectedRollingScene(labels.toList(), scene)")
+        )
+        self.assertIn("check(protectedCompositionHost === host)", rolling)
+        self.assertIn("F1_SCENE_UI_ACTIVATED", rolling)
+        self.assertIn("F1_SCENE_UI_BOUND", viewer)
+        self.assertIn("AndroidView(factory = { context ->", viewer)
+        self.assertIn("ProtectedDecoderSceneView(context, protectedOutput = secureRolling)", viewer)
+        self.assertIn("it.bind(host.player, scene, app.playbackSpeed)", viewer)
+
     def test_native_rendernode_instrumentation_is_run_in_ci(self):
         workflow = (ROOT / ".github/workflows/android-debug-apk.yml").read_text(encoding="utf-8")
         self.assertIn("reactivecircus/android-emulator-runner@v2", workflow)

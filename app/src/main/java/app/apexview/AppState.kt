@@ -344,7 +344,11 @@ class AppState(
         private set
     val observedActiveVideoDecoders get() = tiles.sumOf { it.feed.activeVideoDecoderCount }
     private var f1DashCapture: CmafCaptureLifecycle? = null
-    private var protectedCompositionHost: Tile? = null
+    // Compose must observe a host transition independently of the rolling atlas.
+    // With a plain field the scene could be published while host was null and
+    // PlaybackVideoCanvas would keep the old tile's PlayerView attached to the
+    // full decoded atlas until an unrelated layout/orientation recomposition.
+    private var protectedCompositionHost by mutableStateOf<Tile?>(null)
     /** One original feed stays visible if the composed archive is still preparing or fails. */
     private var singleDecoderFallbackTileId: Int? = null
     private var protectedCompositionAudioMaster: Tile? = null
@@ -3250,7 +3254,10 @@ class AppState(
                         selectedTiles.forEach { it.feed.player.playWhenReady = false }
                         val scene = app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
                             window, labels.size, clearOutput = capture.clearOutput)
-                        protectedRollingScene = ProtectedRollingScene(labels.toList(), scene)
+                        // The scene is validated here, but DO NOT publish it to
+                        // Compose until the decoder host and its playback surface
+                        // have been registered below. Otherwise the old per-tile
+                        // PlayerView can display the entire raw 1920x2176 atlas.
                         android.util.Log.i("ApexviewSingleDecoder",
                             "F1_PROTECTED_SCENE_PREPARED atlas=" + scene.atlasWidth + "x" +
                             scene.atlasHeight + " sources=" + labels.size +
@@ -3271,6 +3278,17 @@ class AppState(
                         archiveCompositionStarting = false
                         showProtectedCompositionPresentation(host, selectedTiles,
                             audioMaster, sceneLayout = true)
+                        check(protectedCompositionHost === host) {
+                            "Composed playback host was not registered before scene activation"
+                        }
+                        // Atomically make the four-crop GLES scene visible only
+                        // after the host is observable and the player is ready.
+                        // This state is the final activation signal, including
+                        // after orientation changes and repeated seek/restarts.
+                        protectedRollingScene = ProtectedRollingScene(labels.toList(), scene)
+                        android.util.Log.i("ApexviewSingleDecoder",
+                            "F1_SCENE_UI_ACTIVATED sources=${labels.size} atlas=${scene.atlasWidth}x${scene.atlasHeight} " +
+                                "hostRegistered=true view=FULL_CANVAS windowMapping=SOURCE_RECTS")
                     },
                     restoreSources = ::restore,
                     dispose = { it.zero() },

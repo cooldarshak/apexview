@@ -1,3 +1,40 @@
+## Build 691 on-device single-decoder raw-atlas display failure (22 November 2026)
+
+**Sign-off BLOCKED.** Screenshot at ~10:55:47 shows all four feeds in a tiny
+top-right tile, with the rest of the intended main/right video windows black.
+The accompanying phone log confirms a successfully decoded four-feed
+1920x2176 HEVC atlas, one Qualcomm hardware decoder and a host player
+surface of 165x188. It is not a missing camera feed or timing-map problem.
+
+Root cause in the UI activation path: replaceHost assigned the observable
+`protectedRollingScene` *before* calling `showProtectedCompositionPresentation`.
+That function assigned `protectedCompositionHost` into a plain, unobservable
+Kotlin field. Compose could recompose on the scene write while the host was
+still null, retain `TileView(videoOnly=true)`, and then skip the canvas
+subtree when the plain host field changed. The old small PlayerView rendered
+the entire coded atlas until an unrelated re-layout finally created the
+full-canvas `ProtectedDecoderSceneView`.
+
+In the observed log, `F1_PROTECTED_SCENE_PREPARED` appeared at 10:55:42,
+but `SURFACE_SCENE_EGL_READY` only at 10:55:50, after the screenshot.
+Earlier composition attempts likewise logged active playback but lacked a
+full-canvas EGL-presenter confirmation. This differentiates a renderer
+lifecycle failure from valid CMAF composition.
+
+Coordinated fix:
+- Make `protectedCompositionHost` observable via `mutableStateOf`.
+- Activate `protectedRollingScene` only after the host is registered and
+  composed playback is installed, using explicit host identity assertion.
+- Emit `F1_SCENE_UI_ACTIVATED` and `F1_SCENE_UI_BOUND` evidence with
+  atlas dimensions, source count, actual output canvas and mapped windows.
+- Add a source-wiring regression check; preserve existing 1920x2176
+  four-camera UV/crop tests, one-decoder gate, Widevine, native layout,
+  movable map and timing tower.
+
+This code fix needs CI and a real S22 Ultra follow-up; no hardware GFX
+sign-off is asserted. A successful decoder-first-frame log *by itself* is
+not adequate evidence of an attached full-canvas surface.
+
 # Pitwall TV: playback performance audit and implementation plan
 
 ### Build 686 instrumentation failure: Android binder not yet stable
