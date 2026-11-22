@@ -268,6 +268,27 @@ fun ViewerScreen(app: AppState) {
             delay(500)
         }
     }
+    // Device-only P0 observability: a standalone TV feed with both overlays
+    // must never be diagnosed as successful from phone-side Cast metrics.
+    // Sample the actual Media3 player and surface choice every five seconds.
+    LaunchedEffect(app.isTv, app.tiles.size, app.towerOpen, app.mapMode) {
+        if (app.isTv) {
+            while (true) {
+                val tile = app.tiles.singleOrNull()
+                if (tile != null && app.towerOpen && app.mapMode != MapMode.OFF) {
+                    val p = tile.feed.player
+                    val size = p.videoSize
+                    android.util.Log.i("PitwallTvHealth",
+                        "TV_SINGLE_OVERLAY_VIDEO_HEALTH playerState=${p.playbackState} " +
+                            "isPlaying=${p.isPlaying} loading=${p.isLoading} playWhenReady=${p.playWhenReady} " +
+                            "visibleVideo=${tile.feed.showingVideo} softwareDrm=${tile.feed.usesSoftwareDrm} " +
+                            "mode=${app.settings.decoderMode} map=${app.mapMode} tower=${app.towerOpen} " +
+                            "video=${size.width}x${size.height} positionMs=${p.currentPosition}")
+                }
+                delay(5_000L)
+            }
+        }
+    }
     LaunchedEffect(app.audioHintCount) {
         delay(AUDIO_HINT_MS)
         app.dismissAudioHint()

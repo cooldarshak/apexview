@@ -351,11 +351,16 @@ class AppState(
                             val acceptedTables = body.optLong("tables", 0L)
                             val epochMismatch = body.optLong("epochMismatch", 0L)
                             val tableMismatch = body.optLong("tableMismatch", 0L)
+                            val mapClockDeltaMs = body.optLong("mapClockDeltaMs", -1L)
+                            val mapFutureHeadroomMs = body.optLong("mapFutureHeadroomMs", 0L)
+                            val mapPredictionSaturated = body.optBoolean("mapPredictionSaturated", false)
                             android.util.Log.i("PitwallCast", "TIMING_REMOTE_HEALTH " +
                                 "frames=$acceptedFrames tables=$acceptedTables " +
                                 "frameAgeMs=$frameAge tableAgeMs=$tableAge " +
                                 "epochMismatch=$epochMismatch tableMismatch=$tableMismatch " +
-                                "remoteEpoch=${body.optLong("epoch", -1L)} localEpoch=$castTimingEpoch")
+                                "remoteEpoch=${body.optLong("epoch", -1L)} localEpoch=$castTimingEpoch " +
+                                "mapClockDeltaMs=$mapClockDeltaMs mapFutureHeadroomMs=$mapFutureHeadroomMs " +
+                                "mapPredictionSaturated=$mapPredictionSaturated")
                             if (castSceneConfirmed && castPlaybackHandedOff &&
                                 bakedCastSession == null && (towerOpen || mapMode != MapMode.OFF)) {
                                 val good = app.apexview.cast.CastTimingHealthPolicy.healthy(

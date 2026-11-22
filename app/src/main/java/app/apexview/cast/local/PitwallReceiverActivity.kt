@@ -36,6 +36,7 @@ import androidx.media3.ui.PlayerView
 import app.apexview.*
 import app.apexview.R
 import app.apexview.cast.CastSceneProtocol
+import app.apexview.cast.CastTimingProtocol
 import app.apexview.cast.CastTimingReceiver
 import app.apexview.cast.CastTimingLayer
 import app.apexview.scene.SingleDecoderSceneView
@@ -111,13 +112,22 @@ class PitwallReceiverActivity : ComponentActivity() {
                     val now = android.os.SystemClock.elapsedRealtime()
                     if (lastTimingHealthAtMs < 0L || now - lastTimingHealthAtMs >= 5_000L) {
                         val h = timingState.health(now)
+                        val motionFrame = timingState.frame
+                        val videoPositionMs = controllerPosition()
+                        val mapClockDeltaMs = motionFrame?.let { videoPositionMs - it.positionMs } ?: Long.MIN_VALUE
+                        val mapFutureHeadroomMs = motionFrame?.cars?.firstOrNull()?.let { car ->
+                            (car.later.size + 1) * CastTimingProtocol.POSITION_STEP_MS
+                        } ?: 0L
+                        val mapPredictionSaturated = motionFrame != null &&
+                            mapClockDeltaMs > mapFutureHeadroomMs && mapFutureHeadroomMs > 0L
                         Log.i("PitwallReceiver", "TIMING_RX_HEALTH " +
                             "frames=${h.framesAccepted} tables=${h.tablesAccepted} " +
                             "rejected=${h.framesRejected} tableMismatch=${h.tableVersionRejects} " +
                             "epochMismatch=${h.clockEpochRejects} geometryMismatch=${h.geometryRejects} " +
                             "staleSequence=${h.sequenceRejects} " +
                             "frameAgeMs=${h.lastFrameAgeMs} tableAgeMs=${h.lastTableAgeMs} " +
-                            "epoch=${h.clockEpoch}")
+                            "epoch=${h.clockEpoch} mapClockDeltaMs=${if (motionFrame == null) -1L else mapClockDeltaMs} " +
+                            "mapFutureHeadroomMs=$mapFutureHeadroomMs mapPredictionSaturated=$mapPredictionSaturated")
                         // Optional diagnostic subtype within the already negotiated timing
                         // channel. Older senders ignore it, and no media/DRM wire format changes.
                         connection?.send(FcastProtocol.TIMING, JSONObject()
@@ -127,7 +137,10 @@ class PitwallReceiverActivity : ComponentActivity() {
                             .put("tableMismatch", h.tableVersionRejects)
                             .put("epochMismatch", h.clockEpochRejects)
                             .put("frameAgeMs", h.lastFrameAgeMs)
-                            .put("tableAgeMs", h.lastTableAgeMs).put("epoch", h.clockEpoch))
+                            .put("tableAgeMs", h.lastTableAgeMs).put("epoch", h.clockEpoch)
+                            .put("mapClockDeltaMs", if (motionFrame == null) -1L else mapClockDeltaMs)
+                            .put("mapFutureHeadroomMs", mapFutureHeadroomMs)
+                            .put("mapPredictionSaturated", mapPredictionSaturated))
                         lastTimingHealthAtMs = now
                     }
                 }

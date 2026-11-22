@@ -261,13 +261,20 @@ motion on the receiver is visibly uneven. Neither is signed off.
 Coordinated code changes for the next full workflow:
 - Keep driver markers on the independent **60Hz Canvas Draw clock**, but sample
   TV/phone non-motion map content (flags, selection hit targets and other
-  composition inputs) at **10Hz** instead of recomposing 30Hz. The 98ms
+  composition inputs) at **10Hz** instead of recomposing 30Hz. Native TV
+  single-feed+map+tower now also logs decoder state, video dimensions,
+  readiness, software DRM and position every five seconds when active, so
+  the unresolved physical failure is identifiable from one TCL trace. The 98ms
   wake interval is checked at both 60Hz and 120Hz vsync, so it cannot
   accidentally publish only 6Hz at 120Hz. This reduces
   overlay UI pressure while a TV is decoding and drawing tower rows.
 - Extend Cast car position predictions from 600ms to 1.2s of *measured*
-  future positions, preserving the older first-200ms protocol and preventing
-  the receiver from freezing its dots between briefly delayed packets. No
+  future positions, preserving the older first-200ms protocol and reducing
+  receiver endpoint holds between briefly delayed packets. Apply bounded
+  monotone cubic interpolation between *measured* points for continuous
+  derivatives without artificial corner overshoot. Add receiver video-clock
+  delta/saturation diagnostics to the five-second health heartbeat so
+  software clock jitter can be distinguished from the TCL GPU draw bottleneck. No
   uncontrolled extrapolation or new metadata endpoints. Reject overlong
   packets; test interpolation, endpoint holding and seek safety.
 - Replace the existing home/hero and player chrome actions with semantic

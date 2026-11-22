@@ -54,6 +54,30 @@ class CastTimingProtocolTest {
         assertEquals(.75f, decoded.mapOpacity, 0f)
         assertFalse(encoded.toString().contains("token", true))
     }
+    @Test fun castMarkersUseContinuousMeasuredMotionWithoutOvershootingTurns() {
+        val motion = CastTimingProtocol.CarMotion("1", 0f, 0f, 20f, 10f,
+            LapState.PUSH, listOf(35f to 30f, 50f to 50f, 55f to 50f))
+        assertEquals(0f, motion.at(0f).x, 0.00001f)
+        assertEquals(20f, motion.at(1f).x, 0.00001f)
+        assertEquals(35f, motion.at(2f).x, 0.00001f)
+        assertEquals(50f, motion.at(3f).x, 0.00001f)
+        assertEquals(55f, motion.at(4f).x, 0.00001f)
+        assertEquals(55f, motion.at(100f).x, 0.00001f)
+        val around = listOf(0f, .25f, .5f, .75f, 1f, 1.25f, 1.5f,
+            1.75f, 2f, 2.5f, 3f, 3.25f, 3.5f, 3.75f, 4f)
+        val xs = around.map { motion.at(it).x }
+        assertTrue(xs.zipWithNext().all { (a, b) -> b >= a })
+        assertTrue(xs.all { it in 0f..55f })
+        // Derivative at the 200ms interior boundary stays continuous,
+        // unlike piecewise linear marker motion with changing speed.
+        val before = motion.at(2f).x - motion.at(1.99f).x
+        val after = motion.at(2.01f).x - motion.at(2f).x
+        assertEquals(before, after, 0.005f)
+        val stopped = CastTimingProtocol.CarMotion("2", 0f, 0f, 0f, 0f,
+            LapState.PIT, listOf(0f to 0f, 10f to 0f))
+        assertEquals(0f, stopped.at(1.5f).x, 0.00001f)
+    }
+
     @Test fun delayedMotionUsesTheNextSamplesWithoutExtrapolatingPastThem() {
         val j = frame(CastTimingProtocol.geometry(timing()).getString("id"))
         j.getJSONArray("cars").getJSONArray(0).put(35).put(30).put(50).put(50)

@@ -29,11 +29,36 @@ internal object CastTimingProtocol {
             val progress = steps.coerceIn(0f, last.toFloat())
             val i = progress.toInt().coerceAtMost(last - 1)
             val fraction = progress - i
-            val fromX = if (i == 0) x else if (i == 1) nextX else later[i - 2].first
-            val fromY = if (i == 0) y else if (i == 1) nextY else later[i - 2].second
-            val toX = if (i == 0) nextX else later[i - 1].first
-            val toY = if (i == 0) nextY else later[i - 1].second
-            return Car(number, fromX + (toX - fromX) * fraction, fromY + (toY - fromY) * fraction, state)
+            // Smooth slopes at measured 200 ms boundaries, but pass through
+            // every transmitted position exactly. Axis-monotone cubic Hermite
+            // avoids the corner overshoot of unconstrained Catmull-Rom; this
+            // is interpolation only, NEVER extrapolation beyond measured data.
+            fun coordinate(index: Int, horizontal: Boolean): Float = when (index) {
+                0 -> if (horizontal) x else y
+                1 -> if (horizontal) nextX else nextY
+                else -> if (horizontal) later[index - 2].first else later[index - 2].second
+            }
+            fun smooth(horizontal: Boolean): Float {
+                val a = coordinate(i, horizontal)
+                val b = coordinate(i + 1, horizontal)
+                val p = coordinate((i - 1).coerceAtLeast(0), horizontal)
+                val q = coordinate((i + 2).coerceAtMost(last), horizontal)
+                val slope = b - a
+                fun tangent(before: Float, after: Float): Float {
+                    if (before == 0f || after == 0f || before * after <= 0f) return 0f
+                    return 2f * before * after / (before + after)
+                }
+                val m0 = if (i == 0) slope else tangent(a - p, slope)
+                val m1 = if (i + 1 == last) slope else tangent(slope, q - b)
+                val t2 = fraction * fraction
+                val t3 = t2 * fraction
+                val interpolated = (2f * t3 - 3f * t2 + 1f) * a +
+                    (t3 - 2f * t2 + fraction) * m0 +
+                    (-2f * t3 + 3f * t2) * b +
+                    (t3 - t2) * m1
+                return interpolated.coerceIn(minOf(a, b), maxOf(a, b))
+            }
+            return Car(number, smooth(true), smooth(false), state)
         }
     }
     class Geometry(val id: String, val timing: SessionTiming)

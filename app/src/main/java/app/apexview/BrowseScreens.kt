@@ -671,7 +671,7 @@ fun HomeScreen(app: AppState) {
     ArtPage(
         image = null,
         artKey = null,
-        title = "Apexview",
+        title = "Pitwall TV",
         listState = app.homeList,
         tvHeaderFocus = headerFocus.takeIf { app.isTv },
         trailing = { backdrop ->
