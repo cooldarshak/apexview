@@ -9,6 +9,28 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 737 coordinated TV map and receiver timing recovery
+
+Build 737 passed Kotlin, JVM, HEVC, APK assembly and emulator instrumentation,
+not TCL hardware playback acceptance. This coordinated pass preserves the
+single/multiple decoder setting, legitimate clear/Widevine playback and Cast.
+
+- TV static map sampling no longer registers a main-thread Choreographer
+  callback for each 60/120Hz vsync. It updates at 100ms; separate marker
+  motion remains on the independent 60Hz Canvas draw clock.
+- Pitwall Cast accepts a motion packet exactly one newly-versioned tower table
+  ahead of the last validated table when chunk reassembly delays the tower.
+  Old and multi-generation-ahead IDs still fail; geometry, epoch, sequence,
+  playback ID and input validation remain unchanged. Independent tower data
+  refreshes when the next validated table arrives.
+- Receiver and sender logs include a count of recovered map frames. Tests
+  cover table delay, hard rejection and continued map motion.
+
+The 16 strict gates are still open except the previously closed architecture
+gate. TCL single-feed video+map+tower, Cast physical car motion, subtitles,
+security, in-place signed release and Material3 hardware acceptance require
+the actual device and release evidence before closure.
+
 ## Build 736 acceptance checkpoint and coordinated P0 timing/overlay correction
 
 **Build 736** passed the full debug workflow at commit

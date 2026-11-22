@@ -25,6 +25,7 @@ class OverlaySampleScheduleTest {
         // Canvas driver-marker motion runs on a separate 60 Hz draw clock.
         assertEquals(100L, MAP_RENDER_INTERVAL_MS)
         assertEquals(100_000_000L, TV_MAP_FRAME_INTERVAL_NS)
+        assertEquals(MAP_RENDER_INTERVAL_MS, TV_MAP_FRAME_INTERVAL_NS / 1_000_000L)
         assertTrue(isOverlayDrawFrameDue(15_000_000L, 0L))
         // Simulate the coroutine sleeping after a Choreographer callback, then
         // awaiting the next 60/120 Hz vsync.

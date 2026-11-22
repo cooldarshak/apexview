@@ -249,6 +249,38 @@ class CastTimingProtocolTest {
         assertSame(previousFrame, receiver.frame)
     }
 
+    @Test fun pendingNextTableDoesNotFreezeIndependentCarMotion() {
+        val state = CastTimingReceiver()
+        val geometry = CastTimingProtocol.geometry(timing()).put("playbackId", "current")
+        val id = geometry.getString("id")
+        val originalRows = frame(id).getJSONArray("rows")
+        state.accept(geometry, "current")
+        state.accept(JSONObject().put("version", 1).put("kind", "table")
+            .put("playbackId", "current").put("id", 1).put("rows", originalRows), "current")
+        state.accept(frame(id).put("playbackId", "current").put("tableId", 1)
+            .put("sequence", 1).put("clockEpoch", 0), "current")
+        val originalTable = state.currentTable
+        state.accept(frame(id).put("playbackId", "current").put("tableId", 2)
+            .put("sequence", 2).put("clockEpoch", 0).put("position", 5200L), "current")
+        assertEquals(5200L, state.frame!!.positionMs)
+        assertSame(originalTable, state.currentTable)
+        assertEquals(1L, state.health().aheadTableFramesRecovered)
+        assertEquals(0L, state.health().tableVersionRejects)
+        // A large leap remains rejected, not silently reinterpreted.
+        state.accept(frame(id).put("playbackId", "current").put("tableId", 5)
+            .put("sequence", 3).put("clockEpoch", 0), "current")
+        assertEquals(1L, state.health().tableVersionRejects)
+        assertEquals(5200L, state.frame!!.positionMs)
+        val nextRows = JSONArray(originalRows.toString())
+        nextRows.getJSONArray(0).put(13, 299)
+        state.accept(JSONObject().put("version", 1).put("kind", "table")
+            .put("playbackId", "current").put("id", 2).put("rows", nextRows), "current")
+        assertEquals(299, state.currentTable!!.speeds.getValue("1").first)
+        state.accept(frame(id).put("playbackId", "current").put("tableId", 2)
+            .put("sequence", 3).put("clockEpoch", 0), "current")
+        assertEquals(3L, state.health().framesAccepted)
+    }
+
     @Test fun malformedTelemetryIsRejectedBeforeRenderAllocation() {
         val id = CastTimingProtocol.geometry(timing()).getString("id")
         assertThrows(IllegalArgumentException::class.java) { CastTimingProtocol.decodeFrame(frame(id).put("density", 0)) }

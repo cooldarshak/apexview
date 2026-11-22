@@ -151,7 +151,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                             "frames=${h.framesAccepted} tables=${h.tablesAccepted} " +
                             "rejected=${h.framesRejected} tableMismatch=${h.tableVersionRejects} " +
                             "epochMismatch=${h.clockEpochRejects} geometryMismatch=${h.geometryRejects} " +
-                            "staleSequence=${h.sequenceRejects} " +
+                            "staleSequence=${h.sequenceRejects} recoveredTableAhead=${h.aheadTableFramesRecovered} " +
                             "frameAgeMs=${h.lastFrameAgeMs} tableAgeMs=${h.lastTableAgeMs} " +
                             "epoch=${h.clockEpoch} mapClockDeltaMs=${if (motionFrame == null) -1L else mapClockDeltaMs} " +
                             "mapFutureHeadroomMs=$mapFutureHeadroomMs mapPredictionSaturated=$mapPredictionSaturated")
@@ -162,6 +162,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                             .put("frames", h.framesAccepted).put("tables", h.tablesAccepted)
                             .put("rejected", h.framesRejected)
                             .put("tableMismatch", h.tableVersionRejects)
+                            .put("recoveredTableAhead", h.aheadTableFramesRecovered)
                             .put("epochMismatch", h.clockEpochRejects)
                             .put("frameAgeMs", h.lastFrameAgeMs)
                             .put("tableAgeMs", h.lastTableAgeMs).put("epoch", h.clockEpoch)

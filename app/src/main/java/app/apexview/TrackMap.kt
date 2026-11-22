@@ -32,7 +32,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -206,15 +205,12 @@ internal fun rememberTvMapTime(read: () -> Long): Long {
     val clock by rememberUpdatedState(read)
     var now by remember { mutableLongStateOf(clock()) }
     LaunchedEffect(Unit) {
-        var previous = Long.MIN_VALUE
+        // Static flags/targets need only 10Hz. Stop invoking TV's main
+        // Choreographer at every 60/120Hz vsync just to discard most frames.
+        // Driver markers keep their separate 60Hz Canvas draw-only clock.
         while (true) {
-            withFrameNanos { frameTime ->
-                if (previous == Long.MIN_VALUE || frameTime < previous ||
-                    frameTime - previous >= TV_MAP_FRAME_INTERVAL_NS) {
-                    now = clock()
-                    previous = frameTime
-                }
-            }
+            now = clock()
+            delay(TV_MAP_FRAME_INTERVAL_NS / 1_000_000L)
         }
     }
     return now

@@ -25,6 +25,7 @@ internal class CastTimingReceiver {
     private var rejectedClockEpoch = 0L
     private var rejectedGeometry = 0L
     private var rejectedSequence = 0L
+    private var aheadTableFramesRecovered = 0L
     private var lastTableReceivedMs = -1L
     private var lastFrameReceivedMs = -1L
     var clockEpoch = 0L
@@ -43,6 +44,7 @@ internal class CastTimingReceiver {
         rejectedClockEpoch = 0L
         rejectedGeometry = 0L
         rejectedSequence = 0L
+        aheadTableFramesRecovered = 0L
         lastTableReceivedMs = -1L
         lastFrameReceivedMs = -1L
         lastSequence = -1
@@ -59,6 +61,7 @@ internal class CastTimingReceiver {
         val clockEpochRejects: Long,
         val geometryRejects: Long,
         val sequenceRejects: Long,
+        val aheadTableFramesRecovered: Long,
         val lastFrameAgeMs: Long,
         val lastTableAgeMs: Long,
         val clockEpoch: Long,
@@ -67,6 +70,7 @@ internal class CastTimingReceiver {
     fun health(nowMs: Long = SystemClock.elapsedRealtime()) = Health(
         framePackets, tablePackets, rejectedFrames, rejectedTableVersion,
         rejectedClockEpoch, rejectedGeometry, rejectedSequence,
+        aheadTableFramesRecovered,
         if (lastFrameReceivedMs < 0L) -1L else (nowMs - lastFrameReceivedMs).coerceAtLeast(0L),
         if (lastTableReceivedMs < 0L) -1L else (nowMs - lastTableReceivedMs).coerceAtLeast(0L),
         clockEpoch,
@@ -112,7 +116,13 @@ internal class CastTimingReceiver {
                 if (sequence <= lastSequence) {
                     rejectedFrames++; rejectedSequence++; return
                 }
-                if (j.getLong("tableId") != tableId) {
+                val incomingTableId = j.getLong("tableId")
+                // New marker positions should survive a pending tower table
+                // packet, but only one generation ahead and only when a
+                // previous validated tower table already exists.
+                val oneAhead = tableId >= 0L && tableId < Long.MAX_VALUE &&
+                    incomingTableId == tableId + 1L && currentTable != null
+                if (incomingTableId != tableId && !oneAhead) {
                     rejectedFrames++; rejectedTableVersion++; return
                 }
                 if (j.getString("geometry").isNotEmpty() && j.getString("geometry") != geometry?.id) {
@@ -144,6 +154,7 @@ internal class CastTimingReceiver {
                     }
                 }
                 frame = CastTimingProtocol.decodeFrame(j, acceptedTable)
+                if (oneAhead) aheadTableFramesRecovered++
                 pendingLegacySeek = null
                 lastSequence = sequence
                 framePackets++
