@@ -52,6 +52,15 @@ Source changes following the Build 699 baseline:
   untrusted third-party APK update is allowed.
 - Physical acceptance is separate; GL EGL swaps are not SurfaceFlinger presentation.
 
+## Responsibility split for release-quality lifecycle ownership
+
+- The phone/TV session models, panel persistence and tile geometry are now
+  isolated in `UiSessionModels.kt` rather than the 6,855-line `AppState`
+  coordinator. Persistence restore validates a complete geometry snapshot
+  before publishing any Compose state, with cross-canvas regression tests.
+- Cast, protected and clear renderer ownership remains in their dedicated
+  classes; further coordinator extraction and instrumentation are still open.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**
