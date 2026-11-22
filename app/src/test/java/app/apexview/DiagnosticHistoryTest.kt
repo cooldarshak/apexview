@@ -21,6 +21,23 @@ class DiagnosticHistoryTest {
     }
 
     @Test
+    fun retainsRepresentativeAndroid16FrameRateWarningAndCountsEveryRepeat() {
+        val history = DiagnosticHistory()
+        val line = "11-23 I View    : setRequestedFrameRate frameRate=NaN, caller=androidx.compose.ui.platform.Api35Impl.setRequestedFrameRate"
+        val next = line.replace("11-23", "11-24")
+        val protected = "I ApexviewSingleDecoder: PROTECTED_CMAF_SEGMENT feeds=6"
+        assertEquals(line, history.accept(line))
+        assertNull(history.accept(next))
+        assertNull(history.accept(next))
+        assertEquals(protected, history.accept(protected))
+        assertEquals(listOf("PLATFORM_FRAME_RATE_NAN repeats=2 last=$next"), history.drain())
+        assertEquals(line, history.accept(line))
+        history.clear()
+        assertEquals(line, history.accept(line))
+        assertEquals(emptyList<String>(), history.drain())
+    }
+
+    @Test
     fun carriesTheReplayStartAcrossLogRotation() {
         val history = DiagnosticHistory()
         val start = "I ApexviewTiming: Starting timing load for content=42 trace=100"

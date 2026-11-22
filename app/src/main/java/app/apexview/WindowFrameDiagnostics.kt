@@ -25,6 +25,8 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
     )
     private val frameDurations = TimingBuckets()
     private val layoutDurations = TimingBuckets()
+    private val inputDurations = TimingBuckets()
+    private val animationDurations = TimingBuckets()
     private val drawDurations = TimingBuckets()
     private val syncDurations = TimingBuckets()
     private val commandDurations = TimingBuckets()
@@ -63,6 +65,8 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
         frames++
         frameDurations.record(duration)
         layoutDurations.record(metrics.getMetric(FrameMetrics.LAYOUT_MEASURE_DURATION))
+        inputDurations.record(metrics.getMetric(FrameMetrics.INPUT_HANDLING_DURATION))
+        animationDurations.record(metrics.getMetric(FrameMetrics.ANIMATION_DURATION))
         drawDurations.record(metrics.getMetric(FrameMetrics.DRAW_DURATION))
         syncDurations.record(metrics.getMetric(FrameMetrics.SYNC_DURATION))
         commandDurations.record(metrics.getMetric(FrameMetrics.COMMAND_ISSUE_DURATION))
@@ -83,6 +87,8 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
         if (now - started >= 2_000) {
             val total = frameDurations.snapshotAndReset()
             val layout = layoutDurations.snapshotAndReset()
+            val input = inputDurations.snapshotAndReset()
+            val animation = animationDurations.snapshotAndReset()
             val draw = drawDurations.snapshotAndReset()
             val sync = syncDurations.snapshotAndReset()
             val command = commandDurations.snapshotAndReset()
@@ -98,6 +104,8 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
                 "lastFrameTimelineVsyncId=$lastFrameTimelineVsyncId frameTimelineIdGaps=$frameTimelineIdGaps " +
                 "deadlineMissTotalMs=${deadlineMissNs / 1_000_000} deadlineMissMaxMs=${longestDeadlineMissNs / 1_000_000} " +
                 "layoutTotalMs=${layout.totalMs.toInt()} layoutMaxMs=${layout.maxMs.toInt()} " +
+                "inputTotalMs=${input.totalMs.toInt()} inputP95UpperMs=${input.percentileUpperMs(95)} " +
+                "animationTotalMs=${animation.totalMs.toInt()} animationP95UpperMs=${animation.percentileUpperMs(95)} " +
                 "drawTotalMs=${draw.totalMs.toInt()} drawMaxMs=${draw.maxMs.toInt()} " +
                 "syncTotalMs=${sync.totalMs.toInt()} syncMaxMs=${sync.maxMs.toInt()} " +
                 "commandTotalMs=${command.totalMs.toInt()} commandMaxMs=${command.maxMs.toInt()} " +
@@ -125,6 +133,8 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
         // Also discard a partial interval when recording is toggled off.
         frameDurations.snapshotAndReset()
         layoutDurations.snapshotAndReset()
+        inputDurations.snapshotAndReset()
+        animationDurations.snapshotAndReset()
         drawDurations.snapshotAndReset()
         syncDurations.snapshotAndReset()
         commandDurations.snapshotAndReset()

@@ -9,6 +9,27 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 744 diagnostic capture load and UI input/animation telemetry
+
+The user's Android 16 six-feed logs recorded thousands of identical framework
+`View setRequestedFrameRate frameRate=NaN` lines (for example, over 6,800
+lines within one 5MB rotating segment). Preserve a verbatim first record,
+count each subsequent matching AndroidX framework line, and emit the last
+verbatim instance plus total repeat count in the existing periodic log summary.
+Keep BufferQueue timeout aggregation, other errors and every protected/CMAF
+playback signal intact. Do not claim Android framework NaN is an app-generated
+frame-rate request or suppress it on the system logger; this change only
+prevents the app's opt-in *file capture* from flooding its own storage.
+
+Add `FrameMetrics.INPUT_HANDLING_DURATION` and `ANIMATION_DURATION`
+buckets to the existing per-window `PitwallFrames` 2-second report. This
+separates main-thread input/animation costs from layout, draw, command queue
+and GPU timing on phone and TV. These are app-window data, **not**
+input-to-visible-photon latency or independent SurfaceFlinger video presents.
+Compile and test aggregator reset, first-line retention and CBCS diagnostics
+preservation. Validate against matching hardware traces and the accepted
+`<5% slow UI frames` goal before closing the Material 3 performance gate.
+
 ## Build 743 carousel memory and immediate Home responsiveness hardening
 
 The visible Home composable previously enqueued **every** carousel pick at

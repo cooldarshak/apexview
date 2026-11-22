@@ -5,8 +5,20 @@ internal class DiagnosticHistory {
     private val bursts = LinkedHashMap<String, Burst>()
     private val milestones = ArrayDeque<String>()
     private var replayStart: String? = null
+    private var repeatedFrameworkRateHints = 0
+    private var latestFrameworkRateHint: String? = null
 
     fun accept(line: String): String? {
+        // Android 16/Compose prints this platform diagnostic at display cadence.
+        // Retain the first exact record, count every following repeat, and
+        // preserve the last full record in the periodic summary. This keeps
+        // important codec/HEVC lines in the 5MB rotating capture.
+        if ("View    : setRequestedFrameRate frameRate=NaN" in line &&
+            "androidx.compose.ui.platform." in line) {
+            repeatedFrameworkRateHints++
+            latestFrameworkRateHint = line
+            if (repeatedFrameworkRateHints > 1) return null
+        }
         val tag = line.indexOf("BufferQueueProducer:")
         val timeout = line.indexOf("dequeueBuffer: waitForFreeSlotThenRelock: timeout")
         if (tag < 0 || timeout <= tag) return line
@@ -21,9 +33,19 @@ internal class DiagnosticHistory {
         return null
     }
 
-    fun drain(): List<String> = bursts.values.mapNotNull {
-        if (it.repeats == 0) null else "BUFFER_QUEUE_TIMEOUT repeats=${it.repeats} last=${it.last}"
-    }.also { bursts.clear() }
+    fun drain(): List<String> {
+        val summaries = bursts.values.mapNotNull {
+            if (it.repeats == 0) null else "BUFFER_QUEUE_TIMEOUT repeats=${it.repeats} last=${it.last}"
+        }.toMutableList()
+        bursts.clear()
+        if (repeatedFrameworkRateHints > 1) {
+            summaries += "PLATFORM_FRAME_RATE_NAN repeats=${repeatedFrameworkRateHints - 1} " +
+                "last=${latestFrameworkRateHint.orEmpty()}"
+        }
+        repeatedFrameworkRateHints = 0
+        latestFrameworkRateHint = null
+        return summaries
+    }
 
     fun retain(line: String) {
         if ("Starting timing load for content=" in line) replayStart = line.take(1024)
@@ -44,5 +66,7 @@ internal class DiagnosticHistory {
         bursts.clear()
         milestones.clear()
         replayStart = null
+        repeatedFrameworkRateHints = 0
+        latestFrameworkRateHint = null
     }
 }
