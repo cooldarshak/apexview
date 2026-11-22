@@ -191,6 +191,55 @@ class HevcPictureSequenceAlignerTest {
         ))
     }
 
+    @Test fun indexesSixFeed288PictureProofAcrossThreeIdrEpochsWithoutGuessing() {
+        // Match the shape of the user's six-feed protected 288-picture F1 CMAF
+        // windows, but keep fixture evidence synthetic rather than claim it is
+        // real source media. All 6 sources must agree on exact picture evidence.
+        val baseTicks = 817_920L
+        val feeds = (0 until 6).map { source ->
+            HevcPictureSequenceAligner.FeedWindow(
+                feedId = "source-$source",
+                timescale = 90_000L,
+                samples = (0 until 288).map { index ->
+                    val dts = baseTicks + index * 1_800L
+                    HevcPictureSequenceAligner.PictureSample(
+                        sampleIndex = index,
+                        sequenceSampleOrdinal = index.toLong(),
+                        fragmentBaseDecodeTimeTicks = baseTicks,
+                        irapEpochOrdinal = (index / 96).toLong(),
+                        irapAnchorPictureOrderCount = 0L,
+                        picture = picture((index % 96).toLong()),
+                        timing = CmafBoxInspector.SampleTiming(
+                            decodeTimeTicks = dts, presentationTimeTicks = dts,
+                            durationTicks = 1800L, compositionOffsetTicks = 0L,
+                            sampleSizeBytes = 4_000L, sampleFlags = 0x02000000L
+                        ),
+                    )
+                }
+            )
+        }
+        val proof = HevcPictureSequenceAligner.align(feeds)
+        assertTrue(proof.reasons.toString(), proof.compatible)
+        assertEquals(288, proof.matches.size)
+        for (index in 0 until 288) {
+            val expected = proof.matches[index]
+            val epoch = (index / 96).toLong()
+            val poc = (index % 96).toLong()
+            assertEquals(expected, HevcPictureSequenceAligner.findMasterMatch(
+                proof, "source-0", baseTicks, index, index.toLong(), epoch, poc
+            ))
+        }
+        assertNull(HevcPictureSequenceAligner.findMasterMatch(
+            proof, "source-0", baseTicks, 192, 192L, 0L, 0L
+        ))
+        assertNull(HevcPictureSequenceAligner.findMasterMatch(
+            proof, "source-0", baseTicks, 192, 192L, 2L, 1L
+        ))
+        assertNull(HevcPictureSequenceAligner.findMasterMatch(
+            proof, "source-1", baseTicks, 192, 192L, 2L, 0L
+        ))
+    }
+
     @Test fun doesNotTreatAnUnverifiedIdrEpochJumpAsNewValidPictureIdentity() {
         val original = (0 until 2).map { feed ->
             HevcPictureSequenceAligner.FeedWindow("feed-$feed", 90_000L,

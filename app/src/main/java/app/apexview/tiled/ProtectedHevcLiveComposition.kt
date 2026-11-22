@@ -735,11 +735,13 @@ internal object ProtectedHevcLiveComposition {
                 "mixedAtlasFit=${if (mixedSizes) mixedPlan != null else "NOT_NEEDED"} " +
                 "ivMatch=AWAITING_PICTURE_ALIGNMENT " +
                 "drmKeysOrIvsLogged=false")
+        val alignmentStartedNs = System.nanoTime()
         val proof = HevcPictureSequenceAligner.align(
             feeds = windows,
             minimumConsecutivePictures = MIN_ALIGN_PICTURES,
             context = "Live protected F1 feed alignment"
         )
+        val alignmentElapsedMs = (System.nanoTime() - alignmentStartedNs) / 1_000_000L
         if (!proof.compatible || !HevcPictureSequenceAligner.isAuthentic(proof)) {
             session.status = "LIVE_PROTECTED_F1_ALIGNMENT_REJECTED"
             session.lastFailure = buildList {
@@ -766,18 +768,27 @@ internal object ProtectedHevcLiveComposition {
         // This final, per-picture crypto test uses precisely the sample pairs
         // attested by the epoch-aware alignment proof, never guessed indices.
         val differentSampleIvCount = newMatches.count { match ->
-            val fingerprints = session.labels.map { label ->
+            var reference: ProtectedValueFingerprint? = null
+            var referencePresent = false
+            var mismatch = false
+            session.labels.forEachIndexed { feedIndex, label ->
                 val ordinal = match.sampleEvidenceByFeed.getValue(label).sequenceSampleOrdinal
-                session.feeds.getValue(label).picturesByOrdinal[ordinal]?.perSampleIvIdentity
-                    ?: if (protectionProfiles[session.labels.indexOf(label)].perSampleIvSize == 0) {
-                        null
-                    } else {
-                        throw IllegalArgumentException(
-                            "Aligned protected sample IV evidence is missing for $label"
-                        )
-                    }
+                val fingerprint = session.feeds.getValue(label).picturesByOrdinal[ordinal]
+                    ?.perSampleIvIdentity ?: if (protectionProfiles[feedIndex].perSampleIvSize == 0) {
+                    null
+                } else {
+                    throw IllegalArgumentException(
+                        "Aligned protected sample IV evidence is missing for $label"
+                    )
+                }
+                if (!referencePresent) {
+                    reference = fingerprint
+                    referencePresent = true
+                } else if (reference != fingerprint) {
+                    mismatch = true
+                }
             }
-            fingerprints.distinct().size != 1
+            mismatch
         }
         android.util.Log.i("ApexviewSingleDecoder",
             "REAL_PROTECTED_SINGLE_SENC_PREFLIGHT feeds=${session.labels.size} " +
@@ -935,6 +946,7 @@ internal object ProtectedHevcLiveComposition {
         val composedSamples = mutableListOf<ProtectedHevcCmafFragmentWriter.Sample>()
         val outputBytesToClear = mutableListOf<ByteArray>()
         try {
+            val pictureComposeStartedNs = System.nanoTime()
             var previousDecodeTime: Long? = null
             var previousDuration: Long? = null
             newMatches.forEach { match ->
@@ -1002,6 +1014,7 @@ internal object ProtectedHevcLiveComposition {
                 )
             }
 
+            val pictureComposeElapsedMs = (System.nanoTime() - pictureComposeStartedNs) / 1_000_000L
             require(composedSamples.size >= MIN_ALIGN_PICTURES) {
                 "fewer than five contiguous pictures survived protected slice composition"
             }
@@ -1015,6 +1028,7 @@ internal object ProtectedHevcLiveComposition {
             val firstComposedDts = requireNotNull(composedSamples.firstOrNull()).let {
                 requireNotNull(firstMasterBuffer.picture.timing.decodeTimeTicks)
             }
+            val fragmentWriteStartedNs = System.nanoTime()
             val mediaFragment = ProtectedHevcCmafFragmentWriter.write(
                 outputInitializationSegment = outputInit,
                 request = ProtectedHevcCmafFragmentWriter.Request(
@@ -1026,6 +1040,7 @@ internal object ProtectedHevcLiveComposition {
                 ),
                 context = "Live protected F1 composed fragment"
             )
+            val fragmentWriteElapsedMs = (System.nanoTime() - fragmentWriteStartedNs) / 1_000_000L
             val durationTicks = composedSamples.fold(0L) { total, sample ->
                 Math.addExact(total, sample.durationTicks)
             }
@@ -1062,6 +1077,8 @@ internal object ProtectedHevcLiveComposition {
             }
             android.util.Log.i("ApexviewSingleDecoder",
                 "PROTECTED_CMAF_SEGMENT composeMs=${(System.nanoTime() - composeStartedNs) / 1_000_000L} " +
+                "alignmentMs=$alignmentElapsedMs pictureComposeMs=$pictureComposeElapsedMs " +
+                "fragmentWriteMs=$fragmentWriteElapsedMs " +
                 "feeds=${session.labels.size} sampleCount=${newOutput.sampleCount} " +
                 "outputBytes=${newOutput.mediaFragment.size} retainedSegments=${session.outputHistory.size} " +
                 "processAllocBytesDuringSegment=${allocated ?: -1L} processGcDuringSegment=${collections ?: -1L} " +

@@ -9,6 +9,39 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 742 protected HEVC proof indexing, allocation and responsive browsing pass
+
+After the Build 741 phone map-clock and browse-key pass, address an algorithmic
+cost identified while reviewing the recorded six-feed protected CMAF windows:
+`HevcPictureSequenceAligner.findMasterMatch` previously used `singleOrNull`
+to linearly scan every proof match **for each composed picture**. With 288
+pictures per CMAF segment, that repeatedly traversed the same 288-evidence
+list in the tight protected CBCS composition path. Index the complete
+fragment base decode time, local sample index, global ordinal, verified IRAP
+epoch and POC **once per aligner-issued immutable proof**; preserve exact
+cross-feed timing/KID/IV/HEVC/header validation, and fail closed on duplicate
+keys. Test an authentic six-feed, 288-picture, three-epoch metadata-shaped
+proof against every indexed picture and negative epoch/POC/owner cases. This
+does not modify protected samples, skip inspection or add a decoder.
+
+The six-feed logs show protected segment allocation spikes up to 312 MB and
+recurrent GCs. Remove per-picture `fingerprints` lists and per-picture
+`distinct` allocation during the strict CBCS IV-equality gate, preserving
+identical null constant-IV handling and the exact same rejection conditions.
+Report separate alignment, picture composition and CMAF writer timings
+alongside existing `PROTECTED_CMAF_SEGMENT` totals and allocation/GC data.
+Do not claim an FPS or allocation win until a same-session post-build
+hardware log shows it.
+
+Material 3 Expressive UX must feel immediate, not merely look modern:
+use a faster 240ms browse/navigation motion and 140ms browse fades while
+leaving the existing independent video geometry 380ms transition untouched.
+No decoder, protected SurfaceView, Cast or player control geometry changes.
+
+These are coding advances; all 16 physical release gates and device matrix
+remain binding. Require Kotlin/JVM, actual HEVC fixtures, signed debug APK
+and emulator suite green before calling the source revision CI-verified.
+
 ## Build 737 six-feed log audit and Build 740 responsiveness execution baseline (23 November 2026)
 
 **Evidence provenance.** The four supplied rotating Samsung SM-S908E Android 16 log captures are

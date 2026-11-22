@@ -373,7 +373,7 @@ internal fun ArtPage(
                     ImageRequest.Builder(context)
                         .data(F1TvApi.picture(image, 1920, 1080))
                         .placeholderMemoryCacheKey(F1TvApi.picture(image, 640, 360))
-                        .crossfade(Motion.FADE_MS)
+                        .crossfade(Motion.BROWSE_FADE_MS)
                         .build()
                 },
                 contentDescription = null,
@@ -674,7 +674,7 @@ fun HomeScreen(app: AppState) {
     LaunchedEffect(pager, pager.settledPage, dragged, heroFocused) {
         if (count < 2 || dragged || heroFocused) return@LaunchedEffect
         delay(CAROUSEL_MS)
-        pager.animateScrollToPage(pager.currentPage + 1, animationSpec = tween(Motion.SCREEN_MS * 2, easing = EaseOut))
+        pager.animateScrollToPage(pager.currentPage + 1, animationSpec = tween(Motion.BROWSE_NAV_MS * 2, easing = EaseOut))
     }
     // Every slide's artwork loads ahead, so turning never waits on it.
     val context = LocalContext.current
@@ -943,7 +943,7 @@ private fun CarouselArt(picks: List<Pick>, pager: PagerState) {
                         ImageRequest.Builder(context)
                             .data(F1TvApi.picture(image, 1920, 1080))
                             .placeholderMemoryCacheKey(F1TvApi.picture(image, 640, 360))
-                            .crossfade(Motion.FADE_MS)
+                            .crossfade(Motion.BROWSE_FADE_MS)
                             .build()
                     },
                     contentDescription = null,
@@ -1037,7 +1037,7 @@ fun WeekendScreen(app: AppState, weekend: WeekendInfo, artKey: String?) {
     ) {
         item { Spacer(Modifier.height(20.dp)) }
         item {
-            AnimatedVisibility(content == null, enter = fadeIn(tween(Motion.FADE_MS)), exit = fadeOut(tween(Motion.FADE_MS))) {
+            AnimatedVisibility(content == null, enter = fadeIn(tween(Motion.BROWSE_FADE_MS)), exit = fadeOut(tween(Motion.BROWSE_FADE_MS))) {
                 Text("Loading sessions…", style = Type.subhead, modifier = Modifier.padding(horizontal = SidePadding))
             }
         }

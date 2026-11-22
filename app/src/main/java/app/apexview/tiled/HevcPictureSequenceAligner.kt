@@ -59,6 +59,20 @@ internal object HevcPictureSequenceAligner {
     )
 
     /**
+     * Full picture-order counts can repeat across IDR epochs. A full proof
+     * lookup key must bind exact fragment, sample, ordinal, epoch and POC.
+     * Index it once when issuing a proof instead of scanning ~288 matches for
+     * every protected picture during six-feed composition.
+     */
+    private data class MasterEvidenceKey(
+        val fragmentBaseDecodeTimeTicks: Long,
+        val sampleIndex: Int,
+        val sequenceSampleOrdinal: Long,
+        val irapEpochOrdinal: Long,
+        val fullPictureOrderCount: Long,
+    )
+
+    /**
      * A proof object can only be minted by this aligner. Collections exposed from it are
      * immutable snapshots; composer-side validation still checks all selected sample evidence.
      */
@@ -75,6 +89,34 @@ internal object HevcPictureSequenceAligner {
         val offsetsByFeed: Map<String, ExactOffset> =
             Collections.unmodifiableMap(LinkedHashMap(offsetsByFeed))
         val reasons: List<String> = Collections.unmodifiableList(reasons.toList())
+
+        // Indexed only from the immutable, aligner-issued evidence. Duplicate keys
+        // are recorded as null and remain fail-closed, matching singleOrNull.
+        private val masterIndex: Map<MasterEvidenceKey, PictureMatch?> =
+            buildMap<MasterEvidenceKey, PictureMatch?> {
+                val master = masterFeedId
+                if (master != null) {
+                    for (match in this@Result.matches) {
+                        val evidence = match.sampleEvidenceByFeed[master] ?: continue
+                        val base = evidence.fragmentBaseDecodeTimeTicks ?: continue
+                        if (match.masterSampleIndex != evidence.sampleIndex ||
+                            match.fullPictureOrderCount != evidence.picture.pictureOrderCount) continue
+                        val key = MasterEvidenceKey(base, evidence.sampleIndex,
+                            evidence.sequenceSampleOrdinal, evidence.irapEpochOrdinal,
+                            match.fullPictureOrderCount)
+                        if (containsKey(key)) put(key, null) else put(key, match)
+                    }
+                }
+            }
+
+        internal fun indexedMasterMatch(
+            fragmentBaseDecodeTimeTicks: Long,
+            sampleIndex: Int,
+            sequenceSampleOrdinal: Long,
+            irapEpochOrdinal: Long,
+            fullPictureOrderCount: Long,
+        ): PictureMatch? = masterIndex[MasterEvidenceKey(fragmentBaseDecodeTimeTicks,
+            sampleIndex, sequenceSampleOrdinal, irapEpochOrdinal, fullPictureOrderCount)]
 
         internal fun wasIssuedBy(expectedIssuer: Any): Boolean = issuerToken === expectedIssuer
     }
@@ -102,17 +144,10 @@ internal object HevcPictureSequenceAligner {
         fullPictureOrderCount: Long
     ): PictureMatch? {
         if (!isAuthentic(proof) || !proof.compatible || proof.masterFeedId != feedId) return null
-        return proof.matches.singleOrNull { match ->
-            val evidence = match.sampleEvidenceByFeed[feedId]
-            match.masterSampleIndex == sampleIndex &&
-                match.fullPictureOrderCount == fullPictureOrderCount &&
-                evidence != null &&
-                evidence.sampleIndex == sampleIndex &&
-                evidence.fragmentBaseDecodeTimeTicks == fragmentBaseDecodeTimeTicks &&
-                evidence.sequenceSampleOrdinal == sequenceSampleOrdinal &&
-                evidence.irapEpochOrdinal == irapEpochOrdinal &&
-                evidence.picture.pictureOrderCount == fullPictureOrderCount
-        }
+        return proof.indexedMasterMatch(
+            fragmentBaseDecodeTimeTicks, sampleIndex, sequenceSampleOrdinal,
+            irapEpochOrdinal, fullPictureOrderCount
+        )
     }
 
     private fun snapshotPicture(
