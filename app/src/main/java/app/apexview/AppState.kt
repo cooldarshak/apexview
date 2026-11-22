@@ -90,15 +90,24 @@ class AppState(
     var captionsSheetOpen by mutableStateOf(false)
     /** One selected audio/programme feed supplies CC, never every onboard at once. */
     val captionSourceFeed: FeedPlayer?
-        get() = CaptionPolicy.owner(
-            tiles,
-            tiles.firstOrNull { it.audible },
-            protectedCompositionHost,
-            protectedCompositionAudioMaster,
-            protectedRollingSceneActive || singleDecoderSceneActive,
-        )?.feed
+        get() {
+            val audible = tiles.firstOrNull { it.audible }
+            // Protected composed video replaces the host's original source. Its
+            // text owner must follow the actual current audio feed, not a stale
+            // composition-start audio master after the user changes commentary.
+            val textMaster = if (protectedRollingSceneActive)
+                audible?.takeUnless { it === protectedCompositionHost }
+            else protectedCompositionAudioMaster
+            return CaptionPolicy.owner(
+                tiles, audible, protectedCompositionHost, textMaster,
+                protectedRollingSceneActive || singleDecoderSceneActive,
+            )?.feed
+        }
 
-    val currentCaptionTracks: List<CaptionTrackOption> get() = captionSourceFeed?.availableCaptionTracks.orEmpty()
+    private var remoteCaptionTracks by mutableStateOf<List<CaptionTrackOption>>(emptyList())
+    val currentCaptionTracks: List<CaptionTrackOption>
+        get() = if (localChosen && castPlaybackHandedOff && localCaptionsSupported)
+            remoteCaptionTracks else captionSourceFeed?.availableCaptionTracks.orEmpty()
 
     private fun applyCaptionPreference() {
         val owner = captionSourceFeed
@@ -212,6 +221,7 @@ class AppState(
         set(value) {
             field = value
             castTimingEpoch = 0L
+            remoteCaptionTracks = emptyList()
         }
     private var localChosen = false
     var castDeviceName by mutableStateOf("TV")
@@ -368,6 +378,7 @@ class AppState(
                         localWidevineSupported = body?.optInt("pitwallWidevine") == 1
                         localDirectSupported = body?.optInt("pitwallDirect") == 1
                         localCaptionsSupported = body?.optInt("pitwallCaptions") == 1
+                        remoteCaptionTracks = emptyList()
                         localMapPredictionSteps = app.apexview.cast.CastTimingProtocol.predictionStepsForReceiver(
                             body?.optInt("pitwallMapPredictionSteps", 0) ?: 0)
                         android.util.Log.i("PitwallCast", "TIMING_RX_CAPABILITY predictionSteps=$localMapPredictionSteps " +
@@ -450,6 +461,11 @@ class AppState(
                     val duration = body.optDouble("duration", 0.0)
                     val speed = body.optDouble("speed", playbackSpeed.toDouble())
                     require(time.isFinite() && duration.isFinite() && time in 0.0..604800.0 && duration in 0.0..604800.0 && speed.isFinite() && speed in 0.25..4.0)
+                    if (localCaptionsSupported) {
+                        body.optJSONArray("captionTracks")?.let { offered ->
+                            remoteCaptionTracks = app.apexview.cast.local.CaptionTrackProtocol.decode(offered)
+                        }
+                    }
                     if (state == 0 && castPlaybackHandedOff) {
                         remoteCastClock.update((time * 1000).toLong(), false, speed.toFloat(), (duration * 1000).toLong())
                         if (body.optBoolean("finished")) playing = false
@@ -1003,6 +1019,7 @@ class AppState(
         val previous = localConnection; localConnection = null; previous?.close()
         localReady = false; localTimingSupported = false; localWidevineSupported = false
         localDirectSupported = false; localCaptionsSupported = false
+        remoteCaptionTracks = emptyList()
         localMapPredictionSteps = app.apexview.cast.CastTimingProtocol.V1_SEND_PREDICTION_STEPS
         localChosen = false; googleCastSelected = false
         app.apexview.cast.local.CastConnectionService.stop(context)

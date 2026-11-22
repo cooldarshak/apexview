@@ -1731,7 +1731,7 @@ private fun ClosedCaptionsSheet(app: AppState) {
                 app.currentCaptionTracks.filter { it.language != CaptionPolicy.AUTO }
             if (app.currentCaptionTracks.isEmpty()) {
                 Text(
-                    "No caption track has been advertised by the current feed yet. " +
+                    "No caption track has been advertised by the current playback source or TV receiver yet. " +
                         "You can enable CC now and it will appear if F1 supplies one.",
                     style = Type.footnote,
                     modifier = Modifier.padding(bottom = 12.dp),

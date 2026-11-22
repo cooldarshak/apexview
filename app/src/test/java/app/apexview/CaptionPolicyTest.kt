@@ -34,6 +34,10 @@ class CaptionPolicyTest {
         assertEquals("main", CaptionPolicy.owner(feeds, "verstappen", "main", null, true))
         // Protected composed HEVC: the authorized audio master still owns text.
         assertEquals("leclerc", CaptionPolicy.owner(feeds, "verstappen", "main", "leclerc", true))
+        // Switching the audible source during protected composition must
+        // move the CC owner as well, without replacing the HEVC video host.
+        assertEquals("verstappen", CaptionPolicy.owner(
+            feeds, "verstappen", "main", "verstappen", true))
         // No made-up caption source when the protected composition has none.
         assertNull(CaptionPolicy.owner(feeds, "main", null, null, true))
         assertNull(CaptionPolicy.owner(emptyList<String>(), null, null, null, false))

@@ -68,6 +68,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var captionsOn by mutableStateOf(false)
     private var captionLanguage = CaptionPolicy.AUTO
     private var receiverCaptionTrackCount by mutableIntStateOf(0)
+    private var receiverCaptionTracks by mutableStateOf<List<CaptionTrackOption>>(emptyList())
     private fun setReceiverCaptions(enabled: Boolean, language: String) {
         captionsOn = enabled
         captionLanguage = CaptionPolicy.normalizeLanguage(language)
@@ -236,7 +237,8 @@ class PitwallReceiverActivity : ComponentActivity() {
                     connection?.send(FcastProtocol.INITIAL, JSONObject().put("displayName", receiverName)
                         .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1).put("pitwallOverlays", 1)
                         .put("pitwallWidevine", 1).put("pitwallDirect", 1).put("pitwallCaptions", 1)
-                        .put("pitwallMapPredictionSteps", CastTimingProtocol.MAX_PREDICTION_STEPS))
+                        .put("pitwallMapPredictionSteps", CastTimingProtocol.MAX_PREDICTION_STEPS)
+                        .put("pitwallCaptionTrackMetadata", 1))
                 }
                 FcastProtocol.PING -> connection?.send(FcastProtocol.PONG)
                 FcastProtocol.PONG -> Unit
@@ -418,11 +420,18 @@ class PitwallReceiverActivity : ComponentActivity() {
         next.addListener(object : Player.Listener {
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
                 if (player !== next) return
-                receiverCaptionTrackCount = tracks.groups.sumOf { group ->
-                    if (group.type == C.TRACK_TYPE_TEXT)
-                        (0 until group.length).count { group.isTrackSupported(it) }
-                    else 0
+                val supported = buildList<Pair<String?, String?>> {
+                    tracks.groups.forEach { group ->
+                        if (group.type == C.TRACK_TYPE_TEXT) {
+                            for (index in 0 until group.length) if (group.isTrackSupported(index)) {
+                                val format = group.getTrackFormat(index)
+                                add(format.language to format.label)
+                            }
+                        }
+                    }
                 }
+                receiverCaptionTracks = CaptionPolicy.tracks(supported)
+                receiverCaptionTrackCount = receiverCaptionTracks.size
                 Log.i("PitwallReceiver", "CC_TRACKS count=$receiverCaptionTrackCount")
             }
 
@@ -527,7 +536,8 @@ class PitwallReceiverActivity : ComponentActivity() {
             .put("duration", (streamMetadata()?.optLong("durationMs") ?: current?.duration ?: 0L).coerceAtLeast(0L) / 1000.0)
             .put("speed", current?.playbackParameters?.speed ?: 1f)
             .put("buffering", loadingRequested || current?.playbackState == Player.STATE_BUFFERING)
-            .put("finished", current?.playbackState == Player.STATE_ENDED).apply {
+            .put("finished", current?.playbackState == Player.STATE_ENDED)
+            .put("captionTracks", CaptionTrackProtocol.encode(receiverCaptionTracks)).apply {
                 streamMetadata()?.takeIf { it.has("wallClockBaseMs") }?.let {
                     put("wallClockMs", Math.addExact(it.getLong("wallClockBaseMs"), controllerPosition()))
                 }
@@ -544,6 +554,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         loadingJob?.cancel(); loadingJob = null
         active = false
         timingState.clear(); timingReported = false; lastTimingHealthAtMs = -1L
+        receiverCaptionTracks = emptyList(); receiverCaptionTrackCount = 0
         sceneView?.release(); sceneView = null
         protectedSceneView?.release(); protectedSceneView = null
         standardView?.player = null; standardView = null

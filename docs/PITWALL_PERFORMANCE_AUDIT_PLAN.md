@@ -33,6 +33,26 @@ leaving clear baked full-picture Cast, MediaCodec, Widevine, audio and the
 standalone player routes unchanged. Real TCL motion cadence and receiver
 drift remain strict device gates, not closed by simulated traces.
 
+
+## Native Cast caption source-of-truth: receiver track metadata
+
+After correcting the Build 730 Kotlin errors, review the CC chooser while
+the phone's native players are suspended for receiver playback. Reading
+their tracks is incorrect: the real TV may advertise a different set.
+Send **only bounded language/label metadata** from the receiver's
+authorized Media3 TRACK_TYPE_TEXT groups with its existing PLAYBACK_UPDATE.
+The phone displays these options for active local Cast, resets them when
+a playback ID or connection changes, and rejects malformed or oversized
+metadata. No cue text, signed URLs, auth tokens, DRM keys or subtitle segments
+are sent. Legacy receiver without this optional metadata remains playable;
+an empty list must be visible as "not advertised", not fabricated.
+
+The in-player CC overlay on protected composition follows the newly audible
+source rather than holding a stale initial audio-master reference when audio
+selection changes. The one-decoder video renderer, CBCS segment validation,
+separate clear/protected Cast and authenticated media sources are unchanged.
+These improvements are coding coverage, **not** TCL subtitle/video acceptance.
+
 ## Mandatory hard rule: universal parity and Closed Captions (new gate 16)
 
 **Source-of-truth rule for every future change, not an optional regression check:**
