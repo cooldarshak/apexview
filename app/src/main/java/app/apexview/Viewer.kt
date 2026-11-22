@@ -1690,15 +1690,21 @@ private fun VideoQualitySheet(app: AppState) {
                                 .horizontalScroll(rememberScrollState()),
                             onPick = { app.chooseFeedVideoQuality(tile.id, it) },
                         )
-                        val actual = app.singleDecoderScenePlayer?.archiveSceneSession
-                            ?.actualSourceDimensions?.get(label)
+                        val actual = app.actualSourceRendition(label)
                         Text(if (actual == null) {
-                            "Requested ceiling: ${app.settings.videoQualityForFeed(label).label} · Actual rendition shown during single-decoder playback"
+                            "Requested ceiling: ${app.settings.videoQualityForFeed(label).label} · Actual rendition appears when single-decoder video starts"
                         } else {
                             "Requested ceiling: ${app.settings.videoQualityForFeed(label).label} · Playing: " +
                                 "${actual.first} × ${actual.second} (${actual.second}p)"
                         },
                             style = Type.footnote, modifier = Modifier.padding(top = 6.dp))
+                        actual?.let { played ->
+                            QualityDisclosurePolicy.notice(app.settings.videoQualityForFeed(label),
+                                played.second)?.let { notice ->
+                                Text(notice, style = Type.footnote.copy(color = Ink.live),
+                                    modifier = Modifier.padding(top = 4.dp))
+                            }
+                        }
                     }
                 }
                 if (app.settings.decoderMode == DecoderMode.SINGLE && active.size > 1 &&

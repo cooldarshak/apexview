@@ -2817,6 +2817,7 @@ class AppState(
             return
         }
         val selectedQualities = selectedTiles.map(::qualityFor)
+        protectedActualRenditions.clear()
         val mixedRequested = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) == null
         val composedQuality = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) ?: VideoQuality.AUTO
         // Do not reject different preference labels without looking at the actual
@@ -2944,6 +2945,7 @@ class AppState(
                             }
                         }
                         prepared.also { window ->
+                            recordProtectedRenditions(labels, window.sourceGeometry)
                             val licenses = selectedTiles.map { it.feed.sourceStream.licenseUrl }
                             if (!capture.clearOutput && !protectedFeedsShareLicense(licenses)) {
                                 window.zero()
@@ -3087,6 +3089,7 @@ class AppState(
                         // refresh only scene metadata, never add another decoder.
                         val nextLayout = app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
                             updated, labels.size, clearOutput = capture.clearOutput)
+                        recordProtectedRenditions(labels, updated.sourceGeometry)
                         host.feed.publishProtectedComposedOutput(updated, capture.widevinePssh())
                         if (protectedRollingScene?.layout != nextLayout) {
                             protectedRollingScene = ProtectedRollingScene(labels.toList(), nextLayout)
@@ -6200,6 +6203,23 @@ class AppState(
         } == true && !castingActive && !castPlaybackHandedOff && !externalDisplayActive
 
     var qualitySheetOpen by mutableStateOf(false)
+    /** Explicit actual protected CMAF source dimensions, also visible on Android TV. */
+    private val protectedActualRenditions = androidx.compose.runtime.mutableStateMapOf<String, Pair<Int, Int>>()
+    internal fun actualSourceRendition(label: String): Pair<Int, Int>? =
+        singleDecoderScenePlayer?.archiveSceneSession?.actualSourceDimensions?.get(label)
+            ?: protectedActualRenditions[label]
+
+    private fun recordProtectedRenditions(
+        labels: List<String>, geometry: app.apexview.tiled.ProtectedHevcLiveComposition.SourceGeometry?
+    ) {
+        if (geometry == null) return
+        val dimensions = ComposedSourceRenditions.fromSourceRects(labels,
+            geometry.displayWidth to geometry.displayHeight,
+            geometry.mixedSourceRects.map { it.width to it.height })
+        dimensions.forEach { (label, value) ->
+            if (protectedActualRenditions[label] != value) protectedActualRenditions[label] = value
+        }
+    }
 
     private fun qualityFor(tile: Tile): VideoQuality = settings.videoQualityForFeed(tile.feed.sourceStream.profileLabel)
 

@@ -167,6 +167,18 @@ Source changes following the Build 699 baseline:
   preserving existing TV/phone behavior while isolating the policy from
   playback UI/DRM session lifecycles.
 
+## Explicit source-rendition transparency on protected and clear HEVC
+
+- The quality selector now displays per-feed actual source picture dimensions
+  from both clear archive composition and authorized protected rolling CMAF
+  geometry. A user-selected 1080p ceiling resulting in 720p/540p from F1
+  renditions or a TV source cap is visibly disclosed, never silently presented
+  as fulfilled.
+- The same source-geometry map is updated when protected adaptive snapshots
+  change and remains read-only to the playback/DRM pipeline. Map/tower and
+  scene choice remain independent. Pure regression tests cover mixed-size
+  and equal-size source layouts and quality-ceiling disclosure.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**
