@@ -1370,3 +1370,9 @@ decryption or stream fallback changes.
 comparisons, timing and badge visual parity, named-layout persistence and
 both Cast modes against actual TCL receiver telemetry. No CI-only
 sign-off is allowed.
+
+**Layout-only drag/resize safeguard:** VideoScene.sameEncodedAtlasAs compares
+coded input dimensions and per-source rects separately from logical output
+windows. A layout transition requests redraw without discarding a current
+decoded atlas or resetting readiness; actual rendition/atlas or surface
+changes do invalidate it. JVM unit tests cover both conditions.

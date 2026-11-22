@@ -131,7 +131,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene,
              speed: Float = 1f) {
         val changed = scene != nextScene
-        if (changed && scene != null) {
+        val atlasChanged = scene?.sameEncodedAtlasAs(nextScene) == false
+        if (atlasChanged) {
+            // Layout-only window changes can reuse the already latched atlas;
+            // only a different coded picture must await a fresh decoder frame.
             outputReadiness.invalidate()
             onOutputLost()
         }
@@ -144,10 +147,15 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             input?.let { nextPlayer.setVideoSurface(it) }
         }
         if (changed) gl.post { guarded {
-            // Do not show an old decoded atlas through new crop geometry.
-            hasFrame = false
-            firstFrameReported = false
-            decoderTexture?.setDefaultBufferSize(nextScene.atlasWidth, nextScene.atlasHeight)
+            if (atlasChanged) {
+                // New encoded atlas or crop mapping cannot reuse old input pixels.
+                hasFrame = false
+                firstFrameReported = false
+            }
+            if (atlasChanged || decoderTexture?.width != nextScene.atlasWidth ||
+                decoderTexture?.height != nextScene.atlasHeight) {
+                decoderTexture?.setDefaultBufferSize(nextScene.atlasWidth, nextScene.atlasHeight)
+            }
             scheduleVideoFrame()
         } }
     }

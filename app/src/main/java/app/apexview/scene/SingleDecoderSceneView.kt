@@ -319,7 +319,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
 
     fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene) {
         val changed = scene != nextScene
-        if (changed && scene != null) {
+        val atlasChanged = scene?.sameEncodedAtlasAs(nextScene) == false
+        if (atlasChanged) {
+            // Layout-only window changes can reuse the already latched atlas;
+            // only a different coded picture must await a fresh decoder frame.
             outputReadiness.invalidate()
             onOutputLost()
         }
@@ -332,8 +335,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         if (changed) {
             main.post { if (!released) logDisplayMode("source-changed") }
             gl.post { guarded {
-                hasFrame = false
-                firstFrameReported = false
+                if (atlasChanged) {
+                    hasFrame = false
+                    firstFrameReported = false
+                }
                 applyOutputFrameRateHint()
                 scheduleDisplayFrame()
             } }
