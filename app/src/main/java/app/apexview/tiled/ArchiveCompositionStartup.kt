@@ -10,7 +10,7 @@ internal class ArchiveCompositionStartup {
     suspend fun <T> start(
         preflight: suspend () -> T,
         releaseSources: suspend () -> Unit,
-        replaceHost: (T) -> Unit,
+        replaceHost: suspend (T) -> Unit,
         restoreSources: (Boolean) -> Unit,
         dispose: (T) -> Unit,
     ) {

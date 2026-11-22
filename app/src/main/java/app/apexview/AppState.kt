@@ -3148,7 +3148,9 @@ class AppState(
                             val durationUs = audioMaster.feed.player.duration.takeIf { it > 0L }?.let { Math.multiplyExact(it, 1000L) }
                             if (ArchiveBufferPolicy.ready(snapshot.outputTiming, clockUs, durationUs,
                                     minimumLeadUs = ArchiveBufferPolicy.protectedLeadUs(playbackSpeed))) {
-                                prepared = capture.outputWindow(group)
+                                prepared = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    capture.outputWindow(group)
+                                }
                             }
                             if (prepared == null) {
                                 if (android.os.SystemClock.elapsedRealtime() >= deadline) {
@@ -3169,15 +3171,17 @@ class AppState(
                             if (!capture.clearOutput) android.util.Log.i("ApexviewSingleDecoder", "WIDEVINE_KEYS requestedBy=COMPOSED_PLAYER")
                             val pssh = capture.widevinePssh()
                             try {
-                                app.apexview.tiled.ProtectedHevcComposedDashPackageBuilder.build(
-                                    window, pssh, window.fragments.first().baseDecodeTimeTicks,
-                                    System.currentTimeMillis(), clearOutput = capture.clearOutput,
-                                ).let { packaged ->
-                                    try {
-                                        android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_PREFLIGHT $evidence " +
-                                            "protection=${capture.protection} picture=${packaged.width}x${packaged.height} " +
-                                            "fragments=${window.fragments.size} manifests=${lastSnapshot?.actualManifests?.values?.distinct()}")
-                                    } finally { packaged.zero() }
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    app.apexview.tiled.ProtectedHevcComposedDashPackageBuilder.build(
+                                        window, pssh, window.fragments.first().baseDecodeTimeTicks,
+                                        System.currentTimeMillis(), clearOutput = capture.clearOutput,
+                                    ).let { packaged ->
+                                        try {
+                                            android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_PREFLIGHT $evidence " +
+                                                "protection=${capture.protection} picture=${packaged.width}x${packaged.height} " +
+                                                "fragments=${window.fragments.size} manifests=${lastSnapshot?.actualManifests?.values?.distinct()}")
+                                        } finally { packaged.zero() }
+                                    }
                                 }
                                 preflightPassed = true
                             } catch (error: Exception) {
@@ -3221,7 +3225,10 @@ class AppState(
                         // Transfer a detached owner into the live DASH source;
                         // otherwise the startup cleanup would zero actively
                         // leased Media3 fragments after our zero-copy publisher.
-                        host.feed.startProtectedComposedPlayback(window.detached(), capture.widevinePssh(),
+                        val handoffWindow = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            window.detached()
+                        }
+                        host.feed.startProtectedComposedPlayback(handoffWindow, capture.widevinePssh(),
                             clearOutput = capture.clearOutput,
                             startPositionMs = (audioMaster.feed.player.currentPosition - requireNotNull(composedArchiveOriginMs)).coerceAtLeast(0L),
                             playWhenReady = false)
@@ -3266,7 +3273,11 @@ class AppState(
                     val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
                     lastSnapshot = snapshot
                     snapshot.failure?.takeUnless { it.retryable }?.let { throw IOException(it.reason) }
-                    if (snapshot.capturedFeeds > 0) capture.outputWindow(group)?.let { updated ->
+                    val updatedWindow = if (snapshot.capturedFeeds > 0)
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            capture.outputWindow(group)
+                        } else null
+                    updatedWindow?.let { updated ->
                         // A rolling adaptive rendition can change atlas geometry.
                         // Capture source rectangles before publishing zeroes the window;
                         // refresh only scene metadata, never add another decoder.

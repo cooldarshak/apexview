@@ -786,7 +786,7 @@ class FeedPlayer(
      * Reuses this FeedPlayer's ExoPlayer, renderer, output Surface, DRM manager and F1-token-bearing
      * license callback. Other selected FeedPlayers remain audio-only.
      */
-    internal fun startProtectedComposedPlayback(
+    internal suspend fun startProtectedComposedPlayback(
         window: ProtectedHevcLiveComposition.OutputWindow,
         widevinePssh: ByteArray?,
         clearOutput: Boolean = false,
@@ -797,8 +797,16 @@ class FeedPlayer(
         firstFrameRendered = false
         error = null
         problem = null
+        var publisherStarted = false
         try {
-            nextSource.publish(window, widevinePssh)
+            // DASH package verification and CBCS resource publication can scan
+            // tens of MB. Never execute them on Media3's/UI application looper.
+            // ProtectedHevcLiveDashSource serializes publish/release, while all
+            // ExoPlayer calls remain on this coroutine's original main thread.
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                publisherStarted = true
+                nextSource.publish(window, widevinePssh)
+            }
             val mediaItem = MediaItem.Builder()
                 .setUri(Uri.parse(PROTECTED_COMPOSED_MANIFEST_URI))
                 .setMimeType(MimeTypes.APPLICATION_MPD)
@@ -820,6 +828,9 @@ class FeedPlayer(
             player.playWhenReady = playWhenReady && !remotePlaybackSuspended
             player.prepare()
         } catch (error: Throwable) {
+            // If cancellation happens before the IO block starts, publish() never
+            // receives ownership. Clean that detached encrypted window here.
+            if (!publisherStarted) window.zero()
             nextSource.release()
             throw error
         } finally {
@@ -893,7 +904,7 @@ class FeedPlayer(
     }
 
     /** Publishes a newer live CMAF window without rebuilding the player or DRM session. */
-    internal fun publishProtectedComposedOutput(
+    internal suspend fun publishProtectedComposedOutput(
         window: ProtectedHevcLiveComposition.OutputWindow,
         widevinePssh: ByteArray?
     ) {
@@ -903,9 +914,14 @@ class FeedPlayer(
             widevinePssh?.fill(0)
             return
         }
+        var publisherStarted = false
         try {
-            source.publish(window, widevinePssh)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                publisherStarted = true
+                source.publish(window, widevinePssh)
+            }
         } finally {
+            if (!publisherStarted) window.zero()
             widevinePssh?.fill(0)
         }
     }
