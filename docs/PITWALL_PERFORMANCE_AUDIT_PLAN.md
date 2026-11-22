@@ -116,6 +116,18 @@ Source changes following the Build 699 baseline:
 - Actual physical source-frame identity and A/V sync still need independent
   device traces; a display refresh count cannot prove 50fps HEVC pictures.
 
+## Corrected Android 36 / Material3 Expressive library compatibility
+
+- A CI AAR-metadata gate definitively rejected Material3 1.5.0 and Compose
+  1.13.0 on AGP 8.13: they require AGP 9.1 and a later platform baseline.
+- Preserve Android compile/target API 36 and Kotlin2.3/AGP8.13, but select
+  the April-June 2026 stable Compose1.11 BOM and Material3 1.4 Expressive
+  core (BOM 2026.06.01). Activity-compose1.11, lifecycle2.9.4 and core1.17
+  avoid the later AndroidX AGP9.1-only transitive artifacts. The UI style,
+  shapes, focus and D-pad changes remain in place.
+- An AGP9 migration would be separate and unnecessary for the Android 36
+  mobile release target. Device and CI parity still required.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**
