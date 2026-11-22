@@ -136,6 +136,19 @@ Source changes following the Build 699 baseline:
   equality contract. Tests verify equal fresh timing snapshots replay all
   three regions unchanged, preserving display list region boundaries.
 
+## Native TV Cast adaptive HEVC geometry acceptance
+
+- Receiver SCENE updates no longer reject every atlas geometry change.
+  Clear/secure adaptive CMAF can legitimately change coded dimensions or
+  mixed source crops when the same authorized feed identities continue.
+- A pure transition gate requires unchanged source count and feed ID-to-source
+  mapping while accepting validated new source rectangles, video picture
+  dimensions and layout. For direct single-source receiver delivery, encoded
+  geometry remains pinned to the native media format.
+- Media3 must still decode the chosen rendition, and the renderer invalidates
+  its old atlas texture before the first new output. Never take an unrelated
+  feed mapping or fall back to additional video decoders.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**

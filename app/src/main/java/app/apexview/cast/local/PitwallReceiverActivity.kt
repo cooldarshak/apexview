@@ -237,7 +237,15 @@ class PitwallReceiverActivity : ComponentActivity() {
                             val next = if (isDirectPlayback()) decoded.copy(atlasWidth = old.atlasWidth, atlasHeight = old.atlasHeight,
                                 atlasColumns = 1, sourceCodedWidth = old.sourceCodedWidth, sourceCodedHeight = old.sourceCodedHeight,
                                 sourceDisplayWidth = old.sourceDisplayWidth, sourceDisplayHeight = old.sourceDisplayHeight) else decoded
-                            require(next.copy(windows = old.windows, width = old.width, height = old.height) == old) { "Stream geometry changed; reload the stream" }
+                            val changed = app.apexview.cast.CastSceneTransitionPolicy.valid(
+                                old, next, direct = isDirectPlayback()
+                            )
+                            if (changed && !next.sameEncodedAtlasAs(old)) {
+                                Log.i("PitwallReceiver", "SCENE_ADAPTIVE_ATLAS_CHANGED " +
+                                    "old=${old.atlasWidth}x${old.atlasHeight} " +
+                                    "new=${next.atlasWidth}x${next.atlasHeight} " +
+                                    "sources=${next.sources} view=ONE_DECODER")
+                            }
                             scene = next
                         }
                         else -> Unit // Unknown optional messages are not executed.
