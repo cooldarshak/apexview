@@ -48,13 +48,14 @@ internal class CastTimingPublisher(private val context: Context, private val app
         }
         if (resend) lastFullSnapshotAt = elapsed
         val timing = app.timing
+        val timingReplaced = timing !== sourceTiming
         val position = app.castFramePositionMs
         val now = app.mapTimeAt(position) ?: 0L
         val output = mutableListOf<JSONObject>()
         var tableSampled = false
         if (timing != null) {
             // Replay geometry is immutable within a published session snapshot.
-            if (timing !== sourceTiming || timing.live && resend) {
+            if (timingReplaced || timing.live && resend) {
                 geometry = CastTimingProtocol.geometry(timing)
                 sourceTiming = timing
             }
@@ -72,7 +73,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
                     lastTableElapsed == Long.MIN_VALUE ||
                     elapsed < lastTableElapsed ||
                     elapsed - lastTableElapsed >= 500L ||
-                    timing !== sourceTiming) {
+                    timingReplaced) {
                     rows = CastTimingProtocol.table(timing, now)
                     tableSampled = true
                     lastTableUtc = now

@@ -17,6 +17,21 @@ class OverlayRetainedDrawingTest {
         assertEquals(1_000L, validity.replays)
     }
 
+    @Test fun equalImmutableKeysFromNewTimingSnapshotsReuseTheRecordedLayer() {
+        data class VisualKey(val geometry: String, val opacity: Int, val flags: Int)
+        val validity = OverlayRecordingValidity()
+        validity.markRecorded(VisualKey("monaco", 85, 4), 720, 420)
+        repeat(300) {
+            assertFalse(validity.needsRecord(VisualKey("monaco", 85, 4), 720, 420))
+            validity.markReplayed()
+        }
+        assertEquals(1L, validity.recordings)
+        assertEquals(300L, validity.replays)
+        assertTrue(validity.needsRecord(VisualKey("monaco", 84, 4), 720, 420))
+        assertTrue(validity.needsRecord(VisualKey("monaco", 85, 5), 720, 420))
+        assertTrue(validity.needsRecord(VisualKey("monaco", 85, 4), 721, 420))
+    }
+
     @Test fun changedStaticGeometryStyleOrPanelSizeInvalidatesOnlyTheNeededLayer() {
         val circuit = OverlayRecordingValidity()
         val events = OverlayRecordingValidity()

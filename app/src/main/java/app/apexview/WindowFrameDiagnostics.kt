@@ -18,7 +18,11 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
     private var firstDraws = 0
     private var missedReports = 0
     private var maxNs = 0L
-    private val fallbackDeadlineNs = (1_000_000_000.0 / (window.decorView.display?.refreshRate ?: 60f)).toLong()
+    // The refresh mode may change during a session. A deadline fixed at
+    // construction misclassifies UI frames after phone/TV mode transitions.
+    private fun fallbackDeadlineNs(): Long = FrameDeadlinePolicy.durationNs(
+        window.decorView.display?.refreshRate ?: 60f
+    )
     private val frameDurations = TimingBuckets()
     private val layoutDurations = TimingBuckets()
     private val drawDurations = TimingBuckets()
@@ -65,7 +69,7 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
         if (Build.VERSION.SDK_INT >= 31) gpuDurations.record(metrics.getMetric(FrameMetrics.GPU_DURATION))
         if (metrics.getMetric(FrameMetrics.FIRST_DRAW_FRAME) == 1L) firstDraws++
         else {
-            val budget = deadline.takeIf { it > 0 } ?: fallbackDeadlineNs
+            val budget = deadline.takeIf { it > 0 } ?: fallbackDeadlineNs()
             if (duration > budget) {
                 slow++
                 deadlineMissNs += duration - budget

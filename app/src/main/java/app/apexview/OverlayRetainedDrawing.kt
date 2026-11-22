@@ -16,6 +16,9 @@ import androidx.compose.runtime.withFrameNanos
  * Pure cache invalidation contract used by both retained map display lists and
  * native tower RenderNodes. A new key OR pixel-size change always re-records.
  * The cache token is ordinary owned data, never mutable Compose snapshot state.
+ * Immutable, structurally equal visual keys must reuse the recording even when
+ * recreated by a timing snapshot. Identity-only comparisons were forcing the
+ * same static layers to re-record, adding pressure to the shared phone/TV UI.
  */
 internal class OverlayRecordingValidity {
     private var owner: Any? = null
@@ -27,7 +30,7 @@ internal class OverlayRecordingValidity {
         private set
 
     fun needsRecord(key: Any, pixelWidth: Int, pixelHeight: Int): Boolean =
-        owner !== key || width != pixelWidth || height != pixelHeight
+        owner != key || width != pixelWidth || height != pixelHeight
 
     fun markRecorded(key: Any, pixelWidth: Int, pixelHeight: Int) {
         owner = key

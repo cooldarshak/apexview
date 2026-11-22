@@ -12,6 +12,9 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.Shapes
+import androidx.compose.material3.Typography
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,24 +53,25 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onKeyEvent
 
 /**
- * The app's look, after Apple's TV app: black canvas, artwork carries the color, white type in a
- * few sizes, one easing curve. Separation comes from type and space, not lines and boxes.
+ * Pitwall's racing-first Material 3 Expressive design tokens. The video canvas
+ * stays neutral and visually stable; interactive chrome carries the stronger
+ * racing accent, depth, accessible type, shapes, and remote focus ring.
  */
 object Ink {
-    val background = Color(0xFF000000)
-    /** Raised surfaces: sheets, settings groups, cards without artwork. */
-    val surface = Color(0xFF1C1C1E)
-    val surfaceHigh = Color(0xFF2C2C2E)
-    val primary = Color(0xFFFFFFFF)
-    /** Apple's secondary label: white at 60%. */
-    val secondary = Color(0x99EBEBF5)
-    val tertiary = Color(0x4DEBEBF5)
-    /** Only for LIVE and errors. */
-    val live = Color(0xFFFF3B30)
+    val background = Color(0xFF07090D)
+    /** Panels stay dark enough not to compete with 50 fps video windows. */
+    val surface = Color(0xFF151922)
+    val surfaceHigh = Color(0xFF282F3A)
+    val primary = Color(0xFFF7F8FC)
+    val secondary = Color(0xFFBAC3D2)
+    val tertiary = Color(0xFF8390A2)
+    val accent = Color(0xFFE10600)
+    /** Race red remains a semantic live/error color as well as a brand accent. */
+    val live = Color(0xFFFF453A)
 }
 
 /**
- * Apple's type ramp. Tracking is per size: large text tighter, small text slightly looser.
+ * Compact video-first typography; larger text and touch targets live in browsing and settings.
  */
 object Type {
     val largeTitle = TextStyle(fontSize = 34.sp, lineHeight = 40.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.02).em, color = Ink.primary)
@@ -112,12 +116,32 @@ private fun Theme(content: @Composable () -> Unit) {
             surfaceContainer = Ink.surface,
             surfaceContainerLow = Ink.surface,
             surfaceContainerHigh = Ink.surfaceHigh,
-            primary = Ink.primary,
-            onPrimary = Color.Black,
+            primary = Ink.accent,
+            onPrimary = Color.White,
+            secondary = Ink.secondary,
+            onSecondary = Ink.background,
             onSurface = Ink.primary,
             onSurfaceVariant = Ink.secondary,
+            surfaceVariant = Ink.surfaceHigh,
             secondaryContainer = Ink.surfaceHigh,
             onSecondaryContainer = Ink.primary,
+            error = Ink.live,
+        ),
+        shapes = Shapes(
+            small = RoundedCornerShape(12.dp),
+            medium = RoundedCornerShape(18.dp),
+            large = RoundedCornerShape(24.dp),
+            extraLarge = RoundedCornerShape(30.dp),
+        ),
+        typography = Typography(
+            displayLarge = Type.largeTitle,
+            headlineLarge = Type.title1,
+            headlineMedium = Type.title2,
+            titleLarge = Type.headline,
+            bodyLarge = Type.body,
+            bodyMedium = Type.subhead,
+            labelLarge = Type.footnote,
+            labelMedium = Type.caption,
         ),
         content = content,
     )

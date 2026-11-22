@@ -232,9 +232,13 @@ internal fun TvCastingMenu(app: AppState) {
 
 @Composable
 private fun Group(title: String, footer: String? = null, content: @Composable () -> Unit) {
-    Text(title, style = Type.subhead, modifier = Modifier.padding(start = 36.dp, end = 20.dp, top = 28.dp, bottom = 8.dp))
+    Text(title, style = Type.subhead.copy(color = Ink.primary, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
+        modifier = Modifier.padding(start = 36.dp, end = 20.dp, top = 28.dp, bottom = 10.dp))
     Column(
-        Modifier.padding(horizontal = 20.dp).fillMaxWidth().clip(Rounded).background(Ink.surface).padding(vertical = 6.dp)
+        Modifier.padding(horizontal = 20.dp).fillMaxWidth()
+            .clip(androidx.compose.material3.MaterialTheme.shapes.large)
+            .background(androidx.compose.material3.MaterialTheme.colorScheme.surfaceContainer)
+            .padding(vertical = 6.dp)
     ) { content() }
     footer?.let { Text(it, style = Type.footnote, modifier = Modifier.padding(start = 36.dp, end = 36.dp, top = 8.dp)) }
 }
@@ -245,7 +249,7 @@ private fun SettingRow(label: String, value: String? = null, valueColor: Color =
         modifier
             .fillMaxWidth()
             .then(if (onClick != null) Modifier.pressable(scaleTo = 0.99f, onClick = onClick) else Modifier)
-            .heightIn(min = 50.dp)
+            .heightIn(min = 56.dp)
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -263,7 +267,7 @@ internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> U
             onCheckedChange = onChange,
             modifier = Modifier.tvFocusRing(),
             colors = SwitchDefaults.colors(
-                checkedTrackColor = Color(0xFF30D158),
+                checkedTrackColor = Ink.accent,
                 checkedThumbColor = Color.White,
                 uncheckedTrackColor = Ink.surfaceHigh,
                 uncheckedThumbColor = Color.White,

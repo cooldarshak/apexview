@@ -114,7 +114,20 @@ internal class CastTimingReceiver {
                 }
                 val acceptedTable = currentTable ?: return
                 if (j.has("clockEpoch")) {
-                    if (j.getLong("clockEpoch") != clockEpoch) {
+                    val incomingEpoch = j.getLong("clockEpoch")
+                    if (incomingEpoch < 0L) {
+                        rejectedFrames++; rejectedClockEpoch++; return
+                    }
+                    // A newly connected TV may join a sender that has already
+                    // sought. Establish the sender's epoch on the FIRST valid
+                    // frame of a new playback only; later frames must match the
+                    // receiver's seek-driven epoch and cannot silently rebase.
+                    if (CastTimingEpochPolicy.adoptInitialEpoch(
+                            framePackets, lastSequence, pendingLegacySeek != null, incomingEpoch
+                        ) && incomingEpoch != clockEpoch) {
+                        clockEpoch = incomingEpoch
+                    }
+                    if (incomingEpoch != clockEpoch) {
                         rejectedFrames++; rejectedClockEpoch++; return
                     }
                 } else {

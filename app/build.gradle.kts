@@ -45,7 +45,7 @@ android {
         buildConfigField("String", "CAST_RECEIVER_APP_ID", "\"$castReceiverId\"")
         buildConfigField("String", "BUILT_AT", "\"$builtAt\"")
         // Where updates come from (owner/repo on GitHub). A fork points this at its own releases.
-        buildConfigField("String", "UPDATE_REPO", "\"mikeyyy0/apexview\"")
+        buildConfigField("String", "UPDATE_REPO", "\"cooldarshak/apexview\"")
     }
 
     signingConfigs {
