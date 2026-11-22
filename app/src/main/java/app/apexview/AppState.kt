@@ -3185,7 +3185,17 @@ class AppState(
                         val deadline = android.os.SystemClock.elapsedRealtime() + 30_000L
                         var prepared: ProtectedHevcLiveComposition.OutputWindow? = null
                         while (prepared == null) {
-                            val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
+                            val captureClockMs = audioMaster.feed.player.currentPosition.coerceAtLeast(0L)
+                            val snapshot = capture.captureAtPosition(group, feeds, captureClockMs)
+                            // A resumed archive/remote seek can update Media3 directly.
+                            // Never keep following the old HLS segment sequence for 30s.
+                            val observedClockMs = audioMaster.feed.player.currentPosition.coerceAtLeast(0L)
+                            if (ArchiveBufferPolicy.preflightClockMoved(captureClockMs, observedClockMs)) {
+                                android.util.Log.i("ApexviewSingleDecoder",
+                                    "F1_PREFLIGHT_SEEK_INVALIDATED phase=CAPTURE clockBeforeMs=" +
+                                        captureClockMs + " clockAfterMs=" + observedClockMs)
+                                throw IOException("Archive preflight invalidated by playback seek")
+                            }
                             lastSnapshot = snapshot
                             diagnostics()
                             snapshot.failure?.takeUnless { it.retryable }?.let { throw app.apexview.tiled.PermanentCaptureException(it.reason) }
@@ -6591,7 +6601,16 @@ class AppState(
             if (castPlaybackHandedOff) { positionMs = target; showChrome(); return }
         }
         val restartRollingComposition = composedArchiveOriginMs != null && decoderMode == DecoderMode.SINGLE
-        if (composedArchiveOriginMs != null) {
+        // Build 694: a seek from 0 to 920734ms during preflight left the
+        // HLS selector fetching old 5760ms fragments until its 30s timeout.
+        // Restart that capture immediately at the selected archive clock,
+        // before decoder handoff, for both clear and protected HEVC.
+        val restartPreflightComposition = ArchiveBufferPolicy.restartPreflightOnSeek(
+            starting = archiveCompositionStarting,
+            captureActive = f1DashCaptureJob?.isActive == true,
+            hasComposedHost = protectedCompositionHost != null || nativeArchiveTiles.isNotEmpty(),
+            isSingleDecoder = decoderMode == DecoderMode.SINGLE)
+        if (composedArchiveOriginMs != null || restartPreflightComposition) {
             // Unlike the finite clear archive, a rolling protected DASH window
             // must be rebuilt for a distant seek. Keep the actual selected TV,
             // featured or named arrangement while changing only media ownership.
@@ -6609,7 +6628,11 @@ class AppState(
         // Every tile moves by the same amount, so their offsets from each other survive the seek.
         tiles.filter { nativeArchiveTiles.isEmpty() || it === protectedCompositionHost }.forEach { it.feed.seekFromControls((it.feed.player.currentPosition + shift).coerceAtLeast(0L)) }
         positionMs = target
-        if (restartRollingComposition) startArchiveSingleDecoderComposition(leader.contentId)
+        if (restartPreflightComposition) android.util.Log.i("ApexviewSingleDecoder",
+            "F1_PREFLIGHT_SEEK_RESTART phase=BEFORE_HANDOFF targetMs=" +
+                target + " content=" + leader.contentId)
+        if (restartRollingComposition || restartPreflightComposition)
+            startArchiveSingleDecoderComposition(leader.contentId)
         if (restartBaked) scope.launch {
             kotlinx.coroutines.delay(1_000)
             if (tiles.isNotEmpty() && !castingActive) prepareFullSceneCast(false)

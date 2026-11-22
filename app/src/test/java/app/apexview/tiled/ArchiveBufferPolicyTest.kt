@@ -125,6 +125,20 @@ class ArchiveBufferPolicyTest {
         assertFalse(ArchiveBufferPolicy.preemptWarmup(41, cached = true, active = 41, seek = true))
     }
 
+    @Test fun archiveSeekCancelsUncommittedCaptureAndRestartsAtTarget() {
+        assertTrue(ArchiveBufferPolicy.restartPreflightOnSeek(true, true, false, true))
+        assertFalse(ArchiveBufferPolicy.restartPreflightOnSeek(false, true, false, true))
+        assertFalse(ArchiveBufferPolicy.restartPreflightOnSeek(true, false, false, true))
+        assertFalse(ArchiveBufferPolicy.restartPreflightOnSeek(true, true, true, true))
+        assertFalse(ArchiveBufferPolicy.restartPreflightOnSeek(true, true, false, false))
+        // The S22 Ultra Build 694 log: 0ms -> 920734ms during first capture.
+        assertTrue(ArchiveBufferPolicy.preflightClockMoved(0, 920_734))
+        assertTrue(ArchiveBufferPolicy.preflightClockMoved(920_734, 0))
+        assertFalse(ArchiveBufferPolicy.preflightClockMoved(920_734, 922_000))
+        assertFalse(ArchiveBufferPolicy.preflightClockMoved(920_734, 922_734))
+        assertTrue(ArchiveBufferPolicy.preflightClockMoved(920_734, 922_735))
+    }
+
     @Test fun anExpiredPreflightWindowCannotReplaceThePlayingSources() {
         val captured = CmafWindowTiming(11_520_000, 17_280_000)
         assertFalse(ArchiveBufferPolicy.ready(captured, 19_600_000, 120_000_000, minimumLeadUs = 0))

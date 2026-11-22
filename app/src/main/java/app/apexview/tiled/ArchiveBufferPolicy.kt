@@ -69,6 +69,19 @@ internal object ArchiveBufferPolicy {
     const val STARTUP_LEAD_US = 3_000_000L
 
     /**
+     * A seek during a still-running archive capture invalidates its old cursor.
+     * The source video clocks are held during preflight; avoid waiting 30s for
+     * old fragments to advance to a completely different replay position.
+     */
+    fun preflightClockMoved(beforeMs: Long, afterMs: Long): Boolean =
+        afterMs - beforeMs > 2_000L || beforeMs - afterMs > 2_000L
+
+    fun restartPreflightOnSeek(
+        starting: Boolean, captureActive: Boolean, hasComposedHost: Boolean,
+        isSingleDecoder: Boolean,
+    ): Boolean = starting && captureActive && !hasComposedHost && isSingleDecoder
+
+    /**
      * Rolling CBCS archive composition is expensive, especially a four-source
      * 3840x2176 picture. Starting the composed player as soon as a single
      * almost-expired segment exists caused ~130ms player buffer and repeated
