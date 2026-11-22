@@ -25,12 +25,12 @@ tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
 
 android {
     namespace = "app.apexview"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "app.apexview_custom"
         minSdk = 29
-        targetSdk = 35
+        targetSdk = 36
         // CI builds get a monotonically increasing version code so a same-signature APK installs
         // over the previous one instead of being rejected as a downgrade.
         val ciRun = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
@@ -121,22 +121,22 @@ android {
 dependencies {
     val media3 = "1.5.1"
 
-    implementation(platform("androidx.compose:compose-bom:2024.12.01"))
+    implementation(platform("androidx.compose:compose-bom:2026.11.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
-    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material3:material3:1.5.0")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("io.coil-kt:coil-compose:2.7.0")
-    implementation("androidx.activity:activity-compose:1.9.3")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
     // The app uses the Android Cast sender UI and Default Media Receiver for the composed
     // archive HEVC stream. Scene/layout customization remains receiver-side.
     implementation("androidx.appcompat:appcompat:1.7.0")
     // Cast transitive ranges can otherwise resolve prerelease libraries that require
     // a newer Android Gradle plugin and SDK than this project supports.
     implementation("androidx.mediarouter:mediarouter") { version { strictly("1.7.0") } }
-    implementation("androidx.core:core") { version { strictly("1.15.0") } }
-    implementation("androidx.core:core-ktx") { version { strictly("1.15.0") } }
+    implementation("androidx.core:core:1.17.0")
+    implementation("androidx.core:core-ktx:1.17.0")
     implementation("com.google.android.gms:play-services-cast-framework:22.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 

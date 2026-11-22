@@ -75,6 +75,20 @@ Source changes following the Build 699 baseline:
   worker, so a verified direct-GPU route may be required if actual device
   measurements exceed the performance budget.
 
+## Platform baseline modernization for 2026 mobile and Android TV
+
+- Coordinated AGP 8.13.2 / Gradle 8.13 / Kotlin Compose plugin 2.3.0
+  toolchain upgrade with Android compile+target 36, Compose BOM 2026.11.01
+  and Material 3 1.5.0 stable. This closes the stale source-level target
+  configuration for Google Play mobile updates; separate Play submission,
+  policy, licensing and real-device Android 16 compatibility checks remain.
+- Android 36 SDK and build tools are installed in CI, and the older
+  approved-release signing tool remains for signature verification.
+- FrameTimeline analysis uses the official API 36 vsync identifier constant,
+  without attributing MainActivity window jank to an independent video layer.
+- This is a deliberate compatibility change, not a claim that an upgraded
+  targetSdk makes the app smoother. CI and TV/mobile acceptance are mandatory.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**

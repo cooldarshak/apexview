@@ -38,8 +38,8 @@ jobs:
         with:
           packages: platform-tools
 
-      - name: Install Android 35 SDK components
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Install Android 36 SDK components (retain 35 tooling for APK signature gate)
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

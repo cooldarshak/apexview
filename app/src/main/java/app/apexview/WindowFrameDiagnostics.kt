@@ -51,8 +51,9 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
         }
         if (frameVsyncNs > 0L) previousWindowVsyncNs = frameVsyncNs
         if (Build.VERSION.SDK_INT >= 36) {
-            // FRAME_TIMELINE_VSYNC_ID is metric 14 on API 36; compileSdk is 35.
-            val id = metrics.getMetric(14)
+            // API 36 declares the canonical metric. This measures the app
+            // window, not the independent SurfaceView video layer.
+            val id = metrics.getMetric(FrameMetrics.FRAME_TIMELINE_VSYNC_ID)
             if (id > 0L) {
                 if (lastFrameTimelineVsyncId > 0L && id > lastFrameTimelineVsyncId + 1) frameTimelineIdGaps++
                 lastFrameTimelineVsyncId = id
