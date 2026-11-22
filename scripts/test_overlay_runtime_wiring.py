@@ -66,7 +66,14 @@ class LiveOverlayWiringTest(unittest.TestCase):
         script = (ROOT / "scripts/run_rendernode_instrumentation.sh").read_text(encoding="utf-8")
         self.assertIn("OverlayRetainedRenderNodeAndroidTest", script)
         self.assertIn("am instrument", script)
-        self.assertIn("grep -q 'OK (2 tests)'", script)
+        # Validate the shared mandatory runner, not the old one-off grep spelling.
+        # Both real device suites must execute and return their exact passed footer.
+        self.assertIn("run_required_instrumentation", script)
+        self.assertIn("grep -Fq \"$expected_footer\" \"$output\"", script)
+        self.assertIn("'OK (2 tests)'", script)
+        self.assertIn("'OK (1 test)'", script)
+        self.assertIn("INSTRUMENTATION_STATUS_CODE", script)
+        self.assertIn("return 1", script)
         self.assertIn("test -s", script)
 
 if __name__ == "__main__":
