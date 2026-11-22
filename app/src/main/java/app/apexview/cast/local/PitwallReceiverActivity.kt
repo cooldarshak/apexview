@@ -410,7 +410,11 @@ class PitwallReceiverActivity : ComponentActivity() {
         renderingReported = true
         showReceiverControls()
         status = if (scene == null) "Playing on this TV" else "Playing ${scene!!.sources} feeds in the phone layout"
-        Log.i("PitwallReceiver", "SCENE_RENDERING_CONFIRMED sources=${scene?.sources ?: 1} videoDecoders=$decoderCount")
+        val model = scene
+        Log.i("PitwallReceiver", "SCENE_RENDERING_CONFIRMED sources=${model?.sources ?: 1} " +
+            "windows=${model?.windows?.size ?: 1} atlas=${model?.atlasWidth ?: 0}x${model?.atlasHeight ?: 0} " +
+            "renderer=${if (surfacePlayback(model, isDirectPlayback())) "DIRECT_SURFACE" else if (secureOutput) "PROTECTED_GLES" else "CLEAR_GLES"} " +
+            "videoDecoders=$decoderCount")
         if (pitwallPeer) connection?.send(FcastProtocol.RENDERING, JSONObject().put("sources", scene?.sources ?: 1)
             .put("playbackId", playbackId()))
     }

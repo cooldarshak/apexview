@@ -2943,8 +2943,19 @@ class AppState(
                     replaceHost = { session ->
                         val handoffPositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
                         sceneOutputSize = 0 to 0
-                        nativeArchiveTiles = selected
+                        // Register the observable host before advertising the
+                        // clear HEVC atlas. Otherwise Compose can see a scene
+                        // with no host and temporarily expose the raw coded
+                        // picture through an old per-tile PlayerView.
                         showProtectedCompositionPresentation(host, selected, sceneLayout = true)
+                        check(protectedCompositionHost === host) {
+                            "Clear composition host was not registered before atlas activation"
+                        }
+                        nativeArchiveTiles = selected
+                        android.util.Log.i("ApexviewSingleDecoder",
+                            "F1_SCENE_UI_ACTIVATED path=CLEAR_ARCHIVE sources=${selected.size} " +
+                                "atlas=${session.width}x${session.height} hostRegistered=true " +
+                                "view=FULL_CANVAS windowMapping=SOURCE_RECTS")
                         // One Media3 player now loads both the composed video and selected audio.
                         // Stopped originals perform no downloads and cannot move its clock.
                         selected.forEach { it.feed.suspendForArchiveComposition(); it.feed.setAudible(false) }
@@ -3287,7 +3298,7 @@ class AppState(
                         // after orientation changes and repeated seek/restarts.
                         protectedRollingScene = ProtectedRollingScene(labels.toList(), scene)
                         android.util.Log.i("ApexviewSingleDecoder",
-                            "F1_SCENE_UI_ACTIVATED sources=${labels.size} atlas=${scene.atlasWidth}x${scene.atlasHeight} " +
+                            "F1_SCENE_UI_ACTIVATED path=PROTECTED_ARCHIVE sources=${labels.size} atlas=${scene.atlasWidth}x${scene.atlasHeight} " +
                                 "hostRegistered=true view=FULL_CANVAS windowMapping=SOURCE_RECTS")
                     },
                     restoreSources = ::restore,
@@ -3513,9 +3524,18 @@ class AppState(
                                 host.feed.startProtectedComposedPlayback(outputWindow, pssh)
                                 published = true
                                 publication.published(requireNotNull(latestOutputVersion))
-                                protectedRollingScene = ProtectedRollingScene(labels.toList(), layout)
+                                // All entry points must establish the same
+                                // observable host-before-atlas invariant.
                                 showProtectedCompositionPresentation(host, selectedTiles, audioTile,
                                     sceneLayout = true)
+                                check(protectedCompositionHost === host) {
+                                    "Live composition host was not registered before atlas activation"
+                                }
+                                protectedRollingScene = ProtectedRollingScene(labels.toList(), layout)
+                                android.util.Log.i("ApexviewSingleDecoder",
+                                    "F1_SCENE_UI_ACTIVATED path=PROTECTED_LIVE sources=${labels.size} " +
+                                        "atlas=${layout.atlasWidth}x${layout.atlasHeight} hostRegistered=true " +
+                                        "view=FULL_CANVAS windowMapping=SOURCE_RECTS")
                                 composedPlaybackStarted = true
                             }
                         } else {

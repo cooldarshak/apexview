@@ -77,6 +77,38 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("ProtectedDecoderSceneView(context, protectedOutput = secureRolling)", viewer)
         self.assertIn("it.bind(host.player, scene, app.playbackSpeed)", viewer)
 
+    def test_clear_live_and_archive_all_register_host_before_atlas_publication(self):
+        app = source("AppState.kt")
+        clear = app.split("replaceHost = { session ->", 1)[1].split(
+            "restoreSources = { restore() },", 1
+        )[0]
+        self.assertLess(
+            clear.index("showProtectedCompositionPresentation(host, selected, sceneLayout = true)"),
+            clear.index("nativeArchiveTiles = selected")
+        )
+        self.assertIn("check(protectedCompositionHost === host)", clear)
+        self.assertIn("F1_SCENE_UI_ACTIVATED path=CLEAR_ARCHIVE", clear)
+        live = app.split("private fun startRollingLiveSingleDecoderComposition", 1)
+        # Verify the live rolling capture activation, not a dormant helper.
+        live = live[-1]
+        self.assertLess(
+            live.index("showProtectedCompositionPresentation(host, selectedTiles, audioTile,"),
+            live.index("protectedRollingScene = ProtectedRollingScene(labels.toList(), layout)")
+        )
+        self.assertIn("F1_SCENE_UI_ACTIVATED path=PROTECTED_LIVE", live)
+        self.assertIn("F1_SCENE_UI_ACTIVATED path=PROTECTED_ARCHIVE", app)
+
+    def test_cast_receiver_waits_for_gl_draw_and_rejects_raw_atlas(self):
+        app = source("AppState.kt")
+        receiver = source("cast/local/PitwallReceiverActivity.kt")
+        self.assertIn("castVideoScene(relay.session)", app)
+        self.assertIn("nativeCastScene(session)", app)
+        self.assertIn("scene.quads() // Validate coordinates", source("cast/CastSceneProtocol.kt"))
+        self.assertIn("raw-atlas fallback is disabled", receiver)
+        self.assertIn("onFirstFrame = { if (this@PitwallReceiverActivity.player === current", receiver)
+        self.assertIn("SCENE_RENDERING_CONFIRMED", receiver)
+        self.assertIn("windows=\\${model?.windows?.size ?: 1}", receiver)
+
     def test_native_rendernode_instrumentation_is_run_in_ci(self):
         workflow = (ROOT / ".github/workflows/android-debug-apk.yml").read_text(encoding="utf-8")
         self.assertIn("reactivecircus/android-emulator-runner@v2", workflow)

@@ -1,3 +1,37 @@
+## Required change-scope matrix (effective after Build 692)
+
+A green build validates compilation and mandatory tests; it never proves
+physical phone/TV performance. Every change to scene activation, timing,
+CMAF handling, decoding, surface lifecycle, overlays or Cast must account
+for the following production paths, with a specific regression test where
+behavior can be reproduced off-device:
+
+| Path | Production renderer / transport | Acceptance |
+| --- | --- | --- |
+| Phone clear HEVC archive | SingleDecoderSceneView, nativeArchiveTiles | Full-canvas per-feed crops, one decoder, proper source order |
+| Phone protected CBCS archive, L1 | ProtectedDecoderSceneView secure output | No raw atlas, secure path retained, correct crop geometry |
+| Phone protected CBCS archive, authorized L3 | ProtectedDecoderSceneView nonsecure surface | No raw atlas, one decoder, no DRM weakening |
+| Phone protected live | ProtectedDecoderSceneView | Host-first scene publication, rolling renditions/seek |
+| Android TV playback | Same AppState/Viewer pipeline plus device codec | TV D-pad, focus, resizing, secure/software DRM differences |
+| Native Pitwall Cast phone→TV | CastSceneProtocol + receiver GLES and authorized receiver DRM | Four distinct crops, signed scene geometry, overlays/clock |
+| Clear HEVC Pitwall Cast phone→TV | CastSceneProtocol clear relay or allowed baked screen capture | Full 4-feed canvas, no raw atlas, overlays captured if baked |
+| Baked Cast scene | One encoded picture of phone window | No second atlas mapping, audio+overlays synchronized |
+| Receiver clear/protected EGL | PitwallReceiverActivity | Actual first GL output swap before RENDERING acknowledgement |
+
+**Follow-up to Build 692:** The protected archive ordering correction is
+now extended to clear archive and protected live composition. The same
+observable host state is shared by the Android and Android TV app. The
+Cast receiver already rejects PLAY without a scene, and the versioned
+protocol preserves source rects; a new four-feed encode/decode test
+asserts source identity and geometric parity through the receiver
+protocol, including window repositioning. Runtime receiver logs now
+include atlas, window count, decoder count and renderer type.
+
+Remaining hardware acceptance: clear HEVC on S22 Ultra and TCL, protected
+archive/live on both (subject to entitlement and TV capability), native
+Pitwall Cast L1/L3 and clear baked, plus animation/tower freshness after
+20+ minutes, seek, layout change, 1× and 1.5×. None are signed off by CI.
+
 ## Build 691 on-device single-decoder raw-atlas display failure (22 November 2026)
 
 **Sign-off BLOCKED.** Screenshot at ~10:55:47 shows all four feeds in a tiny
