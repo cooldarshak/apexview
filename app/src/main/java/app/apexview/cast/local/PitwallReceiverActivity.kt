@@ -79,6 +79,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     private val timingState = CastTimingReceiver()
     private var timingPeer = false
     private var timingReported = false
+    private var lastTimingHealthAtMs = -1L
     private var approved = false
     private var versionReceived = false
     private var pitwallPeer = false
@@ -106,6 +107,20 @@ class PitwallReceiverActivity : ComponentActivity() {
                 delay(1_000)
                 if (versionReceived) connection?.send(FcastProtocol.PING)
                 if (approved) sendPlayback()
+                if (approved && timingPeer && active) {
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (lastTimingHealthAtMs < 0L || now - lastTimingHealthAtMs >= 5_000L) {
+                        val h = timingState.health(now)
+                        Log.i("PitwallReceiver", "TIMING_RX_HEALTH " +
+                            "frames=${h.framesAccepted} tables=${h.tablesAccepted} " +
+                            "rejected=${h.framesRejected} tableMismatch=${h.tableVersionRejects} " +
+                            "epochMismatch=${h.clockEpochRejects} geometryMismatch=${h.geometryRejects} " +
+                            "staleSequence=${h.sequenceRejects} " +
+                            "frameAgeMs=${h.lastFrameAgeMs} tableAgeMs=${h.lastTableAgeMs} " +
+                            "epoch=${h.clockEpoch}")
+                        lastTimingHealthAtMs = now
+                    }
+                }
             }
         }
     }
@@ -443,7 +458,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         loadingRequested = false
         loadingJob?.cancel(); loadingJob = null
         active = false
-        timingState.clear(); timingReported = false
+        timingState.clear(); timingReported = false; lastTimingHealthAtMs = -1L
         sceneView?.release(); sceneView = null
         protectedSceneView?.release(); protectedSceneView = null
         standardView?.player = null; standardView = null

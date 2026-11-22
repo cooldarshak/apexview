@@ -13,6 +13,10 @@ internal class CastTimingPublisher(private val context: Context, private val app
     private var rowsId = 0L
     private var rows = JSONArray()
     private var lastTableUtc = Long.MIN_VALUE
+    private var lastTableElapsed = Long.MIN_VALUE
+    private var lastHealthAt = Long.MIN_VALUE
+    private var sentFrames = 0L
+    private var sentTables = 0L
     private var lane: PitWindow.PitLane? = null
     private var laneAt = Long.MIN_VALUE
     private var laneTiming: SessionTiming? = null
@@ -36,6 +40,9 @@ internal class CastTimingPublisher(private val context: Context, private val app
             lastPlaybackId = playbackId
             rowsText = ""
             lastTableUtc = Long.MIN_VALUE
+            lastTableElapsed = Long.MIN_VALUE
+            sentFrames = 0L
+            sentTables = 0L
             mapSamplerOwner = null
             mapSampler = null
         }
@@ -58,15 +65,24 @@ internal class CastTimingPublisher(private val context: Context, private val app
                 output += JSONObject(currentGeometry.toString()).put("playbackId", playbackId)
             } else if (resend) output += JSONObject(currentGeometry.toString()).put("playbackId", playbackId)
             if (app.towerOpen) {
-                if (lastTableUtc == Long.MIN_VALUE || kotlin.math.abs(now - lastTableUtc) >= CastTimingProtocol.POSITION_STEP_MS) {
+                // Tower telemetry need not re-serialize up to 24 full rows for every 200ms
+                // car-motion packet. 500ms keeps sector/speed/gear updates responsive while
+                // leaving the receiver's GPU and main thread time to draw smooth 60Hz dots.
+                if (lastTableUtc == Long.MIN_VALUE ||
+                    lastTableElapsed == Long.MIN_VALUE ||
+                    elapsed < lastTableElapsed ||
+                    elapsed - lastTableElapsed >= 500L ||
+                    timing !== sourceTiming) {
                     rows = CastTimingProtocol.table(timing, now)
                     tableSampled = true
                     lastTableUtc = now
+                    lastTableElapsed = elapsed
                 }
             } else if (rows.length() > 0) {
                 rows = JSONArray()
                 tableSampled = true
                 lastTableUtc = Long.MIN_VALUE
+                lastTableElapsed = Long.MIN_VALUE
             }
         } else {
             tableSampled = rows.length() > 0 || rowsText.isEmpty()
@@ -77,6 +93,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
         if (text != rowsText || rowsId == 0L || resend) {
             if (text != rowsText || rowsId == 0L) rowsId++
             rowsText = text
+            sentTables++
             output += JSONObject().put("version", 1).put("kind", "table").put("playbackId", playbackId)
                 .put("id", rowsId).put("rows", rows)
         }
@@ -101,7 +118,16 @@ internal class CastTimingPublisher(private val context: Context, private val app
             app, timing, rows, circle, stop, cars)
         message.remove("rows")
         output += message.put("playbackId", playbackId).put("tableId", rowsId).put("sequence", ++sequence).put("clockEpoch", app.castTimingEpoch)
-        return output.flatMap(TimingMessageChunks::split)
+        sentFrames++
+        val packets = output.flatMap(TimingMessageChunks::split)
+        if (lastHealthAt == Long.MIN_VALUE || elapsed < lastHealthAt ||
+            elapsed - lastHealthAt >= 5_000L) {
+            android.util.Log.i("PitwallCast", "TIMING_TX_HEALTH frames=$sentFrames tables=$sentTables " +
+                "rows=${rows.length()} cars=${cars.size} packets=${packets.size} " +
+                "tableId=$rowsId epoch=${app.castTimingEpoch} positionMs=$position")
+            lastHealthAt = elapsed
+        }
+        return packets
     }
     private fun pitBasis(timing: SessionTiming, now: Long): PitBasis {
         val leader = leaderAt(timing, now)

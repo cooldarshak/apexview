@@ -13,6 +13,35 @@ any test has reported a status code. It still requires the exact
 `OK (2 tests)` RenderNode and `OK (1 test)` SurfaceView markers.
 Neither test is disabled, skipped or given a synthetic result.
 
+## Pitwall Cast receiver overlay parity: follow-up to Build 688
+
+Real TCL receiver observation: track-map cars are visibly jerky and timing
+tower values do not update despite smooth phone overlays. This is an observed
+**Cast parity failure**. Do not sign off map/tower, casting, or P2 hardware
+acceptance based on CI.
+
+Source audit found that the native receiver ran a 30Hz Compose map
+recomposition clock in addition to its existing draw-phase car clock.
+The receiver now uses its most recently accepted packet for Compose hit
+targets and drives car motion solely from the receiver's video-position
+draw clock. Tower tables are also separate observable state, so a valid
+timing-table packet can update the tower without waiting for the next
+accepted car-motion frame. The sender samples full tower rows every 500ms,
+while retaining 200ms car-motion packets and 60Hz draw-phase animation,
+to reduce allocations and repeated full-row updates on the TV.
+
+The sender/receiver now log bounded 5-second TIMING_TX_HEALTH and
+TIMING_RX_HEALTH summaries with accepted frame/table counts, stale ages,
+rejected frame reasons and clock epochs. This distinguishes remote transport,
+timeline and renderer problems if TV still freezes. No packet schema,
+Widevine, codec, Cast format or driver timing semantics are changed.
+
+Verification: new receiver table-independence regression, existing Cast
+protocol/seek tests and mandatory Android instrumentation. Real receiver
+smoothness and timing freshness remain **OPEN** pending TCL observation
+and measured diagnostics. The old Build 674 traces cannot validate this
+new receiver-side change.
+
 ## Post-Build 674 coordinated engineering pass (22 November 2026)
 
 **Working branch**: `feature/pitwall-performance-audit-plan` (never create a replacement).

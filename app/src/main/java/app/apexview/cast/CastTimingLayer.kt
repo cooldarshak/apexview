@@ -35,7 +35,7 @@ internal fun CastTimingLayer(state: CastTimingReceiver, canvasWidth: Float, canv
             val frame = state.frame
             val geometry = state.geometry
             if (frame == null || geometry == null || frame.geometryId != geometry.id) return@derivedStateOf 0 to 0
-            val rows = if (frame.tower != null) frame.table.rows.size else 0
+            val rows = if (frame.tower != null) (state.currentTable ?: frame.table).rows.size else 0
             val cars = when {
                 frame.mapMode == MapMode.OFF -> 0
                 frame.mapMode.inWindow && frame.map == null -> 0
@@ -75,8 +75,9 @@ private fun ReceiverTower(state: CastTimingReceiver, scale: Float, onDriver: (St
         derivedStateOf(structuralEqualityPolicy()) {
             val f = state.frame ?: return@derivedStateOf null
             val p = f.tower ?: return@derivedStateOf null
-            TowerFrame(p, f.geometryId, f.table, f.header, f.density, f.fontScale, f.towerFontScale, f.towerOpacity,
-                f.towerHeaderPx, f.onTop, f.speedUnit, f.tvLayout, f.message.takeIf { f.table.rows.isEmpty() })
+            val updatedTable = state.currentTable ?: f.table
+            TowerFrame(p, f.geometryId, updatedTable, f.header, f.density, f.fontScale, f.towerFontScale, f.towerOpacity,
+                f.towerHeaderPx, f.onTop, f.speedUnit, f.tvLayout, f.message.takeIf { updatedTable.rows.isEmpty() })
         }
     }
     val f = tower ?: return
@@ -121,10 +122,13 @@ private fun BoxScope.ReceiverTrack(state: CastTimingReceiver, canvasWidth: Float
 private fun ReceiverMap(timing: SessionTiming, frame: CastTimingProtocol.Frame, canvasWidth: Float,
                         canvasHeight: Float, scale: Float, density: Density, positionMs: () -> Long,
                         onDriver: (String, Boolean) -> Unit) {
-    val position = if (frame.mapMode == MapMode.PIT) frame.positionMs else rememberTvMapTime(positionMs)
+    // The last validated packet supplies static hit-target locations. The 60Hz
+    // draw-only clock below animates actual car markers using receiver video time.
+    // Previously rememberTvMapTime(positionMs) recomposed the entire Map subtree
+    // at 30Hz *in addition* to this draw clock, causing avoidable TV UI jank.
+    val position = frame.positionMs
     val cars = frame.carsAt(position)
-    // Same draw-only motion clock as the local map; the existing Cast frame,
-    // delayed motion endpoints, focus and interaction sampling are untouched.
+    // Keep map state changes on Cast packets and position-only motion in drawing.
     val drawClock = rememberOverlayDrawClock(timing, positionMs, "pitwall-cast-map-motion-clock")
     val motion = remember(frame, drawClock) {
         OverlayMotionSource(drawClock, frame::carsAt)

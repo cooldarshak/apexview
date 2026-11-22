@@ -14,7 +14,19 @@ internal class CastTimingReceiver {
         private set
     private val assembler = TimingMessageChunks.Assembler(SystemClock::elapsedRealtime)
     private var tableId = -1L
-    private var table: CastTimingProtocol.Table? = null
+    /** Independent Compose state: a new tower table must display even when its associated
+     * car-motion frame is late, stale or temporarily rejected across a video seek. */
+    var currentTable by mutableStateOf<CastTimingProtocol.Table?>(null)
+        private set
+    private var tablePackets = 0L
+    private var framePackets = 0L
+    private var rejectedFrames = 0L
+    private var rejectedTableVersion = 0L
+    private var rejectedClockEpoch = 0L
+    private var rejectedGeometry = 0L
+    private var rejectedSequence = 0L
+    private var lastTableReceivedMs = -1L
+    private var lastFrameReceivedMs = -1L
     var clockEpoch = 0L
         private set
     private var pendingLegacySeek: Pair<Long, Long>? = null
@@ -23,12 +35,42 @@ internal class CastTimingReceiver {
         geometry = null
         frame = null
         tableId = -1
-        table = null
+        currentTable = null
+        tablePackets = 0L
+        framePackets = 0L
+        rejectedFrames = 0L
+        rejectedTableVersion = 0L
+        rejectedClockEpoch = 0L
+        rejectedGeometry = 0L
+        rejectedSequence = 0L
+        lastTableReceivedMs = -1L
+        lastFrameReceivedMs = -1L
         lastSequence = -1
         clockEpoch = 0
         pendingLegacySeek = null
         assembler.clear()
     }
+
+    data class Health(
+        val framesAccepted: Long,
+        val tablesAccepted: Long,
+        val framesRejected: Long,
+        val tableVersionRejects: Long,
+        val clockEpochRejects: Long,
+        val geometryRejects: Long,
+        val sequenceRejects: Long,
+        val lastFrameAgeMs: Long,
+        val lastTableAgeMs: Long,
+        val clockEpoch: Long,
+    )
+
+    fun health(nowMs: Long = SystemClock.elapsedRealtime()) = Health(
+        framePackets, tablePackets, rejectedFrames, rejectedTableVersion,
+        rejectedClockEpoch, rejectedGeometry, rejectedSequence,
+        if (lastFrameReceivedMs < 0L) -1L else (nowMs - lastFrameReceivedMs).coerceAtLeast(0L),
+        if (lastTableReceivedMs < 0L) -1L else (nowMs - lastTableReceivedMs).coerceAtLeast(0L),
+        clockEpoch,
+    )
 
     fun onSeek(fromMs: Long, toMs: Long) {
         if (fromMs == toMs) return
@@ -47,16 +89,28 @@ internal class CastTimingReceiver {
                 require(j.getInt("version") == 1)
                 val id = j.getLong("id")
                 if (id <= tableId) return
-                table = CastTimingProtocol.readTable(j.getJSONArray("rows"))
+                val updated = CastTimingProtocol.readTable(j.getJSONArray("rows"))
                 tableId = id
+                currentTable = updated
+                tablePackets++
+                lastTableReceivedMs = SystemClock.elapsedRealtime()
             }
             "frame" -> {
                 val sequence = j.getLong("sequence")
-                if (sequence <= lastSequence || j.getLong("tableId") != tableId) return
-                if (j.getString("geometry").isNotEmpty() && j.getString("geometry") != geometry?.id) return
-                val currentTable = table ?: return
+                if (sequence <= lastSequence) {
+                    rejectedFrames++; rejectedSequence++; return
+                }
+                if (j.getLong("tableId") != tableId) {
+                    rejectedFrames++; rejectedTableVersion++; return
+                }
+                if (j.getString("geometry").isNotEmpty() && j.getString("geometry") != geometry?.id) {
+                    rejectedFrames++; rejectedGeometry++; return
+                }
+                val acceptedTable = currentTable ?: return
                 if (j.has("clockEpoch")) {
-                    if (j.getLong("clockEpoch") != clockEpoch) return
+                    if (j.getLong("clockEpoch") != clockEpoch) {
+                        rejectedFrames++; rejectedClockEpoch++; return
+                    }
                 } else {
                     // Older senders have no seek acknowledgement. Discard updates still at the old playhead.
                     pendingLegacySeek?.let { (from, to) ->
@@ -64,9 +118,11 @@ internal class CastTimingReceiver {
                         if (kotlin.math.abs(position - from) < kotlin.math.abs(position - to)) return
                     }
                 }
-                frame = CastTimingProtocol.decodeFrame(j, currentTable)
+                frame = CastTimingProtocol.decodeFrame(j, acceptedTable)
                 pendingLegacySeek = null
                 lastSequence = sequence
+                framePackets++
+                lastFrameReceivedMs = SystemClock.elapsedRealtime()
             }
         }
     }

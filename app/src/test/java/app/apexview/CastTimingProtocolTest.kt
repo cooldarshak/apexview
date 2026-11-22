@@ -134,6 +134,33 @@ class CastTimingProtocolTest {
         assertSame(first!!.table, receiver.frame!!.table)
         receiver.clear(); assertNull(receiver.frame); assertNull(receiver.geometry)
     }
+    @Test fun refreshedTimingTableIsVisibleEvenBeforeNextMotionFrame() {
+        val receiver = CastTimingReceiver()
+        val geometry = CastTimingProtocol.geometry(timing()).put("playbackId", "new")
+        val id = geometry.getString("id")
+        receiver.accept(geometry, "new")
+        val firstRows = frame(id).getJSONArray("rows")
+        receiver.accept(JSONObject().put("kind", "table").put("version", 1)
+            .put("playbackId", "new").put("id", 1).put("rows", firstRows), "new")
+        receiver.accept(frame(id).put("playbackId", "new").put("tableId", 1)
+            .put("sequence", 1).put("clockEpoch", 0), "new")
+        val previousFrame = receiver.frame
+        val nextRows = JSONArray(firstRows.toString())
+        nextRows.getJSONArray(0).put(13, 285)
+        receiver.accept(JSONObject().put("kind", "table").put("version", 1)
+            .put("playbackId", "new").put("id", 2).put("rows", nextRows), "new")
+        assertSame("A map packet need not arrive for a new tower table", previousFrame, receiver.frame)
+        assertEquals(285, receiver.currentTable!!.speeds.getValue("1").first)
+        val health = receiver.health()
+        assertEquals(2L, health.tablesAccepted)
+        assertEquals(1L, health.framesAccepted)
+        // A frame using the old table must not overwrite a newer tower table.
+        receiver.accept(frame(id).put("playbackId", "new").put("tableId", 1)
+            .put("sequence", 2).put("clockEpoch", 0), "new")
+        assertEquals(1L, receiver.health().tableVersionRejects)
+        assertSame(previousFrame, receiver.frame)
+    }
+
     @Test fun malformedTelemetryIsRejectedBeforeRenderAllocation() {
         val id = CastTimingProtocol.geometry(timing()).getString("id")
         assertThrows(IllegalArgumentException::class.java) { CastTimingProtocol.decodeFrame(frame(id).put("density", 0)) }
