@@ -30,6 +30,18 @@ Never log credentials, remove the signature check, or auto-publish.
 Hardware evidence and the real signed release candidate are still required.
 Code/CI checks do NOT close the updater/signing acceptance gate.
 
+### Build 739 release-gate regression test reconciliation
+
+An existing Python CI test was hardcoded to the old approved-release
+workflow's direct APK-publishing implementation and legacy version scheme.
+After that entry point was safely delegated to the strict shared official
+workflow, those old string assertions became obsolete and failed the
+pre-Gradle CI check. Replace the assertions with stronger checks of both
+entry points: a manual trigger and human acceptance issue, strict exact
+green commit/branch verification, signer and checksum validation, and
+no independent APK publisher in the legacy path. Keep the separate
+runtime Bash missing-secret test. Do not skip any Python test.
+
 ## Build 737 coordinated TV map and receiver timing recovery
 
 Build 737 passed Kotlin, JVM, HEVC, APK assembly and emulator instrumentation,
