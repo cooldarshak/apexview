@@ -118,6 +118,16 @@ class PitwallReceiverActivity : ComponentActivity() {
                             "staleSequence=${h.sequenceRejects} " +
                             "frameAgeMs=${h.lastFrameAgeMs} tableAgeMs=${h.lastTableAgeMs} " +
                             "epoch=${h.clockEpoch}")
+                        // Optional diagnostic subtype within the already negotiated timing
+                        // channel. Older senders ignore it, and no media/DRM wire format changes.
+                        connection?.send(FcastProtocol.TIMING, JSONObject()
+                            .put("kind", "health").put("playbackId", playbackId())
+                            .put("frames", h.framesAccepted).put("tables", h.tablesAccepted)
+                            .put("rejected", h.framesRejected)
+                            .put("tableMismatch", h.tableVersionRejects)
+                            .put("epochMismatch", h.clockEpochRejects)
+                            .put("frameAgeMs", h.lastFrameAgeMs)
+                            .put("tableAgeMs", h.lastTableAgeMs).put("epoch", h.clockEpoch))
                         lastTimingHealthAtMs = now
                     }
                 }

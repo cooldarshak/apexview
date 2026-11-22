@@ -603,9 +603,39 @@ class AppState(
                         }
                     }
                 }
-                protocol.TIMING -> if (localTimingSupported && body?.optString("kind") == "drawn" && body.optString("playbackId") == localLoadId) {
-                    android.util.Log.i("PitwallCast", "TIMING_UI_CONFIRMED rows=${body.optInt("rows")} cars=${body.optInt("cars")}")
-                    castStatus = "Playing on $castDeviceName with the phone video layout and timing/map UI."
+                protocol.TIMING -> if (localTimingSupported && body != null &&
+                    body.optString("playbackId") == localLoadId) {
+                    when (body.optString("kind")) {
+                        "drawn" -> {
+                            android.util.Log.i("PitwallCast", "TIMING_UI_INITIAL_DRAW rows=${body.optInt("rows")} cars=${body.optInt("cars")}")
+                            // One initial draw is not evidence that subsequent telemetry
+                            // continues advancing. Sustained freshness is verified below.
+                        }
+                        "health" -> {
+                            val frameAge = body.optLong("frameAgeMs", -1L)
+                            val tableAge = body.optLong("tableAgeMs", -1L)
+                            val acceptedFrames = body.optLong("frames", 0L)
+                            val acceptedTables = body.optLong("tables", 0L)
+                            val epochMismatch = body.optLong("epochMismatch", 0L)
+                            val tableMismatch = body.optLong("tableMismatch", 0L)
+                            android.util.Log.i("PitwallCast", "TIMING_REMOTE_HEALTH " +
+                                "frames=$acceptedFrames tables=$acceptedTables " +
+                                "frameAgeMs=$frameAge tableAgeMs=$tableAge " +
+                                "epochMismatch=$epochMismatch tableMismatch=$tableMismatch " +
+                                "remoteEpoch=${body.optLong("epoch", -1L)} localEpoch=$castTimingEpoch")
+                            if (castSceneConfirmed && castPlaybackHandedOff &&
+                                bakedCastSession == null && (towerOpen || mapMode != MapMode.OFF)) {
+                                val good = app.apexview.cast.CastTimingHealthPolicy.healthy(
+                                    frameAge, tableAge, mapMode != MapMode.OFF, towerOpen,
+                                    playing && !castRemoteBuffering)
+                                castStatus = if (good) {
+                                    "Playing on $castDeviceName with current timing tower/map updates."
+                                } else {
+                                    "Pitwall Cast timing updates are delayed on $castDeviceName. Export the phone log."
+                                }
+                            }
+                        }
+                    }
                 }
                 protocol.PING -> localConnection?.send(protocol.PONG)
                 protocol.RENDERING -> {
