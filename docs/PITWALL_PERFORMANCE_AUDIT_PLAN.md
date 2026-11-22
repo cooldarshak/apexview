@@ -1,5 +1,18 @@
 # Pitwall TV: playback performance audit and implementation plan
 
+### Build 686 instrumentation failure: Android binder not yet stable
+
+The source/unit test suite, HEVC fixtures, signed debug APK and Android
+instrumentation APK compiled successfully, but the emulator reported
+`DeadObjectException` immediately when `am instrument` contacted the
+activity service shortly after `sys.boot_completed=1`. No native test
+assertion failed and this run is **not** green. The shared instrumentation
+script now waits for sustained ActivityManager and PackageManager binder
+readiness and allows a single repeat **only** for a binder death before
+any test has reported a status code. It still requires the exact
+`OK (2 tests)` RenderNode and `OK (1 test)` SurfaceView markers.
+Neither test is disabled, skipped or given a synthetic result.
+
 ## Post-Build 674 coordinated engineering pass (22 November 2026)
 
 **Working branch**: `feature/pitwall-performance-audit-plan` (never create a replacement).
