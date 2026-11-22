@@ -131,6 +131,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene,
              speed: Float = 1f) {
         val changed = scene != nextScene
+        val firstBinding = scene == null
         val atlasChanged = scene?.sameEncodedAtlasAs(nextScene) == false
         if (atlasChanged) {
             // Layout-only window changes can reuse the already latched atlas;
@@ -152,8 +153,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 hasFrame = false
                 firstFrameReported = false
             }
-            if (atlasChanged || decoderTexture?.width != nextScene.atlasWidth ||
-                decoderTexture?.height != nextScene.atlasHeight) {
+            if (firstBinding || atlasChanged) {
                 decoderTexture?.setDefaultBufferSize(nextScene.atlasWidth, nextScene.atlasHeight)
             }
             scheduleVideoFrame()
