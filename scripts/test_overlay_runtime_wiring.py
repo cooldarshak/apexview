@@ -88,7 +88,7 @@ class LiveOverlayWiringTest(unittest.TestCase):
         )
         self.assertIn("check(protectedCompositionHost === host)", clear)
         self.assertIn("F1_SCENE_UI_ACTIVATED path=CLEAR_ARCHIVE", clear)
-        live = app.split("private fun startRollingLiveSingleDecoderComposition", 1)
+        live = app.split("private fun startTvLiveCompositionIfEligible", 1)
         # Verify the live rolling capture activation, not a dormant helper.
         live = live[-1]
         self.assertLess(
@@ -107,7 +107,7 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("raw-atlas fallback is disabled", receiver)
         self.assertIn("onFirstFrame = { if (this@PitwallReceiverActivity.player === current", receiver)
         self.assertIn("SCENE_RENDERING_CONFIRMED", receiver)
-        self.assertIn("windows=\\${model?.windows?.size ?: 1}", receiver)
+        self.assertIn("windows=${model?.windows?.size ?: 1}", receiver)
 
     def test_native_rendernode_instrumentation_is_run_in_ci(self):
         workflow = (ROOT / ".github/workflows/android-debug-apk.yml").read_text(encoding="utf-8")
