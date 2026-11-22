@@ -6,6 +6,7 @@ import android.net.Uri
 import androidx.media3.exoplayer.dash.manifest.DashManifestParser
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
