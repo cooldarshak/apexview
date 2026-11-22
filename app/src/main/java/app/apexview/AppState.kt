@@ -1389,7 +1389,7 @@ class AppState(
             return
         }
         // A speed this phone already struggled with, with this many feeds: straight to one picture.
-        if (!speedHeld && playbackSpeed > 1f && tiles.size > 1 && (struggledAt[tiles.size] ?: Float.MAX_VALUE) <= playbackSpeed) {
+        if (!speedHeld && playbackSpeed > 1f && tiles.size > 1 && strainMonitor.wasStrainedAt(tiles.size, playbackSpeed)) {
             speedHeld = true
             message = "Only the main feed's picture plays at ${speedLabel(playbackSpeed)} on this device, to keep it smooth. Back to 1× brings the rest back."
         }
@@ -6257,55 +6257,29 @@ class AppState(
     var speedHeld by mutableStateOf(false)
         private set
 
-    /** The slowest speed each number of feeds has struggled at, while the app's been running. */
-    private val struggledAt = mutableMapOf<Int, Float>()
-    /** Frames dropped across the feeds in each of the last few seconds. */
-    private val dropsBySecond = ArrayDeque<Int>()
-    private var lastDropTotal = -1
-    private var strainTicks = 0
-    private var steadyFeeds: List<FeedPlayer> = emptyList()
-    private var steadySinceMs = 0L
+    private val strainMonitor = PlaybackStrainMonitor()
 
-    private fun resetStrain() {
-        dropsBySecond.clear()
-        lastDropTotal = -1
-    }
+    private fun resetStrain() = strainMonitor.reset()
 
-    /**
-     * Sped up with several pictures, whether the phone keeps up: if it keeps dropping frames,
-     * only the main feed's picture plays from then on. Some phones and TVs manage every feed at
-     * double speed, others don't; what counts is how this one does.
-     */
+    /** Restrict accelerated multi-decoder fallback only after measured sustained decoder drops. */
     private fun watchStrain() {
         val pictures = tiles.filter { it.feed.showingVideo }
         if (playbackSpeed <= 1f || speedHeld || pictures.size < 2) {
             resetStrain()
             return
         }
-        // Feeds starting, buffering or catching up drop frames anyway: only a steady few
-        // seconds of the same feeds playing count.
-        val now = System.currentTimeMillis()
-        val feeds = pictures.map { it.feed }
-        if (feeds != steadyFeeds || pictures.any { it.feed.player.playbackState != Player.STATE_READY || !it.feed.player.isPlaying }) {
-            steadyFeeds = feeds
-            steadySinceMs = now
-            resetStrain()
-            return
+        val samples = pictures.map { tile ->
+            PlaybackStrainMonitor.Sample(
+                key = tile.feed,
+                readyAndPlaying = tile.feed.player.playbackState == Player.STATE_READY && tile.feed.player.isPlaying,
+                droppedFrames = tile.feed.player.videoDecoderCounters?.droppedBufferCount ?: 0,
+            )
         }
-        if (now - steadySinceMs < STEADY_MS) return
-        if (++strainTicks % 2 != 0) return
-        val total = pictures.sumOf { it.feed.player.videoDecoderCounters?.droppedBufferCount ?: 0 }
-        val last = lastDropTotal
-        lastDropTotal = total
-        if (last < 0) return
-        dropsBySecond.addLast((total - last).coerceAtLeast(0))
-        if (dropsBySecond.size > STRAIN_WINDOW_S) dropsBySecond.removeFirst()
-        if (dropsBySecond.count { it >= STRAIN_DROPS } < STRAIN_SECONDS) return
-        struggledAt[tiles.size] = minOf(struggledAt[tiles.size] ?: Float.MAX_VALUE, playbackSpeed)
+        if (!strainMonitor.onTick(System.currentTimeMillis(), playbackSpeed, tiles.size, samples))
+            return
         speedHeld = true
-        resetStrain()
         applyVideoBudget()
-        message = "This phone can't keep ${tiles.size} feeds smooth at ${speedLabel(playbackSpeed)}, so only the main " +
+        message = "This device can't keep ${tiles.size} feeds smooth at ${speedLabel(playbackSpeed)}, so only the main " +
             "feed's picture plays while sped up. Back to 1× brings the rest back."
     }
 
@@ -6466,13 +6440,6 @@ class AppState(
         private const val SEEK_DRIFT_MS = 2000L
         private const val NUDGE_DRIFT_MS = 150L
         private const val NUDGE = 0.1f
-        /** Frames dropped across the feeds in a second that counts as struggling... */
-        private const val STRAIN_DROPS = 8
-        /** ...in this many of the last [STRAIN_WINDOW_S] seconds. */
-        private const val STRAIN_SECONDS = 3
-        private const val STRAIN_WINDOW_S = 5
-        /** How long the same feeds have to have been playing before dropped frames count. */
-        private const val STEADY_MS = 10_000L
         const val MAX_FEEDS = 4
         const val MAX_SINGLE_DECODER_FEEDS = 24
         private const val MAX_RECENTS = 4

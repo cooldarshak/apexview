@@ -156,6 +156,17 @@ Source changes following the Build 699 baseline:
   shared element resize/crop transitions with the supported API rather than
   removing motion or downgrading the rendering UI.
 
+## Multiple-decoder strain policy extraction
+
+- The old app-state-only accelerated-playback decoder-drop heuristic now
+  lives in `PlaybackStrainMonitor`, with source-count identity and stable
+  10s warmup, five-second 3-of-5 drop thresholds and speed-specific
+  pressure memory. New tests cover sustained drops, buffering, feed changes,
+  and explicit SINGLE scenes never enabling MULTIPLE decoder fallback.
+- `AppState` retains only player measurement and presentation control,
+  preserving existing TV/phone behavior while isolating the policy from
+  playback UI/DRM session lifecycles.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**
