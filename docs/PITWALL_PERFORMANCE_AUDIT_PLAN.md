@@ -19,8 +19,11 @@ Source changes following the Build 699 baseline:
 - Rolling HLS publishing retains unchanged resource buffers by identity and
   zeroizes only retired buffers; this removes repeated full-segment copies
   from baked Cast publishing without storing protected samples.
-- Home/shelf actions and cards use a consistent accessible dark/red Material
-  3 expressive visual language; the independent video canvas is unchanged.
+- Home/shelf actions, selected settings and cards use a consistent accessible
+  dark/red Material 3 expressive visual language; the video canvas is unchanged.
+- The Widevine L1 secure SurfaceView can request the same seamless-only
+  display frame-rate hint as L3 without altering the protected decoder path.
+  Actual OEM acceptance remains required.
 - Test all changes in CI, and on phone, TV and both authorized Cast modes
   before marking their exit gates complete.
 
@@ -130,6 +133,10 @@ multifeed. MULTIPLE remains a separate user choice and must not be removed.
   from its own release feed. Creating signed releases remains an open gate.
 - Maintain pinned package ID, monotonic versionCode, persistent signing key,
   backing up layouts but never F1 login tokens or WebView auth state.
+- A manual GitHub Actions release gate must require the latest green source
+  build on this branch, explicit physical acceptance and an expected signing
+  certificate SHA-256 before publishing any downloadable APK. No unverified
+  push automatically publishes a release.
 - LAN receiver transports are currently HTTP to dynamically discovered IPs.
   Android network-security-config domain allowlists cannot express arbitrary
   local IPs without breaking Cast. Until an authenticated local TLS design

@@ -1,0 +1,105 @@
+name: Pitwall hardware-approved release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: 'Successful Android debug APK workflow run ID from this exact branch head'
+        required: true
+        type: string
+      physical_acceptance_confirmed:
+        description: 'Confirm S22 Ultra, TCL, protected/clear and Pitwall Cast acceptance'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    if: github.ref_name == 'feature/pitwall-performance-audit-plan' && inputs.physical_acceptance_confirmed == true
+    runs-on: ubuntu-24.04
+    environment: pitwall-hardware-accepted
+    steps:
+      - name: Check that source run passed at this exact branch head
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.source_run_id }}
+          REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]] || { echo "Run ID must be numeric"; exit 1; }
+          status="$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN" --jq '.status')"
+          conclusion="$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN" --jq '.conclusion')"
+          branch="$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN" --jq '.head_branch')"
+          sha="$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN" --jq '.head_sha')"
+          workflow="$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN" --jq '.name')"
+          run_number="$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN" --jq '.run_number')"
+          test "$status" = completed
+          test "$conclusion" = success
+          test "$branch" = feature/pitwall-performance-audit-plan
+          test "$sha" = "$SOURCE_SHA"
+          test "$workflow" = "Android debug APK"
+          [[ "$run_number" =~ ^[0-9]+$ ]]
+          echo "run_number=$run_number" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Download approved signed APK from the successful CI run
+        uses: actions/download-artifact@v4
+        with:
+          name: apexview-custom-debug-apk
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          path: approved-apk
+
+      - name: Validate updateable APK signature, version and provenance
+        env:
+          EXPECTED_SIGNING_SHA256: ${{ secrets.APK_SIGNING_CERT_SHA256 }}
+          RELEASE_RUN_NUMBER: ${{ steps.source.outputs.run_number }}
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_SIGNING_SHA256" || { echo "Set APK_SIGNING_CERT_SHA256 environment secret"; exit 1; }
+          sudo apt-get update -qq >/dev/null
+          sudo apt-get install -y -qq unzip >/dev/null
+          test -n "${ANDROID_HOME:-}"
+          SDK="${ANDROID_HOME}/build-tools/35.0.0"
+          if [ ! -x "$SDK/apksigner" ]; then
+            "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" 'build-tools;35.0.0'
+          fi
+          shopt -s nullglob
+          files=(approved-apk/*.apk)
+          test "${#files[@]}" -eq 1
+          apk="${files[0]}"
+          "$SDK/apksigner" verify --verbose --print-certs "$apk" > signature-report.txt
+          observed="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' signature-report.txt | head -n 1 | tr '[:lower:]' '[:upper:]' | tr -d ':[:space:]')"
+          expected="$(printf '%s' "$EXPECTED_SIGNING_SHA256" | tr '[:lower:]' '[:upper:]' | tr -d ':[:space:]')"
+          test -n "$observed" && test "$observed" = "$expected"
+          badging="$("$SDK/aapt" dump badging "$apk")"
+          printf '%s\n' "$badging" | grep -F "name='app.apexview_custom'"
+          printf '%s\n' "$badging" | grep -F "versionName='1.0.$RELEASE_RUN_NUMBER'"
+          version_code="$((100000 + RELEASE_RUN_NUMBER))"
+          printf '%s\n' "$badging" | grep -F "versionCode='$version_code'"
+          cp "$apk" "pitwall-tv-1.0.$RELEASE_RUN_NUMBER.apk"
+          sha256sum "pitwall-tv-1.0.$RELEASE_RUN_NUMBER.apk" > SHA256SUMS
+
+      - name: Publish hardware-approved signed update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.source.outputs.run_number }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          tag="v1.0.$VERSION"
+          test -f "pitwall-tv-1.0.$VERSION.apk"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists, refusing to replace an approved artifact"
+            exit 1
+          fi
+          gh release create "$tag" "pitwall-tv-1.0.$VERSION.apk" SHA256SUMS \
+            --repo "${GITHUB_REPOSITORY}" --target "$SOURCE_SHA" \
+            --title "Pitwall TV $tag" \
+            --notes "Hardware-accepted APK. Source: $SOURCE_SHA. S22 Ultra, TCL, clear/Widevine and Cast acceptance required. SHA-256 is attached."

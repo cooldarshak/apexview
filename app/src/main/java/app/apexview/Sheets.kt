@@ -280,7 +280,12 @@ internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> U
 @Composable
 private fun ChoiceRow(label: String, chosen: Boolean, onClick: () -> Unit) {
     SettingRow(label, onClick = onClick) {
-        if (chosen) Icon(Icons.Rounded.Check, null, tint = Ink.primary, modifier = Modifier.size(20.dp))
+        if (chosen) {
+            Box(Modifier.size(26.dp).clip(androidx.compose.foundation.shape.CircleShape)
+                .background(Ink.accent), contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.Check, null, tint = Color.White, modifier = Modifier.size(18.dp))
+            }
+        }
     }
 }
 

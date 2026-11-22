@@ -139,7 +139,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }
         playbackSpeed = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
         scene = nextScene
-        if (!protectedOutput && holder.surface.isValid) updateFrameRateHint(holder.surface)
+        if (holder.surface.isValid) updateFrameRateHint(holder.surface)
         if (player !== nextPlayer) {
             input?.let { player?.clearVideoSurface(it) }
             player = nextPlayer
@@ -293,7 +293,11 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     }
 
     private fun updateFrameRateHint(output: Surface) {
-        if (protectedOutput || android.os.Build.VERSION.SDK_INT < 30) return
+        // A frame-rate hint changes only SurfaceFlinger scheduling. It does not
+        // change Widevine, the secure EGL context or protected buffer handling.
+        // L1 surfaces deserve the same seamless-only 50 fps pacing hint as
+        // authorized L3 scenes; unsupported OEM surfaces fail harmlessly.
+        if (android.os.Build.VERSION.SDK_INT < 30) return
         val rate = SceneFrameRatePolicy.hint(scene?.sourceFrameRate ?: 0.0, playbackSpeed)
         if (rate == appliedFrameRateHint) return
         runCatching {
@@ -304,6 +308,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 output.setFrameRate(rate, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
             }
             appliedFrameRateHint = rate
+            Log.i("ApexviewSingleDecoder",
+                "SURFACE_SCENE_FPS_HINT_APPLIED secure=$protectedOutput fps=$rate")
         }.onFailure {
             Log.w("ApexviewSingleDecoder",
                 "SURFACE_SCENE_FPS_HINT_UNAVAILABLE " + it.javaClass.simpleName)
