@@ -343,13 +343,13 @@ fun SettingsScreen(app: AppState) {
             }
         }
         item {
-            Group("Playback", footer = "Applies to feeds you start from now on.") {
+            Group("Playback", footer = "Caption changes apply immediately to the selected feed; available languages depend on F1's source.") {
                 Text("Commentary", style = Type.footnote, modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 2.dp))
                 Settings.COMMENTARY.forEach { (code, name) ->
                     ChoiceRow(name, s.commentary == code) { s.updateCommentary(code) }
                 }
                 Spacer(Modifier.height(6.dp))
-                SwitchRow("Subtitles", s.subtitles, s::updateSubtitles)
+                SwitchRow("Closed captions", s.subtitles, app::setCaptionsEnabled)
                 SwitchRow("Stream stats on tiles", s.showStats, s::updateShowStats)
             }
         }

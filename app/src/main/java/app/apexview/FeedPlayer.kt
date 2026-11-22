@@ -121,10 +121,11 @@ class FeedPlayer(
     entitlement: String,
     userAgent: String,
     forceL3: Boolean,
-    /** Off by default: the international feed carries French captions. */
+    /** Enable only caption tracks that the authorized F1 source actually offers. */
     subtitles: Boolean,
     /** ISO 639 code, such as "en", for the commentary track. */
     commentary: String,
+    captionLanguage: String = CaptionPolicy.AUTO,
     /** Whether to allocate a video decoder before prepare; audio can still run without it. */
     startWithVideo: Boolean = true,
     /** Where a replay starts (ms), set before loading so nothing loads for the wrong spot. */
@@ -168,7 +169,29 @@ class FeedPlayer(
     internal var composedSurfaceHeight: Int = 0
         private set
     private var remotePlaybackSuspended = false
-    private var remoteTextWasDisabled = true
+    private var captionsSelected = subtitles
+    private var selectedCaptionLanguage = CaptionPolicy.normalizeLanguage(captionLanguage)
+    private var remoteTextWasDisabled = !subtitles
+    var availableCaptionTracks by mutableStateOf<List<CaptionTrackOption>>(emptyList())
+        private set
+
+    /** Apply player CC changes immediately, without tearing down any codec or DRM session. */
+    fun setCaptions(enabled: Boolean, language: String) {
+        val normalized = CaptionPolicy.normalizeLanguage(language)
+        val disabled = !enabled || remotePlaybackSuspended
+        if (captionsSelected == enabled && selectedCaptionLanguage == normalized &&
+            (C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes) == disabled) return
+        captionsSelected = enabled
+        selectedCaptionLanguage = normalized
+        remoteTextWasDisabled = !enabled
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, disabled)
+            .setPreferredTextLanguage(CaptionPolicy.textLanguage(normalized, commentary))
+            .setSelectUndeterminedTextLanguage(enabled)
+            .build()
+        playbackEvent("captions", "enabled=$enabled language=$normalized offered=${availableCaptionTracks.size}")
+    }
+
     /** A remote renderer owns playback. Disable tracks as well as pausing to release codec slots. */
     internal fun suspendForRemotePlayback(suspended: Boolean) {
         if (remotePlaybackSuspended == suspended) {
@@ -440,7 +463,8 @@ class FeedPlayer(
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !subtitles)
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !startWithVideo)
             .setPreferredAudioLanguage(commentary)
-            .setPreferredTextLanguage(commentary)
+            .setPreferredTextLanguage(CaptionPolicy.textLanguage(captionLanguage, commentary))
+            .setSelectUndeterminedTextLanguage(subtitles)
             .setMaxVideoSize(qualityWidth(videoQuality), qualityHeight(videoQuality))
             .setForceHighestSupportedBitrate(stableTvResolution)
             .apply { if (stableTvResolution) setPreferredVideoMimeTypes(MimeTypes.VIDEO_H264) }
@@ -448,6 +472,21 @@ class FeedPlayer(
         if (stableTvResolution) Log.i("PitwallVideo",
             "TCL_STABLE_RENDITION preferred=${videoQuality.name} cap=${qualityWidth(videoQuality)}x${qualityHeight(videoQuality)}")
         player.addListener(object : Player.Listener {
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                val offered = buildList {
+                    tracks.groups.forEach { group ->
+                        if (group.type == C.TRACK_TYPE_TEXT) for (index in 0 until group.length) {
+                            if (group.isTrackSupported(index)) {
+                                val format = group.getTrackFormat(index)
+                                add(format.language to format.label)
+                            }
+                        }
+                    }
+                }
+                availableCaptionTracks = CaptionPolicy.tracks(offered)
+                playbackEvent("caption-tracks", "count=${availableCaptionTracks.size} languages=${availableCaptionTracks.joinToString { it.language }}")
+            }
+
             override fun onTimelineChanged(timeline: Timeline, reason: Int) {
                 if (DiagnosticLogs.recording && !loggedClock) windowStartMs()?.let { start ->
                     loggedClock = true
@@ -844,8 +883,10 @@ class FeedPlayer(
         val video = DashMediaSource.Factory(session.dataSourceFactory()).setDrmSessionManagerProvider { drmManager }
             .setLoadErrorHandlingPolicy(app.apexview.tiled.ArchiveVodLoadErrorPolicy())
             .createMediaSource(MediaItem.Builder().setUri(HevcArchiveVodSession.MANIFEST_URI).setMimeType(MimeTypes.APPLICATION_MPD).build())
+        // Keep native audio AND F1-provided text renditions while replacing only video
+        // with the composed HEVC atlas. This does not add any video decoder.
         val audio = FilteringMediaSource(archiveAudioSources.createMediaSource(MediaItem.Builder().setUri(audioUri)
-            .setMimeType(MimeTypes.APPLICATION_M3U8).build()), C.TRACK_TYPE_AUDIO)
+            .setMimeType(MimeTypes.APPLICATION_M3U8).build()), setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_TEXT))
         firstFrameRendered = false; error = null; problem = null
         if (archiveVodSession !== session) archiveVodSession?.close()
         archiveVodSession = session

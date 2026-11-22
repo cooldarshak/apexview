@@ -87,6 +87,51 @@ class AppState(
     val protectedRollingScenePlayer: FeedPlayer?
         get() = if (protectedRollingSceneActive) protectedCompositionHost?.feed else null
     val settings = Settings(context)
+    var captionsSheetOpen by mutableStateOf(false)
+    /** One selected audio/programme feed supplies CC, never every onboard at once. */
+    val captionSourceFeed: FeedPlayer?
+        get() = CaptionPolicy.owner(
+            tiles,
+            tiles.firstOrNull { it.audible },
+            protectedCompositionHost,
+            protectedCompositionAudioMaster,
+            protectedRollingSceneActive || singleDecoderSceneActive,
+        )?.feed
+
+    val currentCaptionTracks: List<CaptionTrackOption> get() = captionSourceFeed?.availableCaptionTracks.orEmpty()
+
+    private fun applyCaptionPreference() {
+        val owner = captionSourceFeed
+        tiles.forEach { tile ->
+            tile.feed.setCaptions(settings.subtitles && tile.feed === owner, settings.captionLanguage)
+        }
+    }
+
+    private fun sendCaptionPreferenceToReceiver() {
+        if (!localChosen || localConnection == null) return
+        if (!localCaptionsSupported) {
+            if (settings.subtitles) message = "Update Pitwall TV on the receiver to enable Cast captions."
+            return
+        }
+        localConnection?.send(app.apexview.cast.local.FcastProtocol.UI_CONTROL,
+            app.apexview.cast.local.CaptionControlProtocol.encode(settings.subtitles, settings.captionLanguage))
+    }
+
+    fun setCaptionsEnabled(enabled: Boolean) {
+        settings.updateSubtitles(enabled)
+        applyCaptionPreference()
+        if (castingActive) sendCaptionPreferenceToReceiver()
+        showChrome()
+    }
+
+    fun setCaptionLanguage(language: String) {
+        settings.updateCaptionLanguage(language)
+        if (!settings.subtitles) settings.updateSubtitles(true)
+        applyCaptionPreference()
+        if (castingActive) sendCaptionPreferenceToReceiver()
+        showChrome()
+    }
+
     var decoderMode by mutableStateOf(settings.decoderMode)
         private set
     private var archiveCompositionStarting by mutableStateOf(false)
@@ -145,6 +190,7 @@ class AppState(
     private var localReady = false
     private var localTimingSupported = false
     private var localWidevineSupported = false
+    private var localCaptionsSupported = false
     private var localDirectSupported = false
     private data class DirectCast(val tileId: Int, val contentId: Long, val channel: Int, val label: String)
     private var directCast by mutableStateOf<DirectCast?>(null)
@@ -310,7 +356,8 @@ class AppState(
                 protocol.VERSION -> {
                     require(body != null && body.getInt("version") >= 3) { "Receiver does not support the Pitwall FCast connection" }
                     localConnection?.send(protocol.INITIAL, JSONObject().put("displayName", android.os.Build.MODEL)
-                        .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1).put("pitwallOverlays", 1))
+                        .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1)
+                        .put("pitwallOverlays", 1).put("pitwallCaptions", 1))
                 }
                 protocol.INITIAL -> {
                     require(body?.optInt("pitwallScene") == 1) { "This receiver cannot arrange Pitwall video windows" }
@@ -318,6 +365,7 @@ class AppState(
                         localTimingSupported = body?.optInt("pitwallOverlays") == 1
                         localWidevineSupported = body?.optInt("pitwallWidevine") == 1
                         localDirectSupported = body?.optInt("pitwallDirect") == 1
+                        localCaptionsSupported = body?.optInt("pitwallCaptions") == 1
                         localReady = true; castBusy = false
                         startFullSceneCast()
                     }
@@ -447,6 +495,7 @@ class AppState(
         if (castPlaybackHandedOff || !castingActive) return
         if (!localChosen) remoteCastClock.update(castFramePositionMs, playing, playbackSpeed, castRelay!!.session.durationUs / 1000)
         castPlaybackHandedOff = true
+        sendCaptionPreferenceToReceiver()
         tiles.forEach { it.feed.suspendForRemotePlayback(true) }
         if ((nativeComposedCast != null || directCast != null) && (protectedCompositionHost != null || f1DashCaptureJob != null)) {
             stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
@@ -946,7 +995,8 @@ class AppState(
         else runCatching { googleCastRemoteClient?.stop() }
         localConnectionJob?.cancel(); localConnectionJob = null
         val previous = localConnection; localConnection = null; previous?.close()
-        localReady = false; localTimingSupported = false; localWidevineSupported = false; localDirectSupported = false; localChosen = false; googleCastSelected = false
+        localReady = false; localTimingSupported = false; localWidevineSupported = false
+        localDirectSupported = false; localCaptionsSupported = false; localChosen = false; googleCastSelected = false
         app.apexview.cast.local.CastConnectionService.stop(context)
         releaseCastRelay(resumeLocal); castBusy = false
         castStatus = "Casting stopped."
@@ -1374,6 +1424,9 @@ class AppState(
      * its limit shows video in the main feed only.
      */
     fun applyVideoBudget() {
+        // Only changes Media3's text track selector when preference/owner changed.
+        // Explicitly preserve the video decoder budget in every rendering mode.
+        applyCaptionPreference()
         if (castPlaybackHandedOff) {
             tiles.forEach { it.feed.suspendForRemotePlayback(true) }
             return
@@ -3562,8 +3615,9 @@ class AppState(
         entitlement = api.entitlement.orEmpty(),
         userAgent = userAgent,
         forceL3 = settings.softwareDrm,
-        subtitles = settings.subtitles,
+        subtitles = false,
         commentary = settings.commentary,
+        captionLanguage = settings.captionLanguage,
         startWithVideo = startWithVideo && !castPlaybackHandedOff,
         videoQuality = settings.videoQualityForFeed(stream.profileLabel),
         startMs = startMs,
@@ -5641,6 +5695,7 @@ class AppState(
         if (byUser) mutedAll = false
         if (nativeComposedCast != null) {
             tiles.forEach { it.audible = it === tile }
+            applyCaptionPreference()
             prepareNativeComposedCast(tiles.toList())
             return
         }
@@ -5665,6 +5720,7 @@ class AppState(
         if (castPlaybackHandedOff) {
             if (byUser) mutedAll = false
             tiles.forEach { it.audible = it === tile }
+            applyCaptionPreference()
             return
         }
         if (singleDecoderSceneActive) {
@@ -5676,6 +5732,7 @@ class AppState(
             if (byUser) mutedAll = false
             tiles.forEach { it.audible = it === tile; it.feed.setAudible(false) }
             owner.setAudible(!mutedAll && !castingActive)
+            applyCaptionPreference()
             return
         }
         if (byUser) mutedAll = false
@@ -5683,6 +5740,7 @@ class AppState(
             it.audible = it === tile
             it.feed.setAudible(it.audible && !mutedAll && !castingActive)
         }
+        applyCaptionPreference()
     }
 
     /** Silences every feed, keeping track of which one had the audio for when it's turned back on. */
@@ -6124,6 +6182,10 @@ class AppState(
             android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> if (first) togglePlay()
             android.view.KeyEvent.KEYCODE_MEDIA_PLAY -> if (first && !playing) togglePlay()
             android.view.KeyEvent.KEYCODE_MEDIA_PAUSE -> if (first && playing) togglePlay()
+            android.view.KeyEvent.KEYCODE_CAPTIONS -> if (first) {
+                setCaptionsEnabled(!settings.subtitles)
+                captionsSheetOpen = true
+            }
             android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> if (down) remoteSkip(event, 10_000)
             android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> if (down) remoteSkip(event, -10_000)
             android.view.KeyEvent.KEYCODE_DPAD_LEFT, android.view.KeyEvent.KEYCODE_DPAD_RIGHT,

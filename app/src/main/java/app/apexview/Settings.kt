@@ -53,6 +53,9 @@ class Settings(context: Context) {
         private set
     var subtitles by mutableStateOf(prefs.getBoolean("subtitles", false))
         private set
+    /** Auto follows commentary; explicit language only selects real offered F1 text tracks. */
+    var captionLanguage by mutableStateOf(CaptionPolicy.normalizeLanguage(prefs.getString("captionLanguage", CaptionPolicy.AUTO)))
+        private set
     var commentary by mutableStateOf(prefs.getString("commentary", "en") ?: "en")
         private set
     var showStats by mutableStateOf(prefs.getBoolean("showStats", false))
@@ -120,6 +123,10 @@ class Settings(context: Context) {
     fun updatePlatform(value: String) { platform = value; prefs.edit().putString("platform", value).apply() }
     fun updateSoftwareDrm(value: Boolean) { softwareDrm = value; prefs.edit().putBoolean("softwareDrm", value).apply() }
     fun updateSubtitles(value: Boolean) { subtitles = value; prefs.edit().putBoolean("subtitles", value).apply() }
+    fun updateCaptionLanguage(language: String) {
+        captionLanguage = CaptionPolicy.normalizeLanguage(language)
+        prefs.edit().putString("captionLanguage", captionLanguage).apply()
+    }
     fun updateCommentary(value: String) { commentary = value; prefs.edit().putString("commentary", value).apply() }
     fun updateShowStats(value: Boolean) { showStats = value; prefs.edit().putBoolean("showStats", value).apply() }
     fun updateVotePrompt(value: Boolean) { votePrompt = value; prefs.edit().putBoolean("votePrompt", value).apply() }

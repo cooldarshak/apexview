@@ -7,6 +7,90 @@ performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
+
+## Mandatory hard rule: universal parity and Closed Captions (new gate 16)
+
+**Source-of-truth rule for every future change, not an optional regression check:**
+Verify both decoder preferences (SINGLE/MULTIPLE), clear HEVC and legitimate
+Widevine-protected HEVC (device L1 or supported L3), standalone Android phone
+and Android TV, and phone-to-TV Pitwall Cast. This applies equally to UI,
+video, map, tower, audio, seek, subtitles, player lifecycle and diagnostics.
+No change may silently remove a feature or substitute multiple decoders for
+the strict one-decoder composition. Keep F1 license/entitlement intact, no
+unauthorized decryption, and do not use proprietary Tiledmedia/ClearVR SDKs.
+
+**Closed Captions from the player itself** is gate **16**, separate from the
+original fourteen engineering workstreams and the Material 3 Expressive gate.
+It is NOT closed by successful compilation or a settings toggle.
+
+Coordinated caption implementation:
+- CC on/off and source-advertised language selector in the full player on
+  phone/TV, persisted and immediately applied to the current Media3 text
+  renderer without restarting video. The existing Settings switch now uses
+  the same live control rather than applying only to future sessions.
+- Read Media3's actual supported TRACK_TYPE_TEXT groups, not a hardcoded list
+  of supposedly available F1 subtitle languages. Report when none is offered.
+  The preferred text language follows commentary in Auto mode. Never invent
+  captions, translate without content or assert F1 always provides English CC.
+- Standard standalone one/multiple-decoder PlayerView tiles already contain
+  Media3 SubtitleView. Enable only the selected programme/audio owner's text
+  renderer, to avoid captions repeated over every onboard.
+- For the clear archived composed one-decoder HEVC scene, preserve the original
+  authorized audio source's *audio and text track types* in MergingMediaSource.
+  For protected composed video, use the original audio-master's offered cues
+  when available; neither path adds a video decoder or modifies the HEVC,
+  DRM, license session, composition or protected output surface.
+- Retain the native, font-scale-respecting Media3 SubtitleView on custom
+  GLES-scene output, subscribing to the authorized player's CueGroup and
+  cleaning the listener on player/generation disposal. Do not capture,
+  transmit or store protected subtitle content in diagnostics.
+- Pitwall TV local receiver advertises an explicit captions capability
+  and accepts a bounded caption selection command. Caption-on and language
+  settings are applied to the receiver's own authorized Media3 source,
+  including legitimate protected direct TV playback. For a decoded scene
+  without a native PlayerView, render its actual Media3 text cues over the
+  independently composited HEVC surface. A hardware CC remote key works
+  on both the standalone viewer and the TV receiver.
+- Clear baked phone Cast includes authorized on-screen captions only if they
+  are actually shown in the PixelCopy source. The receiver does not re-create
+  fabricated captions. Older Pitwall TV receivers have no capability bit
+  and remain playable; updating the TV is required for remote CC controls.
+  Google Cast composed HEVC video and protected multi-feed receiver sources
+  that offer **no subtitle track** still lack a verified source-preserving CC
+  delivery path. That is an OPEN implementation/acceptance item, not success.
+
+### Universal release CC / playback verification matrix (all rows required)
+
+| Decoder preference | HEVC source | Playback destination | Caption acceptance |
+| --- | --- | --- | --- |
+| SINGLE | Clear archive | Phone | Selected real F1 captions in composed scene, on/off/lang/seek/speed |
+| SINGLE | Widevine CBCS | Phone | Selected authorised cue owner above secure surface, no extra decoder |
+| SINGLE | Clear/Widevine | TCL TV standalone | Exact same above, no video black frames and remote CC |
+| MULTIPLE | Clear/Widevine | Phone | Media3 PlayerView CC only on selected source; all feeds survive |
+| MULTIPLE | Clear/Widevine | TCL TV standalone | Same, remote focus, no video/frame loss |
+| SINGLE/MULTIPLE | Clear baked full-picture | Phone-to-TV Pitwall Cast | Actual captions captured in baked scene, no second overlay |
+| SINGLE/MULTIPLE | Widevine direct | Phone-to-TV Pitwall Cast | TV entitlement, receiver's native text track, CC control |
+| SINGLE/MULTIPLE | Clear/Widevine native composed | Phone-to-TV Pitwall Cast | Verified text track/cue delivery on receiver; gap OPEN if source absent |
+| SINGLE/MULTIPLE | Clear scene Google Cast | Phone-to-TV | Verify caption availability in receiver media; gap OPEN if absent |
+
+For every applicable row, check captions Off/Auto/available languages,
+play/pause, 10s seek, playback speed, audio switches, buffering, track
+replacement and updated installed version in-place. Include video-only,
+map-only, tower-only and video+map+tower on TCL 55C655. Measure video
+SurfaceFlinger presentation separately from Compose-caption layout and
+the native Cast driver-dot movement. Real F1 sources and logs are required.
+**Do not close gate 16 until all applicable entries pass on actual hardware.**
+
+**Progress accounting:** The fourteen-workstream engineering baseline
+remains provisional at 66%. Material 3 was separately ~25% before the recent
+browse/settings refinements and remains unaccepted. With captions added,
+**strict full-release acceptance is 1/16 gates closed**, not 100% or 16/16.
+The existing '1/14' and '1/15' figures below are historical baselines and
+must not be interpreted as current project-level release sign-off.
+Even a fully green CI validates implementation contracts, not F1's actual
+subtitle renditions, OEM Widevine or sustained TCL compositor performance.
+
+
 ## Coordinated post-699 engineering corrections
 
 Source changes following the Build 699 baseline:

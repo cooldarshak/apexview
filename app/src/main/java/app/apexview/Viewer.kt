@@ -548,7 +548,7 @@ fun ViewerScreen(app: AppState) {
 
         val fade = motion
         val topBand = with(density) { 64.dp.toPx() }
-        val bottomBand = with(density) { 110.dp.toPx() }
+        val bottomBand = with(density) { 150.dp.toPx() }
         AnimatedVisibility(
             app.chromeVisible,
             Modifier.zIndex(CHROME_Z).align(Alignment.TopCenter),
@@ -586,6 +586,7 @@ fun ViewerScreen(app: AppState) {
     if (app.layoutSheetOpen) LayoutSheet(app)
     if (app.speedSheetOpen) SpeedSheet(app)
     if (app.qualitySheetOpen) VideoQualitySheet(app)
+    if (app.captionsSheetOpen) ClosedCaptionsSheet(app)
     LaptopPrompt(app)
 }
 
@@ -815,7 +816,15 @@ private fun BottomChrome(app: AppState, cutout: Clearance) {
             } else {
                 Text("−" + clock((duration - shown).coerceAtLeast(0)), style = Type.footnote.copy(color = Ink.primary))
             }
-            Spacer(Modifier.width(4.dp))
+            Glyph(if (app.mutedAll) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp, if (app.mutedAll) "Unmute" else "Mute all", modifier = Modifier.helpAnchor(app, "mute"), onClick = app::toggleMuteAll)
+        }
+        // Video controls stay on the first row at narrow phone and Android TV widths.
+        // Quality, speed and CC form a separate focusable row instead of overflowing it.
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             // The speed, always shown; bright when it isn't normal.
             Text(
                 "Quality ${app.settings.videoQuality.label}",
@@ -836,7 +845,24 @@ private fun BottomChrome(app: AppState, cutout: Clearance) {
                     .pressable { app.speedSheetOpen = true; app.showChrome() }
                     .padding(8.dp),
             )
-            Glyph(if (app.mutedAll) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp, if (app.mutedAll) "Unmute" else "Mute all", modifier = Modifier.helpAnchor(app, "mute"), onClick = app::toggleMuteAll)
+            Text(
+                if (app.settings.subtitles) "CC on" else "CC off",
+                style = Type.footnote.copy(
+                    color = Ink.primary,
+                    fontWeight = FontWeight.SemiBold,
+                ),
+                modifier = Modifier
+                    .tvFocusRing()
+                    .semantics {
+                        contentDescription = if (app.settings.subtitles)
+                            "Closed captions on. Choose caption track"
+                        else "Closed captions off. Choose caption track"
+                    }
+                    .pressable { app.captionsSheetOpen = true; app.showChrome() }
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (app.settings.subtitles) Ink.accent else Ink.surfaceHigh)
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+            )
         }
     }
 }
@@ -1045,6 +1071,10 @@ internal fun PlaybackVideoCanvas(
             } }, update = { it.bind(host.player, scene, app.playbackSpeed) },
                 onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
         }
+            // Custom clear HEVC and Widevine HEVC scenes do not host PlayerView.
+            // Display only actual Media3 cues above the single decoded surface.
+            ComposedCaptionOverlay(app.captionSourceFeed?.player, app.settings.subtitles,
+                Modifier.fillMaxSize())
             if (!composedGlReady) {
                 Box(Modifier.fillMaxSize().background(Color(0xFF101017)),
                     contentAlignment = Alignment.Center) {
@@ -1657,6 +1687,77 @@ private fun SpeedSheet(app: AppState) {
             if (app.playbackSpeed != 1f) Row(Modifier.padding(top = 16.dp)) {
                 SecondaryButton("Back to normal speed") { app.chooseSpeed(1f); app.speedSheetOpen = false }
             }
+        }
+    }
+}
+
+
+/** Track choices are discovered from the authorized F1 manifest, not assumed languages. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ClosedCaptionsSheet(app: AppState) {
+    ModalBottomSheet(
+        onDismissRequest = { app.captionsSheetOpen = false },
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = Ink.surface,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+    ) {
+        KeepSystemBarsHidden()
+        val focus = remember { FocusRequester() }
+        LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+        Column(
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                .navigationBarsPadding().padding(horizontal = 20.dp, vertical = 12.dp)
+                .padding(bottom = 24.dp),
+        ) {
+            Text("Closed captions", style = Type.title2)
+            Text(
+                "Captions are shown only when F1 offers a text track for the selected feed. " +
+                    "They follow your playback position and are independent of the video decoder.",
+                style = Type.footnote,
+                modifier = Modifier.padding(top = 8.dp, bottom = 18.dp),
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Show captions", style = Type.body, modifier = Modifier.weight(1f))
+                androidx.compose.material3.Switch(
+                    checked = app.settings.subtitles,
+                    onCheckedChange = app::setCaptionsEnabled,
+                    modifier = Modifier.focusRequester(focus).tvFocusRing(),
+                )
+            }
+            Text("F1 caption track", style = Type.subhead,
+                modifier = Modifier.padding(top = 18.dp, bottom = 8.dp))
+            val choices = listOf(CaptionTrackOption(CaptionPolicy.AUTO, "Automatic")) +
+                app.currentCaptionTracks.filter { it.language != CaptionPolicy.AUTO }
+            if (app.currentCaptionTracks.isEmpty()) {
+                Text(
+                    "No caption track has been advertised by the current feed yet. " +
+                        "You can enable CC now and it will appear if F1 supplies one.",
+                    style = Type.footnote,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
+            }
+            choices.forEach { track ->
+                val selected = app.settings.subtitles && app.settings.captionLanguage == track.language
+                Row(
+                    Modifier.fillMaxWidth()
+                        .tvFocusRing()
+                        .pressable { app.setCaptionLanguage(track.language) }
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(if (selected) Ink.surfaceHigh else Color.Transparent)
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(track.label, style = Type.body, modifier = Modifier.weight(1f))
+                    if (selected) Text("Selected", style = Type.footnote.copy(color = Ink.accent))
+                }
+            }
+            Text(
+                "For Pitwall Cast, the TV uses captions available in its authorized stream. " +
+                    "If the TV video contains no text track, captions cannot be invented.",
+                style = Type.footnote,
+                modifier = Modifier.padding(top = 14.dp),
+            )
         }
     }
 }
