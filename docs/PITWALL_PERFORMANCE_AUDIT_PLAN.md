@@ -188,6 +188,27 @@ Source changes following the Build 699 baseline:
 - The runtime/toolchain migration gate is not closed until all 638+ tests,
   APK assembly, synthetic HEVC and receiver tests pass together.
 
+## Build 710–720 CI regression, root cause and coordinated correction
+
+**Not a release acceptance**. Builds 710–716 initially failed for Kotlin DSL
+migration, AAR metadata or unsupported Compose symbol mismatches introduced by
+the coordinated build-tool / targetSdk / Material update. Those compilation
+issues were resolved by Build 719, which reached the test execution phase.
+
+- Build 719 failed Robolectric test *initialization*: targetSdkVersion=36
+  exceeded test runtime maxSdkVersion=35. This is a test SDK selection mismatch,
+  not a failing assertion about playback. Robolectric 4.16.1 supports SDK 36
+  with JDK 21; set the test runtime SDK to 36 explicitly.
+- Build 720 compiled Kotlin and test code but Maven Central returned 429 for
+  `org.robolectric:nativeruntime-dist-compat:1.0.18` while populating the JVM
+  test classpath. The dependency was not downloaded, so tests never ran.
+- Keep compile/target API 36. Prefer the maintained Google-hosted Maven Central
+  mirror ahead of `mavenCentral()` and set the Robolectric runtime SDK to 36.
+  Do NOT suppress test execution, disable flaky-test evidence, or revert the
+  platform upgrade to mask a test-infrastructure issue.
+- Close this gate only after all JVM and instrumentation tests and signed APK
+  artifact finish on the same new branch commit.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**

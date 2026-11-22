@@ -104,6 +104,11 @@ android {
             // documented mirror of Maven Central for these runtime-only test SDK jars.
             it.systemProperty("robolectric.dependency.repo.url", "https://maven-central.storage-download.googleapis.com/maven2")
             it.systemProperty("robolectric.dependency.repo.id", "googleMavenCentralMirror")
+            // Robolectric 4.16.1 supports Android 16 / API 36 on JDK 21. Some
+            // tests inherit an older maximum SDK from Compose test libraries.
+            // Run the application test runtime on API 36 explicitly instead
+            // of downgrading the shipping targetSdk or skipping tests.
+            it.systemProperty("robolectric.enabledSdks", "36")
         }
     }
 
