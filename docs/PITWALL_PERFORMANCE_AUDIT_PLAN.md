@@ -61,6 +61,20 @@ Source changes following the Build 699 baseline:
 - Cast, protected and clear renderer ownership remains in their dedicated
   classes; further coordinator extraction and instrumentation are still open.
 
+## Clear baked Cast: independent encoder scheduler
+
+- Window PixelCopy and AVC encoder GL texture upload, codec output draining
+  and transport sampling run on `PitwallBakedCastEncoder`, with an independent
+  EGL context. The 50 fps HEVC scene renderer no longer executes 25 fps
+  capture and codec work on its time-critical decoder-latch GL looper.
+- This retains complete visible viewer capture, including Compose timing tower
+  and map, and explicitly refuses protected windows. Widevine HEVC continues
+  to use receiver-side entitlement and secure surfaces.
+- Added measured capture/encode interval logs and deterministic 25 fps pacing
+  regression. PixelCopy still incurs a window copy and CPU upload on its own
+  worker, so a verified direct-GPU route may be required if actual device
+  measurements exceed the performance budget.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**
