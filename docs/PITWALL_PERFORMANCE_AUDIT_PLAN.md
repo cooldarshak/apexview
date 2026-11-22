@@ -179,6 +179,15 @@ Source changes following the Build 699 baseline:
   scene choice remain independent. Pure regression tests cover mixed-size
   and equal-size source layouts and quality-ceiling disclosure.
 
+## Android 16 test toolchain compatibility
+
+- CI's 638 JVM test cases compiled under the Android 36 target, but six
+  Robolectric-runner cases failed because version 4.14 only understands SDK
+  targets through API 35. Use Robolectric 4.16.1, which supports API 36,
+  and JDK 21 for the Android 16 test SDK. Kotlin/JVM app bytecode remains 17.
+- The runtime/toolchain migration gate is not closed until all 638+ tests,
+  APK assembly, synthetic HEVC and receiver tests pass together.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**

@@ -161,7 +161,7 @@ dependencies {
     // Real org.json for JVM tests; android.jar only has stubs.
     testImplementation("org.json:json:20240303")
     // Compose on the JVM, for what a remote's arrow keys reach.
-    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
