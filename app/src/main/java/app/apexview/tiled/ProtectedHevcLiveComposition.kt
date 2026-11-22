@@ -135,14 +135,15 @@ internal object ProtectedHevcLiveComposition {
         var outputParametersKey: Pair<List<List<String>>, HevcOutputParameterSetWriter.Request>? = null
         var outputParameters: HevcOutputParameterSetWriter.Output? = null
         val feeds = labels.associateWith(::FeedState)
-        var status: String = "WAITING_FOR_ACTIVE_PROTECTED_INIT_SEGMENTS"
+        @Volatile var status: String = "WAITING_FOR_ACTIVE_PROTECTED_INIT_SEGMENTS"
         var outputInitializationSegment: ByteArray? = null
         var outputRepresentationSignature: String? = null
         var outputSequenceNumber: Long = 1L
         var lastComposedMasterSequenceOrdinal: Long = -1L
         val outputHistory = mutableListOf<OutputFragment>()
-        var composedFragments: Long = 0L
-        var lastFailure: String? = null
+        @Volatile var composedFragments: Long = 0L
+        @Volatile var lastFailure: String? = null
+        @Volatile var hasPublishedOutput: Boolean = false
 
         fun clear() {
             feeds.values.forEach(FeedState::clearAll)
@@ -155,6 +156,7 @@ internal object ProtectedHevcLiveComposition {
             outputParameters = null
             outputHistory.forEach(OutputFragment::zero)
             outputHistory.clear()
+            hasPublishedOutput = false
             status = "CLEARED"
         }
     }
@@ -169,6 +171,10 @@ internal object ProtectedHevcLiveComposition {
     private val pendingInitializations =
         linkedMapOf<String, LinkedHashMap<String, PendingInitialization>>()
     private val sessions = linkedMapOf<String, Session>()
+    // Immutable membership index. UI diagnostics read only volatile scalar fields, never
+    // the mutable HEVC sample/fragment maps. This prevents multi-second composition from
+    // blocking the main thread when it asks for status or first-output readiness.
+    @Volatile private var sessionIndex: Map<String, Session> = emptyMap()
 
     @Synchronized
     fun selectFeeds(
@@ -206,17 +212,20 @@ internal object ProtectedHevcLiveComposition {
             val oldest = sessions.keys.first()
             sessions.remove(oldest)?.clear()
         }
+        sessionIndex = sessions.toMap()
     }
 
     @Synchronized
     fun clearSelection(group: String, discardInitialization: Boolean = false) {
         sessions.remove(group)?.clear()
+        sessionIndex = sessions.toMap()
         if (discardInitialization) pendingInitializations.remove(group)?.values?.forEach(PendingInitialization::zero)
     }
 
     @Synchronized
     fun clearAll(retainGroups: Set<String> = emptySet()) {
         sessions.keys.filter { it !in retainGroups }.forEach { sessions.remove(it)?.clear() }
+        sessionIndex = sessions.toMap()
         pendingInitializations.keys.filter { it !in retainGroups }.forEach { group ->
             pendingInitializations.remove(group)?.values?.forEach(PendingInitialization::zero)
         }
@@ -275,8 +284,7 @@ internal object ProtectedHevcLiveComposition {
         }
     }
 
-    @Synchronized
-    fun status(group: String): String = sessions[group]?.let { session ->
+    fun status(group: String): String = sessionIndex[group]?.let { session ->
         buildString {
             append(session.status)
             append("; feeds=")
@@ -291,8 +299,7 @@ internal object ProtectedHevcLiveComposition {
     } ?: "PROTECTED_COMPOSITION_NOT_SELECTED"
 
     /** Typed access for preflight, so callers do not parse the diagnostic status string. */
-    @Synchronized
-    fun rejectionReason(group: String): String? = sessions[group]?.lastFailure
+    fun rejectionReason(group: String): String? = sessionIndex[group]?.lastFailure
 
     /** Returns the latest output for diagnostics and one-fragment playback. */
     @Synchronized
@@ -333,11 +340,7 @@ internal object ProtectedHevcLiveComposition {
     @Synchronized
     fun outputTiming(group: String): CmafWindowTiming? = sessions[group]?.let { CmafWindowTiming.from(it.outputHistory) }
 
-    @Synchronized
-    fun hasOutput(group: String): Boolean =
-        sessions[group]?.let {
-            it.outputInitializationSegment != null && it.outputHistory.isNotEmpty()
-        } == true
+    fun hasOutput(group: String): Boolean = sessionIndex[group]?.hasPublishedOutput == true
 
     private fun cacheInitialization(
         group: String,
@@ -430,6 +433,7 @@ internal object ProtectedHevcLiveComposition {
             session.lastComposedMasterSequenceOrdinal = -1L
             session.outputHistory.forEach(OutputFragment::zero)
             session.outputHistory.clear()
+            session.hasPublishedOutput = false
         }
         state.initializationSegment?.fill(0)
         state.initializationSegment = bytes.copyOf()
@@ -1033,6 +1037,8 @@ internal object ProtectedHevcLiveComposition {
             session.lastComposedMasterSequenceOrdinal =
                 newMatches.last().sampleEvidenceByFeed.getValue(masterFeedId).sequenceSampleOrdinal
             session.composedFragments = Math.addExact(session.composedFragments, 1L)
+            // Publish this scalar only after the bounded history and valid init are complete.
+            session.hasPublishedOutput = true
             session.status = "REAL_PROTECTED_F1_CMAF_COMPOSED_NOT_YET_PLAYED"
             session.lastFailure = null
             val allocated = allocatedAtStart?.let { before ->
