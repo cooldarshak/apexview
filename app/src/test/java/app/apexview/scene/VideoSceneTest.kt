@@ -77,6 +77,38 @@ class VideoSceneTest {
         )
     }
 
+    @Test fun protectedFourFeed3840By2176WideAtlasMapsEach1080And540Picture() {
+        // Real Build 674's heavy Las Vegas qualities produce a 3840x2176 picture
+        // with three 1920x1088 coded sources and a 960x544 coded source.
+        // No second video decoder is needed to display four independently
+        // positioned output windows. The actual camera crop rectangles are
+        // established at runtime from independently validated HEVC SPS metadata.
+        val width = 2316f
+        val height = 1080f
+        val sourceRects = listOf(
+            VideoSourceRect(0, 0, 1920, 1080),
+            VideoSourceRect(1920, 0, 1920, 1080),
+            VideoSourceRect(0, 1088, 1920, 1080),
+            VideoSourceRect(1920, 1088, 960, 540),
+        )
+        val windows = Layouts.withCombinedOverlays(
+            LayoutMode.TV, 4, width, height, OverlayLayoutMode.DOCKED
+        ).slots.mapIndexed { index, slot ->
+            VideoWindow(90 + index, index, slot.x, slot.y, slot.w, slot.h, index.toFloat())
+        }
+        val scene = VideoScene(width, height, 3840, 2176, 4, windows,
+            atlasColumns = 2, sourceCodedWidth = 1920, sourceCodedHeight = 1088,
+            sourceDisplayWidth = 1920, sourceDisplayHeight = 1080,
+            sourceRects = sourceRects, sourceFrameRate = 50.0)
+        val quads = scene.quads()
+        assertEquals(4, quads.size)
+        assertEquals(4, quads.map { it.texture.toList() }.distinct().size)
+        assertEquals(windows.map { it.id }, quads.map { it.id })
+        assertTrue(quads.all { q -> q.texture.all { it in 0f..1f } })
+        assertTrue(quads[0].texture[2] < quads[1].texture[0])
+        assertTrue(quads[2].texture[2] < quads[3].texture[0])
+    }
+
     @Test fun sourceEdgesCannotSamplePixelsFromAnAdjacentCamera() {
         val scene = VideoScene(1920f, 1080f, 2880, 540, 3,
             (0..2).map { VideoWindow(it, it, 0f, 0f, 960f, 540f, it.toFloat()) })
