@@ -85,6 +85,13 @@
             android:name=".RecordingReceiver"
             android:exported="false" />
 
+        <!-- Explicit PackageInstaller PendingIntent target. Unlike an
+             Activity-scoped dynamic receiver, this survives rotations and
+             process death while the user is confirming an update. -->
+        <receiver
+            android:name=".PitwallInstallStatusReceiver"
+            android:exported="false" />
+
         <service
             android:name=".cast.local.CastConnectionService"
             android:exported="false"

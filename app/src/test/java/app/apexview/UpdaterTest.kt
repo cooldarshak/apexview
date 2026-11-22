@@ -22,6 +22,15 @@ class UpdaterTest {
     }
 
     @Test
+    fun installerResultIsBoundedAndKeepsItsOwnAppAction() {
+        assertTrue(InstallStatusProtocol.uiAction("app.apexview_custom").startsWith("app.apexview_custom."))
+        val longFailure = "No install permission " + "x".repeat(1000)
+        val result = InstallStatusProtocol.failureMessage(longFailure)
+        assertTrue(result.contains("No install permission"))
+        assertTrue(result.length < 260)
+    }
+
+    @Test
     fun versionsCompareByNumberNotText() {
         assertTrue(Updater.isNewer("0.36", "0.35"))
         assertTrue(Updater.isNewer("0.100", "0.99"))

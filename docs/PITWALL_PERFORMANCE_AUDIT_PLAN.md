@@ -36,10 +36,13 @@ Pitwall Cast physical marker cadence, secure captions, or any unverified gate.
   only cooldarshak/apexview. Manual candidate/publish pipeline checks exact
   commit, green CI run, acceptance issue evidence, signed certificate and
   checksum before publishing. No automatic production releases.
-- Keep updater branding consistent with Pitwall TV and clean up its
-  application BroadcastReceiver with AppState lifecycle, including rotation.
-  Retain all release asset-origin, checksum, certificate and Android version
-  verification.
+- Keep updater branding consistent with Pitwall TV. A manifest-declared,
+  non-exported explicit PackageInstaller result receiver survives activity
+  recreation and app-process death; it opens Android's user confirmation,
+  records bounded failures for next launch and notifies the active UI through
+  a private in-app status action. The Compose listener is disposed with
+  AppState and retains application context only. Retain asset-origin,
+  checksum, certificate and Android version verification.
 - On actual TCL standalone single-feed/map/tower playback, log five-second
   decoder rendered/dropped buffer deltas and media-clock progression alongside
   play-state, L3 and video dimensions. These counts distinguish stalled

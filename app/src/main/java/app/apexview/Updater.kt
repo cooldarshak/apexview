@@ -60,7 +60,9 @@ class Release(
  * to confirm (and, the first time, to allow this app to install updates). Releases must be signed
  * with the same key as the installed app, or Android refuses them.
  */
-class Updater(private val context: Context, private val scope: CoroutineScope) {
+class Updater(context: Context, private val scope: CoroutineScope) {
+    // Never retain an Activity across installer confirmation or rotation.
+    private val context = context.applicationContext
     private val prefs = context.getSharedPreferences("updates", Context.MODE_PRIVATE)
     private val http = OkHttpClient()
 
@@ -75,27 +77,26 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
         private set
 
     private val statusAction = context.packageName + ".INSTALL_STATUS"
+    private val statusUiAction = InstallStatusProtocol.uiAction(context.packageName)
 
     // Register on application context and release on AppState.close(), including
     // configuration changes. Keeping one anonymous receiver for every recreated
     // activity leaked the old updater and its held activity context.
     private val statusReceiver = object : BroadcastReceiver() {
-                override fun onReceive(c: Context, intent: Intent) {
-                    when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
-                        PackageInstaller.STATUS_PENDING_USER_ACTION -> {
-                            @Suppress("DEPRECATION")
-                            val confirm = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
-                            else intent.getParcelableExtra(Intent.EXTRA_INTENT)
-                            confirm?.let { context.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-                        }
-                        PackageInstaller.STATUS_SUCCESS -> progress = null
-                        else -> {
-                            progress = null
-                            note = "The update didn't install: " +
-                                (intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "Android refused it")
-                        }
-                    }
+        override fun onReceive(c: Context, intent: Intent) {
+            when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
+                PackageInstaller.STATUS_SUCCESS -> {
+                    progress = null
+                    prefs.edit().remove(InstallStatusProtocol.PREF_FAILED_RESULT).apply()
                 }
+                PackageInstaller.STATUS_PENDING_USER_ACTION -> Unit // The persistent receiver opens system confirmation.
+                else -> {
+                    progress = null
+                    note = InstallStatusProtocol.failureMessage(intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE))
+                    prefs.edit().remove(InstallStatusProtocol.PREF_FAILED_RESULT).apply()
+                }
+            }
+        }
     }
 
     init {
@@ -104,7 +105,7 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
         ContextCompat.registerReceiver(
             context.applicationContext,
             statusReceiver,
-            IntentFilter(statusAction),
+            IntentFilter(statusUiAction),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
     }
@@ -115,6 +116,12 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
 
     /** On launch. */
     fun checkOnLaunch() {
+        // The manifest receiver can finish while no Activity (and therefore no
+        // Compose state observer) is alive; surface failures on next launch.
+        prefs.getString(InstallStatusProtocol.PREF_FAILED_RESULT, null)?.let { failure ->
+            note = failure
+            prefs.edit().remove(InstallStatusProtocol.PREF_FAILED_RESULT).apply()
+        }
         scope.launch { check(quiet = true) }
     }
 
@@ -271,7 +278,7 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
                 session.fsync(out)
             }
             val status = PendingIntent.getBroadcast(
-                context, id, Intent(statusAction).setPackage(context.packageName),
+                context, id, Intent(statusAction).setClass(context, PitwallInstallStatusReceiver::class.java),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
             )
             session.commit(status.intentSender)
