@@ -46,6 +46,9 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     private val vodPlaylists = java.util.concurrent.ConcurrentHashMap<String, HlsMediaPlaylist>()
     private val initializations = java.util.concurrent.ConcurrentHashMap<String, Init>()
     private val actual = java.util.concurrent.ConcurrentHashMap<String, ManifestProtocol>()
+    // Emit source-quality changes immediately, but not the identical rendition
+    // snapshot on every 200-300ms rolling capture poll.
+    private val renditionDiagnostics = BoundedChangeLog()
     private val clearComposition = ClearCmafArchiveComposition(fullPictures = fullPictures)
     private val compositionDispatcher: ExecutorCoroutineDispatcher = Executors.newSingleThreadExecutor { task ->
         Thread({
@@ -246,10 +249,13 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 else chooseCommon(perFeed, preferredHeight = maximumHeight.takeIf { it <= 1080 },
                     minimumHeight = minimumCaptureHeight)
             format = selected.first().format
-            android.util.Log.i("ApexviewSingleDecoder", "REAL_HLS_RENDITIONS policy=${if (individual) "PER_FEED" else "COMMON"} " +
+            val renditionReport = "REAL_HLS_RENDITIONS policy=${if (individual) "PER_FEED" else "COMMON"} " +
                 selected.joinToString(", ") { offer ->
                     "${offer.feed.label}=${offer.format?.width ?: 0}x${offer.format?.height ?: 0}"
-                } + " protectedValidation=MANDATORY decoderCount=ONE")
+                } + " protectedValidation=MANDATORY decoderCount=ONE"
+            if (renditionDiagnostics.shouldLog(renditionReport, startedMs)) {
+                android.util.Log.i("ApexviewSingleDecoder", renditionReport)
+            }
             stage = "video-playlists"
             val playlists = coroutineScope { selected.map { offer -> async { loadMedia(offer) } }.awaitAll() }
             if (!live && playlists.any { !it.hasEndTag }) throw PermanentCaptureException("HLS single-decoder archive capture requires complete replay playlists")

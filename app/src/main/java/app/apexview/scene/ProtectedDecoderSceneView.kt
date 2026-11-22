@@ -164,14 +164,13 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         val lifetime = surfaceLifetime.advance()
-        val outputEpoch = outputReadiness.invalidate()
+        outputReadiness.invalidate()
         onOutputLost()
         val surface = holder.surface
         gl.post {
             // Android can destroy and recreate a surface before this callback
             // reaches the GL looper. Never initialize an old or invalid output.
-            if (!released && surfaceLifetime.matches(lifetime) &&
-                outputReadiness.generation() == outputEpoch && surface.isValid) {
+            if (!released && surfaceLifetime.matches(lifetime) && surface.isValid) {
                 guarded { initialize(surface); scheduleVideoFrame() }
             }
         }

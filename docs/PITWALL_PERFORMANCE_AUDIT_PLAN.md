@@ -30,6 +30,14 @@ Source changes following the Build 699 baseline:
 - The Widevine L1 secure SurfaceView can request the same seamless-only
   display frame-rate hint as L3 without altering the protected decoder path.
   Actual OEM acceptance remains required.
+- Rolling protected HLS source-quality reporting is now change-driven with
+  a five-second heartbeat rather than a repeating ~250ms log storm. A real
+  quality change is logged immediately; selection, validation, caps and DRM
+  remain unchanged.
+- Build 694 app-side diagnostics sampled the Android display at alternating
+  60Hz and 120Hz during sustained 50fps playback. This is evidence of mode
+  instability, NOT proof of a specific cause. Validate source frame-rate
+  hints, selected mode and physical display timing together after changes.
 - Test all changes in CI, and on phone, TV and both authorized Cast modes
   before marking their exit gates complete.
 
