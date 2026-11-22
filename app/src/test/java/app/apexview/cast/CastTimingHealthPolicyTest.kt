@@ -15,6 +15,7 @@ class CastTimingHealthPolicyTest {
         assertFalse(CastTimingHealthPolicy.healthy(400, 12_000, true, true, true))
         assertTrue(CastTimingHealthPolicy.healthy(400, 12_000, true, false, true))
         assertFalse(CastTimingHealthPolicy.healthy(-1, -1, true, true, true))
+        assertFalse(CastTimingHealthPolicy.healthy(-1, 50, false, true, true))
     }
 
     @Test fun bufferingOrPausedVideoDoesNotCreateFalseAlarm() {

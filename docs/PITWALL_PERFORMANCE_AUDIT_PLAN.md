@@ -38,7 +38,8 @@ extension so diagnostics can be recovered from the phone alone. This is an
 additive report that older senders ignore; it carries only scalar counters
 and the active playback ID, not credentials or video data. The phone no
 longer treats a single initial TIMING_UI_DRAWN event as proof of sustained
-freshness. Healthy map/tower status requires continuously fresh frames and
+freshness. A same-version 5-second table heartbeat refreshes transport freshness
+without reparsing or rerendering an unchanged tower. Healthy map/tower status requires continuously fresh frames and
 periodic table snapshots while video is playing. This distinguishes remote transport,
 timeline and renderer problems if TV still freezes. No packet schema,
 Widevine, codec, Cast format or driver timing semantics are changed.

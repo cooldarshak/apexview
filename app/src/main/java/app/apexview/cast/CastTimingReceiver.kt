@@ -88,7 +88,13 @@ internal class CastTimingReceiver {
             "table" -> {
                 require(j.getInt("version") == 1)
                 val id = j.getLong("id")
-                if (id <= tableId) return
+                if (id < tableId) return
+                if (id == tableId && currentTable != null) {
+                    // Periodic same-version snapshots are valid proof that the
+                    // tower transport is alive. Do not reparse or recompose rows.
+                    lastTableReceivedMs = SystemClock.elapsedRealtime()
+                    return
+                }
                 val updated = CastTimingProtocol.readTable(j.getJSONArray("rows"))
                 tableId = id
                 currentTable = updated

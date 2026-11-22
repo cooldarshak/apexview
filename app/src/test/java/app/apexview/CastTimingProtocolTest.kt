@@ -153,6 +153,11 @@ class CastTimingProtocolTest {
         assertEquals(285, receiver.currentTable!!.speeds.getValue("1").first)
         val health = receiver.health()
         assertEquals(2L, health.tablesAccepted)
+        receiver.accept(JSONObject().put("kind", "table").put("version", 1)
+            .put("playbackId", "new").put("id", 2).put("rows", nextRows), "new")
+        assertEquals(2L, receiver.health().tablesAccepted)
+        assertTrue("Same-version tower heartbeat remains fresh",
+            receiver.health().lastTableAgeMs >= 0L)
         assertEquals(1L, health.framesAccepted)
         // A frame using the old table must not overwrite a newer tower table.
         receiver.accept(frame(id).put("playbackId", "new").put("tableId", 1)

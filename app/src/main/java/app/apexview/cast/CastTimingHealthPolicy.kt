@@ -14,7 +14,9 @@ internal object CastTimingHealthPolicy {
         videoAdvancing: Boolean,
     ): Boolean {
         if (!videoAdvancing) return true
-        if (mapEnabled && frameAgeMs !in 0..1_500L) return false
+        // Even a tower-only display needs an accepted frame for validated panel
+        // geometry, scene clock and session header.
+        if ((mapEnabled || towerEnabled) && frameAgeMs !in 0..1_500L) return false
         if (towerEnabled && tableAgeMs !in 0..10_000L) return false
         return true
     }
