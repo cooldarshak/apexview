@@ -9,6 +9,27 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 737/738 coordinated official release hardening
+
+The published APK's monotonic version requires both release entry points to
+use the SAME signed candidate and manual 16-gate verification. The older
+`pitwall-approved-release.yml` remained a second independent publisher
+with an obsolete debug version expectation (`1.0.run` versus the current
+`1.0.(run*2)`); its source workflow must no longer attempt to publish.
+Retain its user-visible manual entry point as a reusable-workflow delegate
+to `official-release.yml`, with the actual accepted run, full hardware
+acceptance issue, signed candidate and explicit publish boolean.
+
+The official workflow's mandatory-secret validation previously contained
+an escaped Bash indirect parameter expansion: the nonempty test always
+received a literal string, so it did not detect missing signer secrets.
+Correct the expansion and execute the isolated EXACT shell block from
+Python CI tests under both complete and missing-secret environments.
+Never log credentials, remove the signature check, or auto-publish.
+
+Hardware evidence and the real signed release candidate are still required.
+Code/CI checks do NOT close the updater/signing acceptance gate.
+
 ## Build 737 coordinated TV map and receiver timing recovery
 
 Build 737 passed Kotlin, JVM, HEVC, APK assembly and emulator instrumentation,

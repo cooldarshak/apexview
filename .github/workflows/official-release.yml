@@ -23,6 +23,24 @@ on:
         type: boolean
         default: false
 
+  workflow_call:
+    inputs:
+      accepted_debug_run_id:
+        description: 'Green debug workflow run ID from this branch'
+        required: true
+        type: string
+      accepted_commit_sha:
+        description: 'Exact accepted source SHA'
+        required: true
+        type: string
+      hardware_acceptance_issue:
+        description: 'Closed issue with all 16 hardware/release gates'
+        required: true
+        type: string
+      publish:
+        description: 'Publish signed artifacts after acceptance'
+        required: true
+        type: boolean
 permissions:
   contents: write
   actions: read
@@ -103,7 +121,7 @@ jobs:
         run: |
           set -euo pipefail
           for key in APK_SIGNING_KEYSTORE_BASE64 APK_SIGNING_STORE_PASSWORD APK_SIGNING_KEY_ALIAS APK_SIGNING_KEY_PASSWORD SIGNER_SHA256; do
-            [[ -n "\${!key:-}" ]] || { echo "::error::Missing mandatory release secret $key"; exit 1; }
+            [[ -n "${!key:-}" ]] || { echo "::error::Missing mandatory release secret $key"; exit 1; }
           done
           [[ "$SIGNER_SHA256" =~ ^([a-fA-F0-9]{2}:){31}[a-fA-F0-9]{2}$|^[a-fA-F0-9]{64}$ ]] || exit 1
           keystore="$RUNNER_TEMP/pitwall-official-key.p12"
