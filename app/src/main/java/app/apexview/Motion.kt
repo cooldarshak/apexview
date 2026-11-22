@@ -42,7 +42,7 @@ fun Modifier.sharedArt(key: String?, cornerRadius: Int = 0): Modifier {
             enter = fadeIn(tween(Motion.SCREEN_MS, easing = EaseOut)),
             exit = fadeOut(tween(Motion.SCREEN_MS, easing = EaseOut)),
             boundsTransform = ArtBounds,
-            resizeMode = SharedTransitionScope.ResizeMode.ScaleToBounds(ContentScale.Crop),
+            resizeMode = SharedTransitionScope.ResizeMode.scaleToBounds(ContentScale.Crop),
             clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(cornerRadius.dp)),
         )
     }

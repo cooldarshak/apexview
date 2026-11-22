@@ -149,6 +149,13 @@ Source changes following the Build 699 baseline:
   its old atlas texture before the first new output. Never take an unrelated
   feed mapping or fall back to additional video decoders.
 
+## Compose shared-transition API modernization
+
+- Compose 1.11 replaced the deprecated `ResizeMode.ScaleToBounds`
+  constructor with `ResizeMode.scaleToBounds`. Preserve artwork-to-hero
+  shared element resize/crop transitions with the supported API rather than
+  removing motion or downgrading the rendering UI.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**
