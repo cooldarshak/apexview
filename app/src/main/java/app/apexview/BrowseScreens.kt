@@ -1058,8 +1058,14 @@ fun WeekendScreen(app: AppState, weekend: WeekendInfo, artKey: String?) {
                     WeekendSchedule(app, weekend, content.schedule, content.sessions, "Schedule")
                     Spacer(Modifier.height(28.dp))
                 }
-                content.rows.forEach { row ->
-                    item { VideoShelf(app, rowTitle(row.title), row.items, key = "w${weekend.meetingKey}-${row.title}") }
+                content.rows.forEachIndexed { index, row ->
+                    item(
+                        key = "weekend-${weekend.meetingKey}-shelf-${row.title}-$index",
+                        contentType = "video-shelf",
+                    ) {
+                        VideoShelf(app, rowTitle(row.title), row.items,
+                            key = "w${weekend.meetingKey}-${row.title}")
+                    }
                 }
             } else {
                 val sessionsShelf: @Composable () -> Unit = {
@@ -1108,7 +1114,11 @@ fun CollectionScreen(app: AppState, pageId: Int, title: String) {
     ) {
         item { Spacer(Modifier.height(20.dp)) }
         if (page == null) item { Text("Loading…", style = Type.subhead, modifier = Modifier.padding(horizontal = SidePadding)) }
-        page?.rows?.forEach { row -> item { VideoShelf(app, row.title, row.items, key = "c$pageId-${row.title}") } }
+        page?.rows?.forEachIndexed { index, row ->
+            item(key = "collection-$pageId-shelf-${row.title}-$index", contentType = "video-shelf") {
+                VideoShelf(app, row.title, row.items, key = "c$pageId-${row.title}")
+            }
+        }
     }
 }
 
@@ -1132,7 +1142,9 @@ fun ArchiveScreen(app: AppState) {
         item { Spacer(Modifier.height(20.dp)) }
         if (races == null) item { Text("Loading…", style = Type.subhead, modifier = Modifier.padding(horizontal = SidePadding)) }
         races.orEmpty().groupBy { it.year }.toSortedMap(compareByDescending { it }).forEach { (year, list) ->
-            item { VideoShelf(app, if (year > 0) "$year" else "More races", list, key = "archive-$year") }
+            item(key = "archive-shelf-$year", contentType = "video-shelf") {
+                VideoShelf(app, if (year > 0) "$year" else "More races", list, key = "archive-$year")
+            }
         }
     }
 }

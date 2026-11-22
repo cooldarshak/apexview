@@ -9,6 +9,128 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 737 six-feed log audit and Build 740 responsiveness execution baseline (23 November 2026)
+
+**Evidence provenance.** The four supplied rotating Samsung SM-S908E Android 16 log captures are
+`pitwall-20261122-172921-705.log.txt`, `pitwall-20261122-183428-432.log.txt`,
+`pitwall-20261122-183658-441.log.txt` and `pitwall-20261122-184005-006.log.txt`.
+The first reports app version `1.0.729`, while the last three report
+`1.0.1474` (the even-numbered debug version of Build 737), NOT Build 740.
+Segments overlap and include context copied from earlier segments; counts from
+different captures must not be summed as independent observations. These
+diagnostics do not contain TCL TV or Pitwall Cast receiver proof.
+
+**Confirmed advancement.** On the S22 Ultra the protected rolling archive reached
+`feeds=6 stage=ACTIVE activeVideoDecoders=1 decoder=c2.qti.hevc.decoder
+drm=L3 keysLoaded=true firstFrame=true codedFormat=3840x2176`.
+The output decoder rendered more than eight thousand frames with zero reported
+Media3 decoder drops, and the user describes six visible feeds playing smoothly.
+That is a significant single-decoder success, but it does not establish correct
+physical display cadence, UI responsiveness, DRM L1 support, or TCL/receiver parity.
+A later six-feed composition uses a smaller `2880x1632` atlas after rebuilding.
+Preserve the working one-decoder 3840x2176 six-feed path.
+
+**Confirmed performance and lifecycle evidence (not all causal diagnoses):**
+- `PitwallFrames role=player` records slow UI fractions of approximately
+  **58.1%** in the six-feed-heavy `183658` segment and **62.1%** in the
+  `184005` segment; these are overlapping log windows and are not physical
+  video-frame statistics. The latest segment includes a reported 516 ms maximum
+  player UI frame; the preceding six-feed-heavy segment reached 444 ms.
+  These fail the plan's `<5% slow UI frames` goal.
+- Multiple `BufferQueueProducer` groups report
+  `waitForFreeSlotThenRelock: timeout`, as well as
+  `MediaCodec.release` buffer cancellation warnings. The former appear against
+  named `SurfaceTexture` instances during feed-count/atlas changes; investigate
+  lifecycle generations, stale producer ownership and consumer latch delays.
+  Do not silently suppress the warnings or assume they are steady-state crashes.
+- Repeated concurrent-mark-compact GCs accompany the six-feed session
+  (108 GC-summary lines in `183658`, with high overlapping capture volume);
+  correlate allocations, heap footprint and UI stalls before changing buffers.
+- In `184005`, a `MediaCodec$EventHandler` posted to a dead Handler thread
+  after the 00:10:08 composition transition. Treat codec release/listener
+  callback ordering as a lifecycle regression candidate, not a proven root
+  cause of the user's UI jank.
+- Source quality selection exposes mixed 1080p/540p renditions. Some playback
+  telemetry reports `fps=-1.0` and `surface=-1x-1` although decoded frames
+  progress: improve diagnostic separation of unknown metadata and actual video
+  scene sizes. `physicalPresentation=NOT_MEASURED` is accurate and must remain.
+- The log captures include repeated AndroidX `setRequestedFrameRate=NaN`
+  messages. These are platform-side Compose stack messages, not sufficient
+  evidence that the app requested NaN or that they explain the UI jank.
+- At least one original authorized media source advertises text tracks
+  `fr,en`, while others report zero; the CC UI must use actual selected
+  audio-owner tracks and real cues. Track advertisement alone is not proof of
+  rendered subtitles.
+
+**Feed-count capability: do not confuse selection with valid composition.**
+The SINGLE settings selection limit is 24, and clear archive layouts can
+legitimately use up to 24 sources when the encoded picture, tiles and hardware
+limits allow. Protected mixed-picture planning currently rejects more than
+**six** in `HevcMixedArchiveAtlasPlan`; the protected picture composer also
+sets `MAX_FEEDS=6`, and protected live setup limits session tiles to 2..6.
+There is no verified protected seven/eight-feed implementation. Investigate a
+**capability-gated 7–8-feed extension** with actual SPS/PPS geometry, CTB/tile
+budgets, decoder max size/rate, memory/thermal budget and entitlement, never
+an unconditional `MAX_FEEDS` increase. Retain six as the proven protected
+fallback and do not sacrifice six-feed stability. Test clear/archive, protected
+archive/live, explicit MULTIPLE mode, TCL standalone and Pitwall Cast separately.
+
+**Material 3 Expressive is a performance contract, not merely a new visual skin.**
+Users report sluggish navigation and controls while six-feed video succeeds.
+Preserve racing identity and all functionality while profiling:
+input-to-feedback p50/p95, browsing shelf scroll and card state, remote D-pad
+latency/focus recovery, settings/sliders/overlay interaction, composition/layout/
+draw durations and memory. Use real Perfetto UI + independent video layers;
+do not infer UI performance from decoder drops or apply arbitrary animations.
+For the existing Material/TV acceptance gate, target visible input feedback
+without a blocking navigation wait, `<5% slow app UI frames` during stable
+controlled sessions, and no repeatable >100 ms input-to-visible feedback at
+p95 on the acceptance device under the measured workload. Record test conditions,
+display refresh rate and raw traces, including both decoder preferences, both
+DRM paths, standalone phone/TV and both native/baked Pitwall Cast. These are
+acceptance targets, not measurements already achieved.
+
+**Coordinated coding from this audit.** Align the phone's static map metadata
+sampling with TV's Choreographer-free 10Hz approach. Eliminate an extra
+`withFrameMillis` callback followed by a sleep while retaining the independent
+60Hz draw-only driver clock, seek recovery, flags and all overlay controls.
+Give browse/archive lazy shelves stable keys and shared content types so scroll
+state and reuse are not needlessly invalidated by catalogue updates. Add
+sampler scheduling regression checks. This is a measured-workload-oriented
+coding improvement, not yet proof of fixing the 58–62% UI slow-frame rate.
+
+**Release work still open before 100% / 16-of-16:**
+1. P0: Validate six-feed 3840x2176 and adaptive 2880x1632 pipeline with
+   full BufferQueue/codec-release generation tracing and physical 50fps
+   timestamps, 1x/1.5x/seek, controlled decoder/quality source sets.
+2. P0: Identify and eliminate remaining main/RenderThread work via matched
+   overlay OFF/map/tower/both runs; verify responsive browse/player/navigation
+   input latency and stable six-feed scroll/controls under sustained load.
+3. P0: Fix and verify TCL single-feed+map+tower, multi-feed, D-pad controls;
+   verify Cast marker and tower freshness/actual presentation independently.
+4. P1: Profile allocation, GC, output-buffer ownership and thermal pressure
+   without removing existing features or weakening DRM.
+5. P1: Implement and prove any 7–8 feed support only behind an explicit
+   capability/quality gate; preserve clear-archive larger selections and
+   current protected six-feed fallback.
+6. P2: Finish complete Material 3 Expressive navigation/settings/player
+   consistency, large text, focus, gesture responsiveness and accessibility.
+7. P2: Finish real source-owned captions across every applicable device,
+   decoder preference and clear/protected native/baked receiver path.
+8. P2: Publish only after signed official candidate, in-place phone/TV
+   upgrade, own-repo release integrity and all 16 hardware evidence gates.
+   Keep the full cross-path matrix and controlled 10-minute endurance trials.
+
+**Plan consolidation.** This document is the *one* active engineering/release
+plan. Other docs in `docs/` are retained historical diagnoses, implementation
+references, fixture specs or instructions, **not** competing execution plans.
+Do not delete technical evidence or regression references merely to reduce
+document count. At this checkpoint the recorded strict gates remain **1/16**
+closed; no Build 737 log or green Build 740 CI is a substitute for new physical
+acceptance evidence. Do not inflate the historical 66% baseline on the strength
+of a single UI-scheduling commit. Rescore coding progress only after verifying
+each workstream's real implementation and linkable tests.
+
 ## Build 737/738 coordinated official release hardening
 
 The published APK's monotonic version requires both release entry points to

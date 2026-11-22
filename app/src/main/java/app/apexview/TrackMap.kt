@@ -31,7 +31,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -183,10 +182,8 @@ internal fun rememberMapTime(app: AppState): Long {
  * Compose work under simultaneous video + map + timing tower load.
  */
 internal const val MAP_RENDER_INTERVAL_MS = 100L
-// This timer affects flag/hit-target state, NOT driver marker animation.
-// Sampling just ahead of the next 100 ms boundary avoids busy waking the
-// phone UI while leaving car marker Canvas updates on their own 60 Hz clock.
-internal const val MAP_FRAME_WAIT_MS = 98L
+// Only flag/hit-target state uses this interval. Animated car markers retain
+// their independent draw-phase clock on both phone and TV.
 
 /** Sample immutable overlay metadata at most 10 times/second. Recover from seeks. */
 internal fun isOverlaySampleDue(frameMs: Long, lastFrameMs: Long): Boolean =
@@ -220,15 +217,22 @@ internal fun rememberTvMapTime(read: () -> Long): Long {
 internal fun rememberMapRenderTime(app: AppState): Long {
     var now by remember(app) { mutableLongStateOf(app.mapTimeMs() ?: 0L) }
     LaunchedEffect(app) {
-        var lastPublishedFrameMs = Long.MIN_VALUE
+        var lastPublishedAtMs = Long.MIN_VALUE
         while (true) {
-            withFrameMillis { frameMs ->
-                if (isOverlaySampleDue(frameMs, lastPublishedFrameMs)) {
-                    now = app.mapTimeMs() ?: 0L
-                    lastPublishedFrameMs = frameMs
-                }
+            // Phone previously waited for a Choreographer frame then slept, adding
+            // UI-thread wakeups under six-feed playback. Static map metadata needs
+            // elapsed-time sampling, not a display-vsync callback. This does not
+            // change the independent draw-only 60Hz car marker clock.
+            val sampledAtMs = System.nanoTime() / 1_000_000L
+            if (isOverlaySampleDue(sampledAtMs, lastPublishedAtMs)) {
+                val sampledTime = app.mapTimeMs() ?: 0L
+                if (sampledTime != now) now = sampledTime
+                lastPublishedAtMs = sampledAtMs
             }
-            delay(MAP_FRAME_WAIT_MS)
+            val elapsedMs = System.nanoTime() / 1_000_000L
+            val untilNextMs = (lastPublishedAtMs + MAP_RENDER_INTERVAL_MS - elapsedMs)
+                .coerceAtLeast(1L)
+            delay(untilNextMs)
         }
     }
     return now

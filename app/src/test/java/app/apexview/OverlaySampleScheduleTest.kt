@@ -27,24 +27,19 @@ class OverlaySampleScheduleTest {
         assertEquals(100_000_000L, TV_MAP_FRAME_INTERVAL_NS)
         assertEquals(MAP_RENDER_INTERVAL_MS, TV_MAP_FRAME_INTERVAL_NS / 1_000_000L)
         assertTrue(isOverlayDrawFrameDue(15_000_000L, 0L))
-        // Simulate the coroutine sleeping after a Choreographer callback, then
-        // awaiting the next 60/120 Hz vsync.
-        for (refreshHz in listOf(60, 120)) {
-            var published = 0
-            var last = Long.MIN_VALUE
-            var nowNs = 0L
-            val vsyncNs = 1_000_000_000L / refreshHz
-            while (nowNs < 1_000_000_000L) {
-                val frameMs = nowNs / 1_000_000L
-                if (isOverlaySampleDue(frameMs, last)) {
-                    published++
-                    last = frameMs
-                }
-                val wakeNs = nowNs + MAP_FRAME_WAIT_MS * 1_000_000L
-                nowNs = ((wakeNs + vsyncNs - 1) / vsyncNs) * vsyncNs
+        // The low-rate metadata sampler is independent of a 60/120Hz video
+        // display clock. Irregular coroutine wakeups must not produce a burst
+        // of map recompositions, and missed intervals must recover cleanly.
+        val wakeupsMs = listOf(0L, 100L, 207L, 314L, 418L, 524L, 632L, 738L, 844L, 951L)
+        var published = 0
+        var lastPublishedMs = Long.MIN_VALUE
+        for (timeMs in wakeupsMs) {
+            if (isOverlaySampleDue(timeMs, lastPublishedMs)) {
+                published++
+                lastPublishedMs = timeMs
             }
-            assertTrue("$refreshHz Hz published only $published", published in 9..11)
         }
-        assertEquals(98L, MAP_FRAME_WAIT_MS)
+        assertEquals(10, published)
+        assertFalse(isOverlaySampleDue(952L, lastPublishedMs))
     }
 }
