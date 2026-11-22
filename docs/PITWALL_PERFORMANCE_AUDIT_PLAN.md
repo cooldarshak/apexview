@@ -9,6 +9,35 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Coordinated post-732 release integrity and Cast clock correction
+
+Build 732 is green on commit 4bc244b370c248865b3091beaa9031601d536c79.
+A green compile/test/emulator workflow does **not** close TCL standalone-video,
+Pitwall Cast physical marker cadence, secure captions, or any unverified gate.
+
+- Do not jump the phone's estimated receiver cursor to every ordinary 1-second
+  playback heartbeat. Use bounded speed slewing, preserving monotonic cursor
+  under ±90ms heartbeat jitter. Real seeks (>=750ms), pause, buffering, rate
+  changes and explicit user seeks still hard reset, with regression tests.
+  Receiver video remains the authority and receives no DRM/codec changes.
+  Applies to phone-to-TCL Pitwall Cast in both decoder preferences and both
+  supported clear/protected sender paths; Google Cast status uses the same
+  controller clock. TV on-device driver dots use the receiver's actual player
+  position independently. Hardware jitter proof remains OPEN.
+- Preserve in-place release upgrade order by building every official release
+  using the accepted green **debug workflow run number**, rather than the
+  independent manual release workflow counter. Both use the same package
+  identity and persistent signing certificate. The official publisher is
+  only cooldarshak/apexview. Manual candidate/publish pipeline checks exact
+  commit, green CI run, acceptance issue evidence, signed certificate and
+  checksum before publishing. No automatic production releases.
+- Keep updater branding consistent with Pitwall TV. Retain all release
+  asset-origin, checksum, certificate and Android version verification.
+- Universal parity requirement remains: SINGLE/MULTIPLE, clear HEVC/Widevine,
+  standalone phone/TV, local Pitwall Cast and every accessible caption track.
+  The TCL single feed with map+tower and Cast map motion are still BLOCKED
+  until real device evidence establishes smooth independent video frames.
+
 ## Build 730 closed-caption compilation correction and backward-compatible Cast horizon
 
 The Build 730 caption-enabled source reached Gradle but failed the Kotlin compile gate:

@@ -133,7 +133,7 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
         val request = Request.Builder()
             .url("https://api.github.com/repos/${BuildConfig.UPDATE_REPO}/releases/latest")
             .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", "Apexview/${BuildConfig.VERSION_NAME}")
+            .header("User-Agent", "Pitwall/${BuildConfig.VERSION_NAME}")
             .build()
         http.newCall(request).execute().use { r ->
             if (r.code == 404) return@withContext null
@@ -314,7 +314,7 @@ fun UpdatePrompt(updater: Updater) {
                 }
                 return@Column
             }
-            Text("Apexview ${release.version} is out", style = Type.title2)
+            Text("Pitwall TV ${release.version} is out", style = Type.title2)
             Text("You have ${BuildConfig.VERSION_NAME}.", style = Type.subhead, modifier = Modifier.padding(top = 4.dp))
             if (release.notes.isNotEmpty()) {
                 Box(Modifier.padding(top = 16.dp).heightIn(max = 220.dp).verticalScroll(rememberScrollState())) {

@@ -249,7 +249,7 @@ class AppState(
             playing = remote.isPlaying || remote.isBuffering
             castRemoteBuffering = remote.isBuffering
             if (remote.streamDuration > 0) durationMs = remote.streamDuration
-            remoteCastClock.update(remote.approximateStreamPosition, remote.isPlaying, playbackSpeed, remote.streamDuration)
+            remoteCastClock.reconcile(remote.approximateStreamPosition, remote.isPlaying, playbackSpeed, remote.streamDuration)
         }
     }
 
@@ -473,7 +473,7 @@ class AppState(
                     } else if (state in 1..2) {
                         if (duration > 0) durationMs = (duration * 1000).toLong()
                         castRemoteBuffering = body.optBoolean("buffering")
-                        remoteCastClock.update((time * 1000).toLong(), state == 1 && !castRemoteBuffering, speed.toFloat(), (duration * 1000).toLong())
+                        remoteCastClock.reconcile((time * 1000).toLong(), state == 1 && !castRemoteBuffering, speed.toFloat(), (duration * 1000).toLong())
                         if (castPlaybackHandedOff) { playing = state == 1; positionMs = remoteCastClock.positionMs() }
                     }
                 }

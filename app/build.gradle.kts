@@ -34,8 +34,17 @@ android {
         // CI builds get a monotonically increasing version code so a same-signature APK installs
         // over the previous one instead of being rejected as a downgrade.
         val ciRun = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
-        versionCode = 100_000 + ciRun
-        versionName = "1.0.$ciRun"
+        // Manual official releases MUST reuse the verified green debug build
+        // number. GitHub workflow run numbers are independent between workflows;
+        // using the new release workflow's counter would downgrade the APK.
+        val verifiedRun = System.getenv("PITWALL_VERIFIED_DEBUG_RUN_NUMBER")
+            ?.takeIf { it.isNotBlank() }?.toIntOrNull()
+        require(verifiedRun == null || verifiedRun in 1..1_000_000) {
+            "Invalid accepted debug build number for a Pitwall release"
+        }
+        val appRun = verifiedRun ?: ciRun
+        versionCode = 100_000 + appRun
+        versionName = "1.0.$appRun"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         val builtAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("MMM d, HH:mm"))
         val castReceiverId = System.getenv("PITWALL_CAST_RECEIVER_ID").orEmpty().trim().uppercase()
