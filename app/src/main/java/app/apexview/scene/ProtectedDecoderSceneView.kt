@@ -41,6 +41,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     var onFirstFrame: () -> Unit = {}
     var onOutputLost: () -> Unit = {}
     private val outputReadiness = SceneOutputReadiness()
+    // Surface lifetime is not the same as encoded-atlas generation. A quality
+    // change must not discard an otherwise valid pending codec attachment.
+    private val surfaceLifetime = SceneSurfaceLifetime()
     private var firstFrameReported = false
     var onOutputSize: (Int, Int) -> Unit = { _, _ -> }
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
@@ -160,13 +163,15 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
+        val lifetime = surfaceLifetime.advance()
         val outputEpoch = outputReadiness.invalidate()
         onOutputLost()
         val surface = holder.surface
         gl.post {
             // Android can destroy and recreate a surface before this callback
             // reaches the GL looper. Never initialize an old or invalid output.
-            if (!released && outputReadiness.generation() == outputEpoch && surface.isValid) {
+            if (!released && surfaceLifetime.matches(lifetime) &&
+                outputReadiness.generation() == outputEpoch && surface.isValid) {
                 guarded { initialize(surface); scheduleVideoFrame() }
             }
         }
@@ -176,6 +181,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         gl.post { guarded { scheduleVideoFrame() } }
     }
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        surfaceLifetime.advance()
         outputReadiness.invalidate()
         onOutputLost()
         detachOutput()
@@ -193,6 +199,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     fun release() {
         if (released) return
         released = true
+        surfaceLifetime.advance()
         outputReadiness.invalidate()
         holder.removeCallback(this)
         detachOutput(); player = null; gl.removeCallbacks(glQueueProbe); thread.quitSafely()
@@ -290,7 +297,12 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             }
         }, gl)
         val surface = Surface(frames); input = surface
-        post { if (!released && input === surface) player?.setVideoSurface(surface) }
+        val lifetime = surfaceLifetime.generation()
+        post {
+            if (!released && input === surface && surfaceLifetime.matches(lifetime)) {
+                player?.setVideoSurface(surface)
+            }
+        }
     }
 
     private fun updateFrameRateHint(output: Surface) {

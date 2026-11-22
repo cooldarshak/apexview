@@ -11,8 +11,10 @@ technical specifications or test instructions, NOT competing active plans.
 
 Source changes following the Build 699 baseline:
 - Protected SurfaceView EGL teardown no longer waits up to two seconds on
-  the Compose/TV UI thread; stale surface-created callbacks are discarded by
-  their output epoch. This is a scheduling/lifecycle fix, not physical FPS proof.
+  the Compose/TV UI thread. Clear TextureView and protected SurfaceView have
+  separate surface-lifetime gates so a retired surface never receives the
+  late player-attach callback; a video-quality/atlas change retains the active
+  output's lifetime. Tests verify both event sequences. This is a scheduling/lifecycle fix, not physical FPS proof.
 - Protected, native and baked Cast HTTP relays bind only to their selected
   local interface instead of every available device interface. Peer filtering
   and random relay tokens remain intact.

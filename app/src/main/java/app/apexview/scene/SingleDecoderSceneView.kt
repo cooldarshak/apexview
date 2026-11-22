@@ -83,6 +83,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     var onFirstFrame: () -> Unit = {}
     var onOutputLost: () -> Unit = {}
     private val outputReadiness = SceneOutputReadiness()
+    // Surface lifetime is not the same as encoded-atlas generation. A quality
+    // change must not discard an otherwise valid pending codec attachment.
+    private val surfaceLifetime = SceneSurfaceLifetime()
     private var firstFrameReported = false
     var onOutputSize: (Int, Int) -> Unit = { _, _ -> }
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
@@ -347,11 +350,16 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     override fun onSurfaceTextureAvailable(output: SurfaceTexture, width: Int, height: Int) {
+        val lifetime = surfaceLifetime.advance()
         outputReadiness.invalidate()
         onOutputLost()
         outputWidth = width; outputHeight = height
         onOutputSize(width, height)
-        gl.post { guarded { initialize(output); draw() } }
+        gl.post {
+            if (!released && surfaceLifetime.matches(lifetime)) {
+                guarded { initialize(output); draw() }
+            }
+        }
     }
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
         outputWidth = width; outputHeight = height
@@ -360,6 +368,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+        surfaceLifetime.advance()
         outputReadiness.invalidate()
         onOutputLost()
         input?.let { player?.clearVideoSurface(it) }
@@ -372,6 +381,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     fun release() {
         if (released) return
         released = true
+        surfaceLifetime.advance()
         outputReadiness.invalidate()
         main.removeCallbacks(glQueueProbe)
         input?.let { player?.clearVideoSurface(it) }
@@ -466,7 +476,12 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             }
         }, gl)
         val surface = Surface(frames); input = surface
-        post { if (!released && input === surface) player?.setVideoSurface(surface) }
+        val lifetime = surfaceLifetime.generation()
+        post {
+            if (!released && input === surface && surfaceLifetime.matches(lifetime)) {
+                player?.setVideoSurface(surface)
+            }
+        }
     }
 
     private data class DrawTiming(val glDrawNs: Long, val swapNs: Long)
