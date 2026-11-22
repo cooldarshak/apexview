@@ -2126,11 +2126,13 @@ private fun MapSheet(app: AppState) {
                 )
                 Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Corner anchor", style = Type.body, modifier = Modifier.weight(1f))
-                    TextButton(onClick = { app.updateOnboardBadgeAnchor(OnboardBadgeAnchor.TOP_LEFT) }) {
+                    TextButton(onClick = { app.updateOnboardBadgeAnchor(OnboardBadgeAnchor.TOP_LEFT) },
+                        modifier = Modifier.tvFocusRing()) {
                         Text("Top-left", color = if (app.onboardBadgeAnchor == OnboardBadgeAnchor.TOP_LEFT)
                             Ink.primary else Ink.secondary)
                     }
-                    TextButton(onClick = { app.updateOnboardBadgeAnchor(OnboardBadgeAnchor.TOP_RIGHT) }) {
+                    TextButton(onClick = { app.updateOnboardBadgeAnchor(OnboardBadgeAnchor.TOP_RIGHT) },
+                        modifier = Modifier.tvFocusRing()) {
                         Text("Top-right", color = if (app.onboardBadgeAnchor == OnboardBadgeAnchor.TOP_RIGHT)
                             Ink.primary else Ink.secondary)
                     }
@@ -2168,7 +2170,7 @@ private fun MapSheet(app: AppState) {
                     valueRange = 0.2f..1f,
                     trackColor = Ink.surfaceHigh,
                 )
-                TextButton(onClick = app::resetOnboardBadge) {
+                TextButton(onClick = app::resetOnboardBadge, modifier = Modifier.tvFocusRing()) {
                     Text("Reset onboard badge position and appearance")
                 }
             }
