@@ -4456,6 +4456,11 @@ class AppState(
         .put("towerOpen", towerOpen).put("towerReserve", towerReserve)
         .put("towerLocked", towerLocked).put("towerOpacity", towerOpacity)
         .put("towerFontScale", towerFontScale)
+        .put("onboardBadgeScale", speedReadoutScale)
+        .put("onboardBadgeAnchor", onboardBadgeAnchor.name)
+        .put("onboardBadgeX", onboardBadgeXOffsetDp)
+        .put("onboardBadgeY", onboardBadgeYOffsetDp)
+        .put("onboardBadgeOpacity", onboardBadgeOpacity)
         .put("tvTowerWidthShare", tvTowerWidthShare)
         .put("towerPanel", normalizedTower() ?: JSONObject.NULL)
         .put("overlayMode", overlayLayoutMode.name)
@@ -4481,6 +4486,17 @@ class AppState(
             .toFloat().coerceIn(0.2f, 1f)
         towerFontScale = json.optDouble("towerFontScale", towerFontScale.toDouble())
             .toFloat().coerceIn(TOWER_MIN_FONT_SCALE, TOWER_MAX_FONT_SCALE)
+        speedReadoutScale = SpeedReadoutScale.clamp(
+            json.optDouble("onboardBadgeScale", speedReadoutScale.toDouble()).toFloat())
+        onboardBadgeAnchor = runCatching { OnboardBadgeAnchor.valueOf(
+            json.optString("onboardBadgeAnchor", onboardBadgeAnchor.name)) }
+            .getOrDefault(onboardBadgeAnchor)
+        onboardBadgeXOffsetDp = OnboardBadgeGeometry.offset(
+            json.optDouble("onboardBadgeX", onboardBadgeXOffsetDp.toDouble()).toFloat())
+        onboardBadgeYOffsetDp = OnboardBadgeGeometry.offset(
+            json.optDouble("onboardBadgeY", onboardBadgeYOffsetDp.toDouble()).toFloat())
+        onboardBadgeOpacity = OnboardBadgeGeometry.opacity(
+            json.optDouble("onboardBadgeOpacity", onboardBadgeOpacity.toDouble()).toFloat())
         tvTowerWidthShare = json.optDouble("tvTowerWidthShare",
             tvTowerWidthShare.toDouble()).toFloat().coerceIn(
             Layouts.tvTowerWidthRange(1f).start, Layouts.tvTowerWidthRange(1f).endInclusive)
@@ -4508,6 +4524,11 @@ class AppState(
             .putBoolean(PREF_TOWER_LOCKED, towerLocked)
             .putFloat(PREF_TOWER_OPACITY, towerOpacity)
             .putFloat(PREF_TOWER_FONT_SCALE, towerFontScale)
+            .putFloat(PREF_SPEED_READOUT_SCALE, speedReadoutScale)
+            .putString(PREF_ONBOARD_BADGE_ANCHOR, onboardBadgeAnchor.name)
+            .putFloat(PREF_ONBOARD_BADGE_X, onboardBadgeXOffsetDp)
+            .putFloat(PREF_ONBOARD_BADGE_Y, onboardBadgeYOffsetDp)
+            .putFloat(PREF_ONBOARD_BADGE_OPACITY, onboardBadgeOpacity)
             .putFloat(PREF_TV_TOWER_WIDTH, tvTowerWidthShare)
             .putString(PREF_OVERLAY_LAYOUT, overlayLayoutMode.name)
             .putBoolean(PREF_SNAP, snapMode).apply()
@@ -5269,6 +5290,21 @@ class AppState(
         SpeedReadoutScale.clamp(prefs.getFloat(PREF_SPEED_READOUT_SCALE, SpeedReadoutScale.DEFAULT)),
     )
         private set
+    var onboardBadgeAnchor by mutableStateOf(runCatching {
+        OnboardBadgeAnchor.valueOf(prefs.getString(
+            PREF_ONBOARD_BADGE_ANCHOR, OnboardBadgeAnchor.TOP_LEFT.name)!!)
+    }.getOrDefault(OnboardBadgeAnchor.TOP_LEFT))
+        private set
+    var onboardBadgeXOffsetDp by mutableFloatStateOf(
+        OnboardBadgeGeometry.offset(prefs.getFloat(PREF_ONBOARD_BADGE_X, 0f)))
+        private set
+    var onboardBadgeYOffsetDp by mutableFloatStateOf(
+        OnboardBadgeGeometry.offset(prefs.getFloat(PREF_ONBOARD_BADGE_Y, 0f)))
+        private set
+    var onboardBadgeOpacity by mutableFloatStateOf(
+        OnboardBadgeGeometry.opacity(prefs.getFloat(
+            PREF_ONBOARD_BADGE_OPACITY, OnboardBadgeGeometry.DEFAULT_OPACITY)))
+        private set
     var towerLocked by mutableStateOf(prefs.getBoolean(PREF_TOWER_LOCKED, false))
         private set
     var towerReserve by mutableStateOf(prefs.getBoolean(PREF_TOWER_RESERVE, false))
@@ -5295,6 +5331,34 @@ class AppState(
     fun updateSpeedReadoutScale(value: Float) {
         speedReadoutScale = SpeedReadoutScale.clamp(value)
         prefs.edit().putFloat(PREF_SPEED_READOUT_SCALE, speedReadoutScale).apply()
+    }
+
+    fun updateOnboardBadgeAnchor(value: OnboardBadgeAnchor) {
+        onboardBadgeAnchor = value
+        prefs.edit().putString(PREF_ONBOARD_BADGE_ANCHOR, value.name).apply()
+    }
+
+    fun updateOnboardBadgeXOffset(value: Float) {
+        onboardBadgeXOffsetDp = OnboardBadgeGeometry.offset(value)
+        prefs.edit().putFloat(PREF_ONBOARD_BADGE_X, onboardBadgeXOffsetDp).apply()
+    }
+
+    fun updateOnboardBadgeYOffset(value: Float) {
+        onboardBadgeYOffsetDp = OnboardBadgeGeometry.offset(value)
+        prefs.edit().putFloat(PREF_ONBOARD_BADGE_Y, onboardBadgeYOffsetDp).apply()
+    }
+
+    fun updateOnboardBadgeOpacity(value: Float) {
+        onboardBadgeOpacity = OnboardBadgeGeometry.opacity(value)
+        prefs.edit().putFloat(PREF_ONBOARD_BADGE_OPACITY, onboardBadgeOpacity).apply()
+    }
+
+    fun resetOnboardBadge() {
+        updateSpeedReadoutScale(SpeedReadoutScale.DEFAULT)
+        updateOnboardBadgeAnchor(OnboardBadgeAnchor.TOP_LEFT)
+        updateOnboardBadgeXOffset(0f)
+        updateOnboardBadgeYOffset(0f)
+        updateOnboardBadgeOpacity(OnboardBadgeGeometry.DEFAULT_OPACITY)
     }
 
     fun updateTowerOpacity(value: Float) {
@@ -6551,6 +6615,10 @@ class AppState(
         private const val PREF_TOWER_OPACITY = "towerOpacity"
         private const val PREF_TOWER_FONT_SCALE = "towerFontScale"
         private const val PREF_SPEED_READOUT_SCALE = "speedReadoutScale"
+        private const val PREF_ONBOARD_BADGE_ANCHOR = "onboardBadgeAnchor"
+        private const val PREF_ONBOARD_BADGE_X = "onboardBadgeOffsetX"
+        private const val PREF_ONBOARD_BADGE_Y = "onboardBadgeOffsetY"
+        private const val PREF_ONBOARD_BADGE_OPACITY = "onboardBadgeOpacity"
         private const val PREF_TOWER_LOCKED = "towerLocked"
         private const val PREF_TOWER_RESERVE = "towerReserve"
         private const val PREF_TV_TOWER_WIDTH = "tvTowerWidthShare"

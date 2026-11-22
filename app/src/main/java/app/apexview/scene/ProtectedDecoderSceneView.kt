@@ -37,6 +37,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     ).apply { start() }
     private val gl = Handler(thread.looper)
     private var player: ExoPlayer? = null
+    @Volatile private var playbackSpeed = 1f
     @Volatile private var scene: VideoScene? = null
     @Volatile private var released = false
     @Volatile private var input: Surface? = null
@@ -50,6 +51,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     private var decoderTexture: SurfaceTexture? = null
     private var texture = 0
     private var program = 0
+    private var imageUniform = -1
+    private var textureMatrixUniform = -1
+    private var positionAttribute = -1
+    private var texcoordAttribute = -1
     private var hasFrame = false
     private var outputWidth = 0
     private var outputHeight = 0
@@ -73,7 +78,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             val callbackStartNs = System.nanoTime()
             val refreshHz = rootView.display?.refreshRate ?: 60f
             if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
-                frameTimeNanos, scene?.sourceFrameRate ?: 0.0, refreshHz)) {
+                frameTimeNanos, scene?.sourceFrameRate ?: 0.0, refreshHz, playbackSpeed)) {
                 pacing.onPacingDeferred()
                 displayClock?.postFrameCallback(this)
                 return@guarded
@@ -106,8 +111,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         holder.addCallback(this)
     }
 
-    fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene) {
+    fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene,
+             speed: Float = 1f) {
         val changed = scene != nextScene
+        playbackSpeed = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
         scene = nextScene
         if (player !== nextPlayer) {
             input?.let { player?.clearVideoSurface(it) }
@@ -210,6 +217,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val linked = IntArray(1); GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linked, 0)
         check(linked[0] != 0) { "Scene shader link failed" }
         GLES20.glDeleteShader(vertex); GLES20.glDeleteShader(fragment)
+        imageUniform = GLES20.glGetUniformLocation(program, "image")
+        textureMatrixUniform = GLES20.glGetUniformLocation(program, "st")
+        positionAttribute = GLES20.glGetAttribLocation(program, "p")
+        texcoordAttribute = GLES20.glGetAttribLocation(program, "uv")
         val textures = IntArray(1); GLES20.glGenTextures(1, textures, 0); texture = textures[0]
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
@@ -255,9 +266,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         if (hasFrame) {
             GLES20.glUseProgram(program)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
-            GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "image"), 0)
-            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "st"), 1, false, transform, 0)
-            val p = GLES20.glGetAttribLocation(program, "p"); val uv = GLES20.glGetAttribLocation(program, "uv")
+            GLES20.glUniform1i(imageUniform, 0)
+            GLES20.glUniformMatrix4fv(textureMatrixUniform, 1, false, transform, 0)
+            val p = positionAttribute; val uv = texcoordAttribute
             GLES20.glEnableVertexAttribArray(p); GLES20.glEnableVertexAttribArray(uv)
             if (cachedModel != model) {
                 fun buffer(values: FloatArray) = ByteBuffer.allocateDirect(values.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(values); position(0) }
@@ -298,6 +309,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "protected=$protectedOutput output=${outputWidth}x$outputHeight " +
                 "inputTextures=1 outputViews=1 sources=${model.sources} " +
                 "windows=${model.windows.size} decoderFrames=$rendered " +
+                "sourceFps=${model.sourceFrameRate} speed=$playbackSpeed " +
+                "effectiveFps=${model.sourceFrameRate * playbackSpeed} " +
                 "intervalPresented=$intervalPresented intervalGaps45ms=$intervalLongGaps " +
                 "intervalSwapsOver18ms=$intervalSwapsOver18ms " +
                 "maxGapMs=$intervalLongestGapMs maxSwapMs=$intervalLongestSwapMs " +
@@ -353,5 +366,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }
         display = EGL14.EGL_NO_DISPLAY; contextGl = EGL14.EGL_NO_CONTEXT; window = EGL14.EGL_NO_SURFACE
         texture = 0; program = 0
+        imageUniform = -1; textureMatrixUniform = -1
+        positionAttribute = -1; texcoordAttribute = -1
     }
 }

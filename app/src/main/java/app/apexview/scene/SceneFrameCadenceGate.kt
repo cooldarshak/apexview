@@ -13,9 +13,14 @@ internal class SceneFrameCadenceGate {
     private var lastVideoVsyncNs = 0L
     private var consecutiveDeferrals = 0
 
-    fun shouldDefer(frameTimeNs: Long, sourceFps: Double, displayHz: Float): Boolean {
-        if (sourceFps !in 49.0..51.0 || displayHz !in 90f..165f ||
-            !sourceFps.isFinite() || !displayHz.isFinite() || lastVideoVsyncNs <= 0L ||
+    fun shouldDefer(frameTimeNs: Long, sourceFps: Double, displayHz: Float,
+                    playbackSpeed: Float = 1f): Boolean {
+        // 50fps archive played at 1.5x is 75fps. Applying a 50fps vsync gate
+        // to that stream needlessly discards display opportunities and aggravates
+        // output backpressure. Still never block decoder texture latching.
+        val effectiveFps = sourceFps * playbackSpeed
+        if (effectiveFps !in 49.0..51.0 || displayHz !in 90f..165f ||
+            !effectiveFps.isFinite() || !displayHz.isFinite() || lastVideoVsyncNs <= 0L ||
             frameTimeNs <= lastVideoVsyncNs
         ) {
             consecutiveDeferrals = 0

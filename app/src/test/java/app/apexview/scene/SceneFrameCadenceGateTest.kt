@@ -40,6 +40,14 @@ class SceneFrameCadenceGateTest {
         assertFalse(gate.shouldDefer(1_003_000_000L, 50.0, 120f))
     }
 
+    @Test fun acceleratedPlaybackDoesNotThrottleSeventyFiveFpsToFifty() {
+        val gate = SceneFrameCadenceGate()
+        gate.onVideoDraw(1_000_000_000L)
+        assertFalse(gate.shouldDefer(1_008_333_333L, 50.0, 120f, 1.5f))
+        assertFalse(gate.shouldDefer(1_008_333_333L, 50.0, 120f, 2f))
+        assertTrue(gate.shouldDefer(1_008_333_333L, 50.0, 120f, 1f))
+    }
+
     @Test fun seekAndSurfaceResetDiscardPreviousTimestamp() {
         val gate = SceneFrameCadenceGate()
         gate.onVideoDraw(2_000_000_000L)

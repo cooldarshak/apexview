@@ -988,7 +988,7 @@ internal fun PlaybackVideoCanvas(
                         onFailure = app::failSingleDecoderScene
                         onOutputSize = app::reportSceneOutputSize
                     }
-                }, update = { it.bind(host.player, scene) },
+                }, update = { it.bind(host.player, scene, app.playbackSpeed) },
                     onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
             }
         } else {
@@ -1129,29 +1129,28 @@ private fun TileView(
         }
         TargetGlow(targeted)
 
-        // The broadcast-style timing card on onboards.
+        // One retained information badge per onboard, irrespective of TV/Grid/Split layout.
+        // The source data and sector colours are the same as the previous bottom DriverCard.
         val number = tile.channel.racingNumber?.toString()
         val timing = app.timing
         val tileWidth = with(density) { tile.w.toDp() }
+        val tileHeight = with(density) { tile.h.toDp() }
         if (number != null && timing != null && timing.laps.isNotEmpty()) {
             val narrow = tileWidth < CARD_MIN_TILE
-            DriverCard(
-                app, timing, number, tile.channel.driverName,
-                Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(start = if (narrow) 4.dp else CARD_MARGIN,
-                        bottom = if (app.settings.showStats) 28.dp else if (narrow) 4.dp else CARD_MARGIN)
-                    .width(minOf(CARD_MAX_WIDTH,
-                        (tileWidth - if (narrow) 8.dp else CARD_MARGIN * 2).coerceAtLeast(1.dp))),
-                compact = narrow,
+            val badgeWidth = (tileWidth - 8.dp).coerceAtLeast(1.dp)
+                .coerceAtMost(if (narrow) 230.dp else 420.dp)
+            val assumedHeight = (if (narrow) 30f else 45f) * app.speedReadoutScale
+            val badgePosition = OnboardBadgeGeometry.position(
+                tileWidth.value, tileHeight.value, badgeWidth.value, assumedHeight,
+                app.onboardBadgeAnchor, app.onboardBadgeXOffsetDp,
+                app.onboardBadgeYOffsetDp,
             )
-        }
-        if (number != null && timing != null && !app.arranging) {
-            // Keep the speed above the F1 camera graphic, away from the driver's timing card
-            // and the video controls that occupy the bottom of smaller onboard feeds.
-            SpeedReadout(
-                app, timing, number,
-                Modifier.align(Alignment.TopStart).padding(start = 6.dp, top = 6.dp),
+            OnboardInfoBadge(
+                app, timing, number, tile.channel.driverName,
+                Modifier.align(Alignment.TopStart)
+                    .offset(x = badgePosition.first.dp, y = badgePosition.second.dp)
+                    .width(badgeWidth),
+                compact = narrow,
             )
         }
 
@@ -2112,8 +2111,11 @@ private fun MapSheet(app: AppState) {
                 Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
                     .background(Ink.background).padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
+                Text("Unified onboard information badge", style = Type.subhead)
+                Text("One row: position, number, driver, lap, gap and speed. Actual sector colours remain directly below.",
+                    style = Type.footnote, modifier = Modifier.padding(top = 4.dp, bottom = 8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Onboard speed readout size", style = Type.body, modifier = Modifier.weight(1f))
+                    Text("Badge size", style = Type.body, modifier = Modifier.weight(1f))
                     Text("%d%%".format((app.speedReadoutScale * 100f).toInt()), style = Type.footnote)
                 }
                 AppleSlider(
@@ -2122,6 +2124,53 @@ private fun MapSheet(app: AppState) {
                     valueRange = SpeedReadoutScale.MIN..SpeedReadoutScale.MAX,
                     trackColor = Ink.surfaceHigh,
                 )
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Corner anchor", style = Type.body, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { app.updateOnboardBadgeAnchor(OnboardBadgeAnchor.TOP_LEFT) }) {
+                        Text("Top-left", color = if (app.onboardBadgeAnchor == OnboardBadgeAnchor.TOP_LEFT)
+                            Ink.primary else Ink.secondary)
+                    }
+                    TextButton(onClick = { app.updateOnboardBadgeAnchor(OnboardBadgeAnchor.TOP_RIGHT) }) {
+                        Text("Top-right", color = if (app.onboardBadgeAnchor == OnboardBadgeAnchor.TOP_RIGHT)
+                            Ink.primary else Ink.secondary)
+                    }
+                }
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Horizontal offset", style = Type.body, modifier = Modifier.weight(1f))
+                    Text("%.0f dp".format(app.onboardBadgeXOffsetDp), style = Type.footnote)
+                }
+                AppleSlider(
+                    value = app.onboardBadgeXOffsetDp,
+                    onValueChange = app::updateOnboardBadgeXOffset,
+                    valueRange = -OnboardBadgeGeometry.OFFSET_LIMIT_DP..
+                        OnboardBadgeGeometry.OFFSET_LIMIT_DP,
+                    trackColor = Ink.surfaceHigh,
+                )
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Vertical offset", style = Type.body, modifier = Modifier.weight(1f))
+                    Text("%.0f dp".format(app.onboardBadgeYOffsetDp), style = Type.footnote)
+                }
+                AppleSlider(
+                    value = app.onboardBadgeYOffsetDp,
+                    onValueChange = app::updateOnboardBadgeYOffset,
+                    valueRange = -OnboardBadgeGeometry.OFFSET_LIMIT_DP..
+                        OnboardBadgeGeometry.OFFSET_LIMIT_DP,
+                    trackColor = Ink.surfaceHigh,
+                )
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Badge opacity", style = Type.body, modifier = Modifier.weight(1f))
+                    Text("%d%%".format((app.onboardBadgeOpacity * 100f).toInt()),
+                        style = Type.footnote)
+                }
+                AppleSlider(
+                    value = app.onboardBadgeOpacity,
+                    onValueChange = app::updateOnboardBadgeOpacity,
+                    valueRange = 0.2f..1f,
+                    trackColor = Ink.surfaceHigh,
+                )
+                TextButton(onClick = app::resetOnboardBadge) {
+                    Text("Reset onboard badge position and appearance")
+                }
             }
             if (app.towerOpen) {
                 Column(

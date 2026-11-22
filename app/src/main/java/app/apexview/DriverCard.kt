@@ -178,3 +178,98 @@ fun DriverCard(app: AppState, timing: SessionTiming, number: String, name: Strin
         }
     }
 }
+
+
+
+/**
+ * One compact onboard visual, rather than a separate bottom driver card and top speed pill.
+ * The lap-state and colour semantics are exactly those of DriverCard above. The sector strip
+ * remains on the second row, but *all* text stays in one horizontal row. Nothing is baked
+ * into protected video; this is a normal app UI layer and remains compatible with Cast.
+ */
+@Composable
+fun OnboardInfoBadge(
+    app: AppState,
+    timing: SessionTiming,
+    number: String,
+    name: String?,
+    modifier: Modifier = Modifier,
+    compact: Boolean = false,
+) {
+    val laps = timing.laps[number] ?: return
+    LaunchedEffect(timing) { app.loadSpeeds(timing) }
+    // Read the replay clock only once for both video speed and lap information.
+    val now = rememberMapTime(app)
+    val state = laps.at(now) ?: return
+    val driver = timing.drivers[number]
+    val team = driver?.color?.let { Color(it) } ?: Color.White
+    val fullName = (name?.substringAfterLast(' ') ?: driver?.tla ?: number).uppercase()
+    val shownName = if (compact) (driver?.tla ?: fullName.take(3)).uppercase() else fullName
+    val completed = state.lastLap != null && state.runningMs != null &&
+        state.runningMs < LAP_SHOWN_MS
+    val lapClock = when {
+        state.inPit -> "PIT" to Color.White
+        completed -> state.lastLap!!.time to state.lastLap.pace.color(lap = true)
+        state.runningMs != null -> running(state.runningMs) to Color.White
+        else -> state.lastLap?.let { it.time to it.pace.color(lap = true) }
+    }
+    val unit = app.settings.speedUnit
+    val kmh = timing.speeds[number]?.kmhAt(now)
+    val speedText = if (kmh == null) "--" else
+        "${speedIn(kmh, unit)}${if (unit == Settings.KMH) "km/h" else "mph"}"
+    // Narrow 334px TV thumbnails cannot display 125% text without overflow. Clamping the
+    // effective font within that window preserves the user's setting for larger feeds.
+    val scale = if (compact) minOf(app.speedReadoutScale, 0.78f)
+        else app.speedReadoutScale
+    val font = (if (compact) 10f else 13f) * scale / SpeedReadoutScale.DEFAULT
+    val miniFont = font * (if (compact) 0.82f else 0.88f)
+    val gap = if (compact) 2.dp else 5.dp
+    Column(
+        modifier.clip(RoundedCornerShape(5.dp * scale))
+            .background(Color.Black.copy(alpha = app.onboardBadgeOpacity))
+            .padding(horizontal = (if (compact) 3f else 6f).dp * scale,
+                vertical = (if (compact) 2f else 4f).dp * scale)
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.width(3.dp * scale).height((font + 3f).dp)
+                .background(team))
+            Spacer(Modifier.width(gap))
+            state.position?.let { pos ->
+                Text("$pos", style = digits.copy(color = Color.Black,
+                    fontSize = miniFont.sp, fontWeight = FontWeight.Bold),
+                    maxLines = 1, modifier = Modifier.clip(RoundedCornerShape(2.dp))
+                        .background(Color.White).padding(horizontal = 2.dp * scale))
+                Spacer(Modifier.width(gap))
+            }
+            Text(number, style = digits.copy(color = team, fontSize = font.sp,
+                fontWeight = FontWeight.Bold), maxLines = 1)
+            Spacer(Modifier.width(gap))
+            Text(shownName, style = digits.copy(fontSize = font.sp,
+                fontWeight = FontWeight.Bold), maxLines = 1,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Spacer(Modifier.width(gap))
+            lapClock?.let { (value, colour) ->
+                Text(value, style = digits.copy(color = colour, fontSize = miniFont.sp),
+                    maxLines = 1)
+                Spacer(Modifier.width(gap))
+            }
+            if (!compact) state.gap?.let { value ->
+                Text(value, style = digits.copy(fontSize = miniFont.sp,
+                    color = Color.White.copy(alpha = 0.8f)), maxLines = 1)
+                Spacer(Modifier.width(gap))
+            }
+            Text(speedText, style = digits.copy(fontSize = miniFont.sp,
+                fontWeight = FontWeight.SemiBold), maxLines = 1)
+        }
+        // Three genuine timing-sector colours: yellow, personal-best green, session-best
+        // purple. No invented sector values or animation on missing timing data.
+        Row(Modifier.fillMaxWidth().padding(top = 3.dp * scale),
+            horizontalArrangement = Arrangement.spacedBy(3.dp * scale)) {
+            (if (completed) state.lapSectors else state.sectors).forEach { sector ->
+                Box(Modifier.weight(1f).height((if (compact) 2.5f else 4f).dp * scale)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(sector?.pace?.color() ?: SECTOR_EMPTY))
+            }
+        }
+    }
+}
