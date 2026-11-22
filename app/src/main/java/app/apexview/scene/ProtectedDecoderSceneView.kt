@@ -141,15 +141,17 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             outputReadiness.invalidate()
             onOutputLost()
         }
-        playbackSpeed = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
+        val normalizedSpeed = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
+        val speedChanged = playbackSpeed != normalizedSpeed
+        playbackSpeed = normalizedSpeed
         scene = nextScene
-        if (holder.surface.isValid) updateFrameRateHint(holder.surface)
+        if (holder.surface.isValid && (changed || speedChanged)) updateFrameRateHint(holder.surface)
         if (player !== nextPlayer) {
             input?.let { player?.clearVideoSurface(it) }
             player = nextPlayer
             input?.let { nextPlayer.setVideoSurface(it) }
         }
-        if (changed) gl.post { guarded {
+        if (changed || speedChanged) gl.post { guarded {
             if (atlasChanged) {
                 // New encoded atlas or crop mapping cannot reuse old input pixels.
                 hasFrame = false

@@ -10,6 +10,15 @@ class SceneFrameRatePolicyTest {
         assertEquals(59.94f, SceneFrameRatePolicy.hint(59.94), 0.0001f)
     }
 
+    @Test fun bothVideoRendererModesUseSourceCadenceTimesPlaybackSpeed() {
+        for (source in listOf(25.0, 50.0, 60.0)) {
+            for (speed in listOf(0.5f, 1f, 1.5f, 2f)) {
+                assertEquals((source * speed).toFloat(),
+                    SceneFrameRatePolicy.hint(source, speed), 0.0001f)
+            }
+        }
+    }
+
     @Test fun acceleratedPlaybackHintsRealPresentationRateAndRejectsInvalidSpeed() {
         assertEquals(75f, SceneFrameRatePolicy.hint(50.0, 1.5f), 0.0001f)
         assertEquals(100f, SceneFrameRatePolicy.hint(50.0, 2f), 0.0001f)

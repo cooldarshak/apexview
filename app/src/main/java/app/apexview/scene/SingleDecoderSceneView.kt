@@ -63,7 +63,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         val mode = actualDisplay.mode
         selectedDisplayHz = mode.refreshRate
         val sourceFps = scene?.sourceFrameRate ?: 0.0
-        val signature = "${actualDisplay.displayId}:${mode.modeId}:${mode.refreshRate}:$sourceFps"
+        val signature = "${actualDisplay.displayId}:${mode.modeId}:${mode.refreshRate}:$sourceFps:$playbackSpeed"
         if (signature == previousModeSignature) return
         previousModeSignature = signature
         // An available mode is not a selected mode; setFrameRate() is only advice to SurfaceFlinger.
@@ -71,10 +71,11 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             "${it.modeId}:${it.physicalWidth}x${it.physicalHeight}@${it.refreshRate}"
         }
         Log.i("ApexviewSingleDecoder", "SCENE_DISPLAY_MODE reason=$reason displayId=${actualDisplay.displayId} " +
-            "activeMode=${mode.modeId} activeHz=${mode.refreshRate} sourceFps=$sourceFps " +
+            "activeMode=${mode.modeId} activeHz=${mode.refreshRate} sourceFps=$sourceFps speed=$playbackSpeed " +
             "integerRefreshMultiple=${DisplayCadence.exactMultiple(mode.refreshRate, sourceFps)} " +
             "supportedModes=$available physicalPresentation=NOT_MEASURED")
     }
+    @Volatile private var playbackSpeed = 1f
     private var player: ExoPlayer? = null
     @Volatile private var scene: VideoScene? = null
     @Volatile private var released = false
@@ -257,7 +258,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         override fun doFrame(frameTimeNs: Long) = guarded {
             val callbackStarted = System.nanoTime()
             if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
-                    frameTimeNs, scene?.sourceFrameRate ?: 0.0, selectedDisplayHz)) {
+                    frameTimeNs, scene?.sourceFrameRate ?: 0.0, selectedDisplayHz, playbackSpeed)) {
                 pacing.onPacingDeferred()
                 Trace.beginSection("PitwallPacingDefer")
                 try { displayClock?.postFrameCallback(this) } finally { Trace.endSection() }
@@ -286,7 +287,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private fun applyOutputFrameRateHint() {
         if (Build.VERSION.SDK_INT < 30) return
         val surface = outputSurface ?: return
-        val fps = SceneFrameRatePolicy.hint(scene?.sourceFrameRate ?: 0.0)
+        val fps = SceneFrameRatePolicy.hint(scene?.sourceFrameRate ?: 0.0, playbackSpeed)
         if (fps == hintedFrameRate) return
         try {
             if (Build.VERSION.SDK_INT >= 31) {
@@ -321,7 +322,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         super.onDetachedFromWindow()
     }
 
-    fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene) {
+    fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene, speed: Float = 1f) {
+        val normalizedSpeed = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
+        val speedChanged = playbackSpeed != normalizedSpeed
+        playbackSpeed = normalizedSpeed
         val changed = scene != nextScene
         val atlasChanged = scene?.sameEncodedAtlasAs(nextScene) == false
         if (atlasChanged) {
@@ -336,8 +340,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             player = nextPlayer
             input?.let { nextPlayer.setVideoSurface(it) }
         }
-        if (changed) {
-            main.post { if (!released) logDisplayMode("source-changed") }
+        if (changed || speedChanged) {
+            main.post { if (!released) logDisplayMode(if (speedChanged) "speed-changed" else "source-changed") }
             gl.post { guarded {
                 if (atlasChanged) {
                     hasFrame = false

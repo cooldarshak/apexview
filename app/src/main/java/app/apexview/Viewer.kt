@@ -1013,7 +1013,7 @@ internal fun PlaybackVideoCanvas(
                 onOutputLost = { composedGlReady = false }
                 onFirstFrame = { composedGlReady = true }
                 view = this
-            } }, update = { it.bind(host.player, scene) },
+            } }, update = { it.bind(host.player, scene, app.playbackSpeed) },
                 onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
         }
             if (!composedGlReady) {
