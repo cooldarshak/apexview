@@ -49,11 +49,11 @@ internal fun TvTowerRow(
         driver, state, content, tyre, highlight,
         currentDensity.density, currentDensity.fontScale
     )
-    val baseKey = remember(visualKeys.base) { Any() }
-    val sectorKey = remember(visualKeys.sectors) { Any() }
-    val tyreKey = remember(visualKeys.tyre) { Any() }
-    val fieldKeys = remember(baseKey, sectorKey, tyreKey) {
-        arrayOf(baseKey, sectorKey, tyreKey)
+    // RetainedTowerRenderNode now compares immutable visual keys structurally.
+    // Passing the actual field data eliminates three remembered identity tokens
+    // per row, and preserves existing display lists across equal snapshots.
+    val fieldKeys = remember(visualKeys.base, visualKeys.sectors, visualKeys.tyre) {
+        arrayOf<Any>(visualKeys.base, visualKeys.sectors, visualKeys.tyre)
     }
     val accessibleSummary = remember(name, state.position, state.inPit, state.retired,
         state.lastLap?.time, state.bestLap?.time, state.ahead, state.toLeader,

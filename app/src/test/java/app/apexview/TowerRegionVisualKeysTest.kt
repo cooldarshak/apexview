@@ -58,6 +58,18 @@ class TowerRegionVisualKeysTest {
         assertEquals(original.sectors, changedPlace.sectors)
         assertEquals(original.tyre, changedPlace.tyre)
     }
+    @Test fun actualRegionKeysRetainEqualSnapshotsWithoutNewIdentityTokens() {
+        val first = keys()
+        val fresh = keys(state.copy(sectors = state.sectors.toList()),
+            tyre = Tyre("SOFT", 4))
+        val validity = OverlayRecordingValidity()
+        validity.markRecorded(first.base, 600, 45)
+        assertFalse(validity.needsRecord(fresh.base, 600, 45))
+        validity.markRecorded(first.sectors, 600, 45)
+        assertFalse(validity.needsRecord(fresh.sectors, 600, 45))
+        validity.markRecorded(first.tyre, 600, 45)
+        assertFalse(validity.needsRecord(fresh.tyre, 600, 45))
+    }
     @Test fun identicalNewObjectsReuseEveryRegionKey() {
         val first = keys()
         val other = keys(

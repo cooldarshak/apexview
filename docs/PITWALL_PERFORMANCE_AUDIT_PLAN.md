@@ -128,6 +128,14 @@ Source changes following the Build 699 baseline:
 - An AGP9 migration would be separate and unnecessary for the Android 36
   mobile release target. Device and CI parity still required.
 
+## Tower retained-layer key optimizations
+
+- TV/phone timing tower RenderNodes now store their immutable base, sectors,
+  and tyre visual records directly. The prior three `remember { Any() }`
+  identity-token layers allocated extra keys and obscured the structural
+  equality contract. Tests verify equal fresh timing snapshots replay all
+  three regions unchanged, preserving display list region boundaries.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**
