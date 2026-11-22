@@ -3,7 +3,7 @@ package app.apexview
 import java.util.Locale
 
 /** Track labels come from F1's actual Media3 manifest, never a hardcoded menu. */
-internal data class CaptionTrackOption(val language: String, val label: String)
+data class CaptionTrackOption(val language: String, val label: String)
 
 /** Pure selection logic shared by phone, Android TV and the local TV receiver. */
 internal object CaptionPolicy {

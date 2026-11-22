@@ -88,6 +88,40 @@ class CastTimingProtocolTest {
         assertEquals(50f, state.carsAt(9000).single().x, 0f)
     }
 
+    @Test fun negotiatedCastPredictionPreservesOldTVWireFormatAndSupportsNewReceiver() {
+        val driver = DriverTrack(
+            longArrayOf(1000, 1200, 1400, 1600, 1800, 2000, 2200),
+            floatArrayOf(0f, 10f, 20f, 30f, 40f, 50f, 60f),
+            floatArrayOf(0f, 5f, 10f, 15f, 20f, 25f, 30f), 7
+        )
+        val car = Car("1", 0f, 0f, LapState.PUSH)
+        assertEquals(3, CastTimingProtocol.predictionStepsForReceiver(0))
+        assertEquals(3, CastTimingProtocol.predictionStepsForReceiver(3))
+        assertEquals(6, CastTimingProtocol.predictionStepsForReceiver(6))
+        assertEquals(6, CastTimingProtocol.predictionStepsForReceiver(99))
+
+        val legacy = CastTimingProtocol.encodeCarMotion(car, driver, 1000,
+            CastTimingProtocol.predictionStepsForReceiver(0))
+        val extended = CastTimingProtocol.encodeCarMotion(car, driver, 1000,
+            CastTimingProtocol.predictionStepsForReceiver(6))
+        assertEquals(10, legacy.length())
+        assertEquals(16, extended.length())
+        for (i in 0 until legacy.length()) assertEquals(legacy.get(i), extended.get(i))
+        assertEquals(30.0, legacy.getDouble(8), 0.001)
+        assertEquals(60.0, extended.getDouble(14), 0.001)
+        assertEquals(30.0, extended.getDouble(15), 0.001)
+
+        val geometryId = CastTimingProtocol.geometry(timing()).getString("id")
+        val decoded = CastTimingProtocol.decodeFrame(
+            frame(geometryId).put("cars", JSONArray().put(extended)))
+        assertEquals(60f, decoded.carsAt(6200).single().x, 0.0001f)
+        assertEquals(60f, decoded.carsAt(9999).single().x, 0.0001f)
+        // A missing source track never invents motion.
+        val missing = CastTimingProtocol.encodeCarMotion(car, null, 1000, 6)
+        assertEquals(0.0, missing.getDouble(14), 0.001)
+        assertEquals(0.0, missing.getDouble(15), 0.001)
+    }
+
     @Test fun delayedPacketUsesSixMeasuredStepsAndRejectsUnboundedMotion() {
         val packet = frame(CastTimingProtocol.geometry(timing()).getString("id"))
         val values = packet.getJSONArray("cars").getJSONArray(0)

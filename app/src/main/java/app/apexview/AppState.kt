@@ -191,6 +191,7 @@ class AppState(
     private var localTimingSupported = false
     private var localWidevineSupported = false
     private var localCaptionsSupported = false
+    private var localMapPredictionSteps = app.apexview.cast.CastTimingProtocol.V1_SEND_PREDICTION_STEPS
     private var localDirectSupported = false
     private data class DirectCast(val tileId: Int, val contentId: Long, val channel: Int, val label: String)
     private var directCast by mutableStateOf<DirectCast?>(null)
@@ -357,7 +358,8 @@ class AppState(
                     require(body != null && body.getInt("version") >= 3) { "Receiver does not support the Pitwall FCast connection" }
                     localConnection?.send(protocol.INITIAL, JSONObject().put("displayName", android.os.Build.MODEL)
                         .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1)
-                        .put("pitwallOverlays", 1).put("pitwallCaptions", 1))
+                        .put("pitwallOverlays", 1).put("pitwallCaptions", 1)
+                        .put("pitwallMapPredictionSteps", app.apexview.cast.CastTimingProtocol.MAX_PREDICTION_STEPS))
                 }
                 protocol.INITIAL -> {
                     require(body?.optInt("pitwallScene") == 1) { "This receiver cannot arrange Pitwall video windows" }
@@ -366,6 +368,10 @@ class AppState(
                         localWidevineSupported = body?.optInt("pitwallWidevine") == 1
                         localDirectSupported = body?.optInt("pitwallDirect") == 1
                         localCaptionsSupported = body?.optInt("pitwallCaptions") == 1
+                        localMapPredictionSteps = app.apexview.cast.CastTimingProtocol.predictionStepsForReceiver(
+                            body?.optInt("pitwallMapPredictionSteps", 0) ?: 0)
+                        android.util.Log.i("PitwallCast", "TIMING_RX_CAPABILITY predictionSteps=$localMapPredictionSteps " +
+                            "captions=$localCaptionsSupported nativeDRM=$localWidevineSupported")
                         localReady = true; castBusy = false
                         startFullSceneCast()
                     }
@@ -996,7 +1002,9 @@ class AppState(
         localConnectionJob?.cancel(); localConnectionJob = null
         val previous = localConnection; localConnection = null; previous?.close()
         localReady = false; localTimingSupported = false; localWidevineSupported = false
-        localDirectSupported = false; localCaptionsSupported = false; localChosen = false; googleCastSelected = false
+        localDirectSupported = false; localCaptionsSupported = false
+        localMapPredictionSteps = app.apexview.cast.CastTimingProtocol.V1_SEND_PREDICTION_STEPS
+        localChosen = false; googleCastSelected = false
         app.apexview.cast.local.CastConnectionService.stop(context)
         releaseCastRelay(resumeLocal); castBusy = false
         castStatus = "Casting stopped."
@@ -1191,7 +1199,9 @@ class AppState(
     private fun publishLocalCastTiming(timing: app.apexview.cast.CastTimingPublisher, contentId: Long?) {
         if (!localChosen || !localTimingSupported || !castSceneConfirmed || leaderTile()?.contentId != contentId) return
         runCatching {
-            timing.messages(localLoadId).forEach { localConnection?.send(app.apexview.cast.local.FcastProtocol.TIMING, it) }
+            timing.messages(localLoadId, localMapPredictionSteps).forEach {
+                localConnection?.send(app.apexview.cast.local.FcastProtocol.TIMING, it)
+            }
         }.onFailure { android.util.Log.w("PitwallCast", "Timing display update failed: ${it.javaClass.simpleName}") }
     }
 

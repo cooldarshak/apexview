@@ -235,7 +235,8 @@ class PitwallReceiverActivity : ComponentActivity() {
                     versionReceived = true
                     connection?.send(FcastProtocol.INITIAL, JSONObject().put("displayName", receiverName)
                         .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1).put("pitwallOverlays", 1)
-                        .put("pitwallWidevine", 1).put("pitwallDirect", 1).put("pitwallCaptions", 1))
+                        .put("pitwallWidevine", 1).put("pitwallDirect", 1).put("pitwallCaptions", 1)
+                        .put("pitwallMapPredictionSteps", CastTimingProtocol.MAX_PREDICTION_STEPS))
                 }
                 FcastProtocol.PING -> connection?.send(FcastProtocol.PONG)
                 FcastProtocol.PONG -> Unit

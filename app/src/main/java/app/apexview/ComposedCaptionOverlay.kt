@@ -5,7 +5,7 @@ import androidx.annotation.OptIn
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.CueGroup
+import androidx.media3.common.text.CueGroup
 import androidx.media3.common.Player
 import androidx.media3.common.text.Cue
 import androidx.media3.common.util.UnstableApi

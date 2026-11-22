@@ -19,6 +19,12 @@ internal object CastTimingProtocol {
     // arrays of at most ten fields. Extend only after capability negotiation.
     internal const val MAX_PREDICTION_STEPS = 6
     internal const val V1_SEND_PREDICTION_STEPS = 3
+
+    /** Older TV APKs reject longer car arrays; only enable six measured samples
+     * after the peer explicitly advertises its decoder limit in INITIAL. */
+    internal fun predictionStepsForReceiver(advertised: Int): Int =
+        if (advertised >= MAX_PREDICTION_STEPS) MAX_PREDICTION_STEPS else V1_SEND_PREDICTION_STEPS
+
     private const val MAX_DRIVERS = 24
     private const val MAX_COORDINATES = 3072
     data class Panel(val x: Float, val y: Float, val width: Float, val height: Float)
@@ -175,7 +181,10 @@ internal object CastTimingProtocol {
     }
     fun encodeFrame(geometryId: String, positionMs: Long, now: Long, density: Float, fontScale: Float,
         app: AppState, timing: SessionTiming?, table: JSONArray, circle: PitCircleData?, stop: PitStopNow?,
-        cars: List<Car>): JSONObject {
+        cars: List<Car>, predictionSteps: Int = V1_SEND_PREDICTION_STEPS): JSONObject {
+        require(predictionSteps == V1_SEND_PREDICTION_STEPS || predictionSteps == MAX_PREDICTION_STEPS) {
+            "Unsupported Cast prediction horizon"
+        }
         val flags = timing?.flags?.at(now) ?: FlagPicture(TrackCondition.CLEAR, emptyMap())
         val header = timing?.let { towerSessionHeader(it, now) } ?: TowerSessionHeaderData("TIMING", "", Color.White, "", emptyList())
         val panel = app.activeMapPanel
@@ -193,17 +202,7 @@ internal object CastTimingProtocol {
             .put("onTop", app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString() ?: JSONObject.NULL)
             .put("leader", timing?.let { leaderAt(it, now) } ?: JSONObject.NULL)
             .put("cars", JSONArray().apply { cars.take(MAX_DRIVERS).forEach { car ->
-                val track = timing!!.tracks[car.number]
-                var next = track?.atOrFirst(now + POSITION_STEP_MS) ?: (car.x to car.y)
-                val row = JSONArray(listOf(car.number, car.x, car.y, next.first, next.second, car.state.ordinal))
-                // Preserve the original 600 ms V1 wire shape. Old receivers
-                // reject the larger array, so longer horizons are decoder-only
-                // until an explicit newer-receiver capability handshake.
-                for (step in 2..V1_SEND_PREDICTION_STEPS) {
-                    next = track?.atOrFirst(now + step * POSITION_STEP_MS) ?: next
-                    row.put(next.first).put(next.second)
-                }
-                put(row)
+                put(encodeCarMotion(car, timing!!.tracks[car.number], now, predictionSteps))
             } }).put("condition", flags.track.ordinal).put("yellow", JSONArray().apply { flags.yellow.entries.take(64).forEach { put(JSONArray(listOf(it.key, it.value))) } })
             .put("resumption", flags.resumption?.let { JSONArray(listOf(it.announcedUtc, it.atUtc, it.what.safe())) } ?: JSONObject.NULL)
             .put("stop", stop?.let { JSONArray(listOf(it.number, it.carProgress, it.ghostProgress, it.outBehind?.first ?: JSONObject.NULL, it.outBehind?.second ?: 0)) } ?: JSONObject.NULL)
@@ -211,6 +210,23 @@ internal object CastTimingProtocol {
             .put("header", JSONArray(listOf(header.name, header.track, header.color.toArgb(), header.counter, JSONArray(header.weather))))
             .put("message", (timing?.let { noPositionsLine(it, now) } ?: app.mapStatus)?.let(DiagnosticRedaction::redact)?.safe(220) ?: JSONObject.NULL)
     }
+    /**
+     * Append ONLY measured future track coordinates. For legacy peers maintain
+     * exactly the original 10-element row; six-step peers receive 16 elements.
+     * A missing/gapped track holds its last measured value, never extrapolates.
+     */
+    internal fun encodeCarMotion(car: Car, track: DriverTrack?, now: Long,
+        predictionSteps: Int = V1_SEND_PREDICTION_STEPS): JSONArray {
+        require(predictionSteps == V1_SEND_PREDICTION_STEPS || predictionSteps == MAX_PREDICTION_STEPS)
+        var next = track?.atOrFirst(now + POSITION_STEP_MS) ?: (car.x to car.y)
+        return JSONArray(listOf(car.number, car.x, car.y, next.first, next.second, car.state.ordinal)).apply {
+            for (step in 2..predictionSteps) {
+                next = track?.atOrFirst(now + step * POSITION_STEP_MS) ?: next
+                put(next.first); put(next.second)
+            }
+        }
+    }
+
     fun decodeFrame(j: JSONObject, table: Table = readTable(j.getJSONArray("rows"))): Frame {
         require(j.getInt("version") == VERSION && j.getString("kind") == "frame")
         val carArray = j.getJSONArray("cars")

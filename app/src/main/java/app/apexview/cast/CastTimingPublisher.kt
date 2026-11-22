@@ -31,7 +31,9 @@ internal class CastTimingPublisher(private val context: Context, private val app
     private var mapSamplerOwner: SessionTiming? = null
     private var mapSampler: OverlayPositionSampler? = null
 
-    fun messages(playbackId: String): List<JSONObject> {
+    fun messages(playbackId: String,
+        receiverPredictionSteps: Int = CastTimingProtocol.V1_SEND_PREDICTION_STEPS
+    ): List<JSONObject> {
         val elapsed = android.os.SystemClock.elapsedRealtime()
         if (lastPlaybackId == playbackId && lastFrameAt != Long.MIN_VALUE && elapsed - lastFrameAt < CastTimingProtocol.POSITION_STEP_MS) return emptyList()
         lastFrameAt = elapsed
@@ -116,7 +118,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
             "rows=${rows.length()} cars=${cars.size} trackStart=${timing?.firstTrackUtc} trackEnd=${timing?.lastTrackUtc}")
         val message = CastTimingProtocol.encodeFrame(geometryId, position, now,
             context.resources.displayMetrics.density, context.resources.configuration.fontScale,
-            app, timing, rows, circle, stop, cars)
+            app, timing, rows, circle, stop, cars, receiverPredictionSteps)
         message.remove("rows")
         output += message.put("playbackId", playbackId).put("tableId", rowsId).put("sequence", ++sequence).put("clockEpoch", app.castTimingEpoch)
         sentFrames++

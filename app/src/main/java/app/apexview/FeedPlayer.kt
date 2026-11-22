@@ -169,6 +169,8 @@ class FeedPlayer(
     internal var composedSurfaceHeight: Int = 0
         private set
     private var remotePlaybackSuspended = false
+    // Constructor language must survive subsequent in-player CC toggles.
+    private val captionCommentaryLanguage = commentary
     private var captionsSelected = subtitles
     private var selectedCaptionLanguage = CaptionPolicy.normalizeLanguage(captionLanguage)
     private var remoteTextWasDisabled = !subtitles
@@ -186,7 +188,7 @@ class FeedPlayer(
         remoteTextWasDisabled = !enabled
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, disabled)
-            .setPreferredTextLanguage(CaptionPolicy.textLanguage(normalized, commentary))
+            .setPreferredTextLanguage(CaptionPolicy.textLanguage(normalized, captionCommentaryLanguage))
             .setSelectUndeterminedTextLanguage(enabled)
             .build()
         playbackEvent("captions", "enabled=$enabled language=$normalized offered=${availableCaptionTracks.size}")

@@ -8,6 +8,31 @@ Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
 
+
+## Build 730 closed-caption compilation correction and backward-compatible Cast horizon
+
+The Build 730 caption-enabled source reached Gradle but failed the Kotlin compile gate:
+`CueGroup` was imported from the wrong Media3 package, an internal caption
+track type was exposed by two public properties, and `FeedPlayer.setCaptions`
+referenced an unretained constructor parameter. Correct all together,
+retaining the player CC button, actual media text cue ownership, TV CC key,
+native authorized receiver caption controls and all existing tests. No test
+or caption feature is disabled to make CI green.
+
+The earlier six-step Cast receiver decoder remained unused because the sender
+correctly protected installed legacy TV APKs from oversized marker packets.
+Add explicit receiver-advertised `pitwallMapPredictionSteps=6` capability to
+the existing FCast INITIAL exchange, and transmit six *measured* 200ms future
+positions only when the receiver confirms support. Older receiver builds
+silently fall back to the original three-step 10-element per-car packet.
+The current receiver decoder continues to bound incoming arrays; interpolator
+never extrapolates from the last known source position. Add regression tests
+for both formats, real track sampling, end holding and interoperability.
+This affects map timing for native clear and authorized protected Cast while
+leaving clear baked full-picture Cast, MediaCodec, Widevine, audio and the
+standalone player routes unchanged. Real TCL motion cadence and receiver
+drift remain strict device gates, not closed by simulated traces.
+
 ## Mandatory hard rule: universal parity and Closed Captions (new gate 16)
 
 **Source-of-truth rule for every future change, not an optional regression check:**
