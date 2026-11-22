@@ -1,6 +1,5 @@
 package app.apexview.tiled
 
-import java.io.ByteArrayOutputStream
 
 /**
  * Builds one length-prefixed HEVC CMAF sample from rewritten protected slice NALs.
@@ -51,7 +50,11 @@ internal object ProtectedHevcSampleComposer {
             }
         }
 
-        val output = ByteArrayOutputStream(totalSampleBytes.toInt())
+        // The size was checked above. Write each length prefix and encrypted NAL
+        // directly into the single owned output; ByteArrayOutputStream.toByteArray()
+        // previously allocated and copied every sample a second time.
+        val output = ByteArray(totalSampleBytes.toInt())
+        var sampleOffset = 0
         val subsampleRanges = ArrayList<CmafBoxInspector.SubsampleEncryptionRange>()
         var pendingClearBytes = 0L
         var encryptedTotal = 0L
@@ -90,7 +93,7 @@ internal object ProtectedHevcSampleComposer {
         slices.forEachIndexed { index, slice ->
             val nal = slice.nal
             for (byteIndex in nalLengthSize - 1 downTo 0) {
-                output.write((nal.size ushr (byteIndex * 8)) and 0xff)
+                output[sampleOffset++] = ((nal.size ushr (byteIndex * 8)) and 0xff).toByte()
             }
             // The length prefix is part of the clear run preceding this NAL's first encrypted
             // span, and is therefore recorded in the output CENC subsample map.
@@ -102,7 +105,8 @@ internal object ProtectedHevcSampleComposer {
                     flushEncryptedRange(range.lengthBytes.toLong())
                 }
             }
-            output.write(nal)
+            nal.copyInto(output, destinationOffset = sampleOffset)
+            sampleOffset = Math.addExact(sampleOffset, nal.size)
         }
 
         while (pendingClearBytes > MAX_CLEAR_BYTES) {
@@ -111,8 +115,8 @@ internal object ProtectedHevcSampleComposer {
         }
         if (pendingClearBytes > 0L) appendSubsample(pendingClearBytes, 0L)
 
-        val sampleBytes = output.toByteArray()
-        require(sampleBytes.size.toLong() == totalSampleBytes) {
+        val sampleBytes = output
+        require(sampleOffset == sampleBytes.size && sampleBytes.size.toLong() == totalSampleBytes) {
             "$context: output sample byte count differs from its calculated size"
         }
         require(subsampleRanges.isNotEmpty()) {

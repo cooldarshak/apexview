@@ -209,6 +209,42 @@ issues were resolved by Build 719, which reached the test execution phase.
 - Close this gate only after all JVM and instrumentation tests and signed APK
   artifact finish on the same new branch commit.
 
+## Build 694 trace recovery and post-721 protected allocation correction
+
+**Physical evidence remains open.** The original Build 694 application log and
+118 MB Perfetto trace were recovered from the project file library. Decoding
+FrameTimeline records directly confirms substantial MainActivity UI jank in the
+~25 second trace: 1,068 actual app surface frames, 304 app-deadline-miss
+flags, and 879 buffer-stuffing flags. SurfaceFlinger has 1,535 actual display
+slots, 251 late and 11 dropped; these are **NOT** independent HEVC picture
+presentations. The trace does not identify an independently timed Pitwall
+SurfaceView video layer, so 50fps physical video delivery is unmeasured here.
+Do not use app frame counts or display refresh as a substitute.
+
+The Build 694 second EGL_READY at 13:22:58.731 followed a documented window
+invisibility / SurfaceView destruction at 13:22:54, rather than demonstrating
+an unexplained steady-state EGL reboot. Startup's temporary black/partial
+composition remains an earlier symptom awaiting Build 721 hardware replay.
+
+The protected CMAF producer also has a concrete avoidable allocation path:
+the sample composer previously used ByteArrayOutputStream + toByteArray, and
+the fragment writer built a full mdat payload array before concatenating
+another full final segment. Replace both with precisely sized owned output
+arrays, as the clear CMAF writer already does. Preserve exact NAL lengths,
+CBCS encrypted-byte ranges, IV fingerprints, validated moof/trun offsets,
+bounded output checks, and independent CMAF post-write inspection. Exercise
+multi-NAL prefix lengths, uint16 clear-run boundaries and multi-sample
+fragments with generated real HEVC fixtures. This is an allocation reduction
+by construction, **not** proof that UI jank or frame pacing was fixed.
+
+Cross-path impact: the change is inside the shared authorized protected
+archive/live fragment writer and their native protected Cast relay source;
+clear HEVC uses its existing single-buffer writer and is unchanged.
+Single-/multiple-decoder selection, codec ownership, Widevine, phone, TV and
+receiver entitlement remain unchanged. CI regression is required; Samsung
+S22 Ultra, TCL 55C655, clear baked Cast and native protected Cast need
+hardware verification before any exit gate closes.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**

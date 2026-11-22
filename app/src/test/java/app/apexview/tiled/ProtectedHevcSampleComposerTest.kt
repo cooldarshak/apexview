@@ -1,5 +1,6 @@
 package app.apexview.tiled
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -41,6 +42,66 @@ class ProtectedHevcSampleComposerTest {
             ),
             layout.nals.single().protectionRanges
         )
+    }
+
+    @Test fun packsMultipleProtectedNalsExactlyAtEveryAllowedPrefixWidth() {
+        val nals = listOf(
+            byteArrayOf(0x02, 0x01, 0x7e, 0x55),
+            byteArrayOf(0x02, 0x01, 0x44, 0x66, 0x77),
+        )
+        val slices = nals.map { nal ->
+            ProtectedHevcSliceHeaderRewriter.Result(
+                nal = nal,
+                protectionRanges = listOf(
+                    ProtectedHevcSampleLayout.ProtectionRange(0, 2, true),
+                    ProtectedHevcSampleLayout.ProtectionRange(2, nal.size - 2, false),
+                ),
+                destinationAddress = 0,
+                sourceTailOffset = 2,
+                outputTailOffset = 2,
+                copiedTailBytes = nal.size - 2,
+                encryptedByteCount = (nal.size - 2).toLong(),
+            )
+        }
+        for (prefixWidth in 1..4) {
+            val output = ProtectedHevcSampleComposer.compose(slices, prefixWidth)
+            val expected = buildList<Byte> {
+                nals.forEach { nal ->
+                    for (shift in prefixWidth - 1 downTo 0)
+                        add(((nal.size ushr (shift * 8)) and 0xff).toByte())
+                    addAll(nal.toList())
+                }
+            }.toByteArray()
+            assertArrayEquals(expected, output.sampleBytes)
+            assertEquals(nals.map { CmafBoxInspector.SubsampleEncryptionRange(
+                prefixWidth + 2, (it.size - 2).toLong()) }, output.subsampleRanges)
+            assertEquals(2, ProtectedHevcSampleLayout.inspect(
+                output.sampleBytes, prefixWidth, output.subsampleRanges
+            ).nals.size)
+        }
+    }
+
+    @Test fun longClearRunStillSplitsAtTheCencUint16Boundary() {
+        val nal = ByteArray(70_000) { 0x4f }
+        nal[0] = 0x02
+        nal[1] = 0x01
+        val clearNalBytes = nal.size - 16
+        val slice = ProtectedHevcSliceHeaderRewriter.Result(
+            nal = nal,
+            protectionRanges = listOf(
+                ProtectedHevcSampleLayout.ProtectionRange(0, clearNalBytes, true),
+                ProtectedHevcSampleLayout.ProtectionRange(clearNalBytes, 16, false),
+            ),
+            destinationAddress = 0, sourceTailOffset = 2, outputTailOffset = 2,
+            copiedTailBytes = nal.size - 2, encryptedByteCount = 16L,
+        )
+        val output = ProtectedHevcSampleComposer.compose(listOf(slice), 4)
+        assertEquals(nal.size + 4, output.sampleBytes.size)
+        assertArrayEquals(nal, output.sampleBytes.copyOfRange(4, output.sampleBytes.size))
+        assertEquals(listOf(
+            CmafBoxInspector.SubsampleEncryptionRange(65_535, 0),
+            CmafBoxInspector.SubsampleEncryptionRange(4 + clearNalBytes - 65_535, 16),
+        ), output.subsampleRanges)
     }
 
     @Test fun rejectsNalWithIncompleteProtectionMap() {

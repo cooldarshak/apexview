@@ -217,6 +217,68 @@ class ProtectedHevcCmafInitSegmentWriterTest {
     }
 
 
+    @Test fun protectedFragmentCopiesThreeSamplesOnlyOnceIntoExactMdatOrder() {
+        val directory = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+        assumeTrue("CI must generate real HEVC fixtures", !directory.isNullOrBlank())
+        val source = File(directory!!, "source_tiled_2x2.hevc")
+        assumeTrue("Generated source fixture missing", source.isFile)
+        val nals = HevcBitstream.splitAnnexB(source.readBytes())
+        val vps = nals.single { it.type == 32 }.bytes
+        val sps = nals.single { it.type == 33 }.bytes
+        val pps = nals.single { it.type == 34 }.bytes
+        val v = HevcParameterSets.parseVps(vps)
+        val s = HevcParameterSets.parseSps(sps)
+        val p = HevcParameterSets.parsePps(pps, s)
+        val params = HevcOutputParameterSetWriter.generate(vps, sps, pps,
+            HevcOutputParameterSetWriter.Request(
+                v.vpsId, s.spsId, p.ppsId, s.width, s.height,
+                requireNotNull(p.tileColumnWidthsInCtbs),
+                requireNotNull(p.tileRowHeightsInCtbs),
+                requireNotNull(p.loopFilterAcrossTiles), 25
+            )
+        )
+        val init = ProtectedHevcCmafInitSegmentWriter.rewrite(
+            protectInit(HevcClearCmafInitSegmentWriter.write(
+                HevcClearCmafInitSegmentWriter.Request(7L, 90_000L, params)), "hev1"), params)
+        val nal = nals.first { it.type in 16..21 }.bytes
+        require(nal.size > 16)
+        val sampleBytes = u32(nal.size) + nal
+        val samples = (1..3).map { id ->
+            val iv = ByteArray(16) { id.toByte() }
+            ProtectedHevcCmafFragmentWriter.Sample(
+                sampleBytes = sampleBytes.copyOf(),
+                subsampleRanges = listOf(
+                    CmafBoxInspector.SubsampleEncryptionRange(sampleBytes.size - 16, 16L)),
+                perSampleIvBytes = iv,
+                perSampleIvIdentity = ProtectedValueFingerprint.fromBytes("iv", iv),
+                durationTicks = 3_600L, sampleFlags = 0x02000000L,
+                compositionOffsetTicks = 0L,
+            )
+        }
+        val styp = box("styp", ascii("msdh") + u32(0))
+        val fragment = ProtectedHevcCmafFragmentWriter.write(
+            init, ProtectedHevcCmafFragmentWriter.Request(
+                trackId = 7L, baseDecodeTimeTicks = 900_000L,
+                sequenceNumber = 1L, perSampleIvSize = 16,
+                samples = samples, stypBox = styp,
+            )
+        )
+        val expectedPayload = samples.fold(ByteArray(0)) { bytes, sample ->
+            bytes + sample.sampleBytes
+        }
+        assertArrayEquals(styp, fragment.copyOfRange(0, styp.size))
+        assertArrayEquals(expectedPayload, fragment.copyOfRange(
+            fragment.size - expectedPayload.size, fragment.size
+        ))
+        val inspected = CmafBoxInspector.inspect(fragment, CmafBoxInspector.inspect(init))
+        assertTrue(inspected.errors.toString(), inspected.errors.isEmpty())
+        val media = inspected.fragments.single()
+        assertEquals(3, media.sampleCount)
+        assertEquals(3, media.sampleEncryptionMetadata.size)
+        assertEquals(samples.map { it.subsampleRanges },
+            media.sampleEncryptionMetadata.map { it.subsampleRanges })
+    }
+
     @Test fun pitwallCastEncryptedAudioCencRetainsItsOwnDefaultKid() {
         // Pitwall Cast audio reuses the same MPD protection helper. A strict video-only
         // requirement would break the encrypted soun/enca representation.

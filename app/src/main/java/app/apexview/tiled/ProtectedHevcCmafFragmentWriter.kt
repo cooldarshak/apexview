@@ -175,16 +175,37 @@ internal object ProtectedHevcCmafFragmentWriter {
             "$context: moof size changed while calculating media data offset"
         }
 
-        val mdatPayload = ByteArray(mdatBytes.toInt())
-        var cursor = 0
-        request.samples.forEach { sample ->
-            sample.sampleBytes.copyInto(mdatPayload, cursor)
-            cursor = Math.addExact(cursor, sample.sampleBytes.size)
-        }
-        val result = styp + moof + box("mdat", mdatPayload)
-        require(result.size.toLong() <= MAX_FRAGMENT_BYTES) {
+        // Mirror the clear CMAF writer: the output is an exact-sized, owned
+        // fragment buffer. Previously the 5-10 MB mdat payload was copied
+        // into a temporary array, then copied again by box()/byte-array
+        // concatenation. On 50fps four-feed CBCS this repeatedly pressured GC.
+        val totalFragmentBytes = Math.addExact(
+            Math.addExact(styp.size.toLong(), moof.size.toLong()),
+            Math.addExact(mdatBytes, 8L)
+        )
+        require(totalFragmentBytes <= MAX_FRAGMENT_BYTES) {
             "$context: generated fragment exceeds the output size bound"
         }
+        val result = ByteArray(totalFragmentBytes.toInt())
+        var cursor = 0
+        styp.copyInto(result, destinationOffset = cursor)
+        cursor = Math.addExact(cursor, styp.size)
+        moof.copyInto(result, destinationOffset = cursor)
+        cursor = Math.addExact(cursor, moof.size)
+        ByteBuffer.wrap(result).order(ByteOrder.BIG_ENDIAN).apply {
+            position(cursor)
+            putInt(Math.addExact(mdatBytes, 8L).toInt())
+            put('m'.code.toByte())
+            put('d'.code.toByte())
+            put('a'.code.toByte())
+            put('t'.code.toByte())
+        }
+        cursor = Math.addExact(cursor, 8)
+        request.samples.forEach { sample ->
+            sample.sampleBytes.copyInto(result, destinationOffset = cursor)
+            cursor = Math.addExact(cursor, sample.sampleBytes.size)
+        }
+        check(cursor == result.size) { "$context: validated mdat samples did not fill the output fragment" }
 
         val validation = CmafBoxInspector.inspect(
             result, priorInitialization = initReport
