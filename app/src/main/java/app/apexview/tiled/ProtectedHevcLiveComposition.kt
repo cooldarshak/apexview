@@ -342,6 +342,15 @@ internal object ProtectedHevcLiveComposition {
 
     fun hasOutput(group: String): Boolean = sessionIndex[group]?.hasPublishedOutput == true
 
+    /**
+     * Monotonically increasing output publication count. Unlike decode
+     * timestamps, this cannot repeat on discontinuity or POC epoch changes.
+     * It is volatile metadata, never a protected sample or key.
+     */
+    fun latestOutputVersion(group: String): Long? = sessionIndex[group]?.let {
+        if (it.hasPublishedOutput) it.composedFragments else null
+    }
+
     private fun cacheInitialization(
         group: String,
         label: String,

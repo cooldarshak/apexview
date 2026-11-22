@@ -6,16 +6,16 @@ package app.apexview.tiled
  *
  * Only a successfully published output advances the version. Failures remain
  * retryable and a new session has an independent gate. No encrypted payload
- * or license data is retained here, only the media decode-time position.
+ * or license data is retained here, only the monotonic output version.
  */
 internal class RollingPublicationVersion {
-    private var lastPublishedStartUs: Long? = null
+    private var lastPublishedVersion: Long? = null
 
-    fun shouldPublish(latestOutputStartUs: Long?): Boolean =
-        latestOutputStartUs != null && latestOutputStartUs != lastPublishedStartUs
+    fun shouldPublish(latestVersion: Long?): Boolean =
+        latestVersion != null && latestVersion != lastPublishedVersion
 
-    fun published(latestOutputStartUs: Long) {
-        require(latestOutputStartUs >= 0L)
-        lastPublishedStartUs = latestOutputStartUs
+    fun published(latestVersion: Long) {
+        require(latestVersion > 0L)
+        lastPublishedVersion = latestVersion
     }
 }

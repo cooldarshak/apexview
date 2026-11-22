@@ -3425,13 +3425,12 @@ class AppState(
             while (true) {
                 val snapshot = capture.captureNext(group, feeds)
                 // A waiting-for-next-fragment poll is NOT a new composed output.
-                // Read the latest decode-time version before allocating an entire
-                // multi-megabyte copy; both the version and the copy stay off main.
-                val latestOutputStartUs = if (!composedPlaybackStarted || snapshot.capturedFeeds > 0)
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        ProtectedHevcLiveComposition.latestOutputStartUs(group)
-                    } else null
-                val outputWindow = if (publication.shouldPublish(latestOutputStartUs))
+                // Compare the monotonic composed-publication count, never a
+                // timestamp that can repeat after a legitimate CMAF discontinuity.
+                // No media bytes are copied until the version advances.
+                val latestOutputVersion = if (!composedPlaybackStarted || snapshot.capturedFeeds > 0)
+                    ProtectedHevcLiveComposition.latestOutputVersion(group) else null
+                val outputWindow = if (publication.shouldPublish(latestOutputVersion))
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                         ProtectedHevcLiveComposition.outputWindow(group)
                     } else null
@@ -3465,7 +3464,7 @@ class AppState(
                                     outputWindow, labels.size, clearOutput = false)
                                 host.feed.startProtectedComposedPlayback(outputWindow, pssh)
                                 published = true
-                                publication.published(requireNotNull(latestOutputStartUs))
+                                publication.published(requireNotNull(latestOutputVersion))
                                 protectedRollingScene = ProtectedRollingScene(labels.toList(), layout)
                                 showProtectedCompositionPresentation(host, selectedTiles, audioTile,
                                     sceneLayout = true)
@@ -3476,7 +3475,7 @@ class AppState(
                                 outputWindow, labels.size, clearOutput = false)
                             host.feed.publishProtectedComposedOutput(outputWindow, pssh)
                             published = true
-                            publication.published(requireNotNull(latestOutputStartUs))
+                            publication.published(requireNotNull(latestOutputVersion))
                             if (protectedRollingScene?.layout != layout) {
                                 protectedRollingScene = ProtectedRollingScene(labels.toList(), layout)
                                 android.util.Log.i("ApexviewSingleDecoder",
