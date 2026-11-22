@@ -76,11 +76,10 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
 
     private val statusAction = context.packageName + ".INSTALL_STATUS"
 
-    init {
-        // The installer reports back here; when it needs the user's say-so it hands over a screen.
-        ContextCompat.registerReceiver(
-            context.applicationContext,
-            object : BroadcastReceiver() {
+    // Register on application context and release on AppState.close(), including
+    // configuration changes. Keeping one anonymous receiver for every recreated
+    // activity leaked the old updater and its held activity context.
+    private val statusReceiver = object : BroadcastReceiver() {
                 override fun onReceive(c: Context, intent: Intent) {
                     when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
                         PackageInstaller.STATUS_PENDING_USER_ACTION -> {
@@ -97,10 +96,21 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
                         }
                     }
                 }
-            },
+    }
+
+    init {
+        // PackageInstaller requires an application receiver that survives the
+        // temporary foreground-to-system-installer activity transition.
+        ContextCompat.registerReceiver(
+            context.applicationContext,
+            statusReceiver,
             IntentFilter(statusAction),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
+    }
+
+    fun close() {
+        runCatching { context.applicationContext.unregisterReceiver(statusReceiver) }
     }
 
     /** On launch. */

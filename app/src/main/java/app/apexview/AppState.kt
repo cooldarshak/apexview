@@ -1440,6 +1440,7 @@ class AppState(
         f1DashCaptureJob = null
         f1DashCapture = null
         power?.removeThermalStatusListener(thermalListener)
+        updater.close()
     }
 
     /**

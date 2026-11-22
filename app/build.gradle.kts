@@ -43,8 +43,17 @@ android {
             "Invalid accepted debug build number for a Pitwall release"
         }
         val appRun = verifiedRun ?: ciRun
-        versionCode = 100_000 + appRun
-        versionName = "1.0.$appRun"
+        require(appRun in 0..1_000_000) { "Pitwall build number exceeds the supported release range" }
+        // Debug numbers are even; the signed official APK for the accepted
+        // same-code build is odd and therefore installs over that debug APK.
+        // The NEXT debug run is even again and still upgrades in place.
+        // Keeping versionName in the same numerical sequence also makes the
+        // existing GitHub updater offer a same-source accepted release.
+        val isOfficial = System.getenv("PITWALL_OFFICIAL_RELEASE") == "true"
+        require(!isOfficial || verifiedRun != null) { "Official releases require an accepted green debug run" }
+        val versionSerial = appRun * 2 + if (isOfficial) 1 else 0
+        versionCode = 100_000 + versionSerial
+        versionName = "1.0.$versionSerial"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         val builtAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("MMM d, HH:mm"))
         val castReceiverId = System.getenv("PITWALL_CAST_RECEIVER_ID").orEmpty().trim().uppercase()

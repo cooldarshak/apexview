@@ -26,13 +26,25 @@ Pitwall Cast physical marker cadence, secure captions, or any unverified gate.
   position independently. Hardware jitter proof remains OPEN.
 - Preserve in-place release upgrade order by building every official release
   using the accepted green **debug workflow run number**, rather than the
-  independent manual release workflow counter. Both use the same package
-  identity and persistent signing certificate. The official publisher is
+  independent manual release workflow counter. Debug builds use *even*
+  serials (2 × debug run number); accepted signed official APK uses the next
+  *odd* serial. A future green debug run therefore still updates in place,
+  and the existing updater sees the official release as numerically newer
+  than the corresponding accepted debug APK. Both retain the same package
+  identity and persistent signing certificate. The manually gated release
+  source must still equal the current working branch HEAD. The official publisher is
   only cooldarshak/apexview. Manual candidate/publish pipeline checks exact
   commit, green CI run, acceptance issue evidence, signed certificate and
   checksum before publishing. No automatic production releases.
-- Keep updater branding consistent with Pitwall TV. Retain all release
-  asset-origin, checksum, certificate and Android version verification.
+- Keep updater branding consistent with Pitwall TV and clean up its
+  application BroadcastReceiver with AppState lifecycle, including rotation.
+  Retain all release asset-origin, checksum, certificate and Android version
+  verification.
+- On actual TCL standalone single-feed/map/tower playback, log five-second
+  decoder rendered/dropped buffer deltas and media-clock progression alongside
+  play-state, L3 and video dimensions. These counts distinguish stalled
+  Media3 output from overlay-draw stalls but never pretend to be measured
+  SurfaceFlinger display presents. Do not hide the symptom.
 - Universal parity requirement remains: SINGLE/MULTIPLE, clear HEVC/Widevine,
   standalone phone/TV, local Pitwall Cast and every accessible caption track.
   The TCL single feed with map+tower and Cast map motion are still BLOCKED

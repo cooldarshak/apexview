@@ -29,5 +29,10 @@ class UpdaterTest {
         assertTrue(Updater.isNewer("v0.35.1".removePrefix("v"), "0.35"))
         assertFalse(Updater.isNewer("0.35", "0.35"))
         assertFalse(Updater.isNewer("0.34", "0.35"))
+        // A green debug build is even; the corresponding approved release is
+        // odd; a subsequent debug build can still update over that release.
+        assertTrue(Updater.isNewer("1.0.1465", "1.0.1464"))
+        assertTrue(Updater.isNewer("1.0.1466", "1.0.1465"))
+        assertFalse(Updater.isNewer("1.0.1464", "1.0.1465"))
     }
 }

@@ -273,17 +273,41 @@ fun ViewerScreen(app: AppState) {
     // Sample the actual Media3 player and surface choice every five seconds.
     LaunchedEffect(app.isTv, app.tiles.size, app.towerOpen, app.mapMode) {
         if (app.isTv) {
+            var lastPlayer: androidx.media3.common.Player? = null
+            var lastRendered = -1
+            var lastDropped = -1
+            var lastPositionMs = -1L
             while (true) {
                 val tile = app.tiles.singleOrNull()
                 if (tile != null && app.towerOpen && app.mapMode != MapMode.OFF) {
                     val p = tile.feed.player
                     val size = p.videoSize
+                    val counters = p.videoDecoderCounters
+                    val rendered = counters?.renderedOutputBufferCount ?: -1
+                    val dropped = counters?.droppedBufferCount ?: -1
+                    // Codec buffer-output evidence is not physical SurfaceFlinger
+                    // present timestamps. The latter still needs a TCL trace.
+                    val same = lastPlayer === p
+                    val renderedDelta = if (same && lastRendered >= 0 && rendered >= lastRendered)
+                        rendered - lastRendered else -1
+                    val droppedDelta = if (same && lastDropped >= 0 && dropped >= lastDropped)
+                        dropped - lastDropped else -1
+                    val positionDelta = if (same && lastPositionMs >= 0 && p.currentPosition >= lastPositionMs)
+                        p.currentPosition - lastPositionMs else -1
                     android.util.Log.i("PitwallTvHealth",
                         "TV_SINGLE_OVERLAY_VIDEO_HEALTH playerState=${p.playbackState} " +
                             "isPlaying=${p.isPlaying} loading=${p.isLoading} playWhenReady=${p.playWhenReady} " +
                             "visibleVideo=${tile.feed.showingVideo} softwareDrm=${tile.feed.usesSoftwareDrm} " +
                             "mode=${app.settings.decoderMode} map=${app.mapMode} tower=${app.towerOpen} " +
-                            "video=${size.width}x${size.height} positionMs=${p.currentPosition}")
+                            "video=${size.width}x${size.height} positionMs=${p.currentPosition} " +
+                            "positionDeltaMs=$positionDelta decoderRenderedDelta=$renderedDelta " +
+                            "decoderDroppedDelta=$droppedDelta physicalDisplayPresentation=NOT_MEASURED")
+                    lastPlayer = p
+                    lastRendered = rendered
+                    lastDropped = dropped
+                    lastPositionMs = p.currentPosition
+                } else {
+                    lastPlayer = null; lastRendered = -1; lastDropped = -1; lastPositionMs = -1L
                 }
                 delay(5_000L)
             }

@@ -36,6 +36,7 @@ jobs:
     timeout-minutes: 40
     env:
       GH_TOKEN: ${{ github.token }}
+      PITWALL_OFFICIAL_RELEASE: "true"
       ACCEPTED_RUN_ID: ${{ inputs.accepted_debug_run_id }}
       ACCEPTED_SHA: ${{ inputs.accepted_commit_sha }}
       ACCEPTANCE_ISSUE: ${{ inputs.hardware_acceptance_issue }}
@@ -64,6 +65,10 @@ jobs:
           test "$(jq -r .head_sha <<< "$run_json")" = "$ACCEPTED_SHA"
           test "$(jq -r .head_branch <<< "$run_json")" = "feature/pitwall-performance-audit-plan"
           test "$(jq -r .conclusion <<< "$run_json")" = "success"
+          branch_json="$(gh api "repos/$GITHUB_REPOSITORY/branches/feature/pitwall-performance-audit-plan")"
+          test "$(jq -r .commit.sha <<< "$branch_json")" = "$ACCEPTED_SHA" || {
+            echo "::error::Accepted source is no longer the current release branch HEAD"; exit 1;
+          }
           run_number="$(jq -er .run_number <<< "$run_json")"
           [[ "$run_number" =~ ^[0-9]+$ ]] && (( run_number > 0 ))
           issue="$(gh api "repos/$GITHUB_REPOSITORY/issues/$ACCEPTANCE_ISSUE")"
@@ -76,7 +81,7 @@ jobs:
             grep -qiF "$marker" <<< "$(jq -r .body <<< "$issue")"
           done
           echo "PITWALL_VERIFIED_DEBUG_RUN_NUMBER=$run_number" >> "$GITHUB_ENV"
-          echo "PITWALL_VERSION=1.0.$run_number" >> "$GITHUB_ENV"
+          echo "PITWALL_VERSION=1.0.$((run_number * 2 + 1))" >> "$GITHUB_ENV"
           echo "Source, green debug build and recorded acceptance matched." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Java and Android tools
