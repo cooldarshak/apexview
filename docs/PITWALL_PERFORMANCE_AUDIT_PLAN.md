@@ -89,6 +89,15 @@ Source changes following the Build 699 baseline:
 - This is a deliberate compatibility change, not a claim that an upgraded
   targetSdk makes the app smoother. CI and TV/mobile acceptance are mandatory.
 
+## TV receiver speed and circuit parity
+
+- The explicitly requested Cast playback speed is Compose-observable and
+  supplied to both clear and secure video scene renderers on the TV. Speed-only
+  updates change the decoder-surface FPS hint without allocating a new codec.
+- New circuit geometry invalidates only the old car frame, never the separate
+  timing tower state; no stale previous-circuit dots are shown on transition.
+- MapPanel restore tests run in Robolectric with a working Android JSON runtime.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**

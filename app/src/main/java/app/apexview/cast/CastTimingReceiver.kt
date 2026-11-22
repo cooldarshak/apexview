@@ -83,7 +83,13 @@ internal class CastTimingReceiver {
         if (j.optString("playbackId") != playbackId) return
         when (j.getString("kind")) {
             "geometry" -> {
-                if (geometry?.id != j.getString("id")) geometry = CastTimingProtocol.decodeGeometry(j)
+                if (geometry?.id != j.getString("id")) {
+                    // Do not draw the previous circuit while the new timing
+                    // geometry/frame pair is arriving over the LAN.
+                    val next = CastTimingProtocol.decodeGeometry(j)
+                    geometry = next
+                    frame = null
+                }
             }
             "table" -> {
                 require(j.getInt("version") == 1)

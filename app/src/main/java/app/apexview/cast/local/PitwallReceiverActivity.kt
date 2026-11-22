@@ -68,7 +68,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var loadEpoch = 0L
     private var loadingRequested = false
     private var desiredPlaying = true
-    private var desiredSpeed = 1f
+    private var desiredSpeed by mutableFloatStateOf(1f)
     private var desiredVolume = 1f
     private var standardView: PlayerView? = null
     private val httpDelegate = lazy { OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).build() }
@@ -370,6 +370,10 @@ class PitwallReceiverActivity : ComponentActivity() {
                 sendPlayback()
             }
 
+            override fun onPlaybackParametersChanged(parameters: androidx.media3.common.PlaybackParameters) {
+                if (player === next) desiredSpeed = parameters.speed
+            }
+
             override fun onPlayerError(error: PlaybackException) { if (player === next) fail("TV playback failed: ${error.errorCodeName}") }
             override fun onVideoSizeChanged(size: VideoSize) {
                 if (player !== next || size.width <= 0 || size.height <= 0) return
@@ -526,8 +530,8 @@ class PitwallReceiverActivity : ComponentActivity() {
                                 protectedSceneView = this
                                 onFailure = { reason -> if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) fail(reason) }
                                 onFirstFrame = { if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) reportRendering() }
-                                bind(current, model)
-                            } }, update = { it.bind(current, model) }, onRelease = {
+                                bind(current, model, desiredSpeed)
+                            } }, update = { it.bind(current, model, desiredSpeed) }, onRelease = {
                                 if (protectedSceneView === it) protectedSceneView = null
                                 it.release()
                             }, modifier = Modifier.fillMaxSize())
@@ -535,8 +539,8 @@ class PitwallReceiverActivity : ComponentActivity() {
                                 sceneView = this
                                 onFailure = { reason -> if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) fail(reason) }
                                 onFirstFrame = { if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) reportRendering() }
-                                bind(current, model)
-                            } }, update = { it.bind(current, model) }, onRelease = {
+                                bind(current, model, desiredSpeed)
+                            } }, update = { it.bind(current, model, desiredSpeed) }, onRelease = {
                                 if (sceneView === it) sceneView = null
                                 it.release()
                             }, modifier = Modifier.fillMaxSize())
