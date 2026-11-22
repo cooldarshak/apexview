@@ -21,6 +21,10 @@ Source changes following the Build 699 baseline:
   from baked Cast publishing without storing protected samples.
 - Home/shelf actions, selected settings and cards use a consistent accessible
   dark/red Material 3 expressive visual language; the video canvas is unchanged.
+- Clear TextureView, Widevine L1/L3 SurfaceView and both TV Cast renderer
+  types now share a reusable GLES quad-buffer cache. Dragging and resizing
+  windows rewrites float buffers rather than repeatedly allocating native
+  direct memory. JVM tests verify data/identity and size transitions.
 - The Widevine L1 secure SurfaceView can request the same seamless-only
   display frame-rate hint as L3 without altering the protected decoder path.
   Actual OEM acceptance remains required.

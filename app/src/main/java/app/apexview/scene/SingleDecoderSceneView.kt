@@ -26,8 +26,6 @@ import android.view.TextureView
 import app.apexview.cast.BakedCastLiveSession
 import app.apexview.DisplayCadence
 import androidx.media3.exoplayer.ExoPlayer
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 
 /**
  * One codec output texture, one visible output view. No per-window players or decoders.
@@ -241,6 +239,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var outputHeight = 0
     private val transform = FloatArray(16)
     private var cachedModel: VideoScene? = null
+    // Shared by clear archive, authorized Widevine and the TV Cast receiver.
+    // Reuses small native vertex buffers during dragging and layout transitions.
+    private val quadBuffers = SceneQuadBufferCache()
     private var cachedQuads: List<Pair<java.nio.FloatBuffer, java.nio.FloatBuffer>> = emptyList()
     private var failed = false
     private var rendered = 0L
@@ -535,8 +536,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         GLES20.glUniformMatrix4fv(transformUniform, 1, false, transform, 0)
         GLES20.glEnableVertexAttribArray(positionAttribute); GLES20.glEnableVertexAttribArray(uvAttribute)
         if (cachedModel != model) {
-            fun buffer(values: FloatArray) = ByteBuffer.allocateDirect(values.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(values); position(0) }
-            cachedQuads = model.quads().map { buffer(it.positions) to buffer(it.texture) }
+            cachedQuads = quadBuffers.update(model)
             cachedModel = model
         }
         for ((positions, coordinates) in cachedQuads) {
