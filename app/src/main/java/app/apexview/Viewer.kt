@@ -910,6 +910,7 @@ internal fun PlaybackVideoCanvas(
     val host = app.singleDecoderScenePlayer ?: app.protectedRollingScenePlayer
     val secureRolling = app.protectedRollingSceneActive && host != null && !host.usesSoftwareDrm
     if (scene != null && host != null) {
+        var composedGlReady by remember(host, secureRolling) { mutableStateOf(false) }
         // This must happen as soon as the composed scene activates, not after
         // a later user interaction. It also provides direct evidence that the
         // decoded atlas is routed into the full-canvas compositor.
@@ -985,7 +986,6 @@ internal fun PlaybackVideoCanvas(
                 delay(80)
             }
         }
-        var composedGlReady by remember(host, secureRolling) { mutableStateOf(false) }
         Box(Modifier.fillMaxSize()) {
         if (app.protectedRollingSceneActive) {
             // Rolling composition is one decoded atlas, but uses an independent
