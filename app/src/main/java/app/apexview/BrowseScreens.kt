@@ -55,6 +55,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -161,7 +162,7 @@ fun GlyphButton(icon: ImageVector, description: String, modifier: Modifier = Mod
     FilledTonalIconButton(
         onClick = onClick,
         modifier = modifier.tvFocusRing().size(48.dp),
-        colors = ButtonDefaults.filledTonalIconButtonColors(
+        colors = IconButtonDefaults.filledTonalIconButtonColors(
             containerColor = Color.Black.copy(alpha = 0.3f + 0.4f * backdrop.coerceIn(0f, 1f)),
             contentColor = Ink.primary,
         ),

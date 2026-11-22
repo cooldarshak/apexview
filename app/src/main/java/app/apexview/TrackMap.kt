@@ -187,7 +187,7 @@ internal const val MAP_RENDER_INTERVAL_MS = 100L
 // This timer affects flag/hit-target state, NOT driver marker animation.
 // Sampling just ahead of the next 100 ms boundary avoids busy waking the
 // phone UI while leaving car marker Canvas updates on their own 60 Hz clock.
-internal const val MAP_FRAME_WAIT_MS = 85L
+internal const val MAP_FRAME_WAIT_MS = 98L
 
 /** Sample immutable overlay metadata at most 10 times/second. Recover from seeks. */
 internal fun isOverlaySampleDue(frameMs: Long, lastFrameMs: Long): Boolean =

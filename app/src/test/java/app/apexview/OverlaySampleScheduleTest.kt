@@ -44,6 +44,6 @@ class OverlaySampleScheduleTest {
             }
             assertTrue("$refreshHz Hz published only $published", published in 9..11)
         }
-        assertEquals(85L, MAP_FRAME_WAIT_MS)
+        assertEquals(98L, MAP_FRAME_WAIT_MS)
     }
 }

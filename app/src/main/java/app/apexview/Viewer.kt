@@ -89,6 +89,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -622,11 +624,17 @@ private fun Modifier.mapGestures(app: AppState, density: androidx.compose.ui.uni
 
 @Composable
 private fun Glyph(icon: ImageVector, description: String, size: Int = 24, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Box(
-        modifier.pressable(scaleTo = 0.88f, onClick = onClick).size(44.dp),
-        contentAlignment = Alignment.Center,
+    // A real Material 3 button provides selection semantics, accessible touch
+    // behavior and keyboard focus without introducing animation into video GL.
+    IconButton(
+        onClick = onClick,
+        modifier = modifier.tvFocusRing().size(44.dp),
+        colors = IconButtonDefaults.iconButtonColors(
+            containerColor = Ink.surfaceHigh.copy(alpha = 0.42f),
+            contentColor = Ink.primary,
+        ),
     ) {
-        Icon(icon, contentDescription = description, tint = Ink.primary, modifier = Modifier.size(size.dp))
+        Icon(icon, contentDescription = description, modifier = Modifier.size(size.dp))
     }
 }
 

@@ -261,15 +261,18 @@ motion on the receiver is visibly uneven. Neither is signed off.
 Coordinated code changes for the next full workflow:
 - Keep driver markers on the independent **60Hz Canvas Draw clock**, but sample
   TV/phone non-motion map content (flags, selection hit targets and other
-  composition inputs) at **10Hz** instead of recomposing 30Hz. This reduces
+  composition inputs) at **10Hz** instead of recomposing 30Hz. The 98ms
+  wake interval is checked at both 60Hz and 120Hz vsync, so it cannot
+  accidentally publish only 6Hz at 120Hz. This reduces
   overlay UI pressure while a TV is decoding and drawing tower rows.
 - Extend Cast car position predictions from 600ms to 1.2s of *measured*
   future positions, preserving the older first-200ms protocol and preventing
   the receiver from freezing its dots between briefly delayed packets. No
   uncontrolled extrapolation or new metadata endpoints. Reject overlong
   packets; test interpolation, endpoint holding and seek safety.
-- Replace the existing home/hero actions with semantic Material 3 buttons
-  and icon buttons with dedicated remote focus feedback; give browsable cards
+- Replace the existing home/hero and player chrome actions with semantic
+  Material 3 buttons and icon buttons with dedicated remote focus feedback;
+  give browsable cards
   tonal surfaces, strengthen shape hierarchy, show the Pitwall TV identity
   consistently and update racing accent sliders. No video SurfaceView,
   codec, DRM, audio or layout persistence changes are permitted.
