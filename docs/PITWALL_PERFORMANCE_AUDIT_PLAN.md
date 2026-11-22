@@ -63,6 +63,10 @@ describes source changes, NOT validated end-to-end smoothness.
 6. **Profiling**: add trace marks around CBCS per-picture composition, 1Hz
    GL-looper scheduling delay probes and additional EGL/frame-latch
    diagnostics without expensive logging on each frame.
+7. **Protected TV live**: reuse the same independently cropped four-window
+   SurfaceView scene as archive playback, with validated per-rendition
+   geometry, and do not copy/republish protected CMAF output during polls
+   that have not advanced the actual composed-media version.
 
 ### Regression and sign-off gates
 

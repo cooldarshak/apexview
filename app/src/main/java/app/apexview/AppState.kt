@@ -3421,14 +3421,20 @@ class AppState(
         f1DashCaptureJob = scope.launch {
             var lastMessage: String? = null
             var composedPlaybackStarted = false
+            val publication = app.apexview.tiled.RollingPublicationVersion()
             while (true) {
                 val snapshot = capture.captureNext(group, feeds)
-                // Live capture and composition already run on IO, but copying the
-                // composed CBCS output window previously waited on the composer
-                // monitor *on the UI coroutine*. Keep that copy off main.
-                val outputWindow = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    ProtectedHevcLiveComposition.outputWindow(group)
-                }
+                // A waiting-for-next-fragment poll is NOT a new composed output.
+                // Read the latest decode-time version before allocating an entire
+                // multi-megabyte copy; both the version and the copy stay off main.
+                val latestOutputStartUs = if (!composedPlaybackStarted || snapshot.capturedFeeds > 0)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        ProtectedHevcLiveComposition.latestOutputStartUs(group)
+                    } else null
+                val outputWindow = if (publication.shouldPublish(latestOutputStartUs))
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        ProtectedHevcLiveComposition.outputWindow(group)
+                    } else null
                 if (outputWindow != null) {
                     val pssh = capture.widevinePssh()
                     var published = false
@@ -3459,6 +3465,7 @@ class AppState(
                                     outputWindow, labels.size, clearOutput = false)
                                 host.feed.startProtectedComposedPlayback(outputWindow, pssh)
                                 published = true
+                                publication.published(requireNotNull(latestOutputStartUs))
                                 protectedRollingScene = ProtectedRollingScene(labels.toList(), layout)
                                 showProtectedCompositionPresentation(host, selectedTiles, audioTile,
                                     sceneLayout = true)
@@ -3469,6 +3476,7 @@ class AppState(
                                 outputWindow, labels.size, clearOutput = false)
                             host.feed.publishProtectedComposedOutput(outputWindow, pssh)
                             published = true
+                            publication.published(requireNotNull(latestOutputStartUs))
                             if (protectedRollingScene?.layout != layout) {
                                 protectedRollingScene = ProtectedRollingScene(labels.toList(), layout)
                                 android.util.Log.i("ApexviewSingleDecoder",
