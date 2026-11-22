@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageInstaller
+import android.content.pm.PackageManager
 import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -39,9 +40,17 @@ import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.security.MessageDigest
 
 /** A published version: its number, what changed, and where its APK is. */
-class Release(val version: String, val notes: String, val apkUrl: String, val size: Long)
+class Release(
+    val version: String,
+    val notes: String,
+    val apkUrl: String,
+    val size: Long,
+    val filename: String,
+    val checksumsUrl: String,
+)
 
 /**
  * Keeps the app current from its GitHub releases. Each launch it asks GitHub for the latest
@@ -131,13 +140,28 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
             if (!r.isSuccessful) throw IOException("GitHub said ${r.code}")
             val json = JSONObject(r.body?.string().orEmpty())
             val assets = json.optJSONArray("assets") ?: return@withContext null
-            val apk = (0 until assets.length()).map { assets.getJSONObject(it) }
-                .firstOrNull { it.optString("name").endsWith(".apk") } ?: return@withContext null
+            val entries = (0 until assets.length()).map { assets.getJSONObject(it) }
+            val apk = entries.firstOrNull {
+                ReleaseAssetValidation.validAssetName(it.optString("name"))
+            } ?: return@withContext null
+            val checksum = entries.firstOrNull { it.optString("name") == "SHA256SUMS" }
+                ?: return@withContext null
+            val tag = json.optString("tag_name")
+            val version = tag.removePrefix("v")
+            check(version.matches(Regex("1[.]0[.][0-9]+"))) { "Invalid Pitwall release version" }
+            val assetUrl = apk.getString("browser_download_url")
+            val checksumUrl = checksum.getString("browser_download_url")
+            val approvedPrefix = "https://github.com/${BuildConfig.UPDATE_REPO}/releases/download/$tag/"
+            check(assetUrl.startsWith(approvedPrefix) && checksumUrl.startsWith(approvedPrefix)) {
+                "Release assets are not from the installed Pitwall publisher"
+            }
             Release(
-                version = json.optString("tag_name").removePrefix("v"),
+                version = version,
                 notes = json.optString("body").trim(),
-                apkUrl = apk.getString("browser_download_url"),
+                apkUrl = assetUrl,
                 size = apk.optLong("size"),
+                filename = apk.getString("name"),
+                checksumsUrl = checksumUrl,
             )
         }
     }
@@ -165,26 +189,65 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
     }
 
     private fun download(release: Release): File {
+        // Every approved release publishes a checksum beside its signed APK.
+        // Fail closed on absent/corrupted APKs before invoking Android's installer.
+        val checksums = http.newCall(Request.Builder().url(release.checksumsUrl)
+            .header("User-Agent", "Pitwall/${BuildConfig.VERSION_NAME}").build()).execute().use { r ->
+            if (!r.isSuccessful) throw IOException("Checksum manifest HTTP ${r.code}")
+            (r.body ?: throw IOException("Missing checksum manifest")).string().take(16_384)
+        }
+        val expected = ReleaseAssetValidation.expectedSha256(checksums, release.filename)
         val file = File(context.cacheDir, "update.apk")
-        http.newCall(Request.Builder().url(release.apkUrl).header("User-Agent", "Apexview").build()).execute().use { r ->
-            if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
-            val body = r.body ?: throw IOException("empty download")
-            val total = body.contentLength().takeIf { it > 0 } ?: release.size
-            body.byteStream().use { input ->
-                file.outputStream().use { out ->
-                    val buffer = ByteArray(64 * 1024)
-                    var done = 0L
-                    while (true) {
-                        val n = input.read(buffer)
-                        if (n < 0) break
-                        out.write(buffer, 0, n)
-                        done += n
-                        if (total > 0) progress = (done.toFloat() / total).coerceIn(0f, 1f)
+        try {
+            http.newCall(Request.Builder().url(release.apkUrl).header("User-Agent", "Pitwall")
+                .build()).execute().use { r ->
+                if (!r.isSuccessful) throw IOException("Update HTTP ${r.code}")
+                val body = r.body ?: throw IOException("Empty update body")
+                val total = body.contentLength().takeIf { it > 0 } ?: release.size
+                check(total in 1..MAX_APK_BYTES) { "APK length outside the update budget" }
+                val digest = MessageDigest.getInstance("SHA-256")
+                body.byteStream().use { input ->
+                    file.outputStream().use { out ->
+                        val buffer = ByteArray(64 * 1024)
+                        var received = 0L
+                        while (true) {
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            received += n
+                            check(received <= MAX_APK_BYTES) { "APK exceeds the update budget" }
+                            digest.update(buffer, 0, n)
+                            out.write(buffer, 0, n)
+                            progress = (received.toFloat() / total).coerceIn(0f, 1f)
+                        }
+                        check(received == total) { "Incomplete APK download" }
                     }
                 }
+                val actual = digest.digest().joinToString("") { "%02x".format(it) }
+                check(expected == actual) { "APK SHA-256 does not match its release" }
             }
+            verifyPackageIdentity(file)
+            return file
+        } catch (error: Exception) {
+            file.delete()
+            throw error
         }
-        return file
+    }
+
+    @Suppress("DEPRECATION")
+    private fun verifyPackageIdentity(apk: File) {
+        val pm = context.packageManager
+        val flags = PackageManager.GET_SIGNING_CERTIFICATES
+        val candidate = pm.getPackageArchiveInfo(apk.absolutePath, flags)
+            ?: throw IOException("Downloaded file is not an Android APK")
+        val installed = pm.getPackageInfo(context.packageName, flags)
+        check(candidate.packageName == context.packageName) { "APK package identity mismatch" }
+        check(candidate.longVersionCode > installed.longVersionCode) { "APK is not a newer build" }
+        val updateSigners = candidate.signingInfo?.apkContentsSigners.orEmpty()
+        val installedSigners = installed.signingInfo?.apkContentsSigners.orEmpty()
+        check(updateSigners.isNotEmpty() && installedSigners.isNotEmpty() &&
+            updateSigners.contentEquals(installedSigners)) {
+            "APK certificate does not match the installed Pitwall app"
+        }
     }
 
     private fun startInstall(apk: File) {
@@ -210,6 +273,7 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
         private const val PREF_LATER = "laterVersion"
         private const val PREF_LATER_AT = "laterAt"
         private const val LATER_MS = 24 * 3_600_000L
+        private const val MAX_APK_BYTES = 250L * 1024 * 1024
 
         /** "0.36" > "0.35", "1.0" > "0.99", "0.35.1" > "0.35". */
         fun isNewer(candidate: String, current: String): Boolean {

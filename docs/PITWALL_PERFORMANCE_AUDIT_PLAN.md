@@ -41,6 +41,17 @@ Source changes following the Build 699 baseline:
 - Test all changes in CI, and on phone, TV and both authorized Cast modes
   before marking their exit gates complete.
 
+## Post-705 coding: parity and release integrity
+
+- Both clear and Widevine single-decoder renderers now honor playback-speed
+  changes when setting Surface frame-rate hints and in the 50fps cadence gate.
+  This covers 1x, 1.5x, and slow-motion without resetting the encoded atlas.
+- Owned-repository releases must include SHA256SUMS; the updater verifies exact
+  asset metadata, complete bounded download, SHA-256, package ID, newer Android
+  versionCode and installed signing certificate before install. No automatic
+  untrusted third-party APK update is allowed.
+- Physical acceptance is separate; GL EGL swaps are not SurfaceFlinger presentation.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**

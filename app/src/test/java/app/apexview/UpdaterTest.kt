@@ -6,6 +6,22 @@ import org.junit.Test
 
 class UpdaterTest {
     @Test
+    fun checksumManifestBindsExactlyOneOfficialReleaseApk() {
+        val digest = "f".repeat(64)
+        val manifest = "$digest  pitwall-tv-1.0.706.apk\n" +
+            "${"0".repeat(64)}  unrelated.apk\n"
+        org.junit.Assert.assertEquals(digest,
+            ReleaseAssetValidation.expectedSha256(manifest, "pitwall-tv-1.0.706.apk"))
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            ReleaseAssetValidation.expectedSha256(manifest, "pitwall-tv-1.0.707.apk")
+        }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            ReleaseAssetValidation.expectedSha256("invalid  pitwall-tv-1.0.706.apk",
+                "pitwall-tv-1.0.706.apk")
+        }
+    }
+
+    @Test
     fun versionsCompareByNumberNotText() {
         assertTrue(Updater.isNewer("0.36", "0.35"))
         assertTrue(Updater.isNewer("0.100", "0.99"))
