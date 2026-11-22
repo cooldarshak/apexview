@@ -9,6 +9,20 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 743 carousel memory and immediate Home responsiveness hardening
+
+The visible Home composable previously enqueued **every** carousel pick at
+1920x1080 each time the pick list changed, even though just one or two slides
+were on screen. That scales bitmap decode/memory/cache pressure with catalogue
+size and competes with six-feed HEVC playback and Compose navigation. Bound
+prefetching to the currently settled page and nearest two slides at 640x360,
+matching the existing placeholder memory cache key. Visible carousel slides
+still request 1920x1080 from the existing authorized artwork URLs. Handle
+endless-pager modulo, zero/one/two picks and Int index boundaries in pure
+regression tests. Preserve keyboard/TV focus, auto-scroll, image transitions,
+source security and content ordering. This is an avoidable-memory coding fix,
+not measured device memory savings until the post-build 6-feed UI comparison.
+
 ## Build 742 protected HEVC proof indexing, allocation and responsive browsing pass
 
 After the Build 741 phone map-clock and browse-key pass, address an algorithmic

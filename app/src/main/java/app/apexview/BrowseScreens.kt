@@ -676,11 +676,16 @@ fun HomeScreen(app: AppState) {
         delay(CAROUSEL_MS)
         pager.animateScrollToPage(pager.currentPage + 1, animationSpec = tween(Motion.BROWSE_NAV_MS * 2, easing = EaseOut))
     }
-    // Every slide's artwork loads ahead, so turning never waits on it.
+    // Keep the selected slide and immediate neighbours warm, rather than
+    // decoding EVERY 1920x1080 carousel image into cache when Home opens.
+    // A 640x360 placeholder is already the memory-cache key used by
+    // CarouselArt, which loads its actual full-resolution artwork on demand.
     val context = LocalContext.current
-    LaunchedEffect(picks) {
-        picks.forEach { pick ->
-            F1TvApi.picture(pickImage(pick), 1920, 1080)?.let { context.imageLoader.enqueue(ImageRequest.Builder(context).data(it).build()) }
+    LaunchedEffect(picks, pager.settledPage) {
+        carouselPrefetchIndices(pager.settledPage, picks.size).forEach { index ->
+            F1TvApi.picture(pickImage(picks[index]), 640, 360)?.let { image ->
+                context.imageLoader.enqueue(ImageRequest.Builder(context).data(image).build())
+            }
         }
     }
 
