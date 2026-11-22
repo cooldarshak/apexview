@@ -3417,9 +3417,15 @@ class AppState(
             var composedPlaybackStarted = false
             while (true) {
                 val snapshot = capture.captureNext(group, feeds)
-                val outputWindow = ProtectedHevcLiveComposition.outputWindow(group)
+                // Live capture and composition already run on IO, but copying the
+                // composed CBCS output window previously waited on the composer
+                // monitor *on the UI coroutine*. Keep that copy off main.
+                val outputWindow = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    ProtectedHevcLiveComposition.outputWindow(group)
+                }
                 if (outputWindow != null) {
                     val pssh = capture.widevinePssh()
+                    var published = false
                     try {
                         if (!composedPlaybackStarted) {
                             // Keep each source feed audio-only, then wait for its video decoder
@@ -3439,15 +3445,33 @@ class AppState(
                                 pssh?.fill(0)
                                 message = "Waiting for the source video decoder to release before starting the composed grid."
                             } else {
+                                // A validated multi-feed atlas must be rendered as the
+                                // original independently placed windows, not displayed
+                                // as one raw tall tiled frame. This is the same scene
+                                // renderer used for the protected rolling archive.
+                                val layout = app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
+                                    outputWindow, labels.size, clearOutput = false)
                                 host.feed.startProtectedComposedPlayback(outputWindow, pssh)
-                                showProtectedCompositionPresentation(host, selectedTiles, audioTile)
+                                published = true
+                                protectedRollingScene = ProtectedRollingScene(labels.toList(), layout)
+                                showProtectedCompositionPresentation(host, selectedTiles, audioTile,
+                                    sceneLayout = true)
                                 composedPlaybackStarted = true
                             }
                         } else {
+                            val layout = app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
+                                outputWindow, labels.size, clearOutput = false)
                             host.feed.publishProtectedComposedOutput(outputWindow, pssh)
+                            published = true
+                            if (protectedRollingScene?.layout != layout) {
+                                protectedRollingScene = ProtectedRollingScene(labels.toList(), layout)
+                                android.util.Log.i("ApexviewSingleDecoder",
+                                    "F1_LIVE_SCENE_GEOMETRY_CHANGED atlas=${layout.atlasWidth}x${layout.atlasHeight} " +
+                                    "sourceCrops=${layout.geometry.mixedSourceRects.size}")
+                            }
                         }
                     } catch (error: Exception) {
-                        outputWindow.zero()
+                        if (!published) outputWindow.zero()
                         pssh?.fill(0)
                         message = "Protected composed playback: ${error.message ?: error.javaClass.simpleName}"
                     }
