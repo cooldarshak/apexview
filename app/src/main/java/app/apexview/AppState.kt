@@ -3184,6 +3184,12 @@ class AppState(
                                     }
                                 }
                                 preflightPassed = true
+                            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                                // A seek, feed switch or session exit must interrupt
+                                // validation without misclassifying it as a media
+                                // failure or scheduling an automatic retry.
+                                window.zero()
+                                throw cancelled
                             } catch (error: Exception) {
                                 window.zero()
                                 throw IOException("Composed source initialization failed: ${error.message}")
@@ -3470,6 +3476,10 @@ class AppState(
                                     "sourceCrops=${layout.geometry.mixedSourceRects.size}")
                             }
                         }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        if (!published) outputWindow.zero()
+                        pssh?.fill(0)
+                        throw cancelled
                     } catch (error: Exception) {
                         if (!published) outputWindow.zero()
                         pssh?.fill(0)
