@@ -64,6 +64,19 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     private var failed = false
     private var rendered = 0L
     private var lastLogNs = 0L
+    // A one-second GL-looper scheduling probe distinguishes a delayed callback
+    // from a fast GPU swap. It samples once per second, never once per frame.
+    private var nextGlProbeExpectedNs = 0L
+    private val glQueueProbe = object : Runnable {
+        override fun run() {
+            if (released) return
+            val now = System.nanoTime()
+            if (nextGlProbeExpectedNs != 0L)
+                pacing.onGlQueueProbe((now - nextGlProbeExpectedNs).coerceAtLeast(0L))
+            nextGlProbeExpectedNs = now + 1_000_000_000L
+            gl.postDelayed(this, 1_000L)
+        }
+    }
 
     private var appliedFrameRateHint = Float.NaN
     private var lastPresentedAtNs = 0L
@@ -110,6 +123,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     init {
         if (protectedOutput) setSecure(true)
         holder.addCallback(this)
+        gl.post(glQueueProbe)
     }
 
     fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene,
@@ -147,7 +161,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         if (released) return
         released = true
         holder.removeCallback(this)
-        detachOutput(); player = null; thread.quitSafely()
+        detachOutput(); player = null; gl.removeCallbacks(glQueueProbe); thread.quitSafely()
     }
 
     private fun initialize(output: Surface) {
@@ -326,6 +340,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "pacingLatched=${metrics.latched} pacingPresented=${metrics.presented} " +
                 "callbackGaps45ms=${metrics.callbackGaps} displayGaps45ms=${metrics.displayGaps} " +
                 "slowSwaps18ms=${metrics.slowSwaps} slowDraws18ms=${metrics.slowDraws} " +
+                "slowLatches18ms=${metrics.slowLatches} maxLatchMs=${metrics.maxLatchMs} " +
+                "maxDrawMs=${metrics.maxDrawMs} maxVsyncDelayMs=${metrics.maxVsyncCallbackDelayMs} " +
+                "glQueueDelayBins=${metrics.glQueueDelays.compact()} " +
                 "maxCallbackGapMs=${metrics.maxCallbackGapMs} " +
                 "maxDisplayGapMs=${metrics.maxDisplayGapMs} maxSwapMs=${metrics.maxSwapMs} " +
                 "videoDrawPacingDeferrals=${metrics.pacingDeferrals} " +
@@ -359,6 +376,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         frameDemand.reset()
         cadenceGate.reset()
         pacing.reset()
+        nextGlProbeExpectedNs = 0L
         decoderTexture?.setOnFrameAvailableListener(null)
         input?.release(); input = null
         decoderTexture?.release(); decoderTexture = null; hasFrame = false

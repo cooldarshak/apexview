@@ -3069,7 +3069,8 @@ class AppState(
             PerFeedQualityPolicy.description(labels, selectedQualities) +
             " maxSourceHeight=$maxHeight fullPictures=true cbcsGate=REQUIRED")
         val evidence = "content=$contentId attempt=${attempt + 1} feeds=${feeds.size}"
-        android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_START $evidence path=rolling maxSourceHeight=$maxHeight tclG09=${isTclG09()}")
+        android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_START $evidence path=rolling maxSourceHeight=$maxHeight tclG09=${isTclG09()} " +
+            "speed=$playbackSpeed requestedStartupLeadUs=${ArchiveBufferPolicy.protectedLeadUs(playbackSpeed)}")
         f1DashCapture = capture
         ProtectedHevcLiveComposition.selectFeeds(group, labels, fullPictures = mixedRequested)
         val startup = ArchiveCompositionStartup()
@@ -3145,7 +3146,8 @@ class AppState(
                             snapshot.failure?.takeUnless { it.retryable }?.let { throw app.apexview.tiled.PermanentCaptureException(it.reason) }
                             val clockUs = Math.multiplyExact(audioMaster.feed.player.currentPosition.coerceAtLeast(0L), 1000L)
                             val durationUs = audioMaster.feed.player.duration.takeIf { it > 0L }?.let { Math.multiplyExact(it, 1000L) }
-                            if (ArchiveBufferPolicy.ready(snapshot.outputTiming, clockUs, durationUs, minimumLeadUs = 0L)) {
+                            if (ArchiveBufferPolicy.ready(snapshot.outputTiming, clockUs, durationUs,
+                                    minimumLeadUs = ArchiveBufferPolicy.protectedLeadUs(playbackSpeed))) {
                                 prepared = capture.outputWindow(group)
                             }
                             if (prepared == null) {
@@ -3281,7 +3283,8 @@ class AppState(
                     }
                     if (composedArchiveFillingBuffer && ArchiveBufferPolicy.ready(snapshot.outputTiming,
                             Math.multiplyExact(audioMaster.feed.player.currentPosition.coerceAtLeast(0L), 1000L),
-                            audioMaster.feed.player.duration.takeIf { it > 0 }?.let { Math.multiplyExact(it, 1000L) })) {
+                            audioMaster.feed.player.duration.takeIf { it > 0 }?.let { Math.multiplyExact(it, 1000L) },
+                            minimumLeadUs = ArchiveBufferPolicy.protectedLeadUs(playbackSpeed))) {
                         composedArchiveFillingBuffer = false
                     }
                     diagnostics()

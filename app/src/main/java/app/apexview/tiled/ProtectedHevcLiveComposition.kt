@@ -637,6 +637,8 @@ internal object ProtectedHevcLiveComposition {
     }
 
     private fun tryCompose(session: Session) {
+        android.os.Trace.beginSection("PitwallProtectedCmafCompose")
+        try {
         val composeStartedNs = System.nanoTime()
         val allocatedAtStart = android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
         val gcAtStart = android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
@@ -1057,6 +1059,9 @@ internal object ProtectedHevcLiveComposition {
                 "protectedPayloadUnmodified=true")
         } finally {
             outputBytesToClear.forEach { it.fill(0) }
+        }
+        } finally {
+            android.os.Trace.endSection()
         }
     }
 

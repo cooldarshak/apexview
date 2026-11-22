@@ -68,6 +68,19 @@ internal object ArchiveBufferPolicy {
     const val RETAINED_SEGMENTS = 3
     const val STARTUP_LEAD_US = 3_000_000L
 
+    /**
+     * Rolling CBCS archive composition is expensive, especially a four-source
+     * 3840x2176 picture. Starting the composed player as soon as a single
+     * almost-expired segment exists caused ~130ms player buffer and repeated
+     * rebuffering on the S22 Ultra. Preserve two 3-second equivalents at 1x,
+     * scaled to media time at faster playback. Never reduce the user's
+     * chosen source quality or switch to multiple video decoders.
+     */
+    fun protectedLeadUs(playbackSpeed: Float): Long {
+        val speed = playbackSpeed.takeIf { it.isFinite() && it > 0f } ?: 1f
+        return (STARTUP_LEAD_US * 2.0 * maxOf(1.0, speed.toDouble())).toLong()
+    }
+
     /** A finite, cache-sized warm window. Never prefetch beyond the advertised archive. */
     fun warmFollowing(number: Int, lastIndex: Int): IntRange {
         require(number >= 0 && lastIndex >= number)

@@ -131,6 +131,23 @@ class ArchiveBufferPolicyTest {
         assertFalse(ArchiveBufferPolicy.ready(CmafWindowTiming(23_040_000, 28_800_000), 19_600_000, 120_000_000))
     }
 
+    @Test fun protectedRollingPrebufferUsesActualPlaybackSpeed() {
+        assertEquals(6_000_000L, ArchiveBufferPolicy.protectedLeadUs(1f))
+        assertEquals(9_000_000L, ArchiveBufferPolicy.protectedLeadUs(1.5f))
+        assertEquals(12_000_000L, ArchiveBufferPolicy.protectedLeadUs(2f))
+        assertEquals(6_000_000L, ArchiveBufferPolicy.protectedLeadUs(Float.NaN))
+        val clock = 20_000_000L
+        val oneFragment = CmafWindowTiming(17_280_000, 23_040_000)
+        val twoFragments = CmafWindowTiming(17_280_000, 34_560_000)
+        assertFalse(ArchiveBufferPolicy.ready(oneFragment, clock,
+            100_000_000, ArchiveBufferPolicy.protectedLeadUs(1.5f)))
+        assertTrue(ArchiveBufferPolicy.ready(twoFragments, clock,
+            100_000_000, ArchiveBufferPolicy.protectedLeadUs(1.5f)))
+        // A short remainder must not hang forever waiting for media past EOF.
+        assertTrue(ArchiveBufferPolicy.ready(CmafWindowTiming(0, 22_000_000),
+            clock, 22_000_000, ArchiveBufferPolicy.protectedLeadUs(2f)))
+    }
+
     @Test fun startupFreezesTheClockUntilQueuedDataHasRealLead() {
         val clock = 27_600_000L
         val first = CmafWindowTiming(11_520_000, 28_800_000)
