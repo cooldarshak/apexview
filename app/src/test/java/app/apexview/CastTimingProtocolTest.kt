@@ -82,8 +82,8 @@ class CastTimingProtocolTest {
         val j = frame(CastTimingProtocol.geometry(timing()).getString("id"))
         j.getJSONArray("cars").getJSONArray(0).put(35).put(30).put(50).put(50)
         val state = CastTimingProtocol.decodeFrame(j)
-        assertEquals(10f, state.carsAt(5100).single().x, 0f)
-        assertEquals(27.5f, state.carsAt(5300).single().x, 0f)
+        assertEquals(10.357142f, state.carsAt(5100).single().x, .0001f)
+        assertEquals(27.767857f, state.carsAt(5300).single().x, .0001f)
         assertEquals(40f, state.carsAt(5500).single().y, 0f)
         assertEquals(50f, state.carsAt(9000).single().x, 0f)
     }
@@ -105,8 +105,9 @@ class CastTimingProtocolTest {
                 getJSONArray("cars").getJSONArray(0).put(70).put(35)
             })
         }
-        // Six additional endpoints are optional; older receivers' payloads
-        // retain their exact historical interpolation semantics.
+        // Extended input is accepted by this receiver; the V1 sender stays
+        // on the legacy 600 ms format for installed TV APK compatibility.
+        assertEquals(3, CastTimingProtocol.V1_SEND_PREDICTION_STEPS)
         assertEquals(10f, CastTimingProtocol.decodeFrame(
             frame(CastTimingProtocol.geometry(timing()).getString("id"))
         ).carsAt(5100).single().x, 0.0001f)

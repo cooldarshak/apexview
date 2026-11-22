@@ -268,15 +268,16 @@ Coordinated code changes for the next full workflow:
   wake interval is checked at both 60Hz and 120Hz vsync, so it cannot
   accidentally publish only 6Hz at 120Hz. This reduces
   overlay UI pressure while a TV is decoding and drawing tower rows.
-- Extend Cast car position predictions from 600ms to 1.2s of *measured*
-  future positions, preserving the older first-200ms protocol and reducing
-  receiver endpoint holds between briefly delayed packets. Apply bounded
-  monotone cubic interpolation between *measured* points for continuous
-  derivatives without artificial corner overshoot. Add receiver video-clock
-  delta/saturation diagnostics to the five-second health heartbeat so
-  software clock jitter can be distinguished from the TCL GPU draw bottleneck. No
-  uncontrolled extrapolation or new metadata endpoints. Reject overlong
-  packets; test interpolation, endpoint holding and seek safety.
+- Keep legacy Cast V1 sender frames at the existing 600ms horizon (three
+  measured 200ms intervals); installed older TCL receivers reject packets
+  containing more coordinate pairs. The updated receiver can accept bounded
+  future 1.2s horizons, but a sender MUST negotiate that capability before
+  emitting an expanded packet. Apply monotone cubic interpolation to the
+  existing measured positions, preserving exact endpoints without corner
+  overshoot. Add receiver clock delta/prediction-saturation diagnostics to
+  the five-second health heartbeat to distinguish clock jitter from TLC
+  GPU draw stalls. No unbounded extrapolation or new timing endpoints.
+  Regression tests cover nonlinear coordinates and V1 compatibility.
 - Replace the existing home/hero and player chrome actions with semantic
   Material 3 buttons and icon buttons with dedicated remote focus feedback;
   give browsable cards
@@ -287,8 +288,9 @@ Coordinated code changes for the next full workflow:
 Cross-path source impact: map sampling applies to mobile and Android TV
 overlays for both explicit decoder modes and authorized clear/Widevine
 delivery, and Cast receiver uses the same shared retained map drawing.
-Cast packet extension changes the sender and receiver together, for native
-clear/protected receiver timing, not baked Cast PixelCopy. Clear baked Cast
+Cast packet shape remains V1-compatible with older TV installations, for native
+clear/protected receiver timing; the higher decoding bound is receiver-only
+until explicit capability negotiation. Baked Cast PixelCopy is unchanged. Clear baked Cast
 retains the separate full-overlay capture. Hardware video, remote TV
 stability, physical Cast marker cadence and accessibility remain OPEN.
 

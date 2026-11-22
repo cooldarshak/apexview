@@ -14,9 +14,11 @@ import kotlin.math.abs
 internal object CastTimingProtocol {
     const val VERSION = 1
     internal const val POSITION_STEP_MS = 200L
-    // Six measured intervals preserve motion through short LAN jitter or
-    // receiver buffer latency, without extrapolating beyond authorized data.
+    // Future-capable receiver accepts at most six measured intervals. The
+    // sender stays at three while previously installed TCL receivers support
+    // arrays of at most ten fields. Extend only after capability negotiation.
     internal const val MAX_PREDICTION_STEPS = 6
+    internal const val V1_SEND_PREDICTION_STEPS = 3
     private const val MAX_DRIVERS = 24
     private const val MAX_COORDINATES = 3072
     data class Panel(val x: Float, val y: Float, val width: Float, val height: Float)
@@ -194,10 +196,10 @@ internal object CastTimingProtocol {
                 val track = timing!!.tracks[car.number]
                 var next = track?.atOrFirst(now + POSITION_STEP_MS) ?: (car.x to car.y)
                 val row = JSONArray(listOf(car.number, car.x, car.y, next.first, next.second, car.state.ordinal))
-                // Keep the original 200 ms endpoint for older receivers.
-                // Additional real track samples cover up to 1.2s of jitter and
-                // avoid artificial freezes before a delayed packet is received.
-                for (step in 2..MAX_PREDICTION_STEPS) {
+                // Preserve the original 600 ms V1 wire shape. Old receivers
+                // reject the larger array, so longer horizons are decoder-only
+                // until an explicit newer-receiver capability handshake.
+                for (step in 2..V1_SEND_PREDICTION_STEPS) {
                     next = track?.atOrFirst(now + step * POSITION_STEP_MS) ?: next
                     row.put(next.first).put(next.second)
                 }
