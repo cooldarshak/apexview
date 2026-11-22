@@ -9,7 +9,7 @@ import android.os.Build
 /** Pure protocol shared by persistent PackageInstaller and the active update UI. */
 internal object InstallStatusProtocol {
     const val PREF_FAILED_RESULT = "failedInstallResult"
-    fun uiAction(packageName: String): String = "{packageName}.INSTALL_STATUS_UI"
+    fun uiAction(packageName: String): String = packageName + ".INSTALL_STATUS_UI"
     fun failureMessage(message: String?): String =
         "The update didn't install: " +
             DiagnosticRedaction.redact(message?.take(200) ?: "Android refused it").take(200)
