@@ -366,6 +366,11 @@ class AppState(
     var decoderMode by mutableStateOf(settings.decoderMode)
         private set
     private var archiveCompositionStarting by mutableStateOf(false)
+    /** True during genuine multi-feed archive preflight, never inferred from a timer.
+     * The viewer must not show one playable camera as a partially ready four-window scene. */
+    val sceneActivationPreparing: Boolean
+        get() = archiveCompositionStarting && decoderMode == DecoderMode.SINGLE &&
+            tiles.size > 1 && nativeArchiveTiles.isEmpty() && protectedRollingScene == null
     var singleDecoderFailure by mutableStateOf<String?>(null)
         private set
     private var singleDecoderRetryJob: Job? = null

@@ -934,7 +934,7 @@ internal fun PlaybackVideoCanvas(
             delay(Motion.SCREEN_MS.toLong() + 100L)
             val window = captureWindow
             val bounds = viewerBounds
-            if (window == null || bounds == null || bounds.isEmpty ||
+            if (!composedGlReady || window == null || bounds == null || bounds.isEmpty ||
                 host.archiveSceneSession == null ||
                 window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0) {
                 bakedSession.captureFailed("An authorized clear single-decoder viewer is required")
@@ -952,7 +952,7 @@ internal fun PlaybackVideoCanvas(
             val bounds = viewerBounds
             val source = host.archiveSceneSession
             app.replayClipRequested = false
-            if (bounds == null || bounds.isEmpty || source == null || !app.canMakeReplayClip ||
+            if (!composedGlReady || bounds == null || bounds.isEmpty || source == null || !app.canMakeReplayClip ||
                 !host.player.isPlaying || app.replayClipRunning ||
                 window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0) {
                 app.reportReplayClipStatus("Play a clear replay with timing data loaded before making a clip.")
@@ -985,6 +985,8 @@ internal fun PlaybackVideoCanvas(
                 delay(80)
             }
         }
+        var composedGlReady by remember(host, secureRolling) { mutableStateOf(false) }
+        Box(Modifier.fillMaxSize()) {
         if (app.protectedRollingSceneActive) {
             // Rolling composition is one decoded atlas, but uses an independent
             // SurfaceFlinger video layer. TextureView composition depends on
@@ -997,6 +999,8 @@ internal fun PlaybackVideoCanvas(
                     ProtectedDecoderSceneView(context, protectedOutput = secureRolling).apply {
                         onFailure = app::failSingleDecoderScene
                         onOutputSize = app::reportSceneOutputSize
+                        onOutputLost = { composedGlReady = false }
+                        onFirstFrame = { composedGlReady = true }
                     }
                 }, update = { it.bind(host.player, scene, app.playbackSpeed) },
                     onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
@@ -1006,9 +1010,26 @@ internal fun PlaybackVideoCanvas(
             AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
                 onFailure = app::failSingleDecoderScene
                 onOutputSize = app::reportSceneOutputSize
+                onOutputLost = { composedGlReady = false }
+                onFirstFrame = { composedGlReady = true }
                 view = this
             } }, update = { it.bind(host.player, scene) },
                 onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
+        }
+            if (!composedGlReady) {
+                Box(Modifier.fillMaxSize().background(Color(0xFF101017)),
+                    contentAlignment = Alignment.Center) {
+                    Text("Preparing composed video", style = Type.subhead.copy(color = Ink.primary))
+                }
+            }
+        }
+    } else if (app.sceneActivationPreparing) {
+        // This visible state follows actual capture/decoder readiness, not a delay.
+        // Keep source playback budget unchanged; do not reveal an incomplete grid.
+        Box(Modifier.fillMaxSize().background(Color(0xFF101017)),
+            contentAlignment = Alignment.Center) {
+            Text("Preparing ${app.tiles.size}-feed single-decoder scene",
+                style = Type.subhead.copy(color = Ink.primary))
         }
     } else {
         val popped = if (app.inPip) app.pipTile() else null

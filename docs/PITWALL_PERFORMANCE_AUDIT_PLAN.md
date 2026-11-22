@@ -1308,3 +1308,65 @@ For every active composed test, require:
 No entry in this document should be marked complete on the strength of a
 green GitHub Actions run alone. Real-device visual playback, audio sync and
 physical presentation timing remain the final acceptance tests.
+
+## Build 694 raw trace and coordinated scene-readiness follow-up (22 November 2026)
+
+**Hardware acceptance still OPEN.** The S22 Ultra log and the raw Perfetto
+protobuf were inspected. This is not a claim that every P0–P2 item is complete.
+
+- Protected L3 archive: four 1920x2176 source-cropped windows, one Qualcomm
+  c2.qti.hevc.decoder, Media3 decoded about 50fps with zero decoder drops in
+  the sampled interval. This only demonstrates decoded throughput, not exact
+  physical video presentation.
+- Preflight: the app deliberately activated a one-camera native fallback with
+  COMPOSITION_NOT_READY. There is an approximately 9.3-second gap between the
+  logged fallback and the four-window F1_SCENE_UI_ACTIVATED event.
+- Independent video SurfaceView: SURFACE_DECODER_SCENE reports many steady
+  five-second intervals of approximately 247-250 EGL output swaps, but these
+  are **submitted frames**, not externally verified display presentations.
+- FrameTimeline: 1068 actual MainActivity surface frames included 990 late,
+  77 on-time, one unspecified; 628 specifically carried buffer-stuffing-only
+  jank. Distinct global SF display frames numbered 1535, including 1273 on-time,
+  251 late and 11 dropped. The trace has **no separately attributable child
+  SurfaceView video FrameTimeline record**. Do not attribute MainActivity
+  jank directly to the independent video frame cadence.
+- Trace scheduler spans approximately 25 seconds: PID 24958 MainActivity
+  approximately 16.3 CPU-seconds, RenderThread TID 24982 approximately
+  7.7 CPU-seconds and video GL TID 25379 approximately 4.2 CPU-seconds.
+  These are scheduling totals, not method-level exclusive CPU attribution.
+- The 13:22:58 surface reinitialization followed Android window stop and
+  return-to-foreground around 13:22:54-13:22:58; it is consistent with
+  normal surface recreation, not proven spontaneous renderer restart.
+- Main-thread/UI frame jank, allocation/GC during protected composition,
+  periodic SurfaceTexture timeouts and incomplete Cast receiver telemetry
+  remain open investigation items. No trace from the TCL or receiver is present.
+
+**Coordinated source change:** Both Android phone/TV clear HEVC
+TextureView scene and authorized Widevine L1/L3 SurfaceView scene now
+identify output readiness only after the first successfully submitted GL
+frame. Epoch-based readiness rejects stale callbacks after
+surface recreation and rendition/atlas changes; releasing a renderer
+invalidates prior epochs. The viewer displays an explicit, state-driven
+preflight/readiness indicator instead of showing a partial multiview
+picture. Clear baked capture and replay clip setup require an activated
+GL scene. These are additive visual readiness checks, never decoding,
+decryption or stream fallback changes.
+
+**Cross-path impact (sign-off not implied):**
+- Phone clear archive: shared TextureView event and preflight state,
+  with output generation tests. Hardware playback still open.
+- Phone Widevine CBCS archive L3 and supported L1: shared SurfaceView
+  event and preflight state, no DRM-level changes. L1 hardware still open.
+- Protected live/TV: same SurfaceView readiness callback and scene
+  switching, TV focus untouched. TCL hardware still open.
+- Baked clear Pitwall Cast: no capture from an unready viewer; audio and
+  timing transport unchanged. TCL capture verification still open.
+- Native protected Pitwall Cast: receiver and authorized receiver-side DRM
+  unchanged. Existing independent GL-ready acknowledgement remains;
+  receiver freshness/jank hardware validation still open.
+
+**Further required acceptance:** controlled 3840x2176 vs 1920x2176,
+1x/1.5x/seek, physical video layer presentation, overlay OFF/map/tower/both
+comparisons, timing and badge visual parity, named-layout persistence and
+both Cast modes against actual TCL receiver telemetry. No CI-only
+sign-off is allowed.

@@ -83,6 +83,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     @Volatile private var input: Surface? = null
     var onFailure: (String) -> Unit = {}
     var onFirstFrame: () -> Unit = {}
+    var onOutputLost: () -> Unit = {}
+    private val outputReadiness = SceneOutputReadiness()
     private var firstFrameReported = false
     var onOutputSize: (Int, Int) -> Unit = { _, _ -> }
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
@@ -317,6 +319,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
 
     fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene) {
         val changed = scene != nextScene
+        if (changed && scene != null) {
+            outputReadiness.invalidate()
+            onOutputLost()
+        }
         scene = nextScene
         if (player !== nextPlayer) {
             input?.let { player?.clearVideoSurface(it) }
@@ -325,11 +331,18 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
         if (changed) {
             main.post { if (!released) logDisplayMode("source-changed") }
-            gl.post { guarded { applyOutputFrameRateHint(); scheduleDisplayFrame() } }
+            gl.post { guarded {
+                hasFrame = false
+                firstFrameReported = false
+                applyOutputFrameRateHint()
+                scheduleDisplayFrame()
+            } }
         }
     }
 
     override fun onSurfaceTextureAvailable(output: SurfaceTexture, width: Int, height: Int) {
+        outputReadiness.invalidate()
+        onOutputLost()
         outputWidth = width; outputHeight = height
         onOutputSize(width, height)
         gl.post { guarded { initialize(output); draw() } }
@@ -341,6 +354,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+        outputReadiness.invalidate()
+        onOutputLost()
         input?.let { player?.clearVideoSurface(it) }
         // GL owns the Surface reference until queued destruction releases it. Clearing it
         // here lost that reference before destroy() and leaked a codec output surface.
@@ -351,6 +366,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     fun release() {
         if (released) return
         released = true
+        outputReadiness.invalidate()
         main.removeCallbacks(glQueueProbe)
         input?.let { player?.clearVideoSurface(it) }
         player = null
@@ -464,7 +480,15 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         val swapCompleted = System.nanoTime()
         if (hasFrame && !firstFrameReported) {
             firstFrameReported = true
-            post { if (!released) onFirstFrame() }
+            val surfaceEpoch = outputReadiness.generation()
+            post {
+                if (!released && outputReadiness.acknowledgeSubmittedFrame(surfaceEpoch)) {
+                    Log.i("ApexviewSingleDecoder",
+                        "SCENE_FIRST_GL_OUTPUT renderer=TextureView epoch=$surfaceEpoch " +
+                            "physicalPresentation=NOT_MEASURED")
+                    onFirstFrame()
+                }
+            }
         }
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
@@ -538,6 +562,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         decoderTexture?.setOnFrameAvailableListener(null)
         input?.release(); input = null
         decoderTexture?.release(); decoderTexture = null; hasFrame = false
+        firstFrameReported = false
         if (display != EGL14.EGL_NO_DISPLAY) {
             if (program != 0) GLES20.glDeleteProgram(program)
             if (texture != 0) GLES20.glDeleteTextures(1, intArrayOf(texture), 0)

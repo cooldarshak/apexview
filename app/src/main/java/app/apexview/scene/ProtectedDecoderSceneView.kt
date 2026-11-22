@@ -43,6 +43,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     @Volatile private var input: Surface? = null
     var onFailure: (String) -> Unit = {}
     var onFirstFrame: () -> Unit = {}
+    var onOutputLost: () -> Unit = {}
+    private val outputReadiness = SceneOutputReadiness()
     private var firstFrameReported = false
     var onOutputSize: (Int, Int) -> Unit = { _, _ -> }
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
@@ -129,6 +131,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene,
              speed: Float = 1f) {
         val changed = scene != nextScene
+        if (changed && scene != null) {
+            outputReadiness.invalidate()
+            onOutputLost()
+        }
         playbackSpeed = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
         scene = nextScene
         if (!protectedOutput && holder.surface.isValid) updateFrameRateHint(holder.surface)
@@ -138,19 +144,28 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             input?.let { nextPlayer.setVideoSurface(it) }
         }
         if (changed) gl.post { guarded {
+            // Do not show an old decoded atlas through new crop geometry.
+            hasFrame = false
+            firstFrameReported = false
             decoderTexture?.setDefaultBufferSize(nextScene.atlasWidth, nextScene.atlasHeight)
             scheduleVideoFrame()
         } }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
+        outputReadiness.invalidate()
+        onOutputLost()
         gl.post { guarded { initialize(holder.surface); scheduleVideoFrame() } }
     }
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         outputWidth = width; outputHeight = height; onOutputSize(width, height)
         gl.post { guarded { scheduleVideoFrame() } }
     }
-    override fun surfaceDestroyed(holder: SurfaceHolder) { detachOutput() }
+    override fun surfaceDestroyed(holder: SurfaceHolder) {
+        outputReadiness.invalidate()
+        onOutputLost()
+        detachOutput()
+    }
     private fun detachOutput() {
         input?.let { player?.clearVideoSurface(it) }
         val done = CountDownLatch(1)
@@ -160,6 +175,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     fun release() {
         if (released) return
         released = true
+        outputReadiness.invalidate()
         holder.removeCallback(this)
         detachOutput(); player = null; gl.removeCallbacks(glQueueProbe); thread.quitSafely()
     }
@@ -322,7 +338,15 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }
         if (hasFrame && !firstFrameReported) {
             firstFrameReported = true
-            post { if (!released) onFirstFrame() }
+            val surfaceEpoch = outputReadiness.generation()
+            post {
+                if (!released && outputReadiness.acknowledgeSubmittedFrame(surfaceEpoch)) {
+                    Log.i("ApexviewSingleDecoder",
+                        "SCENE_FIRST_GL_OUTPUT renderer=SurfaceView epoch=$surfaceEpoch " +
+                            "physicalPresentation=NOT_MEASURED")
+                    onFirstFrame()
+                }
+            }
         }
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
@@ -380,6 +404,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         decoderTexture?.setOnFrameAvailableListener(null)
         input?.release(); input = null
         decoderTexture?.release(); decoderTexture = null; hasFrame = false
+        firstFrameReported = false
         lastPresentedAtNs = 0L
         lastSourceTimestampNs = 0L
         if (display != EGL14.EGL_NO_DISPLAY) {
