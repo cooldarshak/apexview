@@ -65,6 +65,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     private var rendered = 0L
     private var lastLogNs = 0L
 
+    private var appliedFrameRateHint = Float.NaN
     private var lastPresentedAtNs = 0L
     private var lastSourceTimestampNs = 0L
     // Share the same camera-driven, 50fps-aware scheduling and frame metrics
@@ -116,6 +117,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val changed = scene != nextScene
         playbackSpeed = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
         scene = nextScene
+        if (!protectedOutput && holder.surface.isValid) updateFrameRateHint(holder.surface)
         if (player !== nextPlayer) {
             input?.let { player?.clearVideoSurface(it) }
             player = nextPlayer
@@ -183,21 +185,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         // RenderThread. Compose tower/map jank must never stall video presentation.
         // EGL swaps are paced by the native surface instead of a second
         // Choreographer+TextureView pass through the app window.
-        if (!protectedOutput && android.os.Build.VERSION.SDK_INT >= 30) {
-            val frameRate = SceneFrameRatePolicy.hint(scene?.sourceFrameRate ?: 0.0)
-            if (frameRate > 0f) runCatching {
-                if (android.os.Build.VERSION.SDK_INT >= 31) {
-                    output.setFrameRate(frameRate,
-                        Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
-                        Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS)
-                } else {
-                    output.setFrameRate(frameRate, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
-                }
-            }.onFailure {
-                Log.w("ApexviewSingleDecoder",
-                    "SURFACE_SCENE_FPS_HINT_UNAVAILABLE " + it.javaClass.simpleName)
-            }
-        }
+        // A 50fps source played at 1.5x delivers 75fps. Do not retain a stale
+        // 50Hz Surface hint while the playback rate has changed.
+        updateFrameRateHint(output)
         Log.i("ApexviewSingleDecoder", "SURFACE_SCENE_EGL_READY protected=$protectedOutput " +
             "outputLayer=SurfaceView compositor=SurfaceFlinger layoutFramesIndependentOfHWUI=true")
         fun shader(type: Int, code: String): Int {
@@ -253,6 +243,24 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }, gl)
         val surface = Surface(frames); input = surface
         post { if (!released && input === surface) player?.setVideoSurface(surface) }
+    }
+
+    private fun updateFrameRateHint(output: Surface) {
+        if (protectedOutput || android.os.Build.VERSION.SDK_INT < 30) return
+        val rate = SceneFrameRatePolicy.hint(scene?.sourceFrameRate ?: 0.0, playbackSpeed)
+        if (rate == appliedFrameRateHint) return
+        runCatching {
+            if (android.os.Build.VERSION.SDK_INT >= 31) {
+                output.setFrameRate(rate, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                    Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS)
+            } else {
+                output.setFrameRate(rate, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+            }
+            appliedFrameRateHint = rate
+        }.onFailure {
+            Log.w("ApexviewSingleDecoder",
+                "SURFACE_SCENE_FPS_HINT_UNAVAILABLE " + it.javaClass.simpleName)
+        }
     }
 
     private data class SurfaceFrameTiming(val drawNs: Long, val swapNs: Long)
@@ -366,6 +374,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }
         display = EGL14.EGL_NO_DISPLAY; contextGl = EGL14.EGL_NO_CONTEXT; window = EGL14.EGL_NO_SURFACE
         texture = 0; program = 0
+        appliedFrameRateHint = Float.NaN
         imageUniform = -1; textureMatrixUniform = -1
         positionAttribute = -1; texcoordAttribute = -1
     }

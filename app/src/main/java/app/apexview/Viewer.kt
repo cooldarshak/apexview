@@ -1150,7 +1150,7 @@ private fun TileView(
                 Modifier.align(Alignment.TopStart)
                     .offset(x = badgePosition.first.dp, y = badgePosition.second.dp)
                     .width(badgeWidth),
-                compact = narrow,
+                compact = narrow, availableWidthDp = badgeWidth.value,
             )
         }
 

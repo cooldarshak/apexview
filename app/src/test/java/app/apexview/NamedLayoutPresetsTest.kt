@@ -29,6 +29,11 @@ class NamedLayoutPresetsTest {
                 .put("towerOpen", true)
                 .put("towerReserve", false)
                 .put("towerFontScale", 0.85)
+                .put("onboardBadgeScale", 1.1)
+                .put("onboardBadgeAnchor", "TOP_RIGHT")
+                .put("onboardBadgeX", -12.0)
+                .put("onboardBadgeY", 18.0)
+                .put("onboardBadgeOpacity", 0.55)
                 .put("towerPanel", JSONObject().put("x", 0.6).put("y", 0.0)
                     .put("w", 0.4).put("h", 0.7))
                 .toString(),
@@ -61,6 +66,10 @@ class NamedLayoutPresetsTest {
         assertEquals(18, overlays.getJSONObject("mapPanel").getInt("rotation"))
         assertEquals(0.4, overlays.getJSONObject("towerPanel").getDouble("w"), 0.0001)
         assertEquals(0.85, overlays.getDouble("towerFontScale"), 0.0001)
+        assertEquals("TOP_RIGHT", overlays.getString("onboardBadgeAnchor"))
+        assertEquals(-12.0, overlays.getDouble("onboardBadgeX"), 0.0001)
+        assertEquals(18.0, overlays.getDouble("onboardBadgeY"), 0.0001)
+        assertEquals(0.55, overlays.getDouble("onboardBadgeOpacity"), 0.0001)
         assertFalse("Layout backup must contain no credentials", encoded.contains("ascendon"))
     }
 

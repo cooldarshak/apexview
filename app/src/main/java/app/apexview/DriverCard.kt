@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -195,6 +196,7 @@ fun OnboardInfoBadge(
     name: String?,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
+    availableWidthDp: Float = 250f,
 ) {
     val laps = timing.laps[number] ?: return
     LaunchedEffect(timing) { app.loadSpeeds(timing) }
@@ -219,7 +221,8 @@ fun OnboardInfoBadge(
         "${speedIn(kmh, unit)}${if (unit == Settings.KMH) "km/h" else "mph"}"
     // Narrow 334px TV thumbnails cannot display 125% text without overflow. Clamping the
     // effective font within that window preserves the user's setting for larger feeds.
-    val scale = if (compact) minOf(app.speedReadoutScale, 0.78f)
+    val widthFactor = (availableWidthDp / 190f).coerceIn(0.55f, 1f)
+    val scale = if (compact) minOf(app.speedReadoutScale, 0.78f * widthFactor)
         else app.speedReadoutScale
     val font = (if (compact) 10f else 13f) * scale / SpeedReadoutScale.DEFAULT
     val miniFont = font * (if (compact) 0.82f else 0.88f)
@@ -253,8 +256,9 @@ fun OnboardInfoBadge(
                     maxLines = 1)
                 Spacer(Modifier.width(gap))
             }
-            if (!compact) state.gap?.let { value ->
-                Text(value, style = digits.copy(fontSize = miniFont.sp,
+            state.gap?.let { value ->
+                Text(value, style = digits.copy(
+                    fontSize = (if (compact) miniFont * 0.78f else miniFont).sp,
                     color = Color.White.copy(alpha = 0.8f)), maxLines = 1)
                 Spacer(Modifier.width(gap))
             }
