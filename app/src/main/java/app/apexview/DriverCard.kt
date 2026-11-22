@@ -198,18 +198,19 @@ fun OnboardInfoBadge(
     compact: Boolean = false,
     availableWidthDp: Float = 250f,
 ) {
-    val laps = timing.laps[number] ?: return
+    // Speed was previously available independently of lap packets. Retain that
+    // behaviour during partial timing loads, pits and session transitions.
     LaunchedEffect(timing) { app.loadSpeeds(timing) }
-    // Read the replay clock only once for both video speed and lap information.
     val now = rememberMapTime(app)
-    val state = laps.at(now) ?: return
+    val state = timing.laps[number]?.at(now)
     val driver = timing.drivers[number]
     val team = driver?.color?.let { Color(it) } ?: Color.White
     val fullName = (name?.substringAfterLast(' ') ?: driver?.tla ?: number).uppercase()
     val shownName = if (compact) (driver?.tla ?: fullName.take(3)).uppercase() else fullName
-    val completed = state.lastLap != null && state.runningMs != null &&
-        state.runningMs < LAP_SHOWN_MS
+    val completed = state != null && state.lastLap != null &&
+        state.runningMs != null && state.runningMs < LAP_SHOWN_MS
     val lapClock = when {
+        state == null -> null
         state.inPit -> "PIT" to Color.White
         completed -> state.lastLap!!.time to state.lastLap.pace.color(lap = true)
         state.runningMs != null -> running(state.runningMs) to Color.White
@@ -237,7 +238,7 @@ fun OnboardInfoBadge(
             Box(Modifier.width(3.dp * scale).height((font + 3f).dp)
                 .background(team))
             Spacer(Modifier.width(gap))
-            state.position?.let { pos ->
+            state?.position?.let { pos ->
                 Text("$pos", style = digits.copy(color = Color.Black,
                     fontSize = miniFont.sp, fontWeight = FontWeight.Bold),
                     maxLines = 1, modifier = Modifier.clip(RoundedCornerShape(2.dp))
@@ -256,7 +257,7 @@ fun OnboardInfoBadge(
                     maxLines = 1)
                 Spacer(Modifier.width(gap))
             }
-            state.gap?.let { value ->
+            state?.gap?.let { value ->
                 Text(value, style = digits.copy(
                     fontSize = (if (compact) miniFont * 0.78f else miniFont).sp,
                     color = Color.White.copy(alpha = 0.8f)), maxLines = 1)
@@ -269,7 +270,9 @@ fun OnboardInfoBadge(
         // purple. No invented sector values or animation on missing timing data.
         Row(Modifier.fillMaxWidth().padding(top = 3.dp * scale),
             horizontalArrangement = Arrangement.spacedBy(3.dp * scale)) {
-            (if (completed) state.lapSectors else state.sectors).forEach { sector ->
+            val sectorData = if (completed) state?.lapSectors else state?.sectors
+            repeat(3) { index ->
+                val sector = sectorData?.getOrNull(index)
                 Box(Modifier.weight(1f).height((if (compact) 2.5f else 4f).dp * scale)
                     .clip(RoundedCornerShape(2.dp))
                     .background(sector?.pace?.color() ?: SECTOR_EMPTY))

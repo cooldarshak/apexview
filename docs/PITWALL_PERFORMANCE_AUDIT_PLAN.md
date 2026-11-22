@@ -1,5 +1,92 @@
 # Pitwall TV: playback performance audit and implementation plan
 
+## Post-Build 674 coordinated engineering pass (22 November 2026)
+
+**Working branch**: `feature/pitwall-performance-audit-plan` (never create a replacement).
+**Real-device baseline**: Build 674 on Galaxy S22 Ultra, app log
+`pitwall-20261122-031751-489.log.txt` and two separately supplied Perfetto
+traces for approximately 08:49 and 08:50 local time.
+**CI and actual hardware acceptance remain independent**. This checkpoint
+describes source changes, NOT validated end-to-end smoothness.
+
+### Baseline evidence and diagnosis
+
+- The authorized Las Vegas qualifying HLS/CBCS stream passed protected tile
+  alignment (288 pictures per feed, zero IV mismatches) and started **one**
+  `c2.qti.hevc.decoder`, Widevine L3, with four rendered source crops. The old
+  CBCS-protected stream initialization failure is no longer the first blocker.
+- At `1080p + 1080p + 1080p + 540p`, the composed picture was
+  `3840x2176`. Codec drops reached 857 amid several buffering intervals,
+  severe app-window jank, SurfaceTexture queue timeouts and scene display
+  gaps. A second `1080p + 540p + 540p + 540p` selection used
+  `1920x2176` and had healthier 5-second presentation intervals, but was
+  not entirely drop-free. These quality combinations are distinct workloads.
+- The log records user playback speed `1.5x`; physical 50fps acceptance
+  at `1x` and achievable 75fps delivery at `1.5x` must be assessed
+  separately. BufferQueue timeout events alone do not prove codec failure.
+- Overlay samples in the same recording show occasional maximum
+  `track-car-flag-draw` duration of 35.3ms and tower sampling of 30.9ms.
+  Source timestamps and actual SurfaceFlinger FrameTimeline associations
+  are required to assign causality. Independent overlay sign-off is OPEN.
+- Full binary Perfetto analysis was **not completed in the present tool
+  environment**. Do not infer SurfaceFlinger physical presentations,
+  layer-specific late flags or per-thread running time from app timer probes.
+
+### Coordinated source changes after Build 674
+
+1. **Onboard UI**: replace the separate top speed pill and bottom driver
+   card with one position/number/driver/lap/gap/speed row. Retain the same
+   real green/purple/yellow sector data immediately beneath it, with grey
+   for missing sectors. Display a speed value even if lap timing has not
+   arrived. Add scale, feed-local clamped X/Y offsets, top-left/right anchor,
+   independently adjustable background opacity and reset; persist all
+   settings in named-layout save/load/export/import and device backup.
+   TV D-pad navigation continues through the existing AppleSlider controls.
+   Do not alter the timing data model, sector semantics or Cast wire format.
+2. **50fps pacing**: a user-selected playback rate now participates in the
+   rolling SurfaceView cadence gate and Android's frame-rate hint. A 50fps
+   source played at 1.5x should not be force-padded to a 50fps display gate.
+   Never throttle the SurfaceTexture latch on behalf of the display gate.
+3. **Protected composition polling**: make immutable session-index selection
+   and volatile status/readiness diagnostics visible without entering the
+   global long-running CBCS composition critical section. Media sample
+   ownership, encrypted zeroing and fragment copies remain synchronized.
+4. **Startup/rebuffer lead**: protected rolling source transfer now requires
+   at least 6s at 1x, 9s at 1.5x and 12s at 2x (limited by archive EOF)
+   rather than a nearly expired first fragment. Keep source selections
+   unchanged, and do not silently lower quality to avoid overload.
+5. **Main-thread isolation**: run CMAF output window copies, preflight DASH
+   package validation and the rolling protected DASH resource publication
+   on IO dispatchers; leave all ExoPlayer operations on their established
+   main/application thread. Immutable package generations and source-side
+   lease retirement continue securely zeroing encrypted bytes.
+6. **Profiling**: add trace marks around CBCS per-picture composition, 1Hz
+   GL-looper scheduling delay probes and additional EGL/frame-latch
+   diagnostics without expensive logging on each frame.
+
+### Regression and sign-off gates
+
+- JVM/native CI must pass exact compile, source HEVC/DRM composition tests,
+  screen rendering instrumentation, Cast protocol tests and APK signing.
+  New tests target feed-local badge geometry, named-layout persisted fields,
+  accelerated display pacing/hints and speed-relative startup lead.
+- **Device playback**: same 10-minute authorized session and feed qualities
+  on Galaxy S22 Ultra at 1x then 1.5x; compare both existing quality mixes.
+  Require one hardware decoder, correct independent four-feed windows,
+  no repeated buffering, and real physical presentation stability.
+- **Overlay-only contribution**: same stream/clock, identical playback speed,
+  compare OFF, map, tower, map+tower; inspect RenderNode recording,
+  static geometry invalidation, GPU/RenderThread and physical FrameTimeline.
+  UI slow frames target <5% in stable conditions with no sustained freeze.
+- **TV**: repeat on TCL 55C655 with correct Widevine protection,
+  remote focus/controls and no decoder over-allocation. Independently
+  verify native Pitwall Cast, clear baked Cast and receiver-side timing.
+- **Non-negotiable**: no proprietary HEVC SDK, no OpenF1 paid dependency,
+  no multi-decoder fallback, no DRM bypass or silent source-quality changes.
+  No code-only sign-off is possible; the physical acceptance statuses
+  **remain OPEN** until the supplied traces are decoded and post-change
+  device measurements are available.
+
 ## Coordinated clear/Widevine optimization and named layout library
 
 The current branch shares bounded parallel source acquisition, low-priority

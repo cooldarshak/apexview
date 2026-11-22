@@ -1135,7 +1135,7 @@ private fun TileView(
         val timing = app.timing
         val tileWidth = with(density) { tile.w.toDp() }
         val tileHeight = with(density) { tile.h.toDp() }
-        if (number != null && timing != null && timing.laps.isNotEmpty()) {
+        if (number != null && timing != null) {
             val narrow = tileWidth < CARD_MIN_TILE
             val badgeWidth = (tileWidth - 8.dp).coerceAtLeast(1.dp)
                 .coerceAtMost(if (narrow) 230.dp else 420.dp)
