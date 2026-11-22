@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 /** Bounded peer-only HTTP publication of unchanged CBCS CMAF and its public DRM metadata. */
 internal class ComposedCmafRelay(address: String, private val peer: InetAddress?, private val liveHls: Boolean = false) : AutoCloseable {
     private val token = ByteArray(24).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
-    private val server = ServerSocket(0)
+    private val server = ServerSocket(0, 16, CastRelayBinding.address(address))
     val url = "http://$address:${server.localPort}/p/$token/" + if (liveHls) "live.m3u8" else "manifest.mpd"
     private val accepting = Executors.newSingleThreadExecutor()
     private val workers = ThreadPoolExecutor(3, 3, 0, TimeUnit.SECONDS, ArrayBlockingQueue(6))
@@ -30,8 +30,12 @@ internal class ComposedCmafRelay(address: String, private val peer: InetAddress?
     internal fun publishResources(next: Map<String, ByteArray>) = synchronized(lock) {
         require(!closed.get())
         require(next.size <= 24 && next.values.sumOf { it.size.toLong() } <= 128L * 1024 * 1024) { "Receiver media window exceeds its bounded memory budget" }
-        val previous = resources; resources = next
-        previous.values.forEach { it.fill(0) }
+        val previous = resources
+        resources = next
+        // Keep unchanged segments owned by the new publication. Zero only
+        // retired byte arrays; clearing all old arrays damaged any resource
+        // safely reused in a rolling HLS/DASH window.
+        RelayResourceRetirement.zeroRetired(previous.values, next.values)
     }
     init { accepting.execute {
         while (!closed.get()) {

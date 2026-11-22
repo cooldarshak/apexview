@@ -45,7 +45,11 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?) : AutoCl
             }
             if (ended) append("#EXT-X-ENDLIST\n")
         }
-        relay.publishResources(window.associate { it.name to it.bytes.copyOf() } +
+        // Immutable transport segments can remain owned by the relay while
+        // present in the rolling playlist. Avoid copying every retained
+        // multi-megabyte segment on each refresh and let the relay zero only
+        // retired resources after its in-flight request snapshot is copied.
+        relay.publishResources(window.associate { it.name to it.bytes } +
             ("live.m3u8" to playlist.toByteArray()))
     }
 

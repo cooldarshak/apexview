@@ -106,27 +106,27 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private val CardShape = RoundedCornerShape(12.dp)
+private val CardShape = RoundedCornerShape(20.dp)
 private val Grayscale = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
-private val ButtonShape = RoundedCornerShape(14.dp)
+private val ButtonShape = RoundedCornerShape(26.dp)
 private val SidePadding = 20.dp
 
 // Pieces.
 
-/** White on black, Apple TV's primary action. */
+/** Racing-red primary action, with expressive pill geometry and a 56dp touch target. */
 @Composable
 fun PrimaryButton(text: String, icon: ImageVector? = null, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
     Row(
         modifier
             .pressable(enabled = enabled, onClick = onClick)
             .clip(ButtonShape)
-            .background(if (enabled) Ink.primary else Ink.surfaceHigh)
-            .heightIn(min = 50.dp)
+            .background(if (enabled) Ink.accent else Ink.surfaceHigh)
+            .heightIn(min = 56.dp)
             .padding(horizontal = 22.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
     ) {
-        val color = if (enabled) Color.Black else Ink.tertiary
+        val color = if (enabled) Color.White else Ink.tertiary
         if (icon != null) {
             Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(22.dp))
             Spacer(Modifier.width(6.dp))
@@ -142,8 +142,8 @@ fun SecondaryButton(text: String, modifier: Modifier = Modifier, onClick: () -> 
         modifier
             .pressable(onClick = onClick)
             .clip(ButtonShape)
-            .background(Color.White.copy(alpha = 0.16f))
-            .heightIn(min = 50.dp)
+            .background(Ink.surfaceHigh.copy(alpha = 0.94f))
+            .heightIn(min = 56.dp)
             .padding(horizontal = 22.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -157,7 +157,7 @@ fun GlyphButton(icon: ImageVector, description: String, modifier: Modifier = Mod
     Box(
         modifier
             .pressable(scaleTo = 0.9f, onClick = onClick)
-            .size(40.dp)
+            .size(48.dp)
             .clip(CircleShape)
             .background(Color.Black.copy(alpha = 0.35f * backdrop)),
         contentAlignment = Alignment.Center,
@@ -199,7 +199,7 @@ private fun ArtCard(
             .pressable(enabled = !upcoming, onClick = onClick)
             .graphicsLayer { alpha = if (dimmed || upcoming) 0.55f else 1f }
     ) {
-        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).sharedArt(artKey, cornerRadius = 12).clip(CardShape).background(Ink.surface)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).sharedArt(artKey, cornerRadius = 20).clip(CardShape).background(Ink.surface)) {
             AsyncImage(
                 model = F1TvApi.picture(image, 640, 360),
                 contentDescription = null,

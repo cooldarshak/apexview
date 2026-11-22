@@ -17,8 +17,6 @@ import android.view.SurfaceView
 import android.view.SurfaceHolder
 import android.view.Choreographer
 import android.os.Trace
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import androidx.media3.exoplayer.ExoPlayer
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -161,9 +159,16 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        outputReadiness.invalidate()
+        val outputEpoch = outputReadiness.invalidate()
         onOutputLost()
-        gl.post { guarded { initialize(holder.surface); scheduleVideoFrame() } }
+        val surface = holder.surface
+        gl.post {
+            // Android can destroy and recreate a surface before this callback
+            // reaches the GL looper. Never initialize an old or invalid output.
+            if (!released && outputReadiness.generation() == outputEpoch && surface.isValid) {
+                guarded { initialize(surface); scheduleVideoFrame() }
+            }
+        }
     }
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         outputWidth = width; outputHeight = height; onOutputSize(width, height)
@@ -175,10 +180,14 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         detachOutput()
     }
     private fun detachOutput() {
+        // All EGL objects are GL-looper-owned. Clear the player's video output
+        // on its application thread, then queue GL destruction. Waiting for a
+        // 2-second CountDownLatch here froze Compose/TV controls on rotation,
+        // stop/start and Cast receiver handoff while eglSwapBuffers was busy.
         input?.let { player?.clearVideoSurface(it) }
-        val done = CountDownLatch(1)
-        if (!gl.post { try { destroy() } finally { done.countDown() } }) return
-        if (!done.await(2, TimeUnit.SECONDS)) Log.w("PitwallReceiver", "SECURE_EGL_RELEASE_TIMEOUT")
+        if (!gl.post { destroy() }) {
+            Log.w("ApexviewSingleDecoder", "SECURE_EGL_RELEASE_QUEUE_CLOSED")
+        }
     }
     fun release() {
         if (released) return

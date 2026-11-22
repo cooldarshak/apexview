@@ -7,6 +7,23 @@ performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
+## Coordinated post-699 engineering corrections
+
+Source changes following the Build 699 baseline:
+- Protected SurfaceView EGL teardown no longer waits up to two seconds on
+  the Compose/TV UI thread; stale surface-created callbacks are discarded by
+  their output epoch. This is a scheduling/lifecycle fix, not physical FPS proof.
+- Protected, native and baked Cast HTTP relays bind only to their selected
+  local interface instead of every available device interface. Peer filtering
+  and random relay tokens remain intact.
+- Rolling HLS publishing retains unchanged resource buffers by identity and
+  zeroizes only retired buffers; this removes repeated full-segment copies
+  from baked Cast publishing without storing protected samples.
+- Home/shelf actions and cards use a consistent accessible dark/red Material
+  3 expressive visual language; the independent video canvas is unchanged.
+- Test all changes in CI, and on phone, TV and both authorized Cast modes
+  before marking their exit gates complete.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**

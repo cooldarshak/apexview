@@ -19,7 +19,7 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
                              private val reader: CmafHttpReader, val address: String) : AutoCloseable {
     private val random = SecureRandom()
     private val token = ByteArray(24).also(random::nextBytes).joinToString("") { "%02x".format(it) }
-    private val server = ServerSocket(0)
+    private val server = ServerSocket(0, 16, CastRelayBinding.address(address))
     /** Direct HLS URL loaded by Google's Default Media Receiver after the Cast session starts. */
     val googleCastMediaUrl get() = "http://$address:${server.localPort}/s/$token/master.m3u8"
     private val workers = java.util.concurrent.ThreadPoolExecutor(4, 4, 0, java.util.concurrent.TimeUnit.SECONDS,
