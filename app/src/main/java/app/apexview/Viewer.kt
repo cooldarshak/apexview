@@ -87,6 +87,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -869,24 +871,25 @@ private fun BottomChrome(app: AppState, cutout: Clearance) {
                     .pressable { app.speedSheetOpen = true; app.showChrome() }
                     .padding(8.dp),
             )
-            Text(
-                if (app.settings.subtitles) "CC on" else "CC off",
-                style = Type.footnote.copy(
-                    color = Ink.primary,
-                    fontWeight = FontWeight.SemiBold,
-                ),
-                modifier = Modifier
-                    .tvFocusRing()
+            FilledTonalButton(
+                onClick = { app.captionsSheetOpen = true; app.showChrome() },
+                modifier = Modifier.tvFocusRing().heightIn(min = 48.dp)
                     .semantics {
                         contentDescription = if (app.settings.subtitles)
                             "Closed captions on. Choose caption track"
                         else "Closed captions off. Choose caption track"
-                    }
-                    .pressable { app.captionsSheetOpen = true; app.showChrome() }
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(if (app.settings.subtitles) Ink.accent else Ink.surfaceHigh)
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-            )
+                    },
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = if (app.settings.subtitles) Ink.accent else Ink.surfaceHigh,
+                    contentColor = Ink.primary,
+                ),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    horizontal = 16.dp, vertical = 9.dp),
+            ) {
+                Text(if (app.settings.subtitles) "CC on" else "CC off",
+                    style = Type.footnote.copy(fontWeight = FontWeight.SemiBold))
+            }
         }
     }
 }

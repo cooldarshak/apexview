@@ -12,8 +12,11 @@ internal object CastTimingHealthPolicy {
         mapEnabled: Boolean,
         towerEnabled: Boolean,
         videoAdvancing: Boolean,
+        predictionSaturated: Boolean = false,
     ): Boolean {
         if (!videoAdvancing) return true
+        // A fresh packet may hold only expired car-position samples.
+        if (mapEnabled && predictionSaturated) return false
         // Even a tower-only display needs an accepted frame for validated panel
         // geometry, scene clock and session header.
         if ((mapEnabled || towerEnabled) && frameAgeMs !in 0..1_500L) return false

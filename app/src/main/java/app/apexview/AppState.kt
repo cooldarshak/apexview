@@ -430,11 +430,14 @@ class AppState(
                                 bakedCastSession == null && (towerOpen || mapMode != MapMode.OFF)) {
                                 val good = app.apexview.cast.CastTimingHealthPolicy.healthy(
                                     frameAge, tableAge, mapMode != MapMode.OFF, towerOpen,
-                                    playing && !castRemoteBuffering)
+                                    playing && !castRemoteBuffering,
+                                    predictionSaturated = mapPredictionSaturated)
                                 castStatus = if (good) {
                                     "Playing on $castDeviceName with current timing tower/map updates."
                                 } else {
-                                    "Pitwall Cast timing updates are delayed on $castDeviceName. Export the phone log."
+                                    if (mapPredictionSaturated)
+                                        "Pitwall Cast driver motion is waiting for fresh positions on $castDeviceName. Export the phone log."
+                                    else "Pitwall Cast timing updates are delayed on $castDeviceName. Export the phone log."
                                 }
                             }
                         }

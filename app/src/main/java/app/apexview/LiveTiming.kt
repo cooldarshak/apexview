@@ -659,6 +659,22 @@ internal fun timingStreamIsChronological(text: String, checkActive: () -> Unit):
     return true
 }
 
+/** Main-looper publication order for independently parsed track and timing previews. */
+internal class TimingPreviewEpochs {
+    private var latest = 0L
+    fun next(): Long = ++latest
+    fun isCurrent(epoch: Long): Boolean = epoch == latest
+}
+
+private data class TimingPreviewSnapshot(
+    val epoch: Long,
+    val tracks: Map<String, DriverTrack>,
+    val outline: FloatArray,
+    val states: Map<String, StateLog>,
+    val laps: Map<String, DriverLaps>,
+    val startUtcMs: Long,
+)
+
 class LiveTimingArchive(private val token: String, private val userAgent: String) {
 
     /** [watchedUtc]: when the video on screen was broadcast, if known; finds the session by time. */
@@ -779,16 +795,39 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     heartbeatJob.cancel()
                 }
             }
+            // Map/track geometry index initialization must never block TV's UI
+            // looper. Drop old previews when positions and tower arrive out of order.
+            val previewEpochs = TimingPreviewEpochs()
             suspend fun publishTopics() {
                 val drivers = driverTask.await()
                 val initialStart = heartbeatTask.await()
-                checkpoint("publish-overlays", "towerDrivers=${partialHistory.laps.size} cars=${partialTracks.size} outlinePoints=${partialOutline.size / 2}")
-                onPartial(SessionTiming(
-                    type = type, drivers = drivers, tracks = partialTracks,
-                    states = partialHistory.states.states, outline = partialOutline,
-                    hasStartFinish = false, corners = emptyList(), startUtcMs = partialClock ?: initialStart,
-                    circuitKey = ref.circuitKey, laps = partialHistory.laps, radioBase = BASE + path,
-                ).apply { archivePartial = true })
+                val snapshot = withContext(Dispatchers.Main.immediate) {
+                    TimingPreviewSnapshot(
+                        epoch = previewEpochs.next(),
+                        tracks = partialTracks,
+                        outline = partialOutline,
+                        states = partialHistory.states.states,
+                        laps = partialHistory.laps,
+                        startUtcMs = partialClock ?: initialStart,
+                    )
+                }
+                checkpoint("publish-overlays",
+                    "towerDrivers=${snapshot.laps.size} cars=${snapshot.tracks.size} outlinePoints=${snapshot.outline.size / 2}")
+                val preview = withContext(Dispatchers.Default) {
+                    SessionTiming(
+                        type = type, drivers = drivers, tracks = snapshot.tracks,
+                        states = snapshot.states, outline = snapshot.outline,
+                        hasStartFinish = false, corners = emptyList(), startUtcMs = snapshot.startUtcMs,
+                        circuitKey = ref.circuitKey, laps = snapshot.laps, radioBase = BASE + path,
+                    ).apply { archivePartial = true }
+                }
+                withContext(Dispatchers.Main.immediate) {
+                    if (previewEpochs.isCurrent(snapshot.epoch)) {
+                        onPartial(preview)
+                    } else {
+                        checkpoint("publish-overlays", "dropped outdated preview epoch=${snapshot.epoch}")
+                    }
+                }
             }
             val positionsTask = async(Dispatchers.IO) {
                 progress("Streaming and parsing Position.z.jsonStream…")

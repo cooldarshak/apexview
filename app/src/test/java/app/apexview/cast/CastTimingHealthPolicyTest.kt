@@ -18,6 +18,18 @@ class CastTimingHealthPolicyTest {
         assertFalse(CastTimingHealthPolicy.healthy(-1, 50, false, true, true))
     }
 
+    @Test fun freshPacketWithExpiredPredictionCannotClaimHealthyDriverMotion() {
+        assertFalse(CastTimingHealthPolicy.healthy(
+            100, 300, mapEnabled = true, towerEnabled = true,
+            videoAdvancing = true, predictionSaturated = true))
+        assertTrue(CastTimingHealthPolicy.healthy(
+            100, 300, mapEnabled = false, towerEnabled = true,
+            videoAdvancing = true, predictionSaturated = true))
+        assertTrue(CastTimingHealthPolicy.healthy(
+            100, 300, mapEnabled = true, towerEnabled = true,
+            videoAdvancing = false, predictionSaturated = true))
+    }
+
     @Test fun bufferingOrPausedVideoDoesNotCreateFalseAlarm() {
         assertTrue(CastTimingHealthPolicy.healthy(-1, -1, true, true, false))
         assertTrue(CastTimingHealthPolicy.healthy(-1, -1, false, false, true))

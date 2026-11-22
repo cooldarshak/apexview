@@ -9,6 +9,34 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 736 acceptance checkpoint and coordinated P0 timing/overlay correction
+
+**Build 736** passed the full debug workflow at commit
+`03f2264f7aba5d5d8e7825a04f6630b458e573d1` on the existing branch.
+This verifies Kotlin compilation, JVM tests, synthetic HEVC/CMAF fixture tests,
+APK assembly, emulator RenderNode and receiver JavaScript checks. It does NOT
+prove TCL standalone video+map+tower playback, native Cast driver-dot cadence,
+or real F1 source captions. Strict acceptance stays **1/16 gates closed**.
+
+Archived position/tower previews formerly constructed `SessionTiming` and its
+`TrackGeometry` spatial vertex index on the Android **main thread**, competing
+with TV map, timing-tower and player UI. Capture preview fields together on
+Main, construct geometry/index on `Dispatchers.Default`, then publish on Main
+only if the preview generation remains current. This preserves map/tower
+visuals and prevents late preview data replacing newer source positions.
+The shared path serves phone/TV, clear/Widevine and both decoder modes without
+changing Media3 decoders, surfaces, license sessions or Cast wire formats.
+
+Receiver health now distinguishes a fresh timing packet from a position frame
+whose measured future samples have been exhausted. Do not claim smooth Cast
+motion when the cars are waiting for new positions. Paused, buffering and
+map-off modes are unaffected. The in-player CC chip now uses a semantic
+Material 3 tonal button with TV focus behavior and its existing caption
+selection flow.
+
+All 16 sign-off gates retain their original hardware and release evidence
+requirements. A green build is not a device acceptance report.
+
 ## Coordinated post-732 release integrity and Cast clock correction
 
 Build 732 is green on commit 4bc244b370c248865b3091beaa9031601d536c79.
