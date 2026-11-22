@@ -98,6 +98,14 @@ Source changes following the Build 699 baseline:
   timing tower state; no stale previous-circuit dots are shown on transition.
 - MapPanel restore tests run in Robolectric with a working Android JSON runtime.
 
+## Kotlin 2.3 compiler configuration
+
+- The Android 36/Material 3 build upgrade first failed at Gradle script
+  compilation because Kotlin 2.3 has made the legacy `kotlinOptions.jvmTarget`
+  setter an error. The Android module now configures JVM 17 through the
+  typed `kotlin.compilerOptions.jvmTarget` DSL; this is a build-system
+  compatibility correction, not a playback change.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**
