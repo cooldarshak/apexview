@@ -64,6 +64,30 @@ class CastTimingProtocolTest {
         assertEquals(50f, state.carsAt(9000).single().x, 0f)
     }
 
+    @Test fun delayedPacketUsesSixMeasuredStepsAndRejectsUnboundedMotion() {
+        val packet = frame(CastTimingProtocol.geometry(timing()).getString("id"))
+        val values = packet.getJSONArray("cars").getJSONArray(0)
+        // Step 0..6: exact measured endpoints, never invented extrapolation.
+        for (step in 2..CastTimingProtocol.MAX_PREDICTION_STEPS) {
+            values.put((step * 10).toFloat())
+            values.put((step * 5).toFloat())
+        }
+        val decoded = CastTimingProtocol.decodeFrame(packet)
+        assertEquals(35f, decoded.carsAt(5700).single().x, 0.0001f)
+        assertEquals(60f, decoded.carsAt(6200).single().x, 0.0001f)
+        assertEquals(60f, decoded.carsAt(7200).single().x, 0.0001f)
+        assertThrows(IllegalArgumentException::class.java) {
+            CastTimingProtocol.decodeFrame(JSONObject(packet.toString()).apply {
+                getJSONArray("cars").getJSONArray(0).put(70).put(35)
+            })
+        }
+        // Six additional endpoints are optional; older receivers' payloads
+        // retain their exact historical interpolation semantics.
+        assertEquals(10f, CastTimingProtocol.decodeFrame(
+            frame(CastTimingProtocol.geometry(timing()).getString("id"))
+        ).carsAt(5100).single().x, 0.0001f)
+    }
+
     @Test fun pitwallCastSenderUsesExactNativeOverlayPositionsAfterSeekAndAtLatePackets() {
         val source = timing()
         val sampler = OverlayPositionSampler(source)

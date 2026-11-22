@@ -62,6 +62,8 @@ object Ink {
     /** Panels stay dark enough not to compete with 50 fps video windows. */
     val surface = Color(0xFF151922)
     val surfaceHigh = Color(0xFF282F3A)
+    val surfaceLow = Color(0xFF10141B)
+    val outline = Color(0xFF515D6F)
     val primary = Color(0xFFF7F8FC)
     val secondary = Color(0xFFBAC3D2)
     val tertiary = Color(0xFF8390A2)
@@ -114,8 +116,11 @@ private fun Theme(content: @Composable () -> Unit) {
             background = Ink.background,
             surface = Ink.surface,
             surfaceContainer = Ink.surface,
-            surfaceContainerLow = Ink.surface,
+            surfaceContainerLowest = Ink.background,
+            surfaceContainerLow = Ink.surfaceLow,
             surfaceContainerHigh = Ink.surfaceHigh,
+            outline = Ink.outline,
+            outlineVariant = Ink.surfaceHigh,
             primary = Ink.accent,
             onPrimary = Color.White,
             secondary = Ink.secondary,
@@ -130,8 +135,8 @@ private fun Theme(content: @Composable () -> Unit) {
         shapes = Shapes(
             small = RoundedCornerShape(12.dp),
             medium = RoundedCornerShape(18.dp),
-            large = RoundedCornerShape(24.dp),
-            extraLarge = RoundedCornerShape(30.dp),
+            large = RoundedCornerShape(28.dp),
+            extraLarge = RoundedCornerShape(36.dp),
         ),
         typography = Typography(
             displayLarge = Type.largeTitle,
@@ -225,7 +230,7 @@ internal fun sliderDpadValue(
     return (value + direction * span / 100f * multiplier).coerceIn(min, max)
 }
 
-/** iOS-style slider: a round white thumb on a thin track, instead of Material's bar thumb. */
+/** Compact racing-themed Material 3 slider retaining explicit TV arrow-key control. */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun AppleSlider(
@@ -289,10 +294,10 @@ fun AppleSlider(
             val span = state.valueRange.endInclusive - state.valueRange.start
             val fraction = if (span == 0f) 0f else ((state.value - state.valueRange.start) / span).coerceIn(0f, 1f)
             androidx.compose.foundation.layout.Box(
-                Modifier.fillMaxWidth().height(4.dp).background(trackColor, androidx.compose.foundation.shape.RoundedCornerShape(2.dp))
+                Modifier.fillMaxWidth().height(6.dp).background(trackColor, androidx.compose.foundation.shape.RoundedCornerShape(3.dp))
             ) {
                 androidx.compose.foundation.layout.Box(
-                    Modifier.fillMaxWidth(fraction).fillMaxHeight().background(Color.White, androidx.compose.foundation.shape.RoundedCornerShape(2.dp))
+                    Modifier.fillMaxWidth(fraction).fillMaxHeight().background(Ink.accent, androidx.compose.foundation.shape.RoundedCornerShape(3.dp))
                 )
             }
         },

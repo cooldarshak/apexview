@@ -51,6 +51,11 @@ import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -106,63 +111,62 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private val CardShape = RoundedCornerShape(20.dp)
+private val CardShape = RoundedCornerShape(24.dp)
 private val Grayscale = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
-private val ButtonShape = RoundedCornerShape(26.dp)
+private val ButtonShape = RoundedCornerShape(28.dp)
 private val SidePadding = 20.dp
 
 // Pieces.
 
-/** Racing-red primary action, with expressive pill geometry and a 56dp touch target. */
+/** Material 3 action semantics, elevation and state feedback on mobile and TV. */
 @Composable
 fun PrimaryButton(text: String, icon: ImageVector? = null, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
-    Row(
-        modifier
-            .pressable(enabled = enabled, onClick = onClick)
-            .clip(ButtonShape)
-            .background(if (enabled) Ink.accent else Ink.surfaceHigh)
-            .heightIn(min = 56.dp)
-            .padding(horizontal = 22.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
+    Button(
+        onClick = onClick, enabled = enabled,
+        modifier = modifier.tvFocusRing().heightIn(min = 56.dp),
+        shape = ButtonShape,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Ink.accent, contentColor = Color.White,
+            disabledContainerColor = Ink.surfaceHigh, disabledContentColor = Ink.tertiary,
+        ),
+        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
+        elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp, pressedElevation = 0.dp),
     ) {
-        val color = if (enabled) Color.White else Ink.tertiary
         if (icon != null) {
-            Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(22.dp))
-            Spacer(Modifier.width(6.dp))
+            Icon(icon, contentDescription = null, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.width(8.dp))
         }
-        Text(text, style = Type.headline.copy(color = color))
-    }
-}
-
-/** Translucent dark, for actions over artwork. */
-@Composable
-fun SecondaryButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Box(
-        modifier
-            .pressable(onClick = onClick)
-            .clip(ButtonShape)
-            .background(Ink.surfaceHigh.copy(alpha = 0.94f))
-            .heightIn(min = 56.dp)
-            .padding(horizontal = 22.dp),
-        contentAlignment = Alignment.Center,
-    ) {
         Text(text, style = Type.headline)
     }
 }
 
-/** A round glyph button that floats over artwork. */
+/** Tonal actions stay readable above race artwork without competing with video. */
+@Composable
+fun SecondaryButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    FilledTonalButton(
+        onClick = onClick,
+        modifier = modifier.tvFocusRing().heightIn(min = 56.dp),
+        shape = ButtonShape,
+        colors = ButtonDefaults.filledTonalButtonColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+        ),
+        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
+    ) { Text(text, style = Type.headline) }
+}
+
+/** A minimum 48dp, semantic icon action with TV D-pad focus feedback. */
 @Composable
 fun GlyphButton(icon: ImageVector, description: String, modifier: Modifier = Modifier, backdrop: Float = 1f, onClick: () -> Unit) {
-    Box(
-        modifier
-            .pressable(scaleTo = 0.9f, onClick = onClick)
-            .size(48.dp)
-            .clip(CircleShape)
-            .background(Color.Black.copy(alpha = 0.35f * backdrop)),
-        contentAlignment = Alignment.Center,
+    FilledTonalIconButton(
+        onClick = onClick,
+        modifier = modifier.tvFocusRing().size(48.dp),
+        colors = ButtonDefaults.filledTonalIconButtonColors(
+            containerColor = Color.Black.copy(alpha = 0.3f + 0.4f * backdrop.coerceIn(0f, 1f)),
+            contentColor = Ink.primary,
+        ),
     ) {
-        Icon(icon, contentDescription = description, tint = Ink.primary, modifier = Modifier.size(20.dp))
+        Icon(icon, contentDescription = description, modifier = Modifier.size(22.dp))
     }
 }
 
@@ -198,8 +202,11 @@ private fun ArtCard(
             .width(width)
             .pressable(enabled = !upcoming, onClick = onClick)
             .graphicsLayer { alpha = if (dimmed || upcoming) 0.55f else 1f }
+            .clip(CardShape)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .padding(8.dp)
     ) {
-        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).sharedArt(artKey, cornerRadius = 20).clip(CardShape).background(Ink.surface)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).sharedArt(artKey, cornerRadius = 18).clip(RoundedCornerShape(18.dp)).background(Ink.surface)) {
             AsyncImage(
                 model = F1TvApi.picture(image, 640, 360),
                 contentDescription = null,
@@ -596,7 +603,7 @@ fun SignInScreen(app: AppState) {
             Modifier.align(Alignment.BottomStart).navigationBarsPadding().padding(SidePadding).widthIn(max = 480.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Apexview", style = Type.largeTitle)
+            Text("Pitwall TV", style = Type.largeTitle)
             Text("Every feed of every session, arranged the way you want. Sign in with your F1 TV account.", style = Type.subhead)
             Spacer(Modifier.height(8.dp))
             PrimaryButton("Sign in", modifier = Modifier.fillMaxWidth(), enabled = !app.busy, onClick = app::startLogin)

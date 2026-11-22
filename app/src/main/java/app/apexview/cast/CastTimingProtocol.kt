@@ -14,6 +14,9 @@ import kotlin.math.abs
 internal object CastTimingProtocol {
     const val VERSION = 1
     internal const val POSITION_STEP_MS = 200L
+    // Six measured intervals preserve motion through short LAN jitter or
+    // receiver buffer latency, without extrapolating beyond authorized data.
+    internal const val MAX_PREDICTION_STEPS = 6
     private const val MAX_DRIVERS = 24
     private const val MAX_COORDINATES = 3072
     data class Panel(val x: Float, val y: Float, val width: Float, val height: Float)
@@ -166,9 +169,10 @@ internal object CastTimingProtocol {
                 val track = timing!!.tracks[car.number]
                 var next = track?.atOrFirst(now + POSITION_STEP_MS) ?: (car.x to car.y)
                 val row = JSONArray(listOf(car.number, car.x, car.y, next.first, next.second, car.state.ordinal))
-                // Keep the original 200 ms endpoint for older receivers. New receivers receive
-                // another two measured points so a late packet doesn't stop the cars mid-corner.
-                for (step in 2..3) {
+                // Keep the original 200 ms endpoint for older receivers.
+                // Additional real track samples cover up to 1.2s of jitter and
+                // avoid artificial freezes before a delayed packet is received.
+                for (step in 2..MAX_PREDICTION_STEPS) {
                     next = track?.atOrFirst(now + step * POSITION_STEP_MS) ?: next
                     row.put(next.first).put(next.second)
                 }
@@ -185,7 +189,7 @@ internal object CastTimingProtocol {
         val carArray = j.getJSONArray("cars")
         val cars = (0 until carArray.count(MAX_DRIVERS)).map { i -> carArray.getJSONArray(i).let {
             val n = it.getString(0).safe(8); require(n.matches(Regex("[0-9]{1,3}")))
-            require(it.length() in 6..10 && it.length() % 2 == 0)
+            require(it.length() in 6..(4 + MAX_PREDICTION_STEPS * 2) && it.length() % 2 == 0)
             val later = (6 until it.length() step 2).map { index -> it.f(index) to it.f(index + 1) }
             CarMotion(n, it.f(1), it.f(2), it.f(3), it.f(4), LapState.entries[it.getInt(5)], later)
         } }

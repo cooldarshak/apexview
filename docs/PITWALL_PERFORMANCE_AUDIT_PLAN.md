@@ -245,6 +245,57 @@ receiver entitlement remain unchanged. CI regression is required; Samsung
 S22 Ultra, TCL 55C655, clear baked Cast and native protected Cast need
 hardware verification before any exit gate closes.
 
+## Coordinated Build 721 evidence and Android TV / Cast / Material 3 hardening
+
+This batch follows the confirmed successful Build 724 on the same active branch.
+The new uploaded **Build 721 phone** log records approximately five Cast frame
+packets per second, successful sender/receiver telemetry reports, and timing
+clock-epoch changes around seeks. Receiver-health ACKs are evidence of packet
+transport, **not** verified TCL SurfaceFlinger presentation. It also records
+late F1 host DNS errors (a distinct network failure). No direct TCL crash/video
+trace has been supplied. Native TCL single-feed plus map and tower remains a
+**P0 blocked device acceptance** case; the user reports this is not playing.
+Pitwall Cast single-feed/map/tower playback is reported functional, but car
+motion on the receiver is visibly uneven. Neither is signed off.
+
+Coordinated code changes for the next full workflow:
+- Keep driver markers on the independent **60Hz Canvas Draw clock**, but sample
+  TV/phone non-motion map content (flags, selection hit targets and other
+  composition inputs) at **10Hz** instead of recomposing 30Hz. This reduces
+  overlay UI pressure while a TV is decoding and drawing tower rows.
+- Extend Cast car position predictions from 600ms to 1.2s of *measured*
+  future positions, preserving the older first-200ms protocol and preventing
+  the receiver from freezing its dots between briefly delayed packets. No
+  uncontrolled extrapolation or new metadata endpoints. Reject overlong
+  packets; test interpolation, endpoint holding and seek safety.
+- Replace the existing home/hero actions with semantic Material 3 buttons
+  and icon buttons with dedicated remote focus feedback; give browsable cards
+  tonal surfaces, strengthen shape hierarchy, show the Pitwall TV identity
+  consistently and update racing accent sliders. No video SurfaceView,
+  codec, DRM, audio or layout persistence changes are permitted.
+
+Cross-path source impact: map sampling applies to mobile and Android TV
+overlays for both explicit decoder modes and authorized clear/Widevine
+delivery, and Cast receiver uses the same shared retained map drawing.
+Cast packet extension changes the sender and receiver together, for native
+clear/protected receiver timing, not baked Cast PixelCopy. Clear baked Cast
+retains the separate full-overlay capture. Hardware video, remote TV
+stability, physical Cast marker cadence and accessibility remain OPEN.
+
+### Design progress as a separately enforced release gate
+
+Material 3 Expressive coding was not included in the original fourteen
+equally weighted engineering estimates. Keep their **66%** baseline, and
+track **visual redesign ~25%** separately until device screenshot and TV
+focus audits support re-scoring. Combining these fifteen equally weighted
+workstreams yields a provisional **~63%** implementation estimate, but is
+neither code coverage nor release readiness. Strict acceptance is now
+**1 of 15 gates closed**, with the dedicated visual gate still OPEN.
+The visual gate requires expressive home/browse, player, settings, casting,
+TV focus, large-text/accessibility, login branding and clean screenshot
+comparison on both devices, without independent-video regression.
+Do not mark 100% for any one workstream without hardware evidence where needed.
+
 ## Completion score, 22 November 2026
 
 **Engineering implementation estimate: 66% complete; 34% remaining.**

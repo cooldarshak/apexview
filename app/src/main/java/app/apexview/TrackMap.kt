@@ -179,24 +179,27 @@ internal fun rememberMapTime(app: AppState): Long {
 
 /**
  * Map geometry and marker hit positions do not need to trigger a full Compose pass at 60/120 Hz.
- * Publish map state at 30 Hz, while the video continues on its own playback/surface clock.
+ * Publish static/hit-target/flag state at 10 Hz, while moving car dots continue
+ * at up to 60 Hz in their separate Draw-only clock. This cuts repeated TV
+ * Compose work under simultaneous video + map + timing tower load.
  */
-internal const val MAP_RENDER_INTERVAL_MS = 33L
-// At 60/120 Hz, sleep until close to the next 33 ms overlay tick instead of
-// registering a Choreographer callback on every single display vsync.
-internal const val MAP_FRAME_WAIT_MS = 30L
+internal const val MAP_RENDER_INTERVAL_MS = 100L
+// This timer affects flag/hit-target state, NOT driver marker animation.
+// Sampling just ahead of the next 100 ms boundary avoids busy waking the
+// phone UI while leaving car marker Canvas updates on their own 60 Hz clock.
+internal const val MAP_FRAME_WAIT_MS = 85L
 
-/** Sample at most 31 times/second, even on 60/120 Hz displays. Recover from clock resets. */
+/** Sample immutable overlay metadata at most 10 times/second. Recover from seeks. */
 internal fun isOverlaySampleDue(frameMs: Long, lastFrameMs: Long): Boolean =
     lastFrameMs == Long.MIN_VALUE || frameMs < lastFrameMs || frameMs - lastFrameMs >= MAP_RENDER_INTERVAL_MS
 
 /**
- * Advance car markers on display vsync in even 33 ms steps. A free-running
- * 40 ms coroutine produced 25 Hz map animation on the TV's 60 Hz display,
- * causing visibly uneven 2/3-vsync holds. This remains capped at 30 Hz
- * and does not drive the video decoder or rebuild the static map layer.
+ * Recompute map layout, flags and clickable targets at most 10 times per
+ * second. Car dots do NOT use this clock: their Canvas draw updates continue
+ * at display-vsync cadence, independently of Compose. That separation is
+ * required for an Android TV video decoder alongside map and tower.
  */
-internal const val TV_MAP_FRAME_INTERVAL_NS = 33_000_000L
+internal const val TV_MAP_FRAME_INTERVAL_NS = 100_000_000L
 
 @Composable
 internal fun rememberTvMapTime(read: () -> Long): Long {

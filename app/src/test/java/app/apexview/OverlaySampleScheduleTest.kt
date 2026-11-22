@@ -10,9 +10,9 @@ class OverlaySampleScheduleTest {
         assertTrue(isOverlaySampleDue(1_000, Long.MIN_VALUE))
         assertFalse(isOverlaySampleDue(1_008, 1_000))
         assertFalse(isOverlaySampleDue(1_016, 1_000))
-        assertFalse(isOverlaySampleDue(1_032, 1_000))
-        assertTrue(isOverlaySampleDue(1_033, 1_000))
-        assertTrue(isOverlaySampleDue(1_050, 1_017))
+        assertFalse(isOverlaySampleDue(1_099, 1_000))
+        assertTrue(isOverlaySampleDue(1_100, 1_000))
+        assertTrue(isOverlaySampleDue(1_200, 1_100))
     }
 
     @Test fun restartsCleanlyAfterClockReset() {
@@ -20,9 +20,14 @@ class OverlaySampleScheduleTest {
         assertFalse(isOverlaySampleDue(100, 100))
     }
 
-    @Test fun waitForNextOverlayTickPreservesAboutThirtyHzAtSixtyAndOneTwentyHz() {
-        // Simulate the coroutine sleeping after one Choreographer callback, then
-        // awaiting the next vsync; this must not turn the 30 Hz overlay into 15 Hz.
+    @Test fun staticOverlaySamplingStaysNearTenHzWhileDrawClockRemainsSixtyHz() {
+        // The slow Compose clock is exclusively for static event/layout state.
+        // Canvas driver-marker motion runs on a separate 60 Hz draw clock.
+        assertEquals(100L, MAP_RENDER_INTERVAL_MS)
+        assertEquals(100_000_000L, TV_MAP_FRAME_INTERVAL_NS)
+        assertTrue(isOverlayDrawFrameDue(15_000_000L, 0L))
+        // Simulate the coroutine sleeping after a Choreographer callback, then
+        // awaiting the next 60/120 Hz vsync.
         for (refreshHz in listOf(60, 120)) {
             var published = 0
             var last = Long.MIN_VALUE
@@ -37,8 +42,8 @@ class OverlaySampleScheduleTest {
                 val wakeNs = nowNs + MAP_FRAME_WAIT_MS * 1_000_000L
                 nowNs = ((wakeNs + vsyncNs - 1) / vsyncNs) * vsyncNs
             }
-            assertTrue("$refreshHz Hz published only $published", published in 27..31)
+            assertTrue("$refreshHz Hz published only $published", published in 9..11)
         }
-        assertEquals(30L, MAP_FRAME_WAIT_MS)
+        assertEquals(85L, MAP_FRAME_WAIT_MS)
     }
 }
