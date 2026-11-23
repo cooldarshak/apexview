@@ -9,6 +9,36 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 750 enforce all 16 independent hardware-evidence gates before signing/publishing
+
+The official release workflow previously required a *closed, accepted issue*
+but verified only that the issue body contained nine broad words, including
+"16 gates". This could allow a production candidate to advance without
+an individually traceable P0/1/2 acceptance matrix. Add one small
+stdlib-only Python validator, tested in the existing
+`python -m unittest discover -s scripts` debug CI. It requires:
+
+- The accepted issue explicitly names the **same exact commit SHA**
+  and **same GitHub Actions run ID** already checked by the workflow.
+- All **16** named gates `P0.1..P0.4`, `P1.1..P1.3` and
+  `P2.1..P2.9` each appear exactly once as
+  `GATE P0.1: PASS | evidence: https://...`. A missing, duplicate,
+  unpassed, malformed, non-HTTPS or placeholder evidence gate fails
+  the build before release signing.
+- The issue explicitly covers **Galaxy S22 Ultra**, **TCL 55C655**,
+  authorized **Widevine L1 and L3**, **clear HEVC**, **SINGLE** and
+  **MULTIPLE** decoder settings, **Pitwall Cast**, **closed captions**
+  and **Material 3**.
+- Continue requiring the existing closed owner-approved issue label,
+  source SHA, successful green debug run, signer digest match and
+  explicit publish permission. The validator checks structured
+  evidence *references*; it cannot itself prove a phone or TV test
+  took place, so human issue review remains mandatory.
+
+At this checkpoint no physical issue satisfying this format has been
+verified, hence **1/16 gates remain formally closed**. Keep release
+publishing fail-closed.
+
 ## Build 749 real source-owned captions in composed clear and protected scenes
 
 Inspection found a genuine source-owner mismatch in P2.9:

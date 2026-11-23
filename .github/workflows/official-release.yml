@@ -98,6 +98,11 @@ jobs:
               "SINGLE" "MULTIPLE" "closed captions" "Material 3" "16 gates"; do
             grep -qiF "$marker" <<< "$(jq -r .body <<< "$issue")"
           done
+          # The issue's label and a few search terms are not proof of all
+          # release gates. Require each gate's explicit PASS + HTTPS evidence
+          # tied to this exact accepted commit and debug workflow run.
+          printf '%s' "$issue" | python3 scripts/validate_pitwall_acceptance.py \
+            --sha "$ACCEPTED_SHA" --run "$ACCEPTED_RUN_ID"
           echo "PITWALL_VERIFIED_DEBUG_RUN_NUMBER=$run_number" >> "$GITHUB_ENV"
           echo "PITWALL_VERSION=1.0.$((run_number * 2 + 1))" >> "$GITHUB_ENV"
           echo "Source, green debug build and recorded acceptance matched." >> "$GITHUB_STEP_SUMMARY"
