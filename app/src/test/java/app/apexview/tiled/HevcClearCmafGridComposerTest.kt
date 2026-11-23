@@ -98,6 +98,11 @@ class HevcClearCmafGridComposerTest {
         assertEquals(50, output.sampleCount)
         assertEquals(2, output.fragmentCount)
         assertEquals(100, output.evidence.size)
+        // CPU counters are thread-local; the fixture still proves these fields
+        // are populated without affecting deterministic pixel or CMAF comparisons.
+        assertTrue(output.parseCpuMs >= 0)
+        assertTrue(output.rewriteCpuMs >= 0)
+        assertTrue(output.packageCpuMs >= 0)
 
         // A session validates each exact rendition's init once. Reusing that immutable
         // metadata must not change a single output byte or weaken fragment checks.

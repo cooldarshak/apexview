@@ -226,6 +226,7 @@ internal class HevcArchiveVodSession(
         checkOpen()
         require(number in groups.indices) { "Archive segment is outside the finite timeline" }
         val started = System.nanoTime()
+        val cpuAtStart = android.os.Debug.threadCpuTimeNanos()
         // ART process-wide counters include concurrent player/UI allocation; this is a
         // diagnostic upper bound during production, not thread-exclusive compositor bytes.
         val allocatedAtStart = android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
@@ -354,6 +355,9 @@ internal class HevcArchiveVodSession(
                     android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs " +
                         "composeMs=$compositionMs verifyMs=$verificationMs totalMs=${(System.nanoTime() - started) / 1_000_000L} " +
                         "parseMs=${composed.parseMs} rewriteMs=${composed.rewriteMs} packageMs=${composed.packageMs} " +
+                        "parseCpuMs=${composed.parseCpuMs} rewriteCpuMs=${composed.rewriteCpuMs} " +
+                        "packageCpuMs=${composed.packageCpuMs} " +
+                        "producerCpuMs=${((android.os.Debug.threadCpuTimeNanos() - cpuAtStart) / 1_000_000L).coerceAtLeast(0)} " +
                         "processAllocBytesDuringSegment=${allocatedDuringProduction ?: -1L} " +
                         "processGcDuringSegment=${gcDuringProduction ?: -1L} " +
                         "outputBytes=${output.size} sourceAnnexBBytesAvoided=${composed.sourceAnnexBBytesAvoided} " +

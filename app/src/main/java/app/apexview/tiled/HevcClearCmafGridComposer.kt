@@ -47,6 +47,10 @@ internal object HevcClearCmafGridComposer {
         val parseMs: Long = 0,
         val rewriteMs: Long = 0,
         val packageMs: Long = 0,
+        /** CPU time of the composing thread only (not concurrent network/fetch threads). */
+        val parseCpuMs: Long = 0,
+        val rewriteCpuMs: Long = 0,
+        val packageCpuMs: Long = 0,
         /** Deterministic removed staging bytes, NOT process-wide ART allocation data. */
         val sourceAnnexBBytesAvoided: Long = 0,
     )
@@ -102,6 +106,7 @@ internal object HevcClearCmafGridComposer {
         }
 
         val started = System.nanoTime()
+        val startedCpu = android.os.Debug.threadCpuTimeNanos()
         val parsedFeeds = ArrayList<ParsedFeed>(request.feeds.size)
         try {
             request.feeds.forEachIndexed { index, feed -> parsedFeeds += parseFeed(feed, index) }
@@ -110,6 +115,7 @@ internal object HevcClearCmafGridComposer {
             throw error
         }
         val parsedAt = System.nanoTime()
+        val parsedCpuAt = android.os.Debug.threadCpuTimeNanos()
         val first = parsedFeeds.first()
         val composed = try {
             HevcTizenGridComposer.composeNalUnits(
@@ -128,6 +134,7 @@ internal object HevcClearCmafGridComposer {
             parsedFeeds.forEach(::clearNalUnits)
         }
         val rewrittenAt = System.nanoTime()
+        val rewrittenCpuAt = android.os.Debug.threadCpuTimeNanos()
         val outputFragments = mutableListOf<ByteArray>()
         var committed = false
         var init: ByteArray? = null
@@ -197,6 +204,9 @@ internal object HevcClearCmafGridComposer {
                 parseMs = (parsedAt - started) / 1_000_000L,
                 rewriteMs = (rewrittenAt - parsedAt) / 1_000_000L,
                 packageMs = (System.nanoTime() - rewrittenAt) / 1_000_000L,
+                parseCpuMs = ((parsedCpuAt - startedCpu) / 1_000_000L).coerceAtLeast(0L),
+                rewriteCpuMs = ((rewrittenCpuAt - parsedCpuAt) / 1_000_000L).coerceAtLeast(0L),
+                packageCpuMs = ((android.os.Debug.threadCpuTimeNanos() - rewrittenCpuAt) / 1_000_000L).coerceAtLeast(0L),
                 sourceAnnexBBytesAvoided = parsedFeeds.sumOf { it.annexBEquivalentBytes.toLong() },
             )
             committed = true
