@@ -318,10 +318,16 @@ private fun SettingRow(label: String, value: String? = null, valueColor: Color =
     }
 }
 
+/** Backwards-compatible signature: callers may pass a callback or trailing lambda. */
+@Composable
+internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) =
+    SwitchRow(label, checked, modifier = Modifier, onChange = onChange)
+
+/** Caption sheets may attach their own initial TV FocusRequester without a second focus target. */
 @Composable
 internal fun SwitchRow(
-    label: String, checked: Boolean, onChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier,
+    label: String, checked: Boolean, modifier: Modifier,
+    onChange: (Boolean) -> Unit,
 ) {
     // A single toggleable focus target, not a clickable row containing a second
     // unlabeled focusable Switch. TalkBack and TCL D-pad both announce one control.
