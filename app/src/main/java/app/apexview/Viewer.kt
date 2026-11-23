@@ -110,6 +110,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -1469,7 +1472,7 @@ private fun TileView(
             else Modifier
             Box(
                 Modifier
-                    .size(44.dp)
+                    .size(48.dp)
                     .then(remoteHandle)
                     .pointerInput(tile.id) {
                         detectDragGestures(
@@ -1598,7 +1601,7 @@ private fun TargetGlow(on: Boolean) {
 @Composable
 private fun TileHeader(app: AppState, tile: Tile) {
     val density = LocalDensity.current
-    val fade = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
+    val fade = tween<Float>(if (LocalReduceMotion.current) 0 else Motion.SCREEN_MS, easing = EaseOut)
     Box(
         Modifier
             .offset { IntOffset(tile.x.roundToInt(), tile.y.roundToInt()) }
@@ -1616,7 +1619,11 @@ private fun TileHeader(app: AppState, tile: Tile) {
                 // Takes the width left over, so what follows sits at the feed's right edge.
                 Box(Modifier.weight(1f)) {
                     Row(
-                        Modifier.pressable { app.openTileMenu(tile); app.showChrome() }.padding(vertical = 8.dp),
+                        Modifier.tvFocusRing()
+                            .semantics { contentDescription = "Change ${tile.channel.title} feed" }
+                            .pressable { app.openTileMenu(tile); app.showChrome() }
+                            .heightIn(min = 48.dp)
+                            .padding(vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         tile.channel.teamColor?.let {
@@ -1650,7 +1657,11 @@ private fun TileHeader(app: AppState, tile: Tile) {
 private fun ChannelRow(app: AppState, tile: Tile, channel: Channel) {
     val current = channel == tile.channel
     Row(
-        Modifier.fillMaxWidth().pressable(scaleTo = 0.99f) { app.chooseFeed(tile, channel) }.padding(vertical = 12.dp),
+        Modifier.fillMaxWidth()
+            .tvFocusRing()
+            .semantics { role = Role.RadioButton; selected = current }
+            .pressable(scaleTo = 0.99f) { app.chooseFeed(tile, channel) }
+            .heightIn(min = 56.dp).padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.size(10.dp).clip(CircleShape).background(channel.teamColor?.let { Color(it) } ?: Color.Transparent))
@@ -1734,7 +1745,7 @@ internal fun KeepSystemBarsHidden(enabled: Boolean = true) {
 
 /** A row of choices, one picked, in the style of iOS's segmented control. */
 @Composable
-private fun <T> Segments(
+internal fun <T> Segments(
     options: List<T>,
     chosen: T,
     label: (T) -> String,
@@ -1742,19 +1753,29 @@ private fun <T> Segments(
     focus: FocusRequester? = null,
     onPick: (T) -> Unit,
 ) {
-    Row(modifier.clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(3.dp)) {
+    Row(modifier.clip(RoundedCornerShape(12.dp))
+        .background(androidx.compose.material3.MaterialTheme.colorScheme.surfaceContainerLow)
+        .padding(3.dp)) {
         options.forEach { option ->
             val on = option == chosen
             Box(
                 Modifier
                     .then(if (on && focus != null) Modifier.focusRequester(focus) else Modifier)
+                    .tvFocusRing()
+                    .semantics { role = Role.RadioButton; selected = on }
                     .pressable { onPick(option) }
+                    .heightIn(min = 48.dp)
                     .clip(RoundedCornerShape(9.dp))
-                    .background(if (on) Ink.surfaceHigh else Color.Transparent)
-                    .padding(horizontal = 22.dp, vertical = 9.dp),
+                    .background(if (on)
+                        androidx.compose.material3.MaterialTheme.colorScheme.secondaryContainer
+                        else Color.Transparent)
+                    .padding(horizontal = 18.dp, vertical = 9.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(label(option), style = Type.subhead.copy(color = if (on) Ink.primary else Ink.secondary))
+                Text(label(option), style = Type.subhead.copy(
+                    color = if (on)
+                        androidx.compose.material3.MaterialTheme.colorScheme.onSecondaryContainer
+                    else androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant))
             }
         }
     }
@@ -1786,20 +1807,33 @@ private fun SpeedSheet(app: AppState) {
                 .padding(bottom = 24.dp)
         ) {
             Text("Playback speed", style = Type.title2)
-            Row(Modifier.padding(top = 20.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(3.dp)) {
+            Row(Modifier.padding(top = 20.dp).fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .clip(RoundedCornerShape(12.dp))
+                .background(androidx.compose.material3.MaterialTheme.colorScheme.surfaceContainerLow)
+                .padding(3.dp)) {
                 AppState.SPEEDS.forEach { speed ->
                     val on = speed == app.playbackSpeed
                     Box(
                         Modifier
-                            .weight(1f)
+                            .widthIn(min = if (LocalDensity.current.fontScale >= 1.5f) 96.dp else 68.dp)
                             .then(if (on) Modifier.focusRequester(current) else Modifier)
+                            .tvFocusRing()
+                            .semantics { role = Role.RadioButton; selected = on }
                             .pressable { app.chooseSpeed(speed) }
+                            .heightIn(min = 48.dp)
                             .clip(RoundedCornerShape(9.dp))
-                            .background(if (on) Ink.surfaceHigh else Color.Transparent)
-                            .padding(vertical = 9.dp),
+                            .background(if (on)
+                                androidx.compose.material3.MaterialTheme.colorScheme.secondaryContainer
+                                else Color.Transparent)
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(speedLabel(speed), style = Type.subhead.copy(color = if (on) Ink.primary else Ink.secondary), maxLines = 1)
+                        Text(speedLabel(speed), style = Type.subhead.copy(
+                            color = if (on)
+                                androidx.compose.material3.MaterialTheme.colorScheme.onSecondaryContainer
+                            else androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant),
+                            maxLines = 1)
                     }
                 }
             }
@@ -1867,7 +1901,9 @@ private fun ClosedCaptionsSheet(app: AppState) {
                 Row(
                     Modifier.fillMaxWidth()
                         .tvFocusRing()
+                        .semantics { role = Role.RadioButton; selected = selected }
                         .pressable { app.setCaptionLanguage(track.language) }
+                        .heightIn(min = 56.dp)
                         .clip(RoundedCornerShape(16.dp))
                         .background(if (selected) Ink.surfaceHigh else Color.Transparent)
                         .padding(horizontal = 16.dp, vertical = 14.dp),

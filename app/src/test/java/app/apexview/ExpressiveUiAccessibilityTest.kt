@@ -21,6 +21,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
@@ -107,6 +109,29 @@ class ExpressiveUiAccessibilityTest {
         rule.waitForIdle()
         org.junit.Assert.assertEquals(3, changes.size)
         org.junit.Assert.assertEquals(0.51f, sliderValue, 0.001f)
+    }
+
+
+    @Test fun segmentedChoiceHasRoleSelectionAndKeepsSingleAccessibleClick() {
+        var chosen by mutableStateOf("Single")
+        rule.setContent {
+            AppTheme {
+                Segments(
+                    options = listOf("Single", "Split", "Grid"),
+                    chosen = chosen, label = { it }, onPick = { chosen = it },
+                )
+            }
+        }
+        val single = rule.onNodeWithText("Single")
+        single.assertIsSelected()
+        single.assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.RadioButton))
+        rule.onNodeWithText("Split").assertIsNotSelected()
+        rule.onAllNodes(hasClickAction()).assertCountEquals(3)
+        rule.onNodeWithText("Split").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Split").assertIsSelected()
+        single.assertIsNotSelected()
+        assertEquals("Split", chosen)
     }
 
 
