@@ -681,7 +681,7 @@ internal object ProtectedHevcPictureComposer {
     }
 
     private const val MIN_FEEDS = 2
-    private const val MAX_FEEDS = 6
+    private const val MAX_FEEDS = 8
     private const val RESERVED_SAMPLE_FLAGS_MASK = 0xf0000000L
     private const val RANDOM_ACCESS_DEPENDENCY_MASK = 0x0fff0000L
 }

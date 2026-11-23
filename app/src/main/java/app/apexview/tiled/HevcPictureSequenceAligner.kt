@@ -504,7 +504,7 @@ internal object HevcPictureSequenceAligner {
     )
 
     private const val MIN_FEEDS = 2
-    private const val MAX_FEEDS = 6
+    private const val MAX_FEEDS = 8
     private const val DEFAULT_MINIMUM_MATCHES = 5
     private const val MINIMUM_MATCHES = 2
     private const val MAX_WINDOW_SAMPLES = 4096

@@ -15,7 +15,7 @@ internal object ProtectedHevcSceneGeometry {
 
     fun fromWindow(window: ProtectedHevcLiveComposition.OutputWindow, feeds: Int,
                    clearOutput: Boolean = false): Layout {
-        require(feeds in 2..6) { "Protected scene requires two to six feeds" }
+        require(feeds in 2..8) { "Protected scene requires two to eight feeds" }
         val report = CmafBoxInspector.inspect(window.initializationSegment)
         require(report.errors.isEmpty() && report.initializationSegmentPresent &&
             report.tracks.size == 1) {

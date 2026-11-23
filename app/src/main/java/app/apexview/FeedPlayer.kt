@@ -919,6 +919,36 @@ class FeedPlayer(
     }
 
     /** Validate total picture size/rate, not the number of source feeds, before handoff. */
+    /**
+     * Beyond the six-source validated path, prove the real picture fits a
+     * hardware HEVC decoder before replacing source video. Secure Widevine
+     * needs secure-capable hardware; authorized L3/clear needs normal output.
+     */
+    internal fun requireExtendedProtectedAtlasSupport(
+        width: Int, height: Int, frameRate: Double, clearOutput: Boolean
+    ): String {
+        require(width in 1..4096 && height in 1..2176 &&
+            frameRate.isFinite() && frameRate in 1.0..120.0) {
+            "Extended HEVC picture dimensions or rate are outside bounded limits"
+        }
+        val needsSecure = !clearOutput && !usesSoftwareDrm
+        val codec = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.firstOrNull { info ->
+            !info.isEncoder && info.isHardwareAccelerated &&
+                supportsF1VideoMimeType(info.supportedTypes) &&
+                runCatching {
+                    val caps = info.getCapabilitiesForType(F1_VIDEO_MIME_TYPE)
+                    val drmCompatible = if (needsSecure)
+                        caps.isFeatureSupported(PlatformMediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback)
+                    else !caps.isFeatureRequired(PlatformMediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback)
+                    drmCompatible && caps.videoCapabilities.areSizeAndRateSupported(width, height, frameRate)
+                }.getOrDefault(false)
+        }
+        return requireNotNull(codec) {
+            "No suitable hardware HEVC decoder advertises a protected eight-feed " +
+                "picture of $width x $height at $frameRate fps"
+        }.name
+    }
+
     internal fun requireArchiveHardwareSupport(width: Int, height: Int, frameRate: Double): String {
         val codec = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.firstOrNull { info ->
             !info.isEncoder && info.isHardwareAccelerated && supportsF1VideoMimeType(info.supportedTypes) &&

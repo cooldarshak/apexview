@@ -2889,8 +2889,8 @@ class AppState(
     private fun startRollingArchiveSingleDecoderComposition(contentId: Long, attempt: Int = 0) {
         val selectedTiles = tiles.filter { it.contentId == contentId }
         val previousLayout = layoutMode
-        if (selectedTiles.size !in 2..6 || selectedTiles.size != tiles.size) {
-            singleDecoderFailure = "This protected archive backend supports two to six feeds from one archive. Clear archives can use up to 24 when their composed picture fits the decoder."
+        if (selectedTiles.size !in 2..8 || selectedTiles.size != tiles.size) {
+            singleDecoderFailure = "This protected archive backend supports up to eight compatible feeds behind a hardware gate. Clear archives can use up to 24 when their picture fits the decoder."
             message = singleDecoderFailure
             decoderMode = settings.decoderMode
             tiles.forEach { it.feed.player.playWhenReady = false }
@@ -2924,7 +2924,11 @@ class AppState(
         f1DashCaptureJob?.cancel()
         val maxHeight = if (mixedRequested) selectedQualities.maxOf { it.targetHeight }
             .takeIf { it > 0 } ?: 1080
-        else if (isTclG09()) {
+        else if (selectedTiles.size > 6 && composedQuality == VideoQuality.AUTO) {
+            // AUTO can request a smaller entitled rendition for an 8-feed
+            // atlas. Never silently change a user's explicit quality cap.
+            540
+        } else if (isTclG09()) {
             minOf(composedQuality.targetHeight.takeIf { it > 0 } ?: 720,
                 if (selectedTiles.size > 4) 540 else 720)
         } else composedQuality.targetHeight.takeIf { it > 0 } ?: 2160
@@ -2946,6 +2950,7 @@ class AppState(
         var retryableFailure = false
         var restored = false
         var preflightPassed = false
+        var expandedVerifiedGeometry: Triple<Int, Int, Double>? = null
         var composedFirstFrameSeen = false
         var composedCodec: String? = null
 
@@ -3045,6 +3050,16 @@ class AppState(
                             // have requested a license. The composed Media3 source below uses
                             // the host's existing F1 license callback and its preserved PSSH.
                             if (!capture.clearOutput) android.util.Log.i("ApexviewSingleDecoder", "WIDEVINE_KEYS requestedBy=COMPOSED_PLAYER")
+                            if (selectedTiles.size > 6) {
+                                val expanded = app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
+                                    window, labels.size, clearOutput = capture.clearOutput)
+                                val codec = host.feed.requireExtendedProtectedAtlasSupport(
+                                    expanded.atlasWidth, expanded.atlasHeight, expanded.frameRate, capture.clearOutput)
+                                expandedVerifiedGeometry = Triple(expanded.atlasWidth, expanded.atlasHeight, expanded.frameRate)
+                                android.util.Log.i("ApexviewSingleDecoder",
+                                    "EXTENDED_HEVC_CAPABILITY_GATE=PASS feeds=${labels.size} coded=" +
+                                        "${expanded.atlasWidth}x${expanded.atlasHeight} fps=${expanded.frameRate} codec=$codec")
+                            }
                             val pssh = capture.widevinePssh()
                             try {
                                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -3180,6 +3195,14 @@ class AppState(
                         val nextLayout = app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
                             updated, labels.size, clearOutput = capture.clearOutput)
                         recordProtectedRenditions(labels, updated.sourceGeometry)
+                        if (selectedTiles.size > 6) {
+                            val proposed = Triple(nextLayout.atlasWidth, nextLayout.atlasHeight, nextLayout.frameRate)
+                            if (proposed != expandedVerifiedGeometry) {
+                                host.feed.requireExtendedProtectedAtlasSupport(
+                                    nextLayout.atlasWidth, nextLayout.atlasHeight, nextLayout.frameRate, capture.clearOutput)
+                                expandedVerifiedGeometry = proposed
+                            }
+                        }
                         host.feed.publishProtectedComposedOutput(updated, capture.widevinePssh())
                         if (protectedRollingScene?.layout != nextLayout) {
                             protectedRollingScene = ProtectedRollingScene(labels.toList(), nextLayout)
@@ -3260,9 +3283,9 @@ class AppState(
         val isKnownLive = contentId in knownLiveContentIds || liveNow.any { it.contentId == contentId }
         if (!isKnownLive) return
         val sessionTiles = tiles.filter { it.contentId == contentId }
-        if (sessionTiles.size !in 2..6) {
-            if (sessionTiles.size > 6) {
-                message = "This protected live composition supports up to six feeds on this playback path. Clear archive compositions can use up to 24 when the combined picture fits the decoder."
+        if (sessionTiles.size !in 2..8) {
+            if (sessionTiles.size > 8) {
+                message = "Protected live composition supports up to eight compatible feeds behind the hardware HEVC gate. Clear archive can support 24 when it fits."
                 sessionTiles.forEach { it.feed.player.playWhenReady = false }
                 applyVideoBudget()
             }
@@ -3291,7 +3314,7 @@ class AppState(
                 F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url)
             }
         }
-        if (feeds.size != labels.size || feeds.size !in 2..6) {
+        if (feeds.size != labels.size || feeds.size !in 2..8) {
             message = "Could not start F1 tile capture: selected feed URLs are not all available."
             return
         }
@@ -3312,6 +3335,7 @@ class AppState(
         f1DashCaptureJob = scope.launch {
             var lastMessage: String? = null
             var composedPlaybackStarted = false
+            var expandedVerifiedGeometry: Triple<Int, Int, Double>? = null
             val publication = app.apexview.tiled.RollingPublicationVersion()
             while (true) {
                 val snapshot = capture.captureNext(group, feeds)
@@ -3329,6 +3353,20 @@ class AppState(
                     val pssh = capture.widevinePssh()
                     var published = false
                     try {
+                        val expandedLayout = if (labels.size > 6)
+                            app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
+                                outputWindow, labels.size, clearOutput = false) else null
+                        expandedLayout?.let { candidate ->
+                            val proposed = Triple(candidate.atlasWidth, candidate.atlasHeight, candidate.frameRate)
+                            if (proposed != expandedVerifiedGeometry) {
+                                val codec = host.feed.requireExtendedProtectedAtlasSupport(
+                                    candidate.atlasWidth, candidate.atlasHeight, candidate.frameRate, clearOutput = false)
+                                expandedVerifiedGeometry = proposed
+                                android.util.Log.i("ApexviewSingleDecoder",
+                                    "EXTENDED_TV_HEVC_CAPABILITY_GATE=PASS feeds=${labels.size} coded=" +
+                                        "${candidate.atlasWidth}x${candidate.atlasHeight} fps=${candidate.frameRate} codec=$codec")
+                            }
+                        }
                         if (!composedPlaybackStarted) {
                             // Keep each source feed audio-only, then wait for its video decoder
                             // to release before preparing the single composed video representation.
@@ -3351,7 +3389,7 @@ class AppState(
                                 // original independently placed windows, not displayed
                                 // as one raw tall tiled frame. This is the same scene
                                 // renderer used for the protected rolling archive.
-                                val layout = app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
+                                val layout = expandedLayout ?: app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
                                     outputWindow, labels.size, clearOutput = false)
                                 host.feed.startProtectedComposedPlayback(outputWindow, pssh)
                                 published = true
@@ -3371,7 +3409,7 @@ class AppState(
                                 composedPlaybackStarted = true
                             }
                         } else {
-                            val layout = app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
+                            val layout = expandedLayout ?: app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
                                 outputWindow, labels.size, clearOutput = false)
                             host.feed.publishProtectedComposedOutput(outputWindow, pssh)
                             published = true

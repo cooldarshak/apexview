@@ -185,7 +185,7 @@ internal object ProtectedHevcLiveComposition {
     ) {
         require(group.isNotBlank()) { "Protected composition group is required" }
         val selected = labels.distinct()
-        require(selected.size in 2..6 && selected.all(String::isNotBlank)) {
+        require(selected.size in 2..8 && selected.all(String::isNotBlank)) {
             "Protected composition supports two to six distinct feeds"
         }
         require(sourceTileIndices.size == selected.size &&
@@ -834,7 +834,7 @@ internal object ProtectedHevcLiveComposition {
             "Complete source pictures exceed the supported TV atlas dimensions; choose a lower HD rendition or fewer feeds"
         } else null
         val gridColumns = mixedPlan?.grid?.columns ?: atlas?.columns ?: when (session.labels.size) {
-            2 -> 2; 3 -> 3; 4 -> 2; 5 -> 5; 6 -> 3
+            2 -> 2; 3 -> 3; 4 -> 2; 5 -> 5; 6 -> 3; 7 -> 7; 8 -> 4
             else -> throw IllegalArgumentException("unsupported live composition feed count")
         }
         val gridRows = mixedPlan?.grid?.rows ?: atlas?.rows ?: (session.labels.size + gridColumns - 1) / gridColumns
@@ -864,6 +864,10 @@ internal object ProtectedHevcLiveComposition {
             Math.multiplyExact(Math.multiplyExact(gridColumns, cellWidthInCtbs), ctbSize)
         val outputHeight = mixedPlan?.codedHeight ?:
             Math.multiplyExact(Math.multiplyExact(gridRows, cellHeightInCtbs), ctbSize)
+        if (session.labels.size > 6) require(outputWidth in 1..4096 &&
+            outputHeight in 1..HevcArchiveAtlasPlan.MAX_CODED_HEIGHT) {
+            "Extended protected atlas exceeds the 4096x2176 coded-picture budget"
+        }
         require(outputColumns.sum() * ctbSize == outputWidth &&
             outputRows.sum() * ctbSize == outputHeight) {
             "Protected mixed atlas coded dimensions differ from its tile grid"

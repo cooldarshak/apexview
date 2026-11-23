@@ -138,7 +138,7 @@ internal class F1DashFeedCapture(
      */
     suspend fun captureNext(group: String, feeds: List<Feed>): Snapshot = withContext(Dispatchers.IO) {
         require(group.isNotBlank()) { "Composition group is required" }
-        require(feeds.size in 2..6) {
+        require(feeds.size in 2..8) {
             "Live protected HEVC composition supports two to six selected feeds"
         }
         require(feeds.map { it.label }.distinct().size == feeds.size &&
@@ -255,7 +255,7 @@ internal class F1DashFeedCapture(
         playbackPositionMs: Long
     ): Snapshot = withContext(Dispatchers.IO) {
         require(group.isNotBlank()) { "Composition group is required" }
-        require(feeds.size in 2..6) {
+        require(feeds.size in 2..8) {
             "Protected archive HEVC composition supports two to six selected feeds"
         }
         require(playbackPositionMs >= 0L) { "Archive playback position cannot be negative" }

@@ -240,6 +240,34 @@ class HevcPictureSequenceAlignerTest {
         ))
     }
 
+    @Test fun eightFeedAlignmentRequiresExactCommonPictureIdentity() {
+        val feeds = (0 until 8).map { feed ->
+            HevcPictureSequenceAligner.FeedWindow("extended-$feed", 90_000L,
+                (0 until 8).map { index ->
+                    val dts = 120_000L + index * 1_800L
+                    HevcPictureSequenceAligner.PictureSample(
+                        sampleIndex = index, sequenceSampleOrdinal = index.toLong(),
+                        fragmentBaseDecodeTimeTicks = 120_000L,
+                        timing = CmafBoxInspector.SampleTiming(
+                            decodeTimeTicks = dts, presentationTimeTicks = dts,
+                            durationTicks = 1_800L, compositionOffsetTicks = 0L,
+                            sampleSizeBytes = 100L, sampleFlags = 0x02000000L),
+                        picture = picture(index.toLong()),
+                        irapAnchorPictureOrderCount = 0L,
+                    )
+                })
+        }
+        val accepted = HevcPictureSequenceAligner.align(feeds)
+        assertTrue(accepted.reasons.toString(), accepted.compatible)
+        assertEquals(8, accepted.matches.size)
+        assertEquals(8, accepted.matches.first().sampleEvidenceByFeed.size)
+        val mismatched = feeds.toMutableList()
+        mismatched[7] = feeds[7].copy(samples = feeds[7].samples.mapIndexed { index, sample ->
+            if (index == 5) sample.copy(picture = sample.picture.copy(sliceType = 2)) else sample
+        })
+        assertFalse(HevcPictureSequenceAligner.align(mismatched).compatible)
+    }
+
     @Test fun doesNotTreatAnUnverifiedIdrEpochJumpAsNewValidPictureIdentity() {
         val original = (0 until 2).map { feed ->
             HevcPictureSequenceAligner.FeedWindow("feed-$feed", 90_000L,

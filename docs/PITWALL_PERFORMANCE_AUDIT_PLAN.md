@@ -9,6 +9,75 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Current implementation and acceptance ledger (Build 746 source candidate)
+
+This ledger supersedes the older historical 66% implementation snapshot
+farther down in this same document. Numeric values are explicitly
+**engineering estimates**, not code coverage or verified release scores.
+No numeric percentage closes a gate without evidence.
+
+| Gate | Coding estimate | Pending code/acceptance |
+| --- | ---: | --- |
+| P0.1 Segment priority | 85% | Foreground p95 and seek races |
+| P0.2 Bounded HEVC memory | 65% | Allocation/GC and buffer ownership under sustained real sessions |
+| P0.3 Decoder presentation | 60% | Physical 50fps, SurfaceFlinger and lifecycle proof |
+| P0.4 Map and tower scheduling | 82% | TCL simultaneous overlay and UI frame deadlines |
+| P1.1 Smallest valid atlas | 85% | Extended-source physical decoder and quality compatibility |
+| P1.2 Refresh matching | 60% | Real 50fps, display mode and 1.5x acceptance |
+| P1.3 Quality and thermal | 55% | Sustained 7/8-feed quality/thermal stability |
+| P2.1 Pitwall Cast parity | 83% | Receiver car/tower freshness and protected/baked hardware evidence |
+| P2.2 Coordinator extraction | 25% | Ownership, concurrency and AppState decomposition |
+| P2.3 Official signing/updates | 85% | Real signed production candidate, upgrade on both devices |
+| P2.4 Authorization/security | 70% | Auth, HTTP LAN scoping, backup and redaction audits |
+| P2.5 Android TV/D-pad | 76% | Physical TCL single and multifeed + overlays |
+| P2.6 Repeatable CI/benchmarks | 82% | Real before/after Perfetto, 10-minute endurance |
+| P2.7 Core architecture | 100% | Closed, preserve one-decoder invariant |
+| P2.8 Material 3 Expressive | 50% | Responsive complete product surface and accessibility |
+| P2.9 F1 captions | 70% | Authorized actual cue rendering across native Cast and mobile/TV |
+
+**Coding estimate ~70%, remaining ~30%; this is provisional and must be
+re-scored against the implementation and full device matrix.**
+**Strict full-release gates: 1/16 closed (6.25%); 15/16 open.**
+Build 746 code/CI cannot prove live S22/TCL playback, L1 secure output,
+native Cast, physical frame presentation or a signed release.
+Do not publish a release or say 100% until every external/hardware gate
+has concrete passing trace/log/video evidence and an accepted issue.
+
+## Build 746 extended protected HEVC source capacity, guarded by actual decoder capability
+
+The previous six-source limit existed in multiple separate components:
+DASH and HLS capture, IRAP epoch alignment, CBCS picture composition,
+source atlas planning, protected scene geometry, and Android TV/phone
+composition activation. Expand these consistently to **eight** eligible
+sources without introducing additional video decoders or changing
+authorized CBCS ciphertext/key/IV requirements. The <=6 mixed-picture
+planner retains its original **24-cell** search space and candidate
+ordering. For seven/eight sources only, allow up to **32 verified source
+tiles** and do not exceed 4096 x 2176 coded pixels. Seven one-tile
+sources require seven PPS tile columns when not using full pictures;
+padding seven into a four-by-two grid violates the exact feed-to-tile
+mapping. Eight may use four-by-two. Complete source pictures retain
+the existing area-constrained atlas planner.
+
+For >6 sources only, verify a hardware HEVC decoder advertises the
+specific actual output **width, height and frame rate** *before* releasing
+source decoders or activating a new protected output. Authorized L1
+requires secure-capable HEVC hardware; L3 and clear HEVC require a
+nonsecure hardware output. Recheck if an archive or TV live adaptive
+coded picture changes. AUTO may choose an entitled 540p source for
+an extended atlas; explicit quality caps are never silently lowered.
+If no conforming SPS/PPS picture/compatible CBCS IV/decoder exists,
+fail visibly and keep the six-feed implementation untouched. No
+software decoder or MULTIPLE preference fallback is introduced.
+
+Added tests for seven/eight-source atlas geometry and eight-feed exact
+picture/clock proof, including mismatched-picture rejection. These
+are algorithmic fixtures, **not** evidence of eight real F1 protected
+feeds simultaneously playing on S22/TCL. 7/8 is an experimental
+capability and cannot be marked physically accepted without actual
+entitled F1 content, codec/thermal traces, accurate crops, clear/CBCS
+and native Cast checks. Strict release acceptance remains 1/16.
+
 ## Build 745 coordinated Android TV Cast main-thread isolation, feed synchronization and expressive navigation
 
 **Root cause addressed in code:** FcastConnection previously dispatched all

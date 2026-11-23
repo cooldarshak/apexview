@@ -230,7 +230,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         val gcAtStart = android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
         val allocatedAtStart = android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
         try {
-            require(feeds.size in 2..6 && feeds.map { it.label }.distinct().size == feeds.size)
+            require(feeds.size in 2..8 && feeds.map { it.label }.distinct().size == feeds.size)
             // Keep network lanes bounded and independent of the single GL video thread.
             val perFeed = mapArchiveFeedsBounded(feeds) { feed ->
                 offers.getOrPut(feed.label) { loadOffers(feed) }

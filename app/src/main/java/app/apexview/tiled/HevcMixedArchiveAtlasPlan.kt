@@ -30,7 +30,10 @@ internal object HevcMixedArchiveAtlasPlan {
      * Mixed quality is supported only when the bitstream geometry permits lossless stitching. */
     fun choose(sources: List<Source>, maximumWidth: Int = 4096,
                maximumHeight: Int = HevcArchiveAtlasPlan.MAX_CODED_HEIGHT): Plan? {
-        if (sources.isEmpty() || sources.size > 6) return null
+        if (sources.isEmpty() || sources.size > 8) return null
+        // <=6 retains the proven 24-cell search space; only extended feeds
+        // are permitted to enumerate a maximum of 32 independent source cells.
+        val maximumCells = if (sources.size > 6) 32 else 24
         val ctb = sources.first().sps.ctbSize
         if (ctb <= 0 || sources.any { it.sps.ctbSize != ctb }) return null
         val all = sources.mapIndexed { index, source ->
@@ -51,7 +54,7 @@ internal object HevcMixedArchiveAtlasPlan {
                 }
             })
         }
-        if (all.sumOf { it.tiles.size } > 24) return null
+        if (all.sumOf { it.tiles.size } > maximumCells) return null
         val availableTiles = all.flatMap { it.tiles }
         // Every tile must be independently decodable and share the coding tools of the
         // output PPS. Source dimensions and source tile counts may differ.
@@ -76,7 +79,7 @@ internal object HevcMixedArchiveAtlasPlan {
         val maximumRows = minOf(8, maximumHeight / ctb, all.sumOf { it.rows })
         val candidates = (minimumColumns..maximumColumns).flatMap { columns ->
             (minimumRows..maximumRows).mapNotNull { rows ->
-                if (columns * rows !in minimumCells..24) null else columns to rows
+                if (columns * rows !in minimumCells..maximumCells) null else columns to rows
             }
         }.sortedWith(compareBy<Pair<Int, Int>> { it.first * it.second }.thenBy { it.first })
 
