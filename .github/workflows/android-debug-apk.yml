@@ -38,8 +38,23 @@ jobs:
         with:
           packages: platform-tools
 
-      - name: Install Android 37 compilation SDK (retain 36/35 tooling and target 36)
-        run: sdkmanager "platforms;android-37" "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0"
+      - name: Verify Android 37 compilation SDK and compatible signing tools
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          test -n "$sdk"
+          if [ ! -s "$sdk/platforms/android-37/android.jar" ] ||
+             [ ! -x "$sdk/build-tools/35.0.0/apksigner" ] ||
+             [ ! -x "$sdk/build-tools/36.0.0/apksigner" ]; then
+            # Some images already contain all three packages but sdkmanager fails
+            # because the repository index is unavailable. Do not do a pointless
+            # network re-install if the exact validated SDK files already exist.
+            sdkmanager "platforms;android-37" "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0"
+          fi
+          test -s "$sdk/platforms/android-37/android.jar"
+          test -s "$sdk/platforms/android-36/android.jar"
+          test -x "$sdk/build-tools/35.0.0/apksigner"
+          test -x "$sdk/build-tools/36.0.0/apksigner"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
