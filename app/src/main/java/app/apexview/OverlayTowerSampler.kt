@@ -12,6 +12,10 @@ internal class OverlayTowerSampler(
 ) {
     private data class LapSnapshot(val source: DriverLaps, val index: Int, val state: CardState)
     private val rowCache = HashMap<String, LapSnapshot>()
+    // Reusable position/row index: the previous O(n²) instrumentation scan
+    // allocated closures and repeatedly searched the entire tower on each
+    // changed polling epoch. This map never escapes the single owner worker.
+    private val previousRowsByNumber = HashMap<String, CardState>()
     private var last: TowerSample? = null
     private var lastMs = Long.MIN_VALUE
     private var lastSpeedSource: Map<String, SpeedLog>? = null
@@ -55,11 +59,15 @@ internal class OverlayTowerSampler(
         val candidate = TowerSample(rows, towerSessionHeader(timing, now), tyres, speeds)
         val previous = last
         val same = previous != null && previous.visuallyEquals(candidate)
-        val changedRows = if (same) 0 else rows.count { (number, state) ->
-            previous?.rows?.any { it.first == number && it.second == state } != true ||
-                previous?.tyres?.get(number)?.compound != tyres[number]?.compound ||
-                previous?.tyres?.get(number)?.laps != tyres[number]?.laps ||
-                previous?.speeds?.get(number) != speeds[number]
+        val changedRows = if (same) 0 else {
+            previousRowsByNumber.clear()
+            previous?.rows?.forEach { (number, state) -> previousRowsByNumber[number] = state }
+            rows.count { (number, state) ->
+                previousRowsByNumber[number] != state ||
+                    previous?.tyres?.get(number)?.compound != tyres[number]?.compound ||
+                    previous?.tyres?.get(number)?.laps != tyres[number]?.laps ||
+                    previous?.speeds?.get(number) != speeds[number]
+            }
         }
         val published = if (same) previous!! else candidate
         last = published

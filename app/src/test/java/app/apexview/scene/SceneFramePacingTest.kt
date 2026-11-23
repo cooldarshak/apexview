@@ -86,6 +86,21 @@ class SceneFramePacingTest {
         assertEquals(0L, stats.snapshotAndReset().glQueueDelays.count)
     }
 
+    @Test fun unavailableSurfaceDrawIsNotMisreportedAsVideoOrSwapDrop() {
+        val stats = SceneFramePacing()
+        stats.onDrawUnavailable()
+        stats.onDrawUnavailable()
+        val report = stats.snapshotAndReset()
+        assertEquals(2L, report.unavailableDraws)
+        assertEquals(0L, report.presented)
+        assertEquals(0L, report.latched)
+        assertEquals(0L, report.eglSwapDurations.count)
+        assertEquals(0L, stats.snapshotAndReset().unavailableDraws)
+        stats.onDrawUnavailable()
+        stats.reset()
+        assertEquals(0L, stats.snapshotAndReset().unavailableDraws)
+    }
+
     @Test fun recordsSourceCadenceSeparatelyFromChoreographerAndCpuStages() {
         val stats = SceneFramePacing()
         val start = 1_000_000_000L

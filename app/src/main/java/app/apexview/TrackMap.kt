@@ -682,7 +682,12 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
     val stopText = remember(stopLine) { stopLine?.let { measurer.label(it, 13.sp) } }
     val pulse = rememberOverlayFlagPulse(flags.track.ending)
     val caption = rememberCaption(measurer, flags, now)
-    val safetyCar = if (!flags.track.safetyCar) null else (leader ?: leaderAt(timing, now))
+    // Leader and flags are part of the 10Hz metadata sample. Never redo 24
+    // driver lap lookups on the 60Hz draw thread in either map style.
+    val currentSafetyLeader = remember(timing, now, leader, flags.track.safetyCar) {
+        if (flags.track.safetyCar) leader ?: leaderAt(timing, now) else null
+    }
+    val safetyCar = if (!flags.track.safetyCar) null else currentSafetyLeader
         ?.let { leader -> cars.firstOrNull { it.first.number == leader }?.first }
         ?.let { lapPoint(timing.geometry.progress(it.x, it.y) + SAFETY_CAR_AHEAD) }
     // Only a changed event/flag/pit marker re-records this middle layer.
@@ -804,7 +809,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
                     }
                 }
                 if (flags.track.safetyCar) {
-                    val safetyLeader = leader ?: leaderAt(timing, now)
+                    val safetyLeader = currentSafetyLeader
                     movingCars.firstOrNull { it.number == safetyLeader }?.let { car ->
                         val point = lapPoint(timing.geometry.progress(car.x, car.y) + SAFETY_CAR_AHEAD)
                         drawSafetyCar(point, 10.dp.toPx(), scLabel)
@@ -937,8 +942,23 @@ private fun DrawScope.drawSafetyCar(at: Offset, radius: Float, label: TextLayout
 }
 
 /** The race leader's car number at [now], from the timing cards. */
-internal fun leaderAt(timing: SessionTiming, now: Long): String? =
-    timing.laps.entries.mapNotNull { (number, laps) -> laps.at(now)?.position?.let { number to it } }.minByOrNull { it.second }?.first
+internal fun leaderAt(timing: SessionTiming, now: Long): String? {
+    // Use the same lap interval as DriverLaps.at(), but read only the required
+    // position: full CardState construction also calculates unrelated lap,
+    // sector and running-time fields. Preserve first-in-map tie breaking.
+    var first: String? = null
+    var minPosition = 0
+    for ((number, laps) in timing.laps) {
+        val index = laps.times.floorIndex(now)
+        if (index < 0) continue
+        val position = laps.states[index].position ?: continue
+        if (first == null || position < minPosition) {
+            first = number
+            minPosition = position
+        }
+    }
+    return first
+}
 
 /** The caption for [flags] at [now], measured once per change (the countdown ticks each second). */
 @Composable
@@ -1076,7 +1096,12 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     }
     val pulse = rememberOverlayFlagPulse(flags.track.ending)
     val caption = rememberCaption(measurer, flags, now)
-    val safetyCar = if (!flags.track.safetyCar) null else (leader ?: leaderAt(timing, now))
+    // Leader and flags are part of the 10Hz metadata sample. Never redo 24
+    // driver lap lookups on the 60Hz draw thread in either map style.
+    val currentSafetyLeader = remember(timing, now, leader, flags.track.safetyCar) {
+        if (flags.track.safetyCar) leader ?: leaderAt(timing, now) else null
+    }
+    val safetyCar = if (!flags.track.safetyCar) null else currentSafetyLeader
         ?.let { leader -> cars.firstOrNull { it.first.number == leader }?.second }
         ?.let { it + SAFETY_CAR_AHEAD }
     val pitLabel = remember { measurer.label("PIT", 7.sp) }
@@ -1230,7 +1255,7 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
                     label.size.height / 2f), alpha = alpha)
             }
             if (movingCars != null && flags.track.safetyCar) {
-                val safetyLeader = leader ?: leaderAt(timing, now)
+                val safetyLeader = currentSafetyLeader
                 movingCars.firstOrNull { it.number == safetyLeader }?.let { car ->
                     val f = timing.geometry.progress(car.x, car.y) + SAFETY_CAR_AHEAD
                     drawSafetyCar(ribbon.point(f), 7.5.dp.toPx(), scLabel)

@@ -30,6 +30,17 @@ internal class SceneFrameDemand {
         return videoPending.also { videoPending = false }
     }
 
+    /**
+     * A surface/context transition can temporarily reject a scheduled GL draw.
+     * Preserve its decoder-picture demand until the next explicit surface/bind/video
+     * notification, rather than silently dropping the last frame during a pause.
+     * This does NOT reschedule a failing surface in a hot Choreographer loop.
+     */
+    fun onDrawUnavailable(hadNewVideo: Boolean) {
+        check(!callbackScheduled) { "Unavailable draw must follow beginFrame()" }
+        videoPending = videoPending || hadNewVideo
+    }
+
     fun reset() {
         callbackScheduled = false
         videoPending = false

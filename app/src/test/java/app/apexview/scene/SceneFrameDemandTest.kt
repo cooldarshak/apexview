@@ -25,6 +25,31 @@ class SceneFrameDemandTest {
         assertTrue(frames.beginFrame())
     }
 
+    @Test fun unavailableOutputPreservesLastVideoWithoutBusyLoop() {
+        val frames = SceneFrameDemand()
+        assertTrue(frames.videoArrived())
+        assertTrue(frames.beginFrame())
+        frames.onDrawUnavailable(hadNewVideo = true)
+        assertFalse(frames.hasPendingVideo()) // No callback remains scheduled.
+        assertTrue(frames.requestDraw()) // A later valid output explicitly resumes.
+        assertTrue(frames.hasPendingVideo())
+        assertTrue(frames.beginFrame())
+        assertFalse(frames.hasPendingVideo())
+    }
+
+    @Test fun unavailableLayoutRedrawDoesNotInventDecoderPictures() {
+        val frames = SceneFrameDemand()
+        assertTrue(frames.requestDraw())
+        assertFalse(frames.beginFrame())
+        frames.onDrawUnavailable(hadNewVideo = false)
+        assertTrue(frames.requestDraw())
+        assertFalse(frames.beginFrame())
+        frames.onDrawUnavailable(hadNewVideo = false)
+        frames.reset()
+        assertTrue(frames.videoArrived())
+        assertTrue(frames.beginFrame())
+    }
+
     @Test fun resetDiscardsStaleCallbacksAcrossSurfaceRecreation() {
         val frames = SceneFrameDemand()
         assertTrue(frames.videoArrived())

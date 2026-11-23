@@ -251,6 +251,11 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             if (timing != null) {
                 if (newVideo) cadenceGate.onVideoDraw(frameTimeNs)
                 pacing.onDisplayFrame(frameTimeNs, timing.swapNs, newVideo, timing.glDrawNs, callbackStarted)
+            } else {
+                // Keep the last codec picture pending until a later surface/bind event.
+                // Never spin Choreographer while EGL output is unavailable.
+                frameDemand.onDrawUnavailable(newVideo)
+                pacing.onDrawUnavailable()
             }
         }
     }
@@ -520,6 +525,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 "surfaceTimestampRegressions=${metrics.surfaceTimestampRegressions} " +
                 "drawsWithoutNewVideo=${metrics.noNewVideoDraws} " +
                 "videoDrawPacingDeferrals=${metrics.pacingDeferrals} " +
+                "unavailableSurfaceDraws=${metrics.unavailableDraws} " +
                 "callbackIntervalsBins13_19_23_30_45_100=${metrics.callbackIntervals.compact()} " +
                 "sourceTimestampBins13_19_23_30_45_100=${metrics.textureTimestampIntervals.compact()} " +
                 "videoVsyncBins13_19_23_30_45_100=${metrics.displayIntervals.compact()} " +

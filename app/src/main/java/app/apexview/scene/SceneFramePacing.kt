@@ -31,6 +31,7 @@ internal class SceneFramePacing {
         val eglSwapDurations: TimingBuckets.Snapshot,
         val callbackDelays: TimingBuckets.Snapshot,
         val glQueueDelays: TimingBuckets.Snapshot,
+        val unavailableDraws: Long,
     )
 
     private var lastCallbackNs = 0L
@@ -52,6 +53,7 @@ internal class SceneFramePacing {
     private var surfaceTimestampRegressions = 0L
     private var noNewVideoDraws = 0L
     private var pacingDeferrals = 0L
+    private var unavailableDraws = 0L
     private var lastVsyncNs = 0L
     private val callbackIntervals = TimingBuckets()
     private val textureTimestampIntervals = TimingBuckets()
@@ -121,6 +123,9 @@ internal class SceneFramePacing {
 
     fun onPacingDeferred() { pacingDeferrals++ }
 
+    /** Output lifecycle rejection; not a decoded or SurfaceFlinger dropped picture. */
+    fun onDrawUnavailable() { unavailableDraws++ }
+
     fun snapshotAndReset(): Snapshot {
         val result = Snapshot(latched, presented, callbackGaps, displayGaps, slowSwaps,
             slowDraws, slowLatches, maxCallbackGapMs, maxDisplayGapMs, maxSwapMs,
@@ -129,12 +134,14 @@ internal class SceneFramePacing {
             displayIntervals.snapshotAndReset(), allVsyncIntervals.snapshotAndReset(),
             eglBindDurations.snapshotAndReset(), latchDurations.snapshotAndReset(),
             glDrawDurations.snapshotAndReset(), eglSwapDurations.snapshotAndReset(),
-            callbackDelays.snapshotAndReset(), glQueueDelays.snapshotAndReset())
+            callbackDelays.snapshotAndReset(), glQueueDelays.snapshotAndReset(),
+            unavailableDraws)
         // Retain timestamps so a boundary between windows does not hide a long stall.
         latched = 0; presented = 0; callbackGaps = 0; displayGaps = 0; slowSwaps = 0
         slowDraws = 0; slowLatches = 0
         noNewVideoDraws = 0
         pacingDeferrals = 0
+        unavailableDraws = 0
         maxCallbackGapMs = 0; maxDisplayGapMs = 0; maxSwapMs = 0
         maxDrawMs = 0; maxLatchMs = 0; maxVsyncCallbackDelayMs = 0; surfaceTimestampRegressions = 0
         return result

@@ -126,6 +126,35 @@ class OverlayTowerSamplerTest {
         }
     }
 
+    @Test fun twentyFourDriverTowerRetainsOrderOnSeekWithoutChangingCachedSnapshots() {
+        val snapshots = (1..24).associate { rank ->
+            val number = rank.toString()
+            number to DriverLaps(longArrayOf(1_000L, 2_000L),
+                listOf(
+                    DriverLaps.Snapshot(position = 25 - rank, sectors = emptyList(),
+                        lapSectors = emptyList(), lastLap = null, gap = null, inPit = false,
+                        toLeader = null, ahead = null),
+                    DriverLaps.Snapshot(position = rank, sectors = emptyList(),
+                        lapSectors = emptyList(), lastLap = null, gap = null, inPit = false,
+                        toLeader = null, ahead = null)
+                ), longArrayOf())
+        }
+        val t = SessionTiming(
+            type = "Race", drivers = emptyMap(), tracks = emptyMap(),
+            states = emptyMap(), outline = floatArrayOf(),
+            hasStartFinish = false, corners = emptyList(), startUtcMs = 1_000L,
+            laps = snapshots
+        )
+        val sampler = OverlayTowerSampler(t)
+        val first = sampler.sample(1_100L)
+        assertEquals((24 downTo 1).map { it.toString() }, first.rows.map { it.first })
+        val later = sampler.sample(2_100L)
+        assertEquals((1..24).map { it.toString() }, later.rows.map { it.first })
+        val restored = sampler.sample(1_100L)
+        assertEquals(first.rows, restored.rows)
+        assertSame(restored, sampler.sample(1_100L))
+    }
+
     @Test fun backwardSeekRestoresOldLapAndOldTyres() {
         val sampler = OverlayTowerSampler(timing())
         sampler.sample(3_100L)

@@ -30,6 +30,30 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn('OverlayPerformanceProbe("edge-flag-pulse-draw")', track)
         self.assertIn("OverlayMotionSource(drawClock, drawSampler::sample)", track)
 
+    def test_map_draw_phase_resolves_safety_leader_once_per_static_epoch(self):
+        track = source("TrackMap.kt")
+        self.assertEqual(track.count("val currentSafetyLeader = remember("), 2)
+        self.assertEqual(track.count("leader ?: leaderAt(timing, now)"), 2)
+        self.assertEqual(track.count("val safetyLeader = currentSafetyLeader"), 2)
+        self.assertIn("if (first == null || position < minPosition)", track)
+        tower = source("OverlayTowerSampler.kt")
+        self.assertIn("previousRowsByNumber.clear()", tower)
+        self.assertNotIn("previous?.rows?.any", tower)
+
+    def test_scene_video_demand_preserves_last_frame_on_transient_surface_loss(self):
+        frame = source("scene/SceneFrameDemand.kt")
+        clear = source("scene/SingleDecoderSceneView.kt")
+        protected = source("scene/ProtectedDecoderSceneView.kt")
+        self.assertIn("fun onDrawUnavailable(hadNewVideo: Boolean)", frame)
+        for target in (clear, protected):
+            self.assertIn("frameDemand.onDrawUnavailable(", target)
+            self.assertIn("pacing.onDrawUnavailable()", target)
+            self.assertIn("unavailableSurfaceDraws=", target)
+        self.assertIn("eglMakeCurrent(display, window, window, contextGl)", protected)
+        self.assertIn("eglBindNs = bindNs", protected)
+        self.assertIn("EGL14.eglSwapInterval(display, 0)", protected)
+        self.assertIn("physicalPresentation=NOT_MEASURED", protected)
+
     def test_map_and_cast_sender_are_wired_to_same_sampling_contract(self):
         track = source("TrackMap.kt")
         sender = source("cast/CastTimingPublisher.kt")

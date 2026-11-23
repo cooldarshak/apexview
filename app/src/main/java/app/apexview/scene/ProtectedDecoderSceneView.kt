@@ -107,6 +107,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 if (hasNewVideo) cadenceGate.onVideoDraw(frameTimeNanos)
                 pacing.onDisplayFrame(frameTimeNanos, measurement.swapNs,
                     hasNewVideo, measurement.drawNs, callbackStartNs)
+            } else {
+                frameDemand.onDrawUnavailable(hasNewVideo)
+                pacing.onDrawUnavailable()
             }
         }
     }
@@ -237,6 +240,13 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             ?.split(' ')?.contains("GL_EXT_protected_textures") == true) {
             "Protected texture sampling is unavailable; no insecure output fallback is permitted"
         }
+        // Both protected and clear scenes already present on Choreographer's
+        // display callback. Ask EGL not to block this same decoder-latch thread
+        // on a second swap interval. Unsupported OEM implementations retain
+        // their default pacing without bypassing secure output.
+        val nonBlockingSwapAccepted = EGL14.eglSwapInterval(display, 0)
+        Log.i("ApexviewSingleDecoder", "SURFACE_SCENE_SWAP_INTERVAL requested=0 " +
+            "accepted=$nonBlockingSwapAccepted protected=$protectedOutput pacing=CHOREOGRAPHER")
         // SurfaceView has a SurfaceFlinger layer independent of the app's HWUI
         // RenderThread. Compose tower/map jank must never stall video presentation.
         // EGL swaps are paced by the native surface instead of a second
@@ -279,12 +289,23 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         frames.setOnFrameAvailableListener({
             guarded {
                 if (decoderTexture === frames && !released) {
+                    val callbackStartedNs = System.nanoTime()
+                    // Texture latching and drawing use the SAME protected EGL context.
+                    // EGL may be unbound after surface/encoder handoffs; never assume
+                    // that the previous draw left it current on this GL looper.
+                    val bindStartedNs = System.nanoTime()
+                    check(window != EGL14.EGL_NO_SURFACE &&
+                        EGL14.eglMakeCurrent(display, window, window, contextGl)) {
+                        "Protected scene GL context unavailable for decoder latch"
+                    }
+                    val bindNs = System.nanoTime() - bindStartedNs
                     val latchStartNs = System.nanoTime()
                     Trace.beginSection("PitwallProtectedSceneLatch")
                     try { frames.updateTexImage() } finally { Trace.endSection() }
+                    val latchedAtNs = System.nanoTime()
                     val timestamp = frames.timestamp
-                    pacing.onTextureLatched(System.nanoTime(), System.nanoTime() - latchStartNs,
-                        timestamp, callbackArrivalNs = latchStartNs)
+                    pacing.onTextureLatched(latchedAtNs, latchedAtNs - latchStartNs,
+                        timestamp, eglBindNs = bindNs, callbackArrivalNs = callbackStartedNs)
                     if (lastSourceTimestampNs > 0L && timestamp > 0L &&
                         timestamp < lastSourceTimestampNs) {
                         intervalSourceTimestampRegressions++
@@ -406,8 +427,17 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "maxCallbackGapMs=${metrics.maxCallbackGapMs} " +
                 "maxDisplayGapMs=${metrics.maxDisplayGapMs} maxSwapMs=${metrics.maxSwapMs} " +
                 "videoDrawPacingDeferrals=${metrics.pacingDeferrals} " +
+                "unavailableSurfaceDraws=${metrics.unavailableDraws} " +
+                "sourceTimestampBins13_19_23_30_45_100=${metrics.textureTimestampIntervals.compact()} " +
+                "callbackIntervalsBins13_19_23_30_45_100=${metrics.callbackIntervals.compact()} " +
                 "videoVsyncBins13_19_23_30_45_100=${metrics.displayIntervals.compact()} " +
-                "physicalPresentation=NOT_MEASURED")
+                "eglBindP95UpperMs=${metrics.eglBindDurations.percentileUpperMs(95)} " +
+                "latchP95UpperMs=${metrics.latchDurations.percentileUpperMs(95)} " +
+                "glSubmitP95UpperMs=${metrics.glDrawDurations.percentileUpperMs(95)} " +
+                "eglSwapP95UpperMs=${metrics.eglSwapDurations.percentileUpperMs(95)} " +
+                "choreographerDelayP95UpperMs=${metrics.callbackDelays.percentileUpperMs(95)} " +
+                "glQueueP95UpperMs=${metrics.glQueueDelays.percentileUpperMs(95)} " +
+                "swapSubmissionsNotPhysicalPresentation=true physicalPresentation=NOT_MEASURED")
             lastLogNs = now
             intervalPresented = 0
             intervalLongGaps = 0
