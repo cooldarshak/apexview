@@ -74,7 +74,8 @@ class ExpressiveUiAccessibilityTest {
         var primary = Color.Unspecified
         rule.setContent {
             AppTheme {
-                SideEffect { primary = MaterialTheme.colorScheme.primary }
+                val actualPrimary = MaterialTheme.colorScheme.primary
+                SideEffect { primary = actualPrimary }
                 Text("Pitwall")
             }
         }
