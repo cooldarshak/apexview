@@ -2,24 +2,24 @@
 
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** IN DEVELOPMENT. **Last verified green checkpoint: Build 805**, commit `cd1bb093c2fa7c2fefaa3ceedf38a8de6e0509f6` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45138949199)). The coding-closeout revision needs exact-source CI verification. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
+**Status:** IN DEVELOPMENT. **Last verified green checkpoint: Build 806**, commit `a965218c3762eb2a2bdcd87909315c7c96085ab8` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45141962100)). P0.1, P0.2 and P2.8 coding are **100% and CI-verified**; physical acceptance and release gates remain independent. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
 performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
 
 
-## Build 806 coordinated coding closeout: P0.1 / P0.2 / P2.8 (exact-source CI pending)
+## Build 806 coordinated coding closeout: P0.1 / P0.2 / P2.8 (exact-source CI GREEN)
 
 **Baseline:** [Build 805 GREEN](https://github.com/cooldarshak/apexview/actions/runs/45138949199), SHA `cd1bb093c2fa7c2fefaa3ceedf38a8de6e0509f6`; user physically confirms the revised portrait card sizing is ideal on S22 Ultra. No unverified device metrics or release sign-offs are inferred.
 
-**P0.1 Segment priority: 100% coding / hardware gate OPEN.** Reviewed `HevcArchiveVodSession.segment/prioritizeSeek/fetch/shutdown` -> separate foreground/warm I/O lanes -> `ArchiveSegmentSingleFlight` -> `ArchiveSegmentDelivery` -> bounded byte cache -> `ResourceDataSource`, including shared producer, seek/close cancellation, bounded retries and cleanup. Found and fixed a real exception-classification bug: `SocketTimeoutException` inherits `InterruptedIOException`, but is a real failed network request rather than an expected seek cancellation. Wrapped causes, cancellations and actual timeouts are now distinguished. Added deterministic concurrent foreground-joiner recovery/ownership and timeout classification tests. **Coding acceptance contingent on Build 806 exact-source CI.** Hardware confirmation still pending for 1x/1.5x seek p95, blocked prefetch/cold-cache and S22/TCL/Cast paths. No claim of measured latency improvement.
+**P0.1 Segment priority: 100% coding / hardware gate OPEN.** Reviewed `HevcArchiveVodSession.segment/prioritizeSeek/fetch/shutdown` -> separate foreground/warm I/O lanes -> `ArchiveSegmentSingleFlight` -> `ArchiveSegmentDelivery` -> bounded byte cache -> `ResourceDataSource`, including shared producer, seek/close cancellation, bounded retries and cleanup. Found and fixed a real exception-classification bug: `SocketTimeoutException` inherits `InterruptedIOException`, but is a real failed network request rather than an expected seek cancellation. Wrapped causes, cancellations and actual timeouts are now distinguished. Added deterministic concurrent foreground-joiner recovery/ownership and timeout classification tests. **Coding acceptance PASSED: Build 806 exact-source CI.** Hardware confirmation still pending for 1x/1.5x seek p95, blocked prefetch/cold-cache and S22/TCL/Cast paths. No claim of measured latency improvement.
 
-**P0.2 HEVC memory: 100% coding / hardware gate OPEN.** Reviewed clear archive bounded cache/read copies, 96MiB budget, cache eviction zeroing, protected output history budget and reader leases, clear composer NAL/sample cleanup and DRM isolation. Discovered a real exception-path gap: copied input initialization buffers were created outside the `try/finally` protecting composition, allowing premature feed construction or cancellation checks to skip explicit buffer wiping. New `OwnedArchiveInitializations` has exception-safe cloning and deterministic zero-on-close. Production now encloses feed setup/checkOpen/composition in its cleanup scope; JVM tests check detached ownership, exceptional cleanup and preservation of session-owned originals. **Coding acceptance contingent on Build 806 exact-source CI.** Actual 10-minute process allocation/GC/thermal, 7/8-feed retention, S22/TCL, clear/protected and Pitwall Cast remain device validation. Build 805 heap instrumentation helps attribute jank but is not itself a memory-performance fix.
+**P0.2 HEVC memory: 100% coding / hardware gate OPEN.** Reviewed clear archive bounded cache/read copies, 96MiB budget, cache eviction zeroing, protected output history budget and reader leases, clear composer NAL/sample cleanup and DRM isolation. Discovered a real exception-path gap: copied input initialization buffers were created outside the `try/finally` protecting composition, allowing premature feed construction or cancellation checks to skip explicit buffer wiping. New `OwnedArchiveInitializations` has exception-safe cloning and deterministic zero-on-close. Production now encloses feed setup/checkOpen/composition in its cleanup scope; JVM tests check detached ownership, exceptional cleanup and preservation of session-owned originals. **Coding acceptance PASSED: Build 806 exact-source CI.** Actual 10-minute process allocation/GC/thermal, 7/8-feed retention, S22/TCL, clear/protected and Pitwall Cast remain device validation. Build 805 heap instrumentation helps attribute jank but is not itself a memory-performance fix.
 
-**P2.8 Material 3 Expressive: 100% coding / hardware gate OPEN.** Reviewed `BrowseScreens`, `BrowseLayoutPolicy`, `Sheets`, `Design`, `Viewer`, `Calendar`, `MainActivity` and Android TV receiver theme wiring; existing Compose semantics/role, 200% text, responsive viewport, held-key slider, reduced-motion and ChromeLayoutPolicy tests. Build 805's normal-scale portrait geometry and untouched landscape/TV sizing remain accepted. Discovered that at 175%-200% text, the card switched out of compact styling and accidentally reverted to a single-line title. Portrait title now consistently permits two lines; subtitle permits two at 175%+; narrow/large-font tests and production-wiring checks added. **Coding acceptance contingent on Build 806 exact-source CI.** Device acceptance remains open for TCL DPAD focus and repeated keys, 200% text/TalkBack, player/overlay settings and Cast appearance.
+**P2.8 Material 3 Expressive: 100% coding / hardware gate OPEN.** Reviewed `BrowseScreens`, `BrowseLayoutPolicy`, `Sheets`, `Design`, `Viewer`, `Calendar`, `MainActivity` and Android TV receiver theme wiring; existing Compose semantics/role, 200% text, responsive viewport, held-key slider, reduced-motion and ChromeLayoutPolicy tests. Build 805's normal-scale portrait geometry and untouched landscape/TV sizing remain accepted. Discovered that at 175%-200% text, the card switched out of compact styling and accidentally reverted to a single-line title. Portrait title now consistently permits two lines; subtitle permits two at 175%+; narrow/large-font tests and production-wiring checks added. **Coding acceptance PASSED: Build 806 exact-source CI.** Device acceptance remains open for TCL DPAD focus and repeated keys, 200% text/TalkBack, player/overlay settings and Cast appearance.
 
-**Completion semantics:** These three workstreams have no further known coding tasks after the coordinated fixes. If Build 806 CI is green, coding can be recorded complete independently of hardware testing. If CI fails, reopen the affected source item and repair it in a coordinated pass. The release gate count stays **1/16 closed** until physical evidence is supplied. Separate P0.3/P0.4/P1.3/P2.6 issues own existing UI jank/GC/display pacing performance observations.
+**Completion semantics:** These three workstreams have no further known coding tasks after the coordinated fixes; Build 806 CI is GREEN, so their source coding is **closed at 100%** independently of hardware testing. Future regressions must reopen coding transparently rather than altering historical CI evidence. The release gate count stays **1/16 closed** until physical evidence is supplied. Separate P0.3/P0.4/P1.3/P2.6 issues own existing UI jank/GC/display pacing performance observations.
 
 ## November 23 Build 804 user review: portrait balance and app-window jank diagnostics
 
@@ -147,28 +147,28 @@ Audited historical totals: **44 runs, 10 passed, 34 failed.** These are CI snaps
 - **Code estimates after exact-green 801 (provisional)**: P0.1=96%, P0.2=93%, P2.8=92%. These modest increases recognize passed 801 fixes/tests, NOT hardware acceptance. All three remain unfinished and their release gates remain OPEN. Overall unweighted 16-workstream code estimate = 77.5625%; strict release gates 1/16 closed.
 - **Required next coordinated implementation pass**: repair the still-visible recovery/observability and fairness risks if confirmed, close remaining production tests and wiring, validate full compatibility matrix and document objective evidence. No false 100% and no unsupported physical acceptance.
 
-### Current 16-workstream coding ledger: post-805 audit / Build 806 source awaiting CI
+### Current 16-workstream coding ledger: Build 806 exact-source GREEN
 
-Coding percent describes implemented, audited source, not hardware acceptance. The P0.1/P0.2/P2.8 100% coding figures are conditional on the exact-source closeout CI passing. If a test fails, correct code before preserving 100% status.
+Coding percent describes implemented, audited source, not hardware acceptance. Build 806 passed the exact-source GitHub Actions coding, packaging and emulator tests. P0.1/P0.2/P2.8 are now 100% coding-complete and CI-verified; physical/release gates remain OPEN.
 
 | ID | Workstream | Coding complete | Coding pending | Automated CI | Physical testing | Release gate | Exact remaining work |
 | --- | --- | ---: | ---: | --- | --- | --- | --- |
-| P0.1 | Segment priority | **100%** | **0%** | 805 green, 806 pending | S22/TCL 1x/1.5x seek p95 pending | Open | No known coding left; real contention and seek acceptance |
-| P0.2 | HEVC memory | **100%** | **0%** | 805 green, 806 pending | 10-minute GC/heap and 7/8-feed pending | Open | No known coding left; sustained clear/protected/Cast retention and allocation evidence |
-| P0.3 | Video rendering | 65% | 35% | 805 green | 50fps/decoder cadence pending | Open | BufferQueue/GL/display root cause and integration |
-| P0.4 | Map and tower | 85% | 15% | 805 green | TCL simultaneous overlays pending | Open | Smooth overlay playback and UI timing |
-| P1.1 | HEVC atlas | 85% | 15% | 805 green | Extended feed real streams pending | Open | Composition and quality profile compatibility |
-| P1.2 | Refresh matching | 60% | 40% | 805 green | Physical 50fps/1.5x pacing pending | Open | Display mode and frame pacing policy |
-| P1.3 | Quality and thermal | 55% | 45% | 805 green | Sustained thermal runs pending | Open | Per-mode quality and thermal handling |
-| P2.1 | Pitwall Cast | 85% | 15% | 805 green | TV receiver timing pending | Open | Protected/baked receiver overlay parity |
-| P2.2 | Coordinator architecture | 25% | 75% | 805 green | Pending | Open | AppState lifecycle/concurrency ownership |
-| P2.3 | Release and updates | 88% | 12% | 805 green | Signed upgrade both devices pending | Open | Production signer and upgrade verification |
-| P2.4 | Security | 70% | 30% | 805 green | Pending | Open | Auth, LAN transport, backup/log redaction |
-| P2.5 | Android TV | 80% | 20% | 805 green | TCL player/map/tower/DPAD pending | Open | Native TV playback and remote acceptance |
-| P2.6 | Testing and benchmarks | 87% | 13% | 805 green | Perfetto, A/B endurance pending | Open | Reproducible device benchmarks |
-| P2.7 | Core architecture | 100% | 0% | 805 green | Previously accepted scope | Closed | Preserve single decoder invariants |
-| P2.8 | Material 3 Expressive | **100%** | **0%** | 805 green, 806 pending | Portrait accepted; TCL/TalkBack/200% pending | Open | No known coding left; physical visual/accessibility acceptance |
-| P2.9 | Closed captions | 75% | 25% | 805 green | F1 cue rendering pending | Open | Mobile/TV/Cast clear/protected caption parity |
+| P0.1 | Segment priority | **100%** | **0%** | 806 GREEN | S22/TCL 1x/1.5x seek p95 pending | Open | No known coding left; real contention and seek acceptance |
+| P0.2 | HEVC memory | **100%** | **0%** | 806 GREEN | 10-minute GC/heap and 7/8-feed pending | Open | No known coding left; sustained clear/protected/Cast retention and allocation evidence |
+| P0.3 | Video rendering | 65% | 35% | 806 GREEN | 50fps/decoder cadence pending | Open | BufferQueue/GL/display root cause and integration |
+| P0.4 | Map and tower | 85% | 15% | 806 GREEN | TCL simultaneous overlays pending | Open | Smooth overlay playback and UI timing |
+| P1.1 | HEVC atlas | 85% | 15% | 806 GREEN | Extended feed real streams pending | Open | Composition and quality profile compatibility |
+| P1.2 | Refresh matching | 60% | 40% | 806 GREEN | Physical 50fps/1.5x pacing pending | Open | Display mode and frame pacing policy |
+| P1.3 | Quality and thermal | 55% | 45% | 806 GREEN | Sustained thermal runs pending | Open | Per-mode quality and thermal handling |
+| P2.1 | Pitwall Cast | 85% | 15% | 806 GREEN | TV receiver timing pending | Open | Protected/baked receiver overlay parity |
+| P2.2 | Coordinator architecture | 25% | 75% | 806 GREEN | Pending | Open | AppState lifecycle/concurrency ownership |
+| P2.3 | Release and updates | 88% | 12% | 806 GREEN | Signed upgrade both devices pending | Open | Production signer and upgrade verification |
+| P2.4 | Security | 70% | 30% | 806 GREEN | Pending | Open | Auth, LAN transport, backup/log redaction |
+| P2.5 | Android TV | 80% | 20% | 806 GREEN | TCL player/map/tower/DPAD pending | Open | Native TV playback and remote acceptance |
+| P2.6 | Testing and benchmarks | 87% | 13% | 806 GREEN | Perfetto, A/B endurance pending | Open | Reproducible device benchmarks |
+| P2.7 | Core architecture | 100% | 0% | 806 GREEN | Previously accepted scope | Closed | Preserve single decoder invariants |
+| P2.8 | Material 3 Expressive | **100%** | **0%** | 806 GREEN | Portrait accepted; TCL/TalkBack/200% pending | Open | No known coding left; physical visual/accessibility acceptance |
+| P2.9 | Closed captions | 75% | 25% | 806 GREEN | F1 cue rendering pending | Open | Mobile/TV/Cast clear/protected caption parity |
 
 **Unweighted coding status: 78.75% complete / 21.25% pending across 16 workstreams. Strict release gates: 1/16 closed, 15 open.** Older tables below are dated historical checkpoints, not current coding completion.
 
