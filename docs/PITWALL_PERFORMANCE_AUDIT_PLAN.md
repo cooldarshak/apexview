@@ -2,18 +2,26 @@
 
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** IN DEVELOPMENT. **Last verified green checkpoint: Build 815**, production commit `742dac94d42054a43a2ad349ab920a00d0c874fa` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45160518877)). Includes compiled clear/protected renderer Kotlin and both debug/benchmark Kotlin variants, the full JVM/Python/Cast/HEVC/CMAF checks, signed debug and nondebuggable benchmark APK assembly, and mandatory emulator instrumentation. P0.3 and P0.4 are **100% complete from the coding perspective**, with **0% known coding pending**. Their physical-performance/release-acceptance gates remain OPEN. Physical acceptance and release gates remain separate. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
+**Status:** IN DEVELOPMENT. **Last verified green checkpoint: Build 817**, production commit `d3ad6c75665798b4eaa1436910f31391cb16bb50` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45191605071)). The full source contract, JVM/Python/Cast/HEVC/CMAF checks, signed debug and benchmark APK assemblies, and mandatory emulator instrumentation all passed. This verifies compiled and tested source, not physical device performance, DRM entitlements, or Cast acceptance. P0.3 and P0.4 are **100% complete from the coding perspective**, with **0% known coding pending**. Their physical-performance/release-acceptance gates remain OPEN. Physical acceptance and release gates remain separate. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
 performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
 
 
-## Post-816 thermal startup lifecycle correction (exact-source CI PENDING)
+## Build 817 exact-source GREEN: coordinated P1.1/P1.2/P1.3/P2.6 + thermal startup correction (23 November 2026)
+
+**Full GitHub Actions success:** [Build 817](https://github.com/cooldarshak/apexview/actions/runs/45191605071), production SHA `d3ad6c75665798b4eaa1436910f31391cb16bb50`. Workflow completed **successfully** after the mandatory change contract, new and existing Kotlin JVM regressions, Python checks, Cast/JS validation, independent synthetic tile and HEVC/CMAF decoding, signed app/debug and non-debuggable benchmark packaging, and Android emulator RenderNode/SurfaceDecoder instrumentation. Verified published artifacts: `apexview-custom-unit-test-reports`, `apexview-custom-debug-apk`, `pitwall-benchmark-target-apk`, `pitwall-macrobenchmark-instrumentation`, `apexview-hevc-single-decoder-instrumentation`, `pitwall-rendernode-instrumentation-report`, `apexview-hevc-output-parameter-validation`, `pitwall-cast-layout-receiver`, and `pitwall-full-scene-hevc`. Build 816 was auto-cancelled/superseded by this critical lifecycle correction, not credited as a green build.
+
+**Scoped source results (coding verified, actual performance NOT measured):** P1.1 segment-invariant atlas destination address/seam computations, with byte/slice parity fixtures and no speculative tile-grid rewrite; P1.2 speed-aware 1×/1.5× frame-rate multiples and actual display-mode diagnostics in clear TextureView and authorized protected/receiver SurfaceView, still seamless-only; P1.3 preserved, tested explicit multiple-decoder thermal budget and visible moderate/severe/critical/recovery notices without changing user source caps, with `AppState.message` initialized before the startup listener; P2.6 disallows confounded overlapping/unmatched-duration overlay A/B windows. All protected content, one-decoder and user-MULTIPLE selection, phone/TV/Cast paths, captions, D-pad, seek, layout and signing behavior remain present in source. Green CI does **not** prove physical parity or performance improvements.
+
+**Conservative coding-only rescoring from audited tasks completed:** P1.1 **86%** (+1), P1.2 **65%** (+5), P1.3 **60%** (+5), P2.6 **88%** (+1). These are engineering estimates of remaining defined source scope, not measured improvements or new hardware signoffs. All other coding rows unchanged; aggregate unweighted **82.625% coding / 17.375% pending**. Strict hardware/release gates **1/16 closed / 15 open**. Neither the 46.1% slow S22 UI-window rate, the zero exact codec-to-texture PTS matches, nor BufferQueue owner/cause have been proven fixed. Next work: real mixed atlas/decoder testing and 10-minute controlled S22 and TCL tests with Software DRM ON, 1×/1.5×, protected/clear HEVC and Pitwall Cast; then causal investigation of P0.2/P0.3/P0.4 where traces establish a source defect. This is the ONE consolidated plan; no new build should be started by this docs-only reconciliation.
+
+## Post-816 thermal startup lifecycle correction (historical source correction, VERIFIED IN 817)
 
 **Source-level defect caught before declaring Build 816 accepted:** Kotlin initializes delegated state properties and `init` blocks in declaration order. In the preceding candidate `AppState` thermal startup notice was called from an early `init` block but `var message by mutableStateOf(...)` was declared later, so an already-warm device could reach an uninitialized property delegate before the first screen. This is a real warm-start lifecycle risk independent of compilation or ordinary cold CI. Move the **same** Compose `message` state to the beginning of the class, before the thermal listener and startup notice; do not delete the notice or alter cooling behaviour, Widevine, decode mode, overlays, captions or Cast. Add a production-wiring regression asserting initialization order and a unique delegate declaration. The correction supersedes the exact-source acceptance of the preceding candidate; no success claim for either commit until the corrected source passes the entire normal CI. Coding percentages and physical release-gate count remain unchanged. The extra corrective CI is justified by a specific potentially startup-breaking defect rather than a cosmetic change.
 
-## Post-Build 815 coordinated P1.1/P1.2/P1.3/P2.6 source pass (CI PENDING)
+## Post-Build 815 coordinated P1.1/P1.2/P1.3/P2.6 source pass (historical pre-817 CI candidate)
 
 **Code audit and candidate, 23 November 2026:** The mixed-source atlas planner already evaluates bounded candidates by actual validated coded pixel area; no duplicate planner or speculative new tile logic is introduced. In `HevcTizenGridComposer.composeNalUnits`, per-cell destination CTB addresses and same-source seam booleans are now precomputed once after output geometry validation, instead of recalculated across every coded picture. SPS/PPS validation, exact output header round trips, per-picture identity, CABAC payload preservation and wipe-on-cancel remain unchanged. JVM fixture regression compares emitted sample bytes and slice evidence under shuffled cell selection, across all pictures. No measured decoder pixel/memory/thermal benefit is claimed; P1.1 device and mixed-quality acceptance remain OPEN.
 
@@ -285,9 +293,9 @@ Audited historical totals: **44 runs, 10 passed, 34 failed.** These are CI snaps
 - **Code estimates after exact-green 801 (provisional)**: P0.1=96%, P0.2=93%, P2.8=92%. These modest increases recognize passed 801 fixes/tests, NOT hardware acceptance. All three remain unfinished and their release gates remain OPEN. Overall unweighted 16-workstream code estimate = 77.5625%; strict release gates 1/16 closed.
 - **Required next coordinated implementation pass**: repair the still-visible recovery/observability and fairness risks if confirmed, close remaining production tests and wiring, validate full compatibility matrix and document objective evidence. No false 100% and no unsupported physical acceptance.
 
-### Current 16-workstream coding ledger: Build 806 exact-source GREEN
+### Current 16-workstream coding ledger: Build 817 exact-source GREEN
 
-Coding percent describes implemented, audited source, not hardware acceptance. Build 806 passed the exact-source GitHub Actions coding, packaging and emulator tests. P0.1/P0.2/P2.8 are now 100% coding-complete and CI-verified; physical/release gates remain OPEN.
+Coding percent describes implemented, audited source, not hardware acceptance. Build 817 passed exact-source GitHub Actions, packaging and emulator tests; P1.1/P1.2/P1.3/P2.6 completed additional coding scope. P0.1/P0.2/P0.3/P0.4/P2.8 remain 100% coding-complete and CI-verified; their physical/release gates stay OPEN.
 
 | ID | Workstream | Coding complete | Coding pending | Automated CI | Physical testing | Release gate | Exact remaining work |
 | --- | --- | ---: | ---: | --- | --- | --- | --- |
@@ -295,20 +303,20 @@ Coding percent describes implemented, audited source, not hardware acceptance. B
 | P0.2 | HEVC memory | **100%** | **0%** | 806 GREEN | 10-minute GC/heap and 7/8-feed pending | Open | No known coding left; sustained clear/protected/Cast retention and allocation evidence |
 | P0.3 | Video rendering | **100%** | **0%** | **815 GREEN** | S22 log + 3 Perfetto traces reviewed: visual smoke PASS, 0 exact codec PTS matches and persistent BufferQueue saturation; TCL/Widevine/Cast pending | **Open** | Physical video-layer cadence, timestamp-domain attribution, BufferQueue cause and device acceptance |
 | P0.4 | Map and tower | **100%** | **0%** | **815 GREEN** | S22 visual smoke PASS, but 46.1% slow app UI frames against <5% goal; uncontrolled overlay configurations, TCL/Cast pending | **Open** | Controlled A/B, 10-minute endurance, independent SurfaceFlinger/thermal attribution and TCL testing |
-| P1.1 | HEVC atlas | 85% | 15% | 806 GREEN | Extended feed real streams pending | Open | Composition and quality profile compatibility |
-| P1.2 | Refresh matching | 60% | 40% | 806 GREEN | Physical 50fps/1.5x pacing pending | Open | Display mode and frame pacing policy |
-| P1.3 | Quality and thermal | 55% | 45% | 806 GREEN | Sustained thermal runs pending | Open | Per-mode quality and thermal handling |
+| P1.1 | HEVC atlas | **86%** | **14%** | **817 GREEN** | Extended feed real streams pending | Open | Smallest conforming atlas capability and real mixed-rendition decoder verification |
+| P1.2 | Refresh matching | **65%** | **35%** | **817 GREEN** | Physical 50fps/1.5x pacing pending | Open | Controlled real mode, cadence and scanout comparisons including 75fps |
+| P1.3 | Quality and thermal | **60%** | **40%** | **817 GREEN** | Sustained thermal runs pending | Open | Device-aware quality suggestions, user cap transparency and thermal verification |
 | P2.1 | Pitwall Cast | 85% | 15% | 806 GREEN | TV receiver timing pending | Open | Protected/baked receiver overlay parity |
 | P2.2 | Coordinator architecture | 25% | 75% | 806 GREEN | Pending | Open | AppState lifecycle/concurrency ownership |
 | P2.3 | Release and updates | 88% | 12% | 806 GREEN | Signed upgrade both devices pending | Open | Production signer and upgrade verification |
 | P2.4 | Security | 70% | 30% | 806 GREEN | Pending | Open | Auth, LAN transport, backup/log redaction |
 | P2.5 | Android TV | 80% | 20% | 806 GREEN | TCL player/map/tower/DPAD pending | Open | Native TV playback and remote acceptance |
-| P2.6 | Testing and benchmarks | 87% | 13% | 806 GREEN | Perfetto, A/B endurance pending | Open | Reproducible device benchmarks |
+| P2.6 | Testing and benchmarks | **88%** | **12%** | **817 GREEN** | Matched physical Perfetto, A/B endurance pending | Open | Repeatable 10-minute device benchmarks, BufferQueue and video layer attribution |
 | P2.7 | Core architecture | 100% | 0% | 806 GREEN | Previously accepted scope | Closed | Preserve single decoder invariants |
 | P2.8 | Material 3 Expressive | **100%** | **0%** | 806 GREEN | Portrait accepted; TCL/TalkBack/200% pending | Open | No known coding left; physical visual/accessibility acceptance |
 | P2.9 | Closed captions | 75% | 25% | 806 GREEN | F1 cue rendering pending | Open | Mobile/TV/Cast clear/protected caption parity |
 
-**Unweighted coding estimate after GREEN Build 815: 81.875% complete / 18.125% pending across 16 workstreams. Strict release gates: 1/16 closed, 15 open.** Older tables below are dated historical checkpoints, not current coding completion.
+**Unweighted coding estimate after GREEN Build 817: 82.625% complete / 17.375% pending across 16 workstreams. Strict release gates: 1/16 closed, 15 open.** Rescored gains are coding-scope estimates only; all physical release gates except P2.7 remain open. Older tables below are dated historical checkpoints, not current coding completion.
 
 ## Builds 757–799 failure audit and post-800 coordinated quality checkpoint
 
