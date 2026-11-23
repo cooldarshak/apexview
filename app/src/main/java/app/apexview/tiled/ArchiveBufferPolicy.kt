@@ -136,6 +136,18 @@ internal class BoundedArchiveFragmentCache(
     }
 }
 
+/** One deadline for the *entire* feed group, never 25 seconds per queued source. */
+internal object ArchiveFetchDeadline {
+    const val GROUP_TIMEOUT_MS = 25_000L
+
+    /** Monotonic elapsed-budget arithmetic survives the usual nanoTime signed origin. */
+    fun remainingNs(startedNs: Long, nowNs: Long, timeoutMs: Long = GROUP_TIMEOUT_MS): Long {
+        require(timeoutMs > 0L && timeoutMs <= 60_000L)
+        val budgetNs = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        return (budgetNs - (nowNs - startedNs)).coerceAtLeast(0L)
+    }
+}
+
 internal object ArchiveBufferPolicy {
     // Bounded across feeds and composed atlas sizes, independent of fragment count.
     const val MAX_RETAINED_MEDIA_BYTES = 96L * 1024L * 1024L

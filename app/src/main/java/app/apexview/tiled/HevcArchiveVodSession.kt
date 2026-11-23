@@ -396,6 +396,7 @@ internal class HevcArchiveVodSession(
         val retained = mutableListOf<ByteArray>()
         val aborted = java.util.concurrent.atomic.AtomicBoolean(false)
         val futures = mutableListOf<Future<ByteArray>>()
+        val fetchStartedNs = System.nanoTime()
         try {
         val discontinuities = inputs.mapIndexed { i, input ->
             val segment = input.playlist.segments[groups[number].indexes[i]]
@@ -442,11 +443,18 @@ internal class HevcArchiveVodSession(
             bytes
         } }
             val result = futures.mapIndexed { index, future ->
-                try { future.get(25, TimeUnit.SECONDS) }
-                catch (timeout: java.util.concurrent.TimeoutException) {
-                    // Never include the F1 URL or credential-bearing request headers.
+                try {
+                    // With eight sources and only four bounded HTTP workers, per-future
+                    // 25-second waits could accumulate serially into 50+ seconds.
+                    // Every source instead shares one wall-clock group deadline.
+                    val remaining = ArchiveFetchDeadline.remainingNs(fetchStartedNs, System.nanoTime())
+                    if (remaining == 0L) throw java.util.concurrent.TimeoutException(
+                        "Archive parallel feed capture exceeded its shared deadline")
+                    future.get(remaining, TimeUnit.NANOSECONDS)
+                } catch (timeout: java.util.concurrent.TimeoutException) {
+                    // Never include F1 URL or credential-bearing HTTP headers.
                     android.util.Log.w("ApexviewSingleDecoder", "ARCHIVE_VOD_FETCH_TIMEOUT " +
-                        "segment=$number feed=${inputs[index].label} timeoutMs=25000 " +
+                        "segment=$number feed=${inputs[index].label} groupTimeoutMs=${ArchiveFetchDeadline.GROUP_TIMEOUT_MS} " +
                         "worker=${if (lane === prefetchFetchers) "PREFETCH" else "PLAYBACK"}")
                     throw timeout
                 }

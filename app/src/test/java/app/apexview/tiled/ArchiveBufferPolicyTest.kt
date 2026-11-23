@@ -9,6 +9,21 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class ArchiveBufferPolicyTest {
+    @Test fun allEightFeedsShareOneFiniteNetworkCaptureDeadline() {
+        val started = -40_000_000_000L
+        val limitMs = ArchiveFetchDeadline.GROUP_TIMEOUT_MS
+        val budgetNs = TimeUnit.MILLISECONDS.toNanos(limitMs)
+        assertEquals(budgetNs, ArchiveFetchDeadline.remainingNs(started, started))
+        assertEquals(TimeUnit.SECONDS.toNanos(5),
+            ArchiveFetchDeadline.remainingNs(started, started + TimeUnit.SECONDS.toNanos(20)))
+        // Source seven cannot reset a 25-second timeout after six prior futures.
+        assertEquals(0L, ArchiveFetchDeadline.remainingNs(started, started + budgetNs))
+        assertEquals(0L, ArchiveFetchDeadline.remainingNs(started, started + budgetNs + 1L))
+        assertThrows(IllegalArgumentException::class.java) {
+            ArchiveFetchDeadline.remainingNs(started, started, 0)
+        }
+    }
+
     @Test fun foregroundDoesNotWaitForUnrelatedPrefetch() {
         val coordinator = ArchiveSegmentSingleFlight()
         val slowStarted = CountDownLatch(1)
