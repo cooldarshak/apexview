@@ -62,6 +62,7 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("CLEAR_ARCHIVE", viewer)
         self.assertIn("!protectedRollingScene && !windowCaptureRequired", policy)
         self.assertIn("if (protectedOutput) setSecure(true)", scene)
+        self.assertIn('"PitwallClearSurfaceScene"', scene)
         self.assertIn('Trace.setCounter("PitwallSurfaceSceneLatched5s"', scene)
         self.assertIn('Trace.setCounter("PitwallTextureSceneLatched5s"', texture)
         instrumentation = contents("scripts/run_rendernode_instrumentation.sh")

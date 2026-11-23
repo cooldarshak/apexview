@@ -31,7 +31,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     // Prioritize video surface latching above archive composition and Compose
     // overlay work; this is one GL output thread, never another video decoder.
     private val thread = HandlerThread(
-        "PitwallSecureScene", android.os.Process.THREAD_PRIORITY_DISPLAY
+        if (protectedOutput) "PitwallSecureScene" else "PitwallClearSurfaceScene",
+        android.os.Process.THREAD_PRIORITY_DISPLAY
     ).apply { start() }
     private val gl = Handler(thread.looper)
     private val displayHandler = Handler(Looper.getMainLooper())
