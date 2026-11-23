@@ -118,6 +118,14 @@ private val Grayscale = ColorFilter.colorMatrix(ColorMatrix().apply { setToSatur
 private val ButtonShape = RoundedCornerShape(28.dp)
 private val SidePadding = 20.dp
 
+/** Shrink browsing section gaps only on narrow portrait screens. */
+@Composable
+private fun BrowseSectionGap() {
+    val config = LocalConfiguration.current
+    val portrait = config.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+    Spacer(Modifier.height(BrowseLayoutPolicy.sectionGapDp(portrait, config.screenWidthDp.toFloat()).dp))
+}
+
 // Pieces.
 
 /** Material 3 action semantics, elevation and state feedback on mobile and TV. */
@@ -199,14 +207,19 @@ private fun ArtCard(
     artKey: String? = null,
     onClick: () -> Unit,
 ) {
+    val config = LocalConfiguration.current
+    val compactPortrait = BrowseLayoutPolicy.compactPortrait(
+        config.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT,
+        config.screenWidthDp.toFloat(),
+    ) && LocalDensity.current.fontScale < 1.75f
     Column(
         Modifier
             .width(width)
             .pressable(enabled = !upcoming, onClick = onClick)
             .graphicsLayer { alpha = if (dimmed || upcoming) 0.55f else 1f }
-            .clip(CardShape)
+            .clip(if (compactPortrait) RoundedCornerShape(16.dp) else CardShape)
             .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .padding(8.dp)
+            .padding(if (compactPortrait) 6.dp else 8.dp)
     ) {
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).sharedArt(artKey, cornerRadius = 18).clip(RoundedCornerShape(18.dp)).background(Ink.surface)) {
             AsyncImage(
@@ -231,10 +244,13 @@ private fun ArtCard(
                 }
             }
         }
-        Spacer(Modifier.height(8.dp))
-        Text(title, style = Type.headline, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.height(if (compactPortrait) 6.dp else 8.dp))
+        Text(title, style = if (compactPortrait)
+            Type.subhead.copy(color = Ink.primary, fontWeight = FontWeight.SemiBold) else Type.headline,
+            maxLines = if (compactPortrait) 2 else 1, overflow = TextOverflow.Ellipsis)
         if (!subtitle.isNullOrEmpty()) {
-            Text(subtitle, style = Type.footnote, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, style = if (compactPortrait) Type.caption else Type.footnote,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -260,14 +276,20 @@ private fun <T> Shelf(
 ) {
     if (items.isEmpty()) return
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        // Use viewport width and the user's font scale, not fixed phone/TV bucket widths.
-        val cardWidth = BrowseLayoutPolicy.cardWidthDp(maxWidth.value, posters, LocalDensity.current.fontScale).dp
+        // Width is the real viewport; only compact portrait uses multiple smaller cards.
+        val compactPortrait = BrowseLayoutPolicy.compactPortrait(
+            LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT,
+            maxWidth.value,
+        )
+        val cardWidth = BrowseLayoutPolicy.cardWidthDp(
+            maxWidth.value, posters, LocalDensity.current.fontScale, portrait = compactPortrait).dp
         Column {
             Row(
                 Modifier.fillMaxWidth().padding(start = SidePadding, end = SidePadding, bottom = 12.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
-                Text(title, style = Type.title2, modifier = Modifier.weight(1f))
+                Text(title, style = if (compactPortrait) Type.headline else Type.title2,
+                    modifier = Modifier.weight(1f))
                 action?.let { (label, onClick) -> HeaderAction(label, onClick) }
             }
             LazyRow(
@@ -355,7 +377,12 @@ internal fun ArtPage(
     val screenHeight = LocalConfiguration.current.screenHeightDp.dp
     val page = remember { FocusRequester() }
     BoxWithConstraints(Modifier.fillMaxSize().background(Ink.background)) {
-        val heroHeight = BrowseLayoutPolicy.heroHeightDp(maxWidth.value, screenHeight.value, density.fontScale).dp
+        val compactPortrait = BrowseLayoutPolicy.compactPortrait(
+            LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT,
+            maxWidth.value,
+        )
+        val heroHeight = BrowseLayoutPolicy.heroHeightDp(
+            maxWidth.value, screenHeight.value, density.fontScale, portrait = compactPortrait).dp
         val heroPx = with(density) { heroHeight.toPx() }
         // How far the page has scrolled, capped once the artwork is fully covered.
         val scrolled by remember(heroPx) {
@@ -382,7 +409,13 @@ internal fun ArtPage(
             )
             Box(
                 Modifier.fillMaxSize().background(
-                    Brush.verticalGradient(
+                    if (compactPortrait) Brush.verticalGradient(
+                        // Poster art already contains lettering that must not fight the title.
+                        0f to Color.Black.copy(alpha = 0.24f),
+                        0.22f to Color.Black.copy(alpha = 0.58f),
+                        0.6f to Color.Black.copy(alpha = 0.82f),
+                        1f to Ink.background,
+                    ) else Brush.verticalGradient(
                         0f to Color.Black.copy(alpha = 0.35f),
                         0.25f to Color.Transparent,
                         0.5f to Color.Transparent,
@@ -655,6 +688,17 @@ fun SignInScreen(app: AppState) {
 
 @Composable
 fun HomeScreen(app: AppState) {
+    val configuration = LocalConfiguration.current
+    val fontScale = LocalDensity.current.fontScale
+    LaunchedEffect(configuration.orientation, configuration.screenWidthDp, configuration.screenHeightDp, fontScale) {
+        val portrait = configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+        android.util.Log.i("PitwallBrowse", "HOME_GEOMETRY portrait=$portrait " +
+            "widthDp=${configuration.screenWidthDp} heightDp=${configuration.screenHeightDp} " +
+            "fontScale=$fontScale cardDp=" +
+            BrowseLayoutPolicy.cardWidthDp(configuration.screenWidthDp.toFloat(), false, fontScale, portrait) +
+            " heroDp=" + BrowseLayoutPolicy.heroHeightDp(configuration.screenWidthDp.toFloat(),
+                configuration.screenHeightDp.toFloat(), fontScale, portrait))
+    }
     val headerFocus = remember { FocusRequester() }
     val now = System.currentTimeMillis()
     val latest = app.latestWeekend(now)
@@ -765,7 +809,7 @@ fun HomeScreen(app: AppState) {
                             }
                         }
                     }
-                    Spacer(Modifier.height(28.dp))
+                    BrowseSectionGap()
                 }
             }
         }
@@ -780,7 +824,7 @@ fun HomeScreen(app: AppState) {
                         app.watch(item)
                     }
                 }
-                Spacer(Modifier.height(28.dp))
+                BrowseSectionGap()
             }
         }
 
@@ -791,7 +835,7 @@ fun HomeScreen(app: AppState) {
             // The weekend's schedule under the carousel, as on F1 TV's home page, until the weekend ends.
             if (!latestContent.scheduleOver(now)) item {
                 WeekendSchedule(app, latest, latestContent.schedule, latestContent.sessions, latest.name, action = "Weekend" to { app.open(Screen.Weekend(latest)) })
-                Spacer(Modifier.height(28.dp))
+                BrowseSectionGap()
             }
         } else if (latest != null && latestContent != null && latestContent.sessions.isNotEmpty()) {
             item {
@@ -800,7 +844,7 @@ fun HomeScreen(app: AppState) {
                         app.watch(item)
                     }
                 }
-                Spacer(Modifier.height(28.dp))
+                BrowseSectionGap()
             }
         }
 
@@ -828,7 +872,7 @@ fun HomeScreen(app: AppState) {
                     app.open(Screen.Weekend(w, key))
                 }
             }
-            Spacer(Modifier.height(28.dp))
+            BrowseSectionGap()
         }
 
         item {
@@ -838,7 +882,7 @@ fun HomeScreen(app: AppState) {
                     app.open(Screen.Weekend(w, key))
                 }
             }
-            Spacer(Modifier.height(28.dp))
+            BrowseSectionGap()
         }
 
         f1Rows.firstOrNull { it.tag == CatalogRow.ARCHIVE }?.let { row ->
@@ -848,7 +892,7 @@ fun HomeScreen(app: AppState) {
 
         item {
             SeasonsShelf(app)
-            Spacer(Modifier.height(28.dp))
+            BrowseSectionGap()
         }
 
         (f1Rows.filter { it.posters } + f1Rows.filter { !it.posters && it.tag != CatalogRow.ARCHIVE && it !in weekendRows }).forEach { row ->
@@ -879,7 +923,7 @@ private fun VideoShelf(app: AppState, title: String, items: List<CatalogItem>, k
         if (posters) PosterCard(item, width) { app.watch(item) }
         else ArtCard(item.image, item.title, sessionLine(item), width, live = item.live, upcoming = item.upcoming) { app.watch(item) }
     }
-    Spacer(Modifier.height(28.dp))
+    BrowseSectionGap()
 }
 
 /** A show's or documentary's portrait artwork, which carries its own title. */
@@ -968,6 +1012,11 @@ private fun CarouselArt(picks: List<Pick>, pager: PagerState) {
 /** One slide's words and buttons: why it's here, what it is, and how to watch it. */
 @Composable
 private fun PickHero(app: AppState, pick: Pick) {
+    val config = LocalConfiguration.current
+    val compactPortrait = BrowseLayoutPolicy.compactPortrait(
+        config.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT,
+        config.screenWidthDp.toFloat(),
+    )
     val item = pick.item
     val resume = pick.resume
     val weekend = pick.weekend
@@ -993,9 +1042,10 @@ private fun PickHero(app: AppState, pick: Pick) {
         }
         else -> weekend?.place.orEmpty()
     }
-    Text(title, style = Type.largeTitle, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+    Text(title, style = if (compactPortrait) Type.title1 else Type.largeTitle,
+        maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
     if (line.isNotEmpty()) Text(line, style = Type.subhead, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    Spacer(Modifier.height(16.dp))
+    Spacer(Modifier.height(if (compactPortrait) 10.dp else 16.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         when {
             resume != null -> PrimaryButton("Resume", Icons.Rounded.PlayArrow) { app.resumeWatching(resume) }
@@ -1067,7 +1117,7 @@ fun WeekendScreen(app: AppState, weekend: WeekendInfo, artKey: String?) {
                 // (live and replays, press conferences, past races here).
                 item {
                     WeekendSchedule(app, weekend, content.schedule, content.sessions, "Schedule")
-                    Spacer(Modifier.height(28.dp))
+                    BrowseSectionGap()
                 }
                 content.rows.forEachIndexed { index, row ->
                     item(
@@ -1098,7 +1148,7 @@ fun WeekendScreen(app: AppState, weekend: WeekendInfo, artKey: String?) {
                 val videosFirst = content.sessions.all { it.upcoming } && content.videos.any { !it.upcoming }
                 item {
                     if (videosFirst) videosShelf() else sessionsShelf()
-                    Spacer(Modifier.height(28.dp))
+                    BrowseSectionGap()
                 }
                 item { if (videosFirst) sessionsShelf() else videosShelf() }
             }

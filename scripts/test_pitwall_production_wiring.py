@@ -44,6 +44,17 @@ class ProductionWiringTests(unittest.TestCase):
         for name in ("GoogleCastPlayerButton(app)", "TowerPanel(app", "MapPanelView(app"):
             self.assertIn(name, viewer)
 
+    def test_portrait_browse_is_wired_into_real_shelf_and_hero(self):
+        browse = contents("app/src/main/java/app/apexview/BrowseScreens.kt")
+        policy = contents("app/src/main/java/app/apexview/BrowseLayoutPolicy.kt")
+        unit = contents("app/src/test/java/app/apexview/BrowseLayoutPolicyTest.kt")
+        self.assertIn("portrait = compactPortrait", browse)
+        self.assertIn("if (compactPortrait) Type.title1 else Type.largeTitle", browse)
+        self.assertIn("BrowseSectionGap()", browse)
+        self.assertIn("HOME_GEOMETRY portrait=", browse)
+        self.assertIn("fun compactPortrait(isPortrait: Boolean, widthDp: Float)", policy)
+        self.assertIn("fun portraitPhoneShowsTwoCardsAndNextPeek()", unit)
+
     def test_archive_policy_reaches_real_datasource_without_extra_warm_copy(self):
         session = contents("app/src/main/java/app/apexview/tiled/HevcArchiveVodSession.kt")
         policy = contents("app/src/main/java/app/apexview/tiled/ArchiveBufferPolicy.kt")

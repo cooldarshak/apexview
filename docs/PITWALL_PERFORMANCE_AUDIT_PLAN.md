@@ -2,12 +2,26 @@
 
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** IN DEVELOPMENT. **Checkpoint at authorship: Build 802**, commit `7b50e1ff99e62096fed41672fcb46255f135d485` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45124632991)). Subsequent coordinated implementation must pass its own exact-source CI before any coding credit; consult Actions for the live head rather than treating this dated baseline as a current release status. This is the sole active project plan. Historical
+**Status:** IN DEVELOPMENT. **Last CI-green baseline before portrait correction: Build 803**, commit `80fcf6602d37650d18062727d770e34a6b5afc5a` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45126954569)). Portrait code requires its own exact-source CI. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
 performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
 
+
+## Samsung S22 Ultra Build 803 portrait browse regression: coordinated fix and trace review
+
+**Observed November 23, 2026:** Real S22 Ultra on Android 16, version 1.0.1606. The uploaded screenshot shows a full-width oversized home shelf, hero/title visually colliding with words baked into the F1 artwork, and bulky section spacing. The user reports landscape is fine. This is a real P2.8 coding defect, not merely missing user acceptance.
+
+**Root cause:** On a roughly 384dp portrait viewport, the previous BrowseLayoutPolicy selected a 250dp preferred video card, calculated one column, then expanded the card to 344dp. Hero used 320dp minimum and a 34sp title; cards used 17sp headlines and 28dp section gaps. The screenshot and actual source support this explanation.
+
+**Coordinated implementation:** Portrait-only card width at 320/360/384/412dp now fits two complete video cards/posters and the beginning of another card. Density adapts smoothly on wider portraits. At 175%+ font scaling one larger accessible card is allowed. Only portrait uses smaller artwork cards, radius, padding, heading/title, hero height and section gap; hero artwork gets a stronger portrait-only gradient to separate pre-baked event lettering. Original landscape/TV math and focus, media, map/tower, captions, Cast and DRM are preserved. HOME_GEOMETRY gives actual phone width/fontScale/cardDp in future logs. Add policy regression tests and production-wiring check. Do not close CI acceptance before this exact SHA passes.
+
+**App log findings:** 121 PitwallFrames windows, 9965 UI frames including 2287 marked slow, observed maximum frame interval 623ms, 36 background concurrent mark compact GC records, no FATAL EXCEPTION; no ARCHIVE_VOD_PREFETCH_STOP or ARCHIVE_VOD_DELIVERY_CACHE_RACE observed. These are not video decoder drop measurements, nor proof that the portrait sizing policy caused the GC load.
+
+**Perfetto evidence:** Both uploaded binary traces were readable, showing Choreographer, SurfaceFlinger, RenderThread and FrameTimeline events. Primary boottime ranges approximately 76.8 and 38.2 seconds. App-specific p95 is not claimed without complete FrameTimeline attribution. Track remaining performance and thermal issues in P0.2/P0.3/P1.3 separately from this visual bug.
+
+**Release:** P2.8 cannot be declared coding complete while a known portrait defect is present; physical visual confirmation and full device acceptance remain separate. Strict release gates remain 1 of 16 closed.
 
 ## Post-802 A–E review and coordinated P0.1 / P0.2 / P2.8 implementation (CI verification required)
 
