@@ -48,12 +48,21 @@ class SceneFrameRatePolicyTest {
             SceneFrameRatePolicy.Mode(4, 1280, 720, 100f),
             SceneFrameRatePolicy.Mode(5, 1920, 1080, 75f),
             SceneFrameRatePolicy.Mode(6, 1920, 1080, 150f))
-        assertEquals(listOf(3, 2),
+        // 150Hz is an exact 3:1 multiple of a 50fps source. Reject only
+        // unsupported modes, mismatched resolution and nonintegral cadence.
+        assertEquals(listOf(3, 2, 6),
             SceneFrameRatePolicy.matchingSeamlessModes(active, available, 50.0, 1f).map { it.id })
         assertEquals(listOf(5, 6),
             SceneFrameRatePolicy.matchingSeamlessModes(active, available, 50.0, 1.5f).map { it.id })
         assertTrue(SceneFrameRatePolicy.matchingSeamlessModes(active, emptyList(), 50.0, 1f).isEmpty())
         assertTrue(SceneFrameRatePolicy.matchingSeamlessModes(active, available, Double.NaN, 1f).isEmpty())
+    }
+
+    @Test fun oneHundredFiftyHertzIsThreeSlotsAtOneXAndTwoAtOnePointFiveX() {
+        assertTrue(SceneFrameRatePolicy.isIntegerRefreshMultiple(150f, 50.0, 1f))
+        assertTrue(SceneFrameRatePolicy.isIntegerRefreshMultiple(150f, 50.0, 1.5f))
+        assertFalse(SceneFrameRatePolicy.isIntegerRefreshMultiple(120f, 50.0, 1f))
+        assertFalse(SceneFrameRatePolicy.isIntegerRefreshMultiple(120f, 50.0, 1.5f))
     }
 
     @Test fun alreadyMatchingModeIsKeptFirstWithoutForcingAChange() {

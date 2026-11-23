@@ -9,6 +9,14 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 818 exact-source first-failure and coordinated JUnit correction (Build 819 verification pending)
+
+**Build 818:** [GitHub Actions](https://github.com/cooldarshak/apexview/actions/runs/45200499210), production commit `14bb9179c0a25bdb330eb3e104fd29bdc190ef9f` failed at **one and only one of 772 JVM tests**. Both production `app:compileDebugKotlin` and Macrobenchmark `compileDebugKotlin`/`compileBenchmarkKotlin` passed, Python, HEVC fixture generation and JS/Cast checks passed. All later FFmpeg comparison, APK assembly and emulator instrumentation were correctly skipped; no failed APK was published. The exact failure was `SceneFrameRatePolicyTest.seamlessCandidatesNeverConsiderDifferentResolutionOrInventSupport`: expected mode IDs `[3,2]` (50 and 100Hz), actual `[3,2,6]` (50,100,150Hz).
+
+**Root cause:** The new source policy correctly accepted 150Hz as an *integral multiple of 50fps* (150/50=3), but its test expectation omitted that mode. At 1.5×, 50fps becomes 75fps and 150Hz remains valid (150/75=2). Both are actual mathematical multiples; neither establishes physical scanout or grants an OS refresh mode switch. **No production algorithm change is justified.** Correct the test's expected 1× list to include mode 6; retain same-resolution filtering and 1.5× assertions, and add focused positive 150Hz / negative 120Hz checks at both 1× and 1.5×. This is a single root-cause regression correction with the original plan updated in the SAME commit. Do not delete tests, silence failures, change the underlying algorithm or trigger multiple builds to probe trivial edits.
+
+**Acceptance accounting:** Build 817 remains the last exact-source GREEN until the corrected commit completes full Kotlin/JVM, HEVC/CMAF/FFmpeg, signed APK and emulator instrumentation CI. P1.1 100%, P1.2 100%, P1.3 100%, P2.6 100%, and aggregate 88.9375% remain **targets, not verified completions**, until then. Physical release gates stay **1/16 closed, 15 open**.
+
 ## Post-Build 817: one coordinated four-workstream source closeout (EXACT-COMMIT CI PENDING)
 
 **Requested coding scope:** Close P1.1 HEVC coded atlas, P1.2 display refresh matching, P1.3 quality and thermal policy, and P2.6 reproducible testing/benchmarks **from the coding perspective**. This is a coordinated production/test/plan candidate, not a claim of physical optimization or S22/TCL release. Build 817 remains the last GREEN production checkpoint until the candidate's HEVC fixtures, Kotlin/JVM, Python, signed APK and emulator tests all pass. No new parallel plan, decoder, DRM bypass, Tiledmedia SDK, OpenF1, hidden quality reduction or non-seamless mode switch.
