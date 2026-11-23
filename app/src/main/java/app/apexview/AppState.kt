@@ -6148,6 +6148,9 @@ class AppState(
     }
 
     fun remove(tile: Tile) {
+        // Even a failed/finished preflight with no active job can have a terminal
+        // diagnostic. Removing a feed changes ownership unconditionally.
+        invalidateCompositionDiagnostic()
         singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
         // A preflight also owns the selected set, before a composed host exists. Cancel it
         // when a feed is removed so it cannot hand off a released player afterwards.

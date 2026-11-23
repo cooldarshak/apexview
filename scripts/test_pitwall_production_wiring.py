@@ -15,6 +15,26 @@ def contents(path):
 
 
 class ProductionWiringTests(unittest.TestCase):
+    def test_active_composition_generation_owns_diagnostics_and_remove_revokes_old_state(self):
+        app = contents("app/src/main/java/app/apexview/AppState.kt")
+        viewer = contents("app/src/main/java/app/apexview/Viewer.kt")
+        owner = contents("app/src/main/java/app/apexview/CompositionDiagnosticOwner.kt")
+        self.assertIn("private val compositionDiagnosticOwner = CompositionDiagnosticOwner()", app)
+        self.assertEqual(
+            2,
+            app.count("if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || f1DashCapture !== capture) return")
+        )
+        self.assertIn("compositionDiagnosticOwner.invalidate()", app)
+        remove = app.split("    fun remove(tile: Tile) {", 1)[1].split("\n    fun stopAll()", 1)[0]
+        self.assertIn("invalidateCompositionDiagnostic()", remove)
+        stop = app.split("    fun stopProtectedCompositionPresentation(", 1)[1].split("\n    /** Single-decoder selections", 1)[0]
+        self.assertIn("invalidateCompositionDiagnostic()", stop)
+        self.assertIn("Current feeds: ${app.tiles.size}", viewer)
+        self.assertIn("Composition feeds: ${selected.size}", app)
+        self.assertIn("Composition feeds: ${selectedTiles.size}", app)
+        self.assertNotIn('singleDecoderDiagnostic = singleDecoderDiagnostic?.replace(', app)
+        self.assertIn("fun isOwner(generation: Long)", owner)
+
     def test_thermal_startup_notice_has_initialized_compose_message_state(self):
         # Kotlin executes property initializers and init blocks in source order.
         # Merely compiling a delegated property does not catch an early setter
