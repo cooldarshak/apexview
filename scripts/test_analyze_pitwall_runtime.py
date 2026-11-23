@@ -31,6 +31,34 @@ class RuntimeLogTests(unittest.TestCase):
         self.assertEqual(result["active_decoders"], ["1"])
         self.assertTrue(result["four_feed_prepared"])
 
+    def test_reports_protected_six_feed_allocations_and_real_window_metrics(self):
+        log = "\n".join([
+            "I PitwallFrames: role=player intervalMs=2000 frames=100 slow=20 "
+            "inputP95UpperMs=23 animationP95UpperMs=30 thermalStatus=3",
+            "I PitwallFrames: role=player intervalMs=2000 frames=100 slow=10 "
+            "inputP95UpperMs=19 animationP95UpperMs=45 thermalStatus=4",
+            "I F1_COMPOSITION_PLAYBACK feeds=6 stage=ACTIVE activeVideoDecoders=1",
+        ] + [
+            "I PROTECTED_CMAF_SEGMENT feeds=6 sampleCount=288 "
+            "processAllocBytesDuringSegment={} processGcDuringSegment={} "
+            "composeMs={} outputBytes=10000".format(alloc, gc, compose)
+            for alloc, gc, compose in [
+                (400, 9, 600), (350, 8, 550), (300, 7, 500),
+                (200, 4, 350), (180, 3, 300), (160, 2, 270),
+            ]
+        ])
+        report = summarize(log)
+        self.assertEqual([6], report["protected_active_feeds"])
+        self.assertEqual([3, 4], report["reported_thermal_statuses"])
+        self.assertEqual(23, report["input_p95_bucket_max_ms"])
+        self.assertEqual(45, report["animation_p95_bucket_max_ms"])
+        self.assertEqual(6, report["protected_segments_total"])
+        self.assertEqual(3, report["protected_segments_steady"])
+        self.assertEqual(180, report["protected_alloc_median_bytes"])
+        self.assertEqual(3, report["protected_gc_median"])
+        self.assertEqual(300, report["protected_compose_median_ms"])
+        self.assertEqual(10000, report["protected_output_median_bytes"])
+
     def test_reports_steady_cmaf_allocations_without_startup_warmup(self):
         log = "\n".join(
             "I ARCHIVE_VOD_SEGMENT number={} processAllocBytesDuringSegment={} "

@@ -46,6 +46,11 @@ def summarize(text):
     active_decoders = set()
     four_feed_prepared = False
     segments = []
+    protected_segments = []
+    ui_input_p95_upper = []
+    ui_animation_p95_upper = []
+    thermal_statuses = set()
+    protected_active_feeds = set()
     for line in text.splitlines():
         f = fields(line)
         if "PitwallFrames:" in line and f.get("role") == "player":
@@ -53,6 +58,12 @@ def summarize(text):
             slow += as_int(f.get("slow"))
             frozen += as_int(f.get("frozen700ms"))
             total_ms += as_int(f.get("intervalMs"))
+            if "inputP95UpperMs" in f:
+                ui_input_p95_upper.append(as_int(f["inputP95UpperMs"]))
+            if "animationP95UpperMs" in f:
+                ui_animation_p95_upper.append(as_int(f["animationP95UpperMs"]))
+            if "thermalStatus" in f:
+                thermal_statuses.add(as_int(f["thermalStatus"]))
         if "dequeueBuffer: waitForFreeSlotThenRelock: timeout" in line:
             if "BUFFER_QUEUE_TIMEOUT repeats=" in line:
                 count = as_int(f.get("repeats"))
@@ -72,13 +83,20 @@ def summarize(text):
             segments.append({key: as_int(f.get(key)) for key in (
                 "number", "processAllocBytesDuringSegment", "processGcDuringSegment",
                 "parseMs", "rewriteMs", "packageMs", "composeMs", "outputBytes")})
+        if "PROTECTED_CMAF_SEGMENT " in line:
+            protected_segments.append({key: as_int(f.get(key)) for key in (
+                "feeds", "sampleCount", "processAllocBytesDuringSegment",
+                "processGcDuringSegment", "composeMs", "outputBytes")})
         if "ARCHIVE_VOD_FAILED" in line or "event=load-error" in line:
             failures += 1
         if "F1_COMPOSITION_PLAYBACK" in line and "stage=ACTIVE" in line:
             active_decoders.add(f.get("activeVideoDecoders", "unknown"))
+            if "feeds" in f:
+                protected_active_feeds.add(as_int(f["feeds"]))
     # First three segments include player warmup, HTTP cache fill and codec startup.
     # Report them separately so they cannot distort steady-state allocation claims.
     steady = segments[3:]
+    protected_steady = protected_segments[3:]
     return {
         "frames": frames,
         "slow": slow,
@@ -94,6 +112,10 @@ def summarize(text):
         "failures": failures,
         "active_decoders": sorted(active_decoders),
         "four_feed_prepared": four_feed_prepared,
+        "protected_active_feeds": sorted(protected_active_feeds),
+        "input_p95_bucket_max_ms": max(ui_input_p95_upper) if ui_input_p95_upper else None,
+        "animation_p95_bucket_max_ms": max(ui_animation_p95_upper) if ui_animation_p95_upper else None,
+        "reported_thermal_statuses": sorted(thermal_statuses),
         "archive_segments_total": len(segments),
         "archive_segments_steady": len(steady),
         "archive_alloc_median_bytes": int(median(s["processAllocBytesDuringSegment"] for s in steady)) if steady else None,
@@ -101,6 +123,12 @@ def summarize(text):
         "archive_compose_median_ms": median(s["composeMs"] for s in steady) if steady else None,
         "archive_rewrite_median_ms": median(s["rewriteMs"] for s in steady) if steady else None,
         "archive_output_median_bytes": int(median(s["outputBytes"] for s in steady)) if steady else None,
+        "protected_segments_total": len(protected_segments),
+        "protected_segments_steady": len(protected_steady),
+        "protected_alloc_median_bytes": int(median(s["processAllocBytesDuringSegment"] for s in protected_steady)) if protected_steady else None,
+        "protected_gc_median": median(s["processGcDuringSegment"] for s in protected_steady) if protected_steady else None,
+        "protected_compose_median_ms": median(s["composeMs"] for s in protected_steady) if protected_steady else None,
+        "protected_output_median_bytes": int(median(s["outputBytes"] for s in protected_steady)) if protected_steady else None,
     }
 
 
@@ -112,6 +140,10 @@ def main():
     report = summarize(app_session(args.log.read_text(encoding="utf-8", errors="replace"), args.build))
     for label, value in report.items():
         print(f"{label}: {value}")
+    print("CAUTION: rotating captures can overlap and repeat the same timestamped lines; "
+          "do not sum summaries from multiple files or confuse window p95 bucket maxima "
+          "with input-to-photon latency. Protected segment sample windows include warmup. "
+          "These are app-side observations, not SurfaceFlinger physical video presentation.")
     print("CAUTION: the summary includes all modes in the selected session. "
           "Use steady-state intervals for valid scene-to-scene comparisons; "
           "only Perfetto verifies physical display frames.")

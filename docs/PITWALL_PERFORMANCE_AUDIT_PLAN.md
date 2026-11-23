@@ -9,6 +9,30 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 754 protected six/eight-feed performance log accounting and thermal correlation
+
+The existing `scripts/analyze_pitwall_runtime.py` only summarized
+`ARCHIVE_VOD_SEGMENT` (clear-archive) allocations even though the
+user's confirmed real six-feed protected HEVC path logs
+`PROTECTED_CMAF_SEGMENT` with ~288 samples/segment and substantial
+allocation/GC. Add a separate protected CMAF steady-segment report
+(excluding the first three warmup segments), medians for protected
+allocation, GC, composition and encoded bytes, the actual ACTIVE
+single-decoder feed counts, and app-window input/animation p95
+histogram upper-bin **maxima** plus raw Android thermal categories.
+Never merge clear and protected composition costs into one average.
+Retain the old fields, app-window slow/frozen frame metrics and
+BufferQueue timeout evidence. Add parser regression with genuine
+log-shaped six-feed lines and mixed thermal statuses.
+
+Critically: four supplied Android rotating segments overlap. The
+CLI explicitly warns not to sum different file summaries, because
+they may contain repeated log lines. On-device UI p95 histogram
+maxima are **not** input-to-photon latency and decoder samples are
+**not** SurfaceFlinger physically presented frames. Follow the
+existing Perfetto tools for true 50fps and don't claim P0.2/0.3,
+P0.4 or UI gate closure until matching new device captures prove it.
+
 ## Build 753 reduce FCast TCP framing syscall load without losing ordered control
 
 The local phone-to-TV Pitwall FCast transport used
