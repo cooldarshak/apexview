@@ -3,6 +3,9 @@ package app.apexview
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -55,6 +58,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 
 private val Rounded = RoundedCornerShape(14.dp)
 
@@ -210,10 +214,11 @@ private fun PickCard(
     val dropping = channel in picker.removing
     // On screen counts as picked until unpicked.
     val picked = channel in picker.selected || (playing && !dropping)
+    val reducedMotion = LocalReduceMotion.current
     val background by animateColorAsState(
         if (picked) Ink.accent.copy(alpha = 0.30f)
         else MaterialTheme.colorScheme.surfaceContainerHigh,
-        tween(Motion.PRESS_MS * 2, easing = EaseOut), label = "pick")
+        tween(if (reducedMotion) 0 else Motion.PRESS_MS * 2, easing = EaseOut), label = "pick")
     Box(
         modifier
             .semantics { stateDescription = if (picked) "Selected" else "Not selected" }
@@ -268,15 +273,19 @@ internal fun TvCastingMenu(app: AppState) {
 
 @Composable
 private fun Group(title: String, footer: String? = null, content: @Composable () -> Unit) {
-    Text(title, style = Type.headline.copy(color = Ink.primary, fontWeight = FontWeight.SemiBold),
-        modifier = Modifier.padding(start = 32.dp, end = 20.dp, top = 28.dp, bottom = 12.dp))
-    Column(
-        Modifier.padding(horizontal = 20.dp).fillMaxWidth()
-            .clip(androidx.compose.material3.MaterialTheme.shapes.large)
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .padding(vertical = 8.dp)
-    ) { content() }
-    footer?.let { Text(it, style = Type.footnote, modifier = Modifier.padding(start = 36.dp, end = 36.dp, top = 8.dp)) }
+    Column(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
+        Text(title, style = Type.headline.copy(color = Ink.primary, fontWeight = FontWeight.SemiBold),
+            modifier = Modifier.padding(start = 32.dp, end = 20.dp, top = 28.dp, bottom = 12.dp))
+        Column(
+            Modifier.padding(horizontal = 20.dp).fillMaxWidth()
+                .clip(androidx.compose.material3.MaterialTheme.shapes.large)
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .padding(vertical = 8.dp)
+        ) { content() }
+        footer?.let {
+            Text(it, style = Type.footnote, modifier = Modifier.padding(start = 36.dp, end = 36.dp, top = 8.dp))
+        }
+    }
 }
 
 @Composable
@@ -304,11 +313,22 @@ private fun SettingRow(label: String, value: String? = null, valueColor: Color =
 
 @Composable
 internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    SettingRow(label, onClick = { onChange(!checked) }) {
+    // A single toggleable focus target, not a clickable row containing a second
+    // unlabeled focusable Switch. TalkBack and TCL D-pad both announce one control.
+    Row(
+        Modifier.fillMaxWidth()
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+            .tvFocusRing()
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onChange)
+            .heightIn(min = 60.dp)
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = Type.body, modifier = Modifier.weight(1f))
         Switch(
             checked = checked,
-            onCheckedChange = onChange,
-            modifier = Modifier.tvFocusRing(),
+            onCheckedChange = null,
+            modifier = Modifier.clearAndSetSemantics {},
             colors = SwitchDefaults.colors(
                 checkedTrackColor = Ink.accent,
                 checkedThumbColor = Color.White,
@@ -344,10 +364,12 @@ fun SettingsScreen(app: AppState) {
     val span = with(density) { 50.dp.toPx() }
     val page = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
     Box(Modifier.fillMaxSize().background(Ink.background)) {
-    LazyColumn(Modifier.fillMaxSize().underTopBar(page), state = list) {
+    LazyColumn(Modifier.fillMaxSize().underTopBar(page), state = list,
+        horizontalAlignment = Alignment.CenterHorizontally) {
         item {
-            Spacer(Modifier.statusBarsPadding().height(60.dp))
-            Text("Settings", style = Type.largeTitle, modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
+            Spacer(Modifier.statusBarsPadding().height(BrowseLayoutPolicy.topBarHeightDp(density.fontScale).dp))
+            Text("Settings", style = Type.largeTitle,
+                modifier = Modifier.widthIn(max = 860.dp).fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp))
         }
         item {
             Group("Account") {
@@ -449,7 +471,7 @@ fun SettingsScreen(app: AppState) {
             Text(
                 "Apexview ${BuildConfig.VERSION_NAME} · built ${BuildConfig.BUILT_AT}",
                 style = Type.caption,
-                modifier = Modifier.padding(start = 36.dp, top = 28.dp, bottom = 40.dp),
+                modifier = Modifier.widthIn(max = 860.dp).fillMaxWidth().padding(start = 36.dp, top = 28.dp, bottom = 40.dp),
             )
         }
     }

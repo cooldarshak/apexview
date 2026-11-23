@@ -260,9 +260,8 @@ private fun <T> Shelf(
 ) {
     if (items.isEmpty()) return
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val wide = maxWidth >= 600.dp
-        val perRow = if (posters) (if (wide) 5.3f else 2.6f) else if (wide) 3.3f else 1.7f
-        val cardWidth = ((maxWidth - SidePadding * 2 - 12.dp * perRow.toInt()) / perRow).coerceIn(if (posters) 120.dp else 200.dp, 360.dp)
+        // Use viewport width and the user's font scale, not fixed phone/TV bucket widths.
+        val cardWidth = BrowseLayoutPolicy.cardWidthDp(maxWidth.value, posters, LocalDensity.current.fontScale).dp
         Column {
             Row(
                 Modifier.fillMaxWidth().padding(start = SidePadding, end = SidePadding, bottom = 12.dp),
@@ -307,7 +306,7 @@ internal fun TopBar(
             .focusProperties { if (below != null) down = below }
             .drawBehind { drawRect(Color.Black.copy(alpha = 0.82f * fill())) }
             .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
-            .height(60.dp)
+            .height(BrowseLayoutPolicy.topBarHeightDp(LocalDensity.current.fontScale).dp)
             .padding(horizontal = 12.dp)
     ) {
         leading?.let { Box(Modifier.align(Alignment.CenterStart)) { it(1f - fill()) } }
@@ -355,7 +354,7 @@ internal fun ArtPage(
     val screenHeight = LocalConfiguration.current.screenHeightDp.dp
     val page = remember { FocusRequester() }
     BoxWithConstraints(Modifier.fillMaxSize().background(Ink.background)) {
-        val heroHeight = minOf(maxWidth * 9f / 16f, screenHeight * 0.62f).coerceAtLeast(320.dp)
+        val heroHeight = BrowseLayoutPolicy.heroHeightDp(maxWidth.value, screenHeight.value, density.fontScale).dp
         val heroPx = with(density) { heroHeight.toPx() }
         // How far the page has scrolled, capped once the artwork is fully covered.
         val scrolled by remember(heroPx) {
@@ -373,7 +372,7 @@ internal fun ArtPage(
                     ImageRequest.Builder(context)
                         .data(F1TvApi.picture(image, 1920, 1080))
                         .placeholderMemoryCacheKey(F1TvApi.picture(image, 640, 360))
-                        .crossfade(Motion.BROWSE_FADE_MS)
+                        .crossfade(if (LocalReduceMotion.current) 0 else Motion.BROWSE_FADE_MS)
                         .build()
                 },
                 contentDescription = null,
@@ -405,7 +404,7 @@ internal fun ArtPage(
 
         val listArea = if (tvHeaderFocus == null) Modifier else Modifier
             .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
-            .padding(top = 60.dp)
+            .padding(top = BrowseLayoutPolicy.topBarHeightDp(density.fontScale).dp)
             .focusProperties {
                 exit = { direction ->
                     if (direction == FocusDirection.Up) tvHeaderFocus else FocusRequester.Default

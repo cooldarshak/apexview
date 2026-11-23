@@ -23,6 +23,7 @@ val LocalPageScope = compositionLocalOf<AnimatedVisibilityScope?> { null }
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 private val ArtBounds = BoundsTransform { _, _ -> tween(Motion.BROWSE_NAV_MS, easing = EaseOut) }
+private val ReducedArtBounds = BoundsTransform { _, _ -> tween(0) }
 
 /**
  * Marks artwork that should travel between pages: a card's image grows into the next page's
@@ -34,14 +35,15 @@ private val ArtBounds = BoundsTransform { _, _ -> tween(Motion.BROWSE_NAV_MS, ea
 fun Modifier.sharedArt(key: String?, cornerRadius: Int = 0): Modifier {
     val shared = LocalSharedScope.current ?: return this
     val page = LocalPageScope.current ?: return this
+    val reducedMotion = LocalReduceMotion.current
     if (key == null) return this
     return with(shared) {
         this@sharedArt.sharedBounds(
             rememberSharedContentState(key),
             animatedVisibilityScope = page,
-            enter = fadeIn(tween(Motion.BROWSE_NAV_MS, easing = EaseOut)),
-            exit = fadeOut(tween(Motion.BROWSE_NAV_MS, easing = EaseOut)),
-            boundsTransform = ArtBounds,
+            enter = fadeIn(tween(if (reducedMotion) 0 else Motion.BROWSE_NAV_MS, easing = EaseOut)),
+            exit = fadeOut(tween(if (reducedMotion) 0 else Motion.BROWSE_NAV_MS, easing = EaseOut)),
+            boundsTransform = if (reducedMotion) ReducedArtBounds else ArtBounds,
             resizeMode = SharedTransitionScope.ResizeMode.scaleToBounds(ContentScale.Crop),
             clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(cornerRadius.dp)),
         )

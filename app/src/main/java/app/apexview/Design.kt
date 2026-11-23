@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.material3.MaterialTheme
@@ -109,10 +110,17 @@ object Motion {
 @OptIn(ExperimentalFoundationApi::class)
 internal val PhoneScrolling = object : BringIntoViewSpec {}
 
+/** Accessibility: respect Android's system-wide Remove Animations setting. */
+internal val LocalReduceMotion = compositionLocalOf { false }
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun AppTheme(content: @Composable () -> Unit) {
-    CompositionLocalProvider(LocalBringIntoViewSpec provides PhoneScrolling) { Theme(content) }
+    val reducedMotion = !android.animation.ValueAnimator.areAnimatorsEnabled()
+    CompositionLocalProvider(
+        LocalBringIntoViewSpec provides PhoneScrolling,
+        LocalReduceMotion provides reducedMotion,
+    ) { Theme(content) }
 }
 
 @Composable
@@ -172,9 +180,10 @@ fun Modifier.pressable(enabled: Boolean = true, scaleTo: Float = 0.97f, onClick:
     val context = LocalContext.current
     val isTv = remember(context) { context.packageManager.hasSystemFeature("android.software.leanback") }
     val ringed = focused && (isTv || LocalInputModeManager.current.inputMode == InputMode.Keyboard)
+    val reducedMotion = LocalReduceMotion.current
     val scale by animateFloatAsState(
         if (pressed && enabled) scaleTo else if (ringed) FOCUS_SCALE else 1f,
-        tween(Motion.PRESS_MS, easing = EaseOut),
+        tween(if (reducedMotion) 0 else Motion.PRESS_MS, easing = EaseOut),
         label = "press",
     )
     this
@@ -249,7 +258,9 @@ fun AppleSlider(
     /** The remote is on it: the thumb grows, without moving anything around it. */
     emphasised: Boolean = false,
 ) {
-    val thumbScale by animateFloatAsState(if (emphasised) 1.5f else 1f, tween(Motion.PRESS_MS, easing = EaseOut), label = "thumb")
+    val reducedMotion = LocalReduceMotion.current
+    val thumbScale by animateFloatAsState(if (emphasised) 1.5f else 1f,
+        tween(if (reducedMotion) 0 else Motion.PRESS_MS, easing = EaseOut), label = "thumb")
     var dpadRepeats by remember { mutableIntStateOf(0) }
     androidx.compose.material3.Slider(
         value = value,

@@ -57,7 +57,8 @@ class ArchiveBufferPolicyTest {
     }
 
     @Test fun cancelledProducerDoesNotPoisonLaterForegroundRegistration() {
-        val coordinator = ArchiveSegmentSingleFlight()
+        val joined = CountDownLatch(2)
+        val coordinator = ArchiveSegmentSingleFlight { joined.countDown() }
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)
         val pool = Executors.newFixedThreadPool(3)
@@ -78,6 +79,7 @@ class ArchiveBufferPolicyTest {
                     coordinator.run(5) { fail("joined flight must not duplicate production") }
                 }
             }
+            assertTrue(joined.await(2, TimeUnit.SECONDS))
             release.countDown()
             cancelled.get(2, TimeUnit.SECONDS)
             joining.get(2, TimeUnit.SECONDS)
