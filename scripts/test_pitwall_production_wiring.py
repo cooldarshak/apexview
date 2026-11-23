@@ -128,6 +128,39 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit)", sheets)
         self.assertIn("private fun SettingRow(", sheets)
 
+    def test_real_frame_benchmark_api_compiles_before_apk_and_has_installable_target(self):
+        # A source contract that complements, never replaces, the mandatory
+        # executable Kotlin compilation of BOTH benchmark variants in CI.
+        # Build 811 failed late because the JUnit4 Rule was imported from the
+        # wrong AndroidX package; Build 812 lacked an updated regression test.
+        benchmark = contents(
+            "macrobenchmark/src/main/java/app/apexview/macrobenchmark/"
+            "PitwallFrameTimingBenchmark.kt"
+        )
+        module = contents("macrobenchmark/build.gradle.kts")
+        application = contents("app/build.gradle.kts")
+        workflow = contents(".github/workflows/android-debug-apk.yml")
+        self.assertIn(
+            "import androidx.benchmark.macro.junit4.MacrobenchmarkRule", benchmark
+        )
+        self.assertNotIn(
+            "import androidx.benchmark.macro.MacrobenchmarkRule", benchmark
+        )
+        self.assertIn("@OptIn(ExperimentalMacrobenchmarkApi::class)", benchmark)
+        self.assertIn("compilationMode = CompilationMode.Ignore()", benchmark)
+        self.assertIn("metrics = listOf(FrameTimingMetric())", benchmark)
+        self.assertIn('id("com.android.test")', module)
+        self.assertIn('targetProjectPath = ":app"', module)
+        self.assertIn("isDebuggable = false", application)
+        self.assertIn(
+            "testDebugUnitTest :macrobenchmark:compileDebugKotlin "
+            ":macrobenchmark:compileBenchmarkKotlin", workflow
+        )
+        self.assertIn(":app:assembleBenchmark :macrobenchmark:assembleBenchmark", workflow)
+        self.assertIn("name: pitwall-benchmark-target-apk", workflow)
+        self.assertIn("path: app/build/outputs/apk/benchmark/*.apk", workflow)
+        self.assertIn("name: pitwall-macrobenchmark-instrumentation", workflow)
+
     def test_ci_never_assembles_or_publishes_an_apk_after_failure(self):
         workflow = contents(".github/workflows/android-debug-apk.yml")
         assemble = re.search(
