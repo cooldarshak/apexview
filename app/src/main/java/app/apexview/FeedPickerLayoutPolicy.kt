@@ -7,10 +7,18 @@ internal object FeedPickerLayoutPolicy {
     private const val SIDE_PADDING_DP = 20f
     private const val MAX_COLUMNS = 8
 
-    fun columns(availableWidthDp: Float): Int {
-        if (!availableWidthDp.isFinite()) return 1
+    fun cardWidthDp(availableWidthDp: Float, fontScale: Float = 1f): Float {
+        val scale = fontScale.takeIf { it.isFinite() }?.coerceIn(1f, 2f) ?: 1f
+        val wanted = CARD_WIDTH_DP * (1f + (scale - 1f) * 0.4f)
+        val width = availableWidthDp.takeIf { it.isFinite() && it > 0f } ?: 160f
+        return minOf(wanted, (width - 2f * SIDE_PADDING_DP).coerceAtLeast(1f))
+    }
+
+    fun columns(availableWidthDp: Float, fontScale: Float = 1f): Int {
+        if (!availableWidthDp.isFinite() || availableWidthDp <= 0f) return 1
         val usable = (availableWidthDp - 2f * SIDE_PADDING_DP).coerceAtLeast(0f)
-        return ((usable + SPACING_DP) / (CARD_WIDTH_DP + SPACING_DP))
+        val card = cardWidthDp(availableWidthDp, fontScale)
+        return ((usable + SPACING_DP) / (card + SPACING_DP))
             .toInt().coerceIn(1, MAX_COLUMNS)
     }
 }

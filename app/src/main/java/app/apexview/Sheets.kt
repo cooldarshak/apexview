@@ -39,6 +39,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -91,7 +93,10 @@ fun FeedPickerSheet(app: AppState, picker: FeedPicker) {
             // even when they were off-screen. Keep the same picker actions,
             // but virtualize the driver cards in keyed, adaptive lazy rows.
             BoxWithConstraints(Modifier.weight(1f, fill = false).fillMaxWidth()) {
-                val columns = FeedPickerLayoutPolicy.columns(maxWidth.value)
+                val cardWidthDp = FeedPickerLayoutPolicy.cardWidthDp(maxWidth.value,
+                    LocalDensity.current.fontScale)
+                val columns = FeedPickerLayoutPolicy.columns(maxWidth.value,
+                    LocalDensity.current.fontScale)
                 val channels = picker.channels
                 val broadcast = channels?.filter { it.racingNumber == null }.orEmpty()
                 val onboards = channels?.filter { it.racingNumber != null }.orEmpty()
@@ -150,7 +155,7 @@ fun FeedPickerSheet(app: AppState, picker: FeedPicker) {
                                 ) { i ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                         onboardRows[i].forEach { channel ->
-                                            PickCard(app, picker, channel, Modifier.width(120.dp)) { onColor ->
+                                            PickCard(app, picker, channel, Modifier.width(cardWidthDp.dp)) { onColor ->
                                                 Text(
                                                     "${channel.racingNumber}",
                                                     style = Type.title1.copy(color = channel.teamColor?.let { Color(it) } ?: onColor),
@@ -221,7 +226,9 @@ private fun PickCard(
         tween(if (reducedMotion) 0 else Motion.PRESS_MS * 2, easing = EaseOut), label = "pick")
     Box(
         modifier
-            .semantics { stateDescription = if (picked) "Selected" else "Not selected" }
+            // F1 feeds are multiselect options. Expose the checked state to
+            // TalkBack and keep the existing single D-pad press target.
+            .semantics { role = Role.Checkbox; toggleableState = ToggleableState(picked) }
             .pressable { app.togglePick(channel) }
             .clip(RoundedCornerShape(22.dp))
             .background(background)
