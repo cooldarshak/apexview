@@ -60,7 +60,7 @@ class RuntimeLogTests(unittest.TestCase):
         self.assertEqual(10000, report["protected_output_median_bytes"])
 
     def test_new_cpu_stage_metrics_are_unknown_on_older_runs_not_false_zeroes(self):
-        archive = "\\n".join([
+        archive = "\n".join([
             f"I ARCHIVE_VOD_SEGMENT number={i} outputBytes=1000 parseMs=30 composeMs=60"
             for i in range(5)
         ])
