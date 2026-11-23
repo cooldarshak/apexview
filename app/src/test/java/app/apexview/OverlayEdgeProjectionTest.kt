@@ -38,4 +38,24 @@ class OverlayEdgeProjectionTest {
         assertEquals(1, projection.update(singleton, geometry))
         assertSame(singleton[0], projection.car(0))
     }
+    @Test fun mutableCanvasProjectionRetainsStableDriverOrderAndIdentity() {
+        val projection = OverlayEdgeProjection()
+        val cars = List(24) { index -> OverlayDrawCar(index.toString()).apply {
+            x = (index % 7).toFloat() * 9f
+            y = (index % 5).toFloat() * 11f
+            state = LapState.UNKNOWN
+        } }
+        repeat(60) { frame ->
+            cars.forEachIndexed { index, car -> car.x = (index * 7 + frame % 3).toFloat() }
+            val expected = cars.map { it to geometry.progress(it.x, it.y) }.sortedBy { it.second }
+            assertEquals(24, projection.updateForDraw(cars, geometry))
+            for (i in expected.indices) {
+                assertSame(expected[i].first, projection.drawCar(i))
+                assertEquals(expected[i].second, projection.fraction(i), 0f)
+            }
+        }
+        assertEquals(0, projection.updateForDraw(emptyList(), geometry))
+        assertEquals(24, projection.updateForDraw(cars, geometry))
+    }
+
 }

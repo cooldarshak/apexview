@@ -232,6 +232,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var failed = false
     private var rendered = 0L
     private var lastLogNs = 0L
+    @Volatile private var codecCorrelation: SceneCodecTimestampCorrelation? = null
     private val frameDemand = SceneFrameDemand()
     private val pacing = SceneFramePacing()
     private val cadenceGate = SceneFrameCadenceGate()
@@ -309,13 +310,21 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         super.onDetachedFromWindow()
     }
 
-    fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene, speed: Float = 1f) {
+    fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene, speed: Float = 1f,
+             correlation: SceneCodecTimestampCorrelation? = null) {
+        if (codecCorrelation !== correlation) {
+            codecCorrelation?.active = false
+            codecCorrelation = correlation
+            correlation?.reset()
+            correlation?.active = true
+        }
         val normalizedSpeed = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
         val speedChanged = playbackSpeed != normalizedSpeed
         playbackSpeed = normalizedSpeed
         val changed = scene != nextScene
         val atlasChanged = scene?.sameEncodedAtlasAs(nextScene) == false
         if (atlasChanged) {
+            codecCorrelation?.reset()
             // Layout-only window changes can reuse the already latched atlas;
             // only a different coded picture must await a fresh decoder frame.
             outputReadiness.invalidate()
@@ -348,7 +357,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         onOutputSize(width, height)
         gl.post {
             if (!released && surfaceLifetime.matches(lifetime)) {
-                guarded { initialize(output); draw() }
+                failed = false // New valid EGL output may recover a transient loss.
+                guarded { initialize(output); scheduleDisplayFrame() }
             }
         }
     }
@@ -363,6 +373,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         outputReadiness.invalidate()
         onOutputLost()
         input?.let { player?.clearVideoSurface(it) }
+        codecCorrelation?.reset()
         // GL owns the Surface reference until queued destruction releases it. Clearing it
         // here lost that reference before destroy() and leaked a codec output surface.
         if (!gl.post { destroy(); surface.release() }) {
@@ -383,6 +394,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         input?.let { player?.clearVideoSurface(it) }
         player = null
         surfaceTextureListener = null
+        codecCorrelation?.active = false
+        codecCorrelation?.reset()
+        codecCorrelation = null
         val output = surfaceTexture
         if (!gl.post { destroy(); output?.release(); thread.quitSafely() }) {
             output?.release()
@@ -468,8 +482,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                     hasFrame = true
                     rendered++
                     val latchedAt = System.nanoTime()
-                    pacing.onTextureLatched(latchedAt, latchedAt - latchStarted, frames.timestamp,
+                    val sourceTimestampNs = frames.timestamp
+                    pacing.onTextureLatched(latchedAt, latchedAt - latchStarted, sourceTimestampNs,
                         eglBindNs, callbackArrivalNs = callbackStarted)
+                    codecCorrelation?.onTextureLatched(sourceTimestampNs, latchedAt)
                     scheduleDisplayFrame(videoArrived = true)
                     } finally { Trace.endSection() }
                 }
@@ -499,6 +515,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         try { check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" } }
         finally { Trace.endSection() }
         val swapCompleted = System.nanoTime()
+        if (hasFrame) codecCorrelation?.onSwapSubmitted(swapCompleted)
         if (hasFrame && !firstFrameReported) {
             firstFrameReported = true
             val surfaceEpoch = outputReadiness.generation()
@@ -514,6 +531,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
             val metrics = pacing.snapshotAndReset()
+            val correlation = codecCorrelation?.snapshotAndReset()
             Log.i("ApexviewSingleDecoder", "SINGLE_DECODER_SCENE output=${outputWidth}x$outputHeight inputTextures=1 outputViews=1 sources=${model.sources} windows=${model.windows.size} frames=$rendered " +
                 "pacingLatched=${metrics.latched} pacingPresented=${metrics.presented} " +
                 "callbackGaps45ms=${metrics.callbackGaps} displayGaps45ms=${metrics.displayGaps} " +
@@ -539,6 +557,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 "glQueueP95UpperMs=${metrics.glQueueDelays.percentileUpperMs(95)} " +
                 "glQueueMaxMs=${metrics.glQueueDelays.maxMs.toInt()} " +
                 "glThreadPriority=DISPLAY " +
+                "codecPtsMatched=${correlation?.matchedLatches ?: 0} codecPtsUnmatched=${correlation?.unmatchedLatches ?: 0} " +
+                "codecToLatchP95UpperMs=${correlation?.releaseToLatch?.percentileUpperMs(95) ?: 0} " +
+                "latchToSwapP95UpperMs=${correlation?.latchToSwap?.percentileUpperMs(95) ?: 0} " +
                 "gpuSubmitNotGpuCompletion=true physicalPresentation=NOT_MEASURED")
             lastLogNs = now
         }
@@ -573,6 +594,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     private fun destroy() {
+        codecCorrelation?.reset()
         displayClock?.removeFrameCallback(displayFrame)
         frameDemand.reset()
         cadenceGate.reset()

@@ -87,6 +87,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     private var lastSourceTimestampNs = 0L
     // Share the same camera-driven, 50fps-aware scheduling and frame metrics
     // as the clear HEVC archive; the independent SurfaceView remains distinct.
+    @Volatile private var codecCorrelation: SceneCodecTimestampCorrelation? = null
     private val frameDemand = SceneFrameDemand()
     private val cadenceGate = SceneFrameCadenceGate()
     private val pacing = SceneFramePacing()
@@ -134,11 +135,18 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     }
 
     fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene,
-             speed: Float = 1f) {
+             speed: Float = 1f, correlation: SceneCodecTimestampCorrelation? = null) {
+        if (codecCorrelation !== correlation) {
+            codecCorrelation?.active = false
+            codecCorrelation = correlation
+            correlation?.reset()
+            correlation?.active = true
+        }
         val changed = scene != nextScene
         val firstBinding = scene == null
         val atlasChanged = scene?.sameEncodedAtlasAs(nextScene) == false
         if (atlasChanged) {
+            codecCorrelation?.reset()
             // Layout-only window changes can reuse the already latched atlas;
             // only a different coded picture must await a fresh decoder frame.
             outputReadiness.invalidate()
@@ -176,6 +184,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             // Android can destroy and recreate a surface before this callback
             // reaches the GL looper. Never initialize an old or invalid output.
             if (!released && surfaceLifetime.matches(lifetime) && surface.isValid) {
+                failed = false // Only a genuinely new valid EGL surface can recover output.
                 guarded { initialize(surface); scheduleVideoFrame() }
             }
         }
@@ -188,6 +197,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         surfaceLifetime.advance()
         outputReadiness.invalidate()
         onOutputLost()
+        codecCorrelation?.reset()
         detachOutput()
     }
     private fun detachOutput() {
@@ -206,6 +216,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         surfaceLifetime.advance()
         outputReadiness.invalidate()
         holder.removeCallback(this)
+        codecCorrelation?.active = false
+        codecCorrelation?.reset()
+        codecCorrelation = null
         detachOutput(); player = null; gl.removeCallbacks(glQueueProbe); thread.quitSafely()
     }
 
@@ -306,6 +319,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                     val timestamp = frames.timestamp
                     pacing.onTextureLatched(latchedAtNs, latchedAtNs - latchStartNs,
                         timestamp, eglBindNs = bindNs, callbackArrivalNs = callbackStartedNs)
+                    codecCorrelation?.onTextureLatched(timestamp, latchedAtNs)
                     if (lastSourceTimestampNs > 0L && timestamp > 0L &&
                         timestamp < lastSourceTimestampNs) {
                         intervalSourceTimestampRegressions++
@@ -381,6 +395,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         try { check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" } }
         finally { Trace.endSection() }
         val swapEndedNs = System.nanoTime()
+        if (hasFrame) codecCorrelation?.onSwapSubmitted(swapEndedNs)
         if (hasFrame) {
             val swapMs = (swapEndedNs - swapStartedNs) / 1_000_000L
             intervalLongestSwapMs = maxOf(intervalLongestSwapMs, swapMs)
@@ -408,6 +423,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
             val metrics = pacing.snapshotAndReset()
+            val correlation = codecCorrelation?.snapshotAndReset()
             Log.i("ApexviewSingleDecoder", "SURFACE_DECODER_SCENE " +
                 "protected=$protectedOutput output=${outputWidth}x$outputHeight " +
                 "inputTextures=1 outputViews=1 sources=${model.sources} " +
@@ -437,6 +453,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "eglSwapP95UpperMs=${metrics.eglSwapDurations.percentileUpperMs(95)} " +
                 "choreographerDelayP95UpperMs=${metrics.callbackDelays.percentileUpperMs(95)} " +
                 "glQueueP95UpperMs=${metrics.glQueueDelays.percentileUpperMs(95)} " +
+                "codecPtsMatched=${correlation?.matchedLatches ?: 0} codecPtsUnmatched=${correlation?.unmatchedLatches ?: 0} " +
+                "codecToLatchP95UpperMs=${correlation?.releaseToLatch?.percentileUpperMs(95) ?: 0} " +
+                "latchToSwapP95UpperMs=${correlation?.latchToSwap?.percentileUpperMs(95) ?: 0} " +
                 "swapSubmissionsNotPhysicalPresentation=true physicalPresentation=NOT_MEASURED")
             lastLogNs = now
             intervalPresented = 0
@@ -461,6 +480,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     }
 
     private fun destroy() {
+        codecCorrelation?.reset()
         displayClock?.removeFrameCallback(displayFrame)
         displayClock = null
         frameDemand.reset()

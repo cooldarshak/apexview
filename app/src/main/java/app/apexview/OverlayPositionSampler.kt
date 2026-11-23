@@ -73,6 +73,21 @@ internal class OverlayPositionCursor(private val track: DriverTrack) {
     }
 }
 
+/**
+ * Draw-phase-only mutable projection. Never publish from Compose composition, snapshots,
+ * the LAN sender or another thread. The Canvas consumes this object synchronously.
+ * Reuses a driver object and one list across every 60Hz motion frame, unlike the
+ * immutable 10Hz hit-target / Cast snapshots retained by sample().
+ */
+internal class OverlayDrawCar(val number: String) {
+    var x = 0f
+        internal set
+    var y = 0f
+        internal set
+    var state = LapState.UNKNOWN
+        internal set
+}
+
 /** Do not share between threads. Give local map, edge map and Cast separate owners. */
 internal class OverlayPositionSampler(
     private val timing: SessionTiming,
@@ -80,6 +95,7 @@ internal class OverlayPositionSampler(
 ) {
     private class Entry(val id: String, val cursor: OverlayPositionCursor) {
         var previousCar: Car? = null
+        val drawCar = OverlayDrawCar(id)
     }
     private val entries = timing.tracks.map { (id, track) ->
         Entry(id, OverlayPositionCursor(track))
@@ -88,6 +104,30 @@ internal class OverlayPositionSampler(
     private var lastBeforePositions = false
     private var previous: List<Car> = emptyList()
     private var seeks = 0L
+    private val drawCars = ArrayList<OverlayDrawCar>(entries.size)
+    private var lastDrawMs = Long.MIN_VALUE
+
+    /**
+     * Called ONLY from the map's Canvas draw lambda. Entries remain mutable for this
+     * synchronous draw; consumers must never retain the returned list or its cars.
+     * Independent samplers own the 10Hz immutable hit-target and Cast publication.
+     */
+    fun sampleForDraw(atMs: Long): List<OverlayDrawCar> {
+        if (lastDrawMs == atMs) return drawCars
+        lastDrawMs = atMs
+        drawCars.clear()
+        if (timing.beforePositions(atMs)) return drawCars
+        for (entry in entries) {
+            if (timing.laps[entry.id]?.retiredAt(atMs) == true) continue
+            if (!entry.cursor.sample(atMs)) continue
+            val car = entry.drawCar
+            car.x = entry.cursor.x
+            car.y = entry.cursor.y
+            car.state = timing.states[entry.id]?.at(atMs) ?: LapState.UNKNOWN
+            drawCars.add(car)
+        }
+        return drawCars
+    }
 
     fun sample(atMs: Long): List<Car> {
         // Live archive metadata can make previously unavailable positions

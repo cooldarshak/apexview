@@ -270,7 +270,7 @@ jobs:
         if: success()
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon assembleDebug assembleDebugAndroidTest
+          ./gradlew --no-daemon assembleDebug assembleDebugAndroidTest :macrobenchmark:assembleBenchmark
 
       # This runner may not expose /dev/kvm (nested virtualization is not guaranteed).
       # Do not fail an otherwise successful APK build before the tests even start.
@@ -336,6 +336,15 @@ jobs:
         with:
           name: apexview-hevc-single-decoder-base-debug
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload physical-device FrameTimingMetric benchmark APK
+        if: success() && steps.assemble_apks.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pitwall-macrobenchmark-instrumentation
+          path: macrobenchmark/build/outputs/apk/**/*.apk
           if-no-files-found: error
           retention-days: 14
 

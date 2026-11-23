@@ -133,7 +133,7 @@ internal fun rememberOverlayDrawClock(
 /** Local sources and Pitwall Cast frames expose exactly the same draw API. */
 internal class OverlayMotionSource(
     val positionMs: State<Long>,
-    val carsAt: (Long) -> List<Car>,
+    val drawCarsAt: (Long) -> List<OverlayDrawCar>,
 )
 
 /** Three independently recorded tower regions: lap/telemetry, sectors and tyres. */

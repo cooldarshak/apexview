@@ -248,10 +248,15 @@ internal fun TextMeasurer.label(text: String, size: TextUnit, bold: Boolean = tr
     measure(text, TextStyle(color = Color.White, fontSize = size, fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal))
 
 /** Team-colored dot: a yellow ring on a flying lap in qualifying, small and faded in the pits. */
-internal fun DrawScope.drawCar(timing: SessionTiming, car: Car, at: Offset, baseRadius: Float): Float {
-    val color = Color(timing.drivers[car.number]?.color ?: android.graphics.Color.WHITE)
-    val dim = car.state == LapState.PIT || car.state == LapState.KNOCKED_OUT
-    val push = timing.showsPushLaps && car.state == LapState.PUSH
+internal fun DrawScope.drawCar(timing: SessionTiming, car: Car, at: Offset, baseRadius: Float): Float =
+    drawCar(timing, car.number, car.state, at, baseRadius)
+
+/** Direct field draw avoids per-frame Car allocation for the 60Hz marker layer. */
+internal fun DrawScope.drawCar(timing: SessionTiming, number: String, state: LapState,
+    at: Offset, baseRadius: Float): Float {
+    val color = Color(timing.drivers[number]?.color ?: android.graphics.Color.WHITE)
+    val dim = state == LapState.PIT || state == LapState.KNOCKED_OUT
+    val push = timing.showsPushLaps && state == LapState.PUSH
     val radius = when {
         push -> baseRadius * 1.3f
         dim -> baseRadius * 0.7f
@@ -625,7 +630,7 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
     val drawClock = rememberOverlayDrawClock(timing, { app.mapTimeMs() ?: 0L },
         "phone-map-motion-clock")
     val motion = remember(timing, drawSampler, drawClock) {
-        OverlayMotionSource(drawClock, drawSampler::sample)
+        OverlayMotionSource(drawClock, drawSampler::sampleForDraw)
     }
     val stop = app.pitDriver?.let { driver ->
         pitStopNow(rememberPitBasis(app, timing, now), driver,
@@ -795,12 +800,12 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
         Canvas(layer) {
             val start = System.nanoTime()
             // Dynamic car motion reads the video clock in Draw, never Composition.
-            val movingCars = motion?.let { it.carsAt(it.positionMs.value) }
+            val movingCars = motion?.let { it.drawCarsAt(it.positionMs.value) }
             if (movingCars != null) {
                 val radius = dotSizeDp.dp.toPx()
                 movingCars.forEach { car ->
                     val p = fit.map(car.x, car.y)
-                    val alpha = drawCar(timing, car, p, radius)
+                    val alpha = drawCar(timing, car.number, car.state, p, radius)
                     if (car.number == stop?.number) drawCircle(Color.White, radius + 4.dp.toPx(),
                         p, style = Stroke(2.dp.toPx()))
                     names[car.number]?.let {
@@ -1047,7 +1052,7 @@ fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, i
     val drawClock = rememberOverlayDrawClock(timing, { app.mapTimeMs() ?: 0L },
         "phone-map-motion-clock")
     val motion = remember(timing, drawSampler, drawClock) {
-        OverlayMotionSource(drawClock, drawSampler::sample)
+        OverlayMotionSource(drawClock, drawSampler::sampleForDraw)
     }
     val stop = app.pitDriver?.let { driver ->
         pitStopNow(rememberPitBasis(app, timing, now), driver,
@@ -1222,24 +1227,26 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
         }
         Canvas(layer) {
             val start = System.nanoTime()
-            val movingCars = motion?.let { it.carsAt(it.positionMs.value) }
+            val movingCars = motion?.let { it.drawCarsAt(it.positionMs.value) }
             // Labels step further inward when cars bunch up, so a pack stays readable.
             reusedCollisionRows.fill(-Float.MAX_VALUE)
             val lastAt = reusedCollisionRows
             val motionCount = if (movingCars == null) 0
-                else movingProjection.update(movingCars, timing.geometry)
+                else movingProjection.updateForDraw(movingCars, timing.geometry)
             val count = if (movingCars == null) cars.size else motionCount
             for (index in 0 until count) {
-                val car = if (movingCars == null) cars[index].first
-                    else movingProjection.car(index)
+                val number = if (movingCars == null) cars[index].first.number
+                    else movingProjection.drawCar(index).number
+                val state = if (movingCars == null) cars[index].first.state
+                    else movingProjection.drawCar(index).state
                 val f = if (movingCars == null) cars[index].second
                     else movingProjection.fraction(index)
                 val p = ribbon.point(f)
                 val radius = dotSizeDp.dp.toPx()
-                val alpha = drawCar(timing, car, p, radius)
-                if (car.number == stop?.number) drawCircle(Color.White,
+                val alpha = drawCar(timing, number, state, p, radius)
+                if (number == stop?.number) drawCircle(Color.White,
                     radius + 4.dp.toPx(), p, style = Stroke(2.dp.toPx()))
-                val label = names[car.number] ?: continue
+                val label = names[number] ?: continue
                 val along = f * ribbon.perimeter
                 val gap = label.size.width + 6.dp.toPx()
                 val nearMark = taken.any { (at, w) ->

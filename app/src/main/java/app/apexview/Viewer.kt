@@ -1190,7 +1190,7 @@ internal fun PlaybackVideoCanvas(
                         onOutputLost = { composedGlReady = false }
                         onFirstFrame = { composedGlReady = true }
                     }
-                }, update = { it.bind(host.player, scene, app.playbackSpeed) },
+                }, update = { it.bind(host.player, scene, app.playbackSpeed, host.sceneCodecCorrelation) },
                     onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
             }
         } else {
@@ -1201,7 +1201,7 @@ internal fun PlaybackVideoCanvas(
                 onOutputLost = { composedGlReady = false }
                 onFirstFrame = { composedGlReady = true }
                 view = this
-            } }, update = { it.bind(host.player, scene, app.playbackSpeed) },
+            } }, update = { it.bind(host.player, scene, app.playbackSpeed, host.sceneCodecCorrelation) },
                 onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
         }
             // Custom clear HEVC and Widevine HEVC scenes do not host PlayerView.

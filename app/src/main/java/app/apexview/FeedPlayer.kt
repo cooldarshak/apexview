@@ -39,6 +39,7 @@ import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.exoplayer.source.FilteringMediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
+import app.apexview.scene.SceneCodecTimestampCorrelation
 import app.apexview.tiled.HevcArchiveVodSession
 import app.apexview.tiled.CmafBoxInspector
 import app.apexview.tiled.CmafMetadataInspectingDataSource
@@ -141,6 +142,8 @@ class FeedPlayer(
         private set
 
     val player: ExoPlayer
+    /** Codec PTS correlation for the real clear/protected scene; no SF assertion. */
+    internal val sceneCodecCorrelation = SceneCodecTimestampCorrelation()
     /** Updated to the security level Widevine actually opened, not just the requested setting. */
     var usesSoftwareDrm by mutableStateOf(forceL3)
         private set
@@ -438,8 +441,9 @@ class FeedPlayer(
             override fun onVideoFrameAboutToBeRendered(
                 presentationTimeUs: Long, releaseTimeNs: Long, format: Format, mediaFormat: MediaFormat?
             ) {
-                if (!DiagnosticLogs.recording || archiveVodSession == null) return
                 val now = System.nanoTime()
+                sceneCodecCorrelation.onCodecFrame(presentationTimeUs, releaseTimeNs, now)
+                if (!DiagnosticLogs.recording || archiveVodSession == null) return
                 codecReleaseTiming.record(presentationTimeUs, releaseTimeNs, now)
                 if (Trace.isEnabled()) {
                     Trace.setCounter("PitwallCodecPtsMs", presentationTimeUs / 1000L)
@@ -528,6 +532,8 @@ class FeedPlayer(
             }
 
             override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+                if (reason == Player.DISCONTINUITY_REASON_SEEK ||
+                    reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) sceneCodecCorrelation.reset()
                 if (DiagnosticLogs.recording && reason == Player.DISCONTINUITY_REASON_SEEK) {
                     pendingSeekAtMs = android.os.SystemClock.elapsedRealtime()
                     seekSequence++
@@ -1158,6 +1164,8 @@ class FeedPlayer(
     }
 
     fun release() {
+        sceneCodecCorrelation.active = false
+        sceneCodecCorrelation.reset()
         archiveVodSession?.close()
         archiveVodSession = null
         protectedLiveDashSource?.release()

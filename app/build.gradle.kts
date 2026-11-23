@@ -94,6 +94,15 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("release")
         }
+        // Release-equivalent, non-debuggable app for physical FrameTimingMetric runs.
+        // Keep the same signing identity when a persistent CI key is configured.
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = if (keystoreProps.isNotEmpty()) signingConfigs.getByName("release")
+                else signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
+            isDebuggable = false
+        }
         // The release build under its own app ID, to smoke-test shrinking on a phone without
         // replacing the installed app.
         create("smoke") {

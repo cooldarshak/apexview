@@ -1,5 +1,6 @@
 package app.apexview.cast.local
 
+import android.media.MediaFormat
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -20,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
+import androidx.media3.common.Format
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -32,6 +34,7 @@ import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
@@ -41,6 +44,7 @@ import app.apexview.cast.CastSceneProtocol
 import app.apexview.cast.CastTimingProtocol
 import app.apexview.cast.CastTimingReceiver
 import app.apexview.cast.CastTimingLayer
+import app.apexview.scene.SceneCodecTimestampCorrelation
 import app.apexview.scene.SingleDecoderSceneView
 import app.apexview.scene.ProtectedDecoderSceneView
 import app.apexview.scene.VideoScene
@@ -87,6 +91,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     }
     private var sceneView: SingleDecoderSceneView? = null
     private var protectedSceneView: ProtectedDecoderSceneView? = null
+    private var sceneCodecCorrelation: SceneCodecTimestampCorrelation? = null
     private var widevine: ReceiverWidevine? = null
     private var secureOutput by mutableStateOf(false)
     private var loadingJob: kotlinx.coroutines.Job? = null
@@ -353,6 +358,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             finally { owned?.close(); if (epoch == loadEpoch) loadingJob = null }
         }
     }
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun startPlayer(body: JSONObject) {
         val direct = body.optJSONObject("metadata")?.optJSONObject("custom")?.optBoolean("pitwallDirect") == true
         val data: DataSource.Factory = if (direct) requireNotNull(widevine).mediaHttp else {
@@ -387,6 +393,16 @@ class PitwallReceiverActivity : ComponentActivity() {
             .setMediaSourceFactory(DefaultMediaSourceFactory(data).apply { widevine?.sessions?.let { key -> setDrmSessionManagerProvider { key } } })
             .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(5_000, 15_000, 1_000, 2_000).build())
             .build()
+        val correlation = SceneCodecTimestampCorrelation()
+        sceneCodecCorrelation = correlation
+        next.setVideoFrameMetadataListener(object : VideoFrameMetadataListener {
+            override fun onVideoFrameAboutToBeRendered(
+                presentationTimeUs: Long, releaseTimeNs: Long, format: Format,
+                mediaFormat: MediaFormat?,
+            ) {
+                correlation.onCodecFrame(presentationTimeUs, releaseTimeNs, System.nanoTime())
+            }
+        })
         scene = nextScene; player = next; active = true; generation++; renderingReported = false; decoderCount = 0
         next.addAnalyticsListener(object : AnalyticsListener {
             override fun onVideoInputFormatChanged(
@@ -440,6 +456,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                 if (player !== next || reason != Player.DISCONTINUITY_REASON_SEEK && reason != Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) return
                 val target = controllerPosition()
                 timingState.onSeek(target + oldPosition.positionMs - newPosition.positionMs, target)
+                correlation.reset()
                 sendPlayback()
             }
 
@@ -558,6 +575,9 @@ class PitwallReceiverActivity : ComponentActivity() {
         receiverCaptionTracks = emptyList(); receiverCaptionTrackCount = 0
         sceneView?.release(); sceneView = null
         protectedSceneView?.release(); protectedSceneView = null
+        sceneCodecCorrelation?.active = false
+        sceneCodecCorrelation?.reset()
+        sceneCodecCorrelation = null
         standardView?.player = null; standardView = null
         val previous = player; player = null
         previous?.release()
@@ -609,8 +629,8 @@ class PitwallReceiverActivity : ComponentActivity() {
                                 protectedSceneView = this
                                 onFailure = { reason -> if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) fail(reason) }
                                 onFirstFrame = { if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) reportRendering() }
-                                bind(current, model, desiredSpeed)
-                            } }, update = { it.bind(current, model, desiredSpeed) }, onRelease = {
+                                bind(current, model, desiredSpeed, sceneCodecCorrelation)
+                            } }, update = { it.bind(current, model, desiredSpeed, sceneCodecCorrelation) }, onRelease = {
                                 if (protectedSceneView === it) protectedSceneView = null
                                 it.release()
                             }, modifier = Modifier.fillMaxSize())
@@ -618,8 +638,8 @@ class PitwallReceiverActivity : ComponentActivity() {
                                 sceneView = this
                                 onFailure = { reason -> if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) fail(reason) }
                                 onFirstFrame = { if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) reportRendering() }
-                                bind(current, model, desiredSpeed)
-                            } }, update = { it.bind(current, model, desiredSpeed) }, onRelease = {
+                                bind(current, model, desiredSpeed, sceneCodecCorrelation)
+                            } }, update = { it.bind(current, model, desiredSpeed, sceneCodecCorrelation) }, onRelease = {
                                 if (sceneView === it) sceneView = null
                                 it.release()
                             }, modifier = Modifier.fillMaxSize())

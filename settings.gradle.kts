@@ -32,3 +32,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "F1Multiview"
 include(":app")
+include(":macrobenchmark")

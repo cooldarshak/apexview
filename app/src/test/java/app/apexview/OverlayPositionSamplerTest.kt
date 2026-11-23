@@ -138,4 +138,55 @@ class OverlayPositionSamplerTest {
         assertSame(a[1], b[1])
         assertEquals(2, b.size)
     }
+    @Test fun drawOnlyProjectionReusesMarkersAndPreservesImmutablePublicSnapshotsOnSeeking() {
+        val t = timing()
+        val drawSampler = OverlayPositionSampler(t)
+        val publishedSampler = OverlayPositionSampler(t)
+        val first = drawSampler.sampleForDraw(1_100L)
+        val marker = first.first { it.number == "1" }
+        val mutableList = first
+        assertEquals(carsAt(t, 1_100L).map { it.number }, first.map { it.number })
+        assertSame(first, drawSampler.sampleForDraw(1_100L))
+        val frozen = publishedSampler.sample(1_100L)
+        val oldX = frozen.first().x
+        for (at in listOf(1_120L, 1_500L, 6_600L, 7_200L, 900L, 1_300L)) {
+            val drawn = drawSampler.sampleForDraw(at)
+            val expected = carsAt(t, at)
+            assertSame("one draw list per session", mutableList, drawn)
+            assertEquals("source order at $at", expected.map { it.number }, drawn.map { it.number })
+            expected.zip(drawn).forEach { (actual, reused) ->
+                assertEquals(actual.x, reused.x, 0.00001f)
+                assertEquals(actual.y, reused.y, 0.00001f)
+                assertEquals(actual.state, reused.state)
+            }
+        }
+        assertSame("each moving car retains its marker object", marker,
+            drawSampler.sampleForDraw(1_100L).first { it.number == "1" })
+        assertEquals("10Hz/receiver snapshot cannot be mutated by Canvas", oldX, frozen.first().x, 0f)
+        assertSame(frozen, publishedSampler.sample(1_100L))
+    }
+
+    @Test fun twentyFourDriverDrawProjectionRequiresNoPerFrameCarCreation() {
+        val tracks = linkedMapOf<String, DriverTrack>()
+        repeat(24) { number ->
+            tracks[number.toString()] = DriverTrack(
+                longArrayOf(1_000L, 2_000L), floatArrayOf(number.toFloat(), number + 40f),
+                floatArrayOf(number.toFloat(), number + 80f), 2)
+        }
+        val timing = SessionTiming(type = "Race", drivers = emptyMap(), tracks = tracks,
+            states = emptyMap(), outline = floatArrayOf(), hasStartFinish = false,
+            corners = emptyList(), startUtcMs = 1_000L)
+        val sampler = OverlayPositionSampler(timing)
+        val original = sampler.sampleForDraw(1_050L).toList()
+        for (i in 0 until 50) {
+            val frame = sampler.sampleForDraw(1_051L + 19L * i)
+            assertEquals(24, frame.size)
+            repeat(24) { j -> assertSame(original[j], frame[j]) }
+        }
+        sampler.sampleForDraw(3_000L)
+        assertEquals(0, sampler.sampleForDraw(3_000L).size)
+        assertEquals(24, sampler.sampleForDraw(1_500L).size)
+        repeat(24) { j -> assertSame(original[j], sampler.sampleForDraw(1_500L)[j]) }
+    }
+
 }
