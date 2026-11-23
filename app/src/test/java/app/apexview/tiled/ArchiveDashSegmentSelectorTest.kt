@@ -87,6 +87,31 @@ class ArchiveDashSegmentSelectorTest {
         assertEquals(listOf(10L, 20L), result?.map { it.number })
     }
 
+    @Test
+    fun continuingSelectionUsesChronologicallyNextCandidateEvenWhenListIsUnsorted() {
+        val first = listOf(candidate(13, 3_000_000), candidate(11, 1_000_000),
+            candidate(12, 2_000_000), candidate(10, 0))
+        val second = listOf(candidate(23, 3_000_000), candidate(21, 1_000_000),
+            candidate(22, 2_000_000), candidate(20, 0))
+        val picked = ArchiveDashSegmentSelector.selectAligned(
+            listOf(first, second), targetTimeUs = 1_100_000, previousStartUs = 0,
+            toleranceUs = 10, maximumLeadUs = 2_000_000
+        )
+        assertEquals(listOf(11L, 21L), picked?.map { it.number })
+    }
+
+    @Test
+    fun continuationCannotSkipUnmatchedNextCandidateEvenIfLaterOneMatches() {
+        val first = listOf(candidate(13, 3_000_000), candidate(11, 1_000_000),
+            candidate(12, 2_000_000), candidate(10, 0))
+        val second = listOf(candidate(23, 3_000_000), candidate(22, 2_000_000),
+            candidate(20, 0))
+        assertNull(ArchiveDashSegmentSelector.selectAligned(
+            listOf(first, second), targetTimeUs = 2_000_000, previousStartUs = 0,
+            toleranceUs = 10, maximumLeadUs = 2_000_000
+        ))
+    }
+
     private fun candidate(number: Long, absoluteStartUs: Long) =
         ArchiveDashSegmentSelector.Candidate(number, absoluteStartUs)
 }

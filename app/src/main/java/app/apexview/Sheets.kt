@@ -38,6 +38,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.state.ToggleableState
@@ -357,8 +359,13 @@ internal fun SwitchRow(
 }
 
 @Composable
-private fun ChoiceRow(label: String, chosen: Boolean, onClick: () -> Unit) {
-    SettingRow(label, onClick = onClick, selected = chosen) {
+internal fun ChoiceRow(label: String, chosen: Boolean, onClick: () -> Unit) {
+    // A selected tint alone is not enough: screen readers and remote users
+    // need the same explicit single-select state as segmented Material controls.
+    SettingRow(
+        label, onClick = onClick, selected = chosen,
+        modifier = Modifier.semantics { role = Role.RadioButton; selected = chosen },
+    ) {
         if (chosen) {
             Box(Modifier.size(26.dp).clip(androidx.compose.foundation.shape.CircleShape)
                 .background(Ink.accent), contentAlignment = Alignment.Center) {

@@ -9,6 +9,24 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Follow-up source audit: selector hot path, CMAF wiping, settings choices (CI pending)
+
+- **P0.1**: normal continuation now chooses one chronological next segment
+  in linear time without sorting every master archive candidate at each
+  CMAF boundary; startup/seek retains closeness-ordered fallback. Tests
+  cover out-of-order manifests and never skipping an unmatched HEVC segment.
+- **P0.2**: Media3 CMAF read regression exercises I/O failure during
+  known and unknown transfer-length paths, verifies that retained transient
+  ciphertext buffers are wiped and that DataSource.close always runs.
+  No unmeasured claim of lower physical GC is made.
+- **P2.8**: settings choice rows now expose actual RadioButton semantics
+  and selected state for TalkBack and DPAD, not just a coloured background.
+  Compose regression checks the radio roles and one click target per row.
+
+**Percentages remain 95%, 91%, 90% respectively until exact-source CI
+is green; release acceptance remains 1/16.** Continue hardware p95,
+GC/allocation and accessibility/remote acceptance separately.
+
 ## P0.1 single-flight observer failure isolation (CI pending)
 
 The archive shared-segment coordinator now completes and unregisters a

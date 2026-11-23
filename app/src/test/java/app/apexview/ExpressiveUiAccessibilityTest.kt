@@ -139,6 +139,27 @@ class ExpressiveUiAccessibilityTest {
         assertEquals(true, captions)
     }
 
+    @Test fun settingsChoiceAnnouncesSelectedRadioRoleWithOneClickTargetPerRow() {
+        var chosen by mutableStateOf("Single")
+        rule.setContent {
+            AppTheme {
+                androidx.compose.foundation.layout.Column {
+                    ChoiceRow("Single", chosen == "Single") { chosen = "Single" }
+                    ChoiceRow("Multiple", chosen == "Multiple") { chosen = "Multiple" }
+                }
+            }
+        }
+        rule.onNodeWithText("Single").assertIsSelected()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.RadioButton))
+        rule.onNodeWithText("Multiple").assertIsNotSelected()
+        rule.onAllNodes(hasClickAction()).assertCountEquals(2)
+        rule.onNodeWithText("Multiple").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Multiple").assertIsSelected()
+        rule.onNodeWithText("Single").assertIsNotSelected()
+        assertEquals("Multiple", chosen)
+    }
+
     @Test fun segmentedChoiceHasRoleSelectionAndKeepsSingleAccessibleClick() {
         var chosen by mutableStateOf("Single")
         rule.setContent {

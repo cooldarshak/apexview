@@ -22,21 +22,20 @@ internal object ArchiveDashSegmentSelector {
 
         val latestAllowedStartUs = if (previousStartUs == null) targetTimeUs
             else Math.addExact(targetTimeUs, maximumLeadUs)
-        val masterCandidates = candidateWindows.first()
-            .asSequence()
+        val masterCandidates = candidateWindows.first().asSequence()
             .filter { it.absoluteStartUs <= latestAllowedStartUs }
             .filter { previousStartUs == null || it.absoluteStartUs > previousStartUs }
-            .let { candidates ->
-                if (previousStartUs == null) {
-                    candidates.sortedBy { abs(it.absoluteStartUs - targetTimeUs) }
-                } else {
-                    candidates.sortedBy { it.absoluteStartUs }
-                }
-            }
 
-        // Only startup/seek selection may try other aligned earlier windows.
+        // Steady-state capture only needs the next chronological master fragment.
+        // Do not allocate and sort the entire archive candidate list every time
+        // one six-second CMAF segment is requested, especially at 8 feeds/1.5x.
+        // Startup/seek still orders earlier fallback windows by clock proximity.
+        val eligible = if (previousStartUs == null) {
+            masterCandidates.sortedBy { abs(it.absoluteStartUs - targetTimeUs) }
+        } else {
+            listOfNotNull(masterCandidates.minByOrNull { it.absoluteStartUs }).asSequence()
+        }
         // Continuing across an unmatched fragment would skip HEVC references.
-        val eligible = if (previousStartUs == null) masterCandidates else masterCandidates.take(1)
         for (master in eligible) {
             val matches = candidateWindows.drop(1).map { window ->
                 window.minByOrNull { abs(it.absoluteStartUs - master.absoluteStartUs) }

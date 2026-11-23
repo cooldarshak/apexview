@@ -93,6 +93,55 @@ class CmafHttpReaderTest {
         }
     }
 
+    @Test fun knownLengthIofailureWipesPartialCiphertextAndClosesSource() {
+        var capturedBuffer: ByteArray? = null
+        var closed = false
+        var calls = 0
+        val source = object : DataSource {
+            override fun open(dataSpec: DataSpec) = 16L
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                capturedBuffer = buffer
+                calls++
+                if (calls == 2) throw java.io.IOException("network interrupted")
+                repeat(8) { buffer[offset + it] = 0x55.toByte() }
+                return 8
+            }
+            override fun getUri(): Uri? = uri
+            override fun addTransferListener(transferListener: TransferListener) = Unit
+            override fun close() { closed = true }
+        }
+        assertThrows(java.io.IOException::class.java) {
+            CmafHttpReader(DataSource.Factory { source }).read(uri, 16)
+        }
+        assertEquals(true, closed)
+        assertArrayEquals(ByteArray(16), capturedBuffer)
+    }
+
+    @Test fun unknownLengthIofailureWipesAllTransientChunksAndClosesSource() {
+        val borrowed = mutableListOf<ByteArray>()
+        var closed = false
+        var calls = 0
+        val source = object : DataSource {
+            override fun open(dataSpec: DataSpec) = C.LENGTH_UNSET.toLong()
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                borrowed.add(buffer)
+                calls++
+                if (calls == 2) throw java.io.IOException("connection reset")
+                repeat(length) { buffer[offset + it] = 0x41.toByte() }
+                return length
+            }
+            override fun getUri(): Uri? = uri
+            override fun addTransferListener(transferListener: TransferListener) = Unit
+            override fun close() { closed = true }
+        }
+        assertThrows(java.io.IOException::class.java) {
+            CmafHttpReader(DataSource.Factory { source }).read(uri, 64 * 1024)
+        }
+        assertEquals(true, closed)
+        assertEquals(2, borrowed.size)
+        borrowed.forEach { assertArrayEquals(ByteArray(it.size), it) }
+    }
+
     @Test fun explicitRangeMustMatchReturnedBytesInBothTransferModes() {
         val bytes = byteArrayOf(1, 2, 3, 4, 5, 6)
         assertThrows(PermanentCaptureException::class.java) {
