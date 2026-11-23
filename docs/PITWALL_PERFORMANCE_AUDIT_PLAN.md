@@ -9,6 +9,14 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 814: codec PTS correlation reused-timestamp regression (one root cause)
+
+**Exact-source result:** [Build 814](https://github.com/cooldarshak/apexview/actions/runs/45159589957), source SHA `5536a44832c727d079beed75189f396dd9dce8bd`, **FAILED** at the executable JVM stage. The complete debug and macrobenchmark Kotlin variants COMPILED and **754 of 755 JVM tests passed**, including new Ribbon geometry/parity tests and the new late-metadata tests. The only failure was the *existing* `SceneCodecTimestampCorrelationTest.seekAndSurfaceRecreationDiscardOldCodecReleases`: expected 1 unmatched latch but observed 2. HEVC fixture and JS checks before Gradle passed; Build814 did NOT reach signed APK or emulator instrumentation.
+
+**Production root cause, not a test expectation problem:** An earlier unmatched texture with PTS X at time T remained in the new bounded early-latch history; another codec frame with reused PTS X was scheduled **50ms after T**. The matching loop attached that newer metadata to the impossible older latch solely because PTS matched, leaving the legitimate later texture unmatched. Correct production correlation conservatively: late metadata may match the exact earlier PTS only if its planned release is not more than **two source frames (40ms)** after the recorded latch. A 20ms lead remains permitted for decoder scheduling variance; large positive leads stay in the normal metadata ring and pair with their actual later texture. Do NOT weaken the original test or claim that codec releaseTimeNs is an observed physical release. Extend JVM regressions for *both* incorrect reused PTS and valid modest scheduling lead, along with the original 755-test suite. This focused source/test/plan correction is the only follow-up build; preserve all other rendering/DRM/Cast, map/tower and macrobenchmark changes.
+
+**Accounting until CI green:** Last verified green remains Build 813. P0.3 80% / 20% and P0.4 92% / 8% in the last-green ledger below. Reconcile both to 100% coding only after the corrected exact-source Kotlin, JVM, HEVC/CMAF, signed APK and emulator run passes. Device performance, physical video presentation, protected Widevine/TCL and frame/GC acceptance remain open release gates.
+
 ## Post-Build 813 coordinated P0.3 and P0.4 source closeout (exact-source CI pending)
 
 **Verified baseline:** Build 813, commit `698d7464ce39a7af5e094d4c14ffb4425d40583d`, is GREEN. Its workflow genuinely compiled both variants of the AndroidX Macrobenchmark runner, assembled the matching nondebuggable app, ran the 750 existing JVM tests, exercised the clear composed-HEVC emulator path and published validated debug APKs. This resolves the prior Build808–812 CI blockers, not the user's S22/TCL physical-performance acceptance.

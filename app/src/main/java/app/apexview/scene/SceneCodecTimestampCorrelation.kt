@@ -8,7 +8,13 @@ import app.apexview.TimingBuckets
  * Only timestamps are retained, no protected samples or DRM data.
  */
 internal class SceneCodecTimestampCorrelation {
-    private companion object { const val CAPACITY = 128 }
+    private companion object {
+        const val CAPACITY = 128
+        // Even with reordered looper callbacks, metadata whose *planned* codec
+        // release is over two 50fps frames after an already latched image
+        // cannot safely be attributed to that old image with a reused PTS.
+        const val MAX_FUTURE_PLANNED_RELEASE_NS = 40_000_000L
+    }
     @Volatile var active = false
     private val pts = LongArray(CAPACITY) { Long.MIN_VALUE }
     private val releases = LongArray(CAPACITY)
@@ -41,8 +47,13 @@ internal class SceneCodecTimestampCorrelation {
         for (offset in 0 until minOf(nextEarlyLatch, CAPACITY)) {
             val index = (nextEarlyLatch - 1 - offset) % CAPACITY
             if (earlyLatchPts[index] != ptsNs) continue
-            earlyLatchPts[index] = Long.MIN_VALUE
             val latchedAtNs = earlyLatchTimes[index]
+            // A previously unmatched latch can share a PTS with a later image
+            // after a decoder seek or callback reorder. Never attach metadata
+            // scheduled far into the future to that old latch.
+            if (plannedNs > latchedAtNs &&
+                plannedNs - latchedAtNs > MAX_FUTURE_PLANNED_RELEASE_NS) continue
+            earlyLatchPts[index] = Long.MIN_VALUE
             if (plannedNs in 1L..latchedAtNs) plannedToLatch.record(latchedAtNs - plannedNs)
             if (callbackNs in 1L..latchedAtNs) callbackToLatch.record(latchedAtNs - callbackNs)
             matched++

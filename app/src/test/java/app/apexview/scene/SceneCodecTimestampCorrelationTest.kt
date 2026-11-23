@@ -113,4 +113,33 @@ class SceneCodecTimestampCorrelationTest {
         assertEquals(127, report.outstandingLatches)
     }
 
+    @Test fun reusedPtsNeverBackfillsAFrameWithReleaseScheduledTooFarInTheFuture() {
+        val timing = SceneCodecTimestampCorrelation().apply { active = true }
+        timing.onTextureLatched(900_000_000L, 950_000_000L)
+        // The next rendition/decoder frame uses the same PTS but was only
+        // scheduled 50ms later: it must not claim the earlier image.
+        timing.onCodecFrame(900_000L, 1_000_000_000L, 1_000_000_000L)
+        var metrics = timing.snapshotAndReset()
+        assertEquals(0L, metrics.lateMatchedLatches)
+        assertEquals(0L, metrics.matchedLatches)
+        assertEquals(1, metrics.outstandingLatches)
+        timing.onTextureLatched(900_000_000L, 1_005_000_000L)
+        metrics = timing.snapshotAndReset()
+        assertEquals(1L, metrics.matchedLatches)
+        assertEquals(0L, metrics.lateMatchedLatches)
+    }
+
+    @Test fun boundedClockSchedulingLeadStillAllowsExactLateMetadataMatch() {
+        val timing = SceneCodecTimestampCorrelation().apply { active = true }
+        timing.onTextureLatched(2_000_000_000L, 2_020_000_000L)
+        timing.onCodecFrame(2_000_000L, 2_040_000_000L, 2_041_000_000L)
+        val metrics = timing.snapshotAndReset()
+        assertEquals(1L, metrics.lateMatchedLatches)
+        assertEquals(0, metrics.outstandingLatches)
+        // Planned release and callback both follow the latch, so neither is
+        // a valid positive latency sample.
+        assertEquals(0L, metrics.releaseToLatch.count)
+        assertEquals(0L, metrics.callbackToLatch.count)
+    }
+
 }
