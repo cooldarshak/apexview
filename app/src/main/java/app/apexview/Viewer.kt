@@ -44,6 +44,8 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -327,7 +329,10 @@ fun ViewerScreen(app: AppState) {
     val cutouts = rememberCutouts()
     // The controls and the feeds move together: one curve, one duration. While arranging the
     // feeds stay full size, so what you place is where it ends up.
-    val motion = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
+    val reducedMotion = LocalReduceMotion.current
+    val screenMotionMs = if (reducedMotion) 0 else Motion.SCREEN_MS
+    val chromeMotionMs = if (reducedMotion) 0 else Motion.CHROME_MS
+    val motion = tween<Float>(screenMotionMs, easing = EaseOut)
     // Laptop mode keeps the stream still: the controls lie over its top edge instead.
     // SurfaceView is the recommended Android TV output, but scaling its parent while the
     // controls animate can desynchronise its surface from Compose. TV chrome overlays in place.
@@ -356,7 +361,9 @@ fun ViewerScreen(app: AppState) {
         val height = constraints.maxHeight.toFloat()
         val density = LocalDensity.current
         val edgeInset = with(density) { 30.dp.toPx() }
-        val band = with(density) { CONTROLS_BAND.toPx() }
+        val compactChrome = ChromeLayoutPolicy.compact(
+            with(density) { width.toDp().value }, density.fontScale)
+        val band = with(density) { (CONTROLS_BAND + if (compactChrome) 48.dp else 0.dp).toPx() }
         val narrow = with(density) { width.toDp() } < VOTE_SIDE_SHEET
         val compactWidth = with(density) { width.toDp() } < 600.dp
         // The vote sheet rises over the bottom of a narrow screen: the feeds glide up to the top
@@ -434,8 +441,8 @@ fun ViewerScreen(app: AppState) {
             // The last hinge seen, so the panel still knows its place while it leaves.
             var lastHinge by remember { mutableStateOf(app.hinge) }
             app.hinge?.let { lastHinge = it }
-            val swap = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
-            val slide = tween<IntOffset>(Motion.SCREEN_MS, easing = EaseOut)
+            val swap = tween<Float>(screenMotionMs, easing = EaseOut)
+            val slide = tween<IntOffset>(screenMotionMs, easing = EaseOut)
             AnimatedVisibility(
                 laptop,
                 Modifier.zIndex(1e9f),
@@ -564,7 +571,7 @@ fun ViewerScreen(app: AppState) {
         // No feed on screen with F1's graphics: the time left goes up top, clear of the edge map
         // and below the controls when they're up. Laptop mode has it in its lower panel.
         if (app.countdownOverScreen) app.timing?.let { timing ->
-            val below by animateDpAsState(if (app.chromeVisible) 72.dp else 38.dp, tween(Motion.SCREEN_MS, easing = EaseOut), label = "countdown")
+            val below by animateDpAsState(if (app.chromeVisible) 72.dp else 38.dp, tween(screenMotionMs, easing = EaseOut), label = "countdown")
             SessionCountdown(
                 app, timing,
                 Type.title2.copy(shadow = overlayShadow),
@@ -572,7 +579,7 @@ fun ViewerScreen(app: AppState) {
             )
         }
 
-        val fade = tween<Float>(Motion.CHROME_MS, easing = EaseOut)
+        val fade = tween<Float>(chromeMotionMs, easing = EaseOut)
         val topBand = with(density) { 64.dp.toPx() }
         val bottomBand = with(density) { 150.dp.toPx() }
         AnimatedVisibility(
@@ -676,7 +683,7 @@ private fun Glyph(icon: ImageVector, description: String, size: Int = 24, modifi
     // behavior and keyboard focus without introducing animation into video GL.
     IconButton(
         onClick = onClick,
-        modifier = modifier.tvFocusRing().size(44.dp),
+        modifier = modifier.tvFocusRing().size(48.dp),
         colors = IconButtonDefaults.iconButtonColors(
             containerColor = Ink.surfaceHigh.copy(alpha = 0.42f),
             contentColor = Ink.primary,
@@ -697,62 +704,121 @@ private fun Modifier.clear(of: Clearance, base: androidx.compose.ui.unit.Dp): Mo
     )
 }
 
+/**
+ * Keep every playback action available on narrow phones and 200% font settings.
+ * The primary row keeps transport/navigation visible, while the secondary row
+ * scrolls horizontally rather than clipping the tower, map, layout and radio.
+ */
+@Composable
+private fun TopChromeExtraActions(app: AppState, compact: Boolean) {
+    if (compact) {
+        if (app.singleDecoderFailure != null) {
+            Glyph(Icons.Rounded.Refresh, "Retry single decoder", onClick = app::retrySingleDecoder)
+        }
+        Glyph(Icons.Rounded.GridView, "Layout: ${app.layoutMode.label}",
+            modifier = Modifier.helpAnchor(app, "layout")) {
+            app.layoutSheetOpen = true; app.showChrome()
+        }
+    } else if (app.isTv || LocalConfiguration.current.screenWidthDp >
+        LocalConfiguration.current.screenHeightDp) {
+        Row(
+            Modifier
+                .helpAnchor(app, "layout")
+                .pressable { app.layoutSheetOpen = true; app.showChrome() }
+                .clip(RoundedCornerShape(10.dp))
+                .background(Ink.surfaceHigh.copy(alpha = 0.72f))
+                .padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(Icons.Rounded.GridView, contentDescription = "Layout", tint = Ink.primary,
+                modifier = Modifier.size(20.dp))
+            Text("Layout", style = Type.subhead.copy(color = Ink.primary))
+        }
+    } else {
+        Glyph(Icons.Rounded.GridView, "Layout: ${app.layoutMode.label}",
+            modifier = Modifier.helpAnchor(app, "layout")) {
+            app.layoutSheetOpen = true; app.showChrome()
+        }
+    }
+    if (app.timing != null) Glyph(Icons.Rounded.Headset,
+        if (app.radioOpen) "Hide team radio" else "Team radio",
+        modifier = Modifier.helpAnchor(app, "radio-button"), onClick = app::toggleRadio)
+    if (app.timing?.laps?.isNotEmpty() == true && !app.laptopActive) {
+        Glyph(Icons.Rounded.FormatListNumbered,
+            if (app.towerOpen) "Hide timing tower" else "Show timing tower",
+            onClick = app::toggleTower)
+    }
+    if (app.timing != null || app.mapStatus != null) {
+        Glyph(Icons.Rounded.Map, "Track map", modifier = Modifier.helpAnchor(app, "map")) {
+            app.mapSheetOpen = true
+        }
+    }
+    if (!app.isTv) Glyph(Icons.Rounded.HelpOutline, "What everything does", 22,
+        onClick = app::showHelp)
+}
+
 @Composable
 private fun TopChrome(app: AppState, cutout: Clearance) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            // Taller and darker than the bar itself, so the buttons read over any picture; the
-            // feeds have already moved down out of the way.
-            .background(
-                Brush.verticalGradient(
-                    0f to Color.Black.copy(alpha = 0.92f),
-                    0.55f to Color.Black.copy(alpha = 0.6f),
-                    1f to Color.Transparent,
-                )
+    val compact = ChromeLayoutPolicy.compact(
+        LocalConfiguration.current.screenWidthDp.toFloat(), LocalDensity.current.fontScale)
+    val chromeModifier = Modifier
+        .fillMaxWidth()
+        .background(
+            Brush.verticalGradient(
+                0f to Color.Black.copy(alpha = 0.92f),
+                0.55f to Color.Black.copy(alpha = 0.6f),
+                1f to Color.Transparent,
             )
-            .clear(cutout, 8.dp)
-            .padding(top = 6.dp, bottom = 34.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Glyph(Icons.Rounded.Close, "Stop watching", modifier = Modifier.helpAnchor(app, "close"), onClick = app::stopAll)
-        Text(
-            app.playingTitle,
-            style = Type.headline,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
         )
-        GoogleCastPlayerButton(app)
-        Glyph(if (app.arranging) Icons.Rounded.LockOpen else Icons.Rounded.Lock,
-            if (app.arranging) "Lock layout" else "Unlock to move and resize",
-            modifier = Modifier.helpAnchor(app, "lock"), onClick = app::toggleArranging)
-        if (app.singleDecoderFailure != null) Glyph(Icons.Rounded.Refresh, "Retry single decoder", onClick = app::retrySingleDecoder)
-        Glyph(Icons.Rounded.Add, "Add a feed", modifier = Modifier.helpAnchor(app, "add")) { app.openPickerForPlaying() }
-        if (app.isTv || LocalConfiguration.current.screenWidthDp > LocalConfiguration.current.screenHeightDp) {
-            Row(
-                Modifier
-                    .helpAnchor(app, "layout")
-                    .pressable { app.layoutSheetOpen = true; app.showChrome() }
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Ink.surfaceHigh.copy(alpha = 0.72f))
-                    .padding(horizontal = 10.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Icon(Icons.Rounded.GridView, contentDescription = "Layout", tint = Ink.primary, modifier = Modifier.size(20.dp))
-                Text("Layout", style = Type.subhead.copy(color = Ink.primary))
+        .clear(cutout, 8.dp)
+        .padding(top = 6.dp, bottom = 24.dp)
+
+    if (compact) {
+        Column(chromeModifier) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Glyph(Icons.Rounded.Close, "Stop watching",
+                    modifier = Modifier.helpAnchor(app, "close"), onClick = app::stopAll)
+                Text(app.playingTitle, style = Type.headline, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
+                GoogleCastPlayerButton(app)
+                Glyph(if (app.arranging) Icons.Rounded.LockOpen else Icons.Rounded.Lock,
+                    if (app.arranging) "Lock layout" else "Unlock to move and resize",
+                    modifier = Modifier.helpAnchor(app, "lock"), onClick = app::toggleArranging)
+                Glyph(Icons.Rounded.Add, "Add a feed",
+                    modifier = Modifier.helpAnchor(app, "add")) { app.openPickerForPlaying() }
             }
-        } else {
-            Glyph(Icons.Rounded.GridView, "Layout: ${app.layoutMode.label}", modifier = Modifier.helpAnchor(app, "layout")) { app.layoutSheetOpen = true; app.showChrome() }
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TopChromeExtraActions(app, compact = true)
+            }
         }
-        if (app.timing != null) Glyph(Icons.Rounded.Headset, if (app.radioOpen) "Hide team radio" else "Team radio", modifier = Modifier.helpAnchor(app, "radio-button"), onClick = app::toggleRadio)
-        if (app.timing?.laps?.isNotEmpty() == true && !app.laptopActive) Glyph(Icons.Rounded.FormatListNumbered, if (app.towerOpen) "Hide timing tower" else "Show timing tower", onClick = app::toggleTower)
-        if (app.timing != null || app.mapStatus != null) Glyph(Icons.Rounded.Map, "Track map", modifier = Modifier.helpAnchor(app, "map")) { app.mapSheetOpen = true }
-        if (!app.isTv) Glyph(Icons.Rounded.HelpOutline, "What everything does", 22, onClick = app::showHelp)
+    } else {
+        Row(chromeModifier, verticalAlignment = Alignment.CenterVertically) {
+            Glyph(Icons.Rounded.Close, "Stop watching",
+                modifier = Modifier.helpAnchor(app, "close"), onClick = app::stopAll)
+            Text(app.playingTitle, style = Type.headline, maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
+            GoogleCastPlayerButton(app)
+            Glyph(if (app.arranging) Icons.Rounded.LockOpen else Icons.Rounded.Lock,
+                if (app.arranging) "Lock layout" else "Unlock to move and resize",
+                modifier = Modifier.helpAnchor(app, "lock"), onClick = app::toggleArranging)
+            if (app.singleDecoderFailure != null) {
+                Glyph(Icons.Rounded.Refresh, "Retry single decoder", onClick = app::retrySingleDecoder)
+            }
+            Glyph(Icons.Rounded.Add, "Add a feed",
+                modifier = Modifier.helpAnchor(app, "add")) { app.openPickerForPlaying() }
+            TopChromeExtraActions(app, compact = false)
+        }
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun BottomChrome(app: AppState, cutout: Clearance) {
     var scrubbing by remember { mutableStateOf<Float?>(null) }
@@ -821,35 +887,67 @@ private fun BottomChrome(app: AppState, cutout: Clearance) {
                 )
             }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            val shown = scrubbing?.let { (it * duration).toLong() } ?: app.positionMs
-            val behind = (duration - shown).coerceAtLeast(0)
+        val shown = scrubbing?.let { (it * duration).toLong() } ?: app.positionMs
+        val behind = (duration - shown).coerceAtLeast(0)
+        val compact = ChromeLayoutPolicy.compact(
+            LocalConfiguration.current.screenWidthDp.toFloat(), LocalDensity.current.fontScale)
+        val progress: @Composable () -> Unit = {
             when {
-                // Within a few seconds of the edge counts as live: the player itself sits a little back.
                 app.isLive && (duration <= 0 || behind < LIVE_EDGE_MS) -> LiveMark()
-                app.isLive -> Text("−" + clock(behind) + " behind live", style = Type.footnote.copy(color = Ink.primary))
+                app.isLive -> Text("−" + clock(behind) + " behind live",
+                    style = Type.footnote.copy(color = Ink.primary))
                 else -> Text(clock(shown), style = Type.footnote.copy(color = Ink.primary))
             }
-            Spacer(Modifier.weight(1f))
-            Glyph(Icons.Rounded.Replay10, "Back 10 seconds", 28) { app.skip(-10_000) }
-            Spacer(Modifier.width(12.dp))
-            Glyph(if (app.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, if (app.playing) "Pause" else "Play", 36, Modifier.focusRequester(playButton), onClick = app::togglePlay)
-            Spacer(Modifier.width(12.dp))
-            Glyph(Icons.Rounded.Forward10, "Forward 10 seconds", 28) { app.skip(10_000) }
-            Spacer(Modifier.weight(1f))
+        }
+        val remaining: @Composable () -> Unit = {
             if (app.isLive) {
-                Text("Go live", style = Type.footnote.copy(color = Ink.primary), modifier = Modifier.pressable(onClick = app::goLive).padding(8.dp))
+                Text("Go live", style = Type.footnote.copy(color = Ink.primary),
+                    modifier = Modifier.pressable(onClick = app::goLive)
+                        .heightIn(min = 48.dp).padding(8.dp))
             } else {
-                Text("−" + clock((duration - shown).coerceAtLeast(0)), style = Type.footnote.copy(color = Ink.primary))
+                Text("−" + clock((duration - shown).coerceAtLeast(0)),
+                    style = Type.footnote.copy(color = Ink.primary))
             }
-            Glyph(if (app.mutedAll) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp, if (app.mutedAll) "Unmute" else "Mute all", modifier = Modifier.helpAnchor(app, "mute"), onClick = app::toggleMuteAll)
+        }
+        val transport: @Composable () -> Unit = {
+            Glyph(Icons.Rounded.Replay10, "Back 10 seconds", 28) { app.skip(-10_000) }
+            Glyph(if (app.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                if (app.playing) "Pause" else "Play", 36,
+                Modifier.focusRequester(playButton), onClick = app::togglePlay)
+            Glyph(Icons.Rounded.Forward10, "Forward 10 seconds", 28) { app.skip(10_000) }
+        }
+        if (compact) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                progress()
+                Spacer(Modifier.weight(1f))
+                remaining()
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically) {
+                transport()
+                Glyph(if (app.mutedAll) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp,
+                    if (app.mutedAll) "Unmute" else "Mute all",
+                    modifier = Modifier.helpAnchor(app, "mute"), onClick = app::toggleMuteAll)
+            }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                progress()
+                Spacer(Modifier.weight(1f))
+                transport()
+                Spacer(Modifier.weight(1f))
+                remaining()
+                Glyph(if (app.mutedAll) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp,
+                    if (app.mutedAll) "Unmute" else "Mute all",
+                    modifier = Modifier.helpAnchor(app, "mute"), onClick = app::toggleMuteAll)
+            }
         }
         // Video controls stay on the first row at narrow phone and Android TV widths.
         // Quality, speed and CC form a separate focusable row instead of overflowing it.
-        Row(
-            Modifier.fillMaxWidth(),
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             // The speed, always shown; bright when it isn't normal.
             Text(
@@ -2465,7 +2563,9 @@ private fun BufferingRing(feed: FeedPlayer, modifier: Modifier) {
             shown = false
         }
     }
-    val alpha by animateFloatAsState(if (shown) 1f else 0f, tween(Motion.SCREEN_MS, easing = EaseOut), label = "buffering")
+    val alpha by animateFloatAsState(if (shown) 1f else 0f,
+        tween(if (LocalReduceMotion.current) 0 else Motion.SCREEN_MS, easing = EaseOut),
+        label = "buffering")
     if (alpha > 0f) {
         androidx.compose.material3.CircularProgressIndicator(
             modifier = modifier.size(36.dp).graphicsLayer { this.alpha = alpha },

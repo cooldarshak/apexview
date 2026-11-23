@@ -10,7 +10,7 @@ import java.util.LinkedHashMap
  * selected feed. Sample bytes and IVs are zeroed when a window is replaced or the selection clears.
  * No media is decrypted, no DRM key is requested, and no independent-feed output is generated.
  *
- * The protected entry point supports two through six feeds. The original tile-selection POC
+ * The protected entry point supports two through eight authorized feeds. The original tile-selection POC
  * remains available; fullPictures preserves all source tiles for layout-aware TV playback.
  */
 internal object ProtectedHevcLiveComposition {
@@ -186,7 +186,7 @@ internal object ProtectedHevcLiveComposition {
         require(group.isNotBlank()) { "Protected composition group is required" }
         val selected = labels.distinct()
         require(selected.size in 2..8 && selected.all(String::isNotBlank)) {
-            "Protected composition supports two to six distinct feeds"
+            "Protected composition supports two to eight distinct feeds"
         }
         require(sourceTileIndices.size == selected.size &&
             sourceTileIndices.all { it >= 0 }) {
@@ -1143,5 +1143,4 @@ internal object ProtectedHevcLiveComposition {
     private const val MAX_INIT_BYTES = 2 * 1024 * 1024
     private const val MAX_FRAGMENT_BYTES = 8 * 1024 * 1024
     private const val MAX_SESSIONS = 2
-    private const val MAX_OUTPUT_HISTORY = 3
 }

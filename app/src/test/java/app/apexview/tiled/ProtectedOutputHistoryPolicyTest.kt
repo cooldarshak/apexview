@@ -12,7 +12,7 @@ class ProtectedOutputHistoryPolicyTest {
     @Test fun largeEightFeedAtlasHistoryUsesByteBudget() {
         val mib = 1024 * 1024
         assertEquals(1, ProtectedOutputHistoryPolicy.evictions(listOf(64 * mib, 64 * mib, 64 * mib)))
-        assertEquals(2, ProtectedOutputHistoryPolicy.evictions(listOf(40 * mib, 40 * mib, 40 * mib, 40 * mib)))
+        assertEquals(2, ProtectedOutputHistoryPolicy.evictions(listOf(40 * mib, 40 * mib, 40 * mib, 40 * mib, 40 * mib)))
     }
 
     @Test fun twoProtectedFragmentsRemainForStartupLead() {
