@@ -2,18 +2,20 @@
 
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** IN DEVELOPMENT. This is the sole active project plan. Historical
+**Status:** IN DEVELOPMENT. **Latest CI-verified code: Build 757**, commit `daf4195f9dbec051fe5dc29ed68507963e8a47f3` ([successful GitHub Actions run](https://github.com/cooldarshak/apexview/actions/runs/45109455065)). This is the sole active project plan. Historical
 performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
 
 
-## Post-756 coordinated P0.1/P0.2/P2.8 implementation (CI and hardware evidence pending)
+## Build 757 CI-verified P0.1/P0.2/P2.8 source improvements (hardware evidence pending)
 
-Retain the existing Build 756 baseline and single consolidated plan. This
-revision contains source changes, not a hardware acceptance certificate, and
-must not be named a successful build until GitHub Actions completes.
+Build 757 passed the applicable GitHub Actions unit tests, generated HEVC/CMAF
+checks, APK assembly and native RenderNode emulator instrumentation against
+the exact source commit `daf4195f9dbec051fe5dc29ed68507963e8a47f3`.
+That is CI verification, **not** a hardware acceptance certificate. The green
+Build 756 baseline and this sole consolidated plan are preserved.
 
 **P0.1:** Prevent `ArchiveDashSegmentSelector` from skipping the immediately
 next master segment when a secondary feed lacks the corresponding timestamp.
@@ -316,7 +318,7 @@ being treated as compiled. The device matrix and 16 release gates
 remain unchanged until real Samsung, TCL and Cast evidence exists.
 
 
-## Current implementation and acceptance ledger (Build 756 coding audit; CI pending)
+## Current implementation and acceptance ledger (Build 757, CI verified; hardware pending)
 
 This ledger supersedes the older historical 66% implementation snapshot
 farther down in this same document. Numeric values are explicitly
@@ -325,8 +327,8 @@ No numeric percentage closes a gate without evidence.
 
 | Gate | Coding estimate | Pending code/acceptance |
 | --- | ---: | --- |
-| P0.1 Segment priority | 85% | Foreground p95 and seek races |
-| P0.2 Bounded HEVC memory | 72% | Allocation/GC and buffer ownership under sustained real sessions |
+| P0.1 Segment priority | 87% | Foreground seek p95, cancellation races and device proof |
+| P0.2 Bounded HEVC memory | 75% | Sustained real-session allocation/GC, buffer ownership, cancellation and thermal evidence |
 | P0.3 Decoder presentation | 65% | Hardware coded crop, physical 50fps, SurfaceFlinger and lifecycle proof |
 | P0.4 Map and tower scheduling | 85% | TCL simultaneous overlay and UI frame deadlines |
 | P1.1 Smallest valid atlas | 85% | Extended-source physical decoder and quality compatibility |
@@ -339,14 +341,26 @@ No numeric percentage closes a gate without evidence.
 | P2.5 Android TV/D-pad | 80% | Physical TCL single and multifeed + overlays |
 | P2.6 Repeatable CI/benchmarks | 87% | Real before/after Perfetto, 10-minute endurance |
 | P2.7 Core architecture | 100% | Closed, preserve one-decoder invariant |
-| P2.8 Material 3 Expressive | 53% | Responsive complete product surface and accessibility |
+| P2.8 Material 3 Expressive | 58% | Entire browse/player/settings consistency, large-text accessibility, TCL D-pad/input latency and slow-frame evidence |
 | P2.9 F1 captions | 75% | Authorized actual cue rendering across native Cast and mobile/TV |
 
-**Coding estimate ~72%, remaining ~28%; this is provisional and must be
-re-scored against the implementation and full device matrix.**
+**Build 757 scoring reconciliation (estimates, not measured code coverage):**
+P0.1 **85 -> 87%** (+2 percentage points) for the tested no-segment-skip
+continuation fix. P0.2 **72 -> 75%** (+3) for bounded, one-copy
+unknown-length CMAF reads and boundary/overflow tests. P2.8
+**53 -> 58%** (+5) for the CI-tested adaptive lazy onboard picker.
+These modest increments reflect only those concrete source changes.
+The unweighted mean of the 16 estimates is now **73.75%, approximately
+74% coding implemented**, versus 73.125% in the prior printed table;
+the older headline ~72% was itself approximate. This is a provisional
+engineering estimate and must not be interpreted as an independently
+measured completion percentage or release score.
+
 **Strict full-release gates: 1/16 closed (6.25%); 15/16 open.**
-Build 756 code/CI cannot prove live S22/TCL playback, L1 secure output,
-native Cast, physical frame presentation or a signed release.
+Build 757 CI cannot prove S22/TCL playback, L1 secure output, native Cast,
+physical frame presentation, live timing, accessibility or a signed release.
+The P0.1, P0.2 and P2.8 coding blockers named above remain OPEN and
+none of the three workstreams can legitimately be called 100%.
 Do not publish a release or say 100% until every external/hardware gate
 has concrete passing trace/log/video evidence and an accepted issue.
 
