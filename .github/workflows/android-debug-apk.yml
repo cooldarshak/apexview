@@ -11,6 +11,10 @@ on:
       - feature/continuous-baked-scene-cast
       - feature/per-feed-adaptive-hevc-quality
       - feature/pitwall-performance-audit-plan
+    # Documentation-only changes must not spend an Android build run.
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   workflow_dispatch:
 
 permissions:
@@ -32,6 +36,13 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Enforce coordinated change contract before SDK/Gradle
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_pitwall_change_contract.py' -v
+          python3 scripts/pitwall_change_contract.py
 
       - name: Set up JDK 21 for Robolectric Android 16 tests
         uses: actions/setup-java@v4

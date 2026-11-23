@@ -2,11 +2,113 @@
 
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** IN DEVELOPMENT. **Latest fully green CI build before this coordinated review: 800**, commit `e7d00b57bb7b10661174e822d13c92f06d2c7a88` ([passing GitHub Actions](https://github.com/cooldarshak/apexview/actions/runs/45118199666)). The next coordinated source commit is subject to its own full CI and hardware gates. This is the sole active project plan. Historical
+**Status:** IN DEVELOPMENT. **Latest CI-verified baseline: Build 801**, commit `93cf7581bda337725b178a6fefd5f980bfb74699` ([passing GitHub Actions](https://github.com/cooldarshak/apexview/actions/runs/45119499727)). The coordinated quality-guard/ledger commit after that baseline requires its own exact-source CI; physical acceptance remains separate. This is the sole active project plan. Historical
 performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
+
+
+## MANDATORY HARD RULES: prevent recurrence of Builds 757–800 (effective after Build 801)
+
+These rules apply to every developer or assistant editing Pitwall. This is the ONLY active project plan. Older notes below are historical checkpoints, not permission to ignore these rules.
+
+1. **One coordinated change, one deliberate CI run.** Before any branch push, audit the full affected implementation and failure logs, prepare all call-site updates, real production wiring and matching tests together. Do NOT repeatedly push two- or three-line edits to discover compiler problems. Emergency hotfixes require a documented root cause and focused regression. A line-count quota is prohibited because it rewards fake code churn.
+2. **Pre-push quality barrier.** Run the best available source-level preflight and relevant Kotlin/Compose/Gradle compilation, regression tests, HEVC/CMAF fixture checks, Cast tests and Python checks BEFORE pushing wherever a capable environment is available. When pre-push compilation is unavailable, explicitly report the limitation: the first GitHub run is verification, not proof of an earlier local check. Never label untested source validated.
+3. **API migration is atomic.** A library, Kotlin, Android SDK, Gradle or Compose signature change must update imports, all call sites, related unit/instrumentation tests, dependency resolution and SDK provisioning in the SAME change. Check all branches of feature flags and all screen sizes, not just the edited UI element. The errors in 767–774 and 795–799 must not recur.
+4. **Production integration is mandatory.** Trace entry point -> feature selection -> service/model -> consumer -> lifecycle/cleanup and recovery for actual app usage, not only for a unit helper. For affected behavior, review mobile, TCL Android TV with Software DRM ON, Pitwall Cast, SINGLE/MULTIPLE decoder, clear HEVC and authorized Widevine HEVC L1/L3, captions, map+tower, seek, 1.5x, quality and device focus. Keep single-decoder truly one decoder. FIX, DON'T DELETE. No fallback hiding an error, no bypassing entitlements/DRM.
+5. **Required same-commit evidence.** Every production, build-toolchain or CI source change must update THIS plan and add/update at least one relevant automated regression test. The CI change-contract script enforces the co-change requirement, but a passing filename check does not prove the tests are meaningful. Reviewers must verify assertions cover the defect and the real call path. Only an explicit emergency exception in a PR review may waive this rule; no silent bypasses in CI.
+6. **Fail-fast and no failed APK publication.** If Python, Kotlin, generated HEVC/CMAF, Cast, packaging, signature or emulator instrumentation fails, stop dependent steps and do not publish a distributable APK. Do not run a second Gradle compile after a failed test. Existing workflow success guards and branch-run concurrency must remain tested. Concurrency cancels stale runs, not defective code.
+7. **No device-evidence substitution.** Synthetic HEVC, emulator RenderNode and source-string wiring tests are necessary but NOT proof of real 50fps SurfaceFlinger presentation, Widevine license/secure output, TCL playback, Samsung thermals, Cast timing, accessibility, or memory/GC p95. Keep all device/release gates open until their specific hardware logs, traces and tests pass.
+8. **Accurate progress and one plan.** Reconcile ALL 16 workstream estimates against committed source and CI evidence after a verified checkpoint. Report completed% and pending%=100-completed% separately from hardware gate status. Never mark 100% to satisfy a target. No parallel active plans; update the consolidated plan and archive historical results without erasing evidence.
+9. **No repeated failed-build loop.** After any CI failure, collect the full first-failure log, identify the single root cause plus other changed call sites, and build a coordinated correction before the next push. Do not rerun unchanged failing source to hide the defect. Do not dispatch Codemagic; use GitHub Actions only. Do not amend/rewrite accepted provenance or reset hardware gate counts.
+10. **Release safeguards survive refactors.** Preserve signed in-place upgrades, backup/restore of named layouts, all player/map/tower/onboard/caption/DPAD features, explicit auth/security controls and official release 16-gate evidence. A green debug APK is not an approved release.
+
+**Enforcement implemented with this review:** scripts/pitwall_change_contract.py checks a production-affecting commit for a same-commit change to this consolidated plan and an automated regression test; its own tests exercise the acceptance/rejection cases. The Android debug workflow runs that guard immediately after checkout and before Android SDK/Gradle setup. Docs-only push changes are ignored for automatic debug builds. The workflow already uses fail-fast APK assembly/publication and cancels superseded runs. The guard cannot replace a pre-push Kotlin compiler, human integration review or hardware acceptance.
+
+## Exact GitHub Actions failure ledger: Builds 757–800
+
+Audited historical totals: **44 runs, 10 passed, 34 failed.** These are CI snapshots, not 34 distinct playback bugs. The earliest observable failure in each run is attributed below; several runs also retried APK compilation after an earlier failure. The linked run collection is https://github.com/cooldarshak/apexview/actions .
+
+| Build | CI | Root-cause diagnosis from workflow log |
+| --- | --- | --- |
+| 757 | PASS | Baseline source, tests, APK, emulator passed |
+| 758 | PASS | CI passed |
+| 759 | PASS | CI passed |
+| 760 | FAIL | BrowseScreens.kt invalid composable call |
+| 761 | PASS | CI passed |
+| 762 | FAIL | ProtectedOutputHistoryPolicyTest wrong eviction count (expected 2, actual 1) |
+| 763 | PASS | CI passed |
+| 764 | FAIL | Python runtime p95 fixture expected 1 rather than 20 |
+| 765 | FAIL | Same p95 assertion; extra APK assembly attempted despite failure |
+| 766 | FAIL | Same p95 assertion and premature second assembly |
+| 767 | FAIL | SDK android-37 install unavailable; Material Slider API and codec nullable receiver compile errors |
+| 768 | FAIL | Same SDK, Material Slider and codec-capability compile errors |
+| 769 | FAIL | Same SDK, Material Slider and codec-capability compile errors |
+| 770 | FAIL | Android 37 verification; Material Slider and codec-capability compilation |
+| 771 | FAIL | Android 37 verification; Material Slider and codec-capability compilation |
+| 772 | FAIL | State-based Material Slider still passed obsolete valueRange arguments |
+| 773 | FAIL | State-based Material Slider valueRange compile errors |
+| 774 | FAIL | Kotlin Compose Gradle plugin version 2.3.0 could not be resolved |
+| 775 | FAIL | ExpressiveUiAccessibilityTest invalid onAllNodes/assert imports |
+| 776 | FAIL | Same Compose unit-test compilation errors |
+| 777 | FAIL | Same Compose unit-test compilation errors |
+| 778 | FAIL | Same Compose unit-test compilation errors |
+| 779 | FAIL | Same Compose unit-test compilation errors |
+| 780 | FAIL | Same Compose unit-test compilation errors |
+| 781 | PASS | Material 3 migration, tests, APK and emulator passed |
+| 782 | PASS | CI passed |
+| 783 | PASS | CI passed |
+| 784 | FAIL | ExpressiveUiAccessibilityTest invoked @Composable outside composable context |
+| 785 | FAIL | Python runtime analyzer fixture miscounted steady archive segments (2 versus 0) |
+| 786 | FAIL | Same invalid Compose accessibility-test invocation |
+| 787 | FAIL | Same invalid Compose accessibility-test invocation |
+| 788 | FAIL | Same invalid Compose accessibility-test invocation |
+| 789 | FAIL | Viewer.kt val reassignment compile error |
+| 790 | FAIL | Same Viewer.kt val reassignment |
+| 791 | FAIL | Same Viewer.kt val reassignment |
+| 792 | FAIL | Same Viewer.kt val reassignment at shifted source line |
+| 793 | FAIL | Same Viewer.kt val reassignment |
+| 794 | PASS | CI passed |
+| 795 | FAIL | SwitchRow signature change without updating Calendar/Viewer call sites |
+| 796 | FAIL | Same SwitchRow call-site mismatch |
+| 797 | FAIL | SwitchRow call sites and missing Sheets.kt semantics role import |
+| 798 | FAIL | Sheets.kt missing semantics role import |
+| 799 | FAIL | Same Sheets.kt missing semantics role import |
+| 800 | PASS | Full applicable CI, signed APK, HEVC/CMAF and 3 emulator tests passed |
+
+### Build 801 resolution audit and remaining risk
+
+- **CI blockers CLOSED at Build 801 source SHA 93cf7581bda337725b178a6fefd5f980bfb74699**: Kotlin/Compose source and unit-test compilation; changed API call sites; Gradle/plugin dependency resolution; Android target SDK preparation; Python runtime-analysis regressions; generated HEVC/CMAF decoding, signed debug APK assembly, emulator RenderNode (2 tests) and SurfaceDecoder (1 test). Both Build 800 and Build 801 ended GREEN. Evidence: https://github.com/cooldarshak/apexview/actions/runs/45119499727 . No failed historical run is retroactively GREEN.
+- **Existing CI publication defect CLOSED in 801**: APK assembly now requires prior-step success; distributable APK upload requires overall success; branch concurrency cancels superseded runs. This stops the second compile/publication behavior seen in failed 760–799 checkpoints.
+- **Production wiring PARTIALLY CHECKED in 801**: six new Python integration-presence assertions ran. They establish selected names/call paths remain in source but cannot prove runtime execution, DRM entitlement, device layout or receiver performance.
+- **Unverified runtime risks remain OPEN**: Archive prefetch failure suppression within warm-ahead runCatching (poor error visibility); possible repeated cache-eviction retries under contention; actual 1x/1.5x foreground p95; real 7/8-feed allocation/GC/thermal; protected L1/L3 output; TCL one/multi decoder and map+tower stability; Cast and physical caption parity. These are NOT claimed to be regression failures proved by CI.
+- **Instrumentation scope**: Build 801 ran 3 targeted emulator instrumentation tests, not the entire authored one-decoder and real device/Cast test matrix. No hardware gate may close from that result alone.
+- **Code estimates after exact-green 801 (provisional)**: P0.1=96%, P0.2=93%, P2.8=92%. These modest increases recognize passed 801 fixes/tests, NOT hardware acceptance. All three remain unfinished and their release gates remain OPEN. Overall unweighted 16-workstream code estimate = 77.5625%; strict release gates 1/16 closed.
+- **Required next coordinated implementation pass**: repair the still-visible recovery/observability and fairness risks if confirmed, close remaining production tests and wiring, validate full compatibility matrix and document objective evidence. No false 100% and no unsupported physical acceptance.
+
+### 16-workstream status at the Build 801 audited checkpoint
+
+| ID | Workstream | Coding complete | Coding pending | Release gate | Outstanding proof |
+| --- | --- | ---: | ---: | --- | --- |
+| P0.1 | Segment priority | 96% | 4% | Open | Foreground seek 1x/1.5x p95, cancellation contention/recovery on devices |
+| P0.2 | HEVC memory | 93% | 7% | Open | 10-minute allocation/GC and 7/8-feed clear/protected/Cast retention |
+| P0.3 | Video rendering | 65% | 35% | Open | Physical 50fps / decoder lifecycle and protected vs clear output |
+| P0.4 | Map and tower | 85% | 15% | Open | TCL simultaneous overlays, UI timing and feature parity |
+| P1.1 | HEVC atlas | 85% | 15% | Open | Real extended-source composition and quality compatibility |
+| P1.2 | Refresh matching | 60% | 40% | Open | Physical 50fps vsync / 1.5x frame pacing |
+| P1.3 | Quality and thermal | 55% | 45% | Open | Sustained adaptive quality and thermal performance |
+| P2.1 | Pitwall Cast | 85% | 15% | Open | Actual receiver clocks, driver motion, overlays and protected/baked parity |
+| P2.2 | Coordinator architecture | 25% | 75% | Open | AppState ownership/concurrency extraction, regression proof |
+| P2.3 | Release and updates | 88% | 12% | Open | Persistent production signer and verified upgrade both devices |
+| P2.4 | Security | 70% | 30% | Open | Auth, LAN transport boundaries, backup, redaction review |
+| P2.5 | Android TV | 80% | 20% | Open | TCL single/multiple plus map/tower and DPAD physical acceptance |
+| P2.6 | Testing and benchmarks | 87% | 13% | Open | Before/after Perfetto and endurance results |
+| P2.7 | Core architecture | 100% | 0% | Closed | Preserve established invariant |
+| P2.8 | Material 3 Expressive | 92% | 8% | Open | TCL focus, TalkBack, 200% font, reduced motion and cross-screen visuals |
+| P2.9 | Closed captions | 75% | 25% | Open | Actual F1 cue rendering mobile/TV/Cast clear/protected |
+
+**Totals:** coding complete 77.5625% (unweighted estimate); coding pending 22.4375%; release gates 1 of 16 closed, 15 open. Coding completion, CI acceptance and device sign-off are independent measures.
 
 
 ## Builds 757–799 failure audit and post-800 coordinated quality checkpoint
@@ -29,7 +131,7 @@ different playback defects:
   RenderNode instrumentation. The earlier red builds remain red in history,
   but their compile/test blockers were absent from Build 800.
 
-**Changes prepared as one post-800 coordinated commit, pending CI:**
+**Historical post-800 coordinated commit, verified by Build 801:**
 
 - P0.1/P0.2: speculative archive warming now ensures a CMAF segment is cached
   without allocating another full CMAF fragment only to discard it. Foreground
@@ -46,14 +148,12 @@ different playback defects:
   orphaned P0.1/P0.2/P2.8 production policies. This is an integrity check,
   not a replacement for device runtime proof.
 
-**Progress accounting at verified Build 800:** P0.1 95%, P0.2 91%, P2.8 90%
-(code estimates, not 100%). The next exact-source CI may support a *provisional*
-96%, 93%, 92% after all tests pass; do not award these increases on red CI.
+**Historical Build 800 progress accounting:** P0.1 95%, P0.2 91%, P2.8 90%. Build 801 passed exact-source CI, so the current authoritative coding estimates above are now 96%, 93%, 92%. The previous percentages are retained as history.
 No untested phone, TCL TV, L1/L3 Widevine or Pitwall Cast performance is signed
 off by these changes. **Strict release gates remain 1/16 closed.** Hardware
 seek p95, measured HEVC allocations and UI/TCL remote/Cast parity remain open.
 
-## Follow-up source audit: selector hot path, CMAF wiping, settings choices (CI pending)
+## Historical follow-up source audit: selector hot path, CMAF wiping, settings choices (CI passed in 801)
 
 - **P0.1**: normal continuation now chooses one chronological next segment
   in linear time without sorting every master archive candidate at each
@@ -67,11 +167,9 @@ seek p95, measured HEVC allocations and UI/TCL remote/Cast parity remain open.
   and selected state for TalkBack and DPAD, not just a coloured background.
   Compose regression checks the radio roles and one click target per row.
 
-**Percentages remain 95%, 91%, 90% respectively until exact-source CI
-is green; release acceptance remains 1/16.** Continue hardware p95,
-GC/allocation and accessibility/remote acceptance separately.
+**At that historical pre-801 checkpoint the estimates were 95%, 91%, 90%.** Build 801 CI subsequently passed; use the updated authoritative ledger at the top (96%, 93%, 92%). Release acceptance remains 1/16; hardware p95, GC and accessibility/remote acceptance remain separate.
 
-## P0.1 single-flight observer failure isolation (CI pending)
+## Historical P0.1 single-flight observer failure isolation (CI passed in 801)
 
 The archive shared-segment coordinator now completes and unregisters a
 producer flight if its registration observer fails, rather than leaving
@@ -79,9 +177,7 @@ foreground joiners blocked forever on an unresolved future. A failing
 joiner's observer does not cancel a healthy shared producer. Two JVM
 regression tests cover recovery and the active-joiner exception case.
 
-**Progress accounting:** keep P0.1 at the last CI-validated 95% until
-this exact source change passes CI; P0.2 remains 91% and P2.8 remains
-90%. This resolves a discrete concurrency failure mode but does not
+**Historical progress accounting before Build 801:** P0.1 95%, P0.2 91%, P2.8 90%. Build 801 passed; use the latest 96%, 93%, 92% provisional coding estimates at the top. This resolves a discrete concurrency failure mode but does not
 replace measured physical-device seek p95 or the full coding/device
 acceptance matrix. Latest branch CI must be evaluated independently.
 
@@ -472,51 +568,35 @@ being treated as compiled. The device matrix and 16 release gates
 remain unchanged until real Samsung, TCL and Cast evidence exists.
 
 
-## Current implementation and acceptance ledger (Build 781 green, later CI pending)
+## Current implementation and acceptance ledger (Build 801 green; post-801 guard CI pending)
 
 This ledger supersedes the older historical 66% implementation snapshot
 farther down in this same document. Numeric values are explicitly
 **engineering estimates**, not code coverage or verified release scores.
 No numeric percentage closes a gate without evidence.
 
-| Gate | Coding estimate | Pending code/acceptance |
+| Gate | Coding estimate | Pending coding/acceptance |
 | --- | ---: | --- |
-| P0.1 Segment priority | 95% | Real device archive foreground seek p95 and 1x/1.5x cancellation priority proof |
-| P0.2 Bounded HEVC memory | 91% | Latest telemetry CI plus real clear/protected/Cast 10-minute allocation/GC and 7/8-feed peak memory evidence |
-| P0.3 Decoder presentation | 65% | Hardware coded crop, physical 50fps, SurfaceFlinger and lifecycle proof |
-| P0.4 Map and tower scheduling | 85% | TCL simultaneous overlay and UI frame deadlines |
-| P1.1 Smallest valid atlas | 85% | Extended-source physical decoder and quality compatibility |
-| P1.2 Refresh matching | 60% | Real 50fps, display mode and 1.5x acceptance |
-| P1.3 Quality and thermal | 55% | Sustained 7/8-feed quality/thermal stability |
-| P2.1 Pitwall Cast parity | 85% | Receiver car/tower freshness and protected/baked hardware evidence |
-| P2.2 Coordinator extraction | 25% | Ownership, concurrency and AppState decomposition |
-| P2.3 Official signing/updates | 88% | Real signed production candidate, upgrade on both devices |
-| P2.4 Authorization/security | 70% | Auth, HTTP LAN scoping, backup and redaction audits |
-| P2.5 Android TV/D-pad | 80% | Physical TCL single and multifeed + overlays |
-| P2.6 Repeatable CI/benchmarks | 87% | Real before/after Perfetto, 10-minute endurance |
-| P2.7 Core architecture | 100% | Closed, preserve one-decoder invariant |
-| P2.8 Material 3 Expressive | 90% | Later TV slider regression CI, physical focus/200% font, TalkBack, cross-screen visual and frame-time evidence |
-| P2.9 F1 captions | 75% | Authorized actual cue rendering across native Cast and mobile/TV |
+| P0.1 Segment priority | 96% | undefined |
+| P0.2 HEVC memory | 93% | undefined |
+| P0.3 Video rendering | 65% | undefined |
+| P0.4 Map and tower | 85% | undefined |
+| P1.1 HEVC atlas | 85% | undefined |
+| P1.2 Refresh matching | 60% | undefined |
+| P1.3 Quality and thermal | 55% | undefined |
+| P2.1 Pitwall Cast | 85% | undefined |
+| P2.2 Coordinator architecture | 25% | undefined |
+| P2.3 Release and updates | 88% | undefined |
+| P2.4 Security | 70% | undefined |
+| P2.5 Android TV | 80% | undefined |
+| P2.6 Testing and benchmarks | 87% | undefined |
+| P2.7 Core architecture | 100% | undefined |
+| P2.8 Material 3 Expressive | 92% | undefined |
+| P2.9 Closed captions | 75% | undefined |
 
-**Updated scoring (engineering estimates, not measured code coverage):**
-Build 757 baseline P0.1=87%, P0.2=75%, P2.8=58%.
-After green Builds 759, 761, 763 and now **781** (official Material 3 1.5
-migration, Kotlin/JVM/HEVC/render-node verified), plus later unverified
-instrumentation/failure-safety improvements, P0.1=**95%** (+8 points since
-Build 757), P0.2=**91%** (+16), P2.8=**90%** (+32). The unweighted
-16-workstream coding mean is **77.25%** versus 73.75% after Build 757.
-These increments reflect actual tested source improvements and explicitly
-flag later unverified commits; any latest-CI failures must be repaired
-before further credits. These values are
-provisional, not release scores, code coverage or proven performance.
+**Current Build 801 coding estimate: 77.5625% complete, 22.4375% pending (unweighted average of the 16 entries).** P0.1 moved from 95% to 96%, P0.2 from 91% to 93%, and P2.8 from 90% to 92% solely after Build 801 passed its applicable CI tests. These are provisional engineering estimates, not line coverage, device measurements, or 100% sign-off.
 
-**Strict full-release gates: 1/16 closed (6.25%); 15/16 open.**
-Green Builds 759/761/763/781 cannot prove S22/TCL playback, L1 secure output, native Cast,
-physical frame presentation, live timing, accessibility or a signed release.
-The P0.1, P0.2 and P2.8 coding blockers named above remain OPEN and
-none of the three workstreams can legitimately be called 100%.
-Do not publish a release or say 100% until every external/hardware gate
-has concrete passing trace/log/video evidence and an accepted issue.
+**Strict full-release gates remain 1/16 closed (6.25%); 15/16 OPEN.** CI cannot prove Samsung S22/TCL hardware playback, Widevine L1/L3, Cast, physical frame presentation, timing overlays, captions or accessibility. The detailed Build 757–800 failure audit and enforceable quality contract are at the beginning of this same plan.
 
 ## Build 747 bounded-allocation exact 50fps HEVC alignment
 
