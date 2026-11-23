@@ -616,12 +616,17 @@ internal object ProtectedHevcLiveComposition {
     
             // A real 96-sample F1 window may cross multiple IDRs; duplicate
             // numeric POCs in distinct epochs must not be called ambiguous.
-            val epochCounts = currentPictures.groupingBy { it.irapEpochOrdinal }.eachCount()
-            val duplicateEpochKeys = currentPictures.groupBy {
-                it.irapEpochOrdinal to it.picture.pictureOrderCount
-            }.count { it.value.size > 1 }
-            val rawDuplicatePocs = currentPictures.size -
-                currentPictures.map { it.picture.pictureOrderCount }.distinct().size
+            val epochCounts = linkedMapOf<Long, Int>()
+            val uniqueEpochPocs = HashSet<Pair<Long, Long>>(currentPictures.size)
+            val uniquePocs = HashSet<Long>(currentPictures.size)
+            var duplicateEpochKeys = 0
+            for (picture in currentPictures) {
+                val epoch = picture.irapEpochOrdinal
+                epochCounts[epoch] = (epochCounts[epoch] ?: 0) + 1
+                if (!uniqueEpochPocs.add(epoch to picture.picture.pictureOrderCount)) duplicateEpochKeys++
+                uniquePocs.add(picture.picture.pictureOrderCount)
+            }
+            val rawDuplicatePocs = currentPictures.size - uniquePocs.size
             android.util.Log.i("ApexviewSingleDecoder",
                 "REAL_PROTECTED_POC_EPOCHS feed=${state.label} samples=${currentPictures.size} " +
                     "epochs=${epochCounts.size} perEpoch=${epochCounts.values.joinToString(",")} " +
@@ -1060,9 +1065,13 @@ internal object ProtectedHevcLiveComposition {
                 alignmentOffsetsMillis = proof.offsetsByFeed.mapValues { it.value.offsetMillis }
             )
             session.outputHistory += newOutput
-            while (session.outputHistory.size > MAX_OUTPUT_HISTORY) {
-                session.outputHistory.removeAt(0).zero()
-            }
+            // History used to be limited only by a three-fragment count. Eight composed
+            // feeds make those fragments materially different in size; bound actual bytes
+            // while preserving the two-fragment minimum used by 1.5x startup prebuffering.
+            val evictions = ProtectedOutputHistoryPolicy.evictions(
+                session.outputHistory.map { it.mediaFragment.size }
+            )
+            repeat(evictions) { session.outputHistory.removeAt(0).zero() }
             session.outputSequenceNumber = Math.addExact(session.outputSequenceNumber, 1L)
             session.lastComposedMasterSequenceOrdinal =
                 newMatches.last().sampleEvidenceByFeed.getValue(masterFeedId).sequenceSampleOrdinal
@@ -1085,6 +1094,7 @@ internal object ProtectedHevcLiveComposition {
                 "fragmentWriteMs=$fragmentWriteElapsedMs " +
                 "feeds=${session.labels.size} sampleCount=${newOutput.sampleCount} " +
                 "outputBytes=${newOutput.mediaFragment.size} retainedSegments=${session.outputHistory.size} " +
+                "retainedBytes=${session.outputHistory.sumOf { it.mediaFragment.size.toLong() }} " +
                 "processAllocBytesDuringSegment=${allocated ?: -1L} processGcDuringSegment=${collections ?: -1L} " +
                 "protectedPayloadUnmodified=true")
         } finally {
@@ -1128,7 +1138,8 @@ internal object ProtectedHevcLiveComposition {
     private const val MIN_ALIGN_PICTURES = 5
     private const val MAX_FRAGMENT_SAMPLE_COUNT = 4096
     private const val MAX_PENDING_GROUPS = 2
-    private const val MAX_PENDING_FEEDS_PER_GROUP = 4
+    // Eight onboards can initialize before selection; retain all eight validated snapshots.
+    private const val MAX_PENDING_FEEDS_PER_GROUP = 8
     private const val MAX_INIT_BYTES = 2 * 1024 * 1024
     private const val MAX_FRAGMENT_BYTES = 8 * 1024 * 1024
     private const val MAX_SESSIONS = 2
