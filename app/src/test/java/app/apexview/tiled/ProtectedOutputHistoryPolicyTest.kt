@@ -17,7 +17,23 @@ class ProtectedOutputHistoryPolicyTest {
 
     @Test fun twoProtectedFragmentsRemainForStartupLead() {
         val mib = 1024 * 1024
-        assertEquals(0, ProtectedOutputHistoryPolicy.evictions(listOf(90 * mib, 90 * mib)))
+        assertEquals(0, ProtectedOutputHistoryPolicy.evictions(listOf(80 * mib, 80 * mib)))
+        assertThrows(IllegalArgumentException::class.java) {
+            ProtectedOutputHistoryPolicy.evictions(listOf(90 * mib, 90 * mib))
+        }
+    }
+
+    @Test fun rejectsSingleOversizedFragmentAndKeepsMostRecentValidTwo() {
+        val mib = 1024 * 1024
+        assertThrows(IllegalArgumentException::class.java) {
+            ProtectedOutputHistoryPolicy.evictions(listOf(161 * mib))
+        }
+        assertEquals(1, ProtectedOutputHistoryPolicy.evictions(
+            listOf(150 * mib, 40 * mib, 65 * mib)))
+        assertThrows(IllegalArgumentException::class.java) {
+            ProtectedOutputHistoryPolicy.evictions(
+                listOf(4 * mib, 120 * mib, 90 * mib))
+        }
     }
 
     @Test fun rejectsInvalidPayloadSizesWithoutMediaAccess() {

@@ -1065,13 +1065,19 @@ internal object ProtectedHevcLiveComposition {
                 height = outputSps.displayHeight,
                 alignmentOffsetsMillis = proof.offsetsByFeed.mapValues { it.value.offsetMillis }
             )
+            // Validate the new **unpublished** protected fragment together with the
+            // previously retained outputs. If an 8-feed bitrate cannot hold the
+            // minimum 1.5x startup lead inside our hard byte budget, reject without
+            // mutating the committed history or retaining another ciphertext array.
+            val evictions = try {
+                ProtectedOutputHistoryPolicy.evictions(
+                    session.outputHistory.map { it.mediaFragment.size } + newOutput.mediaFragment.size
+                )
+            } catch (failure: Throwable) {
+                newOutput.zero()
+                throw failure
+            }
             session.outputHistory += newOutput
-            // History used to be limited only by a three-fragment count. Eight composed
-            // feeds make those fragments materially different in size; bound actual bytes
-            // while preserving the two-fragment minimum used by 1.5x startup prebuffering.
-            val evictions = ProtectedOutputHistoryPolicy.evictions(
-                session.outputHistory.map { it.mediaFragment.size }
-            )
             repeat(evictions) { session.outputHistory.removeAt(0).zero() }
             session.outputSequenceNumber = Math.addExact(session.outputSequenceNumber, 1L)
             session.lastComposedMasterSequenceOrdinal =
