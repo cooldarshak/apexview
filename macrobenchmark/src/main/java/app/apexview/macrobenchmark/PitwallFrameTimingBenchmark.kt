@@ -2,7 +2,8 @@ package app.apexview.macrobenchmark
 
 import androidx.benchmark.macro.CompilationMode
 import androidx.benchmark.macro.FrameTimingMetric
-import androidx.benchmark.macro.MacrobenchmarkRule
+import androidx.benchmark.macro.junit4.MacrobenchmarkRule
+import androidx.benchmark.macro.ExperimentalMacrobenchmarkApi
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import org.junit.Assert.assertEquals
@@ -27,6 +28,9 @@ class PitwallFrameTimingBenchmark {
 
     private val targetPackage = "app.apexview_custom"
 
+    // CompilationMode.Ignore preserves the pre-authorized live playback rather than
+    // recompiling/restarting it between UI frame measurements.
+    @OptIn(ExperimentalMacrobenchmarkApi::class)
     private fun measure(operation: androidx.benchmark.macro.MacrobenchmarkScope.() -> Unit) =
         benchmarkRule.measureRepeated(
             packageName = targetPackage,

@@ -175,7 +175,7 @@ jobs:
           export APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR="$OUTPUT_PARAMETER_DIR"
           echo "APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR=$OUTPUT_PARAMETER_DIR" >> "$GITHUB_ENV"
           chmod +x ./gradlew
-          ./gradlew --no-daemon testDebugUnitTest
+          ./gradlew --no-daemon testDebugUnitTest :macrobenchmark:compileDebugKotlin :macrobenchmark:compileBenchmarkKotlin
           TEST_STATUS=$?
           if [ "$TEST_STATUS" -ne 0 ]; then
             echo "::group::Detailed JVM unit-test failures"
@@ -270,7 +270,7 @@ jobs:
         if: success()
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon assembleDebug assembleDebugAndroidTest :macrobenchmark:assembleBenchmark
+          ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleBenchmark :macrobenchmark:assembleBenchmark
 
       # This runner may not expose /dev/kvm (nested virtualization is not guaranteed).
       # Do not fail an otherwise successful APK build before the tests even start.
@@ -336,6 +336,18 @@ jobs:
         with:
           name: apexview-hevc-single-decoder-base-debug
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      # A physical benchmark needs BOTH a non-debuggable target and the runner APK.
+      # Upload both from the same exact-source CI run, never treat the debug app
+      # as a valid Macrobenchmark target.
+      - name: Upload non-debuggable benchmark target APK
+        if: success() && steps.assemble_apks.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pitwall-benchmark-target-apk
+          path: app/build/outputs/apk/benchmark/*.apk
           if-no-files-found: error
           retention-days: 14
 
