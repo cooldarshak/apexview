@@ -9,6 +9,30 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 749 real source-owned captions in composed clear and protected scenes
+
+Inspection found a genuine source-owner mismatch in P2.9:
+`FeedPlayer.startArchiveVodPlayback` merges the selected authorized HLS
+audio **and text** tracks with clear HEVC video inside the *single*
+composed ExoPlayer. `AppState.captionSourceFeed` instead allowed
+`protectedCompositionAudioMaster` to win as the caption owner, so
+`applyCaptionPreference` could enable text on an inactive source tile
+while disabling it on the actual composed host. Update the shared pure
+`CaptionPolicy.owner` contract with an explicit
+`clearArchiveComposed` flag. Clear composed video captions ALWAYS belong
+to the composed host player, including when a user changes the source
+audio feed; protected rolling Widevine video still gets captions from
+the authorized source audio master, preserving user-selected commentary.
+No extra MediaCodec, DRM session, relay or text URL is introduced.
+
+Tests cover both cases including an unavailable composed host and
+the original standalone/MULTIPLE modes. Cast receiver text still uses
+its own actually advertised Media3 tracks. Confirm real cues on
+S22, TCL native, authorized L1/L3, SINGLE/MULTIPLE, clear/protected
+and both Pitwall Cast modes before closing the captions gate.
+This code-level correction does not prove captions exist in every
+F1 media rendition or automatically close 16-gate hardware acceptance.
+
 ## Build 748 coordinated UI responsiveness, eight-feed layout persistence and release hardening
 
 The new 7/8-feed HEVC path exposed an actual saved-layout interoperability bug:

@@ -25,8 +25,16 @@ internal object CaptionPolicy {
     fun <T> owner(
         feeds: List<T>, audible: T?, composedHost: T?, composedAudioMaster: T?,
         compositionActive: Boolean,
-    ): T? = if (compositionActive) composedAudioMaster ?: composedHost
-        else audible ?: feeds.firstOrNull()
+        clearArchiveComposed: Boolean = false,
+    ): T? = when {
+        // Clear HEVC merges the source's native audio+TEXT into its one
+        // composed ExoPlayer. The original audio tile no longer owns cues.
+        compositionActive && clearArchiveComposed -> composedHost
+        // Protected rolling HEVC replaces only picture playback; the
+        // authorized audio owner continues to own its source text tracks.
+        compositionActive -> composedAudioMaster ?: composedHost
+        else -> audible ?: feeds.firstOrNull()
+    }
 
     fun tracks(formats: List<Pair<String?, String?>>): List<CaptionTrackOption> =
         formats.map { (rawLanguage, rawLabel) ->

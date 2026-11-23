@@ -30,10 +30,17 @@ class CaptionPolicyTest {
         // Standalone clear/Widevine, single source, multiple decoders.
         assertEquals("main", CaptionPolicy.owner(feeds, null, null, null, false))
         assertEquals("verstappen", CaptionPolicy.owner(feeds, "verstappen", null, null, false))
-        // Composed clear HEVC: the one Media3 host merges source audio/text.
+        // Clear HEVC: selecting a different audio camera remerges its text
+        // tracks into the one composed host, not the old source audio tile.
         assertEquals("main", CaptionPolicy.owner(feeds, "verstappen", "main", null, true))
+        assertEquals("main", CaptionPolicy.owner(
+            feeds, "verstappen", "main", "verstappen", true, clearArchiveComposed = true))
+        assertNull(CaptionPolicy.owner(
+            feeds, "verstappen", null, "verstappen", true, clearArchiveComposed = true))
         // Protected composed HEVC: the authorized audio master still owns text.
         assertEquals("leclerc", CaptionPolicy.owner(feeds, "verstappen", "main", "leclerc", true))
+        assertEquals("leclerc", CaptionPolicy.owner(
+            feeds, "verstappen", "main", "leclerc", true, clearArchiveComposed = false))
         // Switching the audible source during protected composition must
         // move the CC owner as well, without replacing the HEVC video host.
         assertEquals("verstappen", CaptionPolicy.owner(

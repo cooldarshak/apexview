@@ -101,6 +101,7 @@ class AppState(
             return CaptionPolicy.owner(
                 tiles, audible, protectedCompositionHost, textMaster,
                 protectedRollingSceneActive || singleDecoderSceneActive,
+                clearArchiveComposed = singleDecoderSceneActive,
             )?.feed
         }
 
