@@ -79,8 +79,8 @@ internal object HevcClearCmafGridComposer {
         val inspectorFragments: List<CmafBoxInspector.FragmentMetadata>,
         val nalUnits: List<HevcBitstream.NalUnit>,
         val annexBEquivalentBytes: Int,
-        val cmafInspectorMs: Long,
-        val nalInspectorMs: Long,
+        val cmafInspectorNanos: Long,
+        val nalInspectorNanos: Long,
     )
 
     /** A single clear source needs no stitching. Keep its bytes, after the same protection/syntax checks. */
@@ -211,8 +211,11 @@ internal object HevcClearCmafGridComposer {
                 parseCpuMs = ((parsedCpuAt - startedCpu) / 1_000_000L).coerceAtLeast(0L),
                 rewriteCpuMs = ((rewrittenCpuAt - parsedCpuAt) / 1_000_000L).coerceAtLeast(0L),
                 packageCpuMs = ((android.os.Debug.threadCpuTimeNanos() - rewrittenCpuAt) / 1_000_000L).coerceAtLeast(0L),
-                cmafInspectorMs = parsedFeeds.sumOf { it.cmafInspectorMs },
-                nalInspectorMs = parsedFeeds.sumOf { it.nalInspectorMs },
+                // Aggregate nanoseconds *before* converting to milliseconds.
+                // Flooring each of eight feeds separately hid sub-ms inspector
+                // work and falsely reported 0 for a nonzero total.
+                cmafInspectorMs = parsedFeeds.sumOf { it.cmafInspectorNanos } / 1_000_000L,
+                nalInspectorMs = parsedFeeds.sumOf { it.nalInspectorNanos } / 1_000_000L,
                 sourceAnnexBBytesAvoided = parsedFeeds.sumOf { it.annexBEquivalentBytes.toLong() },
             )
             committed = true
@@ -363,8 +366,8 @@ internal object HevcClearCmafGridComposer {
             }
             return ParsedFeed(track, config, rawParameterSets, fragments, metadata,
                 nalUnits, annexBEquivalentBytes,
-                cmafInspectorMs = (cmafInspectorNanos / 1_000_000L).coerceAtLeast(0L),
-                nalInspectorMs = ((System.nanoTime() - nalInspectStarted) / 1_000_000L).coerceAtLeast(0L))
+                cmafInspectorNanos = cmafInspectorNanos.coerceAtLeast(0L),
+                nalInspectorNanos = (System.nanoTime() - nalInspectStarted).coerceAtLeast(0L))
         } catch (error: Throwable) {
             nalUnits.forEach { it.bytes.fill(0) }
             throw error
