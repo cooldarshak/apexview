@@ -1,6 +1,6 @@
 import unittest
 
-from analyze_pitwall_runtime import app_session, summarize, nearest_rank_p95
+from analyze_pitwall_runtime import app_session, summarize, nearest_rank_p95, check_thresholds
 
 
 class RuntimeLogTests(unittest.TestCase):
@@ -58,6 +58,40 @@ class RuntimeLogTests(unittest.TestCase):
         self.assertEqual(3, report["protected_gc_median"])
         self.assertEqual(300, report["protected_compose_median_ms"])
         self.assertEqual(10000, report["protected_output_median_bytes"])
+
+    def test_log_gates_refuse_missing_evidence_and_invalid_budgets(self):
+        self.assertEqual(["archive_request_p95_ms: no observed evidence"],
+            check_thresholds({}, {"archive_request_p95_ms": 250}))
+        self.assertEqual(["covered_seconds: 0 below 600"],
+            check_thresholds({}, {}, minimum_covered_seconds=600))
+        with self.assertRaises(ValueError):
+            check_thresholds({}, {"archive_request_p95_ms": -1})
+        with self.assertRaises(ValueError):
+            check_thresholds({}, {}, minimum_covered_seconds=0)
+
+    def test_performance_budgets_check_p95_clear_and_protected_memory_without_guessing(self):
+        data = {
+            "archive_request_p95_ms": 175,
+            "archive_cache_peak_bytes": 96 * 1024 * 1024,
+            "protected_history_peak_bytes": 160 * 1024 * 1024,
+            "input_p95_bucket_max_ms": 21,
+            "animation_p95_bucket_max_ms": 17,
+            "covered_seconds": 610,
+        }
+        limits = {
+            "archive_request_p95_ms": 180,
+            "archive_cache_peak_bytes": 96 * 1024 * 1024,
+            "protected_history_peak_bytes": 160 * 1024 * 1024,
+            "input_p95_bucket_max_ms": 24,
+            "animation_p95_bucket_max_ms": 24,
+        }
+        self.assertEqual([], check_thresholds(data, limits, minimum_covered_seconds=600))
+        limits["archive_request_p95_ms"] = 170
+        limits["input_p95_bucket_max_ms"] = 16
+        issues = check_thresholds(data, limits, minimum_covered_seconds=600)
+        self.assertEqual(2, len(issues))
+        self.assertTrue(any("archive_request_p95_ms" in issue for issue in issues))
+        self.assertTrue(any("input_p95_bucket_max_ms" in issue for issue in issues))
 
     def test_p95_foreground_requests_count_hits_and_misses_without_bias(self):
         report = summarize("\n".join(

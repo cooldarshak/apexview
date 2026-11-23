@@ -167,10 +167,44 @@ def summarize(text):
     }
 
 
+def check_thresholds(report, ceilings, minimum_covered_seconds=None):
+    """Return failures: absent real-device evidence is never a passing gate."""
+    issues = []
+    for metric, maximum in ceilings.items():
+        if maximum is None:
+            continue
+        if maximum < 0:
+            raise ValueError("Negative budget: " + metric)
+        observed = report.get(metric)
+        if observed is None:
+            issues.append(f"{metric}: no observed evidence")
+        elif observed > maximum:
+            issues.append(f"{metric}: {observed} exceeds budget {maximum}")
+    if minimum_covered_seconds is not None:
+        if minimum_covered_seconds <= 0:
+            raise ValueError("Minimum capture seconds must be positive")
+        observed = report.get("covered_seconds", 0)
+        if observed < minimum_covered_seconds:
+            issues.append(f"covered_seconds: {observed} below {minimum_covered_seconds}")
+    return issues
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log", type=Path, help="Pitwall exported diagnostic text file")
     parser.add_argument("--build", help="For appended logs, use only this version, e.g. 1.0.573")
+    parser.add_argument("--max-archive-p95-ms", type=float,
+                        help="Fail when real foreground archive request p95 exceeds ms")
+    parser.add_argument("--max-archive-cache-mib", type=float,
+                        help="Fail when retained clear cache peak exceeds MiB")
+    parser.add_argument("--max-protected-history-mib", type=float,
+                        help="Fail when composed protected history peak exceeds MiB")
+    parser.add_argument("--max-ui-input-p95-ms", type=float,
+                        help="Fail when UI input p95 bucket upper bound exceeds ms")
+    parser.add_argument("--max-ui-animation-p95-ms", type=float,
+                        help="Fail when UI animation p95 bucket upper bound exceeds ms")
+    parser.add_argument("--min-covered-seconds", type=float,
+                        help="Require this many seconds of real observed performance frames")
     args = parser.parse_args()
     report = summarize(app_session(args.log.read_text(encoding="utf-8", errors="replace"), args.build))
     for label, value in report.items():
@@ -182,6 +216,28 @@ def main():
     print("CAUTION: the summary includes all modes in the selected session. "
           "Use steady-state intervals for valid scene-to-scene comparisons; "
           "only Perfetto verifies physical display frames.")
+
+
+    ceilings = {
+        "archive_request_p95_ms": args.max_archive_p95_ms,
+        "archive_cache_peak_bytes": (
+            args.max_archive_cache_mib * 1024 * 1024 if args.max_archive_cache_mib is not None else None
+        ),
+        "protected_history_peak_bytes": (
+            args.max_protected_history_mib * 1024 * 1024
+            if args.max_protected_history_mib is not None else None
+        ),
+        "input_p95_bucket_max_ms": args.max_ui_input_p95_ms,
+        "animation_p95_bucket_max_ms": args.max_ui_animation_p95_ms,
+    }
+    failures = check_thresholds(report, ceilings, args.min_covered_seconds)
+    if failures:
+        import sys
+        for failure in failures:
+            print("NOT ACCEPTED: " + failure, file=sys.stderr)
+        raise SystemExit(2)
+    if any(limit is not None for limit in ceilings.values()) or args.min_covered_seconds is not None:
+        print("LOG METRICS PASS. Physical decoder, DRM and SurfaceFlinger gates remain separate.")
 
 
 if __name__ == "__main__":
