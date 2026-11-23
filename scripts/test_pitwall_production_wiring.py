@@ -15,6 +15,18 @@ def contents(path):
 
 
 class ProductionWiringTests(unittest.TestCase):
+    def test_thermal_startup_notice_has_initialized_compose_message_state(self):
+        # Kotlin executes property initializers and init blocks in source order.
+        # Merely compiling a delegated property does not catch an early setter
+        # dereferencing its not-yet-initialized delegate when startup is warm.
+        app = contents("app/src/main/java/app/apexview/AppState.kt")
+        self.assertLess(app.index("var message by mutableStateOf<String?>(null)"),
+                        app.index("power?.addThermalStatusListener(context.mainExecutor, thermalListener)"))
+        self.assertLess(app.index("var message by mutableStateOf<String?>(null)"),
+                        app.index("VideoThermalBudget.startupNotice(thermal)?.let { message = it }"))
+        self.assertIn("VideoThermalBudget.transitionNotice(status, before)?.let { message = it }", app)
+        self.assertEqual(app.count("var message by mutableStateOf<String?>(null)"), 1)
+
     def test_main_and_cast_receiver_use_real_expressive_theme(self):
         activity = contents("app/src/main/java/app/apexview/MainActivity.kt")
         receiver = contents("app/src/main/java/app/apexview/cast/local/PitwallReceiverActivity.kt")

@@ -62,6 +62,12 @@ class AppState(
     private val chromeMajor: String,
     private val openLogin: () -> Unit,
 ) {
+    // Initialized before the thermal listener and its eager startup notice.
+    // An init block below must not access a Compose delegated property before
+    // the declaration that creates its delegate has executed.
+    var message by mutableStateOf<String?>(null)
+        private set
+
     private var api = F1TvApi(userAgent, chromeMajor)
     private var f1DashCaptureJob: Job? = null
     var singleDecoderDiagnostic by mutableStateOf<String?>(null)
@@ -1573,8 +1579,6 @@ class AppState(
     var tier by mutableStateOf("")
         private set
     var busy by mutableStateOf(false)
-        private set
-    var message by mutableStateOf<String?>(null)
         private set
     var pastedToken by mutableStateOf("")
 
