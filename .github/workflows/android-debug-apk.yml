@@ -38,20 +38,21 @@ jobs:
         with:
           packages: platform-tools
 
-      - name: Verify Android 37 compilation SDK and compatible signing tools
+      - name: Prepare Android 36 target platform and persistent APK-signing tools
         run: |
           set -euo pipefail
           sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
           test -n "$sdk"
-          if [ ! -s "$sdk/platforms/android-37/android.jar" ] ||
+          # sdkmanager's stable package index does not yet list android-37 on
+          # these runners. AGP resolves compileSdk 37 through its Gradle-managed
+          # platform installation. Validate the available target platform and
+          # both signature tools here; the compile/AAR-metadata tasks are the
+          # authoritative android-37 compile gate below.
+          if [ ! -s "$sdk/platforms/android-36/android.jar" ] ||
              [ ! -x "$sdk/build-tools/35.0.0/apksigner" ] ||
              [ ! -x "$sdk/build-tools/36.0.0/apksigner" ]; then
-            # Some images already contain all three packages but sdkmanager fails
-            # because the repository index is unavailable. Do not do a pointless
-            # network re-install if the exact validated SDK files already exist.
-            sdkmanager "platforms;android-37" "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0"
+            sdkmanager "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0"
           fi
-          test -s "$sdk/platforms/android-37/android.jar"
           test -s "$sdk/platforms/android-36/android.jar"
           test -x "$sdk/build-tools/35.0.0/apksigner"
           test -x "$sdk/build-tools/36.0.0/apksigner"
