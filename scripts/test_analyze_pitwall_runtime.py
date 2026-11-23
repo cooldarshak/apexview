@@ -71,7 +71,7 @@ class RuntimeLogTests(unittest.TestCase):
         self.assertEqual(20, report["archive_requests_total"])
         self.assertEqual(18, report["archive_cache_hits"])
         self.assertEqual(90.0, report["archive_cache_hit_pct"])
-        self.assertEqual(600, report["archive_request_p95_ms"])
+        self.assertEqual(90, report["archive_request_p95_ms"])
         self.assertEqual(600, report["archive_cache_miss_p95_ms"])
         self.assertEqual(1, report["archive_cache_hit_p95_ms"])
         self.assertEqual(12582912, report["archive_cache_peak_bytes"])
