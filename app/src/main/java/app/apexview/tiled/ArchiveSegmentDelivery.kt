@@ -74,8 +74,15 @@ internal enum class ArchiveWarmupStopReason { CANCELLED, FAILED }
 
 /** Classify without logging exception messages, URLs, tokens or Widevine information. */
 internal object ArchiveWarmupFailurePolicy {
-    fun classify(error: Exception, closed: Boolean, interrupted: Boolean): ArchiveWarmupStopReason =
-        if (closed || interrupted || error is ArchiveWarmupCancelledException ||
-            error is InterruptedException || error is java.io.InterruptedIOException)
-            ArchiveWarmupStopReason.CANCELLED else ArchiveWarmupStopReason.FAILED
+    fun classify(error: Exception, closed: Boolean, interrupted: Boolean): ArchiveWarmupStopReason {
+        if (closed || interrupted) return ArchiveWarmupStopReason.CANCELLED
+        val causes = generateSequence(error as Throwable) { it.cause }.take(8).toList()
+        // SocketTimeoutException inherits InterruptedIOException, but indicates a real
+        // transport failure and must remain visible to recovery and diagnostics.
+        if (causes.any { it is java.net.SocketTimeoutException }) return ArchiveWarmupStopReason.FAILED
+        return if (causes.any { it is ArchiveWarmupCancelledException ||
+                it is InterruptedException || it is java.util.concurrent.CancellationException ||
+                it is java.io.InterruptedIOException }) ArchiveWarmupStopReason.CANCELLED
+        else ArchiveWarmupStopReason.FAILED
+    }
 }

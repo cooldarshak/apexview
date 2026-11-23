@@ -102,6 +102,64 @@ class ArchiveSegmentDeliveryTest {
         }
     }
 
+    @Test fun foregroundJoinerRecoversFromCancelledPrefetchWithoutDuplicatingProduction() {
+        val lock = Any()
+        val cache = BoundedArchiveFragmentCache(maxEntries = 3, maxBytes = 64)
+        val started = CountDownLatch(1)
+        val registered = CountDownLatch(2)
+        val release = CountDownLatch(1)
+        val producers = AtomicInteger()
+        val recovered = AtomicInteger()
+        val delivery = ArchiveSegmentDelivery(
+            cache, lock, ArchiveSegmentSingleFlight { registered.countDown() }, {},
+            { key ->
+                if (producers.incrementAndGet() == 1) {
+                    started.countDown()
+                    check(release.await(5, TimeUnit.SECONDS))
+                    throw ArchiveWarmupCancelledException()
+                }
+                synchronized(lock) { cache.put(key, ByteArray(6) { 0x37 }) }
+            }, onCancelledWarmupRecovery = { recovered.incrementAndGet() }
+        )
+        val workers = Executors.newFixedThreadPool(2)
+        try {
+            val prefetch = workers.submit {
+                assertThrows(ArchiveWarmupCancelledException::class.java) {
+                    delivery.obtain(12, copyForCaller = false)
+                }
+            }
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            val foreground = workers.submit<ByteArray?> { delivery.obtain(12, copyForCaller = true) }
+            assertTrue(registered.await(2, TimeUnit.SECONDS))
+            release.countDown()
+            prefetch.get(2, TimeUnit.SECONDS)
+            val copy = requireNotNull(foreground.get(2, TimeUnit.SECONDS))
+            assertArrayEquals(ByteArray(6) { 0x37 }, copy)
+            assertEquals(2, producers.get())
+            assertEquals(1, recovered.get())
+            cache.clear()
+            assertArrayEquals(ByteArray(6) { 0x37 }, copy)
+            copy.fill(0)
+        } finally {
+            release.countDown()
+            workers.shutdownNow()
+        }
+    }
+
+    @Test fun socketTimeoutIsFailureButSeekInterruptIsCancellation() {
+        val timeout = java.net.SocketTimeoutException("network timed out")
+        assertEquals(ArchiveWarmupStopReason.FAILED,
+            ArchiveWarmupFailurePolicy.classify(timeout, false, false))
+        assertEquals(ArchiveWarmupStopReason.FAILED,
+            ArchiveWarmupFailurePolicy.classify(IOException("wrapped", timeout), false, false))
+        assertEquals(ArchiveWarmupStopReason.CANCELLED,
+            ArchiveWarmupFailurePolicy.classify(timeout, false, true))
+        assertEquals(ArchiveWarmupStopReason.CANCELLED,
+            ArchiveWarmupFailurePolicy.classify(java.io.InterruptedIOException("seek interrupted"), false, false))
+        assertEquals(ArchiveWarmupStopReason.CANCELLED,
+            ArchiveWarmupFailurePolicy.classify(IOException("wrapped", ArchiveWarmupCancelledException()), false, false))
+    }
+
     @Test fun failedWarmupIsVisibleAndDoesNotPoisonNextForegroundRequest() {
         val cache = BoundedArchiveFragmentCache(maxEntries = 3, maxBytes = 64)
         val calls = AtomicInteger()

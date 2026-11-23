@@ -208,10 +208,11 @@ private fun ArtCard(
     onClick: () -> Unit,
 ) {
     val config = LocalConfiguration.current
+    val portrait = config.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+    val fontScale = LocalDensity.current.fontScale
     val compactPortrait = BrowseLayoutPolicy.compactPortrait(
-        config.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT,
-        config.screenWidthDp.toFloat(),
-    ) && LocalDensity.current.fontScale < 1.75f
+        portrait, config.screenWidthDp.toFloat(),
+    ) && fontScale < 1.75f
     Column(
         Modifier
             .width(width)
@@ -246,10 +247,12 @@ private fun ArtCard(
         }
         Spacer(Modifier.height(if (compactPortrait) 7.dp else 8.dp))
         Text(title, style = Type.headline,
-            maxLines = if (compactPortrait) 2 else 1, overflow = TextOverflow.Ellipsis)
+            maxLines = BrowseLayoutPolicy.cardTitleMaxLines(portrait, config.screenWidthDp.toFloat()),
+            overflow = TextOverflow.Ellipsis)
         if (!subtitle.isNullOrEmpty()) {
             Text(subtitle, style = Type.footnote,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                maxLines = BrowseLayoutPolicy.cardSubtitleMaxLines(portrait, config.screenWidthDp.toFloat(), fontScale),
+                overflow = TextOverflow.Ellipsis)
         }
     }
 }

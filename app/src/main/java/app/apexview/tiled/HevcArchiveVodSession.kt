@@ -287,19 +287,24 @@ internal class HevcArchiveVodSession(
                 HevcTizenGridComposer.CellSelection(feed, row * columns + col,
                     (slot % atlas.columns) * columns + col, (slot / atlas.columns) * rows + row)
             } } }
-            val ownedInits = synchronized(cacheLock) { checkOpen(); inputs.map { it.initialization.copyOf() } }
-            val validated = validatedInitializations
-            val composingFeeds = inputs.mapIndexed { i, input -> HevcClearCmafGridComposer.Feed(
-                ownedInits[i], batches.map { it[i] }, input.label, validated[i]) }
-            checkOpen()
+            val ownedInits = synchronized(cacheLock) {
+                checkOpen()
+                OwnedArchiveInitializations.snapshot(inputs.map { it.initialization })
+            }
             val compositionStarted = System.nanoTime()
-            val composed = try { if (inputs.size == 1) HevcClearCmafGridComposer.passThrough(composingFeeds.single())
+            val composed = try {
+                // Every pre-composition exception, including feed setup and seek/close
+                // validation, must wipe owned initialization snapshots.
+                val composingFeeds = inputs.mapIndexed { i, input -> HevcClearCmafGridComposer.Feed(
+                    ownedInits.copies[i], batches.map { it[i] }, input.label, validatedInitializations[i]) }
+                checkOpen()
+                if (inputs.size == 1) HevcClearCmafGridComposer.passThrough(composingFeeds.single())
                 else HevcClearCmafGridComposer.compose(HevcClearCmafGridComposer.Request(
-                composingFeeds,
-                mixedAtlas?.grid ?: HevcOutputGridDimensions(columns * requireNotNull(atlas).columns, rows * atlas.rows), cells,
-                firstOutputSequenceNumber = anchor + 1L,
-                frameRateNumerator = (trackScale / divisor).toInt(), frameRateDenominator = (step / divisor).toInt()))
-            } finally { ownedInits.forEach { it.fill(0) } }
+                    composingFeeds,
+                    mixedAtlas?.grid ?: HevcOutputGridDimensions(columns * requireNotNull(atlas).columns, rows * atlas.rows), cells,
+                    firstOutputSequenceNumber = anchor + 1L,
+                    frameRateNumerator = (trackScale / divisor).toInt(), frameRateDenominator = (step / divisor).toInt()))
+            } finally { ownedInits.close() }
             var publishedFragment: ByteArray? = null
             try {
                 checkOpen()
@@ -391,12 +396,16 @@ internal class HevcArchiveVodSession(
                 composed.mediaFragments.forEach { if (it !== publishedFragment) it.fill(0) }
             }
         } catch (error: Exception) {
-            if (error is InterruptedException || Thread.currentThread().isInterrupted) {
+            val root = (error as? java.util.concurrent.ExecutionException)?.cause as? Exception ?: error
+            // A socket timeout is a network failure, not a seek cancellation:
+            // SocketTimeoutException extends InterruptedIOException.
+            if (Thread.currentThread().isInterrupted ||
+                root is InterruptedException || root is java.util.concurrent.CancellationException ||
+                (root is java.io.InterruptedIOException && root !is java.net.SocketTimeoutException)) {
                 Thread.currentThread().interrupt()
                 throw ArchiveWarmupCancelledException()
             }
             if (error is ProtectedArchiveBackendRequired) throw error
-            val root = (error as? java.util.concurrent.ExecutionException)?.cause as? Exception ?: error
             val message = if (root is IllegalArgumentException || root is IllegalStateException) root.message.orEmpty()
                 .replace(Regex("https?://\\S+"), "[URL]").take(220) else CaptureFailure.from(root).reason
             val retryable = root !is IllegalArgumentException && root !is IllegalStateException && CaptureFailure.from(root).retryable

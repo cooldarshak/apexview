@@ -53,6 +53,19 @@ class BrowseLayoutPolicyTest {
         assertEquals(28f, BrowseLayoutPolicy.sectionGapDp(false, 384f), 0f)
     }
 
+    @Test fun portraitLargeFontKeepsReadableTwoLineTitlesAndSubtitles() {
+        for (width in listOf(320f, 384f, 412f, 600f)) {
+            assertEquals(2, BrowseLayoutPolicy.cardTitleMaxLines(true, width))
+            assertEquals(1, BrowseLayoutPolicy.cardSubtitleMaxLines(true, width, 1f))
+            assertEquals(2, BrowseLayoutPolicy.cardSubtitleMaxLines(true, width, 1.75f))
+            assertEquals(2, BrowseLayoutPolicy.cardSubtitleMaxLines(true, width, 2f))
+            assertEquals(1, BrowseLayoutPolicy.cardTitleMaxLines(false, width))
+            assertEquals(1, BrowseLayoutPolicy.cardSubtitleMaxLines(false, width, 2f))
+        }
+        assertEquals(1, BrowseLayoutPolicy.cardTitleMaxLines(true, 800f))
+        assertEquals(1, BrowseLayoutPolicy.cardSubtitleMaxLines(true, 800f, 2f))
+    }
+
     @Test fun largerFontScaleEnlargesNavigationTouchRegion() {
         assertEquals(60f, BrowseLayoutPolicy.topBarHeightDp(1f), 0.01f)
         assertEquals(76f, BrowseLayoutPolicy.topBarHeightDp(2f), 0.01f)

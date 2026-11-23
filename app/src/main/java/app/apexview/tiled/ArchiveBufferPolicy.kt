@@ -98,6 +98,27 @@ internal data class CmafWindowTiming(val startUs: Long, val endUs: Long) {
     }
 }
 
+/**
+ * Source init snapshots have explicit ownership independent from session-owned originals.
+ * Construction zeros partial copies if a later copy fails; close zeros all snapshots even
+ * when a seek or validation error occurs before composition starts.
+ */
+internal class OwnedArchiveInitializations private constructor(val copies: List<ByteArray>) : AutoCloseable {
+    companion object {
+        fun snapshot(sources: List<ByteArray>): OwnedArchiveInitializations {
+            val copied = ArrayList<ByteArray>(sources.size)
+            try {
+                sources.forEach { copied += it.copyOf() }
+                return OwnedArchiveInitializations(copied)
+            } catch (failure: Throwable) {
+                copied.forEach { it.fill(0) }
+                throw failure
+            }
+        }
+    }
+    override fun close() { copies.forEach { it.fill(0) } }
+}
+
 /** Transient only: an interrupted prefetch must not fail an unrelated foreground seek. */
 internal class ArchiveWarmupCancelledException : IOException("Archive prefetch cancelled")
 

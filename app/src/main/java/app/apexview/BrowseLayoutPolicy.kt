@@ -8,6 +8,13 @@ internal object BrowseLayoutPolicy {
     fun compactPortrait(isPortrait: Boolean, widthDp: Float): Boolean =
         isPortrait && widthDp.isFinite() && widthDp in 1f..719.999f
 
+    /** Keep large-font portrait titles legible even when compact styling switches off. */
+    fun cardTitleMaxLines(portrait: Boolean, widthDp: Float): Int =
+        if (compactPortrait(portrait, widthDp)) 2 else 1
+
+    fun cardSubtitleMaxLines(portrait: Boolean, widthDp: Float, fontScale: Float): Int =
+        if (compactPortrait(portrait, widthDp) && fontScale.isFinite() && fontScale >= 1.75f) 2 else 1
+
     fun topBarHeightDp(fontScale: Float): Float {
         val scale = fontScale.takeIf { it.isFinite() }?.coerceIn(1f, 2f) ?: 1f
         return 60f + (scale - 1f) * 16f

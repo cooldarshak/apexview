@@ -54,9 +54,23 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("HOME_GEOMETRY portrait=", browse)
         self.assertIn("fun compactPortrait(isPortrait: Boolean, widthDp: Float)", policy)
         self.assertIn("fun portraitPhoneBalancesReadableCardsAndNextPreview()", unit)
+        self.assertIn("cardTitleMaxLines(portrait, config.screenWidthDp.toFloat())", browse)
+        self.assertIn("cardSubtitleMaxLines(portrait, config.screenWidthDp.toFloat(), fontScale)", browse)
         self.assertIn("available * (if (posters) 0.55f else 0.60f)", policy)
         self.assertIn("val reducedMotion = LocalReduceMotion.current", browse)
         self.assertIn(".crossfade(if (reducedMotion) 0 else Motion.BROWSE_FADE_MS)", browse)
+
+    def test_source_archive_cleanup_and_error_classification_are_wired(self):
+        session = contents("app/src/main/java/app/apexview/tiled/HevcArchiveVodSession.kt")
+        ownership = contents("app/src/main/java/app/apexview/tiled/ArchiveBufferPolicy.kt")
+        delivery = contents("app/src/main/java/app/apexview/tiled/ArchiveSegmentDelivery.kt")
+        self.assertIn("OwnedArchiveInitializations.snapshot(inputs.map { it.initialization })", session)
+        self.assertIn("} finally { ownedInits.close() }", session)
+        self.assertIn("internal class OwnedArchiveInitializations", ownership)
+        self.assertIn("root !is java.net.SocketTimeoutException", session)
+        self.assertIn("it is java.net.SocketTimeoutException", delivery)
+        self.assertIn("fun foregroundJoinerRecoversFromCancelledPrefetchWithoutDuplicatingProduction()",
+                      contents("app/src/test/java/app/apexview/tiled/ArchiveSegmentDeliveryTest.kt"))
 
     def test_real_window_metrics_include_frame_stage_p95_and_heap_snapshots(self):
         diagnostics = contents("app/src/main/java/app/apexview/WindowFrameDiagnostics.kt")
