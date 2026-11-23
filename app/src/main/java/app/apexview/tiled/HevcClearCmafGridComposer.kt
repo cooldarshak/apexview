@@ -155,8 +155,9 @@ internal object HevcClearCmafGridComposer {
             )
         )
 
+        val outputFragments = mutableListOf<ByteArray>()
+        var committed = false
         try {
-            val outputFragments = mutableListOf<ByteArray>()
             var pictureOffset = 0
             parsedFeeds.first().fragments.forEachIndexed { fragmentIndex, sourceFragment ->
                 checkNotInterrupted()
@@ -182,7 +183,7 @@ internal object HevcClearCmafGridComposer {
                 pictureOffset += count
             }
 
-            return Output(
+            val output = Output(
                 initializationSegment = init,
                 mediaFragments = outputFragments,
                 codedWidth = composed.codedWidth,
@@ -197,7 +198,16 @@ internal object HevcClearCmafGridComposer {
                 packageMs = (System.nanoTime() - rewrittenAt) / 1_000_000L,
                 sourceAnnexBBytesAvoided = parsedFeeds.sumOf { it.annexBEquivalentBytes.toLong() },
             )
+            committed = true
+            return output
         } finally {
+            // A failed/cancelled packaging pass may have already written valid CMAF
+            // fragments. They are not visible to a caller and must not keep copied
+            // clear HEVC payloads alive. Successful outputs transfer ownership.
+            if (!committed) {
+                init.fill(0)
+                outputFragments.forEach { it.fill(0) }
+            }
             // The final CMAF fragments own their copied bytes; no full rewritten HEVC
             // sample buffers need to survive this call, including on exception paths.
             composed.pictures.forEach { picture -> picture.vclNals.forEach { it.fill(0) } }
