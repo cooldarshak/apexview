@@ -572,7 +572,7 @@ fun ViewerScreen(app: AppState) {
             )
         }
 
-        val fade = motion
+        val fade = tween<Float>(Motion.CHROME_MS, easing = EaseOut)
         val topBand = with(density) { 64.dp.toPx() }
         val bottomBand = with(density) { 150.dp.toPx() }
         AnimatedVisibility(

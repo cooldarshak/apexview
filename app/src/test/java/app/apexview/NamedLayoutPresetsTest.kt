@@ -73,6 +73,17 @@ class NamedLayoutPresetsTest {
         assertFalse("Layout backup must contain no credentials", encoded.contains("ascendon"))
     }
 
+    @Test fun extendedEightAndTwentyFourFeedLayoutsRestoreWithBothOverlays() {
+        val eight = preset("pilot-008", "Eight feed", 8, 3840f, 2160f)
+        val twentyFour = preset("pilot-024", "Twenty-four clear", 24, 3840f, 2160f)
+        val restored = NamedLayoutPresets.parse(NamedLayoutPresets.encode(listOf(eight, twentyFour)))
+        assertEquals(listOf(8, 24), restored.map { it.feedCount })
+        assertEquals(24, restored.last().layout.boxes.size)
+        assertEquals("TRACK", JSONObject(restored.first().overlaySnapshot).getString("mapMode"))
+        assertTrue(JSONObject(restored.last().overlaySnapshot).getBoolean("towerOpen"))
+        assertTrue(NamedLayoutPresets.parse("x".repeat(1_000_001)).isEmpty())
+    }
+
     @Test fun rejectsUnsupportedFormatsAndMaliciousOrCorruptStoredEntries() {
         assertTrue(NamedLayoutPresets.parse(null).isEmpty())
         assertTrue(NamedLayoutPresets.parse("invalid json").isEmpty())
@@ -80,7 +91,7 @@ class NamedLayoutPresetsTest {
         assertFalse(NamedLayoutPresets.validName("\n"))
         assertFalse(NamedLayoutPresets.validName("A".repeat(49)))
         val valid = preset("pilot-123", "Good", 4, 1920f, 1080f)
-        val invalid = valid.toJson().put("feeds", 7)
+        val invalid = valid.toJson().put("feeds", 25)
         val text = JSONObject().put("version", 1).put("presets",
             org.json.JSONArray().put(invalid).put(valid.toJson())).toString()
         assertEquals(listOf("Good"), NamedLayoutPresets.parse(text).map { it.name })

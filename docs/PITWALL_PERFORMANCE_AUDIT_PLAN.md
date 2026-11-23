@@ -9,7 +9,45 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
-## Current implementation and acceptance ledger (Build 746 source candidate)
+## Build 748 coordinated UI responsiveness, eight-feed layout persistence and release hardening
+
+The new 7/8-feed HEVC path exposed an actual saved-layout interoperability bug:
+the credential-free `NamedLayoutPreset` parser only accepted 1..6 feeds.
+Allow all `AppState.MAX_SINGLE_DECODER_FEEDS=24` positions for clear
+archive and hardware-gated protected layouts. Preserve the same versioned
+storage format, every map and tower field and Android Auto Backup exclusion
+of F1 login; test real Android SharedPreferences round trips with eight and
+24 feed slots, refuse a 25-feed import and reject >1MB untrusted layout
+JSON before expensive parsing. Restoration after uninstall depends on
+Android's actual backup provider and must be physically verified.
+
+Give the player top/bottom controls a 140ms visibility fade and 90ms
+press feedback. Keep the 380ms *video geometry* transition separate
+to avoid reparenting/tearing an active protected SurfaceView. This
+does not constitute measured <100ms input-to-display response.
+
+The updater previously wrote mutable Compose `progress` from
+`Dispatchers.IO` on every **64KB** download read, which can
+invalidate a visible settings dialog hundreds of times per second.
+Throttle UI publication to 5% or 250ms intervals, always preserve
+initial/final status, and publish from Main. Retain checksum, app ID,
+signer identity, monotonic versionCode and Android package installer
+security gates. Add a pure sampling-policy regression test.
+
+Handle a late `TextureView` output-destroy callback after its GL
+HandlerThread exits by freeing its SurfaceTexture even when the
+handler refuses a posted release. Log rather than silently hiding
+the lifecycle failure. Record raw Android thermal status (-1 if
+unavailable) in the existing two-second player/receiver FrameMetrics
+reports to correlate real 50fps, GC and UI slow frames, without
+inventing thermal causes or degrading quality invisibly.
+
+The code and tests in this pass require green GitHub Actions before
+being treated as compiled. The device matrix and 16 release gates
+remain unchanged until real Samsung, TCL and Cast evidence exists.
+
+
+## Current implementation and acceptance ledger (Build 748 checkpoint)
 
 This ledger supersedes the older historical 66% implementation snapshot
 farther down in this same document. Numeric values are explicitly

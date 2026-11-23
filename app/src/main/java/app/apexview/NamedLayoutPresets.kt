@@ -32,7 +32,7 @@ internal data class NamedLayoutPreset(
                 it.length in 8..80 && it.all { c -> c.isLetterOrDigit() || c == '-' }
             } ?: return null
             val name = json.getString("name").trim().takeIf { NamedLayoutPresets.validName(it) } ?: return null
-            val feeds = json.getInt("feeds").takeIf { it in 1..6 } ?: return null
+            val feeds = json.getInt("feeds").takeIf { it in 1..AppState.MAX_SINGLE_DECODER_FEEDS } ?: return null
             val layout = SavedLayout.fromJson(json.getJSONObject("layout").toString())
                 ?.takeIf { it.boxes.size == feeds && it.aspect.isFinite() && it.aspect > 0f }
                 ?: return null
@@ -54,11 +54,14 @@ internal data class NamedLayoutPreset(
 
 internal object NamedLayoutPresets {
     const val MAX_ITEMS = 50
+    // Bound imported backup JSON on the UI path before allocating any models.
+    private const val MAX_BACKUP_CHARS = 1_000_000
     fun validName(name: String) = name.trim().length in 1..48 &&
         name.none { it == '\n' || it == '\r' || it.isISOControl() }
 
     fun parse(data: String?): List<NamedLayoutPreset> = runCatching {
-        val root = JSONObject(data ?: return emptyList())
+        if (data == null || data.length > MAX_BACKUP_CHARS) return emptyList()
+        val root = JSONObject(data)
         if (root.optInt("version") != 1) return emptyList()
         val array = root.getJSONArray("presets")
         (0 until minOf(array.length(), MAX_ITEMS)).mapNotNull { i ->
@@ -71,6 +74,6 @@ internal object NamedLayoutPresets {
         return JSONObject()
             .put("version", 1)
             .put("presets", JSONArray().apply { items.forEach { put(it.toJson()) } })
-            .toString()
+            .toString().also { require(it.length <= MAX_BACKUP_CHARS) }
     }
 }

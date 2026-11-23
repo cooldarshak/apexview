@@ -90,13 +90,15 @@ object Type {
 val EaseOut = CubicBezierEasing(0.23f, 1f, 0.32f, 1f)
 
 object Motion {
-    const val PRESS_MS = 120
+    const val PRESS_MS = 90
     const val SCREEN_MS = 380
     const val FADE_MS = 220
     // Browsing should respond quickly even when the video player runs at 50fps.
     // Keep the longer SCREEN_MS for protected SurfaceView/video geometry moves.
     const val BROWSE_NAV_MS = 240
     const val BROWSE_FADE_MS = 140
+    // Fast control feedback without changing protected video geometry motion.
+    const val CHROME_MS = 140
 }
 
 /**

@@ -1,6 +1,8 @@
 package app.apexview
 
 import android.os.Build
+import android.content.Context
+import android.os.PowerManager
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
@@ -11,6 +13,7 @@ import android.view.Window
 /** Summarizes window render times independently of the video decoder counters. */
 internal class WindowFrameDiagnostics(private val window: Window, private val role: String = "player") : AutoCloseable {
     private val thread = HandlerThread("PitwallFrameMetrics").apply { start() }
+    private val power = window.context.getSystemService(Context.POWER_SERVICE) as? PowerManager
     private var started = 0L
     private var frames = 0
     private var slow = 0
@@ -111,7 +114,10 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
                 "commandTotalMs=${command.totalMs.toInt()} commandMaxMs=${command.maxMs.toInt()} " +
                 "swapTotalMs=${swap.totalMs.toInt()} swapMaxMs=${swap.maxMs.toInt()} " +
                 "gpuTotalMs=${gpu.totalMs.toInt()} gpuMaxMs=${gpu.maxMs.toInt()} " +
-                "gpuAvailable=${Build.VERSION.SDK_INT >= 31}")
+                "gpuAvailable=${Build.VERSION.SDK_INT >= 31} " +
+                // Raw system thermal classification; -1 means unsupported,
+                // not an inferred cause of decoder or RenderThread stalls.
+                "thermalStatus=${runCatching { power?.currentThermalStatus }.getOrNull() ?: -1}")
             reset(now)
         }
     }

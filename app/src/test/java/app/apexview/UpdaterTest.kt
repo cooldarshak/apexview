@@ -31,6 +31,17 @@ class UpdaterTest {
     }
 
     @Test
+    fun updateProgressOnlyReportsMeaningfulChangesToCompose() {
+        assertTrue(UpdateProgressPolicy.shouldPublish(.01f, -1f, 0))
+        assertFalse(UpdateProgressPolicy.shouldPublish(.02f, .01f, 5))
+        assertTrue(UpdateProgressPolicy.shouldPublish(.06f, .01f, 5))
+        assertTrue(UpdateProgressPolicy.shouldPublish(.02f, .01f, 250))
+        assertTrue(UpdateProgressPolicy.shouldPublish(1f, .99f, 0))
+        assertFalse(UpdateProgressPolicy.shouldPublish(1f, 1f, 500))
+        assertFalse(UpdateProgressPolicy.shouldPublish(Float.NaN, 0f, 500))
+    }
+
+    @Test
     fun versionsCompareByNumberNotText() {
         assertTrue(Updater.isNewer("0.36", "0.35"))
         assertTrue(Updater.isNewer("0.100", "0.99"))

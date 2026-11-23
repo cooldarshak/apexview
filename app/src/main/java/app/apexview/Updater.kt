@@ -205,7 +205,7 @@ class Updater(context: Context, private val scope: CoroutineScope) {
         }
     }
 
-    private fun download(release: Release): File {
+    private suspend fun download(release: Release): File {
         // Every approved release publishes a checksum beside its signed APK.
         // Fail closed on absent/corrupted APKs before invoking Android's installer.
         val checksums = http.newCall(Request.Builder().url(release.checksumsUrl)
@@ -227,6 +227,8 @@ class Updater(context: Context, private val scope: CoroutineScope) {
                     file.outputStream().use { out ->
                         val buffer = ByteArray(64 * 1024)
                         var received = 0L
+                        var lastReportedFraction = -1f
+                        var lastReportedAtMs = 0L
                         while (true) {
                             val n = input.read(buffer)
                             if (n < 0) break
@@ -234,13 +236,24 @@ class Updater(context: Context, private val scope: CoroutineScope) {
                             check(received <= MAX_APK_BYTES) { "APK exceeds the update budget" }
                             digest.update(buffer, 0, n)
                             out.write(buffer, 0, n)
-                            progress = (received.toFloat() / total).coerceIn(0f, 1f)
+                            val fraction = (received.toFloat() / total).coerceIn(0f, 1f)
+                            val elapsedMs = android.os.SystemClock.elapsedRealtime()
+                            if (UpdateProgressPolicy.shouldPublish(
+                                    fraction, lastReportedFraction, elapsedMs - lastReportedAtMs
+                                )) {
+                                // Bound Compose snapshot updates and deliver on Main,
+                                // never for every 64KB byte-buffer read on IO.
+                                withContext(Dispatchers.Main.immediate) { progress = fraction }
+                                lastReportedFraction = fraction
+                                lastReportedAtMs = elapsedMs
+                            }
                         }
                         check(received == total) { "Incomplete APK download" }
                     }
                 }
                 val actual = digest.digest().joinToString("") { "%02x".format(it) }
                 check(expected == actual) { "APK SHA-256 does not match its release" }
+                withContext(Dispatchers.Main.immediate) { progress = 1f }
             }
             verifyPackageIdentity(file)
             return file

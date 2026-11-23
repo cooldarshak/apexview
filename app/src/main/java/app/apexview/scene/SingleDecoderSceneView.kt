@@ -360,7 +360,12 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         input?.let { player?.clearVideoSurface(it) }
         // GL owns the Surface reference until queued destruction releases it. Clearing it
         // here lost that reference before destroy() and leaked a codec output surface.
-        gl.post { destroy(); surface.release() }
+        if (!gl.post { destroy(); surface.release() }) {
+            // TextureView returns false: the app owns SurfaceTexture release
+            // even when the GL loop has already quit on a late lifecycle event.
+            surface.release()
+            Log.w("ApexviewSingleDecoder", "SCENE_OUTPUT_RELEASE_AFTER_GL_THREAD_EXIT")
+        }
         return false
     }
 
@@ -374,7 +379,11 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         player = null
         surfaceTextureListener = null
         val output = surfaceTexture
-        gl.post { destroy(); output?.release(); thread.quitSafely() }
+        if (!gl.post { destroy(); output?.release(); thread.quitSafely() }) {
+            output?.release()
+            thread.quitSafely()
+            Log.w("ApexviewSingleDecoder", "SCENE_GL_RELEASE_QUEUE_CLOSED")
+        }
     }
 
     private fun initialize(output: SurfaceTexture) {
