@@ -34,7 +34,10 @@ internal object ArchiveDashSegmentSelector {
                 }
             }
 
-        for (master in masterCandidates) {
+        // Only startup/seek selection may try other aligned earlier windows.
+        // Continuing across an unmatched fragment would skip HEVC references.
+        val eligible = if (previousStartUs == null) masterCandidates else masterCandidates.take(1)
+        for (master in eligible) {
             val matches = candidateWindows.drop(1).map { window ->
                 window.minByOrNull { abs(it.absoluteStartUs - master.absoluteStartUs) }
             }

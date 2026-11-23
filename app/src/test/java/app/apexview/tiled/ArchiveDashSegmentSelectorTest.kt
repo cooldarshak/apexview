@@ -66,6 +66,27 @@ class ArchiveDashSegmentSelectorTest {
         assertNull(selected)
     }
 
+    @Test
+    fun continuingCaptureNeverSkipsAnUnmatchedFragmentToReachALaterMatch() {
+        val first = listOf(candidate(10, 0), candidate(11, 1_000_000), candidate(12, 2_000_000))
+        val second = listOf(candidate(20, 0), candidate(22, 2_000_000))
+        assertNull(ArchiveDashSegmentSelector.selectAligned(
+            listOf(first, second), targetTimeUs = 2_000_000,
+            previousStartUs = 0, toleranceUs = 100_000, maximumLeadUs = 2_000_000
+        ))
+    }
+
+    @Test
+    fun initialArchiveSelectionMayUseAnOlderCompleteWindow() {
+        val first = listOf(candidate(10, 0), candidate(11, 1_000_000), candidate(12, 2_000_000))
+        val second = listOf(candidate(20, 0), candidate(22, 2_000_000))
+        val result = ArchiveDashSegmentSelector.selectAligned(
+            listOf(first, second), targetTimeUs = 1_100_000,
+            previousStartUs = null, toleranceUs = 100_000
+        )
+        assertEquals(listOf(10L, 20L), result?.map { it.number })
+    }
+
     private fun candidate(number: Long, absoluteStartUs: Long) =
         ArchiveDashSegmentSelector.Candidate(number, absoluteStartUs)
 }

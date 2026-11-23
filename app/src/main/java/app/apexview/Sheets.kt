@@ -5,6 +5,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -81,58 +83,83 @@ fun FeedPickerSheet(app: AppState, picker: FeedPicker) {
         // Over the viewer (adding a feed), the status bar stays hidden; while browsing it shows.
         KeepSystemBarsHidden(enabled = app.tiles.isNotEmpty() && !app.browsing)
         Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
-            Column(
-                Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)
-            ) {
-                Text(picker.title, style = Type.title2)
-                Text(
-                    picker.note ?: when {
-                        app.layoutMode == LayoutMode.TILE_TEST ->
-                            "Tile testing: select exactly two feeds from this session. Existing feeds are already selected. Unselect extras or add a second feed, then confirm."
-                        app.singleFeedPlan -> "Your F1 TV plan may only play one feed at a time. Watching several at once needs F1 TV Premium."
-                        app.tiles.isEmpty() -> "Pick up to ${app.feedSelectionLimit} feeds in ${app.settings.decoderMode.label.lowercase()} mode. You can switch feeds while watching."
-                        else -> "Feeds on screen are already picked. Unpick one to make room for another."
-                    },
-                    style = Type.footnote.copy(color = if (picker.note != null || app.singleFeedPlan) Ink.primary else Ink.secondary),
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-
+            // Eager FlowRow/verticalScroll used to compose all onboards
+            // even when they were off-screen. Keep the same picker actions,
+            // but virtualize the driver cards in keyed, adaptive lazy rows.
+            BoxWithConstraints(Modifier.weight(1f, fill = false).fillMaxWidth()) {
+                val columns = FeedPickerLayoutPolicy.columns(maxWidth.value)
                 val channels = picker.channels
-                when {
-                    picker.error != null -> Text(picker.error!!, style = Type.subhead, modifier = Modifier.padding(vertical = 24.dp))
-                    channels == null -> Text("Loading feeds…", style = Type.subhead, modifier = Modifier.padding(vertical = 24.dp))
-                    else -> {
-                        val broadcast = channels.filter { it.racingNumber == null }
-                        val onboards = channels.filter { it.racingNumber != null }
-
-                        if (broadcast.isNotEmpty()) {
-                            Text("Broadcast", style = Type.headline, modifier = Modifier.padding(top = 24.dp, bottom = 10.dp))
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                broadcast.forEach { channel ->
-                                    val (name, about) = describe(channel)
-                                    PickCard(app, picker, channel, Modifier.widthIn(min = 150.dp, max = 220.dp)) { onColor ->
-                                        Text(name, style = Type.headline.copy(color = onColor))
-                                        about?.let { Text(it, style = Type.footnote.copy(color = onColor.copy(alpha = 0.65f))) }
+                val broadcast = channels?.filter { it.racingNumber == null }.orEmpty()
+                val onboards = channels?.filter { it.racingNumber != null }.orEmpty()
+                val onboardRows = onboards.chunked(columns)
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    item(key = "picker-heading") { Text(picker.title, style = Type.title2) }
+                    item(key = "picker-help") {
+                        Text(
+                            picker.note ?: when {
+                                app.layoutMode == LayoutMode.TILE_TEST ->
+                                    "Tile testing: select exactly two feeds from this session. Existing feeds are already selected. Unselect extras or add a second feed, then confirm."
+                                app.singleFeedPlan -> "Your F1 TV plan may only play one feed at a time. Watching several at once needs F1 TV Premium."
+                                app.tiles.isEmpty() -> "Pick up to ${app.feedSelectionLimit} feeds in ${app.settings.decoderMode.label.lowercase()} mode. You can switch feeds while watching."
+                                else -> "Feeds on screen are already picked. Unpick one to make room for another."
+                            },
+                            style = Type.footnote.copy(color = if (picker.note != null || app.singleFeedPlan) Ink.primary else Ink.secondary),
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                    when {
+                        picker.error != null -> item(key = "picker-error") {
+                            Text(picker.error!!, style = Type.subhead, modifier = Modifier.padding(vertical = 24.dp))
+                        }
+                        channels == null -> item(key = "picker-loading") {
+                            Text("Loading feeds…", style = Type.subhead, modifier = Modifier.padding(vertical = 24.dp))
+                        }
+                        else -> {
+                            if (broadcast.isNotEmpty()) {
+                                item(key = "broadcast-heading") {
+                                    Text("Broadcast", style = Type.headline, modifier = Modifier.padding(top = 24.dp))
+                                }
+                                item(key = "broadcast-feeds") {
+                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        broadcast.forEach { channel ->
+                                            val (name, about) = describe(channel)
+                                            PickCard(app, picker, channel, Modifier.widthIn(min = 150.dp, max = 220.dp)) { onColor ->
+                                                Text(name, style = Type.headline.copy(color = onColor))
+                                                about?.let { Text(it, style = Type.footnote.copy(color = onColor.copy(alpha = 0.65f))) }
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        }
-                        if (onboards.isNotEmpty()) {
-                            Text("Onboards", style = Type.headline, modifier = Modifier.padding(top = 24.dp, bottom = 10.dp))
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                onboards.forEach { channel ->
-                                    PickCard(app, picker, channel, Modifier.width(104.dp)) { onColor ->
-                                        Text(
-                                            "${channel.racingNumber}",
-                                            style = Type.title1.copy(color = channel.teamColor?.let { Color(it) } ?: onColor),
-                                        )
-                                        Text(channel.tla ?: "", style = Type.headline.copy(color = onColor))
-                                        Text(channel.driverName ?: "", style = Type.caption.copy(color = onColor.copy(alpha = 0.65f)), maxLines = 1)
+                            if (onboardRows.isNotEmpty()) {
+                                item(key = "onboard-heading") {
+                                    Text("Onboards", style = Type.headline, modifier = Modifier.padding(top = 24.dp))
+                                }
+                                items(
+                                    count = onboardRows.size,
+                                    key = { i -> "onboard-row-${onboardRows[i].first().racingNumber}" },
+                                    contentType = { "onboard-row" },
+                                ) { i ->
+                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        onboardRows[i].forEach { channel ->
+                                            PickCard(app, picker, channel, Modifier.width(120.dp)) { onColor ->
+                                                Text(
+                                                    "${channel.racingNumber}",
+                                                    style = Type.title1.copy(color = channel.teamColor?.let { Color(it) } ?: onColor),
+                                                )
+                                                Text(channel.tla ?: "", style = Type.headline.copy(color = onColor))
+                                                Text(channel.driverName ?: "", style = Type.caption.copy(color = onColor.copy(alpha = 0.65f)), maxLines = 1)
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            item(key = "picker-bottom-space") { Spacer(Modifier.height(16.dp)) }
                         }
-                        Spacer(Modifier.height(16.dp))
                     }
                 }
             }

@@ -4,7 +4,6 @@ import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
-import java.io.ByteArrayOutputStream
 
 /** Bounded authorised reads only. Does not request keys or interpret licence endpoints. */
 internal class CmafHttpReader(private val factory: DataSource.Factory) {
@@ -14,6 +13,7 @@ internal class CmafHttpReader(private val factory: DataSource.Factory) {
         require(offset >= 0 && (length == C.LENGTH_UNSET.toLong() || length in 1..limit.toLong())) {
             "HLS byte range is invalid or exceeds its capture limit"
         }
+        require(limit > 0) { "CMAF capture budget must be positive" }
         val source = factory.createDataSource()
         try {
             val size = source.open(DataSpec.Builder().setUri(uri).setPosition(offset).setLength(length).build())
@@ -50,23 +50,58 @@ internal class CmafHttpReader(private val factory: DataSource.Factory) {
                     throw error
                 }
             }
-            val output = ByteArrayOutputStream()
-            val buffer = ByteArray(32 * 1024)
-            while (true) {
-                if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("CMAF read cancelled")
-                val count = source.read(buffer, 0, minOf(buffer.size, limit - output.size() + 1))
-                if (count == C.RESULT_END_OF_INPUT) break
-                // DataSource.read(nonzero length) must return bytes or EOF.
-                // A broken transport that repeatedly returns zero otherwise
-                // spins the IO thread forever and starves playback workers.
-                if (count == 0) throw PermanentCaptureException("CMAF data source made no progress")
-                if (output.size().toLong() + count > limit) throw PermanentCaptureException("CMAF response exceeds its capture limit")
-                output.write(buffer, 0, count)
+            // Unknown-length source: collect bounded chunks, then copy each
+            // byte once into the final response. No repeated full-buffer growth
+            // or duplicate ByteArrayOutputStream.toByteArray clone.
+            val chunks = ArrayList<ByteArray>()
+            var active: ByteArray? = null
+            var total = 0
+            var eof = false
+            try {
+                while (!eof) {
+                    // One-byte overflow probe even at an exact chunk/budget boundary.
+                    val capacity = minOf(32 * 1024L, limit.toLong() - total + 1L).toInt()
+                    val block = ByteArray(capacity)
+                    active = block
+                    var used = 0
+                    while (used < block.size) {
+                        if (Thread.currentThread().isInterrupted) {
+                            throw java.io.InterruptedIOException("CMAF read cancelled")
+                        }
+                        val count = source.read(block, used, block.size - used)
+                        if (count == C.RESULT_END_OF_INPUT) {
+                            eof = true
+                            break
+                        }
+                        if (count <= 0) {
+                            throw PermanentCaptureException("CMAF data source made no progress")
+                        }
+                        if (count > limit - total) {
+                            throw PermanentCaptureException("CMAF response exceeds its capture limit")
+                        }
+                        used += count
+                        total += count
+                    }
+                    if (used > 0) chunks.add(block) else block.fill(0)
+                    active = null
+                }
+                if (length != C.LENGTH_UNSET.toLong() && total.toLong() != length) {
+                    throw PermanentCaptureException("HLS byte-range response was truncated")
+                }
+                val complete = ByteArray(total)
+                var copied = 0
+                for (chunk in chunks) {
+                    val amount = minOf(chunk.size, total - copied)
+                    chunk.copyInto(complete, destinationOffset = copied, endIndex = amount)
+                    copied += amount
+                }
+                return Response(source.uri ?: uri, complete)
+            } finally {
+                // Clear transient ciphertext after both successful handoff and
+                // exceptions. Never clear the final caller-owned response.
+                active?.fill(0)
+                chunks.forEach { it.fill(0) }
             }
-            if (length != C.LENGTH_UNSET.toLong() && output.size().toLong() != length) {
-                throw PermanentCaptureException("HLS byte-range response was truncated")
-            }
-            return Response(source.uri ?: uri, output.toByteArray())
         } finally { runCatching { source.close() } }
     }
 }

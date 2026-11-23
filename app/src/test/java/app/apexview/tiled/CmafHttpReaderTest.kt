@@ -77,6 +77,22 @@ class CmafHttpReaderTest {
         }
     }
 
+    @Test fun unknownLengthAcceptsExactChunkBoundaryAndRejectsOneExtraByte() {
+        val exact = ByteArray(64 * 1024) { it.toByte() }
+        assertArrayEquals(exact, reader(exact, C.LENGTH_UNSET.toLong()).read(uri, exact.size).bytes)
+        assertThrows(PermanentCaptureException::class.java) {
+            reader(exact, C.LENGTH_UNSET.toLong()).read(uri, exact.size - 1)
+        }
+    }
+
+    @Test fun unknownLengthAllowsEmptyDataButRejectsOversizedUntrustedContent() {
+        assertEquals(0, reader(byteArrayOf(), C.LENGTH_UNSET.toLong()).read(uri, 1).bytes.size)
+        val tooLarge = ByteArray(96 * 1024) { (it * 3).toByte() }
+        assertThrows(PermanentCaptureException::class.java) {
+            reader(tooLarge, C.LENGTH_UNSET.toLong()).read(uri, 48 * 1024)
+        }
+    }
+
     @Test fun explicitRangeMustMatchReturnedBytesInBothTransferModes() {
         val bytes = byteArrayOf(1, 2, 3, 4, 5, 6)
         assertThrows(PermanentCaptureException::class.java) {

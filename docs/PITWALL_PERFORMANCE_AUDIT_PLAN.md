@@ -9,6 +9,42 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Post-756 coordinated P0.1/P0.2/P2.8 implementation (CI and hardware evidence pending)
+
+Retain the existing Build 756 baseline and single consolidated plan. This
+revision contains source changes, not a hardware acceptance certificate, and
+must not be named a successful build until GitHub Actions completes.
+
+**P0.1:** Prevent `ArchiveDashSegmentSelector` from skipping the immediately
+next master segment when a secondary feed lacks the corresponding timestamp.
+Continuing after the next unmatched segment could omit reference-dependent
+HEVC pictures. Startup/seek selection may still use an older fully aligned
+window. Add both positive and negative selector regression cases. Foreground
+seek p95 and cancellation-race device evidence remain outstanding.
+
+**P0.2:** Unknown-length Media3 CMAF I/O now uses bounded 32KB owned chunks
+and a single final copy, instead of geometric ByteArrayOutputStream growth plus
+a further full copy. The byte-budget overflow probe rejects one extra byte;
+no-progress, interruption, partial encrypted byte cleanup, authorized URL
+and existing known-length exact-copy handling are retained. Add exact-boundary,
+over-budget and empty-response DataSource regression tests. This reduces
+avoidable temporary copies in source, NOT proven device GC/thermal pressure.
+
+**P2.8:** The feed picker moved its eager full-driver FlowRow inside a
+verticalScroll column to a lazy, keyed per-row viewport with adaptive
+120dp onboard cards (1..8 columns across phone and TV), retaining broadcast,
+captioned name, selected state, existing watch-live/from-start commands and
+remote focus interaction. Add phone/TV width and 24-feed preservation tests.
+The wider settings/viewer accessibility and physical input-latency gate remain
+open. Preserve the Material 3 theme, native TV focus ring, no extra decoder
+and authorized clear/Widevine and Cast ownership.
+
+**Acceptance:** pending exact source CI, S22 Ultra/TCL 55C655 10-minute
+performance traces, 50fps presentation, 1x/1.5x, seeks, overlays, Cast,
+auth L1/L3, accessibility and official signer. These changes do not close
+any of the strict hardware gates. Keep 1/16 closed and avoid inflating
+the 72% historical estimate without full evidence.
+
 ## Build 756 coordinated Kotlin call-site correction and owned-buffer CMAF I/O
 
 **Build 755 CI result: FAILED, not accepted.** Kotlin compilation reported
