@@ -3862,7 +3862,7 @@ class AppState(
                                     }
                                 }
                                 if (mapReadyMs == null && session.outline.size >= 8) {
-                                    val cars = session.tracks.count { it.value.at(clock) != null }
+                                    val cars = session.tracks.count { it.value.hasPositionAt(clock) }
                                     if (cars > 0) {
                                         mapReadyMs = elapsed
                                         recordTimingDiagnostic("Replay map ready utcMs=$clock positionedCars=$cars")
@@ -3879,7 +3879,7 @@ class AppState(
                                 val rows = if (session == null || clock == null) 0 else
                                     session.laps.count { it.value.at(clock)?.position != null }
                                 val cars = if (session == null || clock == null || session.outline.size < 8) 0 else
-                                    session.tracks.count { it.value.at(clock) != null }
+                                    session.tracks.count { it.value.hasPositionAt(clock) }
                                 recordTimingDiagnostic("Replay ${budget}s checkpoint towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs " +
                                     "clockUtcMs=$clock positionMs=${sample.positionMs} rankedRows=$rows positionedCars=$cars " +
                                     "trackFromUtcMs=${session?.firstTrackUtc} trackThroughUtcMs=${session?.lastTrackUtc}")

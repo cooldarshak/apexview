@@ -265,17 +265,27 @@ class DriverTrack(
     val startMs get() = if (n > 0) t[0] else 0L
     val endMs get() = if (n > 0) t[n - 1] else 0L
 
-    /** Position at [utcMs], interpolated between samples. Null outside the data or across gaps. */
-    fun at(utcMs: Long): Pair<Float, Float>? {
-        if (n == 0 || utcMs < t[0] || utcMs > t[n - 1]) return null
+    /** Shared exact interval lookup; readiness checks never allocate marker coordinates. */
+    private fun validBracketStart(utcMs: Long): Int {
+        if (n == 0 || utcMs < t[0] || utcMs > t[n - 1]) return -1
         var lo = 0
         var hi = n - 1
         while (hi - lo > 1) {
             val mid = (lo + hi) ushr 1
             if (t[mid] <= utcMs) lo = mid else hi = mid
         }
+        return if (t[hi] - t[lo] > MAX_GAP_MS) -1 else lo
+    }
+
+    /** True exactly when at(time) can render a marker, without allocating a Pair. */
+    fun hasPositionAt(utcMs: Long): Boolean = validBracketStart(utcMs) >= 0
+
+    /** Position at [utcMs], interpolated between samples. Null outside the data or across gaps. */
+    fun at(utcMs: Long): Pair<Float, Float>? {
+        val lo = validBracketStart(utcMs)
+        if (lo < 0) return null
+        val hi = if (lo + 1 < n) lo + 1 else lo
         val span = t[hi] - t[lo]
-        if (span > MAX_GAP_MS) return null
         val f = if (span == 0L) 0f else (utcMs - t[lo]).toFloat() / span
         return Pair(x[lo] + (x[hi] - x[lo]) * f, y[lo] + (y[hi] - y[lo]) * f)
     }
@@ -662,8 +672,8 @@ internal fun timingStreamIsChronological(text: String, checkActive: () -> Unit):
 /** Main-looper publication order for independently parsed track and timing previews. */
 internal class TimingPreviewEpochs {
     private var latest = 0L
-    fun next(): Long = ++latest
-    fun isCurrent(epoch: Long): Boolean = epoch == latest
+    @Synchronized fun next(): Long = ++latest
+    @Synchronized fun isCurrent(epoch: Long): Boolean = epoch == latest
 }
 
 private data class TimingPreviewSnapshot(
@@ -798,6 +808,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             // Map/track geometry index initialization must never block TV's UI
             // looper. Drop old previews when positions and tower arrive out of order.
             val previewEpochs = TimingPreviewEpochs()
+            // Position parser can enqueue several partial updates while the
+            // previous Compose/RenderNode publication is suspended. Latest
+            // complete preview wins; an older map cannot replace a newer one.
+            val positionPreviewEpochs = TimingPreviewEpochs()
             suspend fun publishTopics() {
                 val drivers = driverTask.await()
                 val initialStart = heartbeatTask.await()
@@ -836,11 +850,16 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     traceStage("map-position-stream") { report ->
                         report("opening HTTP stream")
                         val topic = path + "Position.z.jsonStream"
-                        suspend fun publishTracks(snapshot: Map<String, DriverTrack>, outline: FloatArray, start: Long) {
-                            withContext(Dispatchers.Main) {
+                        suspend fun publishTracks(snapshot: Map<String, DriverTrack>, outline: FloatArray,
+                                                  start: Long, previewEpoch: Long) {
+                            withContext(Dispatchers.Main.immediate) {
+                                if (!positionPreviewEpochs.isCurrent(previewEpoch)) {
+                                    checkpoint("map-position-preview", "discarded stale preview epoch=$previewEpoch")
+                                    return@withContext
+                                }
                                 val target = targetUtc(start)
-                                val covered = partialTracks.values.any { it.at(target) != null }
-                                if (!covered || snapshot.values.any { it.at(target) != null }) {
+                                val covered = partialTracks.values.any { it.hasPositionAt(target) }
+                                if (!covered || snapshot.values.any { it.hasPositionAt(target) }) {
                                     partialTracks = snapshot
                                     partialOutline = outline
                                     publishTopics()
@@ -870,7 +889,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                             return@parsePositionLines
                                         }
                                         val snapshot = builders.mapValues { it.value.build() }
-                                        val covering = snapshot.values.filter { it.at(target) != null }
+                                        val covering = snapshot.values.filter { it.hasPositionAt(target) }
                                         if (covering.isEmpty()) return@parsePositionLines
                                         if (previewOutline.isEmpty()) {
                                             previewOutline = availableCircuit.get()?.outline ?: FloatArray(0)
@@ -884,7 +903,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                         publishedThrough = covering.maxOf { it.endMs }
                                         val outline = previewOutline
                                         report("position preview targetUtcMs=$target cars=${covering.size} throughUtcMs=$publishedThrough")
-                                        launch { publishTracks(snapshot, outline, initialStart) }
+                                        val previewEpoch = positionPreviewEpochs.next()
+                                        launch { publishTracks(snapshot, outline, initialStart, previewEpoch) }
                                     }
                                 } finally {
                                     android.os.Process.setThreadPriority(thread, previousPriority)

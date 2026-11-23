@@ -50,7 +50,7 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 
 /**
  * Pitwall's racing-first Material 3 Expressive design tokens. The video canvas
@@ -257,7 +257,9 @@ fun AppleSlider(
         modifier = modifier
             .tvFocusRing()
             .onFocusChanged { if (!it.isFocused) dpadRepeats = 0 }
-            .onKeyEvent { event ->
+            // Preview intercepts TCL D-pad events before Material3 consumes
+            // its own arrow keys. Do not also seek the active media player.
+            .onPreviewKeyEvent { event ->
                 when (event.key) {
                     Key.DirectionLeft, Key.DirectionRight -> when (event.type) {
                         KeyEventType.KeyDown -> {

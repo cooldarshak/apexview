@@ -3,6 +3,8 @@ package app.apexview.tiled
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import app.apexview.croppedHevcCodedSize
+import app.apexview.effectiveHevcCodedMaximum
+import app.apexview.tclCodedSizeChanged
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -121,6 +123,31 @@ class HevcParameterSetParserTest {
             .setInitializationData(listOf(csd)).build()
         assertEquals(1920 to 1088, croppedHevcCodedSize(format))
         assertEquals(null, croppedHevcCodedSize(format.buildUpon().setWidth(1920).setHeight(1080).build()))
+    }
+
+    @Test fun tclCodedPictureUsesSmallConformanceCropNotJustFullCtbDeltas() {
+        val smallBottomCrop = byteArrayOf(0, 0, 0, 1) +
+            nal(33, spsBits(cropBottom = 4, codedHeight = 1088))
+        val padded1080 = Format.Builder().setSampleMimeType(MimeTypes.VIDEO_H265)
+            .setWidth(1920).setHeight(1080).setInitializationData(listOf(smallBottomCrop)).build()
+        // HEVC 4:2:0: four chroma crop units remove eight luma lines.
+        assertEquals(1920 to 1088, croppedHevcCodedSize(padded1080))
+        val smallRightCrop = byteArrayOf(0, 0, 0, 1) +
+            nal(33, spsBits(cropRight = 1))
+        val paddedWidth = Format.Builder().setSampleMimeType(MimeTypes.VIDEO_H265)
+            .setWidth(1918).setHeight(1080).setInitializationData(listOf(smallRightCrop)).build()
+        assertEquals(1920 to 1080, croppedHevcCodedSize(paddedWidth))
+        val uncropped = Format.Builder().setSampleMimeType(MimeTypes.VIDEO_H265)
+            .setWidth(1920).setHeight(1080)
+            .setInitializationData(listOf(byteArrayOf(0, 0, 0, 1) + nal(33, spsBits()))).build()
+        assertEquals(null, croppedHevcCodedSize(uncropped))
+        // Same visible 1080p picture, different actual decoder buffer size.
+        assertTrue(tclCodedSizeChanged(uncropped, padded1080))
+        assertTrue(tclCodedSizeChanged(padded1080, uncropped))
+        assertFalse(tclCodedSizeChanged(padded1080, padded1080))
+        assertEquals(1088, effectiveHevcCodedMaximum(1088, null))
+        assertEquals(1088, effectiveHevcCodedMaximum(1088, 1000))
+        assertEquals(2160, effectiveHevcCodedMaximum(1088, 2160))
     }
 
     @Test fun extractsUniformPpsTileGridAndCalculatesCtbPartitions() {

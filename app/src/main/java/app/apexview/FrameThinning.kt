@@ -78,8 +78,25 @@ internal fun croppedHevcCodedSize(format: Format): Pair<Int, Int>? {
         .filter { it.type == 33 }
         .mapNotNull { runCatching { HevcParameterSets.parseSps(it.bytes) }.getOrNull() }
         .firstOrNull { sps -> sps.displayWidth == format.width && sps.displayHeight == format.height &&
-            (sps.width - sps.displayWidth >= sps.ctbSize || sps.height - sps.displayHeight >= sps.ctbSize) }
+            (sps.width > sps.displayWidth || sps.height > sps.displayHeight) }
         ?.let { it.width to it.height }
+}
+
+/**
+ * Amlogic maximum coded dimensions may be absent from Media3's MediaFormat.
+ * Never call getInteger(KEY_MAX_*) on a key that is not present; also never
+ * shrink an existing maximum. This is a decoder configuration, not a crop.
+ */
+internal fun effectiveHevcCodedMaximum(actual: Int, advertised: Int?): Int =
+    maxOf(actual, advertised?.takeIf { it > 0 } ?: 0)
+
+/** Compare actual SPS coded pictures, not just equal cropped display rectangles. */
+internal fun tclCodedSizeChanged(oldFormat: Format, newFormat: Format): Boolean {
+    if (oldFormat.width <= 0 || oldFormat.height <= 0 ||
+        newFormat.width <= 0 || newFormat.height <= 0) return false
+    val oldCoded = croppedHevcCodedSize(oldFormat) ?: (oldFormat.width to oldFormat.height)
+    val newCoded = croppedHevcCodedSize(newFormat) ?: (newFormat.width to newFormat.height)
+    return oldCoded != newCoded
 }
 
 /** The usual video renderer, showing only the frames [FrameThinner] keeps. */
@@ -109,8 +126,14 @@ private class ThinningVideoRenderer(
         configuration.mediaFormat.apply {
             setInteger(MediaFormat.KEY_WIDTH, width)
             setInteger(MediaFormat.KEY_HEIGHT, height)
-            setInteger(MediaFormat.KEY_MAX_WIDTH, maxOf(width, getInteger(MediaFormat.KEY_MAX_WIDTH)))
-            setInteger(MediaFormat.KEY_MAX_HEIGHT, maxOf(height, getInteger(MediaFormat.KEY_MAX_HEIGHT)))
+            // OMX.amlogic.hevc.* on TCL can omit KEY_MAX_WIDTH/HEIGHT.
+            // Accessing absent keys throws and used to abort video activation.
+            val previousMaxWidth = if (containsKey(MediaFormat.KEY_MAX_WIDTH))
+                runCatching { getInteger(MediaFormat.KEY_MAX_WIDTH) }.getOrNull() else null
+            val previousMaxHeight = if (containsKey(MediaFormat.KEY_MAX_HEIGHT))
+                runCatching { getInteger(MediaFormat.KEY_MAX_HEIGHT) }.getOrNull() else null
+            setInteger(MediaFormat.KEY_MAX_WIDTH, effectiveHevcCodedMaximum(width, previousMaxWidth))
+            setInteger(MediaFormat.KEY_MAX_HEIGHT, effectiveHevcCodedMaximum(height, previousMaxHeight))
         }
         android.util.Log.i("PitwallVideo", "TCL_CODED_PICTURE coded=${width}x$height display=${format.width}x${format.height}")
         return configuration
@@ -119,8 +142,7 @@ private class ThinningVideoRenderer(
     override fun canReuseCodec(codecInfo: MediaCodecInfo, oldFormat: Format, newFormat: Format): DecoderReuseEvaluation {
         val reuse = super.canReuseCodec(codecInfo, oldFormat, newFormat)
         if (isTv && codecInfo.name.startsWith("OMX.amlogic.hevc.", ignoreCase = true) &&
-            oldFormat.width > 0 && oldFormat.height > 0 && newFormat.width > 0 && newFormat.height > 0 &&
-            (oldFormat.width != newFormat.width || oldFormat.height != newFormat.height)) {
+            tclCodedSizeChanged(oldFormat, newFormat)) {
             android.util.Log.i("PitwallVideo", "RECREATE_ON_SIZE_CHANGE codec=${codecInfo.name} " +
                 "${oldFormat.width}x${oldFormat.height} -> ${newFormat.width}x${newFormat.height}")
             return DecoderReuseEvaluation(codecInfo.name, oldFormat, newFormat,

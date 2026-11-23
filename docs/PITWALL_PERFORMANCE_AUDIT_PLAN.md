@@ -9,6 +9,60 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 755 coordinated TCL HEVC coded-picture, remote input and map-preview pass
+
+**P0.3/P2.5, Android TV coded-picture defect (actual code bug):**
+The Amlogic OMX decoder correction in `FrameThinning.kt` assumed that
+any HEVC conformance crop must be at least **one whole 64-pixel CTB**.
+F1 HEVC routinely uses non-CTB-aligned coded heights, including 1088
+coded lines with only eight lines cropped to 1080 visible lines.
+That made `croppedHevcCodedSize` return `null` on a valid 1920x1088
+bitstream displayed as 1920x1080, bypassing the special TCL codec
+configuration entirely. Match the **real parsed SPS conformance window
+of any positive size**, and retain exact display-dimension validation.
+Never call `MediaFormat.getInteger(KEY_MAX_WIDTH/HEIGHT)` when its key
+is absent, which otherwise throws in OEM MediaFormats and interrupts
+decoder setup. Preserve or enlarge any existing maximum coded dimensions.
+Compare the **actual coded** SPS dimensions on rendition switching,
+not merely the cropped display dimensions, before deciding OMX codec
+reuse. Tests use real parser-produced HEVC SPS NAL-shaped fixtures with
+8-line and 2-pixel crops, unchanged unpadded streams, same-display
+coded-geometry switches, and missing/max-size capability paths.
+Clear and Widevine still use the same authorized Media3 renderer;
+no decoder bypass, removal or hidden fallback.
+
+**P0.4, map and tower startup:** Snapshot readiness previously called
+`DriverTrack.at(utc)` solely to determine whether a car has usable
+coordinates, constructing a new `Pair` per car on every map/tower
+readiness poll. Make the existing binary interval/gap validator reusable
+as `hasPositionAt(utc)`, with **identical bounds and five-second gap
+rules** but no coordinate allocations. Use it both in F1 archive
+position previews and the TV/phone readiness observer, retaining the
+original `at` interpolation for actual map rendering. Regression
+tests check the exact equivalence across end points, gaps and empty/
+single-point tracks. The position parser can queue several overlapping
+asynchronous partial publications; assign them synchronized monotonic
+epochs **when enqueued** and drop older work on Main instead of letting
+a late map snapshot replace a newer track/tower state. Preserve
+partial tower publication and later fallback to the circuit outline.
+
+**P2.5, TV remote:** Intercept Material3 slider left/right D-pad
+events in Compose's **preview** phase, before its inner slider consumes
+the key; retain the custom one-percent step, held-key acceleration,
+explicit key-up commit and the focus ring. Expand the existing
+Robolectric Leanback remote interaction test to cover ten consecutive
+right/left presses, retained focus and completion callbacks.
+
+**Sign-off and invariants:** The patch is not considered source-verified
+until all Kotlin unit tests, HEVC generated fixtures, APK assembly and
+native emulator instrumentation pass. Still require real TCL 55C655
+with **Software DRM ON** plus Galaxy S22 Ultra physical playback,
+three combinations (video only, map only, tower only, map+tower),
+SINGLE and MULTIPLE decoder, authorized clear/CBCS Widevine L1/L3,
+Pitwall Cast, 1x/1.5x, measured 50fps vsync/BufferQueue and long-duration
+performance. This patch **does not** close hardware gates by changing
+tests or counting CI as a physical video measurement.
+
 ## Build 754 protected six/eight-feed performance log accounting and thermal correlation
 
 The existing `scripts/analyze_pitwall_runtime.py` only summarized
@@ -187,7 +241,7 @@ being treated as compiled. The device matrix and 16 release gates
 remain unchanged until real Samsung, TCL and Cast evidence exists.
 
 
-## Current implementation and acceptance ledger (Build 748 checkpoint)
+## Current implementation and acceptance ledger (Build 755 coding audit; CI pending)
 
 This ledger supersedes the older historical 66% implementation snapshot
 farther down in this same document. Numeric values are explicitly
@@ -197,26 +251,26 @@ No numeric percentage closes a gate without evidence.
 | Gate | Coding estimate | Pending code/acceptance |
 | --- | ---: | --- |
 | P0.1 Segment priority | 85% | Foreground p95 and seek races |
-| P0.2 Bounded HEVC memory | 65% | Allocation/GC and buffer ownership under sustained real sessions |
-| P0.3 Decoder presentation | 60% | Physical 50fps, SurfaceFlinger and lifecycle proof |
-| P0.4 Map and tower scheduling | 82% | TCL simultaneous overlay and UI frame deadlines |
+| P0.2 Bounded HEVC memory | 70% | Allocation/GC and buffer ownership under sustained real sessions |
+| P0.3 Decoder presentation | 65% | Hardware coded crop, physical 50fps, SurfaceFlinger and lifecycle proof |
+| P0.4 Map and tower scheduling | 85% | TCL simultaneous overlay and UI frame deadlines |
 | P1.1 Smallest valid atlas | 85% | Extended-source physical decoder and quality compatibility |
 | P1.2 Refresh matching | 60% | Real 50fps, display mode and 1.5x acceptance |
 | P1.3 Quality and thermal | 55% | Sustained 7/8-feed quality/thermal stability |
-| P2.1 Pitwall Cast parity | 83% | Receiver car/tower freshness and protected/baked hardware evidence |
+| P2.1 Pitwall Cast parity | 85% | Receiver car/tower freshness and protected/baked hardware evidence |
 | P2.2 Coordinator extraction | 25% | Ownership, concurrency and AppState decomposition |
-| P2.3 Official signing/updates | 85% | Real signed production candidate, upgrade on both devices |
+| P2.3 Official signing/updates | 88% | Real signed production candidate, upgrade on both devices |
 | P2.4 Authorization/security | 70% | Auth, HTTP LAN scoping, backup and redaction audits |
-| P2.5 Android TV/D-pad | 76% | Physical TCL single and multifeed + overlays |
-| P2.6 Repeatable CI/benchmarks | 82% | Real before/after Perfetto, 10-minute endurance |
+| P2.5 Android TV/D-pad | 80% | Physical TCL single and multifeed + overlays |
+| P2.6 Repeatable CI/benchmarks | 87% | Real before/after Perfetto, 10-minute endurance |
 | P2.7 Core architecture | 100% | Closed, preserve one-decoder invariant |
-| P2.8 Material 3 Expressive | 50% | Responsive complete product surface and accessibility |
-| P2.9 F1 captions | 70% | Authorized actual cue rendering across native Cast and mobile/TV |
+| P2.8 Material 3 Expressive | 53% | Responsive complete product surface and accessibility |
+| P2.9 F1 captions | 75% | Authorized actual cue rendering across native Cast and mobile/TV |
 
-**Coding estimate ~70%, remaining ~30%; this is provisional and must be
+**Coding estimate ~72%, remaining ~28%; this is provisional and must be
 re-scored against the implementation and full device matrix.**
 **Strict full-release gates: 1/16 closed (6.25%); 15/16 open.**
-Build 746 code/CI cannot prove live S22/TCL playback, L1 secure output,
+Build 755 code/CI cannot prove live S22/TCL playback, L1 secure output,
 native Cast, physical frame presentation or a signed release.
 Do not publish a release or say 100% until every external/hardware gate
 has concrete passing trace/log/video evidence and an accepted issue.

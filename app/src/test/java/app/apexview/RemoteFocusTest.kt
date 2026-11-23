@@ -269,7 +269,12 @@ class RemoteFocusTest {
         rule.runOnIdle { assertEquals(0.51f, value, 0.001f) }
         press(Key.DirectionLeft)
         rule.runOnIdle { assertEquals(0.5f, value, 0.001f) }
-        rule.runOnIdle { assertTrue(finished >= 2) }
+        repeat(4) { press(Key.DirectionRight) }
+        rule.runOnIdle { assertEquals(0.54f, value, 0.001f) }
+        assertFocus("apple-slider")
+        repeat(4) { press(Key.DirectionLeft) }
+        rule.runOnIdle { assertEquals(0.5f, value, 0.001f) }
+        rule.runOnIdle { assertTrue(finished >= 10) }
     }
 
     @Test
