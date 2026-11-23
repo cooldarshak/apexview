@@ -2,7 +2,7 @@
 
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** IN DEVELOPMENT. **Latest CI-green coordinated implementation: Build 763**, commit `0b7933de29256be875958495de0536ee0012d149` ([green GitHub Actions](https://github.com/cooldarshak/apexview/actions/runs/45112174152)). Later Material 3 1.5 / Android 37 migration remains pending green CI. This is the sole active project plan. Historical
+**Status:** IN DEVELOPMENT. **Latest fully green CI build: 781**, commit `24f3d8921eb31fbab02bce6c7ffb92b7ca91f839` ([passing GitHub Actions](https://github.com/cooldarshak/apexview/actions/runs/45114462887)). Later performance telemetry/slider regression changes continue through CI and are not yet accepted. This is the sole active project plan. Historical
 performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
@@ -23,18 +23,23 @@ validated protected 8-feed pending-init retention, byte-aware output-history
 policy, adaptive player chrome, exact eviction assertions and existing
 generated clear-HEVC pixel/CMAF fixture checks.
 
-**P0.1: now 92% coding estimate (was 87%).**
+**P0.1: now 95% coding estimate (was 92%; Build 757 baseline 87%).**
 Foreground archive requests now take priority over cancelled prefetch flight
 exceptions, terminated flights are released before another producer registers,
 and test fixtures cover shared work, cancellation, priority, seek and close.
 Every foreground request emits its actual wait time, including cache hits,
 and the runtime analyzer calculates *unbiased* nearest-rank p95 over request
 samples. The log-analysis regression was corrected after Builds 764/765.
-**Remaining 8%:** gate an actual foreground-seek p95 bound against comparable
-before/after S22/TCL device logs; prove network cancellation during rapid
-multi-seek plus mixed 1x/1.5x never starves foreground, using trace evidence.
+The archive-cache critical section now excludes blocking process-wide ART
+allocation/GC probes, CPU-time sampling, and expensive logcat formatting.
+A fail-closed runtime acceptance tool evaluates real foreground seek p95
+alongside required capture duration and refuses missing observations.
+**Remaining 5%:** obtain actual S22/TCL repeated-seek 1x/1.5x
+before/after p95 measurements and prove uninterrupted cross-path priority
+under real network and foreground pressure. This is a code-oriented estimate,
+not measured performance.
 
-**P0.2: now 84% coding estimate (was 75%).**
+**P0.2: now 91% coding estimate (was 84%; Build 757 baseline 75%).**
 Clear archive fragment cache owns its ByteArrays under both an entry cap and
 96MiB byte budget, wiping evicted buffers; tests prove copy isolation, LRU,
 oversized rejection and zeroing. Protected CBCS composer now preserves up to
@@ -44,28 +49,37 @@ wipes evictions, and reports peak held bytes. HEVC tile rewriting now zeroes
 partially written NALs on failure/seek, and avoids a flattened hot-path
 selection collection. Runtime log analytics separate steady-state GC and
 allocation from warmup and report clear/protected peak retained bytes.
-**Remaining 16%:** prove allocation and GC reductions on actual paired
-10-minute S22/TCL protected and clear sessions, profile 7/8 feeds and
-authorization ownership under actual Cast and codec handoff, settle the
-bounded peak-memory budget for live streaming backpressure.
+Clear CMAF composition now wipes unpublished NALs, init and media fragments
+across *all* post-rewrite failures, including early compatibility checks.
+HEVC telemetry separates wall-clock fetch, CMAF inspector, NAL inspection,
+rewrite, packaging, thread CPU, process-wide allocation and GC; sub-ms
+per-feed inspector time is aggregated in nanoseconds to avoid false 0ms
+results. The runtime report treats absent historical CPU metrics as
+UNKNOWN rather than passing zeroes, and fails closed on device memory-budget
+thresholds when requested.
+**Remaining 9%:** verify latest post-781 telemetry changes under full CI;
+capture comparable 10-minute live protected/clear/Cast sessions on real
+S22/TCL to establish allocation, GC, 7/8-feed and backpressure
+bounds. No measured memory/thermal win may be claimed without that evidence.
 
-**P2.8: now 78% coding estimate (was 58%).**
+**P2.8: now 90% coding estimate (was 78%; Build 757 baseline 58%).**
 Feed pickers are lazy and viewport-aware; browse hero/cards/settings
 scale for narrow landscape, TV and 200% text; settings switches expose
 one labeled TV-D-pad/TalkBack toggle; player chrome splits to preserve
 all Cast, map, tower, layout and caption commands in small viewports;
 buttons meet 48dp targets; animation honors reduced-motion. Added pure
-viewport tests and Compose accessibility switch tests. The next dependency
-migration adopts **real stable Material 3 1.5
-`MaterialExpressiveTheme`** (rather than treating a dark
-`MaterialTheme` palette as full Expressive), necessitating AGP 9.1,
-Gradle 9.3, compileSdk 37, Android 36 target retained and a state-based
-Material Slider that preserves TCL D-pad control. This **toolchain change
-is not yet fully CI-green** and remains part of the unclosed 22%.
-**Remaining 22%:** successful end-to-end migrated CI (all tests, Kotlin,
-HEVC fixtures, emulator/APK), actual 200%-font/TalkBack and remote-focus
-device run, complete UI visual consistency and measured smooth playback
-with map/tower/Cast.
+viewport tests and Compose accessibility switch tests. **Build 781 fully
+passed** the real stable Material 3 1.5 `MaterialExpressiveTheme`,
+Compose BOM 2026.11.01, AGP 9.1.1, Gradle 9.3.1, compileSdk 37,
+targetSdk 36, HEVC fixture tests and Android RenderNode instrumentation.
+The new state-based M3 1.5 Slider preserves custom TCL D-pad key handling.
+After this green build, added semantic role tests and repeat-key regression
+tests, now running in newer CI jobs.
+**Remaining 10%:** verify those follow-up UI regression tests, real 200%
+font/TalkBack and TCL D-pad device runs, review all player/settings
+navigation for visual consistency and measured smoothness with map,
+tower and Cast. Full library migration is CI-accepted; physical device
+acceptance is not.
 
 **Strict release gates unchanged: 1/16 closed.** CI does not sign off
 S22, TCL, native phone-to-TV Cast, 50fps physical presentation or DRM L1/L3.
@@ -382,7 +396,7 @@ being treated as compiled. The device matrix and 16 release gates
 remain unchanged until real Samsung, TCL and Cast evidence exists.
 
 
-## Current implementation and acceptance ledger (post-Build 763, code and later CI pending)
+## Current implementation and acceptance ledger (Build 781 green, later CI pending)
 
 This ledger supersedes the older historical 66% implementation snapshot
 farther down in this same document. Numeric values are explicitly
@@ -391,8 +405,8 @@ No numeric percentage closes a gate without evidence.
 
 | Gate | Coding estimate | Pending code/acceptance |
 | --- | ---: | --- |
-| P0.1 Segment priority | 92% | Device foreground seek p95 and multi-seek cancellation/priority trace proof |
-| P0.2 Bounded HEVC memory | 84% | Real 10-minute allocation/GC, peak ownership and backpressure proof with all 8 feeds and Cast |
+| P0.1 Segment priority | 95% | Real device archive foreground seek p95 and 1x/1.5x cancellation priority proof |
+| P0.2 Bounded HEVC memory | 91% | Latest telemetry CI plus real clear/protected/Cast 10-minute allocation/GC and 7/8-feed peak memory evidence |
 | P0.3 Decoder presentation | 65% | Hardware coded crop, physical 50fps, SurfaceFlinger and lifecycle proof |
 | P0.4 Map and tower scheduling | 85% | TCL simultaneous overlay and UI frame deadlines |
 | P1.1 Smallest valid atlas | 85% | Extended-source physical decoder and quality compatibility |
@@ -405,23 +419,23 @@ No numeric percentage closes a gate without evidence.
 | P2.5 Android TV/D-pad | 80% | Physical TCL single and multifeed + overlays |
 | P2.6 Repeatable CI/benchmarks | 87% | Real before/after Perfetto, 10-minute endurance |
 | P2.7 Core architecture | 100% | Closed, preserve one-decoder invariant |
-| P2.8 Material 3 Expressive | 78% | AGP9.1/M3 1.5 Kotlin+full CI green, real TCL focus/200% font, TalkBack, visual + frame-time acceptance |
+| P2.8 Material 3 Expressive | 90% | Later TV slider regression CI, physical focus/200% font, TalkBack, cross-screen visual and frame-time evidence |
 | P2.9 F1 captions | 75% | Authorized actual cue rendering across native Cast and mobile/TV |
 
 **Updated scoring (engineering estimates, not measured code coverage):**
 Build 757 baseline P0.1=87%, P0.2=75%, P2.8=58%.
-Following green Build 759, 761 and 763 coding plus further pending-CI
-source migration, P0.1=**92%** (+5 points), P0.2=**84%** (+9), and
-P2.8=**78%** (+20). The **unweighted 16-workstream coding mean =
-75.875% (about 76%)** compared with the prior 73.75%.
-These increments reflect implemented ownership, caching, cancellation,
-real instrumentation plumbing, adaptive UI, accessibility and the
-not-yet-accepted Material 3 1.5 toolchain changes; further CI failures
-must be repaired before any additional credit. These values are
+After green Builds 759, 761, 763 and now **781** (official Material 3 1.5
+migration, Kotlin/JVM/HEVC/render-node verified), plus later unverified
+instrumentation/failure-safety improvements, P0.1=**95%** (+8 points since
+Build 757), P0.2=**91%** (+16), P2.8=**90%** (+32). The unweighted
+16-workstream coding mean is **77.25%** versus 73.75% after Build 757.
+These increments reflect actual tested source improvements and explicitly
+flag later unverified commits; any latest-CI failures must be repaired
+before further credits. These values are
 provisional, not release scores, code coverage or proven performance.
 
 **Strict full-release gates: 1/16 closed (6.25%); 15/16 open.**
-Green Builds 759/761/763 cannot prove S22/TCL playback, L1 secure output, native Cast,
+Green Builds 759/761/763/781 cannot prove S22/TCL playback, L1 secure output, native Cast,
 physical frame presentation, live timing, accessibility or a signed release.
 The P0.1, P0.2 and P2.8 coding blockers named above remain OPEN and
 none of the three workstreams can legitimately be called 100%.
@@ -1083,11 +1097,13 @@ Source changes following the Build 699 baseline:
   and Compose BOM 2026.11.01, AGP 9.1.1 / Gradle 9.3.1, compileSdk 37,
   while retaining targetSdk 36 and minSdk 29. Material Slider now uses
   the state-based custom-track API and guarded videoCapabilities on API37.
-- This migration is **not accepted until all CI jobs pass**. The original
-  sdkmanager index does not discover platform android-37 even when Gradle
-  installs its compile platform; workflow now installs/verifies Android 36
-  and signing tools early and lets Gradle's actual compile + AAR-metadata
-  enforce Android37 correctness. No DRM or player feature is removed.
+- **Build 781 fully passed** the migration's CI (Kotlin/JVM,
+  genuine HEVC decode fixtures, debug/instrumentation APK and native
+  RenderNode instrumentation). The original sdkmanager index did not
+  discover `platforms;android-37`; the workflow now installs/verifies
+  Android 36 and signing tools early while Gradle's real compilation
+  and AAR metadata enforce compileSdk 37. Later slider and telemetry
+  regressions remain subject to their own CI, not to Build 781. No DRM or player feature is removed.
 
 ## Tower retained-layer key optimizations
 
