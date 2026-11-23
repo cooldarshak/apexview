@@ -2,14 +2,14 @@
 
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** IN DEVELOPMENT. **Last verified green checkpoint: Build 806**, commit `a965218c3762eb2a2bdcd87909315c7c96085ab8` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45141962100)). P0.1, P0.2 and P2.8 coding are **100% and CI-verified**; physical acceptance and release gates remain independent. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
+**Status:** IN DEVELOPMENT. **Last verified green checkpoint: Build 807**, commit `5dccdabe91b3bd0530c64176b2db57149d16eb40` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45145555682)). P0.3/P0.4 changes passed the full exact-source workflow, including Kotlin/JVM, Python contracts, HEVC/CMAF, APK assembly and emulator instrumentation. Physical acceptance and release gates remain separate. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
 performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
 
 
-## Build 807: consolidated P0.3 video / P0.4 timing-overlay engineering pass (exact-source CI pending)
+## Build 807: consolidated P0.3 video / P0.4 timing-overlay engineering pass (exact-source CI GREEN)
 
 **Verified starting point:** Build 806 green SHA `a965218c3762eb2a2bdcd87909315c7c96085ab8`, with the documentation-only HEAD `b68d6775c4c39a872e0099c50351f4f4fb00d765`. This source revision implements **both workstreams in one atomic production commit with tests**, not an independent sequence of small APK builds. Exact-source Build 807 CI is the next acceptance check.
 
@@ -19,7 +19,7 @@ technical specifications or test instructions, NOT competing active plans.
 
 **Cross-mode matrix and accepted limits:** Multiple-decoder playback still runs through its existing authorized Media3 players, and the shared map/tower and `WindowFrameDiagnostics` work applies unchanged; do NOT replace that path with the one-decoder scene. `SingleDecoderSceneView` remains clear archive only; `ProtectedDecoderSceneView` remains secure for L1/L3 as permitted and also handles already-authorized unprotected composed output/receiver. Phone/TV, clear/protected, direct and Pitwall Cast keep their lifecycle/selection/CC/focus paths. No DRM bypass, alternate media SDK, removed controls or hidden decoder fallback. Existing `TvTowerRow` Offscreen composition remains untouched because a prior ModulateAlpha experiment regressed physical UI results and no controlled device evidence supports another replacement.
 
-**Coding-only estimated progress (post-change, pending exact-source CI):** P0.3 **80% / 20%**, P0.4 **92% / 8%**. Remaining P0.3 implementation is real per-device codec-to-FrameTimeline correlation where feasible, surface recreation/seek hardware instrumentation, and root-cause-informed BufferQueue handling once traces identify where delay originates; media-window metrics alone are not true video-layer presentation. Remaining P0.4 coding includes repeatable Macrobenchmark `FrameTimingMetric` and any profiler-confirmed draw/GC reductions, rather than pretending existing percentages prove UI smoothness. Do not conflate source completion with device acceptance or claim fewer than 5% slow UI frames without a controlled before/after.
+**Coding-only progress (Build 807 exact-source CI GREEN):** P0.3 **80% / 20%**, P0.4 **92% / 8%**. Remaining P0.3 implementation is real per-device codec-to-FrameTimeline correlation where feasible, surface recreation/seek hardware instrumentation, and root-cause-informed BufferQueue handling once traces identify where delay originates; media-window metrics alone are not true video-layer presentation. Remaining P0.4 coding includes repeatable Macrobenchmark `FrameTimingMetric` and any profiler-confirmed draw/GC reductions, rather than pretending existing percentages prove UI smoothness. Do not conflate source completion with device acceptance or claim fewer than 5% slow UI frames without a controlled before/after.
 
 **Hardware acceptance after one CI-green source revision:** On S22 Ultra record a comparable 10-minute sustained session at 1x and 1.5x and video only, video+map, video+tower, video+both under 1/4/6 feeds; capture app `PitwallFrames` jank/GC and independent video/SurfaceFlinger FrameTimeline, codec frame timestamp, EGL stage latency, source timestamp cadence, audio drift and queue stalls. Repeat on TCL 55C655 with Software DRM ON for clear/protected and both single/multiple decoders, then phone-to-TV Pitwall Cast, map/tower movement, focus, resize and captions. Compare controlled OFF/map/tower/both runs to the user-visible smoothness target. Existing historical Build 803 traces were not reprocessed in this commit; log symptoms are **not** proven P0.3/P0.4 root causes. **Strict release gates remain 1/16 closed.**
 
@@ -169,8 +169,8 @@ Coding percent describes implemented, audited source, not hardware acceptance. B
 | --- | --- | ---: | ---: | --- | --- | --- | --- |
 | P0.1 | Segment priority | **100%** | **0%** | 806 GREEN | S22/TCL 1x/1.5x seek p95 pending | Open | No known coding left; real contention and seek acceptance |
 | P0.2 | HEVC memory | **100%** | **0%** | 806 GREEN | 10-minute GC/heap and 7/8-feed pending | Open | No known coding left; sustained clear/protected/Cast retention and allocation evidence |
-| P0.3 | Video rendering | **80%** | **20%** | 806 green; 807 pending | Independent 50fps codec/FrameTimeline and TCL/S22/receiver pending | Open | Codec-to-presentation correlation, full seek/recreation hardware instrumentation, trace-driven BufferQueue fixes |
-| P0.4 | Map and tower | **92%** | **8%** | 806 green; 807 pending | Controlled OFF/map/tower/both S22/TCL/Cast pending | Open | Macrobenchmark FrameTimingMetric, source fixes driven by measured UI/GC bottlenecks |
+| P0.3 | Video rendering | **80%** | **20%** | **807 GREEN** | Independent 50fps codec/FrameTimeline and TCL/S22/receiver pending | Open | Codec-to-presentation correlation, full seek/recreation hardware instrumentation, trace-driven BufferQueue fixes |
+| P0.4 | Map and tower | **92%** | **8%** | **807 GREEN** | Controlled OFF/map/tower/both S22/TCL/Cast pending | Open | Macrobenchmark FrameTimingMetric, source fixes driven by measured UI/GC bottlenecks |
 | P1.1 | HEVC atlas | 85% | 15% | 806 GREEN | Extended feed real streams pending | Open | Composition and quality profile compatibility |
 | P1.2 | Refresh matching | 60% | 40% | 806 GREEN | Physical 50fps/1.5x pacing pending | Open | Display mode and frame pacing policy |
 | P1.3 | Quality and thermal | 55% | 45% | 806 GREEN | Sustained thermal runs pending | Open | Per-mode quality and thermal handling |
@@ -184,7 +184,7 @@ Coding percent describes implemented, audited source, not hardware acceptance. B
 | P2.8 | Material 3 Expressive | **100%** | **0%** | 806 GREEN | Portrait accepted; TCL/TalkBack/200% pending | Open | No known coding left; physical visual/accessibility acceptance |
 | P2.9 | Closed captions | 75% | 25% | 806 GREEN | F1 cue rendering pending | Open | Mobile/TV/Cast clear/protected caption parity |
 
-**Unweighted coding estimate after coordinated Build 807 source: 80.125% complete / 19.875% pending across 16 workstreams, subject to exact-source CI. Strict release gates: 1/16 closed, 15 open.** Older tables below are dated historical checkpoints, not current coding completion.
+**Unweighted coding estimate after GREEN Build 807: 80.125% complete / 19.875% pending across 16 workstreams. Strict release gates: 1/16 closed, 15 open.** Older tables below are dated historical checkpoints, not current coding completion.
 
 ## Builds 757–799 failure audit and post-800 coordinated quality checkpoint
 
