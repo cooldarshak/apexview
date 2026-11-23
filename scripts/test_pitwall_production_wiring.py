@@ -56,6 +56,7 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("ProtectedDecoderSceneView(context, protectedOutput = secureRolling)", viewer)
         self.assertIn("SingleDecoderSceneView(context)", viewer)
         self.assertIn("CLEAR_SURFACE_AB_REVERT", viewer)
+        self.assertIn("kotlinx.coroutines.withTimeoutOrNull(5_000L)", viewer)
         self.assertIn("app.settings.updateClearSceneSurfaceExperiment(false)", viewer)
         self.assertIn("backend=", viewer)
         self.assertIn("CLEAR_ARCHIVE", viewer)

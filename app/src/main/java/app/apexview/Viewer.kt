@@ -1142,9 +1142,17 @@ internal fun PlaybackVideoCanvas(
             // The Cast button closes its sheet first. Capture from the real window so every
             // selected feed, timing row, map marker and speed label is part of the one video.
             delay(Motion.SCREEN_MS.toLong() + 100L)
+            // Changing the optional clear SurfaceView to the capture-capable
+            // TextureView creates an EGL output epoch. The old fixed animation
+            // delay is not proof a new decoded picture reached that epoch.
+            val clearOutputReady = if (composedGlReady) true else
+                kotlinx.coroutines.withTimeoutOrNull(5_000L) {
+                    while (!composedGlReady) delay(40L)
+                    true
+                } ?: false
             val window = captureWindow
             val bounds = viewerBounds
-            if (!composedGlReady || window == null || bounds == null || bounds.isEmpty ||
+            if (!clearOutputReady || window == null || bounds == null || bounds.isEmpty ||
                 host.archiveSceneSession == null ||
                 window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0) {
                 bakedSession.captureFailed("An authorized clear single-decoder viewer is required")

@@ -81,6 +81,15 @@ run_required_instrumentation \
   'OK (1 test)' "$surface_report"
 cat "$surface_report" >> "$report"
 
+# The clear TextureView is the production default and must be tested with the
+# same real synthetic HEVC/MediaCodec/EGL pipeline as independent SurfaceView.
+# Never mark the A/B code verified when only its optional renderer passed.
+texture_report="${RUNNER_TEMP:?}/pitwall-texture-scene-instrumentation.txt"
+run_required_instrumentation \
+  app.apexview.scene.SingleDecoderSceneInstrumentationTest \
+  'OK (1 test)' "$texture_report"
+cat "$texture_report" >> "$report"
+
 # Independent Android-runtime coverage for archive delivery and memory ownership.
 # No synthetic hardware codec can substitute for physical F1/Widevine device evidence.
 delivery_report="${RUNNER_TEMP:?}/pitwall-archive-delivery-instrumentation.txt"
