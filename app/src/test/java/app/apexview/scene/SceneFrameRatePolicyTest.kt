@@ -1,6 +1,8 @@
 package app.apexview.scene
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class SceneFrameRatePolicyTest {
@@ -24,6 +26,18 @@ class SceneFrameRatePolicyTest {
         assertEquals(100f, SceneFrameRatePolicy.hint(50.0, 2f), 0.0001f)
         assertEquals(25f, SceneFrameRatePolicy.hint(50.0, 0.5f), 0.0001f)
         assertEquals(0f, SceneFrameRatePolicy.hint(50.0, Float.NaN), 0.0001f)
+    }
+
+    @Test fun refreshMultipleUsesRealPlaybackSpeedInsteadOfOnlySourceFps() {
+        assertTrue(SceneFrameRatePolicy.isIntegerRefreshMultiple(100f, 50.0, 1f))
+        assertTrue(SceneFrameRatePolicy.isIntegerRefreshMultiple(50f, 50.0, 1f))
+        assertFalse(SceneFrameRatePolicy.isIntegerRefreshMultiple(120f, 50.0, 1f))
+        assertFalse(SceneFrameRatePolicy.isIntegerRefreshMultiple(100f, 50.0, 1.5f))
+        assertTrue(SceneFrameRatePolicy.isIntegerRefreshMultiple(75f, 50.0, 1.5f))
+        assertTrue(SceneFrameRatePolicy.isIntegerRefreshMultiple(150f, 50.0, 1.5f))
+        assertFalse(SceneFrameRatePolicy.isIntegerRefreshMultiple(0f, 50.0))
+        assertFalse(SceneFrameRatePolicy.isIntegerRefreshMultiple(Float.NaN, 50.0))
+        assertFalse(SceneFrameRatePolicy.isIntegerRefreshMultiple(120f, 0.0))
     }
 
     @Test fun rejectsUnknownOrInvalidCadenceInsteadOfForcingARefreshSwitch() {

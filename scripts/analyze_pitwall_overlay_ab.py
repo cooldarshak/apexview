@@ -30,6 +30,24 @@ class Window:
         return result
 
 
+def validate_windows(windows):
+    """A/B exposure must be time-comparable before reporting delta misses.
+
+    This cannot prove equal feed counts, thermals or source renditions. Record
+    those physical conditions separately in the acceptance evidence.
+    """
+    if len({window.label for window in windows}) != len(windows):
+        raise ValueError("each overlay label may appear once per comparison")
+    ordered = sorted(windows, key=lambda window: window.start)
+    for left, right in zip(ordered, ordered[1:]):
+        if right.start < left.end:
+            raise ValueError("overlay windows overlap; use independent steady intervals")
+    if len(windows) > 1:
+        durations = [window.end - window.start for window in windows]
+        if max(durations) - min(durations) > max(1.0, 0.05 * max(durations)):
+            raise ValueError("overlay windows have unmatched durations; use matched A/B exposure")
+
+
 def scalar(processor, sql):
     result = list(processor.query(sql))
     return vars(result[0]) if result else {}
@@ -124,8 +142,10 @@ def main():
         windows = [Window.parse(value) for value in args.window]
     except ValueError as error:
         parser.error(str(error))
-    if len({window.label for window in windows}) != len(windows):
-        parser.error("each overlay label may appear once per comparison")
+    try:
+        validate_windows(windows)
+    except ValueError as error:
+        parser.error(str(error))
     try:
         from perfetto.trace_processor import TraceProcessor
     except ImportError as error:

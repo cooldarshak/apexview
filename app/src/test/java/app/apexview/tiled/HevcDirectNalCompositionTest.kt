@@ -8,6 +8,34 @@ import org.junit.Test
 
 /** Verify that direct NAL consumption does not change HEVC tile payloads or generated metadata. */
 class HevcDirectNalCompositionTest {
+    @Test fun unsortedCellsKeepByteExactPicturesAndCtbAddressesAcrossFrames() {
+        val fixtures = System.getenv("APEXVIEW_HEVC_FIXTURE_DIR")?.takeIf { it.isNotBlank() }?.let(::File)
+        assumeTrue("HEVC fixtures are not configured", fixtures != null)
+        val nals = listOf("feed_a.hevc", "feed_b.hevc")
+            .map { HevcBitstream.splitAnnexB(File(fixtures!!, it).readBytes()) }
+        val grid = HevcOutputGridDimensions(columns = 2, rows = 1)
+        val left = HevcTizenGridComposer.CellSelection(0, 0, 0, 0)
+        val right = HevcTizenGridComposer.CellSelection(1, 0, 1, 0)
+        val normal = HevcTizenGridComposer.composeNalUnits(
+            nals, grid, listOf(left, right), frameRateNumerator = 25,
+            includeAnnexBOutput = false, emitSampleData = true
+        )
+        val unsorted = HevcTizenGridComposer.composeNalUnits(
+            nals, grid, listOf(right, left), frameRateNumerator = 25,
+            includeAnnexBOutput = false, emitSampleData = true
+        )
+        assertEquals(normal.pictures.size, unsorted.pictures.size)
+        org.junit.Assert.assertTrue(normal.pictures.size > 1)
+        val addresses = normal.pictures.first().evidence.map { it.destinationCtbAddress }
+        org.junit.Assert.assertTrue(addresses[1] > addresses[0])
+        normal.pictures.zip(unsorted.pictures).forEach { (expected, actual) ->
+            assertArrayEquals(expected.sampleData, actual.sampleData)
+            assertEquals(expected.evidence, actual.evidence)
+            assertEquals(listOf(0, 1), actual.evidence.map { it.feedIndex })
+            assertEquals(addresses, actual.evidence.map { it.destinationCtbAddress })
+        }
+    }
+
     @Test fun directNalHandoffMatchesAnnexBComposerByteForByte() {
         val fixtures = System.getenv("APEXVIEW_HEVC_FIXTURE_DIR")?.takeIf { it.isNotBlank() }?.let(::File)
         assumeTrue("HEVC fixtures are not configured", fixtures != null)

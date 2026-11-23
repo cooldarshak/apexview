@@ -200,12 +200,19 @@ internal object HevcTizenGridComposer {
             }
         }
 
+        // Destination CTB addresses and seam ownership are properties of the validated
+        // layout, not picture timestamps: cache once for the full CMAF segment.
+        val destinationAddresses = orderedSelections.map {
+            destinationAddress(geometry, it.outputColumn, it.outputRow)
+        }
+        val sameSourceEdges = orderedSelections.indices.map {
+            hasOwnLeftAndTopEdges(orderedSelections, it, feeds)
+        }
+
         // The output PPS flag is global. Enable filtering across output tile seams only
         // when every seam corresponds to adjacent source tiles from the same source feed.
         // Independent full-frame feeds are never filtered into one another at their boundary.
-        val allOutputTileSeamsAreSourceTileSeams = orderedSelections.indices.all { outputIndex ->
-            hasOwnLeftAndTopEdges(orderedSelections, outputIndex, feeds)
-        }
+        val allOutputTileSeamsAreSourceTileSeams = sameSourceEdges.all { it }
         // Do not allocate an additional 50fps x feedCount flattened list solely for
         // one boolean PPS compatibility test on every CMAF segment.
         val canGateLoopFilter = allOutputTileSeamsAreSourceTileSeams &&
@@ -266,10 +273,8 @@ internal object HevcTizenGridComposer {
                         checkNotInterrupted()
                         val selection = orderedSelections[outputIndex]
                         val feed = feeds[selection.feedIndex]
-                        val outputAddress = destinationAddress(
-                            geometry, selection.outputColumn, selection.outputRow
-                        )
-                        val ownEdges = hasOwnLeftAndTopEdges(orderedSelections, outputIndex, feeds)
+                        val outputAddress = destinationAddresses[outputIndex]
+                        val ownEdges = sameSourceEdges[outputIndex]
                         val filterOverride = if (canGateLoopFilter) {
                             located.header.loopFilterAcrossSlices == true && ownEdges
                         } else null

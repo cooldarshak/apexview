@@ -1414,17 +1414,17 @@ class AppState(
     private val thermalListener = android.os.PowerManager.OnThermalStatusChangedListener { status ->
         val before = thermal
         thermal = status
-        when {
-            status >= android.os.PowerManager.THERMAL_STATUS_CRITICAL && before < android.os.PowerManager.THERMAL_STATUS_CRITICAL ->
-                message = "The phone is very hot. Only the main feed shows video until it cools down; the others keep their sound and place."
-            status >= android.os.PowerManager.THERMAL_STATUS_SEVERE && before < android.os.PowerManager.THERMAL_STATUS_SEVERE ->
-                message = "The phone is running hot, so the feeds are at lower quality until it cools down."
-        }
+        VideoThermalBudget.transitionNotice(status, before)?.let { message = it }
+        android.util.Log.i("PitwallThermal", "THERMAL_STATUS_CHANGE from=$before to=$status " +
+            "multipleDecoderScale=${VideoThermalBudget.multipleDecoderScale(status)} " +
+            "criticalMainOnly=${VideoThermalBudget.mainVideoOnly(status)} " +
+            "singleDecoderAtlasQualityUnchanged=true")
         applyVideoBudget()
     }
 
     init {
         power?.addThermalStatusListener(context.mainExecutor, thermalListener)
+        VideoThermalBudget.startupNotice(thermal)?.let { message = it }
         // Feeds come and go, move, hide behind each other and off screen; twice a second is soon enough.
         // Waits first: this runs while AppState is still being built, before the tiles exist.
         scope.launch {
@@ -1486,11 +1486,7 @@ class AppState(
         }
         val shown = if (inPip) pipTile() else null
         val main = protectedCompositionHost ?: tiles.firstOrNull { it.id == bigTileId } ?: tiles.firstOrNull { it.audible } ?: tiles.maxByOrNull { it.w }
-        val scale = when {
-            thermal >= android.os.PowerManager.THERMAL_STATUS_SEVERE -> 0.5f
-            thermal >= android.os.PowerManager.THERMAL_STATUS_MODERATE -> 0.75f
-            else -> 1f
-        }
+        val scale = VideoThermalBudget.multipleDecoderScale(thermal)
         val visibleTiles = tiles.filter { tile ->
             if (tile.protectedCompositionHidden) return@filter false
             when {
@@ -1524,7 +1520,7 @@ class AppState(
                 return@forEach
             }
             val overDecoderBudget = isTv && visible && tile !in decoderEligible
-            val hot = thermal >= android.os.PowerManager.THERMAL_STATUS_CRITICAL && tile !== main
+            val hot = VideoThermalBudget.mainVideoOnly(thermal) && tile !== main
             val held = speedHeld && !inPip && tile !== main
             tile.coolingOff = visible && hot
             tile.heldForSpeed = visible && held && !hot

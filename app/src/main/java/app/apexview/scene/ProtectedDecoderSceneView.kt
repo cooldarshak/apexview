@@ -1,6 +1,8 @@
 package app.apexview.scene
 
 import android.content.Context
+import android.hardware.display.DisplayManager
+import android.os.Looper
 import android.graphics.SurfaceTexture
 import android.opengl.EGL14
 import android.opengl.EGLConfig
@@ -32,6 +34,47 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         "PitwallSecureScene", android.os.Process.THREAD_PRIORITY_DISPLAY
     ).apply { start() }
     private val gl = Handler(thread.looper)
+    private val displayHandler = Handler(Looper.getMainLooper())
+    private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+    private var previousModeSignature: String? = null
+    private val modeListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            if (rootView.display?.displayId == displayId) logDisplayMode("mode-changed")
+        }
+    }
+
+    private fun logDisplayMode(reason: String) {
+        val current = rootView.display ?: return
+        val mode = current.mode
+        val sourceFps = scene?.sourceFrameRate ?: 0.0
+        val signature = "${current.displayId}:${mode.modeId}:${mode.refreshRate}:$sourceFps:$playbackSpeed"
+        if (signature == previousModeSignature) return
+        previousModeSignature = signature
+        val available = current.supportedModes.joinToString(",") {
+            "${it.modeId}:${it.physicalWidth}x${it.physicalHeight}@${it.refreshRate}"
+        }
+        Log.i("ApexviewSingleDecoder", "SURFACE_SCENE_DISPLAY_MODE reason=$reason protected=$protectedOutput " +
+            "displayId=${current.displayId} activeMode=${mode.modeId} activeHz=${mode.refreshRate} " +
+            "sourceFps=$sourceFps speed=$playbackSpeed " +
+            "effectiveFps=${SceneFrameRatePolicy.hint(sourceFps, playbackSpeed)} " +
+            "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
+            "supportedModes=$available physicalPresentation=NOT_MEASURED")
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        displayManager.registerDisplayListener(modeListener, displayHandler)
+        logDisplayMode("attach")
+    }
+
+    override fun onDetachedFromWindow() {
+        displayManager.unregisterDisplayListener(modeListener)
+        previousModeSignature = null
+        super.onDetachedFromWindow()
+    }
+
     private var player: ExoPlayer? = null
     @Volatile private var playbackSpeed = 1f
     @Volatile private var scene: VideoScene? = null
@@ -156,6 +199,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val speedChanged = playbackSpeed != normalizedSpeed
         playbackSpeed = normalizedSpeed
         scene = nextScene
+        logDisplayMode("bind")
         if (holder.surface.isValid && (changed || speedChanged)) updateFrameRateHint(holder.surface)
         if (player !== nextPlayer) {
             input?.let { player?.clearVideoSurface(it) }

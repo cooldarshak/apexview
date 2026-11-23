@@ -24,7 +24,6 @@ import android.view.Window
 import android.view.Surface
 import android.view.TextureView
 import app.apexview.cast.BakedCastLiveSession
-import app.apexview.DisplayCadence
 import androidx.media3.exoplayer.ExoPlayer
 
 /**
@@ -72,7 +71,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
         Log.i("ApexviewSingleDecoder", "SCENE_DISPLAY_MODE reason=$reason displayId=${actualDisplay.displayId} " +
             "activeMode=${mode.modeId} activeHz=${mode.refreshRate} sourceFps=$sourceFps speed=$playbackSpeed " +
-            "integerRefreshMultiple=${DisplayCadence.exactMultiple(mode.refreshRate, sourceFps)} " +
+            "effectiveFps=${SceneFrameRatePolicy.hint(sourceFps, playbackSpeed)} " +
+            "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
             "supportedModes=$available physicalPresentation=NOT_MEASURED")
     }
     @Volatile private var playbackSpeed = 1f

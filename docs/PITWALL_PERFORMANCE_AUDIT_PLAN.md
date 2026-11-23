@@ -9,6 +9,18 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Post-Build 815 coordinated P1.1/P1.2/P1.3/P2.6 source pass (CI PENDING)
+
+**Code audit and candidate, 23 November 2026:** The mixed-source atlas planner already evaluates bounded candidates by actual validated coded pixel area; no duplicate planner or speculative new tile logic is introduced. In `HevcTizenGridComposer.composeNalUnits`, per-cell destination CTB addresses and same-source seam booleans are now precomputed once after output geometry validation, instead of recalculated across every coded picture. SPS/PPS validation, exact output header round trips, per-picture identity, CABAC payload preservation and wipe-on-cancel remain unchanged. JVM fixture regression compares emitted sample bytes and slice evidence under shuffled cell selection, across all pictures. No measured decoder pixel/memory/thermal benefit is claimed; P1.1 device and mixed-quality acceptance remain OPEN.
+
+**P1.2:** Clear and protected video renderers report active and available real display modes, with effective 50fps × playback-speed and integer refresh multiple checks. Protected SurfaceView (including receiver use) registers/unregisters a DisplayManager mode-change listener. 50fps 1× and 75fps 1.5× JUnit cadence cases distinguish 50/75/100/120/150 Hz. Existing Surface.setFrameRate hints remain seamless-only; no non-seamless mode switch or claim of physical video scanout. Android TV mode and independent physical presentation acceptance remain OPEN.
+
+**P1.3:** Existing multiple-decoder visible-tile budget is now an explicitly testable shared thermal policy, preserving its 0.75× MODERATE, 0.5× SEVERE, critical main-video-only limits, and original single-decoder behavior. App notifications disclose the impact at MODERATE/SEVERE/CRITICAL and on recovery, also when starting warm. Explicit requested resolution caps, HEVC source quality, DRM and Cast wiring are not changed. No verified thermal improvement or automatic quality negotiation is claimed.
+
+**P2.6:** The controlled OFF/MAP/TOWER/BOTH Perfetto comparison rejects duplicate or overlapping samples and mismatched exposure durations; Python regressions check these fail-closed rules. Equal thermal state, feed count, actual video-layer FPS, 1×/1.5× and 10-minute runs still require physical-device recordings, and app-window FrameTimeline is not independent video FPS.
+
+**Strict accounting:** This is a SINGLE candidate commit, awaiting exact-source GitHub CI. Pre-push Android Gradle and real F1 hardware testing are unavailable in this session; Kotlin/compiler, HEVC fixtures, Python scripts, artifact/signature and emulator claims are deferred to CI. Until CI verifies and the source is reassessed, retain **P1.1 85%, P1.2 60%, P1.3 55%, P2.6 87%, aggregate 81.875% coding** and strict release gates **1/16 closed**. No claim that Build815 BufferQueue timeouts, codec PTS correlation or 46.1% slow app UI frames are fixed.
+
 ## Build 815: 23 November 2026 real S22 Ultra phone log + three Perfetto traces (physical gates NOT CLOSED)
 
 **Grounded evidence:** User supplied `pitwall-20261123-125446-075.log.txt` (SM-S908E, Android 16, app 1.0.1630, local log 18:24:45–18:34:27), and three actual on-device Perfetto `.perfetto-trace` captures inside zipped files ending **18:26:37**, **18:31:51**, and **18:33:37**. The archives are valid native Perfetto protobuf traces; the primary `FrameTimelineEvent` actual-surface records and end cookies were decoded directly with their boottime timestamps (no fictional trace-processor SQL results). This tests the genuine Build815 phone playback, **not TCL, protected L1 or Pitwall Cast**. The user's physical visual observation is that playback, tower and map look correct and smooth.
