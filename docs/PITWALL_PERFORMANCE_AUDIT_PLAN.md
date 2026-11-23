@@ -2,12 +2,56 @@
 
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** IN DEVELOPMENT. **Latest fully green CI build: 781**, commit `24f3d8921eb31fbab02bce6c7ffb92b7ca91f839` ([passing GitHub Actions](https://github.com/cooldarshak/apexview/actions/runs/45114462887)). Later performance telemetry/slider regression changes continue through CI and are not yet accepted. This is the sole active project plan. Historical
+**Status:** IN DEVELOPMENT. **Latest fully green CI build before this coordinated review: 800**, commit `e7d00b57bb7b10661174e822d13c92f06d2c7a88` ([passing GitHub Actions](https://github.com/cooldarshak/apexview/actions/runs/45118199666)). The next coordinated source commit is subject to its own full CI and hardware gates. This is the sole active project plan. Historical
 performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
 
+
+## Builds 757–799 failure audit and post-800 coordinated quality checkpoint
+
+**Historical CI ledger, verified from GitHub Actions:** Among 43 builds (757–799),
+9 passed and 34 failed. Build 799 was RED, not an accepted release candidate.
+This included several kinds of independently verified failures, not 34
+different playback defects:
+
+- Compose type and call-site compilation problems in the player/settings
+  refactor, including `Sheets.kt` role semantics, `Viewer.kt` assignments and
+  the `SwitchRow` callable signature (788/789/793/795–799).
+- Material 3 1.5 / AGP 9.1 / compileSdk 37 migration and SDK provisioning
+  failures (766–774), followed by corrections checked by newer green CI.
+- Incorrect regression fixtures/assertions in JVM Compose and Python
+  performance analysis tests (760, 762, 764–765, 779–780, 785–788).
+- Builds 781, 782, 783, 794 and finally **800** prove that particular source
+  snapshots compiled and passed their applicable checks. Build 800 also ran
+  generated HEVC/CMAF decoder comparisons, signed APK assembly, and emulator
+  RenderNode instrumentation. The earlier red builds remain red in history,
+  but their compile/test blockers were absent from Build 800.
+
+**Changes prepared as one post-800 coordinated commit, pending CI:**
+
+- P0.1/P0.2: speculative archive warming now ensures a CMAF segment is cached
+  without allocating another full CMAF fragment only to discard it. Foreground
+  readers retain exclusive copies, per-segment single-flight, cancellation,
+  bounded cache/zeroing and explicit player-priority recovery. Verify this
+  production wiring and existing cancellation/ownership tests in CI.
+- P2.8: root Browse/Viewer navigation and shared navigation animations now
+  honor system Remove Animations; the 200%-type TV chrome uses a second row
+  instead of clipping its video/Map/Tower/Cast actions. Preserve the genuine
+  stable M3 1.5 Expressive theme and DPAD/accessibility semantics.
+- Release engineering: fail-fast APK assembly (no second compilation after
+  a failed unit test), no distributable APK after emulator or other failure,
+  branch-run deduplication, and a source-wiring test to detect accidentally
+  orphaned P0.1/P0.2/P2.8 production policies. This is an integrity check,
+  not a replacement for device runtime proof.
+
+**Progress accounting at verified Build 800:** P0.1 95%, P0.2 91%, P2.8 90%
+(code estimates, not 100%). The next exact-source CI may support a *provisional*
+96%, 93%, 92% after all tests pass; do not award these increases on red CI.
+No untested phone, TCL TV, L1/L3 Widevine or Pitwall Cast performance is signed
+off by these changes. **Strict release gates remain 1/16 closed.** Hardware
+seek p95, measured HEVC allocations and UI/TCL remote/Cast parity remain open.
 
 ## Follow-up source audit: selector hot path, CMAF wiping, settings choices (CI pending)
 

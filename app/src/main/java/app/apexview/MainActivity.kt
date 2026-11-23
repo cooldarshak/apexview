@@ -243,6 +243,7 @@ private fun PipSetup(app: AppState) {
 
 @Composable
 private fun Root(app: AppState) {
+    val reducedMotion = LocalReduceMotion.current
     PipSetup(app)
     val watching = app.tiles.isNotEmpty() && !app.browsing
     val handlesBack = !app.isTv || app.backStack.size > 1 || app.tiles.isNotEmpty() ||
@@ -265,7 +266,10 @@ private fun Root(app: AppState) {
             AuthState.SIGNED_IN -> {
                 AnimatedContent(
                     targetState = watching,
-                    transitionSpec = { fadeIn(tween(Motion.SCREEN_MS, easing = EaseOut)) togetherWith fadeOut(tween(Motion.FADE_MS)) },
+                    transitionSpec = {
+                        fadeIn(tween(if (reducedMotion) 0 else Motion.SCREEN_MS, easing = EaseOut)) togetherWith
+                            fadeOut(tween(if (reducedMotion) 0 else Motion.FADE_MS))
+                    },
                     label = "viewer",
                 ) { showViewer ->
                     when {
@@ -293,13 +297,16 @@ private fun Root(app: AppState) {
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun Browse(app: AppState) {
+    val reducedMotion = LocalReduceMotion.current
     SharedTransitionLayout {
         AnimatedContent(
             targetState = app.backStack.toList(),
             transitionSpec = {
                 val forward = targetState.size >= initialState.size
-                val enter = tween<Float>(Motion.SCREEN_MS, delayMillis = 60, easing = EaseOut)
-                val exit = tween<Float>(Motion.FADE_MS, easing = EaseOut)
+                val enter = tween<Float>(
+                    if (reducedMotion) 0 else Motion.SCREEN_MS,
+                    delayMillis = if (reducedMotion) 0 else 60, easing = EaseOut)
+                val exit = tween<Float>(if (reducedMotion) 0 else Motion.FADE_MS, easing = EaseOut)
                 if (forward) {
                     (fadeIn(enter) + scaleIn(enter, initialScale = 0.98f)) togetherWith fadeOut(exit)
                 } else {

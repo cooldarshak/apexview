@@ -16,6 +16,12 @@ on:
 permissions:
   contents: read
 
+# One branch HEAD, one useful CI run. Pushing an updated HEAD cancels only the
+# superseded run on that branch; a failed compiler/test never publishes an APK.
+concurrency:
+  group: pitwall-debug-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Test and build debug APK
@@ -250,7 +256,7 @@ jobs:
 
       - name: Assemble debug APK
         id: assemble_apks
-        if: always() && !cancelled()
+        if: success()
         run: |
           chmod +x ./gradlew
           ./gradlew --no-daemon assembleDebug assembleDebugAndroidTest
@@ -305,7 +311,7 @@ jobs:
           retention-days: 14
 
       - name: Upload debug APK
-        if: always() && steps.assemble_apks.outcome == 'success' && env.APK_SIGNING_READY == 'true'
+        if: success() && steps.assemble_apks.outcome == 'success' && env.APK_SIGNING_READY == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: apexview-custom-debug-apk
@@ -314,7 +320,7 @@ jobs:
           retention-days: 14
 
       - name: Upload temporary POC debug APK for device proof
-        if: always() && steps.assemble_apks.outcome == 'success' && env.APK_SIGNING_READY != 'true'
+        if: success() && steps.assemble_apks.outcome == 'success' && env.APK_SIGNING_READY != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: apexview-hevc-single-decoder-base-debug
@@ -323,7 +329,7 @@ jobs:
           retention-days: 14
 
       - name: Upload single-decoder instrumentation APK
-        if: always() && steps.assemble_apks.outcome == 'success'
+        if: success() && steps.assemble_apks.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: apexview-hevc-single-decoder-instrumentation

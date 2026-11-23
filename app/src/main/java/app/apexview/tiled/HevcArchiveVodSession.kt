@@ -177,7 +177,9 @@ internal class HevcArchiveVodSession(
                         if (closed || Thread.currentThread().isInterrupted) break
                         synchronized(warmLock) { warmActiveNumber = candidate }
                         try {
-                            if (runCatching { composeOrRead(candidate).fill(0) }.isFailure) break
+                            // Prefetch populates the bounded cache, not a DataSource reader.
+                            // Do NOT allocate a second multi-MB ByteArray just to zero it.
+                            if (runCatching { ensureCached(candidate, copyForCaller = false) }.isFailure) break
                         } finally {
                             synchronized(warmLock) { warmActiveNumber = null }
                         }
@@ -198,27 +200,39 @@ internal class HevcArchiveVodSession(
         }
     }
 
-    private fun composeOrRead(number: Int): ByteArray {
-        // The cache lock guards only ownership/publication, not I/O or HEVC work. A foreground
-        // request joins an in-flight warmup for the SAME segment and preempts unrelated warmups.
+    /**
+     * Foreground readers need an independently owned ByteArray because their DataSource
+     * clears it on close. Speculative production needs only cache publication: do not
+     * allocate and immediately wipe an extra full CMAF segment for every prefetch.
+     */
+    private fun composeOrRead(number: Int): ByteArray =
+        requireNotNull(ensureCached(number, copyForCaller = true))
+
+    private fun ensureCached(number: Int, copyForCaller: Boolean): ByteArray? {
+        // Cache ownership is protected by cacheLock, never by the production flight.
+        // The flight owns one exact number and never serializes unrelated foreground I/O.
         var cancelledWarmFlights = 0
         while (true) {
-            synchronized(cacheLock) { checkOpen(); cache.readCopy(number) }?.let { return it }
+            if (copyForCaller) {
+                synchronized(cacheLock) { checkOpen(); cache.readCopy(number) }?.let { return it }
+            } else if (synchronized(cacheLock) { checkOpen(); cache.contains(number) }) {
+                return null // Warm copy was never made; cache keeps the only owned buffer.
+            }
             try {
                 production.run(number) {
-                    // A cancelled warm producer may have been observed by a foreground waiter.
-                    if (synchronized(cacheLock) { checkOpen(); !cache.contains(number) }) composeAndPublish(number)
+                    // A cancelled speculative flight must not poison a later player request.
+                    if (synchronized(cacheLock) { checkOpen(); !cache.contains(number) }) {
+                        composeAndPublish(number)
+                    }
                 }
             } catch (cancelled: ArchiveWarmupCancelledException) {
-                // A seek interrupting an obsolete speculative producer must never poison the
-                // foreground DataSource request. Retry once, independently, at player priority.
-                if (Thread.currentThread().isInterrupted || ++cancelledWarmFlights > 1) throw cancelled
+                if (!copyForCaller || Thread.currentThread().isInterrupted ||
+                    ++cancelledWarmFlights > 1) throw cancelled
                 android.util.Log.i("ApexviewSingleDecoder",
                     "ARCHIVE_VOD_FOREGROUND_RECOVER segment=$number cause=CANCELLED_PREFETCH")
-                continue
             }
-            synchronized(cacheLock) { checkOpen(); cache.readCopy(number) }?.let { return it }
-            // An unrelated completed segment may have evicted this bounded entry.
+            // A different segment can evict ours before the next read: retry instead
+            // of returning missing/corrupted media or violating the ownership contract.
         }
     }
 
