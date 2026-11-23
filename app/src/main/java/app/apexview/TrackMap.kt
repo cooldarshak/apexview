@@ -1014,36 +1014,61 @@ internal class Ribbon(
     /** Start/finish sits at the middle of the top edge. */
     private val shift = top / 2
 
-    /** Walks the rounded rectangle clockwise from the top-left end of the top edge. */
-    private fun at(f: Float): Pair<Offset, Offset> {
-        var d = ((if (clockwise) f else -f) * perimeter + shift).mod(perimeter)
-        fun corner(cx: Float, cy: Float, startDeg: Float): Pair<Offset, Offset> {
-            val a = Math.toRadians((startDeg + 90f * d / arc).toDouble())
-            val p = Offset(cx + rr * kotlin.math.cos(a).toFloat(), cy + rr * kotlin.math.sin(a).toFloat())
-            val n = Offset(cx - p.x, cy - p.y).let { if (rr > 0f) it / rr else it }
-            return p to n
-        }
-        if (d < top) return Offset(l + rr + d, t) to Offset(0f, 1f)
-        d -= top
-        if (d < arc) return corner(r - rr, t + rr, -90f)
-        d -= arc
-        if (d < side) return Offset(r, t + rr + d) to Offset(-1f, 0f)
-        d -= side
-        if (d < arc) return corner(r - rr, b - rr, 0f)
-        d -= arc
-        if (d < top) return Offset(r - rr - d, b) to Offset(0f, -1f)
-        d -= top
-        if (d < arc) return corner(l + rr, b - rr, 90f)
-        d -= arc
-        if (d < side) return Offset(l, b - rr - d) to Offset(1f, 0f)
-        d -= side
-        return corner(l + rr, t + rr, 180f)
+    /** Preserve the old exact ribbon geometry without allocating a Pair on every
+     * marker and every inward-label lookup (24 drivers at up to 60 Hz). */
+    private fun distance(f: Float): Float =
+        ((if (clockwise) f else -f) * perimeter + shift).mod(perimeter)
+
+    private fun cornerPoint(cx: Float, cy: Float, startDeg: Float, distance: Float): Offset {
+        val angle = Math.toRadians((startDeg + 90f * distance / arc).toDouble())
+        return Offset(cx + rr * kotlin.math.cos(angle).toFloat(),
+            cy + rr * kotlin.math.sin(angle).toFloat())
     }
 
-    fun point(f: Float) = at(f).first
+    private fun cornerInward(cx: Float, cy: Float, startDeg: Float, distance: Float): Offset {
+        val p = cornerPoint(cx, cy, startDeg, distance)
+        val normal = Offset(cx - p.x, cy - p.y)
+        return if (rr > 0f) normal / rr else normal
+    }
+
+    fun point(f: Float): Offset {
+        var d = distance(f)
+        if (d < top) return Offset(l + rr + d, t)
+        d -= top
+        if (d < arc) return cornerPoint(r - rr, t + rr, -90f, d)
+        d -= arc
+        if (d < side) return Offset(r, t + rr + d)
+        d -= side
+        if (d < arc) return cornerPoint(r - rr, b - rr, 0f, d)
+        d -= arc
+        if (d < top) return Offset(r - rr - d, b)
+        d -= top
+        if (d < arc) return cornerPoint(l + rr, b - rr, 90f, d)
+        d -= arc
+        if (d < side) return Offset(l, b - rr - d)
+        d -= side
+        return cornerPoint(l + rr, t + rr, 180f, d)
+    }
 
     /** Unit vector pointing into the screen. */
-    fun inward(f: Float) = at(f).second
+    fun inward(f: Float): Offset {
+        var d = distance(f)
+        if (d < top) return Offset(0f, 1f)
+        d -= top
+        if (d < arc) return cornerInward(r - rr, t + rr, -90f, d)
+        d -= arc
+        if (d < side) return Offset(-1f, 0f)
+        d -= side
+        if (d < arc) return cornerInward(r - rr, b - rr, 0f, d)
+        d -= arc
+        if (d < top) return Offset(0f, -1f)
+        d -= top
+        if (d < arc) return cornerInward(l + rr, b - rr, 90f, d)
+        d -= arc
+        if (d < side) return Offset(1f, 0f)
+        d -= side
+        return cornerInward(l + rr, t + rr, 180f, d)
+    }
 
     fun path() = Path().apply {
         addRoundRect(androidx.compose.ui.geometry.RoundRect(l, t, r, b, androidx.compose.ui.geometry.CornerRadius(rr, rr)))

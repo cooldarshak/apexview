@@ -42,6 +42,24 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("fun sample(atMs: Long): List<Car>", sampler)
         self.assertIn("updateForDraw(movingCars, timing.geometry)", track)
 
+    def test_real_clear_protected_and_cast_frame_attribution_with_bounded_draw_ribbon(self):
+        timestamp = source("scene/SceneCodecTimestampCorrelation.kt")
+        self.assertIn("earlyLatchPts = LongArray(CAPACITY)", timestamp)
+        self.assertIn("lateMatchedLatches: Long", timestamp)
+        self.assertIn("outstandingLatches: Int", timestamp)
+        for scene in ("SingleDecoderSceneView.kt", "ProtectedDecoderSceneView.kt"):
+            actual = source("scene/" + scene)
+            self.assertIn("codecCorrelation?.onTextureLatched(", actual)
+            self.assertIn("codecCorrelation?.onSwapSubmitted(", actual)
+            self.assertIn("codecPtsMissingAtLatch=", actual)
+            self.assertIn("codecPtsLateMatched=", actual)
+            self.assertIn("codecPtsOutstanding=", actual)
+        track = source("TrackMap.kt")
+        self.assertNotIn("private fun at(f: Float): Pair<Offset, Offset>", track)
+        self.assertIn("private fun cornerPoint(", track)
+        self.assertIn("private fun cornerInward(", track)
+        self.assertIn("movingProjection.updateForDraw(movingCars, timing.geometry)", track)
+
     def test_map_draw_phase_resolves_safety_leader_once_per_static_epoch(self):
         track = source("TrackMap.kt")
         self.assertEqual(track.count("val currentSafetyLeader = remember("), 2)

@@ -64,4 +64,53 @@ class SceneCodecTimestampCorrelationTest {
         timing.reset()
         assertEquals(0L, timing.snapshotAndReset().swapsAfterLatch)
     }
+    @Test fun lateMetadataMatchesOnlyExactEarlierTexturePtsWithoutNegativeLatency() {
+        val timing = SceneCodecTimestampCorrelation().apply { active = true }
+        timing.onTextureLatched(1_000_000_000L, 1_004_000_000L)
+        timing.onSwapSubmitted(1_005_000_000L)
+        // Metadata arrived after EGL latched the frame. The planned release
+        // can precede latch, but callback arrival may follow it.
+        timing.onCodecFrame(1_000_000L, 1_002_000_000L, 1_006_000_000L)
+        val report = timing.snapshotAndReset()
+        assertEquals(1L, report.codecFrames)
+        assertEquals(1L, report.matchedLatches)
+        assertEquals(1L, report.lateMatchedLatches)
+        assertEquals(1L, report.unmatchedLatches) // missing only AT latch time
+        assertEquals(0, report.outstandingLatches)
+        assertEquals(2.0, report.releaseToLatch.maxMs, 0.001)
+        assertEquals(0L, report.callbackToLatch.count) // never fabricate negative latency
+        assertEquals(1.0, report.latchToSwap.maxMs, 0.001)
+    }
+
+    @Test fun lateMetadataNeverCrossesSeekEpochOrMatchesAnUnrelatedPts() {
+        val timing = SceneCodecTimestampCorrelation().apply { active = true }
+        timing.onTextureLatched(400_000_000L, 401_000_000L)
+        assertEquals(1, timing.snapshotAndReset().outstandingLatches)
+        timing.onCodecFrame(500_000L, 400_000_000L, 401_000_000L)
+        var report = timing.snapshotAndReset()
+        assertEquals(0L, report.lateMatchedLatches)
+        assertEquals(1, report.outstandingLatches)
+        timing.reset()
+        timing.onCodecFrame(400_000L, 600_000_000L, 600_000_000L)
+        report = timing.snapshotAndReset()
+        assertEquals(0L, report.lateMatchedLatches)
+        assertEquals(0L, report.matchedLatches)
+        assertEquals(0, report.outstandingLatches)
+        timing.onTextureLatched(400_000_000L, 605_000_000L)
+        assertEquals(1L, timing.snapshotAndReset().matchedLatches)
+    }
+
+    @Test fun pendingLatchCorrelationIsBoundedAndSurvivesFiveSecondLogReset() {
+        val timing = SceneCodecTimestampCorrelation().apply { active = true }
+        repeat(256) { i ->
+            timing.onTextureLatched((1_000_000L + i * 20_000L) * 1000L, 9_000_000_000L)
+        }
+        assertEquals(128, timing.snapshotAndReset().outstandingLatches)
+        timing.onCodecFrame(6_100_000L, 8_000_000_000L, 9_100_000_000L)
+        timing.onCodecFrame(1_000_000L, 8_000_000_000L, 9_100_000_000L)
+        val report = timing.snapshotAndReset()
+        assertEquals(1L, report.lateMatchedLatches)
+        assertEquals(127, report.outstandingLatches)
+    }
+
 }

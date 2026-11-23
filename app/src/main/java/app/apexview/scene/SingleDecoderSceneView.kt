@@ -558,7 +558,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 "glQueueMaxMs=${metrics.glQueueDelays.maxMs.toInt()} " +
                 "glThreadPriority=DISPLAY " +
                 "codecFrameCallbacks=${correlation?.codecFrames ?: 0} " +
-                "codecPtsMatched=${correlation?.matchedLatches ?: 0} codecPtsUnmatched=${correlation?.unmatchedLatches ?: 0} " +
+                "codecPtsMatched=${correlation?.matchedLatches ?: 0} " +
+                "codecPtsMissingAtLatch=${correlation?.unmatchedLatches ?: 0} " +
+                "codecPtsLateMatched=${correlation?.lateMatchedLatches ?: 0} " +
+                "codecPtsOutstanding=${correlation?.outstandingLatches ?: 0} " +
                 "plannedCodecReleaseToLatchP95UpperMs=${correlation?.releaseToLatch?.percentileUpperMs(95) ?: 0} " +
                 "codecCallbackToLatchP95UpperMs=${correlation?.callbackToLatch?.percentileUpperMs(95) ?: 0} " +
                 "latchToSwapP95UpperMs=${correlation?.latchToSwap?.percentileUpperMs(95) ?: 0} " +
