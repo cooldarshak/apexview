@@ -524,6 +524,10 @@ internal class HevcArchiveVodSession(
 
     private fun shutdown() {
         closed = true
+        // Wake foreground waiters before shutting down speculative networking.
+        // A waiter must never spend a stale 25s fetch timeout on an owned,
+        // explicitly closed session.
+        production.close()
         synchronized(warmLock) { warmTask?.cancel(true); warmer.shutdownNow() }
         fetchers.shutdownNow()
         prefetchFetchers.shutdownNow()

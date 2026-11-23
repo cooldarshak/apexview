@@ -13,9 +13,28 @@ internal class ArchiveSegmentSingleFlight(private val onRegistered: ((Int) -> Un
     private class Flight(val finished: CompletableFuture<Unit> = CompletableFuture(), var users: Int = 0)
     private val lock = Any()
     private val flights = mutableMapOf<Int, Flight>()
+    private var closed = false
+
+    /**
+     * Closing the stream must wake every foreground joiner immediately,
+     * even when a speculative producer is blocked in network I/O.
+     * Producers are still responsible for cooperative cancellation; the
+     * owning session's closed flag prevents any later cache publication.
+     */
+    fun close() {
+        val pending = synchronized(lock) {
+            if (closed) return
+            closed = true
+            val abandoned = flights.values.toList()
+            flights.clear()
+            abandoned
+        }
+        pending.forEach { it.finished.completeExceptionally(IOException("Archive session closed")) }
+    }
 
     fun run(number: Int, produce: () -> Unit) {
         val (flight, producer) = synchronized(lock) {
+            if (closed) throw IOException("Archive session closed")
             val existing = flights[number]
             val current = existing ?: Flight().also { flights[number] = it }
             current.users++

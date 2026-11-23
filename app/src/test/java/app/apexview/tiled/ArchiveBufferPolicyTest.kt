@@ -91,6 +91,42 @@ class ArchiveBufferPolicyTest {
         }
     }
 
+    @Test fun shutdownUnblocksJoiningForegroundWithoutWaitingForStalledProducer() {
+        val registered = CountDownLatch(2)
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val coordinator = ArchiveSegmentSingleFlight { registered.countDown() }
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val producer = pool.submit {
+                assertThrows(IOException::class.java) {
+                    coordinator.run(42) {
+                        started.countDown()
+                        check(release.await(5, TimeUnit.SECONDS))
+                    }
+                }
+            }
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            val waiter = pool.submit {
+                assertThrows(IOException::class.java) {
+                    coordinator.run(42) { fail("closed join must never spawn second producer") }
+                }
+            }
+            assertTrue(registered.await(2, TimeUnit.SECONDS))
+            coordinator.close()
+            waiter.get(1, TimeUnit.SECONDS)
+            assertFalse(producer.isDone)
+            release.countDown()
+            producer.get(2, TimeUnit.SECONDS)
+            // A fresh foreground request must not resurrect the closed flight.
+            assertThrows(IOException::class.java) { coordinator.run(42) {} }
+            coordinator.close() // idempotent
+        } finally {
+            release.countDown()
+            pool.shutdownNow()
+        }
+    }
+
     @Test fun failureIsSharedAndNextAttemptCanRetry() {
         val coordinator = ArchiveSegmentSingleFlight()
         val attempts = AtomicInteger()
