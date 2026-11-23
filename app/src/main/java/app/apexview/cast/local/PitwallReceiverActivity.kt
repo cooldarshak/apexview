@@ -227,7 +227,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         status = "Phone connected. Waiting for playback request…"
     }
 
-    private fun handle(packet: FcastProtocol.Packet) {
+    private suspend fun handle(packet: FcastProtocol.Packet) {
         val body = packet.body
         try {
             when (packet.opcode) {
@@ -272,7 +272,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                             setReceiverCaptions(requested.enabled, requested.language)
                         }
                         FcastProtocol.TIMING -> if (timingPeer && body != null) {
-                            try { timingState.accept(body, playbackId()) }
+                            try { timingState.acceptAsync(body, playbackId()) }
                             catch (error: Exception) { Log.w("PitwallReceiver", "Timing display message rejected: ${error.javaClass.simpleName}") }
                             return // The periodic playback update carries the clock independently of overlay updates.
                         }

@@ -1,6 +1,8 @@
 package app.apexview.cast
 
 import android.os.SystemClock
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -32,7 +34,11 @@ internal class CastTimingReceiver {
         private set
     private var pendingLegacySeek: Pair<Long, Long>? = null
     private var lastSequence = -1L
+    // All state mutation stays on the owner UI scope; this lease prevents a
+    // completed background parse from publishing after stop or a seek.
+    private var mutationGeneration = 0L
     fun clear() {
+        mutationGeneration++
         geometry = null
         frame = null
         tableId = -1
@@ -78,19 +84,86 @@ internal class CastTimingReceiver {
 
     fun onSeek(fromMs: Long, toMs: Long) {
         if (fromMs == toMs) return
+        mutationGeneration++
         clockEpoch++
         pendingLegacySeek = fromMs to toMs
         frame = null
     }
+    /** Synchronous contract retained for regression tests and lightweight callers. */
     fun accept(packet: JSONObject, playbackId: String) {
         val j = assembler.accept(packet) ?: return
+        acceptDecoded(j, playbackId)
+    }
+
+    /**
+     * Receiver TCP transport awaits this before reading the next packet, keeping
+     * geometry, table and motion publication strictly ordered. Decode expensive
+     * JSON models on Default rather than freezing TCL Compose/remote input.
+     * The original CBCS, geometry, epoch and sequence checks still run on Main.
+     */
+    suspend fun acceptAsync(packet: JSONObject, playbackId: String) {
+        val j = assembler.accept(packet) ?: return
+        if (j.optString("playbackId") != playbackId) return
+        val lease = mutationGeneration
+        var decodedGeometry: CastTimingProtocol.Geometry? = null
+        var decodedTable: CastTimingProtocol.Table? = null
+        var decodedFrame: CastTimingProtocol.Frame? = null
+        when (j.getString("kind")) {
+            "geometry" -> {
+                if (geometry?.id != j.getString("id")) {
+                    decodedGeometry = withContext(Dispatchers.Default) {
+                        CastTimingProtocol.decodeGeometry(j)
+                    }
+                }
+            }
+            "table" -> {
+                require(j.getInt("version") == 1)
+                val version = j.getLong("id")
+                if (version > tableId || currentTable == null) {
+                    decodedTable = withContext(Dispatchers.Default) {
+                        CastTimingProtocol.readTable(j.getJSONArray("rows"))
+                    }
+                }
+            }
+            "frame" -> {
+                val incomingTableId = j.getLong("tableId")
+                val canUseTable = incomingTableId == tableId ||
+                    (tableId >= 0L && tableId < Long.MAX_VALUE &&
+                        incomingTableId == tableId + 1L && currentTable != null)
+                val geometryName = j.getString("geometry")
+                val validGeometry = geometryName.isEmpty() || geometryName == geometry?.id
+                val incomingEpoch = if (j.has("clockEpoch")) j.getLong("clockEpoch") else null
+                val validEpoch = incomingEpoch == null ||
+                    (incomingEpoch >= 0L && (incomingEpoch == clockEpoch ||
+                        CastTimingEpochPolicy.adoptInitialEpoch(
+                            framePackets, lastSequence, pendingLegacySeek != null, incomingEpoch)))
+                val table = currentTable
+                if (j.getLong("sequence") > lastSequence && canUseTable &&
+                    validGeometry && validEpoch && table != null) {
+                    decodedFrame = withContext(Dispatchers.Default) {
+                        CastTimingProtocol.decodeFrame(j, table)
+                    }
+                }
+            }
+        }
+        // A native player seek or new PLAY can occur while parsing a large
+        // tower/geometry packet. Never resurrect the previous playhead on return.
+        if (lease != mutationGeneration) return
+        acceptDecoded(j, playbackId, decodedGeometry, decodedTable, decodedFrame)
+    }
+
+    private fun acceptDecoded(j: JSONObject, playbackId: String,
+        decodedGeometry: CastTimingProtocol.Geometry? = null,
+        decodedTable: CastTimingProtocol.Table? = null,
+        decodedFrame: CastTimingProtocol.Frame? = null,
+    ) {
         if (j.optString("playbackId") != playbackId) return
         when (j.getString("kind")) {
             "geometry" -> {
                 if (geometry?.id != j.getString("id")) {
                     // Do not draw the previous circuit while the new timing
                     // geometry/frame pair is arriving over the LAN.
-                    val next = CastTimingProtocol.decodeGeometry(j)
+                    val next = decodedGeometry ?: CastTimingProtocol.decodeGeometry(j)
                     geometry = next
                     frame = null
                 }
@@ -105,7 +178,7 @@ internal class CastTimingReceiver {
                     lastTableReceivedMs = SystemClock.elapsedRealtime()
                     return
                 }
-                val updated = CastTimingProtocol.readTable(j.getJSONArray("rows"))
+                val updated = decodedTable ?: CastTimingProtocol.readTable(j.getJSONArray("rows"))
                 tableId = id
                 currentTable = updated
                 tablePackets++
@@ -153,7 +226,7 @@ internal class CastTimingReceiver {
                         if (kotlin.math.abs(position - from) < kotlin.math.abs(position - to)) return
                     }
                 }
-                frame = CastTimingProtocol.decodeFrame(j, acceptedTable)
+                frame = decodedFrame ?: CastTimingProtocol.decodeFrame(j, acceptedTable)
                 if (oneAhead) aheadTableFramesRecovered++
                 pendingLegacySeek = null
                 lastSequence = sequence

@@ -9,6 +9,44 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 745 coordinated Android TV Cast main-thread isolation, feed synchronization and expressive navigation
+
+**Root cause addressed in code:** FcastConnection previously dispatched all
+receiver packets to Main and synchronously parsed the complete timing geometry,
+24-driver tower table and 200ms motion frame on Main. On the TCL that work
+competes directly with Compose/D-pad and HWUI on a device already showing
+overlay lag. The receiver now keeps ordered TCP delivery (each packet
+awaited before the next) but parses geometry, tower table and eligible
+motion payloads using Dispatchers.Default, returning to the owner/Main
+scope only for existing packet generation, geometry identity, epoch,
+table version and sequence validation and Compose state publication.
+Clear and protected receiver playback are unaffected; DRM and media
+payloads never enter this timing parser. A generation lease invalidates
+a parse in flight on STOP/new PLAY or native seek, preventing old packets
+from resurrecting stale map/tower state. The direct synchronous receiver
+API remains usable by existing tests. New async tests exercise geometry,
+tower, motion and seek epoch recovery. This is a coding performance fix,
+not a hardware-confirmed TCL P0 closure.
+
+**Coordinator extraction:** The follower clock correction algorithm moves
+from the monolithic AppState into tested, pure FeedSyncPolicy with the
+same 2000ms seek and 150ms nudge thresholds and 0.9/1.1 speed multipliers.
+Keep the existing explicit SINGLE video-decoder invariant: this policy
+does not allocate a player/decoder and must not be used as an implicit
+fallback. Clamp extreme position discontinuities safely.
+
+**Expressive interaction:** Use existing 240ms fast navigation motion in
+shared browse artwork transitions (previously 380ms), without changing
+video SurfaceView, GL, seek, or protected scene animation pacing.
+Regression tests must pass on both phone and TV.
+
+**Gate accounting:** This is an implementation progress checkpoint; it
+does not close the 15 still-open full-release evidence gates. Close
+P0.3/0.4, Cast, TV, UI and sync only after 10-minute physical TCL/S22
+runs with full overlay matrix, real source ownership, frame presentation
+and UI input metrics, and protected/clear SINGLE/MULTIPLE parity. Keep
+the historical workstream estimates independent from CI success.
+
 ## Build 744 diagnostic capture load and UI input/animation telemetry
 
 The user's Android 16 six-feed logs recorded thousands of identical framework

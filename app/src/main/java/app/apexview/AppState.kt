@@ -6522,14 +6522,9 @@ class AppState(
             else feed.player.currentPosition - leader.player.currentPosition
             feed.driftMs = drift
 
-            when {
-                abs(drift) > SEEK_DRIFT_MS -> {
-                    feed.setSpeed(1f)
-                    feed.player.seekTo((feed.player.currentPosition - drift).coerceAtLeast(0L))
-                }
-                abs(drift) > NUDGE_DRIFT_MS && playing -> feed.setSpeed(if (drift > 0) 1f - NUDGE else 1f + NUDGE)
-                else -> feed.setSpeed(1f)
-            }
+            val correction = FeedSyncPolicy.decide(drift, feed.player.currentPosition, playing)
+            feed.setSpeed(correction.speedMultiplier)
+            correction.seekPositionMs?.let { feed.player.seekTo(it) }
         }
     }
 
@@ -6556,9 +6551,6 @@ class AppState(
     companion object {
         private const val SINGLE_DECODER_ACTIVATING = "Single decoder activation in progress."
         private const val SINGLE_DECODER_AUTO_RETRIES = 2
-        private const val SEEK_DRIFT_MS = 2000L
-        private const val NUDGE_DRIFT_MS = 150L
-        private const val NUDGE = 0.1f
         const val MAX_FEEDS = 4
         const val MAX_SINGLE_DECODER_FEEDS = 24
         private const val MAX_RECENTS = 4

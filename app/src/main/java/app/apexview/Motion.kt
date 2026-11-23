@@ -22,7 +22,7 @@ val LocalSharedScope = compositionLocalOf<SharedTransitionScope?> { null }
 val LocalPageScope = compositionLocalOf<AnimatedVisibilityScope?> { null }
 
 @OptIn(ExperimentalSharedTransitionApi::class)
-private val ArtBounds = BoundsTransform { _, _ -> tween(Motion.SCREEN_MS, easing = EaseOut) }
+private val ArtBounds = BoundsTransform { _, _ -> tween(Motion.BROWSE_NAV_MS, easing = EaseOut) }
 
 /**
  * Marks artwork that should travel between pages: a card's image grows into the next page's
@@ -39,8 +39,8 @@ fun Modifier.sharedArt(key: String?, cornerRadius: Int = 0): Modifier {
         this@sharedArt.sharedBounds(
             rememberSharedContentState(key),
             animatedVisibilityScope = page,
-            enter = fadeIn(tween(Motion.SCREEN_MS, easing = EaseOut)),
-            exit = fadeOut(tween(Motion.SCREEN_MS, easing = EaseOut)),
+            enter = fadeIn(tween(Motion.BROWSE_NAV_MS, easing = EaseOut)),
+            exit = fadeOut(tween(Motion.BROWSE_NAV_MS, easing = EaseOut)),
             boundsTransform = ArtBounds,
             resizeMode = SharedTransitionScope.ResizeMode.scaleToBounds(ContentScale.Crop),
             clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(cornerRadius.dp)),

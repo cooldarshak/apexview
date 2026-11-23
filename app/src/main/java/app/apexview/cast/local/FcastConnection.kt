@@ -13,7 +13,7 @@ import org.json.JSONObject
 internal class FcastConnection(
     private val scope: CoroutineScope,
     val socket: Socket,
-    private val onPacket: (FcastProtocol.Packet) -> Unit,
+    private val onPacket: suspend (FcastProtocol.Packet) -> Unit,
     private val onClosed: (String) -> Unit,
 ) : AutoCloseable {
     private val closed = AtomicBoolean(false)

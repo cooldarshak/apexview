@@ -8,6 +8,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -198,6 +199,33 @@ class CastTimingProtocolTest {
         assertThrows(IllegalArgumentException::class.java) { assembler.accept(packets[1]) }
         assertThrows(IllegalArgumentException::class.java) { TimingMessageChunks.split(JSONObject().put("rows", "x".repeat(128001))) }
     }
+    @Test fun orderedAsyncReceiverParsesAllThreePacketsAndRejectsPriorSeekEpoch() = runBlocking {
+        val receiver = CastTimingReceiver()
+        val geometry = CastTimingProtocol.geometry(timing()).put("playbackId", "async-session")
+        val id = geometry.getString("id")
+        val base = frame(id).put("playbackId", "async-session")
+            .put("tableId", 1L).put("sequence", 1L).put("clockEpoch", 0L)
+        val table = JSONObject().put("kind", "table").put("version", 1)
+            .put("playbackId", "async-session").put("id", 1L)
+            .put("rows", base.getJSONArray("rows"))
+        receiver.acceptAsync(geometry, "async-session")
+        receiver.acceptAsync(table, "async-session")
+        receiver.acceptAsync(base, "async-session")
+        assertEquals(id, receiver.geometry?.id)
+        assertEquals(1L, receiver.health().tablesAccepted)
+        assertEquals(1L, receiver.health().framesAccepted)
+        assertEquals(5000L, receiver.frame!!.positionMs)
+        receiver.onSeek(5000L, 25000L)
+        receiver.acceptAsync(JSONObject(base.toString()).put("sequence", 2L), "async-session")
+        assertNull(receiver.frame)
+        receiver.acceptAsync(JSONObject(base.toString()).put("sequence", 3L)
+            .put("clockEpoch", 1L).put("position", 25000L), "async-session")
+        assertEquals(25000L, receiver.frame!!.positionMs)
+        receiver.clear()
+        assertNull(receiver.currentTable)
+        assertNull(receiver.geometry)
+    }
+
     @Test fun staleMediaLoadAndOutOfOrderTimingFramesCannotOverwriteTheCurrentUi() {
         val receiver = CastTimingReceiver()
         val geo = CastTimingProtocol.geometry(timing()).put("playbackId", "current")
