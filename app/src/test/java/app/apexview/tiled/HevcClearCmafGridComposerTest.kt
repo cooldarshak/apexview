@@ -103,6 +103,8 @@ class HevcClearCmafGridComposerTest {
         assertTrue(output.parseCpuMs >= 0)
         assertTrue(output.rewriteCpuMs >= 0)
         assertTrue(output.packageCpuMs >= 0)
+        assertTrue(output.cmafInspectorMs >= 0)
+        assertTrue(output.nalInspectorMs >= 0)
 
         // A session validates each exact rendition's init once. Reusing that immutable
         // metadata must not change a single output byte or weaken fragment checks.

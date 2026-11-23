@@ -100,13 +100,15 @@ def summarize(text):
                 archived_cached_bytes.append(as_int(f["cachedBytes"]))
             segments.append({key: as_int(f.get(key)) for key in (
                 "number", "processAllocBytesDuringSegment", "processGcDuringSegment",
-                "parseMs", "rewriteMs", "packageMs", "composeMs", "outputBytes")})
+                "parseMs", "rewriteMs", "packageMs", "cmafInspectorMs",
+                "nalInspectorMs", "parseCpuMs", "rewriteCpuMs", "packageCpuMs",
+                "producerCpuMs", "composeMs", "outputBytes")})
         if "PROTECTED_CMAF_SEGMENT " in line:
             if "retainedBytes" in f:
                 protected_retained_bytes.append(as_int(f["retainedBytes"]))
             protected_segments.append({key: as_int(f.get(key)) for key in (
                 "feeds", "sampleCount", "processAllocBytesDuringSegment",
-                "processGcDuringSegment", "composeMs", "outputBytes")})
+                "processGcDuringSegment", "composeMs", "composerThreadCpuMs", "outputBytes")})
         if "ARCHIVE_VOD_FAILED" in line or "event=load-error" in line:
             failures += 1
         if "F1_COMPOSITION_PLAYBACK" in line and "stage=ACTIVE" in line:
@@ -157,12 +159,16 @@ def summarize(text):
         "archive_gc_median": median(s["processGcDuringSegment"] for s in steady) if steady else None,
         "archive_compose_median_ms": median(s["composeMs"] for s in steady) if steady else None,
         "archive_rewrite_median_ms": median(s["rewriteMs"] for s in steady) if steady else None,
+        "archive_cmaf_inspector_median_ms": median(s["cmafInspectorMs"] for s in steady) if steady else None,
+        "archive_nal_inspector_median_ms": median(s["nalInspectorMs"] for s in steady) if steady else None,
+        "archive_rewrite_cpu_median_ms": median(s["rewriteCpuMs"] for s in steady) if steady else None,
         "archive_output_median_bytes": int(median(s["outputBytes"] for s in steady)) if steady else None,
         "protected_segments_total": len(protected_segments),
         "protected_segments_steady": len(protected_steady),
         "protected_alloc_median_bytes": int(median(s["processAllocBytesDuringSegment"] for s in protected_steady)) if protected_steady else None,
         "protected_gc_median": median(s["processGcDuringSegment"] for s in protected_steady) if protected_steady else None,
         "protected_compose_median_ms": median(s["composeMs"] for s in protected_steady) if protected_steady else None,
+        "protected_composer_cpu_median_ms": median(s["composerThreadCpuMs"] for s in protected_steady) if protected_steady else None,
         "protected_output_median_bytes": int(median(s["outputBytes"] for s in protected_steady)) if protected_steady else None,
     }
 

@@ -654,6 +654,7 @@ internal object ProtectedHevcLiveComposition {
         android.os.Trace.beginSection("PitwallProtectedCmafCompose")
         try {
         val composeStartedNs = System.nanoTime()
+        val composeStartedCpuNs = android.os.Debug.threadCpuTimeNanos()
         val allocatedAtStart = android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
         val gcAtStart = android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
         if (session.feeds.values.any { it.window.size < MIN_ALIGN_PICTURES }) {
@@ -1091,6 +1092,7 @@ internal object ProtectedHevcLiveComposition {
             android.util.Log.i("ApexviewSingleDecoder",
                 "PROTECTED_CMAF_SEGMENT composeMs=${(System.nanoTime() - composeStartedNs) / 1_000_000L} " +
                 "alignmentMs=$alignmentElapsedMs pictureComposeMs=$pictureComposeElapsedMs " +
+                "composerThreadCpuMs=${((android.os.Debug.threadCpuTimeNanos() - composeStartedCpuNs) / 1_000_000L).coerceAtLeast(0)} " +
                 "fragmentWriteMs=$fragmentWriteElapsedMs " +
                 "feeds=${session.labels.size} sampleCount=${newOutput.sampleCount} " +
                 "outputBytes=${newOutput.mediaFragment.size} retainedSegments=${session.outputHistory.size} " +

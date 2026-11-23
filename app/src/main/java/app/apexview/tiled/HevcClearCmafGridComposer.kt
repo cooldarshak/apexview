@@ -51,6 +51,8 @@ internal object HevcClearCmafGridComposer {
         val parseCpuMs: Long = 0,
         val rewriteCpuMs: Long = 0,
         val packageCpuMs: Long = 0,
+        val cmafInspectorMs: Long = 0,
+        val nalInspectorMs: Long = 0,
         /** Deterministic removed staging bytes, NOT process-wide ART allocation data. */
         val sourceAnnexBBytesAvoided: Long = 0,
     )
@@ -76,7 +78,9 @@ internal object HevcClearCmafGridComposer {
         val fragments: List<SourceFragment>,
         val inspectorFragments: List<CmafBoxInspector.FragmentMetadata>,
         val nalUnits: List<HevcBitstream.NalUnit>,
-        val annexBEquivalentBytes: Int
+        val annexBEquivalentBytes: Int,
+        val cmafInspectorMs: Long,
+        val nalInspectorMs: Long,
     )
 
     /** A single clear source needs no stitching. Keep its bytes, after the same protection/syntax checks. */
@@ -207,6 +211,8 @@ internal object HevcClearCmafGridComposer {
                 parseCpuMs = ((parsedCpuAt - startedCpu) / 1_000_000L).coerceAtLeast(0L),
                 rewriteCpuMs = ((rewrittenCpuAt - parsedCpuAt) / 1_000_000L).coerceAtLeast(0L),
                 packageCpuMs = ((android.os.Debug.threadCpuTimeNanos() - rewrittenCpuAt) / 1_000_000L).coerceAtLeast(0L),
+                cmafInspectorMs = parsedFeeds.sumOf { it.cmafInspectorMs },
+                nalInspectorMs = parsedFeeds.sumOf { it.nalInspectorMs },
                 sourceAnnexBBytesAvoided = parsedFeeds.sumOf { it.annexBEquivalentBytes.toLong() },
             )
             committed = true
@@ -242,7 +248,9 @@ internal object HevcClearCmafGridComposer {
     )
 
     private fun parseFeed(feed: Feed, feedIndex: Int): ParsedFeed {
+        val initialInspectStarted = System.nanoTime()
         val initReport = feed.validatedInitialization ?: CmafBoxInspector.inspect(feed.initializationSegment)
+        var cmafInspectorNanos = System.nanoTime() - initialInspectStarted
         require(initReport.errors.isEmpty()) {
             "Feed ${feed.label} init segment is invalid: ${initReport.errors.joinToString("; ")}"
         }
@@ -274,7 +282,9 @@ internal object HevcClearCmafGridComposer {
         val metadata = mutableListOf<CmafBoxInspector.FragmentMetadata>()
         feed.mediaFragments.forEachIndexed { fragmentIndex, bytes ->
             checkNotInterrupted()
+            val fragmentInspectStarted = System.nanoTime()
             val report = CmafBoxInspector.inspect(bytes, priorInitialization = initReport)
+            cmafInspectorNanos += System.nanoTime() - fragmentInspectStarted
             require(report.errors.isEmpty()) {
                 "Feed ${feed.label} fragment $fragmentIndex is invalid: ${report.errors.joinToString("; ")}"
             }
@@ -304,6 +314,7 @@ internal object HevcClearCmafGridComposer {
         }
 
         // Keep the existing overflow limit, without allocating the whole intermediate stream.
+        val nalInspectStarted = System.nanoTime()
         val annexBEquivalentBytes = exactAnnexBSize(rawParameterSets, fragments, config.nalLengthSize)
         val nalUnits = ArrayList<HevcBitstream.NalUnit>()
         try {
@@ -351,7 +362,9 @@ internal object HevcClearCmafGridComposer {
                 "Feed ${feed.label} CMAF fragment sample counts are inconsistent"
             }
             return ParsedFeed(track, config, rawParameterSets, fragments, metadata,
-                nalUnits, annexBEquivalentBytes)
+                nalUnits, annexBEquivalentBytes,
+                cmafInspectorMs = (cmafInspectorNanos / 1_000_000L).coerceAtLeast(0L),
+                nalInspectorMs = ((System.nanoTime() - nalInspectStarted) / 1_000_000L).coerceAtLeast(0L))
         } catch (error: Throwable) {
             nalUnits.forEach { it.bytes.fill(0) }
             throw error
