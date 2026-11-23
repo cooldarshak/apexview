@@ -271,7 +271,7 @@ fun AppleSlider(
     // Material 3 1.5 moved custom thumb/track slots to the state-based overload.
     // Preserve two-way external state (remote, app settings, restore) as well as
     // direct drag updates. An active gesture must not be reset by recomposition.
-    val sliderState = remember(valueRange) { SliderState(value = value, valueRange = valueRange) }
+    val sliderState = remember(valueRange) { SliderState(value = value, trackRange = valueRange) }
     SideEffect {
         if (!sliderState.isDragging && sliderState.value != value) sliderState.value = value
     }
@@ -325,8 +325,8 @@ fun AppleSlider(
             )
         },
         track = { state ->
-            val span = state.valueRange.endInclusive - state.valueRange.start
-            val fraction = if (span == 0f) 0f else ((state.value - state.valueRange.start) / span).coerceIn(0f, 1f)
+            val span = state.trackRange.endInclusive - state.trackRange.start
+            val fraction = if (span == 0f) 0f else ((state.value - state.trackRange.start) / span).coerceIn(0f, 1f)
             androidx.compose.foundation.layout.Box(
                 Modifier.fillMaxWidth().height(6.dp).background(trackColor, androidx.compose.foundation.shape.RoundedCornerShape(3.dp))
             ) {
