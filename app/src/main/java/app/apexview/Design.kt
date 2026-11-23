@@ -292,15 +292,19 @@ fun AppleSlider(
                         KeyEventType.KeyDown -> {
                             dpadRepeats++
                             val direction = if (event.key == Key.DirectionLeft) -1 else 1
-                            onValueChange(
-                                sliderDpadValue(
-                                    value,
-                                    valueRange.start,
-                                    valueRange.endInclusive,
-                                    direction,
-                                    dpadRepeats,
-                                )
+                            // Change the Material-owned state immediately before notifying
+                            // the app. Holding a physical remote key can send events faster
+                            // than the parent Compose snapshot recomposes; do not step from
+                            // the stale externally-supplied value for every repeated key.
+                            val next = sliderDpadValue(
+                                sliderState.value,
+                                valueRange.start,
+                                valueRange.endInclusive,
+                                direction,
+                                dpadRepeats,
                             )
+                            sliderState.value = next
+                            onValueChange(next)
                             true
                         }
                         KeyEventType.KeyUp -> {

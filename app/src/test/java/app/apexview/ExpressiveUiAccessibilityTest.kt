@@ -1,5 +1,21 @@
 package app.apexview
 
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.platform.LocalInputModeManager
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.pressKey
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -52,4 +68,46 @@ class ExpressiveUiAccessibilityTest {
         node.assertIsOff()
         assertEquals(2, changed)
     }
+    @Test fun realExpressiveThemePreservesRacingContrast() {
+        var primary = Color.Unspecified
+        rule.setContent {
+            AppTheme {
+                SideEffect { primary = MaterialTheme.colorScheme.primary }
+                Text("Pitwall")
+            }
+        }
+        rule.waitForIdle()
+        assertEquals(Ink.accent, primary)
+    }
+
+    @Test fun material15SliderReceivesRemoteArrowsWithoutLosingRepeatedChanges() {
+        var sliderValue by mutableFloatStateOf(0.50f)
+        val focus = FocusRequester()
+        val changes = mutableListOf<Float>()
+        rule.setContent {
+            val mode = LocalInputModeManager.current
+            LaunchedEffect(Unit) { mode.requestInputMode(InputMode.Keyboard) }
+            AppTheme {
+                AppleSlider(
+                    value = sliderValue,
+                    onValueChange = { next -> sliderValue = next; changes += next },
+                    valueRange = 0f..1f,
+                    modifier = Modifier.testTag("expressive-slider").focusRequester(focus),
+                )
+            }
+        }
+        rule.waitForIdle()
+        rule.runOnIdle { focus.requestFocus() }
+        rule.waitForIdle()
+        rule.onRoot().performKeyInput {
+            pressKey(Key.DirectionRight)
+            pressKey(Key.DirectionRight)
+            pressKey(Key.DirectionLeft)
+        }
+        rule.waitForIdle()
+        org.junit.Assert.assertEquals(3, changes.size)
+        org.junit.Assert.assertEquals(0.51f, sliderValue, 0.001f)
+    }
+
+
 }
