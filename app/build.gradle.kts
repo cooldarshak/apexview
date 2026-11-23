@@ -10,7 +10,6 @@ val keystoreProps = Properties().apply {
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -25,7 +24,9 @@ tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
 
 android {
     namespace = "app.apexview"
-    compileSdk = 36
+    // Compose 1.13 and Material3 1.5 AAR metadata require Android API 37.
+    // Preserve targetSdk 36 and minSdk 29 for phone and TCL parity.
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "app.apexview_custom"
