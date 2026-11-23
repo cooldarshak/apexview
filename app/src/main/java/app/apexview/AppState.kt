@@ -3067,6 +3067,7 @@ class AppState(
                                     app.apexview.tiled.ProtectedHevcComposedDashPackageBuilder.build(
                                         window, pssh, window.fragments.first().baseDecodeTimeTicks,
                                         System.currentTimeMillis(), clearOutput = capture.clearOutput,
+                                        validationOnly = true,
                                     ).let { packaged ->
                                         try {
                                             android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_PREFLIGHT $evidence " +

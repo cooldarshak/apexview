@@ -51,7 +51,13 @@ internal object ProtectedHevcComposedDashPackageBuilder {
         clearOutput: Boolean = false,
         /** Transfer ONLY an independently detached OutputWindow into the live publisher. */
         takeOwnership: Boolean = false,
+        /** Fully inspect and validate the CMAF/CBCS package without cloning media.
+         * Only the actual Media3 publisher may take ownership of its buffers. */
+        validationOnly: Boolean = false,
     ): Package {
+        require(!takeOwnership || !validationOnly) {
+            "Validation cannot simultaneously transfer protected CMAF ownership"
+        }
         val init = window.initializationSegment
         require(init.isNotEmpty()) { "Protected composed init segment is empty" }
         require(window.fragments.isNotEmpty()) { "Protected composed output window is empty" }
@@ -104,7 +110,7 @@ internal object ProtectedHevcComposedDashPackageBuilder {
         val timeline = StringBuilder()
         val urls = StringBuilder()
         val resources = linkedMapOf<String, ByteArray>()
-        resources["init.mp4"] = if (takeOwnership) init else init.copyOf()
+        if (!validationOnly) resources["init.mp4"] = if (takeOwnership) init else init.copyOf()
 
         window.fragments.forEachIndexed { index, fragment ->
             require(fragment.sequenceNumber in 1..UINT32_MAX &&
@@ -162,7 +168,9 @@ internal object ProtectedHevcComposedDashPackageBuilder {
             )
             val name = "segment-${fragment.sequenceNumber}.m4s"
             urls.append("""<SegmentURL media="$name"/>""")
-            resources[name] = if (takeOwnership) fragment.mediaFragment else fragment.mediaFragment.copyOf()
+            if (!validationOnly) {
+                resources[name] = if (takeOwnership) fragment.mediaFragment else fragment.mediaFragment.copyOf()
+            }
         }
 
         val first = window.fragments.first()
@@ -213,7 +221,7 @@ internal object ProtectedHevcComposedDashPackageBuilder {
   </Period>
 </MPD>"""
 
-        resources["manifest.mpd"] = manifest.toByteArray(Charsets.UTF_8)
+        if (!validationOnly) resources["manifest.mpd"] = manifest.toByteArray(Charsets.UTF_8)
         return Package(
             manifest = manifest,
             resources = resources,

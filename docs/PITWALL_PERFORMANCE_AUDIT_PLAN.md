@@ -9,6 +9,31 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 751 preserve protected validation with zero-copy preflight resource accounting
+
+P0.2's rolling archive startup previously called
+`ProtectedHevcComposedDashPackageBuilder.build` for preflight and
+created duplicate copies of **every** output CMAF initialization and
+media fragment, only to zero those buffers immediately. The real
+`ProtectedHevcLiveDashSource.publish` validates the same exact
+CBCS/HEVC window again and takes ownership of a separately detached
+encrypted output. Keep both full inspections and the existing
+copy-on-handoff source-lifetime safety, but add a `validationOnly`
+mode to the preflight builder that verifies all track, IV, KID,
+subsample, timing, PSSH and manifest constraints **without copying
+fragment bytes into an unused package**. Explicitly reject combining
+`validationOnly` and `takeOwnership`. Tests build a real generated
+encrypted HEVC CMAF fixture, compare the resulting exact MPD, assert
+no temporary resource buffers, verify source bytes remain unchanged
+after validation teardown, and reject accidental ownership transfer.
+
+No DRM decryption, signature change, decoder allocation, missing
+validation or bypass; the successfully published package still owns
+its buffers until all Media3 leases release and zero them. This is a
+source-level reduction of redundant allocations, not a measured
+device-memory/GC win until a matching six/eight-feed Perfetto run
+proves it. All strict 16-gate hardware sign-offs remain required.
+
 ## Build 750 enforce all 16 independent hardware-evidence gates before signing/publishing
 
 The official release workflow previously required a *closed, accepted issue*

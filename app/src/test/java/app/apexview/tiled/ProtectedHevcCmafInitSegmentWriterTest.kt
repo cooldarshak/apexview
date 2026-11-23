@@ -194,6 +194,23 @@ class ProtectedHevcCmafInitSegmentWriterTest {
             window, pssh, 900_000L, 1_795_233_600_000L
         )
         try {
+            // Preflight must validate identical CBCS/MPD metadata without
+            // cloning or clearing any of the real protected output fragments.
+            val checked = ProtectedHevcComposedDashPackageBuilder.build(
+                window, pssh, 900_000L, 1_795_233_600_000L,
+                validationOnly = true
+            )
+            assertEquals(pkg.manifest, checked.manifest)
+            assertTrue(checked.resources.isEmpty())
+            checked.zero() // Must not mutate the preflight caller-owned bytes.
+            assertTrue(window.initializationSegment.contentEquals(init))
+            assertTrue(window.fragments.single().mediaFragment.contentEquals(media))
+            assertThrows(IllegalArgumentException::class.java) {
+                ProtectedHevcComposedDashPackageBuilder.build(
+                    window, pssh, 900_000L, 1_795_233_600_000L,
+                    validationOnly = true, takeOwnership = true
+                )
+            }
             assertTrue(pkg.manifest.contains(
                 "cenc:default_KID=\"23232323-2323-2323-2323-232323232323\""))
             assertTrue(pkg.manifest.contains("value=\"cbcs\""))
