@@ -1,5 +1,7 @@
 package app.apexview.cast.local
 
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
@@ -18,6 +20,10 @@ internal class FcastConnection(
 ) : AutoCloseable {
     private val closed = AtomicBoolean(false)
     private val outgoing = Channel<FcastProtocol.Packet>(32)
+    // A framed FCast packet is at most 32KB. Buffering an entire packet
+    // prevents five tiny TCP writes for its little-endian header/opcode when
+    // tcpNoDelay is enabled, without delaying a single message's flush.
+    private val ioBufferBytes = 32 * 1024
     private var reader: Job? = null
     private var writer: Job? = null
 
@@ -26,16 +32,22 @@ internal class FcastConnection(
         socket.tcpNoDelay = true
         socket.soTimeout = 20_000
         writer = scope.launch(Dispatchers.IO) {
-            try { for (packet in outgoing) FcastProtocol.write(socket.getOutputStream(), packet) }
-            catch (error: Exception) { finish(error.javaClass.simpleName) }
+            try {
+                BufferedOutputStream(socket.getOutputStream(), ioBufferBytes).use { output ->
+                    for (packet in outgoing) FcastProtocol.write(output, packet)
+                }
+            } catch (error: Exception) { finish(error.javaClass.simpleName) }
         }
         reader = scope.launch(Dispatchers.IO) {
             try {
-                while (!closed.get()) {
-                    val packet = FcastProtocol.read(socket.getInputStream()) ?: break
-                    // Dispatch through the owner's scope (normally Main) in order, with backpressure.
-                    kotlinx.coroutines.withContext(scope.coroutineContext) {
-                        if (!closed.get()) onPacket(packet)
+                BufferedInputStream(socket.getInputStream(), ioBufferBytes).use { input ->
+                    while (!closed.get()) {
+                        val packet = FcastProtocol.read(input) ?: break
+                        // The owner still receives ordered packets; async timing
+                        // parsing on Default never reorders geometry/table/frame.
+                        kotlinx.coroutines.withContext(scope.coroutineContext) {
+                            if (!closed.get()) onPacket(packet)
+                        }
                     }
                 }
                 finish("Connection closed")

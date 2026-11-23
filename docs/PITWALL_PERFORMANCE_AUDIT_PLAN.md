@@ -9,6 +9,28 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 753 reduce FCast TCP framing syscall load without losing ordered control
+
+The local phone-to-TV Pitwall FCast transport used
+`socket.tcpNoDelay=true` and called `OutputStream.write` separately
+for each of the four length bytes, opcode and body, then flushed.
+On a real TCP socket those tiny header writes can generate extra
+system calls and packets while frequent 200ms timing frames, video
+hand-off, remote D-pad and caption controls share the connection.
+Reuse one bounded **32KB BufferedOutputStream and BufferedInputStream**
+on the existing IO writer/reader for the whole connection. Keep
+`FcastProtocol.write`'s per-packet flush, strict 32KB length checks,
+ordered backpressure and 20-second socket timeout unchanged, so
+there is **no added batching delay**, lost telemetry, new thread
+or change to DRM/LAN authorization.
+
+Extend the FCast protocol test to round-trip a 16KB motion payload
+between VERSION and PAUSE, and keep the real socket test proving
+order, ack and close. This is a transport CPU/packet reduction by
+construction, not proof the TCL's missing-map or receiver jitter
+issues have disappeared; real Cast overlay and video traces must
+still close those gates.
+
 ## Build 752 fix Build 748-751 CI regression, preserve strict gate integrity
 
 Build 748 was NOT green: the real Android unit-test job completed

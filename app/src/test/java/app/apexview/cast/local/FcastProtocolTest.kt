@@ -2,6 +2,8 @@ package app.apexview.cast.local
 
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.BufferedOutputStream
+import java.io.BufferedInputStream
 import java.io.EOFException
 import java.io.InputStream
 import java.net.InetAddress
@@ -45,6 +47,25 @@ class FcastProtocolTest {
             FcastProtocol.write(ByteArrayOutputStream(), FcastProtocol.Packet(1, JSONObject().put("content", "x".repeat(32000))))
         }
     }
+    @Test fun bufferedFramingPreservesLargeTimingPacketsAndControlOrdering() {
+        val networkBytes = ByteArrayOutputStream()
+        BufferedOutputStream(networkBytes, 32 * 1024).use { out ->
+            FcastProtocol.write(out, FcastProtocol.Packet(FcastProtocol.VERSION,
+                JSONObject().put("version", 3)))
+            FcastProtocol.write(out, FcastProtocol.Packet(FcastProtocol.TIMING,
+                JSONObject().put("kind", "frame").put("payload", "m".repeat(16000))))
+            FcastProtocol.write(out, FcastProtocol.Packet(FcastProtocol.PAUSE))
+        }
+        BufferedInputStream(ByteArrayInputStream(networkBytes.toByteArray()), 32 * 1024).use { input ->
+            assertEquals(FcastProtocol.VERSION, FcastProtocol.read(input)!!.opcode)
+            val timing = FcastProtocol.read(input)!!
+            assertEquals(FcastProtocol.TIMING, timing.opcode)
+            assertEquals(16000, timing.body!!.getString("payload").length)
+            assertEquals(FcastProtocol.PAUSE, FcastProtocol.read(input)!!.opcode)
+            assertNull(FcastProtocol.read(input))
+        }
+    }
+
     @Test fun controlsAndLayoutTravelInOrderOverARealSocketAndClosingReleasesReader() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val messages = LinkedBlockingQueue<FcastProtocol.Packet>()
