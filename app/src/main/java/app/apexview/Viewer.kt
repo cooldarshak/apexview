@@ -1884,14 +1884,14 @@ private fun ClosedCaptionsSheet(app: AppState) {
                 style = Type.footnote,
                 modifier = Modifier.padding(top = 8.dp, bottom = 18.dp),
             )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Show captions", style = Type.body, modifier = Modifier.weight(1f))
-                androidx.compose.material3.Switch(
-                    checked = app.settings.subtitles,
-                    onCheckedChange = app::setCaptionsEnabled,
-                    modifier = Modifier.focusRequester(focus).tvFocusRing(),
-                )
-            }
+            // Reuse settings' single labeled Switch semantics. Previously the
+            // label and inner Switch were separate TalkBack/remote focus nodes.
+            SwitchRow(
+                "Show captions",
+                checked = app.settings.subtitles,
+                onChange = app::setCaptionsEnabled,
+                modifier = Modifier.focusRequester(focus),
+            )
             Text("F1 caption track", style = Type.subhead,
                 modifier = Modifier.padding(top = 18.dp, bottom = 8.dp))
             val choices = listOf(CaptionTrackOption(CaptionPolicy.AUTO, "Automatic")) +

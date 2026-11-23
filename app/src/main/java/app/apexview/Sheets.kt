@@ -312,11 +312,14 @@ private fun SettingRow(label: String, value: String? = null, valueColor: Color =
 }
 
 @Composable
-internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+internal fun SwitchRow(
+    label: String, checked: Boolean, onChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     // A single toggleable focus target, not a clickable row containing a second
     // unlabeled focusable Switch. TalkBack and TCL D-pad both announce one control.
     Row(
-        Modifier.fillMaxWidth()
+        modifier.fillMaxWidth()
             .padding(horizontal = 6.dp, vertical = 2.dp)
             .tvFocusRing()
             .toggleable(value = checked, role = Role.Switch, onValueChange = onChange)

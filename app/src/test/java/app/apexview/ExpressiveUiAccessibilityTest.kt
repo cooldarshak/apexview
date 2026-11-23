@@ -113,6 +113,32 @@ class ExpressiveUiAccessibilityTest {
     }
 
 
+    @Test fun captionEnableSwitchAcceptsOneRemoteSelectWithLabeledSemantics() {
+        var captions by mutableStateOf(false)
+        val focus = FocusRequester()
+        rule.setContent {
+            AppTheme {
+                SwitchRow(
+                    "Show captions",
+                    checked = captions,
+                    onChange = { captions = it },
+                    modifier = Modifier.focusRequester(focus),
+                )
+            }
+        }
+        rule.runOnIdle { focus.requestFocus() }
+        rule.waitForIdle()
+        val target = rule.onNodeWithText("Show captions")
+        target.assertIsOff()
+        target.assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Switch))
+        rule.onAllNodes(hasClickAction()).assertCountEquals(1)
+        // Match remote centre/select, not an unlabelled nested Switch.
+        rule.onRoot().performKeyInput { pressKey(Key.Enter) }
+        rule.waitForIdle()
+        target.assertIsOn()
+        assertEquals(true, captions)
+    }
+
     @Test fun segmentedChoiceHasRoleSelectionAndKeepsSingleAccessibleClick() {
         var chosen by mutableStateOf("Single")
         rule.setContent {
