@@ -9,6 +9,20 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## P0.1 single-flight observer failure isolation (CI pending)
+
+The archive shared-segment coordinator now completes and unregisters a
+producer flight if its registration observer fails, rather than leaving
+foreground joiners blocked forever on an unresolved future. A failing
+joiner's observer does not cancel a healthy shared producer. Two JVM
+regression tests cover recovery and the active-joiner exception case.
+
+**Progress accounting:** keep P0.1 at the last CI-validated 95% until
+this exact source change passes CI; P0.2 remains 91% and P2.8 remains
+90%. This resolves a discrete concurrency failure mode but does not
+replace measured physical-device seek p95 or the full coding/device
+acceptance matrix. Latest branch CI must be evaluated independently.
+
 ## P0.1 / P0.2 / P2.8 coordinated work after Build 757 (coding in progress)
 
 **Source-only checkpoint, not a release certificate.** Build 759

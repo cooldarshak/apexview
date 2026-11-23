@@ -24,6 +24,48 @@ class ArchiveBufferPolicyTest {
         }
     }
 
+    @Test fun failedRegistrationDoesNotStrandFutureOrPoisonForegroundRetry() {
+        val registrations = AtomicInteger(0)
+        val coordinator = ArchiveSegmentSingleFlight {
+            if (registrations.incrementAndGet() == 1) throw IOException("registration observer failed")
+        }
+        assertThrows(IOException::class.java) {
+            coordinator.run(17) { fail("registration failed before production") }
+        }
+        coordinator.run(17) { /* foreground retry must own a new flight */ }
+        assertEquals(2, registrations.get())
+    }
+
+    @Test fun failedJoinerRegistrationMustNotCancelExistingProducer() {
+        val producerReady = CountDownLatch(1)
+        val releaseProducer = CountDownLatch(1)
+        val registrations = AtomicInteger(0)
+        val coordinator = ArchiveSegmentSingleFlight {
+            if (registrations.incrementAndGet() == 2) throw IOException("joiner registration failed")
+        }
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val producer = pool.submit {
+                coordinator.run(18) {
+                    producerReady.countDown()
+                    check(releaseProducer.await(5, TimeUnit.SECONDS))
+                }
+            }
+            assertTrue(producerReady.await(2, TimeUnit.SECONDS))
+            assertThrows(java.util.concurrent.ExecutionException::class.java) {
+                pool.submit {
+                    coordinator.run(18) { fail("a joiner may not replace active production") }
+                }.get(2, TimeUnit.SECONDS)
+            }
+            releaseProducer.countDown()
+            producer.get(2, TimeUnit.SECONDS)
+            coordinator.run(18) { /* completed old flight must be released */ }
+        } finally {
+            releaseProducer.countDown()
+            pool.shutdownNow()
+        }
+    }
+
     @Test fun foregroundDoesNotWaitForUnrelatedPrefetch() {
         val coordinator = ArchiveSegmentSingleFlight()
         val slowStarted = CountDownLatch(1)

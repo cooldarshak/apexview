@@ -41,7 +41,18 @@ internal class ArchiveSegmentSingleFlight(private val onRegistered: ((Int) -> Un
             current to (existing == null)
         }
         try {
-            onRegistered?.invoke(number)
+            // A registration callback is observational, but it may still throw.
+            // If the first caller fails here, every concurrent joiner must be
+            // released rather than waiting forever on an uncompleted future.
+            try {
+                onRegistered?.invoke(number)
+            } catch (failure: Throwable) {
+                if (producer) {
+                    synchronized(lock) { flights.remove(number, flight) }
+                    flight.finished.completeExceptionally(failure)
+                }
+                throw failure
+            }
             if (producer) {
                 try {
                     produce()
