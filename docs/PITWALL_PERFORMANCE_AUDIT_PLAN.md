@@ -90,6 +90,10 @@ Every row below specifies **source project and actual reference file**, **Pitwal
 
 ## Batch 1 coordinated implementation: Media3 1.11.1 + clear SurfaceView A/B + presentation observability
 
+**Build 825 CI emulator-only hardware assertion diagnosed and corrected:** All Kotlin/JVM, Media3 1.11.1 compilation, independent HEVC/CMAF FFmpeg, APK build and RenderNode + independent synthetic SurfaceView scene tests passed. Newly required *clear TextureView* synthetic HEVC scene test decoded and sampled both initial source cameras, but stopped at its pre-existing assertion that the selected decoder must be hardware accelerated. GitHub's hosted Android emulator exposes software-only HEVC for this fixture, unlike a physical Samsung/TCL device. Keep the complete pixel identity/overlap/seek/recreation/one-decoder tests mandatory, now reject a software HEVC decoder unless the device is explicitly an emulator **and advertises no hardware HEVC decoder at all**. Every real phone/TV still requires actual hardware decoder selection. The source test logs both codec name and distinct `physicalHardwareGate=NOT_MEASURED` for emulator. This is accurate test-environment accounting, never a DRM or user-playback software fallback and never physical-performance sign-off.
+
+
+
 **Build 824 exact-source Kotlin API failure and coordinated migration correction:** The true first compile errors after Media3 1.5.1→1.11.1 are `FrameThinning.kt`'s custom `MediaCodecVideoRenderer.canReuseCodec` now requiring `isAdaptiveFormatChange: Boolean` and `onPositionReset` now requiring `sampleStreamIsResetToKeyFrame: Boolean`. Forward both flags to the superclass and preserve the existing TCL coded SPS re-creation and frame-thinning reset. Android SDK 37 `Trace.setCounter` requires a `Long`; switch both per-five-second scene instrumentation counters to nonnegative `Long` samples without reducing precision or claiming scanout. Wire real-source regression tests and this single plan into the same corrective commit. No disabling the compiler, CI, DRM, source-output validation or any renderer path.
 
 

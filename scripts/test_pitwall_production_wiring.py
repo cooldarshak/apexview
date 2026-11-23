@@ -74,6 +74,14 @@ class ProductionWiringTests(unittest.TestCase):
                       frame_thinning)
         self.assertIn("metrics.latched.coerceAtLeast(0L)", scene)
         self.assertIn("metrics.latched.coerceAtLeast(0L)", texture)
+        android_renderer_test = contents(
+            "app/src/androidTest/java/app/apexview/scene/SingleDecoderSceneInstrumentationTest.kt"
+        )
+        self.assertIn("codec!!.isHardwareAccelerated || (isEmulator && !offersHardwareHevc)",
+                      android_renderer_test)
+        self.assertIn("physicalHardwareGate=", android_renderer_test)
+        self.assertIn("maxActive.get()", android_renderer_test)
+        self.assertIn("captureUntil { moved ->", android_renderer_test)
         instrumentation = contents("scripts/run_rendernode_instrumentation.sh")
         self.assertIn("app.apexview.scene.SurfaceDecoderSceneInstrumentationTest", instrumentation)
         self.assertIn("app.apexview.scene.SingleDecoderSceneInstrumentationTest", instrumentation)

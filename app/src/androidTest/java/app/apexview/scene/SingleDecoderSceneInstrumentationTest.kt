@@ -4,6 +4,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.media.MediaCodecList
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import android.widget.FrameLayout
@@ -108,7 +109,28 @@ class SingleDecoderSceneInstrumentationTest {
                 assertEquals("The renderer must not create parallel video decoders", 1, maxActive.get())
                 val codec = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.firstOrNull { it.name == decoder.get() }
                 assertNotNull("No observed scene decoder", codec)
-                assertTrue("A hardware decoder is required", codec!!.isHardwareAccelerated)
+                // Hosted Android emulators normally expose only Google's
+                // software HEVC codec. They still run a *real* MediaCodec,
+                // SurfaceTexture and GLES path for pixel/lifetime validation,
+                // but cannot certify hardware decoder selection. Never permit
+                // a physical phone/TV to satisfy this synthetic-only exception.
+                val isEmulator = Build.FINGERPRINT.startsWith("generic", ignoreCase = true) ||
+                    Build.HARDWARE.equals("ranchu", ignoreCase = true) ||
+                    Build.HARDWARE.equals("goldfish", ignoreCase = true) ||
+                    Build.MODEL.startsWith("sdk_gphone", ignoreCase = true)
+                val offersHardwareHevc = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.any {
+                    !it.isEncoder && it.isHardwareAccelerated &&
+                        it.supportedTypes.any { mime -> mime.equals("video/hevc", ignoreCase = true) }
+                }
+                assertTrue(
+                    "Software HEVC is acceptable ONLY on an emulator with no advertised hardware HEVC; " +
+                        "physical playback MUST use the selected hardware decoder",
+                    codec!!.isHardwareAccelerated || (isEmulator && !offersHardwareHevc)
+                )
+                Log.i("ApexviewSingleDecoder",
+                    "SCENE_CODEC_HARDWARE_ACCEPTANCE observed=${codec.name} hardware=${codec.isHardwareAccelerated} " +
+                        "emulator=$isEmulator hardwareHevcAvailable=$offersHardwareHevc " +
+                        "physicalHardwareGate=${if (isEmulator) "NOT_MEASURED" else "TESTED"}")
                 // Recreate the REAL TextureView output, then seek while the same
                 // one-player HEVC archive remains active. This exercises the
                 // TextureView/EGL lifecycle rather than only crop geometry.
