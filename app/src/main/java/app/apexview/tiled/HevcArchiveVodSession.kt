@@ -306,7 +306,11 @@ internal class HevcArchiveVodSession(
                 val offset = requireNotNull(last.baseDecodeTimeTicks) - scaleUs(groups[number].startUs, trackScale)
                 checkOpen()
                 val verificationMs = (System.nanoTime() - verificationStarted) / 1_000_000L
-                synchronized(cacheLock) {
+                var atlasDiagnostic: String? = null
+                // Protect only state ownership/publication. Debug/ART counters and logcat
+                // writes can block on JVM/system locks and must not delay a foreground
+                // DataSource request behind a speculative producer's cacheLock.
+                val (cacheEntries, cachedByteCount) = synchronized(cacheLock) {
                     checkOpen()
                     if (initialization == null) {
                         initialization = composed.initializationSegment.copyOf()
@@ -317,7 +321,6 @@ internal class HevcArchiveVodSession(
                         frameRate = trackScale.toDouble() / step
                         codedWidth = composed.codedWidth
                         codedHeight = composed.codedHeight
-                        // Mixed crops use explicit rectangles, not the legacy source-count grid.
                         atlasColumns = atlas?.columns ?: minOf(mixedAtlas!!.grid.columns, inputs.size)
                         atlasRows = atlas?.rows ?: mixedAtlas!!.grid.rows
                         sourceCodedWidth = sourceSps.width; sourceCodedHeight = sourceSps.height
@@ -325,45 +328,50 @@ internal class HevcArchiveVodSession(
                         mixedSourceRects = mixedAtlas?.sourceRects.orEmpty()
                         val uniqueSourcePixels = mixedInputs.sumOf { it.sps.width.toLong() * it.sps.height }
                         val decodedPixels = composed.codedWidth.toLong() * composed.codedHeight
-                        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_ATLAS feeds=${inputs.size} cells=${atlasColumns}x${atlasRows} " +
+                        atlasDiagnostic = "ARCHIVE_VOD_ATLAS feeds=${inputs.size} cells=${atlasColumns}x${atlasRows} " +
                             "mixed=$mixed sourceCoded=${sourceSps.width}x${sourceSps.height} " +
                             "sourceDisplay=${sourceSps.displayWidth}x${sourceSps.displayHeight} ctb=${sourceSps.ctbSize} " +
                             "decodedPixels=$decodedPixels uniqueSourcePixels=$uniqueSourcePixels " +
                             "atlasExtraPixels=${decodedPixels - uniqueSourcePixels} " +
                             "atlasShapesEvaluated=${mixedAtlas?.evaluatedShapes ?: 0} " +
                             "atlasGridValidationsRejected=${mixedAtlas?.rejectedGridValidations ?: 0} " +
-                            "atlasSearchBudgetLimited=${mixedAtlas?.searchBudgetLimited ?: false}")
+                            "atlasSearchBudgetLimited=${mixedAtlas?.searchBudgetLimited ?: false}"
                     } else {
-                        require(initialization!!.contentEquals(composed.initializationSegment)) { "Archive representation changed its initialization" }
-                        require(abs(requireNotNull(presentationOffsetTicks) - offset) <= 1L) { "Archive decode timestamps differ from the VOD timeline" }
+                        require(initialization!!.contentEquals(composed.initializationSegment)) {
+                            "Archive representation changed its initialization"
+                        }
+                        require(abs(requireNotNull(presentationOffsetTicks) - offset) <= 1L) {
+                            "Archive decode timestamps differ from the VOD timeline"
+                        }
                     }
-                    // Transfer the final owned fragment to the cache. Returning it to the
-                    // DataSource still makes a defensive copy, but this publication must not
-                    // allocate another multi-megabyte buffer just to wipe the original.
+                    // The cache owns the fragment. DataSource readers get isolated copies.
                     val output = composed.mediaFragments.last()
                     cache.put(number, output)
                     publishedFragment = output
-                    val worker = if (Thread.currentThread().name == "ApexviewVodWarm") "PREFETCH" else "PLAYBACK"
-                    val allocatedDuringProduction = allocatedAtStart?.let { first ->
-                        android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
-                            ?.let { (it - first).coerceAtLeast(0L) }
-                    }
-                    val gcDuringProduction = gcAtStart?.let { first ->
-                        android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
-                            ?.let { (it - first).coerceAtLeast(0L) }
-                    }
-                    android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs " +
-                        "composeMs=$compositionMs verifyMs=$verificationMs totalMs=${(System.nanoTime() - started) / 1_000_000L} " +
-                        "parseMs=${composed.parseMs} rewriteMs=${composed.rewriteMs} packageMs=${composed.packageMs} " +
-                        "parseCpuMs=${composed.parseCpuMs} rewriteCpuMs=${composed.rewriteCpuMs} " +
-                        "packageCpuMs=${composed.packageCpuMs} " +
-                        "producerCpuMs=${((android.os.Debug.threadCpuTimeNanos() - cpuAtStart) / 1_000_000L).coerceAtLeast(0)} " +
-                        "processAllocBytesDuringSegment=${allocatedDuringProduction ?: -1L} " +
-                        "processGcDuringSegment=${gcDuringProduction ?: -1L} " +
-                        "outputBytes=${output.size} sourceAnnexBBytesAvoided=${composed.sourceAnnexBBytesAvoided} " +
-                        "durationMs=${groups[number].durationUs / 1000L} " +
-                        "worker=$worker clock=PLAYER_REQUEST cache=${cache.size} cachedBytes=${cache.bytesRetained}")
+                    cache.size to cache.bytesRetained
                 }
+                atlasDiagnostic?.let { android.util.Log.i("ApexviewSingleDecoder", it) }
+                val worker = if (Thread.currentThread().name == "ApexviewVodWarm") "PREFETCH" else "PLAYBACK"
+                val allocatedDuringProduction = allocatedAtStart?.let { first ->
+                    android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
+                        ?.let { (it - first).coerceAtLeast(0L) }
+                }
+                val gcDuringProduction = gcAtStart?.let { first ->
+                    android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
+                        ?.let { (it - first).coerceAtLeast(0L) }
+                }
+                android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs " +
+                    "composeMs=$compositionMs verifyMs=$verificationMs totalMs=${(System.nanoTime() - started) / 1_000_000L} " +
+                    "parseMs=${composed.parseMs} rewriteMs=${composed.rewriteMs} packageMs=${composed.packageMs} " +
+                    "parseCpuMs=${composed.parseCpuMs} rewriteCpuMs=${composed.rewriteCpuMs} " +
+                    "packageCpuMs=${composed.packageCpuMs} " +
+                    "producerCpuMs=${((android.os.Debug.threadCpuTimeNanos() - cpuAtStart) / 1_000_000L).coerceAtLeast(0)} " +
+                    "processAllocBytesDuringSegment=${allocatedDuringProduction ?: -1L} " +
+                    "processGcDuringSegment=${gcDuringProduction ?: -1L} " +
+                    "outputBytes=${composed.mediaFragments.last().size} " +
+                    "sourceAnnexBBytesAvoided=${composed.sourceAnnexBBytesAvoided} " +
+                    "durationMs=${groups[number].durationUs / 1000L} " +
+                    "worker=$worker clock=PLAYER_REQUEST cache=$cacheEntries cachedBytes=$cachedByteCount")
             } finally {
                 composed.initializationSegment.fill(0)
                 composed.mediaFragments.forEach { if (it !== publishedFragment) it.fill(0) }
