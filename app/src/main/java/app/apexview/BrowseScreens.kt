@@ -118,7 +118,7 @@ private val Grayscale = ColorFilter.colorMatrix(ColorMatrix().apply { setToSatur
 private val ButtonShape = RoundedCornerShape(28.dp)
 private val SidePadding = 20.dp
 
-/** Shrink browsing section gaps only on narrow portrait screens. */
+/** Balance browsing section gaps on narrow portrait screens. */
 @Composable
 private fun BrowseSectionGap() {
     val config = LocalConfiguration.current
@@ -217,9 +217,9 @@ private fun ArtCard(
             .width(width)
             .pressable(enabled = !upcoming, onClick = onClick)
             .graphicsLayer { alpha = if (dimmed || upcoming) 0.55f else 1f }
-            .clip(if (compactPortrait) RoundedCornerShape(16.dp) else CardShape)
+            .clip(if (compactPortrait) RoundedCornerShape(20.dp) else CardShape)
             .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .padding(if (compactPortrait) 6.dp else 8.dp)
+            .padding(8.dp)
     ) {
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).sharedArt(artKey, cornerRadius = 18).clip(RoundedCornerShape(18.dp)).background(Ink.surface)) {
             AsyncImage(
@@ -244,12 +244,11 @@ private fun ArtCard(
                 }
             }
         }
-        Spacer(Modifier.height(if (compactPortrait) 6.dp else 8.dp))
-        Text(title, style = if (compactPortrait)
-            Type.subhead.copy(color = Ink.primary, fontWeight = FontWeight.SemiBold) else Type.headline,
+        Spacer(Modifier.height(if (compactPortrait) 7.dp else 8.dp))
+        Text(title, style = Type.headline,
             maxLines = if (compactPortrait) 2 else 1, overflow = TextOverflow.Ellipsis)
         if (!subtitle.isNullOrEmpty()) {
-            Text(subtitle, style = if (compactPortrait) Type.caption else Type.footnote,
+            Text(subtitle, style = Type.footnote,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
@@ -288,7 +287,8 @@ private fun <T> Shelf(
                 Modifier.fillMaxWidth().padding(start = SidePadding, end = SidePadding, bottom = 12.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
-                Text(title, style = if (compactPortrait) Type.headline else Type.title2,
+                Text(title, style = if (compactPortrait)
+                    Type.headline.copy(fontSize = 19.sp, lineHeight = 24.sp) else Type.title2,
                     modifier = Modifier.weight(1f))
                 action?.let { (label, onClick) -> HeaderAction(label, onClick) }
             }
@@ -985,17 +985,18 @@ private fun SeasonsShelf(app: AppState) {
 private fun CarouselArt(picks: List<Pick>, pager: PagerState) {
     if (picks.isEmpty()) return
     val context = LocalContext.current
+    val reducedMotion = LocalReduceMotion.current
     val base by remember(pager) { derivedStateOf { floor(pager.currentPage + pager.currentPageOffsetFraction).toInt() } }
     Box(Modifier.fillMaxSize().clipToBounds()) {
         for (page in base..base + 1) {
             key(page) {
                 val image = pickImage(picks[page.mod(picks.size)])
                 AsyncImage(
-                    model = remember(image) {
+                    model = remember(image, reducedMotion) {
                         ImageRequest.Builder(context)
                             .data(F1TvApi.picture(image, 1920, 1080))
                             .placeholderMemoryCacheKey(F1TvApi.picture(image, 640, 360))
-                            .crossfade(Motion.BROWSE_FADE_MS)
+                            .crossfade(if (reducedMotion) 0 else Motion.BROWSE_FADE_MS)
                             .build()
                     },
                     contentDescription = null,
@@ -1042,10 +1043,11 @@ private fun PickHero(app: AppState, pick: Pick) {
         }
         else -> weekend?.place.orEmpty()
     }
-    Text(title, style = if (compactPortrait) Type.title1 else Type.largeTitle,
+    Text(title, style = if (compactPortrait)
+        Type.title1.copy(fontSize = 30.sp, lineHeight = 36.sp) else Type.largeTitle,
         maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
     if (line.isNotEmpty()) Text(line, style = Type.subhead, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    Spacer(Modifier.height(if (compactPortrait) 10.dp else 16.dp))
+    Spacer(Modifier.height(if (compactPortrait) 12.dp else 16.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         when {
             resume != null -> PrimaryButton("Resume", Icons.Rounded.PlayArrow) { app.resumeWatching(resume) }

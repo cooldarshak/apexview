@@ -2,12 +2,24 @@
 
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** IN DEVELOPMENT. **Last CI-green baseline before portrait correction: Build 803**, commit `80fcf6602d37650d18062727d770e34a6b5afc5a` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45126954569)). Portrait code requires its own exact-source CI. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
+**Status:** IN DEVELOPMENT. **Last verified green checkpoint: Build 804**, commit `e6884a7433659f62ca924f425e0aad78a2aee192` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45131452109)). The later portrait rebalance and enhanced jank instrumentation require their OWN exact-source CI; do not assume they pass before verification. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
 performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
 
+
+## November 23 Build 804 user review: portrait balance and app-window jank diagnostics
+
+**Physical user report after Build 804:** The new portrait screenshot confirms the compact layout is too small. The request is a middle ground between Build 803's ~344dp oversized full-width cards and Build 804's ~151dp cards on a 384dp viewport. Landscape is already acceptable; do not alter it.
+
+**Coordinated source revision after 804 (CI pending):** On 320-412dp portrait viewports at default font scaling, set video card width to 60% and posters to 55% of usable shelf width (after 20dp sides), leaving approximately 1.5 visible video cards instead of one or over two. Expected at 384dp: 206.4dp video, 189.2dp poster. Raise portrait card headline from 15sp to 17sp and subtitle from 12sp to 13sp; restore 8dp card padding, 20dp radius, section heading to 19sp, 23dp section gap, 308dp hero and 30sp hero title. Keep explicit 175%-200% large-font full-card behavior and legacy landscape/TV dimensions. Respect remove-animations setting for the hero artwork crossfade. Add width, 200% font, tablet, landscape and production wiring tests.
+
+**Previously documented Build 803 performance symptom, NOT an attributed root cause:** 2,287/9,965 slow application-window frames across 121 windows, max 623ms, 36 background concurrent mark-compact GC lines; Perfetto capture durations ~76.8s and 38.2s contain RenderThread, Choreographer, SurfaceFlinger and FrameTimeline but no reliably attributed per-app p95 reported. Original ZIP/log bytes were NOT mounted in this continuation; these figures were carried forward from the prior dated analysis, not reprocessed. They are NOT video decoder-drop measurements. No crash established.
+
+**Coordinated observability improvement:** PitwallFrames now includes Java heap used/committed/max, native heap allocated, and layout/draw/sync/command/swap/GPU stage p95 upper-bin diagnostics every existing 2-second window. This helps determine whether GC or rendering stages correlate with jank without adding per-frame allocations or implying causation. Actual cause, video-layer FrameTimeline attribution, device comparison and before/after performance improvements remain OPEN under P0.2/P0.3/P1.3/P2.6. Do not credit a performance fix from new logging or card-size changes alone. Preserve logging privacy, video pipelines, map, tower, Cast, captions, single-decoder invariant and L1/L3 entitlement.
+
+**Progress discipline:** Build 804 green verifies its own correction but physical user review has rejected its excessively small portrait appearance. The new revision must pass CI and user visual acceptance. Coding P2.8 remains below 100% while further screen/TV/accessibility source audit remains. Workstreams retain separate automated CI and physical/release columns. Strict release gate count stays 1/16.
 
 ## Samsung S22 Ultra Build 803 portrait browse regression: coordinated fix and trace review
 
@@ -127,8 +139,8 @@ Audited historical totals: **44 runs, 10 passed, 34 failed.** These are CI snaps
 
 | ID | Workstream | Coding complete | Coding pending | Release gate | Outstanding proof |
 | --- | --- | ---: | ---: | --- | --- |
-| P0.1 | Segment priority | 96% | 4% | Open | Foreground seek 1x/1.5x p95, cancellation contention/recovery on devices |
-| P0.2 | HEVC memory | 93% | 7% | Open | 10-minute allocation/GC and 7/8-feed clear/protected/Cast retention |
+| P0.1 | Segment priority | 98% | 2% | Open | Source audit of foreground cancellation/seek recovery remains; 1x/1.5x physical seek p95 separately pending |
+| P0.2 | HEVC memory | 96% | 4% | Open | Audit session-wide allocation/ownership across modes; 10-minute heap/GC and 7/8-feed device tests separately pending |
 | P0.3 | Video rendering | 65% | 35% | Open | Physical 50fps / decoder lifecycle and protected vs clear output |
 | P0.4 | Map and tower | 85% | 15% | Open | TCL simultaneous overlays, UI timing and feature parity |
 | P1.1 | HEVC atlas | 85% | 15% | Open | Real extended-source composition and quality compatibility |
@@ -141,7 +153,7 @@ Audited historical totals: **44 runs, 10 passed, 34 failed.** These are CI snaps
 | P2.5 | Android TV | 80% | 20% | Open | TCL single/multiple plus map/tower and DPAD physical acceptance |
 | P2.6 | Testing and benchmarks | 87% | 13% | Open | Before/after Perfetto and endurance results |
 | P2.7 | Core architecture | 100% | 0% | Closed | Preserve established invariant |
-| P2.8 | Material 3 Expressive | 92% | 8% | Open | TCL focus, TalkBack, 200% font, reduced motion and cross-screen visuals |
+| P2.8 | Material 3 Expressive | 95% | 5% | Open | Complete portrait/all-screen source and focus/semantics audit; TCL DPAD, TalkBack, 200% font and screenshots separately pending |
 | P2.9 | Closed captions | 75% | 25% | Open | Actual F1 cue rendering mobile/TV/Cast clear/protected |
 
 **Totals:** coding complete 77.5625% (unweighted estimate); coding pending 22.4375%; release gates 1 of 16 closed, 15 open. Coding completion, CI acceptance and device sign-off are independent measures.

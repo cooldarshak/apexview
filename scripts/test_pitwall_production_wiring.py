@@ -49,11 +49,22 @@ class ProductionWiringTests(unittest.TestCase):
         policy = contents("app/src/main/java/app/apexview/BrowseLayoutPolicy.kt")
         unit = contents("app/src/test/java/app/apexview/BrowseLayoutPolicyTest.kt")
         self.assertIn("portrait = compactPortrait", browse)
-        self.assertIn("if (compactPortrait) Type.title1 else Type.largeTitle", browse)
+        self.assertIn("Type.title1.copy(fontSize = 30.sp, lineHeight = 36.sp) else Type.largeTitle", browse)
         self.assertIn("BrowseSectionGap()", browse)
         self.assertIn("HOME_GEOMETRY portrait=", browse)
         self.assertIn("fun compactPortrait(isPortrait: Boolean, widthDp: Float)", policy)
-        self.assertIn("fun portraitPhoneShowsTwoCardsAndNextPeek()", unit)
+        self.assertIn("fun portraitPhoneBalancesReadableCardsAndNextPreview()", unit)
+        self.assertIn("available * (if (posters) 0.55f else 0.60f)", policy)
+        self.assertIn("val reducedMotion = LocalReduceMotion.current", browse)
+        self.assertIn(".crossfade(if (reducedMotion) 0 else Motion.BROWSE_FADE_MS)", browse)
+
+    def test_real_window_metrics_include_frame_stage_p95_and_heap_snapshots(self):
+        diagnostics = contents("app/src/main/java/app/apexview/WindowFrameDiagnostics.kt")
+        self.assertIn("jvmHeapUsedMiB=$heapUsedMiB", diagnostics)
+        self.assertIn("nativeHeapAllocatedMiB=$nativeHeapMiB", diagnostics)
+        for stage in ("layout", "draw", "sync", "command", "swap", "gpu"):
+            self.assertIn(stage + "P95UpperMs=", diagnostics)
+        self.assertIn("window.addOnFrameMetricsAvailableListener(listener", diagnostics)
 
     def test_archive_policy_reaches_real_datasource_without_extra_warm_copy(self):
         session = contents("app/src/main/java/app/apexview/tiled/HevcArchiveVodSession.kt")

@@ -98,6 +98,13 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
             val swap = swapDurations.snapshotAndReset()
             val gpu = gpuDurations.snapshotAndReset()
             val windowVsync = windowVsyncIntervals.snapshotAndReset()
+            // Capture low-overhead heap snapshots on the same 2-second cadence as UI
+            // jank. Correlation is not causation; SurfaceView decoder drops are separate.
+            val runtime = Runtime.getRuntime()
+            val heapUsedMiB = (runtime.totalMemory() - runtime.freeMemory()) / 1_048_576L
+            val heapCommittedMiB = runtime.totalMemory() / 1_048_576L
+            val heapMaxMiB = runtime.maxMemory() / 1_048_576L
+            val nativeHeapMiB = android.os.Debug.getNativeHeapAllocatedSize() / 1_048_576L
             Log.i("PitwallFrames", "role=$role uptimeMs=$now intervalMs=${now - started} frames=$frames " +
                 "slow=$slow frozen700ms=$frozen firstDraws=$firstDraws missedReports=$missedReports " +
                 "refreshRate=${window.decorView.display?.refreshRate ?: 0f} maxFrameMs=${maxNs / 1_000_000} " +
@@ -106,15 +113,17 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
                 "windowIntendedVsyncBins13_19_23_30_45_100=${windowVsync.compact()} " +
                 "lastFrameTimelineVsyncId=$lastFrameTimelineVsyncId frameTimelineIdGaps=$frameTimelineIdGaps " +
                 "deadlineMissTotalMs=${deadlineMissNs / 1_000_000} deadlineMissMaxMs=${longestDeadlineMissNs / 1_000_000} " +
-                "layoutTotalMs=${layout.totalMs.toInt()} layoutMaxMs=${layout.maxMs.toInt()} " +
+                "layoutTotalMs=${layout.totalMs.toInt()} layoutMaxMs=${layout.maxMs.toInt()} layoutP95UpperMs=${layout.percentileUpperMs(95)} " +
                 "inputTotalMs=${input.totalMs.toInt()} inputP95UpperMs=${input.percentileUpperMs(95)} " +
                 "animationTotalMs=${animation.totalMs.toInt()} animationP95UpperMs=${animation.percentileUpperMs(95)} " +
-                "drawTotalMs=${draw.totalMs.toInt()} drawMaxMs=${draw.maxMs.toInt()} " +
-                "syncTotalMs=${sync.totalMs.toInt()} syncMaxMs=${sync.maxMs.toInt()} " +
-                "commandTotalMs=${command.totalMs.toInt()} commandMaxMs=${command.maxMs.toInt()} " +
-                "swapTotalMs=${swap.totalMs.toInt()} swapMaxMs=${swap.maxMs.toInt()} " +
-                "gpuTotalMs=${gpu.totalMs.toInt()} gpuMaxMs=${gpu.maxMs.toInt()} " +
+                "drawTotalMs=${draw.totalMs.toInt()} drawMaxMs=${draw.maxMs.toInt()} drawP95UpperMs=${draw.percentileUpperMs(95)} " +
+                "syncTotalMs=${sync.totalMs.toInt()} syncMaxMs=${sync.maxMs.toInt()} syncP95UpperMs=${sync.percentileUpperMs(95)} " +
+                "commandTotalMs=${command.totalMs.toInt()} commandMaxMs=${command.maxMs.toInt()} commandP95UpperMs=${command.percentileUpperMs(95)} " +
+                "swapTotalMs=${swap.totalMs.toInt()} swapMaxMs=${swap.maxMs.toInt()} swapP95UpperMs=${swap.percentileUpperMs(95)} " +
+                "gpuTotalMs=${gpu.totalMs.toInt()} gpuMaxMs=${gpu.maxMs.toInt()} gpuP95UpperMs=${gpu.percentileUpperMs(95)} " +
                 "gpuAvailable=${Build.VERSION.SDK_INT >= 31} " +
+                "jvmHeapUsedMiB=$heapUsedMiB jvmHeapCommittedMiB=$heapCommittedMiB " +
+                "jvmHeapMaxMiB=$heapMaxMiB nativeHeapAllocatedMiB=$nativeHeapMiB " +
                 // Raw system thermal classification; -1 means unsupported,
                 // not an inferred cause of decoder or RenderThread stalls.
                 "thermalStatus=${runCatching { power?.currentThermalStatus }.getOrNull() ?: -1}")

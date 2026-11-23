@@ -16,23 +16,30 @@ class BrowseLayoutPolicyTest {
         }
     }
 
-    @Test fun portraitPhoneShowsTwoCardsAndNextPeek() {
+    @Test fun portraitPhoneBalancesReadableCardsAndNextPreview() {
         for (width in listOf(320f, 360f, 384f, 412f)) {
+            val shelf = width - 40f
             val video = BrowseLayoutPolicy.cardWidthDp(width, false, 1f, true)
             val poster = BrowseLayoutPolicy.cardWidthDp(width, true, 1f, true)
-            val shelf = width - 40f
-            assertTrue("two video cards fit", 2f * video + 12f <= shelf)
-            assertTrue("next card peeks", 2f * video + 24f < shelf)
-            assertTrue("two posters fit", 2f * poster + 12f <= shelf)
-            assertTrue("portrait is not a single oversized card", video <= 165f)
+            assertEquals("video target at $width", shelf * 0.60f, video, 0.01f)
+            assertEquals("poster target at $width", shelf * 0.55f, poster, 0.01f)
+            assertTrue("second video card must be visible", video + 12f < shelf)
+            assertTrue("never squeeze two complete video cards", 2f * video + 12f > shelf)
+            assertTrue("second poster card must be visible", poster + 12f < shelf)
         }
+        assertEquals(206.4f, BrowseLayoutPolicy.cardWidthDp(384f, false, 1f, true), 0.01f)
+        assertEquals(252f, BrowseLayoutPolicy.cardWidthDp(640f, false, 1f, true), 0.01f)
     }
 
     @Test fun portraitLargeFontDoesNotForceUnreadableTinyTiles() {
         assertEquals(344f, BrowseLayoutPolicy.cardWidthDp(384f, false, 2f, true), 0.01f)
-        assertEquals(288f, BrowseLayoutPolicy.heroHeightDp(384f, 824f, 1f, true), 0.01f)
+        assertEquals(308f, BrowseLayoutPolicy.heroHeightDp(384f, 824f, 1f, true), 0.01f)
         assertTrue(BrowseLayoutPolicy.heroHeightDp(384f, 824f, 2f, true) >= 400f)
-        assertEquals(18f, BrowseLayoutPolicy.sectionGapDp(true, 384f), 0.01f)
+        assertEquals(23f, BrowseLayoutPolicy.sectionGapDp(true, 384f), 0.01f)
+        val normal = BrowseLayoutPolicy.cardWidthDp(384f, false, 1f, true)
+        assertTrue(BrowseLayoutPolicy.cardWidthDp(384f, false, 1.5f, true) > normal)
+        assertEquals(280f, BrowseLayoutPolicy.cardWidthDp(320f, false, 2f, true), 0.01f)
+        assertEquals(240f, BrowseLayoutPolicy.cardWidthDp(280f, false, 1f, true), 0.01f)
     }
 
     @Test fun landscapeRetainsExistingWidthHeroAndSectionGap() {
