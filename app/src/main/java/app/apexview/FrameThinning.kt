@@ -139,8 +139,12 @@ private class ThinningVideoRenderer(
         return configuration
     }
 
-    override fun canReuseCodec(codecInfo: MediaCodecInfo, oldFormat: Format, newFormat: Format): DecoderReuseEvaluation {
-        val reuse = super.canReuseCodec(codecInfo, oldFormat, newFormat)
+    override fun canReuseCodec(codecInfo: MediaCodecInfo, oldFormat: Format, newFormat: Format,
+        isAdaptiveFormatChange: Boolean): DecoderReuseEvaluation {
+        // Media3 1.11.1 includes the adaptive-format-change flag in the base
+        // renderer's codec-reuse evaluation. Preserve its reasoning before
+        // enforcing TCL coded SPS resolution changes as a hard recreate.
+        val reuse = super.canReuseCodec(codecInfo, oldFormat, newFormat, isAdaptiveFormatChange)
         if (isTv && codecInfo.name.startsWith("OMX.amlogic.hevc.", ignoreCase = true) &&
             tclCodedSizeChanged(oldFormat, newFormat)) {
             android.util.Log.i("PitwallVideo", "RECREATE_ON_SIZE_CHANGE codec=${codecInfo.name} " +
@@ -152,8 +156,11 @@ private class ThinningVideoRenderer(
         return reuse
     }
 
-    override fun onPositionReset(positionUs: Long, joining: Boolean) {
-        super.onPositionReset(positionUs, joining)
+    override fun onPositionReset(positionUs: Long, joining: Boolean,
+        sampleStreamIsResetToKeyFrame: Boolean) {
+        // Media3 1.11.1 tracks keyframe-reset seeks to avoid briefly showing
+        // stale frames. Forward the new flag before resetting local thinning.
+        super.onPositionReset(positionUs, joining, sampleStreamIsResetToKeyFrame)
         thinner.reset()
     }
 

@@ -65,6 +65,15 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn('"PitwallClearSurfaceScene"', scene)
         self.assertIn('Trace.setCounter("PitwallSurfaceSceneLatched5s"', scene)
         self.assertIn('Trace.setCounter("PitwallTextureSceneLatched5s"', texture)
+        frame_thinning = contents("app/src/main/java/app/apexview/FrameThinning.kt")
+        self.assertIn("isAdaptiveFormatChange: Boolean", frame_thinning)
+        self.assertIn("super.canReuseCodec(codecInfo, oldFormat, newFormat, isAdaptiveFormatChange)",
+                      frame_thinning)
+        self.assertIn("sampleStreamIsResetToKeyFrame: Boolean", frame_thinning)
+        self.assertIn("super.onPositionReset(positionUs, joining, sampleStreamIsResetToKeyFrame)",
+                      frame_thinning)
+        self.assertIn("metrics.latched.coerceAtLeast(0L)", scene)
+        self.assertIn("metrics.latched.coerceAtLeast(0L)", texture)
         instrumentation = contents("scripts/run_rendernode_instrumentation.sh")
         self.assertIn("app.apexview.scene.SurfaceDecoderSceneInstrumentationTest", instrumentation)
         self.assertIn("app.apexview.scene.SingleDecoderSceneInstrumentationTest", instrumentation)

@@ -90,6 +90,10 @@ Every row below specifies **source project and actual reference file**, **Pitwal
 
 ## Batch 1 coordinated implementation: Media3 1.11.1 + clear SurfaceView A/B + presentation observability
 
+**Build 824 exact-source Kotlin API failure and coordinated migration correction:** The true first compile errors after Media3 1.5.1→1.11.1 are `FrameThinning.kt`'s custom `MediaCodecVideoRenderer.canReuseCodec` now requiring `isAdaptiveFormatChange: Boolean` and `onPositionReset` now requiring `sampleStreamIsResetToKeyFrame: Boolean`. Forward both flags to the superclass and preserve the existing TCL coded SPS re-creation and frame-thinning reset. Android SDK 37 `Trace.setCounter` requires a `Long`; switch both per-five-second scene instrumentation counters to nonnegative `Long` samples without reducing precision or claiming scanout. Wire real-source regression tests and this single plan into the same corrective commit. No disabling the compiler, CI, DRM, source-output validation or any renderer path.
+
+
+
 **Build 822/823 CI correction, consolidated in the following code candidate:** Build 822 stopped on an overly strict Python source-wiring expectation before Android compilation. The correction makes both the original TextureView and the experimental SurfaceView genuine *mandatory* emulator synthetic HEVC instrumentation paths. Build 823 enforced the coordinated-change contract, which rejected the preceding three-file source correction because this single consolidated plan had not been changed in that exact commit. This pass keeps that gate fully enforced and includes **this plan, the corresponding production code, and regression coverage together**. Also distinguish clear-versus-secure SurfaceView GL threads in Perfetto (PitwallClearSurfaceScene vs PitwallSecureScene), preventing clear-video experimental queue samples from being mistaken for protected output. This is a correction to real source/test/diagnostic parity, not permission to hide failures or mark physical gates closed.
 
 

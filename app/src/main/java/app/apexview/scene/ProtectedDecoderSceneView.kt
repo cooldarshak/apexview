@@ -478,9 +478,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             val correlation = codecCorrelation?.snapshotAndReset()
             // Five-second trace samples of GL stages, not video scanout.
             Trace.setCounter("PitwallSurfaceSceneLatched5s",
-                metrics.latched.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt())
+                metrics.latched.coerceAtLeast(0L))
             Trace.setCounter("PitwallSurfaceSceneGlSubmits5s",
-                metrics.presented.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt())
+                metrics.presented.coerceAtLeast(0L))
             Log.i("ApexviewSingleDecoder", "SURFACE_DECODER_SCENE " +
                 "protected=$protectedOutput output=${outputWidth}x$outputHeight " +
                 "inputTextures=1 outputViews=1 sources=${model.sources} " +
