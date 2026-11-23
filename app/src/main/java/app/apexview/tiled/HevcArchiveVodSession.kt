@@ -267,8 +267,18 @@ internal class HevcArchiveVodSession(
                 HevcMixedArchiveAtlasPlan.Source(hvc.vps.single(), hvc.sps.single(), hvc.pps.single())
             }
             val mixed = mixedInputs.any { it.sps.width != sourceSps.width || it.sps.height != sourceSps.height }
+            // Resolve the real per-sample rate before choosing geometry. A smaller
+            // atlas that cannot decode at the advertised rate is not eligible.
+            val trackScale = requireNotNull(firstTrack.timescale)
+            val firstFragment = CmafBoxInspector.inspect(batches.first().first(), inputs.first().report).fragments.single()
+            val step = firstFragment.sampleTimings.map { requireNotNull(it.durationTicks) }.distinct().single()
+            require(step > 0L && trackScale > 0L) { "Invalid source sample cadence" }
+            val sourceRate = trackScale.toDouble() / step.toDouble()
             val mixedAtlas = if (mixed) requireNotNull(cachedMixedAtlas ?: HevcMixedArchiveAtlasPlan.choose(mixedInputs,
-                maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT)?.also { candidate ->
+                maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT,
+                outputEligible = { width, height ->
+                    HevcArchiveDecoderCapability.supportsClearAtlas(width, height, sourceRate)
+                })?.also { candidate ->
                     synchronized(cacheLock) { checkOpen(); if (cachedMixedAtlas == null) cachedMixedAtlas = candidate }
                 }) {
                 "Selected source resolutions have incompatible HEVC tile geometry for one decoder"
@@ -277,9 +287,6 @@ internal class HevcArchiveVodSession(
                 maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT)) {
                 "Full archive feeds exceed composed picture size; choose fewer feeds or a lower common HEVC rendition"
             } else null
-            val trackScale = requireNotNull(firstTrack.timescale)
-            val firstFragment = CmafBoxInspector.inspect(batches.first().first(), inputs.first().report).fragments.single()
-            val step = firstFragment.sampleTimings.map { requireNotNull(it.durationTicks) }.distinct().single()
             val divisor = java.math.BigInteger.valueOf(trackScale).gcd(java.math.BigInteger.valueOf(step)).longValueExact()
             val cells = mixedAtlas?.cells ?: (0 until (requireNotNull(atlas).columns * atlas.rows)).flatMap { slot ->
                 val feed = slot.coerceAtMost(inputs.lastIndex)
@@ -353,6 +360,8 @@ internal class HevcArchiveVodSession(
                             "atlasExtraPixels=${decodedPixels - uniqueSourcePixels} " +
                             "atlasShapesEvaluated=${mixedAtlas?.evaluatedShapes ?: 0} " +
                             "atlasGridValidationsRejected=${mixedAtlas?.rejectedGridValidations ?: 0} " +
+                            "atlasDecoderCandidatesRejected=${mixedAtlas?.rejectedDecoderCapabilities ?: 0} " +
+                            "atlasMinimumAreaProven=${mixedAtlas?.smallestAreaProven ?: (atlas != null)} " +
                             "atlasSearchBudgetLimited=${mixedAtlas?.searchBudgetLimited ?: false}"
                     } else {
                         require(initialization!!.contentEquals(composed.initializationSegment)) {

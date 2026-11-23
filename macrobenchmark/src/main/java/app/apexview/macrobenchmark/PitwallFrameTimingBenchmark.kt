@@ -47,6 +47,27 @@ class PitwallFrameTimingBenchmark {
             operation()
         }
 
+    /** Full ten-minute physical endurance of the actual authorized content.
+     * Run this individually on S22 and TCL at 1x/1.5x for overlays OFF/MAP/
+     * TOWER/BOTH. The chosen overlay is MANUAL and logged in the evidence
+     * manifest; CI only compiles this runner and never fakes account media. */
+    @OptIn(ExperimentalMacrobenchmarkApi::class)
+    @Test fun sustainedAuthorizedPlaybackTenMinutes() =
+        benchmarkRule.measureRepeated(
+            packageName = targetPackage,
+            metrics = listOf(FrameTimingMetric()),
+            compilationMode = CompilationMode.Ignore(),
+            iterations = 1,
+            startupMode = null,
+        ) {
+            assertEquals(
+                "Open your authorized playback first; preserve feed count, F1 " +
+                    "renditions and speed throughout this ten-minute interval.",
+                targetPackage, device.currentPackageName,
+            )
+            Thread.sleep(600_000L)
+        }
+
     /** Stable-playback frames, including a separate SurfaceFlinger video layer. */
     @Test fun playbackWithSelectedOverlayConfiguration() = measure {
         Thread.sleep(8_000L)

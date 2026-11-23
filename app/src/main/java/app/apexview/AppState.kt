@@ -6360,6 +6360,22 @@ class AppState(
         }
     }
 
+    /** Only codec input measurements actually produced by authorized composition.
+     * Protected output reports its coded atlas, not unencrypted source pixels. */
+    internal fun activeAtlasQualityEvidence(): VideoQualityAdvisory.Atlas? {
+        val session = singleDecoderScenePlayer?.archiveSceneSession
+        if (session != null && session.codedWidth > 0 && session.codedHeight > 0) {
+            return VideoQualityAdvisory.Atlas(session.codedWidth, session.codedHeight,
+                session.frameRate, playbackSpeed, singleDecoderScenePlayer?.activeVideoDecoderName)
+        }
+        val protected = protectedRollingScene?.layout
+        if (protected != null && protected.atlasWidth > 0 && protected.atlasHeight > 0) {
+            return VideoQualityAdvisory.Atlas(protected.atlasWidth, protected.atlasHeight,
+                protected.frameRate, playbackSpeed, protectedCompositionHost?.feed?.activeVideoDecoderName)
+        }
+        return null
+    }
+
     private fun qualityFor(tile: Tile): VideoQuality = settings.videoQualityForFeed(tile.feed.sourceStream.profileLabel)
 
     /** A choice belongs to the F1 feed, not its current on-screen size or tile position. */

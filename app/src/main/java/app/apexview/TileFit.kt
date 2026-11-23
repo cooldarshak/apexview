@@ -32,6 +32,13 @@ internal fun bandwidthShares(areas: List<Float>): List<Float> {
 
 private const val MIN_BANDWIDTH_SHARE = 0.1f
 
+/** A manual selection must not silently select an above-cap format when
+ * no source rendition below its ceiling exists. */
+internal fun matchesManualQuality(requestedHeight: Int, offeredHeight: Int?,
+                                  candidateHeight: Int): Boolean =
+    requestedHeight <= 0 || (offeredHeight != null && offeredHeight == candidateHeight)
+
+
 /** Highest rendition height available without exceeding the user's manual quality choice. */
 internal fun highestAvailableVideoHeightAtOrBelow(
     renditions: List<Pair<Int, Int>>,
@@ -92,10 +99,11 @@ class TileFitSelectionFactory(private val fit: TileFit) : AdaptiveTrackSelection
             val forcedHeight = fit.qualityHeight.takeIf { it > 0 }?.let {
                 highestAvailableVideoHeightAtOrBelow(availableRenditions, it)
             }
-            val fits = if (forcedHeight != null && format.height > 0) {
-                // Manual quality pins the resolution while AdaptiveTrackSelection can still
-                // move between bitrates at that resolution. Auto retains tile-size fitting.
-                format.height == forcedHeight
+            val fits = if (fit.qualityHeight > 0) {
+                // Fix the exact offered rung, or fail closed if no valid rung
+                // exists beneath the user's cap. Do not use an Auto fallback.
+                format.height > 0 && matchesManualQuality(
+                    fit.qualityHeight, forcedHeight, format.height)
             } else {
                 val ceiling = pixelCeiling(availableRenditions, fit.width, fit.height)
                 val fastStartCeiling = if (fit.fastStart) availableRenditions

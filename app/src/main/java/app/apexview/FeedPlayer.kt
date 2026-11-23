@@ -333,6 +333,17 @@ class FeedPlayer(
         fastStart = preferFastStart || startMs != C.TIME_UNSET
     }
     private var selectedVideoQuality = videoQuality
+    private var offeredSourceVideoSizes: List<Pair<Int, Int>> = emptyList()
+    var sourceQualityNotice by mutableStateOf<String?>(null)
+        private set
+
+    private fun refreshMissingQualityNotice() {
+        val next = if (archiveVodSession != null) null
+            else QualityDisclosurePolicy.unavailableManualCap(
+                selectedVideoQuality, offeredSourceVideoSizes)
+        if (sourceQualityNotice != next) sourceQualityNotice = next
+    }
+
     private var externalQualityFloor = false
     private val sourceTrackSelector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context, TileFitSelectionFactory(fit))
     private var audioTrackEnabled = false
@@ -479,6 +490,17 @@ class FeedPlayer(
             "TCL_STABLE_RENDITION preferred=${videoQuality.name} cap=${qualityWidth(videoQuality)}x${qualityHeight(videoQuality)}")
         player.addListener(object : Player.Listener {
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                offeredSourceVideoSizes = tracks.groups.filter {
+                    it.type == C.TRACK_TYPE_VIDEO
+                }.flatMap { group ->
+                    (0 until group.length).mapNotNull { index ->
+                        if (!group.isTrackSupported(index)) null else {
+                            val format = group.getTrackFormat(index)
+                            (format.width to format.height).takeIf { it.first > 0 && it.second > 0 }
+                        }
+                    }
+                }
+                refreshMissingQualityNotice()
                 val offered = buildList {
                     tracks.groups.forEach { group ->
                         if (group.type == C.TRACK_TYPE_TEXT) for (index in 0 until group.length) {
@@ -1069,6 +1091,7 @@ class FeedPlayer(
     fun setVideoQuality(value: VideoQuality) {
         if (selectedVideoQuality == value) return
         selectedVideoQuality = value
+        refreshMissingQualityNotice()
         fit.qualityHeight = if (externalQualityFloor) maxOf(720, value.targetHeight) else value.targetHeight
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setMaxVideoSize(if (externalQualityFloor) maxOf(1280, qualityWidth(value)) else qualityWidth(value), if (externalQualityFloor) maxOf(720, qualityHeight(value)) else qualityHeight(value))

@@ -124,3 +124,64 @@ first three segment compositions when reporting steady median allocations,
 GC counts, compose and rewrite time. App deadline misses, codec throughput,
 GL submission and physical video presentation are different metrics. A green
 CI build or fewer app deadline misses alone is not a video smoothness PASS.
+
+
+## Controlled release-quality endurance matrix (P2.6)
+
+Run a full **10-minute authorized playback session** for each of OFF, MAP,
+TOWER and BOTH, first at **1.0x**, then at **1.5x**. Keep the same F1 event,
+source renditions, feed count, decoder preference, device display refresh mode,
+DRM entitlement and layout across cases. Do not attribute thermal drift or
+feed changes to an overlay. Start with the S22 Ultra, repeat on the TCL 55C655
+with Software DRM **ON**, and separately exercise clear/protected and Pitwall Cast
+where permitted. Never turn off security, recording or overlays to pass a gate.
+
+For each ten-minute interval, export the app diagnostic log and take a 60-second
+Perfetto trace **during steady playback**. Record temperature/charging conditions,
+actual mode shown by `SCENE_DISPLAY_MODE` / `SURFACE_SCENE_DISPLAY_MODE`,
+decoder type, real source dimensions and effective playback rate. Benchmark
+APKs produced by green CI include a physical-only
+`sustainedAuthorizedPlaybackTenMinutes` instrumentation test. It deliberately
+requires the already-authorized viewer on screen and does not insert credentials.
+
+Export the Perfetto `actual_frame_timeline_slice` CSV with
+`docs/perfetto/frame_timeline_export.sql`, then create a local JSON manifest
+containing **eight runs** per device and playback configuration. A sample
+single-run entry (repeat for the other seven overlays/speeds):
+
+```json
+{
+  "runs": [{
+    "label": "S22-4feed-1x-off",
+    "overlay": "OFF",
+    "speed": 1.0,
+    "device": "SM-S908E",
+    "build": "1.0.2000",
+    "content_id": "same-authorized-session",
+    "source_profile": "verified-source-dimensions-and-fps",
+    "decoder_mode": "SINGLE",
+    "protection": "CLEAR_HEVC",
+    "delivery": "PHONE",
+    "feed_count": 4,
+    "display_hz": 120.0,
+    "thermal_start": 0,
+    "thermal_end": 1,
+    "app_log": "s22-off-1x.log.txt",
+    "timeline_csv": "s22-off-1x.csv"
+  }]
+}
+```
+
+Then run `python scripts/pitwall_acceptance_matrix.py captures.json --json`.
+Its validator refuses an incomplete or mixed-quality matrix, missing measured
+app frames, less than 600 seconds of real app diagnostics, or less than 45 seconds
+of FrameTimeline capture. Reports include app slow-frame percentage,
+SurfaceFlinger app/video layer lateness, frozen frames, HEVC process-wide
+allocations, GC, foreground request p95, queue timeout rate and thermal statuses.
+It reports `NO_INDEPENDENT_VIDEO_LAYER` for clear TextureView when there is no
+separate SurfaceView layer; **that is not a video presentation PASS**.
+
+The comparison program cannot independently prove source-to-scanout picture
+identity, protected Widevine functionality, true 50fps video presentation,
+A/V sync, or TCL/Cast parity. All of these still require on-device validation.
+A script exit status or successful CI build never closes a physical release gate.

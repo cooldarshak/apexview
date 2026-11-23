@@ -21,4 +21,25 @@ internal object SceneFrameRatePolicy {
         val nearest = kotlin.math.round(ratio)
         return nearest >= 1.0 && kotlin.math.abs(ratio - nearest) <= 0.005
     }
+
+    /** Platform mode descriptors without Android dependencies, for exact JVM tests.
+     * Only same-resolution modes can be considered seamless candidates. The OS
+     * owns actual mode choice; callers never set a preferred mode ID. */
+    data class Mode(val id: Int, val width: Int, val height: Int, val refreshHz: Float)
+
+    fun matchingSeamlessModes(
+        active: Mode, supported: List<Mode>,
+        sourceFps: Double, playbackSpeed: Float
+    ): List<Mode> {
+        val videoFps = hint(sourceFps, playbackSpeed)
+        if (active.width <= 0 || active.height <= 0 || videoFps == 0f) return emptyList()
+        return supported.filter { mode ->
+            mode.width == active.width && mode.height == active.height &&
+                isIntegerRefreshMultiple(mode.refreshHz, sourceFps, playbackSpeed)
+        }.distinctBy { it.id }.sortedWith(
+            compareBy<Mode> { if (it.id == active.id) 0 else 1 }
+                .thenBy { it.refreshHz }
+                .thenBy { it.id }
+        )
+    }
 }

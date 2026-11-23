@@ -1975,6 +1975,14 @@ private fun VideoQualitySheet(app: AppState) {
                 style = Type.footnote,
                 modifier = Modifier.padding(top = 12.dp),
             )
+            VideoQualityAdvisory.atlasNotice(app.activeAtlasQualityEvidence())?.let { notice ->
+                Text(notice, style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
+            }
+            VideoQualityAdvisory.thermalNotice(app.thermal, app.settings.decoderMode,
+                app.settings.videoQuality)?.let { notice ->
+                Text(notice, style = Type.footnote.copy(color = Ink.live),
+                    modifier = Modifier.padding(top = 8.dp))
+            }
             val active = app.tiles.distinctBy { it.feed.sourceStream.profileLabel }
                 .sortedBy { if (it.id == app.bigTileIdForUi) 0 else 1 }
             if (active.isNotEmpty()) {
@@ -2002,6 +2010,16 @@ private fun VideoQualitySheet(app: AppState) {
                                 "${actual.first} × ${actual.second} (${actual.second}p)"
                         },
                             style = Type.footnote, modifier = Modifier.padding(top = 6.dp))
+                        if (app.settings.decoderMode == DecoderMode.MULTIPLE) {
+                            tile.feed.sourceQualityNotice?.let { warning ->
+                                Text(warning, style = Type.footnote.copy(color = Ink.live),
+                                    modifier = Modifier.padding(top = 6.dp))
+                            }
+                        }
+                        VideoQualityAdvisory.tileNotice(actual, tile.w, tile.h)?.let { evidence ->
+                            Text(evidence, style = Type.footnote,
+                                modifier = Modifier.padding(top = 4.dp))
+                        }
                         actual?.let { played ->
                             QualityDisclosurePolicy.notice(app.settings.videoQualityForFeed(label),
                                 played.second)?.let { notice ->

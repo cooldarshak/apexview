@@ -19,6 +19,8 @@ internal object HevcMixedArchiveAtlasPlan {
         val evaluatedShapes: Int = 0,
         val rejectedGridValidations: Int = 0,
         val searchBudgetLimited: Boolean = false,
+        val rejectedDecoderCapabilities: Int = 0,
+        val smallestAreaProven: Boolean = false,
     )
 
     private data class Tile(val feed: Int, val index: Int, val col: Int, val row: Int,
@@ -29,8 +31,9 @@ internal object HevcMixedArchiveAtlasPlan {
     /** Returns null if the actual SPS/PPS partitions cannot form one conforming tiled picture.
      * Mixed quality is supported only when the bitstream geometry permits lossless stitching. */
     fun choose(sources: List<Source>, maximumWidth: Int = 4096,
-               maximumHeight: Int = HevcArchiveAtlasPlan.MAX_CODED_HEIGHT): Plan? {
-        if (sources.isEmpty() || sources.size > 8) return null
+               maximumHeight: Int = HevcArchiveAtlasPlan.MAX_CODED_HEIGHT,
+               outputEligible: (Int, Int) -> Boolean = { _, _ -> true }): Plan? {
+        if (sources.isEmpty() || sources.size > 8 || maximumWidth <= 0 || maximumHeight <= 0) return null
         // <=6 retains the proven 24-cell search space; only extended feeds
         // are permitted to enumerate a maximum of 32 independent source cells.
         val maximumCells = if (sources.size > 6) 32 else 24
@@ -92,6 +95,10 @@ internal object HevcMixedArchiveAtlasPlan {
         var evaluatedShapes = 0
         var rejectedGridValidations = 0
         var searchBudgetLimited = false
+        var rejectedDecoderCapabilities = 0
+        // Hardware capability queries can be expensive. A coded size has one
+        // deterministic eligibility answer for this composition epoch.
+        val capabilityBySize = HashMap<Pair<Int, Int>, Boolean>()
         val sourceAreaLowerBound = sources.sumOf {
             it.sps.width.toLong() * it.sps.height.toLong()
         }
@@ -130,6 +137,10 @@ internal object HevcMixedArchiveAtlasPlan {
                 if (!checked.compatible || checked.geometry == null ||
                     checked.geometry.codedWidth != width || checked.geometry.codedHeight != height) {
                     rejectedGridValidations++
+                    return null
+                }
+                if (!capabilityBySize.getOrPut(width to height) { outputEligible(width, height) }) {
+                    rejectedDecoderCapabilities++
                     return null
                 }
                 val rects = sources.indices.map { feed ->
@@ -189,6 +200,10 @@ internal object HevcMixedArchiveAtlasPlan {
         }
         return best?.copy(evaluatedShapes = evaluatedShapes,
             rejectedGridValidations = rejectedGridValidations,
-            searchBudgetLimited = searchBudgetLimited)
+            searchBudgetLimited = searchBudgetLimited,
+            rejectedDecoderCapabilities = rejectedDecoderCapabilities,
+            // A bounded search may return the smallest KNOWN valid layout, not
+            // a mathematical optimum. Lower-bound equality is the sole exception.
+            smallestAreaProven = !searchBudgetLimited || bestArea == sourceAreaLowerBound)
     }
 }

@@ -27,6 +27,19 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("VideoThermalBudget.transitionNotice(status, before)?.let { message = it }", app)
         self.assertEqual(app.count("var message by mutableStateOf<String?>(null)"), 1)
 
+    def test_mixed_atlas_checks_real_decoder_support_before_publishing(self):
+        session = contents("app/src/main/java/app/apexview/tiled/HevcArchiveVodSession.kt")
+        atlas = contents("app/src/main/java/app/apexview/tiled/HevcMixedArchiveAtlasPlan.kt")
+        probe = contents("app/src/main/java/app/apexview/tiled/HevcArchiveDecoderCapability.kt")
+        self.assertIn("outputEligible = { width, height ->", session)
+        self.assertIn("HevcArchiveDecoderCapability.supportsClearAtlas(width, height, sourceRate)", session)
+        self.assertIn("atlasDecoderCandidatesRejected=", session)
+        self.assertIn("smallestAreaProven = !searchBudgetLimited || bestArea == sourceAreaLowerBound", atlas)
+        self.assertIn("capabilities.videoCapabilities?.areSizeAndRateSupported(", probe)
+        self.assertIn("FEATURE_SecurePlayback", probe)
+        self.assertIn("allDeviceRejectedCandidatesFailClosedRatherThanSwitchingDecoders",
+                      contents("app/src/test/java/app/apexview/tiled/HevcMixedArchiveAtlasPlanTest.kt"))
+
     def test_main_and_cast_receiver_use_real_expressive_theme(self):
         activity = contents("app/src/main/java/app/apexview/MainActivity.kt")
         receiver = contents("app/src/main/java/app/apexview/cast/local/PitwallReceiverActivity.kt")

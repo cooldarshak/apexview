@@ -35,3 +35,41 @@ class ComposedSourceRenditionsTest {
         }
     }
 }
+
+
+class ManualQualityOfferDisclosureTest {
+    @org.junit.Test fun aMissingManualRungIsNeverSilentlyRelabelledAsAvailable() {
+        val offered = listOf(1920 to 1080, 1280 to 720)
+        val message = QualityDisclosurePolicy.unavailableManualCap(VideoQuality.P540, offered)
+        org.junit.Assert.assertNotNull(message)
+        org.junit.Assert.assertTrue(message!!.contains("no video at or below 540p"))
+        org.junit.Assert.assertNull(QualityDisclosurePolicy.unavailableManualCap(VideoQuality.AUTO, offered))
+        org.junit.Assert.assertNull(QualityDisclosurePolicy.unavailableManualCap(
+            VideoQuality.P720, offered))
+        org.junit.Assert.assertNull(QualityDisclosurePolicy.unavailableManualCap(
+            VideoQuality.P540, emptyList()))
+    }
+}
+
+class VideoQualityAdvisoryTest {
+    @org.junit.Test fun reportsOnlyRealCodedSizeAndEffectivePlaybackRate() {
+        val evidence = VideoQualityAdvisory.Atlas(1920, 2176, 50.0, 1.5f)
+        val notice = VideoQualityAdvisory.atlasNotice(evidence)!!
+        org.junit.Assert.assertTrue(notice.contains("1920 × 2176"))
+        org.junit.Assert.assertTrue(notice.contains("75.0 effective fps"))
+        org.junit.Assert.assertTrue(notice.contains("not screen resolution"))
+        org.junit.Assert.assertNull(VideoQualityAdvisory.atlasNotice(null))
+    }
+
+    @org.junit.Test fun thermalAdviceDoesNotPretendToChangeProtectedOrFixedSourceQuality() {
+        val hot = android.os.PowerManager.THERMAL_STATUS_SEVERE
+        val single = VideoQualityAdvisory.thermalNotice(hot, DecoderMode.SINGLE, VideoQuality.P1080)!!
+        org.junit.Assert.assertTrue(single.contains("unchanged"))
+        val fixed = VideoQualityAdvisory.thermalNotice(hot, DecoderMode.MULTIPLE, VideoQuality.P1080)!!
+        org.junit.Assert.assertTrue(fixed.contains("fixed quality ceiling"))
+        val auto = VideoQualityAdvisory.thermalNotice(hot, DecoderMode.MULTIPLE, VideoQuality.AUTO)!!
+        org.junit.Assert.assertTrue(auto.contains("Auto quality"))
+        org.junit.Assert.assertNull(VideoQualityAdvisory.thermalNotice(
+            android.os.PowerManager.THERMAL_STATUS_LIGHT, DecoderMode.SINGLE, VideoQuality.AUTO))
+    }
+}

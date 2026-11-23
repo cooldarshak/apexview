@@ -40,6 +40,18 @@ class TileFitTest {
     }
 
     @Test
+    fun aManualQualityBelowTheOnlyOfferedRenditionHasNoValidForcedHeight() {
+        assertEquals(null, highestAvailableVideoHeightAtOrBelow(
+            listOf(1920 to 1080), 540))
+        assertEquals(540, highestAvailableVideoHeightAtOrBelow(
+            listOf(960 to 540, 1920 to 1080), 720))
+        org.junit.Assert.assertFalse(matchesManualQuality(540, null, 1080))
+        org.junit.Assert.assertFalse(matchesManualQuality(720, 540, 1080))
+        org.junit.Assert.assertTrue(matchesManualQuality(720, 540, 540))
+        org.junit.Assert.assertTrue(matchesManualQuality(0, null, 1080))
+    }
+
+    @Test
     fun aFeedAloneHasTheWholeConnection() {
         assertEquals(listOf(1f), bandwidthShares(listOf(1920f * 1080f)))
     }

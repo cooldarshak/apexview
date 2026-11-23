@@ -66,14 +66,21 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         if (signature == previousModeSignature) return
         previousModeSignature = signature
         // An available mode is not a selected mode; setFrameRate() is only advice to SurfaceFlinger.
-        val available = actualDisplay.supportedModes.joinToString(",") {
+        val modes = actualDisplay.supportedModes
+        val available = modes.joinToString(",") {
             "${it.modeId}:${it.physicalWidth}x${it.physicalHeight}@${it.refreshRate}"
         }
+        val active = SceneFrameRatePolicy.Mode(mode.modeId, mode.physicalWidth, mode.physicalHeight, mode.refreshRate)
+        val seamlessMatches = SceneFrameRatePolicy.matchingSeamlessModes(
+            active, modes.map { SceneFrameRatePolicy.Mode(it.modeId, it.physicalWidth, it.physicalHeight, it.refreshRate) },
+            sourceFps, playbackSpeed
+        ).joinToString(",") { "${it.id}@${it.refreshHz}" }.ifBlank { "none" }
         Log.i("ApexviewSingleDecoder", "SCENE_DISPLAY_MODE reason=$reason displayId=${actualDisplay.displayId} " +
             "activeMode=${mode.modeId} activeHz=${mode.refreshRate} sourceFps=$sourceFps speed=$playbackSpeed " +
             "effectiveFps=${SceneFrameRatePolicy.hint(sourceFps, playbackSpeed)} " +
             "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
-            "supportedModes=$available physicalPresentation=NOT_MEASURED")
+            "supportedModes=$available sameResolutionIntegralModes=$seamlessMatches " +
+            "modeSwitchIssuedByApp=false physicalPresentation=NOT_MEASURED")
     }
     @Volatile private var playbackSpeed = 1f
     private var player: ExoPlayer? = null

@@ -52,15 +52,22 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val signature = "${current.displayId}:${mode.modeId}:${mode.refreshRate}:$sourceFps:$playbackSpeed"
         if (signature == previousModeSignature) return
         previousModeSignature = signature
-        val available = current.supportedModes.joinToString(",") {
+        val modes = current.supportedModes
+        val available = modes.joinToString(",") {
             "${it.modeId}:${it.physicalWidth}x${it.physicalHeight}@${it.refreshRate}"
         }
+        val active = SceneFrameRatePolicy.Mode(mode.modeId, mode.physicalWidth, mode.physicalHeight, mode.refreshRate)
+        val seamlessMatches = SceneFrameRatePolicy.matchingSeamlessModes(
+            active, modes.map { SceneFrameRatePolicy.Mode(it.modeId, it.physicalWidth, it.physicalHeight, it.refreshRate) },
+            sourceFps, playbackSpeed
+        ).joinToString(",") { "${it.id}@${it.refreshHz}" }.ifBlank { "none" }
         Log.i("ApexviewSingleDecoder", "SURFACE_SCENE_DISPLAY_MODE reason=$reason protected=$protectedOutput " +
             "displayId=${current.displayId} activeMode=${mode.modeId} activeHz=${mode.refreshRate} " +
             "sourceFps=$sourceFps speed=$playbackSpeed " +
             "effectiveFps=${SceneFrameRatePolicy.hint(sourceFps, playbackSpeed)} " +
             "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
-            "supportedModes=$available physicalPresentation=NOT_MEASURED")
+            "supportedModes=$available sameResolutionIntegralModes=$seamlessMatches " +
+            "modeSwitchIssuedByApp=false physicalPresentation=NOT_MEASURED")
     }
 
     override fun onAttachedToWindow() {

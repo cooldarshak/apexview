@@ -40,6 +40,30 @@ class SceneFrameRatePolicyTest {
         assertFalse(SceneFrameRatePolicy.isIntegerRefreshMultiple(120f, 0.0))
     }
 
+    @Test fun seamlessCandidatesNeverConsiderDifferentResolutionOrInventSupport() {
+        val active = SceneFrameRatePolicy.Mode(1, 1920, 1080, 120f)
+        val available = listOf(active,
+            SceneFrameRatePolicy.Mode(2, 1920, 1080, 100f),
+            SceneFrameRatePolicy.Mode(3, 1920, 1080, 50f),
+            SceneFrameRatePolicy.Mode(4, 1280, 720, 100f),
+            SceneFrameRatePolicy.Mode(5, 1920, 1080, 75f),
+            SceneFrameRatePolicy.Mode(6, 1920, 1080, 150f))
+        assertEquals(listOf(3, 2),
+            SceneFrameRatePolicy.matchingSeamlessModes(active, available, 50.0, 1f).map { it.id })
+        assertEquals(listOf(5, 6),
+            SceneFrameRatePolicy.matchingSeamlessModes(active, available, 50.0, 1.5f).map { it.id })
+        assertTrue(SceneFrameRatePolicy.matchingSeamlessModes(active, emptyList(), 50.0, 1f).isEmpty())
+        assertTrue(SceneFrameRatePolicy.matchingSeamlessModes(active, available, Double.NaN, 1f).isEmpty())
+    }
+
+    @Test fun alreadyMatchingModeIsKeptFirstWithoutForcingAChange() {
+        val active = SceneFrameRatePolicy.Mode(4, 1920, 1080, 100f)
+        val available = listOf(
+            SceneFrameRatePolicy.Mode(5, 1920, 1080, 50f), active,
+            SceneFrameRatePolicy.Mode(6, 1920, 1080, 120f))
+        assertEquals(4, SceneFrameRatePolicy.matchingSeamlessModes(active, available, 50.0, 1f).first().id)
+    }
+
     @Test fun rejectsUnknownOrInvalidCadenceInsteadOfForcingARefreshSwitch() {
         listOf(0.0, -50.0, Double.NaN, Double.POSITIVE_INFINITY, 300.0).forEach {
             assertEquals(0f, SceneFrameRatePolicy.hint(it), 0f)
