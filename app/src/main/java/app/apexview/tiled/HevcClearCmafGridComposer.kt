@@ -128,6 +128,10 @@ internal object HevcClearCmafGridComposer {
             parsedFeeds.forEach(::clearNalUnits)
         }
         val rewrittenAt = System.nanoTime()
+        val outputFragments = mutableListOf<ByteArray>()
+        var committed = false
+        var init: ByteArray? = null
+        try {
         require(composed.pictures.size == first.fragments.sumOf { it.samples.size }) {
             "Composed picture count does not match the CMAF sample sequence"
         }
@@ -147,7 +151,7 @@ internal object HevcClearCmafGridComposer {
             }
         }
 
-        val init = HevcClearCmafInitSegmentWriter.write(
+        init = HevcClearCmafInitSegmentWriter.write(
             HevcClearCmafInitSegmentWriter.Request(
                 trackId = request.outputTrackId,
                 mediaTimescale = requireNotNull(first.track.timescale),
@@ -155,9 +159,6 @@ internal object HevcClearCmafGridComposer {
             )
         )
 
-        val outputFragments = mutableListOf<ByteArray>()
-        var committed = false
-        try {
             var pictureOffset = 0
             parsedFeeds.first().fragments.forEachIndexed { fragmentIndex, sourceFragment ->
                 checkNotInterrupted()
@@ -184,7 +185,7 @@ internal object HevcClearCmafGridComposer {
             }
 
             val output = Output(
-                initializationSegment = init,
+                initializationSegment = requireNotNull(init),
                 mediaFragments = outputFragments,
                 codedWidth = composed.codedWidth,
                 codedHeight = composed.codedHeight,
@@ -205,11 +206,12 @@ internal object HevcClearCmafGridComposer {
             // fragments. They are not visible to a caller and must not keep copied
             // clear HEVC payloads alive. Successful outputs transfer ownership.
             if (!committed) {
-                init.fill(0)
+                init?.fill(0)
                 outputFragments.forEach { it.fill(0) }
             }
-            // The final CMAF fragments own their copied bytes; no full rewritten HEVC
-            // sample buffers need to survive this call, including on exception paths.
+            // Cover *all* validation failures after rewriting, not only errors
+            // in packaging. The final CMAF fragments own their copied bytes; no
+            // full rewritten HEVC sample buffers survive successful packaging.
             composed.pictures.forEach { picture -> picture.vclNals.forEach { it.fill(0) } }
         }
     }
