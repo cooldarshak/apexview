@@ -72,6 +72,12 @@ class AppState(
     private var f1DashCaptureJob: Job? = null
     var singleDecoderDiagnostic by mutableStateOf<String?>(null)
         private set
+    /** Attempt-scoped diagnostics must not outlive the decoder/session that produced them. */
+    private val compositionDiagnosticOwner = CompositionDiagnosticOwner()
+    private fun invalidateCompositionDiagnostic() {
+        compositionDiagnosticOwner.invalidate()
+        singleDecoderDiagnostic = null
+    }
     val observedActiveVideoDecoders get() = tiles.sumOf { it.feed.activeVideoDecoderCount }
     private var f1DashCapture: CmafCaptureLifecycle? = null
     // Compose must observe a host transition independently of the rolling atlas.
@@ -2665,6 +2671,8 @@ class AppState(
         val replacingActiveScene = singleDecoderSceneActive && singleDecoderScenePlayer === host.feed
         val previousLayout = layoutMode
         val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
+        val diagnosticGeneration = compositionDiagnosticOwner.begin()
+        singleDecoderDiagnostic = null
         f1DashCaptureJob?.cancel()
         f1DashCapture = capture
         val startup = ArchiveCompositionStartup()
@@ -2684,9 +2692,9 @@ class AppState(
                 "activeSourceVideos=1 reason=COMPOSITION_NOT_READY")
         }
         fun diagnostic() {
-            if (f1DashCapture != null && f1DashCapture !== capture) return
+            if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || f1DashCapture !== capture) return
             singleDecoderDiagnostic = buildString {
-                append("Source: F1 Archive · Selected feeds: ${selected.size}\n")
+                append("Source: F1 Archive · Composition feeds: ${selected.size}\n")
                 append("Requested platform: ${selected.map { it.feed.sourceStream.requestedPlatform }.distinct().joinToString()}\n")
                 append("Actual manifest: ${if (prepared != null) "HLS → static composed DASH" else "VALIDATING RESPONSE"}\n")
                 append("HEVC compatibility / CMAF alignment: ${if (prepared != null) "PASS" else "VALIDATING"}\n")
@@ -2837,6 +2845,10 @@ class AppState(
                 diagnostic()
                 throw cancelled
             } catch (error: Exception) {
+                if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || f1DashCapture !== capture) {
+                    android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_IGNORED_OBSOLETE_ERROR path=CLEAR class=${error.javaClass.simpleName}")
+                    return@launch
+                }
                 failure = (error.message ?: error.javaClass.simpleName).replace(Regex("https?://\\S+"), "[URL]").take(400)
                 val failedAt = phase
                 phase = "FAILED"
@@ -2871,13 +2883,16 @@ class AppState(
                     capture.reset(); f1DashCapture = null; f1DashCaptureJob = null
                 }
             }
-            if (useExistingBackend) startRollingArchiveSingleDecoderComposition(contentId, attempt)
-            else if (retryableFailure && attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
+            if (useExistingBackend && compositionDiagnosticOwner.isOwner(diagnosticGeneration))
+                startRollingArchiveSingleDecoderComposition(contentId, attempt)
+            else if (retryableFailure && compositionDiagnosticOwner.isOwner(diagnosticGeneration) &&
+                attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
                 val originalIds = selected.map { it.id }
                 android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_RETRY requested=AUTO attempt=${attempt + 1} delayMs=${500L * (attempt + 1)}")
                 singleDecoderRetryJob = scope.launch {
                     kotlinx.coroutines.delay(500L * (attempt + 1))
-                    if (settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && !singleDecoderSceneActive) {
+                    if (compositionDiagnosticOwner.isOwner(diagnosticGeneration) &&
+                        settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && !singleDecoderSceneActive) {
                         singleDecoderRetryJob = null
                         startArchiveSingleDecoderComposition(contentId, attempt + 1)
                     }
@@ -2922,6 +2937,8 @@ class AppState(
         val audioMaster = selectedTiles.firstOrNull { it !== host && it.audible }
             ?: selectedTiles.first { it !== host }
         val group = "archive-content-$contentId-${java.util.UUID.randomUUID()}"
+        val diagnosticGeneration = compositionDiagnosticOwner.begin()
+        singleDecoderDiagnostic = null
         f1DashCaptureJob?.cancel()
         val maxHeight = if (mixedRequested) selectedQualities.maxOf { it.targetHeight }
             .takeIf { it > 0 } ?: 1080
@@ -2956,10 +2973,10 @@ class AppState(
         var composedCodec: String? = null
 
         fun diagnostics() {
-            if (f1DashCapture != null && f1DashCapture !== capture) return
+            if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || f1DashCapture !== capture) return
             val snapshot = lastSnapshot
             singleDecoderDiagnostic = buildString {
-                append("Source: F1 Archive · Selected feeds: ${selectedTiles.size}\n")
+                append("Source: F1 Archive · Composition feeds: ${selectedTiles.size}\n")
                 append("Requested platform: " + selectedTiles.map { it.feed.sourceStream.requestedPlatform }.distinct().joinToString() + "\n")
                 append("Player: " + selectedTiles.map { it.feed.sourceStream.playerType }.distinct().joinToString() + "\n")
                 labels.forEach { label ->
@@ -3235,6 +3252,10 @@ class AppState(
                 diagnostics()
                 throw cancelled
             } catch (error: Exception) {
+                if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || f1DashCapture !== capture) {
+                    android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_IGNORED_OBSOLETE_ERROR path=PROTECTED class=${error.javaClass.simpleName}")
+                    return@launch
+                }
                 // Do not log raw network exceptions or their signed URLs.
                 terminalReason = (error.message ?: error.javaClass.simpleName)
                     .replace(Regex("https?://\\S+"), "[redacted URL]").take(400)
@@ -3262,12 +3283,14 @@ class AppState(
                     ProtectedHevcLiveComposition.clearSelection(group)
                 }
             }
-            if (retryableFailure && attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
+            if (retryableFailure && compositionDiagnosticOwner.isOwner(diagnosticGeneration) &&
+                attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
                 val originalIds = selectedTiles.map { it.id }
                 android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_RETRY requested=AUTO attempt=${attempt + 1} delayMs=${500L * (attempt + 1)} backend=PROTECTED")
                 singleDecoderRetryJob = scope.launch {
                     kotlinx.coroutines.delay(500L * (attempt + 1))
-                    if (settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && protectedCompositionHost == null) {
+                    if (compositionDiagnosticOwner.isOwner(diagnosticGeneration) &&
+                        settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && protectedCompositionHost == null) {
                         singleDecoderRetryJob = null
                         startArchiveSingleDecoderComposition(contentId, attempt + 1)
                     }
@@ -3320,6 +3343,7 @@ class AppState(
             message = "Could not start F1 tile capture: selected feed URLs are not all available."
             return
         }
+        invalidateCompositionDiagnostic()
         f1DashCaptureJob?.cancel()
         f1DashCapture?.reset()
         val capture = F1DashFeedCapture(
@@ -3488,6 +3512,10 @@ class AppState(
 
     /** Stop protected capture and restore the original tile arrangement and feed player. */
     fun stopProtectedCompositionPresentation(restorePlayer: Boolean = true, keepSourceVideoDisabled: Boolean = false) {
+        // Revoke the publisher BEFORE cancelling; a late catch/finally must never
+        // expose a historical CANCELLED result after native playback resumes.
+        invalidateCompositionDiagnostic()
+        if (message == SINGLE_DECODER_ACTIVATING) message = null
         val wasStarting = archiveCompositionStarting
         archiveCompositionStarting = false
         f1DashCaptureJob?.cancel()
@@ -4380,6 +4408,7 @@ class AppState(
             towerSpot.h = -1f
         }
         if (!singleDecoderSceneActive && !protectedRollingSceneActive) {
+            invalidateCompositionDiagnostic()
             f1DashCaptureJob?.cancel()
             f1DashCaptureJob = null
             f1DashCapture = null
@@ -6494,7 +6523,6 @@ class AppState(
             // featured or named arrangement while changing only media ownership.
             // Resetting to GRID here used to silently discard user layouts.
             stopProtectedCompositionPresentation()
-            singleDecoderDiagnostic = singleDecoderDiagnostic?.replace("Playback: ACTIVE", "Playback: STOPPED FOR SEEK")
         }
         val leader = leaderTile() ?: return
         // A live stream's length can be unknown; then only the start bounds the seek (the player

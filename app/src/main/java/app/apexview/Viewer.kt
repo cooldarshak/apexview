@@ -2125,8 +2125,15 @@ private fun LayoutSheet(app: AppState) {
                 .padding(horizontal = 20.dp).padding(bottom = 24.dp)
         ) {
             Text("Layout", style = Type.title2)
-            app.singleDecoderDiagnostic?.let { diagnostic ->
-                Text(diagnostic, style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
+            if (app.tiles.isNotEmpty()) {
+                Text("Current feeds: ${app.tiles.size}", style = Type.footnote,
+                    modifier = Modifier.padding(top = 12.dp))
+                if (app.tiles.size == 1 && app.singleDecoderDiagnostic == null) {
+                    Text("Presentation: native single-feed player", style = Type.footnote)
+                }
+                app.singleDecoderDiagnostic?.let { diagnostic ->
+                    Text(diagnostic, style = Type.footnote)
+                }
                 Text("Active video decoders (app callbacks): ${app.observedActiveVideoDecoders}", style = Type.footnote)
             }
             if (app.canMakeReplayClip && !app.replayClipRunning) {
