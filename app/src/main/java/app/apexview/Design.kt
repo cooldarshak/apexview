@@ -8,11 +8,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SliderState
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
@@ -266,9 +268,19 @@ fun AppleSlider(
     val thumbScale by animateFloatAsState(if (emphasised) 1.5f else 1f,
         tween(if (reducedMotion) 0 else Motion.PRESS_MS, easing = EaseOut), label = "thumb")
     var dpadRepeats by remember { mutableIntStateOf(0) }
+    // Material 3 1.5 moved custom thumb/track slots to the state-based overload.
+    // Preserve two-way external state (remote, app settings, restore) as well as
+    // direct drag updates. An active gesture must not be reset by recomposition.
+    val sliderState = remember(valueRange) { SliderState(value = value, valueRange = valueRange) }
+    SideEffect {
+        if (!sliderState.isDragging && sliderState.value != value) sliderState.value = value
+    }
     androidx.compose.material3.Slider(
-        value = value,
-        onValueChange = onValueChange,
+        state = sliderState,
+        onValueChange = { updated ->
+            sliderState.value = updated
+            onValueChange(updated)
+        },
         modifier = modifier
             .tvFocusRing()
             .onFocusChanged { if (!it.isFocused) dpadRepeats = 0 }
@@ -302,7 +314,6 @@ fun AppleSlider(
                 }
             }
             .focusable(),
-        valueRange = valueRange,
         onValueChangeFinished = onValueChangeFinished,
         thumb = {
             androidx.compose.foundation.layout.Box(

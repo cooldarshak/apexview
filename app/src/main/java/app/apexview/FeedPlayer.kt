@@ -940,7 +940,7 @@ class FeedPlayer(
                     val drmCompatible = if (needsSecure)
                         caps.isFeatureSupported(PlatformMediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback)
                     else !caps.isFeatureRequired(PlatformMediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback)
-                    drmCompatible && caps.videoCapabilities.areSizeAndRateSupported(width, height, frameRate)
+                    drmCompatible && caps.videoCapabilities?.areSizeAndRateSupported(width, height, frameRate) == true
                 }.getOrDefault(false)
         }
         return requireNotNull(codec) {
@@ -955,7 +955,7 @@ class FeedPlayer(
                 runCatching {
                     val caps = info.getCapabilitiesForType(F1_VIDEO_MIME_TYPE)
                     !caps.isFeatureRequired(PlatformMediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback) &&
-                        caps.videoCapabilities.areSizeAndRateSupported(width, height, frameRate)
+                        caps.videoCapabilities?.areSizeAndRateSupported(width, height, frameRate) == true
                 }.getOrDefault(false)
         }
         return requireNotNull(codec) { "No hardware HEVC decoder reports support for composed ${width}x$height at ${frameRate}fps" }.name
