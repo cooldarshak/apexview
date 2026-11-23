@@ -2,12 +2,24 @@
 
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** IN DEVELOPMENT. **Last verified green checkpoint: Build 813**, commit `698d7464ce39a7af5e094d4c14ffb4425d40583d` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45156939193)). Includes compiled debug/benchmark Kotlin variants, full JVM/Python/Cast/HEVC/CMAF checks, debug and nondebuggable benchmark APK assembly, and mandatory emulator instrumentation. P0.3/P0.4 source closeout below is a subsequent single coordinated commit requiring a new exact-source green run before coding sign-off. Physical acceptance and release gates remain separate. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
+**Status:** IN DEVELOPMENT. **Last verified green checkpoint: Build 815**, production commit `742dac94d42054a43a2ad349ab920a00d0c874fa` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45160518877)). Includes compiled clear/protected renderer Kotlin and both debug/benchmark Kotlin variants, the full JVM/Python/Cast/HEVC/CMAF checks, signed debug and nondebuggable benchmark APK assembly, and mandatory emulator instrumentation. P0.3 and P0.4 are **100% complete from the coding perspective**, with **0% known coding pending**. Their physical-performance/release-acceptance gates remain OPEN. Physical acceptance and release gates remain separate. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
 performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
 
+
+## Build 815: P0.3 video rendering + P0.4 map/tower coding completed (EXACT SOURCE GREEN)
+
+**Verified result:** [GitHub Actions Build 815, success](https://github.com/cooldarshak/apexview/actions/runs/45160518877), production SHA `742dac94d42054a43a2ad349ab920a00d0c874fa`. The entire CI job completed successfully: change contract, production Kotlin and AndroidX macrobenchmark debug/benchmark Kotlin compilation, executed JVM and Python regression suites, JavaScript/Cast protocol checks, standalone HEVC/tile/CMAF decoder comparisons, signed app/debug/benchmark target and runner APK assembly, and mandatory emulator RenderNode/SurfaceDecoder instrumentation. Published artifact names include `apexview-custom-debug-apk`, `apexview-hevc-single-decoder-instrumentation`, `pitwall-benchmark-target-apk`, `pitwall-macrobenchmark-instrumentation` and `pitwall-rendernode-instrumentation-report`. Build 814 remains a historical failure; its source cause was corrected and its original assertion passed in this green workflow. No test was weakened, omitted or hidden to declare success.
+
+**P0.3 coding 100% / 0% pending:** Both actual clear TextureView and secure/protected SurfaceView one-decoder scene pipelines and the Pitwall Cast receiver retain EGL lifecycle recovery, cadence, codec-frame-to-texture-to-EGL diagnostics and reusable native scene buffers. Bounded PTS correlation supports late codec metadata on a separate looper, rejects metadata with a planned release more than 40ms after a stale texture's latch, preserves valid up-to-40ms scheduling lead, and distinguishes exact matches, missing-at-latch, late matches and pending unmatched history. Surface/seek/rebind/atlas lifecycle clearing, device-runnable seek/recreate instrumentation and executable JVM tests pass. All playback authorization, Widevine protection, single-/multiple-decoder selection, mobile/TV, Cast, captions, seek and 1x/1.5x behavior remain preserved. **This is source/CI closure only, not a finding that BufferQueue stalls or real 50fps video-layer jank are cured.**
+
+**P0.4 coding 100% / 0% pending:** The real local track and edge maps use retained mutable 60Hz draw-only driver markers, immutable 10Hz static/hit-target and Cast snapshots, stable in-place map-edge sorting, independent flag animation and native cached tower regions. Shared edge-map Ribbon corner and normal projection no longer allocates a `Pair` per car/label draw; executable parity exercises all segments, rounded corners, both travel directions, wrap, narrow portrait and wide landscape. The physical benchmark runner compiles/assembles for real `FrameTimingMetric` sampling and does not include synthetic F1 credentials/media or insecure DRM capture. Device benchmarks themselves have NOT been run.
+
+**Precisely separated acceptance:** Both **coding workstreams CLOSED**, both **physical release gates OPEN**. Before release sign-off, run actual authorized playback for clear and protected L1/L3 HEVC, 1x/1.5x, 1/4/6 feeds, repeated seeks/surface recreations, and Pitwall Cast on S22 Ultra and TCL 55C655 (Software DRM ON); capture 10-minute UI/GC/thermal and independent SurfaceFlinger/FrameTimeline/BufferQueue/decoder traces in controlled OFF/map/tower/both scenarios. Debug/emulator green cannot establish 50fps on-screen presentation, source-to-scanout latency, license behavior, device audio sync or UI slow-frame target. New physical evidence of a code defect reopens its coding line; no speculative code or fake 100% hardware acceptance.
+
+**Ledger after exact-green Build815:** P0.3 **100% coding / 0% pending**, P0.4 **100% / 0%**. P0.1, P0.2 and P2.8 already remain 100% source coding. Across 16 workstreams, unweighted **81.875% coded / 18.125% pending**. Strict release gates **1/16 closed, 15 open**. This plan remains the ONLY active release/workstream plan. The single documentation-only reconciliation commit does not change compiled source, and `docs/**` is explicitly ignored by the Android debug workflow to avoid an unnecessary Build816.
 
 ## Build 814: codec PTS correlation reused-timestamp regression (one root cause)
 
@@ -241,8 +253,8 @@ Coding percent describes implemented, audited source, not hardware acceptance. B
 | --- | --- | ---: | ---: | --- | --- | --- | --- |
 | P0.1 | Segment priority | **100%** | **0%** | 806 GREEN | S22/TCL 1x/1.5x seek p95 pending | Open | No known coding left; real contention and seek acceptance |
 | P0.2 | HEVC memory | **100%** | **0%** | 806 GREEN | 10-minute GC/heap and 7/8-feed pending | Open | No known coding left; sustained clear/protected/Cast retention and allocation evidence |
-| P0.3 | Video rendering | **80%** | **20%** | **807 GREEN** | Independent 50fps codec/FrameTimeline and TCL/S22/receiver pending | Open | Codec-to-presentation correlation, full seek/recreation hardware instrumentation, trace-driven BufferQueue fixes |
-| P0.4 | Map and tower | **92%** | **8%** | **807 GREEN** | Controlled OFF/map/tower/both S22/TCL/Cast pending | Open | Macrobenchmark FrameTimingMetric, source fixes driven by measured UI/GC bottlenecks |
+| P0.3 | Video rendering | **100%** | **0%** | **815 GREEN** | Independent 50fps codec/FrameTimeline, BufferQueue cause, authorized Widevine and S22/TCL/Cast pending | Open | No known coding left; real video-layer cadence, seek and release acceptance |
+| P0.4 | Map and tower | **100%** | **0%** | **815 GREEN** | Real FrameTimingMetric/GC/thermal OFF/map/tower/both on S22/TCL/Cast pending | Open | No known coding left; physical overlay jank and 10-minute endurance acceptance |
 | P1.1 | HEVC atlas | 85% | 15% | 806 GREEN | Extended feed real streams pending | Open | Composition and quality profile compatibility |
 | P1.2 | Refresh matching | 60% | 40% | 806 GREEN | Physical 50fps/1.5x pacing pending | Open | Display mode and frame pacing policy |
 | P1.3 | Quality and thermal | 55% | 45% | 806 GREEN | Sustained thermal runs pending | Open | Per-mode quality and thermal handling |
@@ -256,7 +268,7 @@ Coding percent describes implemented, audited source, not hardware acceptance. B
 | P2.8 | Material 3 Expressive | **100%** | **0%** | 806 GREEN | Portrait accepted; TCL/TalkBack/200% pending | Open | No known coding left; physical visual/accessibility acceptance |
 | P2.9 | Closed captions | 75% | 25% | 806 GREEN | F1 cue rendering pending | Open | Mobile/TV/Cast clear/protected caption parity |
 
-**Unweighted coding estimate after GREEN Build 807: 80.125% complete / 19.875% pending across 16 workstreams. Strict release gates: 1/16 closed, 15 open.** Older tables below are dated historical checkpoints, not current coding completion.
+**Unweighted coding estimate after GREEN Build 815: 81.875% complete / 18.125% pending across 16 workstreams. Strict release gates: 1/16 closed, 15 open.** Older tables below are dated historical checkpoints, not current coding completion.
 
 ## Builds 757–799 failure audit and post-800 coordinated quality checkpoint
 
