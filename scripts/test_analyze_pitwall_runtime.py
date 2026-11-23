@@ -59,6 +59,18 @@ class RuntimeLogTests(unittest.TestCase):
         self.assertEqual(300, report["protected_compose_median_ms"])
         self.assertEqual(10000, report["protected_output_median_bytes"])
 
+    def test_new_cpu_stage_metrics_are_unknown_on_older_runs_not_false_zeroes(self):
+        archive = "\\n".join([
+            f"I ARCHIVE_VOD_SEGMENT number={i} outputBytes=1000 parseMs=30 composeMs=60"
+            for i in range(5)
+        ])
+        report = summarize(archive)
+        self.assertEqual(2, report["archive_segments_steady"])
+        self.assertIsNone(report["archive_cmaf_inspector_median_ms"])
+        self.assertIsNone(report["archive_nal_inspector_median_ms"])
+        self.assertIsNone(report["archive_rewrite_cpu_median_ms"])
+        self.assertIsNone(report["protected_composer_cpu_median_ms"])
+
     def test_log_gates_refuse_missing_evidence_and_invalid_budgets(self):
         self.assertEqual(["archive_request_p95_ms: no observed evidence"],
             check_thresholds({}, {"archive_request_p95_ms": 250}))

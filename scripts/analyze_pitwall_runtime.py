@@ -98,17 +98,25 @@ def summarize(text):
         if "ARCHIVE_VOD_SEGMENT " in line:
             if "cachedBytes" in f:
                 archived_cached_bytes.append(as_int(f["cachedBytes"]))
-            segments.append({key: as_int(f.get(key)) for key in (
+            row = {key: as_int(f.get(key)) for key in (
                 "number", "processAllocBytesDuringSegment", "processGcDuringSegment",
-                "parseMs", "rewriteMs", "packageMs", "cmafInspectorMs",
-                "nalInspectorMs", "parseCpuMs", "rewriteCpuMs", "packageCpuMs",
-                "producerCpuMs", "composeMs", "outputBytes")})
+                "parseMs", "rewriteMs", "packageMs", "composeMs", "outputBytes")}
+            # New stage metrics were introduced after the baseline captures.
+            # Absence is NOT a measured 0 ms; never fabricate a cost reduction.
+            for key in ("cmafInspectorMs", "nalInspectorMs", "parseCpuMs",
+                        "rewriteCpuMs", "packageCpuMs", "producerCpuMs"):
+                if key in f:
+                    row[key] = as_int(f[key])
+            segments.append(row)
         if "PROTECTED_CMAF_SEGMENT " in line:
             if "retainedBytes" in f:
                 protected_retained_bytes.append(as_int(f["retainedBytes"]))
-            protected_segments.append({key: as_int(f.get(key)) for key in (
+            row = {key: as_int(f.get(key)) for key in (
                 "feeds", "sampleCount", "processAllocBytesDuringSegment",
-                "processGcDuringSegment", "composeMs", "composerThreadCpuMs", "outputBytes")})
+                "processGcDuringSegment", "composeMs", "outputBytes")}
+            if "composerThreadCpuMs" in f:
+                row["composerThreadCpuMs"] = as_int(f["composerThreadCpuMs"])
+            protected_segments.append(row)
         if "ARCHIVE_VOD_FAILED" in line or "event=load-error" in line:
             failures += 1
         if "F1_COMPOSITION_PLAYBACK" in line and "stage=ACTIVE" in line:
@@ -119,6 +127,9 @@ def summarize(text):
     # Report them separately so they cannot distort steady-state allocation claims.
     steady = segments[3:]
     protected_steady = protected_segments[3:]
+    def observed_median(records, metric):
+        measured = [record[metric] for record in records if metric in record]
+        return median(measured) if measured else None
     return {
         "frames": frames,
         "slow": slow,
@@ -159,16 +170,16 @@ def summarize(text):
         "archive_gc_median": median(s["processGcDuringSegment"] for s in steady) if steady else None,
         "archive_compose_median_ms": median(s["composeMs"] for s in steady) if steady else None,
         "archive_rewrite_median_ms": median(s["rewriteMs"] for s in steady) if steady else None,
-        "archive_cmaf_inspector_median_ms": median(s["cmafInspectorMs"] for s in steady) if steady else None,
-        "archive_nal_inspector_median_ms": median(s["nalInspectorMs"] for s in steady) if steady else None,
-        "archive_rewrite_cpu_median_ms": median(s["rewriteCpuMs"] for s in steady) if steady else None,
+        "archive_cmaf_inspector_median_ms": observed_median(steady, "cmafInspectorMs"),
+        "archive_nal_inspector_median_ms": observed_median(steady, "nalInspectorMs"),
+        "archive_rewrite_cpu_median_ms": observed_median(steady, "rewriteCpuMs"),
         "archive_output_median_bytes": int(median(s["outputBytes"] for s in steady)) if steady else None,
         "protected_segments_total": len(protected_segments),
         "protected_segments_steady": len(protected_steady),
         "protected_alloc_median_bytes": int(median(s["processAllocBytesDuringSegment"] for s in protected_steady)) if protected_steady else None,
         "protected_gc_median": median(s["processGcDuringSegment"] for s in protected_steady) if protected_steady else None,
         "protected_compose_median_ms": median(s["composeMs"] for s in protected_steady) if protected_steady else None,
-        "protected_composer_cpu_median_ms": median(s["composerThreadCpuMs"] for s in protected_steady) if protected_steady else None,
+        "protected_composer_cpu_median_ms": observed_median(protected_steady, "composerThreadCpuMs"),
         "protected_output_median_bytes": int(median(s["outputBytes"] for s in protected_steady)) if protected_steady else None,
     }
 
