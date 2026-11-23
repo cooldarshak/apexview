@@ -43,6 +43,26 @@ native Cast, physical frame presentation or a signed release.
 Do not publish a release or say 100% until every external/hardware gate
 has concrete passing trace/log/video evidence and an accepted issue.
 
+## Build 747 bounded-allocation exact 50fps HEVC alignment
+
+The protected eight-source extension increases the number of per-picture
+candidate comparisons. Each `HevcPictureSequenceAligner.sameTime`
+comparison previously allocated multiple BigInteger values, despite
+normal F1 50fps CMAF timescales safely fitting exact Long products.
+Use `Math.multiplyExact` for an allocation-free exact hot path and fall
+back to BigInteger only when a product would overflow. Floating-point
+approximation is forbidden; 1/90000 second timing mismatches must
+still reject cross-feed encrypted composition. Replace the two
+`groupBy`/per-group List allocations in each 288-sample window's
+duplicate POC and epoch-anchor validation with one pass over bounded
+sets/maps, keeping identical fail-closed semantics. Tests cover
+cross-timescale equality, exact mismatch, overflow fallback, negative
+offsets and the existing multi-IDR/8-source rejection cases.
+
+Acceptance remains contingent on the same real six-feed content
+and TCL phone/TV matrix; performance savings cannot be asserted
+until after-device traces, and 15 of 16 gates remain open.
+
 ## Build 746 extended protected HEVC source capacity, guarded by actual decoder capability
 
 The previous six-source limit existed in multiple separate components:

@@ -357,19 +357,29 @@ internal object HevcPictureSequenceAligner {
         if (feed.samples.size !in 1..MAX_WINDOW_SAMPLES) {
             reasons += context + ": feed " + feed.feedId + " sample window is outside supported bounds"
         }
-        val duplicatePocsWithinEpoch = feed.samples.groupBy {
-            it.irapEpochOrdinal to it.picture.pictureOrderCount
-        }.filterValues { it.size > 1 }.keys
-        if (duplicatePocsWithinEpoch.isNotEmpty()) {
+        // The original groupBy/flatMap checks allocated a per-POC List and
+        // per-epoch Lists at every 6-8-feed alignment. One pass preserves the
+        // exact duplicate and anchor rejection rules with bounded set/map
+        // ownership, without retaining a second 288-picture window per feed.
+        val seenPictures = HashSet<Pair<Long, Long>>(feed.samples.size)
+        val epochAnchors = HashMap<Long, Long?>(8)
+        var duplicatePoc = false
+        var inconsistentAnchor = false
+        for (sample in feed.samples) {
+            if (!seenPictures.add(sample.irapEpochOrdinal to sample.picture.pictureOrderCount)) {
+                duplicatePoc = true
+            }
+            val anchor = sample.irapAnchorPictureOrderCount
+            if (anchor == null) inconsistentAnchor = true
+            if (epochAnchors.containsKey(sample.irapEpochOrdinal)) {
+                if (epochAnchors[sample.irapEpochOrdinal] != anchor) inconsistentAnchor = true
+            } else epochAnchors[sample.irapEpochOrdinal] = anchor
+        }
+        if (duplicatePoc) {
             reasons += context + ": feed " + feed.feedId +
                 " has ambiguous duplicate full POCs within the same IRAP epoch"
         }
-        val epochAnchors = feed.samples.groupBy { it.irapEpochOrdinal }.values
-        if (epochAnchors.any { epoch ->
-                epoch.map { it.irapAnchorPictureOrderCount }.distinct().let {
-                    it.size != 1 || it.singleOrNull() == null
-                }
-            }) {
+        if (inconsistentAnchor) {
             reasons += context + ": feed " + feed.feedId +
                 " has no consistent verified temporal-id-zero IRAP POC anchor"
         }
@@ -456,9 +466,20 @@ internal object HevcPictureSequenceAligner {
         secondScale: Long
     ): Boolean {
         if (firstTicks == null || secondTicks == null) return false
-        val first = BigInteger.valueOf(firstTicks).multiply(BigInteger.valueOf(secondScale))
-        val second = BigInteger.valueOf(secondTicks).multiply(BigInteger.valueOf(firstScale))
-        return first == second
+        return scaledTicksEqual(firstTicks, firstScale, secondTicks, secondScale)
+    }
+
+    /** Equal rational durations without a BigInteger pair on the normal 50fps path.
+     * Overflow still uses exact BigInteger products; never compare rounded doubles. */
+    internal fun scaledTicksEqual(
+        firstTicks: Long, firstScale: Long,
+        secondTicks: Long, secondScale: Long
+    ): Boolean = try {
+        Math.multiplyExact(firstTicks, secondScale) ==
+            Math.multiplyExact(secondTicks, firstScale)
+    } catch (_: ArithmeticException) {
+        BigInteger.valueOf(firstTicks).multiply(BigInteger.valueOf(secondScale)) ==
+            BigInteger.valueOf(secondTicks).multiply(BigInteger.valueOf(firstScale))
     }
 
     private fun exactOffset(

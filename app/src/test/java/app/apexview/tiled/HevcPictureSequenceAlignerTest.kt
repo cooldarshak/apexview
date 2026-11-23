@@ -240,6 +240,17 @@ class HevcPictureSequenceAlignerTest {
         ))
     }
 
+    @Test fun rationalCadenceFastPathAndOverflowFallbackBothRemainExact() {
+        assertTrue(HevcPictureSequenceAligner.scaledTicksEqual(1800L, 90000L, 1000L, 50000L))
+        assertFalse(HevcPictureSequenceAligner.scaledTicksEqual(1801L, 90000L, 1000L, 50000L))
+        assertTrue(HevcPictureSequenceAligner.scaledTicksEqual(
+            Long.MAX_VALUE, Long.MAX_VALUE - 1L, Long.MAX_VALUE, Long.MAX_VALUE - 1L))
+        assertFalse(HevcPictureSequenceAligner.scaledTicksEqual(
+            Long.MAX_VALUE - 1L, Long.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE))
+        assertTrue(HevcPictureSequenceAligner.scaledTicksEqual(
+            -1800L, 90000L, -1000L, 50000L))
+    }
+
     @Test fun eightFeedAlignmentRequiresExactCommonPictureIdentity() {
         val feeds = (0 until 8).map { feed ->
             HevcPictureSequenceAligner.FeedWindow("extended-$feed", 90_000L,
