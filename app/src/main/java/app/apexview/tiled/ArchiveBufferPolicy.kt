@@ -2,6 +2,7 @@ package app.apexview.tiled
 
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
+import java.io.IOException
 
 /**
  * Only one producer owns a numbered segment at a time. Unrelated segments never share a
@@ -27,6 +28,9 @@ internal class ArchiveSegmentSingleFlight(private val onRegistered: ((Int) -> Un
                     produce()
                     flight.finished.complete(Unit)
                 } catch (failure: Throwable) {
+                    // Do not leave a failed/cancelled producer registered while other waiters
+                    // unwind. A new foreground request can take ownership immediately.
+                    synchronized(lock) { flights.remove(number, flight) }
                     flight.finished.completeExceptionally(failure)
                 }
             }
@@ -64,7 +68,58 @@ internal data class CmafWindowTiming(val startUs: Long, val endUs: Long) {
     }
 }
 
+/** Transient only: an interrupted prefetch must not fail an unrelated foreground seek. */
+internal class ArchiveWarmupCancelledException : IOException("Archive prefetch cancelled")
+
+/**
+ * Owns each CMAF fragment exactly once. Callers keep their returned copies; evicted and
+ * replaced cached ciphertext is zeroed. The session's cacheLock serializes operations.
+ * Retaining three *items* alone is not enough when an 8-feed atlas grows to many MiB.
+ */
+internal class BoundedArchiveFragmentCache(
+    private val maxEntries: Int = ArchiveBufferPolicy.RETAINED_SEGMENTS,
+    private val maxBytes: Long = ArchiveBufferPolicy.MAX_RETAINED_MEDIA_BYTES,
+) {
+    init { require(maxEntries > 0 && maxBytes > 0) }
+    private val entries = LinkedHashMap<Int, ByteArray>(maxEntries + 1, 0.75f, true)
+    var bytesRetained: Long = 0L
+        private set
+    val size: Int get() = entries.size
+    fun contains(number: Int): Boolean = entries.containsKey(number)
+    fun readCopy(number: Int): ByteArray? = entries[number]?.copyOf()
+
+    /** Takes ownership only on success; no request can observe a mutable cache-owned array. */
+    fun put(number: Int, owned: ByteArray) {
+        require(owned.isNotEmpty() && owned.size.toLong() <= maxBytes) {
+            "Archive CMAF fragment exceeds the bounded cache budget"
+        }
+        // Protect against one ByteArray being inserted under two separate keys.
+        require(entries.values.none { it === owned }) { "Archive fragment ownership already transferred" }
+        entries.put(number, owned)?.let { previous ->
+            bytesRetained -= previous.size
+            if (previous !== owned) previous.fill(0)
+        }
+        bytesRetained += owned.size
+        while (entries.size > maxEntries || bytesRetained > maxBytes) {
+            val eldest = entries.entries.iterator()
+            if (!eldest.hasNext()) break
+            val victim = eldest.next()
+            eldest.remove()
+            bytesRetained -= victim.value.size
+            victim.value.fill(0)
+        }
+    }
+
+    fun clear() {
+        entries.values.forEach { it.fill(0) }
+        entries.clear()
+        bytesRetained = 0L
+    }
+}
+
 internal object ArchiveBufferPolicy {
+    // Bounded across feeds and composed atlas sizes, independent of fragment count.
+    const val MAX_RETAINED_MEDIA_BYTES = 96L * 1024L * 1024L
     const val RETAINED_SEGMENTS = 3
     const val STARTUP_LEAD_US = 3_000_000L
 

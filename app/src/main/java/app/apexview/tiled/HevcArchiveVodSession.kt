@@ -51,7 +51,7 @@ internal class HevcArchiveVodSession(
             require(it.errors.isEmpty() && it.tracks.size == 1) { "Invalid archive source initialization" }
         }
     }
-    private val cache = LinkedHashMap<Int, ByteArray>(4, 0.75f, true)
+    private val cache = BoundedArchiveFragmentCache()
     private val compatibleMaps = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val cacheLock = Any()
     private val production = ArchiveSegmentSingleFlight()
@@ -162,7 +162,7 @@ internal class HevcArchiveVodSession(
         require(number in groups.indices) { "Archive segment is outside the finite timeline" }
         preemptUnrelatedWarmup(number)
         val started = System.nanoTime()
-        val wasCached = synchronized(cacheLock) { cache.containsKey(number) }
+        val wasCached = synchronized(cacheLock) { cache.contains(number) }
         val bytes = composeOrRead(number)
         val waitMs = (System.nanoTime() - started) / 1_000_000L
         if (!wasCached || waitMs > 50L) {
@@ -188,7 +188,7 @@ internal class HevcArchiveVodSession(
     }
 
     private fun preemptUnrelatedWarmup(number: Int, seek: Boolean = false) {
-        val cached = synchronized(cacheLock) { checkOpen(); cache.containsKey(number) }
+        val cached = synchronized(cacheLock) { checkOpen(); cache.contains(number) }
         synchronized(warmLock) {
             if (warmTask?.isDone == false && ArchiveBufferPolicy.preemptWarmup(
                     number, cached, warmActiveNumber, seek)) {
@@ -200,14 +200,24 @@ internal class HevcArchiveVodSession(
     private fun composeOrRead(number: Int): ByteArray {
         // The cache lock guards only ownership/publication, not I/O or HEVC work. A foreground
         // request joins an in-flight warmup for the SAME segment and preempts unrelated warmups.
+        var cancelledWarmFlights = 0
         while (true) {
-            synchronized(cacheLock) { checkOpen(); cache[number]?.copyOf() }?.let { return it }
-            production.run(number) {
-                // The previous flight could have finished between the cache check and registration.
-                if (synchronized(cacheLock) { checkOpen(); !cache.containsKey(number) }) composeAndPublish(number)
+            synchronized(cacheLock) { checkOpen(); cache.readCopy(number) }?.let { return it }
+            try {
+                production.run(number) {
+                    // A cancelled warm producer may have been observed by a foreground waiter.
+                    if (synchronized(cacheLock) { checkOpen(); !cache.contains(number) }) composeAndPublish(number)
+                }
+            } catch (cancelled: ArchiveWarmupCancelledException) {
+                // A seek interrupting an obsolete speculative producer must never poison the
+                // foreground DataSource request. Retry once, independently, at player priority.
+                if (Thread.currentThread().isInterrupted || ++cancelledWarmFlights > 1) throw cancelled
+                android.util.Log.i("ApexviewSingleDecoder",
+                    "ARCHIVE_VOD_FOREGROUND_RECOVER segment=$number cause=CANCELLED_PREFETCH")
+                continue
             }
-            synchronized(cacheLock) { checkOpen(); cache[number]?.copyOf() }?.let { return it }
-            // An unrelated concurrently completed segment may have evicted this bounded entry.
+            synchronized(cacheLock) { checkOpen(); cache.readCopy(number) }?.let { return it }
+            // An unrelated completed segment may have evicted this bounded entry.
         }
     }
 
@@ -329,9 +339,8 @@ internal class HevcArchiveVodSession(
                     // DataSource still makes a defensive copy, but this publication must not
                     // allocate another multi-megabyte buffer just to wipe the original.
                     val output = composed.mediaFragments.last()
-                    cache.put(number, output)?.fill(0)
+                    cache.put(number, output)
                     publishedFragment = output
-                    while (cache.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) cache.remove(cache.keys.first())?.fill(0)
                     val worker = if (Thread.currentThread().name == "ApexviewVodWarm") "PREFETCH" else "PLAYBACK"
                     val allocatedDuringProduction = allocatedAtStart?.let { first ->
                         android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
@@ -348,13 +357,17 @@ internal class HevcArchiveVodSession(
                         "processGcDuringSegment=${gcDuringProduction ?: -1L} " +
                         "outputBytes=${output.size} sourceAnnexBBytesAvoided=${composed.sourceAnnexBBytesAvoided} " +
                         "durationMs=${groups[number].durationUs / 1000L} " +
-                        "worker=$worker clock=PLAYER_REQUEST cache=${cache.size}")
+                        "worker=$worker clock=PLAYER_REQUEST cache=${cache.size} cachedBytes=${cache.bytesRetained}")
                 }
             } finally {
                 composed.initializationSegment.fill(0)
                 composed.mediaFragments.forEach { if (it !== publishedFragment) it.fill(0) }
             }
         } catch (error: Exception) {
+            if (error is InterruptedException || Thread.currentThread().isInterrupted) {
+                Thread.currentThread().interrupt()
+                throw ArchiveWarmupCancelledException()
+            }
             if (error is ProtectedArchiveBackendRequired) throw error
             val root = (error as? java.util.concurrent.ExecutionException)?.cause as? Exception ?: error
             val message = if (root is IllegalArgumentException || root is IllegalStateException) root.message.orEmpty()
@@ -427,6 +440,9 @@ internal class HevcArchiveVodSession(
             checkOpen()
             return result
         } catch (error: Exception) {
+            // Future.get clears the interrupt flag before throwing InterruptedException.
+            // Restore it so cancelled warm producers cannot publish stale media.
+            if (error is InterruptedException) Thread.currentThread().interrupt()
             aborted.set(true)
             futures.forEach { it.cancel(true) }
             synchronized(retained) { retained.forEach { it.fill(0) } }
@@ -498,7 +514,7 @@ internal class HevcArchiveVodSession(
         fetchers.shutdownNow()
         prefetchFetchers.shutdownNow()
         synchronized(cacheLock) {
-            initialization?.fill(0); initialization = null; cache.values.forEach { it.fill(0) }; cache.clear()
+            initialization?.fill(0); initialization = null; cache.clear()
             inputs.forEach { it.initialization.fill(0) }
         }
         compatibleMaps.clear()

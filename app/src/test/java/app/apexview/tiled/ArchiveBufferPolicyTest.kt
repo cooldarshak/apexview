@@ -56,6 +56,39 @@ class ArchiveBufferPolicyTest {
         }
     }
 
+    @Test fun cancelledProducerDoesNotPoisonLaterForegroundRegistration() {
+        val coordinator = ArchiveSegmentSingleFlight()
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(3)
+        val attempts = AtomicInteger()
+        try {
+            val cancelled = pool.submit {
+                assertThrows(ArchiveWarmupCancelledException::class.java) {
+                    coordinator.run(5) {
+                        started.countDown()
+                        check(release.await(5, TimeUnit.SECONDS))
+                        throw ArchiveWarmupCancelledException()
+                    }
+                }
+            }
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            val joining = pool.submit {
+                assertThrows(ArchiveWarmupCancelledException::class.java) {
+                    coordinator.run(5) { fail("joined flight must not duplicate production") }
+                }
+            }
+            release.countDown()
+            cancelled.get(2, TimeUnit.SECONDS)
+            joining.get(2, TimeUnit.SECONDS)
+            pool.submit { coordinator.run(5) { attempts.incrementAndGet() } }.get(2, TimeUnit.SECONDS)
+            assertEquals(1, attempts.get())
+        } finally {
+            release.countDown()
+            pool.shutdownNow()
+        }
+    }
+
     @Test fun failureIsSharedAndNextAttemptCanRetry() {
         val coordinator = ArchiveSegmentSingleFlight()
         val attempts = AtomicInteger()
