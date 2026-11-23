@@ -12,6 +12,16 @@ from pathlib import Path
 from statistics import median
 
 
+def nearest_rank_p95(values):
+    """Exact nearest-rank p95 from observed samples; never interpolate or hide misses."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = (len(ordered) * 95 + 99) // 100
+    return ordered[rank - 1]
+
+
+
 def fields(line):
     return dict(re.findall(r"\b([A-Za-z][A-Za-z0-9]*)=([^\s]+)", line))
 
@@ -47,6 +57,9 @@ def summarize(text):
     four_feed_prepared = False
     segments = []
     protected_segments = []
+    archive_requests = []
+    archived_cached_bytes = []
+    protected_retained_bytes = []
     ui_input_p95_upper = []
     ui_animation_p95_upper = []
     thermal_statuses = set()
@@ -79,11 +92,18 @@ def summarize(text):
             drawn += as_int(f.get("pacingPresented"))
         if "ARCHIVE_VOD_PREPARED feeds=4" in line:
             four_feed_prepared = True
+        if "ARCHIVE_VOD_REQUEST " in line:
+            if f.get("cached") in ("true", "false") and "waitMs" in f:
+                archive_requests.append((f["cached"] == "true", as_int(f["waitMs"])))
         if "ARCHIVE_VOD_SEGMENT " in line:
+            if "cachedBytes" in f:
+                archived_cached_bytes.append(as_int(f["cachedBytes"]))
             segments.append({key: as_int(f.get(key)) for key in (
                 "number", "processAllocBytesDuringSegment", "processGcDuringSegment",
                 "parseMs", "rewriteMs", "packageMs", "composeMs", "outputBytes")})
         if "PROTECTED_CMAF_SEGMENT " in line:
+            if "retainedBytes" in f:
+                protected_retained_bytes.append(as_int(f["retainedBytes"]))
             protected_segments.append({key: as_int(f.get(key)) for key in (
                 "feeds", "sampleCount", "processAllocBytesDuringSegment",
                 "processGcDuringSegment", "composeMs", "outputBytes")})
@@ -116,6 +136,21 @@ def summarize(text):
         "input_p95_bucket_max_ms": max(ui_input_p95_upper) if ui_input_p95_upper else None,
         "animation_p95_bucket_max_ms": max(ui_animation_p95_upper) if ui_animation_p95_upper else None,
         "reported_thermal_statuses": sorted(thermal_statuses),
+        "archive_requests_total": len(archive_requests),
+        "archive_cache_hits": sum(hit for hit, _ in archive_requests),
+        "archive_cache_hit_pct": (
+            round(100 * sum(hit for hit, _ in archive_requests) / len(archive_requests), 1)
+            if archive_requests else None
+        ),
+        "archive_request_p95_ms": nearest_rank_p95([duration for _, duration in archive_requests]),
+        "archive_cache_hit_p95_ms": nearest_rank_p95(
+            [duration for hit, duration in archive_requests if hit]
+        ),
+        "archive_cache_miss_p95_ms": nearest_rank_p95(
+            [duration for hit, duration in archive_requests if not hit]
+        ),
+        "archive_cache_peak_bytes": max(archived_cached_bytes, default=None),
+        "protected_history_peak_bytes": max(protected_retained_bytes, default=None),
         "archive_segments_total": len(segments),
         "archive_segments_steady": len(steady),
         "archive_alloc_median_bytes": int(median(s["processAllocBytesDuringSegment"] for s in steady)) if steady else None,

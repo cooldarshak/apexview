@@ -165,9 +165,10 @@ internal class HevcArchiveVodSession(
         val wasCached = synchronized(cacheLock) { cache.contains(number) }
         val bytes = composeOrRead(number)
         val waitMs = (System.nanoTime() - started) / 1_000_000L
-        if (!wasCached || waitMs > 50L) {
-            android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_REQUEST number=$number cached=$wasCached waitMs=$waitMs")
-        }
+        // Record every foreground request. Only logging misses/slow hits biases the
+        // sample and makes a real p95 impossible to calculate from exported logs.
+        android.util.Log.i("ApexviewSingleDecoder",
+            "ARCHIVE_VOD_REQUEST number=$number cached=$wasCached waitMs=$waitMs")
         synchronized(warmLock) {
             if (!closed && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
                 val next = ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex)
