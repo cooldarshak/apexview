@@ -206,14 +206,18 @@ internal object HevcTizenGridComposer {
         val allOutputTileSeamsAreSourceTileSeams = orderedSelections.indices.all { outputIndex ->
             hasOwnLeftAndTopEdges(orderedSelections, outputIndex, feeds)
         }
+        // Do not allocate an additional 50fps x feedCount flattened list solely for
+        // one boolean PPS compatibility test on every CMAF segment.
         val canGateLoopFilter = allOutputTileSeamsAreSourceTileSeams &&
-            selectedByFrame.flatten().withIndex().all { (flatIndex, selected) ->
-                val selection = orderedSelections[flatIndex % orderedSelections.size]
-                val feed = feeds[selection.feedIndex]
-                feed.pps.tilesEnabled &&
-                    feed.pps.loopFilterAcrossTiles == true &&
-                    feed.pps.loopFilterAcrossSlicesEnabled &&
-                    selected.header.loopFilterAcrossSlicesFieldBit != null
+            selectedByFrame.all { frameSelections ->
+                frameSelections.withIndex().all { (outputIndex, selected) ->
+                    val selection = orderedSelections[outputIndex]
+                    val feed = feeds[selection.feedIndex]
+                    feed.pps.tilesEnabled &&
+                        feed.pps.loopFilterAcrossTiles == true &&
+                        feed.pps.loopFilterAcrossSlicesEnabled &&
+                        selected.header.loopFilterAcrossSlicesFieldBit != null
+                }
             }
         val templateFeed = feeds[orderedSelections.first().feedIndex]
         // Uniform sources can preserve their common display crop. When source sizes
@@ -249,86 +253,113 @@ internal object HevcTizenGridComposer {
         val outputSps = HevcParameterSets.parseSps(generated.sps)
         val outputPps = HevcParameterSets.parsePps(generated.pps, outputSps)
 
-        val outputPictures = selectedByFrame.mapIndexed { frameIndex, selectedSlices ->
-            checkNotInterrupted()
-            val vclOutput = ArrayList<ByteArray>(orderedSelections.size)
-            val evidence = ArrayList<SliceEvidence>(orderedSelections.size)
-            selectedSlices.forEachIndexed { outputIndex, located ->
-                val selection = orderedSelections[outputIndex]
-                val feed = feeds[selection.feedIndex]
-                val outputAddress = destinationAddress(
-                    geometry, selection.outputColumn, selection.outputRow
-                )
-                val ownEdges = hasOwnLeftAndTopEdges(orderedSelections, outputIndex, feeds)
-                val filterOverride = if (canGateLoopFilter) {
-                    located.header.loopFilterAcrossSlices == true && ownEdges
-                } else null
-                val rewritten = HevcSliceHeaderRewriter.rewrite(
-                    nal = located.nal,
-                    sourceSps = feed.sps,
-                    sourcePps = feed.pps,
-                    outputSps = outputSps,
-                    outputPps = outputPps,
-                    destinationAddress = outputAddress,
-                    clearNalBytes = located.nal.size,
-                    loopFilterAcrossSlicesOverride = filterOverride,
-                    parsedSourceHeader = located.header
-                )
-                val verifiedHeader = HevcSliceHeaderParser.parse(
-                    rewritten.nal, outputSps, outputPps
-                )
-                require(verifiedHeader.sliceSegmentAddress == outputAddress) {
-                    "Output slice address failed round-trip verification"
+        // Build incrementally so partial seek cancellations can zero every rewritten NAL
+        // already owned by this compositor, instead of leaving it retained until GC.
+        val outputPictures = ArrayList<ComposedPicture>(selectedByFrame.size)
+        try {
+            selectedByFrame.forEachIndexed { frameIndex, selectedSlices ->
+                checkNotInterrupted()
+                val vclOutput = ArrayList<ByteArray>(orderedSelections.size)
+                val evidence = ArrayList<SliceEvidence>(orderedSelections.size)
+                try {
+                    selectedSlices.forEachIndexed { outputIndex, located ->
+                        checkNotInterrupted()
+                        val selection = orderedSelections[outputIndex]
+                        val feed = feeds[selection.feedIndex]
+                        val outputAddress = destinationAddress(
+                            geometry, selection.outputColumn, selection.outputRow
+                        )
+                        val ownEdges = hasOwnLeftAndTopEdges(orderedSelections, outputIndex, feeds)
+                        val filterOverride = if (canGateLoopFilter) {
+                            located.header.loopFilterAcrossSlices == true && ownEdges
+                        } else null
+                        val rewritten = HevcSliceHeaderRewriter.rewrite(
+                            nal = located.nal,
+                            sourceSps = feed.sps,
+                            sourcePps = feed.pps,
+                            outputSps = outputSps,
+                            outputPps = outputPps,
+                            destinationAddress = outputAddress,
+                            clearNalBytes = located.nal.size,
+                            loopFilterAcrossSlicesOverride = filterOverride,
+                            parsedSourceHeader = located.header
+                        )
+                        // If verification throws, the new NAL still belongs to this scope.
+                        try {
+                            val verifiedHeader = HevcSliceHeaderParser.parse(
+                                rewritten.nal, outputSps, outputPps
+                            )
+                            require(verifiedHeader.sliceSegmentAddress == outputAddress) {
+                                "Output slice address failed round-trip verification"
+                            }
+                            require(verifiedHeader.firstSliceSegmentInPicture == (outputAddress == 0)) {
+                                "Output first-slice flag does not match its output CTB address"
+                            }
+                            vclOutput += rewritten.nal
+                            evidence += SliceEvidence(
+                                feedIndex = selection.feedIndex,
+                                sourceTileIndex = selection.sourceTileIndex,
+                                sourceCtbAddress = located.header.sliceSegmentAddress,
+                                destinationCtbAddress = rewritten.destinationAddress,
+                                sourceHeaderBytes = rewritten.sourceHeaderBytes,
+                                outputHeaderBytes = rewritten.outputHeaderBytes,
+                                copiedTailBytes = rewritten.copiedTailBytes,
+                                loopFilterAcrossSlices = verifiedHeader.loopFilterAcrossSlices
+                            )
+                        } catch (failure: Throwable) {
+                            if (vclOutput.none { it === rewritten.nal }) rewritten.nal.fill(0)
+                            throw failure
+                        }
+                    }
+                    require(vclOutput.isNotEmpty()) { "Composed output picture contains no VCL NAL units" }
+                    val sample = if (emitSampleData) lengthPrefix(vclOutput, outputNalLengthSize)
+                        else ByteArray(0)
+                    val retainRewritten = includeAnnexBOutput || !emitSampleData
+                    outputPictures += ComposedPicture(
+                        frameIndex = frameIndex,
+                        fullPoc = feeds.first().pictureIdentities[frameIndex].pictureOrderCount,
+                        sampleData = sample,
+                        // Keep only one payload representation when assembling CMAF.
+                        vclNals = if (retainRewritten) vclOutput else emptyList(),
+                        evidence = evidence
+                    )
+                    if (!retainRewritten) vclOutput.forEach { it.fill(0) }
+                } catch (failure: Throwable) {
+                    vclOutput.forEach { it.fill(0) }
+                    throw failure
                 }
-                require(verifiedHeader.firstSliceSegmentInPicture == (outputAddress == 0)) {
-                    "Output first-slice flag does not match its output CTB address"
-                }
-                vclOutput += rewritten.nal
-                evidence += SliceEvidence(
-                    feedIndex = selection.feedIndex,
-                    sourceTileIndex = selection.sourceTileIndex,
-                    sourceCtbAddress = located.header.sliceSegmentAddress,
-                    destinationCtbAddress = rewritten.destinationAddress,
-                    sourceHeaderBytes = rewritten.sourceHeaderBytes,
-                    outputHeaderBytes = rewritten.outputHeaderBytes,
-                    copiedTailBytes = rewritten.copiedTailBytes,
-                    loopFilterAcrossSlices = verifiedHeader.loopFilterAcrossSlices
-                )
             }
-            require(vclOutput.isNotEmpty()) { "Composed output picture contains no VCL NAL units" }
-            ComposedPicture(
-                frameIndex = frameIndex,
-                fullPoc = feeds.first().pictureIdentities[frameIndex].pictureOrderCount,
-                sampleData = if (emitSampleData) lengthPrefix(vclOutput, outputNalLengthSize) else ByteArray(0),
-                // Exactly one payload representation survives. CMAF owns the slice arrays
-                // until its final moof+mdat buffer has been written and can wipe them.
-                vclNals = if (includeAnnexBOutput || !emitSampleData) vclOutput else emptyList(),
-                evidence = evidence
+
+            val annexB = if (includeAnnexBOutput) {
+                val outputStream = ByteArrayOutputStream()
+                listOf(generated.vps, generated.sps, generated.pps).forEach { writeAnnexB(outputStream, it) }
+                outputPictures.forEach { picture ->
+                    checkNotInterrupted()
+                    picture.vclNals.forEach { writeAnnexB(outputStream, it) }
+                }
+                outputStream.toByteArray()
+            } else ByteArray(0)
+
+            return Result(
+                outputParameters = generated,
+                codedWidth = outputSps.width,
+                codedHeight = outputSps.height,
+                displayWidth = outputSps.displayWidth,
+                displayHeight = outputSps.displayHeight,
+                tileColumnWidthsInCtbs = generated.tileColumnWidthsInCtbs,
+                tileRowHeightsInCtbs = generated.tileRowHeightsInCtbs,
+                pictures = outputPictures,
+                sourcePictureIdentities = feeds.map { it.pictureIdentities },
+                annexB = annexB,
+                outputLoopFilterAcrossTilesEnabled = outputPps.loopFilterAcrossTiles == true
             )
-        }
-
-        val annexB = if (includeAnnexBOutput) {
-            val outputStream = ByteArrayOutputStream()
-            listOf(generated.vps, generated.sps, generated.pps).forEach { writeAnnexB(outputStream, it) }
+        } catch (failure: Throwable) {
             outputPictures.forEach { picture ->
-                picture.vclNals.forEach { writeAnnexB(outputStream, it) }
+                picture.sampleData.fill(0)
+                picture.vclNals.forEach { it.fill(0) }
             }
-            outputStream.toByteArray()
-        } else ByteArray(0)
-
-        return Result(
-            outputParameters = generated,
-            codedWidth = outputSps.width,
-            codedHeight = outputSps.height,
-            displayWidth = outputSps.displayWidth,
-            displayHeight = outputSps.displayHeight,
-            tileColumnWidthsInCtbs = generated.tileColumnWidthsInCtbs,
-            tileRowHeightsInCtbs = generated.tileRowHeightsInCtbs,
-            pictures = outputPictures,
-            sourcePictureIdentities = feeds.map { it.pictureIdentities },
-            annexB = annexB,
-            outputLoopFilterAcrossTilesEnabled = outputPps.loopFilterAcrossTiles == true
-        )
+            throw failure
+        }
     }
 
     private fun parseFeed(index: Int, nals: List<HevcBitstream.NalUnit>): ParsedFeed {
