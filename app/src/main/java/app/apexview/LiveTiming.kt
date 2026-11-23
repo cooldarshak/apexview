@@ -954,7 +954,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                             lastPreviewCheckMs = now
                                             val currentUtc = targetUtc(initialStart)
                                             val snapshot = builders.mapValues { it.value.build() }
-                                            val positioned = snapshot.values.count { it.at(currentUtc) != null }
+                                            val positioned = snapshot.values.count { it.hasPositionAt(currentUtc) }
                                             if (positioned > 0) {
                                                 val remoteShape = availableCircuit.get()?.outline
                                                 val shape = remoteShape?.takeIf { it.size >= 8 }
@@ -962,7 +962,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                                 if (shape.size >= 8) {
                                                     previewSent = true
                                                     report("position window ready before lookahead targetUtcMs=$currentUtc cars=$positioned")
-                                                    launch { publishTracks(snapshot, shape, initialStart) }
+                                                    val previewEpoch = positionPreviewEpochs.next()
+                                                    launch { publishTracks(snapshot, shape, initialStart, previewEpoch) }
                                                 }
                                             }
                                         }
@@ -974,7 +975,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                         else -> traced
                                     }
                                     if (outline.size >= 8 && initial.tracks.isNotEmpty()) {
-                                        publishTracks(initial.tracks.mapValues { it.value.build() }, outline, initialStart)
+                                        val previewEpoch = positionPreviewEpochs.next()
+                                        publishTracks(initial.tracks.mapValues { it.value.build() }, outline,
+                                            initialStart, previewEpoch)
                                     }
                                     report("position window available cars=${initial.tracks.size} outlinePoints=${outline.size / 2}")
                                     while (records.hasNext()) records.next()

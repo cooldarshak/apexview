@@ -9,6 +9,45 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 756 coordinated Kotlin call-site correction and owned-buffer CMAF I/O
+
+**Build 755 CI result: FAILED, not accepted.** Kotlin compilation reported
+two missed `publishTracks` call sites in the archive's seek-window
+streaming branch (the regular streaming path was already updated).
+Both must pass a monotonic `positionPreviewEpochs.next()` value at
+queue time so that every full-archive and near-seek position preview
+uses the *same* freshness contract. The old branch also used
+`DriverTrack.at(currentUtc)` merely to count positioned cars;
+switch it to the allocation-free `hasPositionAt(currentUtc)`.
+Retain all map/tower fields, clock retargeting, cached track outlines,
+and the final full-archive fallback. Require Kotlin compilation and
+end-to-end HEVC/Android emulated CI before marking this fixed.
+
+**P0.2/P0.1 memory and I/O:**
+`CmafHttpReader.read` supports clear HEVC, authenticated CBCS media
+and the existing LAN Cast relay, with a strict caller-supplied byte
+budget. When Media3 `DataSource.open` reports a known Content-Length
+(or explicit byte-range length), the previous reader grew a
+`ByteArrayOutputStream` and then copied its **entire contents** again
+via `toByteArray`. For each concurrently read fragment, this added
+a second large temporary allocation in addition to the output.
+The known-length path now allocates one bounded exact-size byte array,
+reads it to completion, verifies requested HLS ranges, and transfers
+the same array to the existing authorized caller without an extra copy.
+Unknown-length sources retain the original bounded output-stream
+fallback. Fail closed on premature EOF, zero-byte reads, overflow and
+invalid byte-range lengths, and zero partial encrypted buffers on
+exceptions. The reader never decrypts samples, requests licenses or
+changes stream authorization. New Media3 DataSource tests exercise
+known/unknown transfer size, multipacket reads, premature EOF, no
+progress, byte limits and mismatched HLS ranges.
+
+This is an algorithmic reduction in transient heap allocations, not
+physical proof of lower process allocation/GC, TCL map/tower playback,
+true 50fps or protected eight-feed reliability. All 16 hardware
+acceptance gates still use the evidence policy and are not overridden
+by green CI.
+
 ## Build 755 coordinated TCL HEVC coded-picture, remote input and map-preview pass
 
 **P0.3/P2.5, Android TV coded-picture defect (actual code bug):**
@@ -241,7 +280,7 @@ being treated as compiled. The device matrix and 16 release gates
 remain unchanged until real Samsung, TCL and Cast evidence exists.
 
 
-## Current implementation and acceptance ledger (Build 755 coding audit; CI pending)
+## Current implementation and acceptance ledger (Build 756 coding audit; CI pending)
 
 This ledger supersedes the older historical 66% implementation snapshot
 farther down in this same document. Numeric values are explicitly
@@ -251,7 +290,7 @@ No numeric percentage closes a gate without evidence.
 | Gate | Coding estimate | Pending code/acceptance |
 | --- | ---: | --- |
 | P0.1 Segment priority | 85% | Foreground p95 and seek races |
-| P0.2 Bounded HEVC memory | 70% | Allocation/GC and buffer ownership under sustained real sessions |
+| P0.2 Bounded HEVC memory | 72% | Allocation/GC and buffer ownership under sustained real sessions |
 | P0.3 Decoder presentation | 65% | Hardware coded crop, physical 50fps, SurfaceFlinger and lifecycle proof |
 | P0.4 Map and tower scheduling | 85% | TCL simultaneous overlay and UI frame deadlines |
 | P1.1 Smallest valid atlas | 85% | Extended-source physical decoder and quality compatibility |
@@ -270,7 +309,7 @@ No numeric percentage closes a gate without evidence.
 **Coding estimate ~72%, remaining ~28%; this is provisional and must be
 re-scored against the implementation and full device matrix.**
 **Strict full-release gates: 1/16 closed (6.25%); 15/16 open.**
-Build 755 code/CI cannot prove live S22/TCL playback, L1 secure output,
+Build 756 code/CI cannot prove live S22/TCL playback, L1 secure output,
 native Cast, physical frame presentation or a signed release.
 Do not publish a release or say 100% until every external/hardware gate
 has concrete passing trace/log/video evidence and an accepted issue.
