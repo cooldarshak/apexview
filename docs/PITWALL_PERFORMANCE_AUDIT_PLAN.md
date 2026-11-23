@@ -2,12 +2,34 @@
 
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** IN DEVELOPMENT. **Latest CI-verified baseline: Build 801**, commit `93cf7581bda337725b178a6fefd5f980bfb74699` ([passing GitHub Actions](https://github.com/cooldarshak/apexview/actions/runs/45119499727)). The coordinated quality-guard/ledger commit after that baseline requires its own exact-source CI; physical acceptance remains separate. This is the sole active project plan. Historical
+**Status:** IN DEVELOPMENT. **Checkpoint at authorship: Build 802**, commit `7b50e1ff99e62096fed41672fcb46255f135d485` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45124632991)). Subsequent coordinated implementation must pass its own exact-source CI before any coding credit; consult Actions for the live head rather than treating this dated baseline as a current release status. This is the sole active project plan. Historical
 performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
 
+
+## Post-802 A–E review and coordinated P0.1 / P0.2 / P2.8 implementation (CI verification required)
+
+**Starting point:** Build 802 green on `7b50e1ff99e6`. The GitHub source is the only implementation authority. One coordinated change addresses all five specifically audited findings; no independent micro-pushes and no artificial 100% completion.
+
+| Previous finding | Engineering action in this change | Proof and limitation |
+| --- | --- | --- |
+| A. Silenced prefetch exceptions | Replace runCatching().isFailure with typed catch/diagnostics; classify routine cancellation separately, log exception **type only** without F1 URLs or secrets | Production archive path, JVM fault-recovery test, Python wiring check; device error-rate trend still needed |
+| B. Unbounded cache-republish retries | Extract real ArchiveSegmentDelivery from HevcArchiveVodSession, cap cache eviction retries at 2 after initial composition, issue retryable playback failure instead of hanging; preserve single-flight and per-reader owned copies | Concurrent JVM tests and Android emulator tests confirm no starvation/zeroed returned samples; physical contention p95 remains open |
+| C. Weak source-string wiring checks | Retain static contract checks but add executable shared production-delivery JVM/Android tests and assert source entry-point integration; do not misrepresent static tests as full runtime proof | Core archive delivery executed rather than only text inspected; DRM/Cast/full AppState matrix is still not instrumented |
+| D. Partial instrumentation | Add mandatory archive-delivery Android instrumentation to existing RenderNode/SurfaceDecoder workflow; a failing assertion fails the whole build | 2 new Android-runtime tests run by CI. Real HEVC hardware decoder and protected F1 tests remain physical-only/unexecuted; **not** complete hardware sign-off |
+| E. Stale plan checkpoints | Set Build 802 as dated verified baseline, retain all historical sections as history, add source/CI/device distinction and pending% table | Current top ledger below is the authoritative progress; historical statements do not supersede it |
+
+**P0.1 additional source scope:** Observed cache ownership and explicit cancellation/failure classification now share an executable delivery coordinator. Background errors are visible without leaking exception messages or credentials. P0.1 remains open for real foreground 1x/1.5x seek p95 and exact-source CI.
+
+**P0.2 additional source scope:** Archive preflight now populates the bounded cache without making a second full-sized fragment copy. Warmups never borrow a reader copy; foreground receives an independently owned buffer; Android/JVM tests verify retained original data and zeroed eviction. The bounded publication loop fails retryably rather than spinning. No claim of actual lower GC/thermal without 10-minute protected/clear/Cast physical logs.
+
+**P2.8 additional source scope:** Player action layout accounts for pixels occupied by actual map/tower clearance when deciding whether to split into two rows. Add pure effective-width tests and a Robolectric 200%-font settings semantics/click test. Keep stable Material 3 Expressive, captions/Map/Tower/Cast accessibility and native TCL DPAD behavior. Physical focus, TalkBack and image review still outstanding.
+
+**Progress discipline:** The last exact-source-green coded estimates are P0.1 **96% complete / 4% pending**, P0.2 **93% / 7%**, and P2.8 **92% / 8%**. These percentages stay unchanged while the coordinated source commit is unverified. If all relevant CI checks and the new real test gates pass, provisional **coding-only** estimates may rise to **98% / 96% / 95%** respectively. They must NOT be raised to 100% until the remaining source/hardware acceptance work is actually complete. Release gates remain **1/16 closed**, unchanged.
+
+**Remaining acceptance work:** S22 Ultra and TCL 55C655 (Software DRM ON) physical 10-minute allocation/GC, 50fps and map/tower cases; one and multiple decoder paths; clear and authorized L1/L3 Widevine; phone-to-TV Pitwall Cast; 1x/1.5x seek p95, held-key focus, 200% font/TalkBack and signed update acceptance. The emulator cannot supply that evidence.
 
 ## MANDATORY HARD RULES: prevent recurrence of Builds 757–800 (effective after Build 801)
 

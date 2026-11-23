@@ -763,8 +763,13 @@ private fun TopChromeExtraActions(app: AppState, compact: Boolean) {
 
 @Composable
 private fun TopChrome(app: AppState, cutout: Clearance) {
-    val compact = ChromeLayoutPolicy.compact(
-        LocalConfiguration.current.screenWidthDp.toFloat(), LocalDensity.current.fontScale)
+    // Map/tower keep-clear zones consume real dp. Full screen width is not toolbar width.
+    val compact = ChromeLayoutPolicy.compactWithClearance(
+        screenWidthDp = LocalConfiguration.current.screenWidthDp.toFloat(),
+        fontScale = LocalDensity.current.fontScale,
+        startClearancePx = cutout.start, endClearancePx = cutout.end,
+        density = LocalDensity.current.density,
+    )
     val chromeModifier = Modifier
         .fillMaxWidth()
         .background(

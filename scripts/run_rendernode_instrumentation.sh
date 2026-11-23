@@ -80,3 +80,11 @@ run_required_instrumentation \
   app.apexview.scene.SurfaceDecoderSceneInstrumentationTest \
   'OK (1 test)' "$surface_report"
 cat "$surface_report" >> "$report"
+
+# Independent Android-runtime coverage for archive delivery and memory ownership.
+# No synthetic hardware codec can substitute for physical F1/Widevine device evidence.
+delivery_report="${RUNNER_TEMP:?}/pitwall-archive-delivery-instrumentation.txt"
+run_required_instrumentation \
+  app.apexview.tiled.ArchiveSegmentDeliveryAndroidTest \
+  'OK (2 tests)' "$delivery_report"
+cat "$delivery_report" >> "$report"

@@ -38,21 +38,33 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("ChromeLayoutPolicy.compact(", viewer)
         self.assertIn("TopChromeExtraActions(app, compact = true)", viewer)
         self.assertIn("widthDp < 1200f", chrome)
+        self.assertIn("ChromeLayoutPolicy.compactWithClearance(", viewer)
+        self.assertIn("cutout.start", viewer)
+        self.assertIn("cutout.end", viewer)
         for name in ("GoogleCastPlayerButton(app)", "TowerPanel(app", "MapPanelView(app"):
             self.assertIn(name, viewer)
 
     def test_archive_policy_reaches_real_datasource_without_extra_warm_copy(self):
         session = contents("app/src/main/java/app/apexview/tiled/HevcArchiveVodSession.kt")
         policy = contents("app/src/main/java/app/apexview/tiled/ArchiveBufferPolicy.kt")
+        delivery = contents("app/src/main/java/app/apexview/tiled/ArchiveSegmentDelivery.kt")
         self.assertIn("private val cache = BoundedArchiveFragmentCache()", session)
         self.assertIn("private val production = ArchiveSegmentSingleFlight()", session)
-        self.assertIn("production.run(number)", session)
+        self.assertIn("production.run(number)", delivery)
+        self.assertIn("private val delivery = ArchiveSegmentDelivery(", session)
+        self.assertIn("delivery.obtain(probe, copyForCaller = false)", session)
+        self.assertIn("delivery.obtain(candidate, copyForCaller = false)", session)
+        self.assertIn("ArchiveWarmupFailurePolicy.classify(", session)
+        self.assertIn("ARCHIVE_VOD_PREFETCH_STOP", session)
+        self.assertIn("ARCHIVE_VOD_DELIVERY_CACHE_RACE", session)
+        self.assertNotIn("runCatching { ensureCached(", session)
+        self.assertIn("MAX_EVICTION_RETRIES = 2", delivery)
         self.assertIn("production.close()", session)
         self.assertIn("ArchiveFetchDeadline.remainingNs(", session)
-        self.assertIn("ensureCached(candidate, copyForCaller = false)", session)
+        self.assertIn("onEvictionRace = { number, attempt ->", session)
         self.assertNotIn("composeOrRead(candidate).fill(0)", session)
-        self.assertIn("cache.readCopy(number)", session)
-        self.assertIn("cache.contains(number)", session)
+        self.assertIn("cache.readCopy(number)", delivery)
+        self.assertIn("cache.contains(number)", delivery)
         self.assertIn("cache.put(number, output)", session)
         self.assertIn("MAX_RETAINED_MEDIA_BYTES", policy)
         self.assertIn("pending.forEach { it.finished.completeExceptionally", policy)
@@ -93,6 +105,9 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("Execute native RenderNode recording and replay instrumentation", workflow)
         self.assertLess(workflow.index("- name: Execute native RenderNode recording and replay instrumentation"),
                         workflow.index("- name: Upload debug APK"))
+        instrumentation = contents("scripts/run_rendernode_instrumentation.sh")
+        self.assertIn("app.apexview.tiled.ArchiveSegmentDeliveryAndroidTest", instrumentation)
+        self.assertIn("'OK (2 tests)'", instrumentation)
 
 
 if __name__ == "__main__":

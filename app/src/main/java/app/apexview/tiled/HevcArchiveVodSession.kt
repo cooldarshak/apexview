@@ -55,6 +55,18 @@ internal class HevcArchiveVodSession(
     private val compatibleMaps = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val cacheLock = Any()
     private val production = ArchiveSegmentSingleFlight()
+    private val delivery = ArchiveSegmentDelivery(
+        cache = cache, cacheLock = cacheLock, production = production,
+        checkOpen = ::checkOpen, composeAndPublish = ::composeAndPublish,
+        onCancelledWarmupRecovery = { number ->
+            android.util.Log.i("ApexviewSingleDecoder",
+                "ARCHIVE_VOD_FOREGROUND_RECOVER segment=$number cause=CANCELLED_PREFETCH")
+        },
+        onEvictionRace = { number, attempt ->
+            android.util.Log.w("ApexviewSingleDecoder",
+                "ARCHIVE_VOD_DELIVERY_CACHE_RACE segment=$number retry=$attempt")
+        },
+    )
     @Volatile private var cachedMixedAtlas: HevcMixedArchiveAtlasPlan.Plan? = null
     // Never queue foreground network requests behind speculative prefetch I/O. Each lane is
     // bounded to four per-feed requests and seek cancellation interrupts the warm lane.
@@ -130,7 +142,8 @@ internal class HevcArchiveVodSession(
             require(track.hevcConfiguration != null) { "Archive input is not HEVC CMAF" }
         }
         val probe = segmentAt(positionMs.coerceAtLeast(0) * 1000L)
-        composeOrRead(probe).fill(0)
+        // Prepare and verify the manifest without borrowing a full extra CMAF copy.
+        delivery.obtain(probe, copyForCaller = false)
         // Validate the complete finite manifest with Media3 before any decoder is released.
         val parsed = androidx.media3.exoplayer.dash.manifest.DashManifestParser().parse(MANIFEST_URI,
             manifest().inputStream())
@@ -179,7 +192,21 @@ internal class HevcArchiveVodSession(
                         try {
                             // Prefetch populates the bounded cache, not a DataSource reader.
                             // Do NOT allocate a second multi-MB ByteArray just to zero it.
-                            if (runCatching { ensureCached(candidate, copyForCaller = false) }.isFailure) break
+                            try {
+                                delivery.obtain(candidate, copyForCaller = false)
+                            } catch (failure: Exception) {
+                                // The previous runCatching().isFailure silently hid production errors.
+                                // Never include exception messages: URLs can carry F1 credentials.
+                                val reason = ArchiveWarmupFailurePolicy.classify(
+                                    failure, closed, Thread.currentThread().isInterrupted)
+                                val entry = "ARCHIVE_VOD_PREFETCH_STOP segment=$candidate " +
+                                    "reason=$reason exception=${failure.javaClass.simpleName}"
+                                if (reason == ArchiveWarmupStopReason.CANCELLED)
+                                    android.util.Log.i("ApexviewSingleDecoder", entry)
+                                else android.util.Log.w("ApexviewSingleDecoder", entry)
+                                if (failure is InterruptedException) Thread.currentThread().interrupt()
+                                break
+                            }
                         } finally {
                             synchronized(warmLock) { warmActiveNumber = null }
                         }
@@ -206,35 +233,7 @@ internal class HevcArchiveVodSession(
      * allocate and immediately wipe an extra full CMAF segment for every prefetch.
      */
     private fun composeOrRead(number: Int): ByteArray =
-        requireNotNull(ensureCached(number, copyForCaller = true))
-
-    private fun ensureCached(number: Int, copyForCaller: Boolean): ByteArray? {
-        // Cache ownership is protected by cacheLock, never by the production flight.
-        // The flight owns one exact number and never serializes unrelated foreground I/O.
-        var cancelledWarmFlights = 0
-        while (true) {
-            if (copyForCaller) {
-                synchronized(cacheLock) { checkOpen(); cache.readCopy(number) }?.let { return it }
-            } else if (synchronized(cacheLock) { checkOpen(); cache.contains(number) }) {
-                return null // Warm copy was never made; cache keeps the only owned buffer.
-            }
-            try {
-                production.run(number) {
-                    // A cancelled speculative flight must not poison a later player request.
-                    if (synchronized(cacheLock) { checkOpen(); !cache.contains(number) }) {
-                        composeAndPublish(number)
-                    }
-                }
-            } catch (cancelled: ArchiveWarmupCancelledException) {
-                if (!copyForCaller || Thread.currentThread().isInterrupted ||
-                    ++cancelledWarmFlights > 1) throw cancelled
-                android.util.Log.i("ApexviewSingleDecoder",
-                    "ARCHIVE_VOD_FOREGROUND_RECOVER segment=$number cause=CANCELLED_PREFETCH")
-            }
-            // A different segment can evict ours before the next read: retry instead
-            // of returning missing/corrupted media or violating the ownership contract.
-        }
-    }
+        requireNotNull(delivery.obtain(number, copyForCaller = true))
 
     private fun composeAndPublish(number: Int) {
         checkOpen()

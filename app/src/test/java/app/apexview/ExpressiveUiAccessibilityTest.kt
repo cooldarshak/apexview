@@ -182,5 +182,31 @@ class ExpressiveUiAccessibilityTest {
         assertEquals("Split", chosen)
     }
 
-
+    @Test fun twoHundredPercentTextPreservesClickableSettingsRoles() {
+        var chosen by mutableStateOf("Single")
+        var captions by mutableStateOf(false)
+        rule.setContent {
+            androidx.compose.runtime.CompositionLocalProvider(
+                androidx.compose.ui.platform.LocalDensity provides
+                    androidx.compose.ui.unit.Density(density = 1f, fontScale = 2f)
+            ) {
+                AppTheme {
+                    androidx.compose.foundation.layout.Column {
+                        ChoiceRow("Single", chosen == "Single") { chosen = "Single" }
+                        ChoiceRow("Multiple", chosen == "Multiple") { chosen = "Multiple" }
+                        SwitchRow("Closed captions", captions) { captions = it }
+                    }
+                }
+            }
+        }
+        rule.onAllNodes(hasClickAction()).assertCountEquals(3)
+        rule.onNodeWithText("Multiple").assertIsNotSelected()
+        rule.onNodeWithText("Multiple").performClick()
+        rule.onNodeWithText("Multiple").assertIsSelected()
+        rule.onNodeWithText("Closed captions").assertIsOff()
+        rule.onNodeWithText("Closed captions").performClick()
+        rule.onNodeWithText("Closed captions").assertIsOn()
+        assertEquals("Multiple", chosen)
+        assertEquals(true, captions)
+    }
 }
