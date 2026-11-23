@@ -1,6 +1,13 @@
 pluginManagement {
     repositories {
         google()
+        // Use the Maven Central mirror for Kotlin Compose plugin markers and
+        // compiler transitive dependencies when the public Maven index is rate-limited.
+        // These are the same published coordinates; never skip compiler validation.
+        maven {
+            name = "GoogleMavenCentralPluginMirror"
+            url = uri("https://maven-central.storage-download.googleapis.com/maven2/")
+        }
         mavenCentral()
         gradlePluginPortal()
     }
