@@ -453,8 +453,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "eglSwapP95UpperMs=${metrics.eglSwapDurations.percentileUpperMs(95)} " +
                 "choreographerDelayP95UpperMs=${metrics.callbackDelays.percentileUpperMs(95)} " +
                 "glQueueP95UpperMs=${metrics.glQueueDelays.percentileUpperMs(95)} " +
+                "codecFrameCallbacks=${correlation?.codecFrames ?: 0} " +
                 "codecPtsMatched=${correlation?.matchedLatches ?: 0} codecPtsUnmatched=${correlation?.unmatchedLatches ?: 0} " +
-                "codecToLatchP95UpperMs=${correlation?.releaseToLatch?.percentileUpperMs(95) ?: 0} " +
+                "plannedCodecReleaseToLatchP95UpperMs=${correlation?.releaseToLatch?.percentileUpperMs(95) ?: 0} " +
+                "codecCallbackToLatchP95UpperMs=${correlation?.callbackToLatch?.percentileUpperMs(95) ?: 0} " +
                 "latchToSwapP95UpperMs=${correlation?.latchToSwap?.percentileUpperMs(95) ?: 0} " +
                 "swapSubmissionsNotPhysicalPresentation=true physicalPresentation=NOT_MEASURED")
             lastLogNs = now

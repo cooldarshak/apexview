@@ -54,9 +54,13 @@ class SceneCodecTimestampCorrelationTest {
         val timing = SceneCodecTimestampCorrelation().apply { active = true }
         repeat(256) { i -> timing.onCodecFrame(1_000_000L + i * 20_000L, 1_000_000_000L, 1_000_000_000L) }
         assertEquals(256L, timing.snapshotAndReset().codecFrames)
+        // 1,000,000us is evicted by the 128-entry ring. The last frame
+        // (6,100,000us) must still correlate across the logging boundary.
         timing.onTextureLatched(1_000_000_000L, 9_000_000_000L)
         timing.onTextureLatched(6_100_000_000L, 9_200_000_000L)
-        assertEquals(2L, timing.snapshotAndReset().unmatchedLatches)
+        val result = timing.snapshotAndReset()
+        assertEquals("evicted first PTS stays unattributed", 1L, result.unmatchedLatches)
+        assertEquals("retained final PTS matches", 1L, result.matchedLatches)
         timing.reset()
         assertEquals(0L, timing.snapshotAndReset().swapsAfterLatch)
     }
