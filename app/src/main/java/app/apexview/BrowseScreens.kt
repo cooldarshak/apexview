@@ -351,6 +351,7 @@ internal fun ArtPage(
 ) {
     val density = LocalDensity.current
     val context = LocalContext.current
+    val reducedMotion = LocalReduceMotion.current
     val screenHeight = LocalConfiguration.current.screenHeightDp.dp
     val page = remember { FocusRequester() }
     BoxWithConstraints(Modifier.fillMaxSize().background(Ink.background)) {
@@ -368,11 +369,11 @@ internal fun ArtPage(
             if (backdrop != null) backdrop()
             else AsyncImage(
                 // The card's smaller image, already in memory, stands in until this size loads.
-                model = remember(image) {
+                model = remember(image, reducedMotion) {
                     ImageRequest.Builder(context)
                         .data(F1TvApi.picture(image, 1920, 1080))
                         .placeholderMemoryCacheKey(F1TvApi.picture(image, 640, 360))
-                        .crossfade(if (LocalReduceMotion.current) 0 else Motion.BROWSE_FADE_MS)
+                        .crossfade(if (reducedMotion) 0 else Motion.BROWSE_FADE_MS)
                         .build()
                 },
                 contentDescription = null,
