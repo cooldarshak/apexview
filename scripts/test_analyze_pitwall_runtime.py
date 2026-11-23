@@ -60,7 +60,7 @@ class RuntimeLogTests(unittest.TestCase):
         self.assertEqual(10000, report["protected_output_median_bytes"])
 
     def test_p95_foreground_requests_count_hits_and_misses_without_bias(self):
-        report = summarize("\\n".join(
+        report = summarize("\n".join(
             ["I ARCHIVE_VOD_REQUEST number={} cached=true waitMs=1".format(i) for i in range(18)]
             + ["I ARCHIVE_VOD_REQUEST number=18 cached=false waitMs=90",
                "I ARCHIVE_VOD_REQUEST number=19 cached=false waitMs=600",
