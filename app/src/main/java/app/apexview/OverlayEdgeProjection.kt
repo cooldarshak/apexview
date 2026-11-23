@@ -8,7 +8,7 @@ package app.apexview
  */
 internal class OverlayEdgeProjection {
     private var drivers = arrayOfNulls<Car>(24)
-    private var drawDrivers = arrayOfNulls<OverlayDrawCar>(24)
+    private var drawDrivers = arrayOfNulls<OverlayMotionCar>(24)
     private var positions = FloatArray(24)
     var size: Int = 0
         private set
@@ -39,7 +39,7 @@ internal class OverlayEdgeProjection {
     }
 
     /** Synchronously sort the mutable 60Hz Canvas projection, without creating Car objects. */
-    fun updateForDraw(cars: List<OverlayDrawCar>, geometry: TrackGeometry): Int {
+    fun updateForDraw(cars: List<OverlayMotionCar>, geometry: TrackGeometry): Int {
         if (drawDrivers.size < cars.size) {
             val capacity = maxOf(drawDrivers.size * 2, cars.size)
             drawDrivers = drawDrivers.copyOf(capacity)
@@ -63,7 +63,7 @@ internal class OverlayEdgeProjection {
         return size
     }
 
-    fun drawCar(i: Int): OverlayDrawCar = requireNotNull(drawDrivers[i])
+    fun drawCar(i: Int): OverlayMotionCar = requireNotNull(drawDrivers[i])
     fun car(i: Int): Car = requireNotNull(drivers[i])
     fun fraction(i: Int): Float = positions[i]
 }

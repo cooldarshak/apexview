@@ -133,7 +133,9 @@ internal fun rememberOverlayDrawClock(
 /** Local sources and Pitwall Cast frames expose exactly the same draw API. */
 internal class OverlayMotionSource(
     val positionMs: State<Long>,
-    val drawCarsAt: (Long) -> List<OverlayDrawCar>,
+    // List is covariant: both allocation-bounded local draw markers and the
+    // immutable Cast packet car snapshots execute on this same motion path.
+    val carsAt: (Long) -> List<OverlayMotionCar>,
 )
 
 /** Three independently recorded tower regions: lap/telemetry, sectors and tyres. */

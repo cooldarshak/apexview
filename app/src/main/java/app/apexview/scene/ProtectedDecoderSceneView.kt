@@ -494,9 +494,23 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         lastPresentedAtNs = 0L
         lastSourceTimestampNs = 0L
         if (display != EGL14.EGL_NO_DISPLAY) {
-            if (program != 0) GLES20.glDeleteProgram(program)
-            if (texture != 0) GLES20.glDeleteTextures(1, intArrayOf(texture), 0)
-            EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+            // Android can have unbound this GL looper after a rotation, stop or
+            // SurfaceFlinger output handoff. GL deletion requires this exact
+            // context to be current on the owning GL thread.
+            val canDeleteGlObjects = contextGl != EGL14.EGL_NO_CONTEXT &&
+                window != EGL14.EGL_NO_SURFACE &&
+                EGL14.eglMakeCurrent(display, window, window, contextGl)
+            if (canDeleteGlObjects) {
+                if (program != 0) GLES20.glDeleteProgram(program)
+                if (texture != 0) GLES20.glDeleteTextures(1, intArrayOf(texture), 0)
+            } else if (program != 0 || texture != 0) {
+                // EGL context destruction reclaims its owned GPU objects.
+                // Do not issue GLES commands against a stale/foreign context.
+                Log.w("ApexviewSingleDecoder",
+                    "SCENE_GL_CLEANUP_CONTEXT_UNAVAILABLE release=EGL_CONTEXT_TEARDOWN")
+            }
+            EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
+                EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
             if (window != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, window)
             if (contextGl != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, contextGl)
             EGL14.eglTerminate(display)

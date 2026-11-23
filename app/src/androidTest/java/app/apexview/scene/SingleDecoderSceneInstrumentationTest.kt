@@ -109,8 +109,34 @@ class SingleDecoderSceneInstrumentationTest {
                 val codec = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.firstOrNull { it.name == decoder.get() }
                 assertNotNull("No observed scene decoder", codec)
                 assertTrue("A hardware decoder is required", codec!!.isHardwareAccelerated)
+                // Recreate the REAL TextureView output, then seek while the same
+                // one-player HEVC archive remains active. This exercises the
+                // TextureView/EGL lifecycle rather than only crop geometry.
+                val recoveredFrame = CountDownLatch(1)
+                instrumentation.runOnMainSync {
+                    view!!.release()
+                    activity.root.removeView(view)
+                    view = SingleDecoderSceneView(activity).apply {
+                        onFirstFrame = { recoveredFrame.countDown() }
+                        onFailure = { failure.set(it); recoveredFrame.countDown() }
+                    }
+                    activity.root.addView(view, FrameLayout.LayoutParams(-1, -1))
+                    view!!.bind(playback!!.player, scene(listOf(a, b)))
+                    playback!!.player.seekTo(0L)
+                    playback!!.player.play()
+                }
+                assertTrue("A real clear TextureView must recover after seek and output recreation",
+                    recoveredFrame.await(30, TimeUnit.SECONDS))
+                failure.get()?.let { throw AssertionError(it) }
+                captureUntil { image ->
+                    patchBrightness(image, 0, 0) > 30 &&
+                        patchBrightness(image, 400, 300) > 30
+                }.recycle()
+                assertEquals("Clear output recreation must not create parallel video decoders",
+                    1, maxActive.get())
                 Log.i("ApexviewSingleDecoder", "SINGLE_DECODER_SCENE_PIXELS_PASS decoder=${decoder.get()} " +
-                    "maxActiveVideoDecoders=${maxActive.get()} move=PASS sourceIdentity=PASS overlap=PASS outputViews=1")
+                    "maxActiveVideoDecoders=${maxActive.get()} move=PASS sourceIdentity=PASS " +
+                    "overlap=PASS seek=PASS recreation=PASS outputViews=1")
             } finally { original.recycle() }
         } finally {
             instrumentation.runOnMainSync { view?.release(); playback?.release(); activity.finish() }

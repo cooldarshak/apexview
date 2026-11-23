@@ -166,7 +166,21 @@ class MapFit private constructor(
 
 private val PUSH_RING = Color(0xFFFFD400)
 
-internal class Car(val number: String, val x: Float, val y: Float, val state: LapState)
+/**
+ * Common draw-time contract for immutable receiver packets and retained map markers.
+ * The actual immutable Cast packet and 60Hz mutable map marker remain separate owners.
+ */
+internal interface OverlayMotionCar {
+    val number: String
+    val x: Float
+    val y: Float
+    val state: LapState
+}
+
+internal class Car(
+    override val number: String, override val x: Float,
+    override val y: Float, override val state: LapState,
+) : OverlayMotionCar
 
 /** The video keeps its 50 fps clock. Text overlays need fewer Compose updates than the video. */
 @Composable
@@ -800,7 +814,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
         Canvas(layer) {
             val start = System.nanoTime()
             // Dynamic car motion reads the video clock in Draw, never Composition.
-            val movingCars = motion?.let { it.drawCarsAt(it.positionMs.value) }
+            val movingCars = motion?.let { it.carsAt(it.positionMs.value) }
             if (movingCars != null) {
                 val radius = dotSizeDp.dp.toPx()
                 movingCars.forEach { car ->
@@ -1227,7 +1241,7 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
         }
         Canvas(layer) {
             val start = System.nanoTime()
-            val movingCars = motion?.let { it.drawCarsAt(it.positionMs.value) }
+            val movingCars = motion?.let { it.carsAt(it.positionMs.value) }
             // Labels step further inward when cars bunch up, so a pack stays readable.
             reusedCollisionRows.fill(-Float.MAX_VALUE)
             val lastAt = reusedCollisionRows

@@ -79,12 +79,12 @@ internal class OverlayPositionCursor(private val track: DriverTrack) {
  * Reuses a driver object and one list across every 60Hz motion frame, unlike the
  * immutable 10Hz hit-target / Cast snapshots retained by sample().
  */
-internal class OverlayDrawCar(val number: String) {
-    var x = 0f
+internal class OverlayDrawCar(override val number: String) : OverlayMotionCar {
+    override var x = 0f
         internal set
-    var y = 0f
+    override var y = 0f
         internal set
-    var state = LapState.UNKNOWN
+    override var state = LapState.UNKNOWN
         internal set
 }
 

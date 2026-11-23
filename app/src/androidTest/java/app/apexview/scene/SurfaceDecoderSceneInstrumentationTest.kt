@@ -3,14 +3,17 @@ package app.apexview.scene
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.media.MediaFormat
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.PixelCopy
 import android.widget.FrameLayout
+import androidx.media3.common.Format
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import app.apexview.tiled.HevcComposedPlayback
@@ -53,6 +56,9 @@ class SurfaceDecoderSceneInstrumentationTest {
         val firstFrame = CountDownLatch(1)
         val failures = AtomicReference<String?>(null)
         val initializations = AtomicInteger()
+        val activeDecoders = AtomicInteger()
+        val maxActiveDecoders = AtomicInteger()
+        val correlation = SceneCodecTimestampCorrelation().apply { active = true }
         val original = listOf(
             VideoWindow(10, 0, 0f, 0f, 400f, 225f, 0f),
             VideoWindow(11, 1, 400f, 300f, 400f, 225f, 1f)
@@ -82,6 +88,14 @@ class SurfaceDecoderSceneInstrumentationTest {
             instrumentation.runOnMainSync {
                 playback = HevcComposedPlayback(activity, full.copyOfRange(0, firstMoof),
                     segmentBytes)
+                playback!!.player.setVideoFrameMetadataListener(object : VideoFrameMetadataListener {
+                    override fun onVideoFrameAboutToBeRendered(
+                        presentationTimeUs: Long, releaseTimeNs: Long, format: Format,
+                        mediaFormat: MediaFormat?,
+                    ) {
+                        correlation.onCodecFrame(presentationTimeUs, releaseTimeNs, System.nanoTime())
+                    }
+                })
                 playback!!.player.addListener(object : Player.Listener {
                     override fun onPlayerError(error: PlaybackException) {
                         failures.set(error.errorCodeName)
@@ -94,7 +108,15 @@ class SurfaceDecoderSceneInstrumentationTest {
                             eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
                             name: String, initializedTimestampMs: Long,
                             initializationDurationMs: Long
-                        ) { initializations.incrementAndGet() }
+                        ) {
+                            initializations.incrementAndGet()
+                            val current = activeDecoders.incrementAndGet()
+                            maxActiveDecoders.updateAndGet { maxOf(it, current) }
+                        }
+                        override fun onVideoDecoderReleased(
+                            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                            name: String,
+                        ) { activeDecoders.decrementAndGet() }
                     }
                 )
                 surface = ProtectedDecoderSceneView(activity, protectedOutput = false).apply {
@@ -102,7 +124,8 @@ class SurfaceDecoderSceneInstrumentationTest {
                     onFailure = { failures.set(it); firstFrame.countDown() }
                 }
                 activity.root.addView(surface, FrameLayout.LayoutParams(-1, -1))
-                surface!!.bind(playback!!.player, scene(original))
+                surface!!.bind(playback!!.player, scene(original),
+                    correlation = correlation)
                 playback!!.prepare()
             }
             assertTrue("No frame reached the independent video SurfaceView",
@@ -133,6 +156,38 @@ class SurfaceDecoderSceneInstrumentationTest {
             assertTrue("Moving camera windows must reuse the same surface", observed)
             assertEquals("Scene layout updates must not recreate the decoder",
                 1, initializations.get())
+            assertEquals("Only one decoder may be active during unchanged layout",
+                1, maxActiveDecoders.get())
+
+            // The old SurfaceView must release codec ownership before a newly
+            // created SurfaceView can present a fresh seeked frame. Repeat on
+            // the actual EGL and MediaCodec pipeline, not a mock view.
+            val recreated = CountDownLatch(1)
+            instrumentation.runOnMainSync {
+                surface!!.release()
+                activity.root.removeView(surface)
+                surface = ProtectedDecoderSceneView(activity, protectedOutput = false).apply {
+                    onFirstFrame = { recreated.countDown() }
+                    onFailure = { failures.set(it); recreated.countDown() }
+                }
+                activity.root.addView(surface, FrameLayout.LayoutParams(-1, -1))
+                surface!!.bind(playback!!.player, scene(original),
+                    correlation = correlation)
+                playback!!.player.seekTo(0L)
+                playback!!.player.play()
+            }
+            assertTrue("Recreated video surface must present after seek",
+                recreated.await(30, TimeUnit.SECONDS))
+            failures.get()?.let { throw AssertionError(it) }
+            val recovered = capture()
+            try {
+                assertTrue("After surface recreation and seek both tiles remain visible",
+                    mean(recovered, 100, 100) > 20 && mean(recovered, 500, 400) > 20)
+            } finally { recovered.recycle() }
+            assertTrue("Surface handoff must not spawn two concurrently active decoders",
+                maxActiveDecoders.get() <= 1)
+            assertTrue("Codec PTS listener must execute on real video renderer",
+                correlation.snapshotAndReset().codecFrames >= 1L)
         } finally {
             instrumentation.runOnMainSync {
                 surface?.release()

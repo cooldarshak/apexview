@@ -58,4 +58,25 @@ class OverlayEdgeProjectionTest {
         assertEquals(24, projection.updateForDraw(cars, geometry))
     }
 
+    @Test fun castPacketCarsAndLocalDrawCarsShareTheSameStableProjection() {
+        val index = OverlayEdgeProjection()
+        val immutable: List<OverlayMotionCar> = listOf(
+            Car("16", 10f, 10f, LapState.UNKNOWN),
+            Car("44", 20f, 20f, LapState.PUSH),
+        )
+        val mutable: List<OverlayMotionCar> = immutable.map {
+            OverlayDrawCar(it.number).apply {
+                x = it.x
+                y = it.y
+                state = it.state
+            }
+        }
+        assertEquals(2, index.updateForDraw(immutable, geometry))
+        val orderedIds = (0 until 2).map { index.drawCar(it).number }
+        assertEquals(2, index.updateForDraw(mutable, geometry))
+        assertEquals(orderedIds, (0 until 2).map { index.drawCar(it).number })
+        assertEquals("Cast packet state preserved", LapState.PUSH,
+            mutable.first { it.number == "44" }.state)
+    }
+
 }

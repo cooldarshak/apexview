@@ -31,7 +31,11 @@ class LiveOverlayWiringTest(unittest.TestCase):
         # Both real map variants now use the allocation-bounded draw-only cursor.
         # UI hit targets and Cast sender must continue publishing immutable snapshots.
         self.assertEqual(track.count("OverlayMotionSource(drawClock, drawSampler::sampleForDraw)"), 2)
-        self.assertEqual(track.count("it.drawCarsAt(it.positionMs.value)"), 2)
+        self.assertEqual(track.count("it.carsAt(it.positionMs.value)"), 2)
+        motion = source("OverlayRetainedDrawing.kt")
+        self.assertIn("val carsAt: (Long) -> List<OverlayMotionCar>", motion)
+        self.assertIn("frame::carsAt", source("cast/CastTimingLayer.kt"))
+        self.assertIn("internal interface OverlayMotionCar", track)
         sampler = source("OverlayPositionSampler.kt")
         self.assertIn("fun sampleForDraw(atMs: Long)", sampler)
         self.assertIn("private val drawCars = ArrayList<OverlayDrawCar>(entries.size)", sampler)
