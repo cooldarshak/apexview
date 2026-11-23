@@ -475,6 +475,11 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         if (now - lastLogNs >= 5_000_000_000L) {
             val metrics = pacing.snapshotAndReset()
             val correlation = codecCorrelation?.snapshotAndReset()
+            // Five-second trace samples of GL stages, not video scanout.
+            Trace.setCounter("PitwallSurfaceSceneLatched5s",
+                metrics.latched.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt())
+            Trace.setCounter("PitwallSurfaceSceneGlSubmits5s",
+                metrics.presented.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt())
             Log.i("ApexviewSingleDecoder", "SURFACE_DECODER_SCENE " +
                 "protected=$protectedOutput output=${outputWidth}x$outputHeight " +
                 "inputTextures=1 outputViews=1 sources=${model.sources} " +
@@ -529,7 +534,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         if (released || failed) return
         try { action() } catch (error: Exception) {
             failed = true
-            val reason = "Protected scene output: ${error.message ?: error.javaClass.simpleName}".take(200)
+            val reason = "${if (protectedOutput) "Protected" else "Clear SurfaceView"} scene output: " +
+                (error.message ?: error.javaClass.simpleName).take(200)
             Log.w("ApexviewSingleDecoder", reason)
             post { if (!released) onFailure(reason) }
         }

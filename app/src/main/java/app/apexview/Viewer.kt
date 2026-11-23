@@ -1097,19 +1097,40 @@ internal fun PlaybackVideoCanvas(
     val scene = app.videoScene(width, height)
     val host = app.singleDecoderScenePlayer ?: app.protectedRollingScenePlayer
     val secureRolling = app.protectedRollingSceneActive && host != null && !host.usesSoftwareDrm
+    // Window PixelCopy is used for baked Cast and replay. Independently
+    // composited clear SurfaceView is A/B-only and must not silently break
+    // that existing capture path or the selected SINGLE decoder preference.
+    val windowCaptureRequired = app.bakedCastSession != null || app.castingActive ||
+        app.replayClipRequested || app.replayClipRunning || app.externalDisplayActive
+    val clearOutputMode = selectClearSceneOutput(
+        app.settings.clearSceneSurfaceExperiment,
+        protectedRollingScene = app.protectedRollingSceneActive,
+        windowCaptureRequired = windowCaptureRequired,
+    )
+    val independentClearSurface = clearOutputMode == ClearSceneOutputMode.SURFACE_VIEW
     if (scene != null && host != null) {
-        var composedGlReady by remember(host, secureRolling) { mutableStateOf(false) }
+        var composedGlReady by remember(host, secureRolling, independentClearSurface) {
+            mutableStateOf(false)
+        }
         // This must happen as soon as the composed scene activates, not after
         // a later user interaction. It also provides direct evidence that the
         // decoded atlas is routed into the full-canvas compositor.
-        LaunchedEffect(host, scene.sources, scene.atlasWidth, scene.atlasHeight) {
+        LaunchedEffect(host, scene.sources, scene.atlasWidth, scene.atlasHeight,
+            app.protectedRollingSceneActive, independentClearSurface, windowCaptureRequired) {
+            val renderer = if (app.protectedRollingSceneActive || independentClearSurface)
+                "SurfaceView" else "TextureView"
             android.util.Log.i("ApexviewSingleDecoder",
                 "F1_SCENE_UI_BOUND outputCanvas=${width.toInt()}x${height.toInt()} " +
                     "atlas=${scene.atlasWidth}x${scene.atlasHeight} " +
                     "sources=${scene.sources} windows=${scene.windows.size} " +
-                    "renderer=${if (app.protectedRollingSceneActive) "SurfaceView" else "TextureView"}")
+                    "backend=${if (app.protectedRollingSceneActive) "ROLLING_PROTECTED" else "CLEAR_ARCHIVE"} " +
+                    "renderer=$renderer clearSurfaceAB=$independentClearSurface " +
+                    "captureRequiresTexture=$windowCaptureRequired " +
+                    "physicalVideoPresentation=NOT_MEASURED")
         }
-        var view by remember { mutableStateOf<SingleDecoderSceneView?>(null) }
+        var view by remember(host, independentClearSurface) {
+            mutableStateOf<SingleDecoderSceneView?>(null)
+        }
         var recordingBounds by remember { mutableStateOf<Rect?>(null) }
         val bakedSession = app.bakedCastSession
         LaunchedEffect(view, bakedSession) {
@@ -1175,17 +1196,27 @@ internal fun PlaybackVideoCanvas(
             }
         }
         Box(Modifier.fillMaxSize()) {
-        if (app.protectedRollingSceneActive) {
+        if (app.protectedRollingSceneActive || independentClearSurface) {
+            // Reuse the tested protected scene's *nonsecure* GLES path for clear
+            // A/B. Still one decoder input, one atlas, one independent output.
             // Rolling composition is one decoded atlas, but uses an independent
             // SurfaceFlinger video layer. TextureView composition depends on
             // main-window HWUI frames; a busy tower/map was visibly stalling
             // the 50fps video even while the decoder rendered every frame.
             // L1 always uses protected EGL; only authorized L3 may use normal
             // EGL and the nonsecure video output surface.
-            androidx.compose.runtime.key(secureRolling) {
+            androidx.compose.runtime.key(app.protectedRollingSceneActive, secureRolling, independentClearSurface) {
                 AndroidView(factory = { context ->
                     ProtectedDecoderSceneView(context, protectedOutput = secureRolling).apply {
-                        onFailure = app::failSingleDecoderScene
+                        onFailure = { error ->
+                            if (independentClearSurface && !app.protectedRollingSceneActive) {
+                                // On an unsupported clear EGL SurfaceView, restore the
+                                // original path. Never fallback to MULTIPLE/less secure DRM.
+                                android.util.Log.e("ApexviewSingleDecoder",
+                                    "CLEAR_SURFACE_AB_REVERT reason=$error")
+                                app.settings.updateClearSceneSurfaceExperiment(false)
+                            } else app.failSingleDecoderScene(error)
+                        }
                         onOutputSize = app::reportSceneOutputSize
                         onOutputLost = { composedGlReady = false }
                         onFirstFrame = { composedGlReady = true }
@@ -1194,7 +1225,7 @@ internal fun PlaybackVideoCanvas(
                     onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
             }
         } else {
-            // Keep finite clear-archive scene/capture behavior unchanged.
+            // Capture-compatible TextureView, also the controlled A/B baseline.
             AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
                 onFailure = app::failSingleDecoderScene
                 onOutputSize = app::reportSceneOutputSize

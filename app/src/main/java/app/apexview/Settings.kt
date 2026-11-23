@@ -60,6 +60,15 @@ class Settings(context: Context) {
         private set
     var showStats by mutableStateOf(prefs.getBoolean("showStats", false))
         private set
+
+    /** Opt-in clear GLES SurfaceView A/B. Never changes Widevine or decoder selection. */
+    var clearSceneSurfaceExperiment by mutableStateOf(prefs.getBoolean("clearSceneSurfaceExperiment", false))
+        private set
+
+    fun updateClearSceneSurfaceExperiment(value: Boolean) {
+        clearSceneSurfaceExperiment = value
+        prefs.edit().putBoolean("clearSceneSurfaceExperiment", value).apply()
+    }
     var mapDriverSelection by mutableStateOf(prefs.getBoolean("mapDriverSelection", true))
         private set
 

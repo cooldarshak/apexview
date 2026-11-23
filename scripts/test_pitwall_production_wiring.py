@@ -35,6 +35,44 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertNotIn('singleDecoderDiagnostic = singleDecoderDiagnostic?.replace(', app)
         self.assertIn("fun isOwner(generation: Long)", owner)
 
+    def test_batch1_media3_upgrade_and_clear_ab_are_production_wired(self):
+        gradle = contents("app/build.gradle.kts")
+        viewer = contents("app/src/main/java/app/apexview/Viewer.kt")
+        settings = contents("app/src/main/java/app/apexview/Settings.kt")
+        sheets = contents("app/src/main/java/app/apexview/Sheets.kt")
+        policy = contents("app/src/main/java/app/apexview/ClearSceneOutputPolicy.kt")
+        scene = contents("app/src/main/java/app/apexview/scene/ProtectedDecoderSceneView.kt")
+        texture = contents("app/src/main/java/app/apexview/scene/SingleDecoderSceneView.kt")
+        self.assertIn('val media3 = "1.11.1"', gradle)
+        self.assertEqual(5, gradle.count('"androidx.media3:media3-'))
+        self.assertNotIn('val media3 = "1.5.1"', gradle)
+        self.assertIn('prefs.getBoolean("clearSceneSurfaceExperiment", false)', settings)
+        self.assertIn("s::updateClearSceneSurfaceExperiment", sheets)
+        self.assertIn("app.bakedCastSession != null || app.castingActive", viewer)
+        self.assertIn("app.replayClipRequested || app.replayClipRunning", viewer)
+        self.assertIn("app.externalDisplayActive", viewer)
+        self.assertIn("selectClearSceneOutput(", viewer)
+        self.assertIn("if (app.protectedRollingSceneActive || independentClearSurface)", viewer)
+        self.assertIn("ProtectedDecoderSceneView(context, protectedOutput = secureRolling)", viewer)
+        self.assertIn("SingleDecoderSceneView(context)", viewer)
+        self.assertIn("CLEAR_SURFACE_AB_REVERT", viewer)
+        self.assertIn("app.settings.updateClearSceneSurfaceExperiment(false)", viewer)
+        self.assertIn("backend=", viewer)
+        self.assertIn("CLEAR_ARCHIVE", viewer)
+        self.assertIn("!protectedRollingScene && !windowCaptureRequired", policy)
+        self.assertIn("if (protectedOutput) setSecure(true)", scene)
+        self.assertIn('Trace.setCounter("PitwallSurfaceSceneLatched5s"', scene)
+        self.assertIn('Trace.setCounter("PitwallTextureSceneLatched5s"', texture)
+        instrumentation = contents("scripts/run_rendernode_instrumentation.sh")
+        self.assertIn("app.apexview.scene.SurfaceDecoderSceneInstrumentationTest", instrumentation)
+        self.assertIn("app.apexview.scene.SingleDecoderSceneInstrumentationTest", instrumentation)
+        tests = contents("app/src/test/java/app/apexview/ClearSceneOutputPolicyTest.kt")
+        for test in ("productionDefaultIsTextureView", "optedInClearCompositionUsesIndependentSurfaceView",
+                     "protectedVideoIsNeverChangedByClearExperiment",
+                     "castAndReplayRequireOriginalCaptureCompatibleOutput",
+                     "switchingCaptureStateRevertsAndRestoresIndependentLayer"):
+            self.assertIn(test, tests)
+
     def test_thermal_startup_notice_has_initialized_compose_message_state(self):
         # Kotlin executes property initializers and init blocks in source order.
         # Merely compiling a delegated property does not catch an early setter

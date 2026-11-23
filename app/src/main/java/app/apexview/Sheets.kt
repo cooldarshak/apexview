@@ -473,6 +473,14 @@ fun SettingsScreen(app: AppState) {
         item {
             Group("Diagnostics", footer = "Records app and playback logs to Download/Pitwall while the app runs. Files rotate at 5 MB. Full system logs require ADB. Logs stay on this device.") {
                 SwitchRow("Enable diagnostic logs", s.diagnosticLogging, s::updateDiagnosticLogging)
+                SwitchRow("Experimental clear-video SurfaceView (A/B)",
+                    s.clearSceneSurfaceExperiment, s::updateClearSceneSurfaceExperiment)
+                Text(
+                    "OFF keeps the proven TextureView. ON tests independent clear-video SurfaceView. " +
+                        "Cast, replay clipping and external-display capture automatically use TextureView. " +
+                        "Secure Widevine output is unchanged.",
+                    style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
                 SettingRow("Log status", DiagnosticLogs.status)
             }
         }

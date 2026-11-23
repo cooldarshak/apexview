@@ -185,3 +185,40 @@ The comparison program cannot independently prove source-to-scanout picture
 identity, protected Widevine functionality, true 50fps video presentation,
 A/V sync, or TCL/Cast parity. All of these still require on-device validation.
 A script exit status or successful CI build never closes a physical release gate.
+
+## Batch 1: Media3 1.11.1 clear video presentation A/B
+
+The **Experimental clear-video SurfaceView (A/B)** toggle is in
+**Settings > Diagnostics**, defaults **OFF**, and applies only to
+**clear single-decoder composed HEVC**. OFF = existing TextureView; ON =
+unprotected `ProtectedDecoderSceneView(protectedOutput=false)` with the same
+one codec input, one GLES atlas and a separate SurfaceFlinger output.
+Authorized protected playback stays on its existing protected output.
+During baked Cast, replay clipping or external-display capture Pitwall
+automatically chooses capture-compatible TextureView; an EGL failure of the
+experimental clear SurfaceView automatically disables the toggle without
+changing SINGLE/MULTIPLE preference. Do not confuse this setting with
+Widevine security or a new decoder.
+
+Record paired **OFF and ON** real F1 sessions with the same device, build,
+content ID, selected feeds, source rendition caps and actual dimensions,
+atlas geometry, thermal conditions, display refresh, playback position,
+speed, map/tower and audio. Do both **1.0x and 1.5x** after a 30-second warmup;
+use at least 60 seconds of genuine Perfetto FrameTimeline per short A/B and
+repeat stable scenarios for 10 minutes before hardware acceptance.
+Check the app log for:
+`F1_SCENE_UI_BOUND ... backend=CLEAR_ARCHIVE renderer=TextureView`
+and
+`F1_SCENE_UI_BOUND ... backend=CLEAR_ARCHIVE renderer=SurfaceView clearSurfaceAB=true`.
+Collect `SINGLE_DECODER_SCENE` or `SURFACE_DECODER_SCENE` five-second stage
+summaries and trace counters:
+`PitwallTextureSceneLatched5s`, `PitwallTextureSceneGlSubmits5s`,
+`PitwallSurfaceSceneLatched5s`, `PitwallSurfaceSceneGlSubmits5s`.
+All four are **GL-side counts only**, not actual video scanout. Export
+`docs/perfetto/frame_timeline_export.sql` and inspect true video
+SurfaceView layer IDs separately from app-window HWUI. Preserve
+camera identity, correct captions, map/tower, one active decoder,
+seek/recovery, secure output and Cast parity. Never infer displayed 50/75 fps
+from codec drops=0, GLES submissions or late app-window frames alone.
+Keep the surface experiment OFF by default until a physical A/B proves an
+advantage without feature regressions.

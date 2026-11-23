@@ -539,6 +539,11 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         if (now - lastLogNs >= 5_000_000_000L) {
             val metrics = pacing.snapshotAndReset()
             val correlation = codecCorrelation?.snapshotAndReset()
+            // Five-second trace samples of GL stages, not video scanout.
+            Trace.setCounter("PitwallTextureSceneLatched5s",
+                metrics.latched.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt())
+            Trace.setCounter("PitwallTextureSceneGlSubmits5s",
+                metrics.presented.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt())
             Log.i("ApexviewSingleDecoder", "SINGLE_DECODER_SCENE output=${outputWidth}x$outputHeight inputTextures=1 outputViews=1 sources=${model.sources} windows=${model.windows.size} frames=$rendered " +
                 "pacingLatched=${metrics.latched} pacingPresented=${metrics.presented} " +
                 "callbackGaps45ms=${metrics.callbackGaps} displayGaps45ms=${metrics.displayGaps} " +
