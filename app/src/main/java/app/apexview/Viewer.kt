@@ -1372,11 +1372,12 @@ private fun TileView(
             )
         }
 
-        val fade = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
+        val reducedMotion = LocalReduceMotion.current
+        val fade = tween<Float>(if (reducedMotion) 0 else Motion.SCREEN_MS, easing = EaseOut)
         AnimatedVisibility(
             app.audioHint === tile,
             Modifier.align(Alignment.BottomEnd).padding(end = 52.dp, bottom = if (number != null) 46.dp else 10.dp),
-            enter = fadeIn(fade), exit = fadeOut(tween(600, easing = EaseOut)),
+            enter = fadeIn(fade), exit = fadeOut(tween(if (reducedMotion) 0 else 600, easing = EaseOut)),
         ) {
             Row(
                 Modifier
@@ -1565,14 +1566,21 @@ private fun Modifier.arrangeGestures(app: AppState, tile: Tile) = pointerInput(t
 /** A light that runs round the tile's border, fading in, and out when [on] ends. */
 @Composable
 private fun TargetGlow(on: Boolean) {
-    val alpha by animateFloatAsState(if (on) 1f else 0f, tween(Motion.SCREEN_MS * 2, easing = EaseOut), label = "glow")
+    val reducedMotion = LocalReduceMotion.current
+    val alpha by animateFloatAsState(if (on) 1f else 0f,
+        tween(if (reducedMotion) 0 else Motion.SCREEN_MS * 2, easing = EaseOut), label = "glow")
     if (alpha == 0f) return
-    val spin = rememberInfiniteTransition(label = "glow-spin")
-    val angle by spin.animateFloat(
-        0f, 360f,
-        infiniteRepeatable(tween(2_400, easing = androidx.compose.animation.core.LinearEasing)),
-        label = "glow-angle",
-    )
+    // A static bright focus border is still visible when Android removes
+    // animations, but no infinite frame scheduling/CPU work remains.
+    val angle = if (reducedMotion) 0f else {
+        val spin = rememberInfiniteTransition(label = "glow-spin")
+        val animated by spin.animateFloat(
+            0f, 360f,
+            infiniteRepeatable(tween(2_400, easing = androidx.compose.animation.core.LinearEasing)),
+            label = "glow-angle",
+        )
+        animated
+    }
     Canvas(Modifier.fillMaxSize()) {
         // A sweep gradient can't be turned, so the bright stretch is moved round by building the
         // gradient's stops from the angle: bright at the angle, fading to nothing opposite it.
@@ -2628,12 +2636,13 @@ private val VOTE_SIDE_SHEET = 840.dp
  */
 @Composable
 private fun NextLivePrompt(app: AppState, modifier: Modifier) {
-    val fade = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
-    val slide = tween<IntOffset>(Motion.SCREEN_MS, easing = EaseOut)
+    val durationMs = if (LocalReduceMotion.current) 0 else Motion.SCREEN_MS
+    val fade = tween<Float>(durationMs, easing = EaseOut)
+    val slide = tween<IntOffset>(durationMs, easing = EaseOut)
     // Clear of the playback controls while they're up.
     val lift by animateDpAsState(
         if (app.chromeVisible && !app.arranging) 110.dp else 0.dp,
-        tween(Motion.SCREEN_MS, easing = EaseOut),
+        tween(durationMs, easing = EaseOut),
         label = "nextLift",
     )
     // Kept while it fades out.
@@ -2677,18 +2686,19 @@ private fun NextLivePrompt(app: AppState, modifier: Modifier) {
 @Composable
 private fun VotePrompt(app: AppState, modifier: Modifier) {
     val activity = LocalContext.current as Activity
+    val durationMs = if (LocalReduceMotion.current) 0 else Motion.SCREEN_MS
     LaunchedEffect(app.votePromptOpen) {
         if (app.votePromptOpen) {
             delay(VOTE_PROMPT_MS)
             app.dismissVotePrompt()
         }
     }
-    val fade = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
-    val slide = tween<IntOffset>(Motion.SCREEN_MS, easing = EaseOut)
+    val fade = tween<Float>(durationMs, easing = EaseOut)
+    val slide = tween<IntOffset>(durationMs, easing = EaseOut)
     // Clear of the playback controls while they're up.
     val lift by animateDpAsState(
         if (app.chromeVisible && !app.arranging) 110.dp else 0.dp,
-        tween(Motion.SCREEN_MS, easing = EaseOut),
+        tween(durationMs, easing = EaseOut),
         label = "voteLift",
     )
     AnimatedVisibility(

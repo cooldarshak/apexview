@@ -664,6 +664,7 @@ fun HomeScreen(app: AppState) {
         listOfNotNull(app.featuredWeekend(now)?.let { Pick("${roundLabel(it)} · ${dates(it)}", weekend = it) })
     }
     val count = picks.size
+    val reducedMotion = LocalReduceMotion.current
     // Endless both ways: the pager starts among many copies of the picks. A new first pick (a
     // session going live) starts it over, so that's what shows even if the count stays the same.
     val pager = key(count, picks.firstOrNull()?.item?.contentId) { rememberPagerState(initialPage = if (count > 1) count * 500 else 0) { if (count > 1) count * 1000 else count } }
@@ -671,8 +672,10 @@ fun HomeScreen(app: AppState) {
     // A remote on one of the slide's buttons: turning would take the button away from under it.
     var heroFocused by remember { mutableStateOf(false) }
     // Turns on its own, and waits a full turn again after you swipe.
-    LaunchedEffect(pager, pager.settledPage, dragged, heroFocused) {
-        if (count < 2 || dragged || heroFocused) return@LaunchedEffect
+    LaunchedEffect(pager, pager.settledPage, dragged, heroFocused, reducedMotion) {
+        // The automatic carousel is nonessential movement. Android's Remove
+        // Animations setting disables it without hiding any F1 session cards.
+        if (count < 2 || dragged || heroFocused || reducedMotion) return@LaunchedEffect
         delay(CAROUSEL_MS)
         pager.animateScrollToPage(pager.currentPage + 1, animationSpec = tween(Motion.BROWSE_NAV_MS * 2, easing = EaseOut))
     }
@@ -1028,6 +1031,7 @@ private fun PageDots(count: Int, pager: PagerState, modifier: Modifier) {
 @Composable
 fun WeekendScreen(app: AppState, weekend: WeekendInfo, artKey: String?) {
     val content = app.weekendContent[weekend.meetingKey]
+    val fadeDurationMs = if (LocalReduceMotion.current) 0 else Motion.BROWSE_FADE_MS
     ArtPage(
         image = weekend.image,
         artKey = artKey,
@@ -1042,7 +1046,9 @@ fun WeekendScreen(app: AppState, weekend: WeekendInfo, artKey: String?) {
     ) {
         item { Spacer(Modifier.height(20.dp)) }
         item {
-            AnimatedVisibility(content == null, enter = fadeIn(tween(Motion.BROWSE_FADE_MS)), exit = fadeOut(tween(Motion.BROWSE_FADE_MS))) {
+            AnimatedVisibility(content == null,
+                enter = fadeIn(tween(fadeDurationMs)),
+                exit = fadeOut(tween(fadeDurationMs))) {
                 Text("Loading sessions…", style = Type.subhead, modifier = Modifier.padding(horizontal = SidePadding))
             }
         }
