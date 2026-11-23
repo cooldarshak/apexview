@@ -35,6 +35,7 @@ class UpdaterTest {
         assertTrue(UpdateProgressPolicy.shouldPublish(.01f, -1f, 0))
         assertFalse(UpdateProgressPolicy.shouldPublish(.02f, .01f, 5))
         assertTrue(UpdateProgressPolicy.shouldPublish(.06f, .01f, 5))
+        assertFalse(UpdateProgressPolicy.shouldPublish(.059f, .01f, 5))
         assertTrue(UpdateProgressPolicy.shouldPublish(.02f, .01f, 250))
         assertTrue(UpdateProgressPolicy.shouldPublish(1f, .99f, 0))
         assertFalse(UpdateProgressPolicy.shouldPublish(1f, 1f, 500))

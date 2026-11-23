@@ -9,6 +9,21 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 752 fix Build 748-751 CI regression, preserve strict gate integrity
+
+Build 748 was NOT green: the real Android unit-test job completed
+**691 tests with exactly one failure** at
+`UpdaterTest.updateProgressOnlyReportsMeaningfulChangesToCompose:37`.
+`0.06f - 0.01f` rounds slightly below `0.05f`, causing the
+new 5% progress boundary to be skipped. The rule now accounts for
+single-precision quantization with a narrow 0.000001f tolerance;
+updates below 4.9% still fail the progress threshold. Extend the
+real JVM test to cover both exact boundary and sub-threshold cases.
+Keep all 16 release gates closed/open based on actual device
+acceptance, not merely green CI. Builds 749-751 inherit the same
+pre-fix unit test and are not release candidates. This is a
+source-level correctness repair; require latest CI green end-to-end.
+
 ## Build 751 preserve protected validation with zero-copy preflight resource accounting
 
 P0.2's rolling archive startup previously called
