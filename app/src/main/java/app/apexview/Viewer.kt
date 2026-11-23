@@ -1905,20 +1905,20 @@ private fun ClosedCaptionsSheet(app: AppState) {
                 )
             }
             choices.forEach { track ->
-                val selected = app.settings.subtitles && app.settings.captionLanguage == track.language
+                val isSelected = app.settings.subtitles && app.settings.captionLanguage == track.language
                 Row(
                     Modifier.fillMaxWidth()
                         .tvFocusRing()
-                        .semantics { role = Role.RadioButton; selected = selected }
+                        .semantics { role = Role.RadioButton; selected = isSelected }
                         .pressable { app.setCaptionLanguage(track.language) }
                         .heightIn(min = 56.dp)
                         .clip(RoundedCornerShape(16.dp))
-                        .background(if (selected) Ink.surfaceHigh else Color.Transparent)
+                        .background(if (isSelected) Ink.surfaceHigh else Color.Transparent)
                         .padding(horizontal = 16.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(track.label, style = Type.body, modifier = Modifier.weight(1f))
-                    if (selected) Text("Selected", style = Type.footnote.copy(color = Ink.accent))
+                    if (isSelected) Text("Selected", style = Type.footnote.copy(color = Ink.accent))
                 }
             }
             Text(
