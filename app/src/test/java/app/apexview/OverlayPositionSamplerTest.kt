@@ -189,4 +189,23 @@ class OverlayPositionSamplerTest {
         repeat(24) { j -> assertSame(original[j], sampler.sampleForDraw(1_500L)[j]) }
     }
 
+    @Test fun pausedLiveClockPublishesNewPositionsWhenMetadataArrivesAtSameTime() {
+        val t = SessionTiming(type = "Race", drivers = emptyMap(),
+            tracks = mapOf("44" to DriverTrack(
+                longArrayOf(1_000L, 2_000L),
+                floatArrayOf(10f, 20f), floatArrayOf(30f, 40f), 2)),
+            states = emptyMap(), outline = floatArrayOf(), hasStartFinish = false,
+            corners = emptyList(), startUtcMs = 1_000L, live = true)
+        val sampler = OverlayPositionSampler(t)
+        // Live position history has not yet reached this paused video clock.
+        t.positionsFromUtc = 2_000_000L
+        assertTrue(sampler.sampleForDraw(1_100L).isEmpty())
+        // A new live/archive update supplies history without advancing playback.
+        t.positionsFromUtc = null
+        val visible = sampler.sampleForDraw(1_100L)
+        assertEquals(listOf("44"), visible.map { it.number })
+        t.positionsFromUtc = 2_000_000L
+        assertTrue("stale dots must disappear at the same playhead", sampler.sampleForDraw(1_100L).isEmpty())
+    }
+
 }

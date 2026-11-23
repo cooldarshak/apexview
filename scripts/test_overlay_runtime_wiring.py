@@ -28,7 +28,15 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertNotIn("pulse, caption, stop?.number", track)
         self.assertIn('OverlayPerformanceProbe("track-flag-pulse-draw")', track)
         self.assertIn('OverlayPerformanceProbe("edge-flag-pulse-draw")', track)
-        self.assertIn("OverlayMotionSource(drawClock, drawSampler::sample)", track)
+        # Both real map variants now use the allocation-bounded draw-only cursor.
+        # UI hit targets and Cast sender must continue publishing immutable snapshots.
+        self.assertEqual(track.count("OverlayMotionSource(drawClock, drawSampler::sampleForDraw)"), 2)
+        self.assertEqual(track.count("it.drawCarsAt(it.positionMs.value)"), 2)
+        sampler = source("OverlayPositionSampler.kt")
+        self.assertIn("fun sampleForDraw(atMs: Long)", sampler)
+        self.assertIn("private val drawCars = ArrayList<OverlayDrawCar>(entries.size)", sampler)
+        self.assertIn("fun sample(atMs: Long): List<Car>", sampler)
+        self.assertIn("updateForDraw(movingCars, timing.geometry)", track)
 
     def test_map_draw_phase_resolves_safety_leader_once_per_static_epoch(self):
         track = source("TrackMap.kt")
@@ -99,7 +107,16 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("F1_SCENE_UI_BOUND", viewer)
         self.assertIn("AndroidView(factory = { context ->", viewer)
         self.assertIn("ProtectedDecoderSceneView(context, protectedOutput = secureRolling)", viewer)
-        self.assertIn("it.bind(host.player, scene, app.playbackSpeed)", viewer)
+        self.assertEqual(viewer.count(
+            "it.bind(host.player, scene, app.playbackSpeed, host.sceneCodecCorrelation)"
+        ), 2)
+        host = source("FeedPlayer.kt")
+        self.assertIn("sceneCodecCorrelation.onCodecFrame(", host)
+        for renderer in ("scene/SingleDecoderSceneView.kt", "scene/ProtectedDecoderSceneView.kt"):
+            scene = source(renderer)
+            self.assertIn("codecCorrelation?.onTextureLatched(", scene)
+            self.assertIn("codecCorrelation?.onSwapSubmitted(", scene)
+            self.assertIn("codecCorrelation?.snapshotAndReset()", scene)
 
     def test_clear_live_and_archive_all_register_host_before_atlas_publication(self):
         app = source("AppState.kt")
@@ -131,6 +148,9 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("raw-atlas fallback is disabled", receiver)
         self.assertIn("onFirstFrame = { if (this@PitwallReceiverActivity.player === current", receiver)
         self.assertIn("SCENE_RENDERING_CONFIRMED", receiver)
+        self.assertIn("next.setVideoFrameMetadataListener(", receiver)
+        self.assertIn("correlation.onCodecFrame(", receiver)
+        self.assertEqual(receiver.count("bind(current, model, desiredSpeed, sceneCodecCorrelation)"), 4)
         self.assertIn("windows=${model?.windows?.size ?: 1}", receiver)
 
     def test_native_rendernode_instrumentation_is_run_in_ci(self):

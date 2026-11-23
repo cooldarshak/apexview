@@ -106,6 +106,7 @@ internal class OverlayPositionSampler(
     private var seeks = 0L
     private val drawCars = ArrayList<OverlayDrawCar>(entries.size)
     private var lastDrawMs = Long.MIN_VALUE
+    private var lastDrawBeforePositions = false
 
     /**
      * Called ONLY from the map's Canvas draw lambda. Entries remain mutable for this
@@ -113,10 +114,14 @@ internal class OverlayPositionSampler(
      * Independent samplers own the 10Hz immutable hit-target and Cast publication.
      */
     fun sampleForDraw(atMs: Long): List<OverlayDrawCar> {
-        if (lastDrawMs == atMs) return drawCars
+        // Even while paused, new timing metadata can make positions available
+        // without moving the playhead. Follow the immutable sampler's policy.
+        val before = timing.beforePositions(atMs)
+        if (lastDrawMs == atMs && lastDrawBeforePositions == before) return drawCars
         lastDrawMs = atMs
+        lastDrawBeforePositions = before
         drawCars.clear()
-        if (timing.beforePositions(atMs)) return drawCars
+        if (before) return drawCars
         for (entry in entries) {
             if (timing.laps[entry.id]?.retiredAt(atMs) == true) continue
             if (!entry.cursor.sample(atMs)) continue
