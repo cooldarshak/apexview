@@ -11,6 +11,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.Shapes
@@ -125,7 +126,10 @@ fun AppTheme(content: @Composable () -> Unit) {
 
 @Composable
 private fun Theme(content: @Composable () -> Unit) {
-    MaterialTheme(
+    // Genuine stable Material 3 Expressive theme, including the platform's
+    // expressive shape/motion defaults. Keep Pitwall's high-contrast racing palette
+    // and app-owned reduced-motion settings; video rendering is unchanged.
+    MaterialExpressiveTheme(
         colorScheme = darkColorScheme(
             background = Ink.background,
             surface = Ink.surface,
