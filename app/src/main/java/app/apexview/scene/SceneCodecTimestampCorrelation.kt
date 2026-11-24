@@ -17,6 +17,17 @@ internal class SceneCodecTimestampCorrelation {
     }
     @Volatile var active = false
     private var surfaceOwner: Any? = null
+    private val pipelineHealth = ScenePipelineHealth()
+
+    fun allowsAcceleratedOutput(nowNs: Long): Boolean = active && pipelineHealth.allows(nowNs)
+
+    @Synchronized fun recordPipelineWindow(owner: Any?, nowNs: Long, durationNs: Long,
+                                            expectedFps: Float, metrics: SceneFramePacing.Snapshot) {
+        if (owner == null || surfaceOwner !== owner || !active) return
+        pipelineHealth.observe(nowNs, durationNs, expectedFps, metrics.latched,
+            metrics.presented, metrics.callbackGaps, metrics.displayGaps, metrics.slowSwaps,
+            metrics.slowDraws, metrics.slowLatches, metrics.unavailableDraws)
+    }
 
     // The Media3 application looper installs the actual decoder output surface.
     // A retired renderer's GL callbacks must not reset or consume a newer surface's data.
@@ -196,6 +207,7 @@ internal class SceneCodecTimestampCorrelation {
 
     /** A seek, rendition change or EGL epoch must never reuse old PTS mappings. */
     @Synchronized fun reset() {
+        pipelineHealth.reset()
         pts.fill(Long.MIN_VALUE)
         releases.fill(0)
         callbacks.fill(0)

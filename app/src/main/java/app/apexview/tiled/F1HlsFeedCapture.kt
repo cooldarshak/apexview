@@ -97,20 +97,49 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             require(playlists.none { it.tags.any { tag -> tag.startsWith("#EXT-X-KEY:") && !tag.contains("METHOD=NONE") } }) {
                 "HLS declares protection but the selected CMAF track is clear"
             }
-            val audioUris = mapArchiveFeedsBounded(indexedOffers) { (index, offer) ->
+            val clockPlaylist = playlists[selected.indexOfFirst { it.feed.label == clockLabel }.coerceAtLeast(0)]
+            val audioOffers = mapArchiveFeedsBounded(indexedOffers) { (index, offer) ->
                 val separate = offer.master?.audios.orEmpty().filter { it.url != null &&
                     (offer.audioGroupId == null || it.groupId == offer.audioGroupId) }
                     .sortedWith(compareByDescending<HlsMultivariantPlaylist.Rendition> { it.format.language == commentary }
                         .thenByDescending { (it.format.selectionFlags and C.SELECTION_FLAG_DEFAULT) != 0 }).firstOrNull()?.url
-                if (commentary != null && separate != null && offer.feed.label == clockLabel) {
-                    val audioPlaylist = parse(separate, offer.master) as? HlsMediaPlaylist
-                        ?: throw PermanentCaptureException("Archive audio rendition is not a media playlist")
-                    val clock = playlists[index]
-                    require(audioPlaylist.hasEndTag && audioPlaylist.segments.isNotEmpty() &&
-                        kotlin.math.abs(audioPlaylist.durationUs - clock.durationUs) <= clock.targetDurationUs &&
-                        (!audioPlaylist.hasProgramDateTime || !clock.hasProgramDateTime ||
-                            kotlin.math.abs(audioPlaylist.startTimeUs - clock.startTimeUs) <= 250_000L)) {
-                        "Archive native audio and composed video timelines are incompatible"
+                // Preserve the original mandatory primary-audio validation. For
+                // alternate separate renditions, failed or uncertain inspection
+                // only excludes the source from stable merging, not audio selection.
+                var stable = false
+                if (separate != null) {
+                    val mandatory = commentary != null && offer.feed.label == clockLabel
+                    val audioPlaylist = try {
+                        parse(separate, offer.master) as? HlsMediaPlaylist
+                            ?: throw PermanentCaptureException("Archive audio rendition is not a media playlist")
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        coroutineContext.ensureActive()
+                        if (mandatory) throw failure
+                        android.util.Log.w("ApexviewPlaybackOffer",
+                            "ARCHIVE_AUDIO_STABLE_PROBE_FAILED type=${failure.javaClass.simpleName}")
+                        null
+                    }
+                    if (audioPlaylist != null) {
+                        val clock = playlists[index]
+                        if (mandatory) require(audioPlaylist.hasEndTag && audioPlaylist.segments.isNotEmpty() &&
+                            kotlin.math.abs(audioPlaylist.durationUs - clock.durationUs) <= clock.targetDurationUs &&
+                            (!audioPlaylist.hasProgramDateTime || !clock.hasProgramDateTime ||
+                                kotlin.math.abs(audioPlaylist.startTimeUs - clock.startTimeUs) <= 250_000L)) {
+                            "Archive native audio and composed video timelines are incompatible"
+                        }
+                        stable = audioPlaylist.hasEndTag && audioPlaylist.segments.isNotEmpty() &&
+                            audioPlaylist.segments.none { segment ->
+                                segment.hasGapTag || segment.drmInitData != null ||
+                                    segment.fullSegmentEncryptionKeyUri != null ||
+                                    segment.initializationSegment?.fullSegmentEncryptionKeyUri != null ||
+                                    segment.initializationSegment?.drmInitData != null
+                            } && audioPlaylist.tags.none { it.startsWith("#EXT-X-KEY:") && !it.contains("METHOD=NONE") } &&
+                            ArchiveAudioSelectionPlan.sameTimeline(
+                                audioPlaylist.startTimeUs.takeIf { audioPlaylist.hasProgramDateTime },
+                                clockPlaylist.startTimeUs.takeIf { clockPlaylist.hasProgramDateTime },
+                                audioPlaylist.durationUs, clockPlaylist.durationUs)
                     }
                 }
                 // Silent video tiles need no audio rendition. Some HLS variants instead carry
@@ -120,8 +149,11 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                     offer.format?.codecs.orEmpty().split(',').any { it.trim().startsWith("mp4a") }
                 val audio = separate ?: if (muxed) offer.uri else null
                 android.util.Log.i("ApexviewPlaybackOffer", "${offer.feed.label}: audio=${if (separate != null) "SEPARATE" else if (muxed) "MUXED_ADVERTISED" else "NOT_ADVERTISED"}")
-                audio?.let { offer.feed.label to it }
-            }.filterNotNull().toMap()
+                audio?.let { Triple(offer.feed.label, it, stable) }
+            }.filterNotNull()
+            val audioUris = audioOffers.associate { it.first to it.second }
+            val stableAudioUris = audioOffers.filter { it.third }.map { it.second }.toSet()
+            android.util.Log.i("ApexviewPlaybackOffer", "ARCHIVE_AUDIO_STABLE_ELIGIBLE count=${stableAudioUris.size}")
             val audio = audioUris[clockLabel] ?: if (commentary == null) null else {
                 // Let the ordinary authorized Media3 HLS path resolve the selected feed's
                 // audio when the selected variant doesn't advertise a separate rendition.
@@ -136,7 +168,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 requireNotNull(playlists[i].segments[probeIndexes[i]].initializationSegment)) }
             try {
                 session = HevcArchiveVodSession(reader, owned, clockLabel, maximumOutputWidth = maximumOutputWidth,
-                    audioUri = audio, audioUris = selectableAudioUris)
+                    audioUri = audio, audioUris = selectableAudioUris, stableAudioUris = stableAudioUris)
                 session.prepare(positionMs)
                 coroutineContext.ensureActive()
                 acquired = session

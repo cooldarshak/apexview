@@ -39,7 +39,8 @@ internal object HevcTizenGridComposer {
         val fullPoc: Long,
         val sampleData: ByteArray,
         val vclNals: List<ByteArray>,
-        val evidence: List<SliceEvidence>
+        val evidence: List<SliceEvidence>,
+        val nalParts: List<HevcSliceHeaderRewriter.Parts> = emptyList()
     )
 
     data class Result(
@@ -134,8 +135,12 @@ internal object HevcTizenGridComposer {
         frameRateDenominator: Int = 1,
         outputNalLengthSize: Int = 4,
         includeAnnexBOutput: Boolean = true,
-        emitSampleData: Boolean = true
+        emitSampleData: Boolean = true,
+        emitNalParts: Boolean = false
     ): Result {
+        require(!emitNalParts || (!includeAnnexBOutput && !emitSampleData)) {
+            "Borrowed NAL parts require the synchronous clear CMAF writer"
+        }
         require(feedNals.size >= 2) { "At least two independent source feeds are required" }
         require(outputNalLengthSize in 1..4) { "Output NAL length size must be between 1 and 4" }
         val feeds = feedNals.mapIndexed { index, nals -> parseFeed(index, nals) }
@@ -283,6 +288,7 @@ internal object HevcTizenGridComposer {
             selectedByFrame.forEachIndexed { frameIndex, selectedSlices ->
                 checkNotInterrupted()
                 val vclOutput = ArrayList<ByteArray>(orderedSelections.size)
+                val partsOutput = ArrayList<HevcSliceHeaderRewriter.Parts>(orderedSelections.size)
                 val evidence = ArrayList<SliceEvidence>(orderedSelections.size)
                 try {
                     selectedSlices.forEachIndexed { outputIndex, located ->
@@ -294,31 +300,32 @@ internal object HevcTizenGridComposer {
                         val filterOverride = if (canGateLoopFilter) {
                             located.header.loopFilterAcrossSlices == true && ownEdges
                         } else null
-                        val rewritten = HevcSliceHeaderRewriter.rewrite(
-                            nal = located.nal.backing,
+                        val rewritten = HevcSliceHeaderRewriter.rewriteClearParts(
+                            nal = located.nal,
                             sourceSps = feed.sps,
                             sourcePps = feed.pps,
                             outputSps = outputSps,
                             outputPps = outputPps,
                             destinationAddress = outputAddress,
-                            clearNalBytes = located.nal.size,
                             loopFilterAcrossSlicesOverride = filterOverride,
-                            parsedSourceHeader = located.header,
-                            sourceOffset = located.nal.offset,
-                            sourceLength = located.nal.length
+                            parsedSourceHeader = located.header
                         )
-                        // If verification throws, the new NAL still belongs to this scope.
+                        var ownedNal: ByteArray? = null
                         try {
-                            val verifiedHeader = HevcSliceHeaderParser.parse(
-                                rewritten.nal, outputSps, outputPps
-                            )
+                            // Legacy Annex-B and sample callers keep their single owned output.
+                            // Clear CMAF verifies the same bytes with bounded-prefix/full fallback.
+                            ownedNal = if (emitNalParts) null else rewritten.materialize()
+                            val verifiedHeader = ownedNal?.let {
+                                HevcSliceHeaderParser.parse(it, outputSps, outputPps)
+                            } ?: rewritten.verifyHeader(outputSps, outputPps)
                             require(verifiedHeader.sliceSegmentAddress == outputAddress) {
                                 "Output slice address failed round-trip verification"
                             }
                             require(verifiedHeader.firstSliceSegmentInPicture == (outputAddress == 0)) {
                                 "Output first-slice flag does not match its output CTB address"
                             }
-                            vclOutput += rewritten.nal
+                            if (emitNalParts) partsOutput += rewritten
+                            else vclOutput += requireNotNull(ownedNal)
                             evidence += SliceEvidence(
                                 feedIndex = selection.feedIndex,
                                 sourceTileIndex = selection.sourceTileIndex,
@@ -329,12 +336,14 @@ internal object HevcTizenGridComposer {
                                 copiedTailBytes = rewritten.copiedTailBytes,
                                 loopFilterAcrossSlices = verifiedHeader.loopFilterAcrossSlices
                             )
-                        } catch (failure: Throwable) {
-                            if (vclOutput.none { it === rewritten.nal }) rewritten.nal.fill(0)
-                            throw failure
+                        } finally {
+                            // The frame owns retained parts; every other path owns
+                            // only a materialized output and can wipe the short header.
+                            ownedNal?.let { bytes -> if (vclOutput.none { it === bytes }) bytes.fill(0) }
+                            if (partsOutput.none { it === rewritten }) rewritten.close()
                         }
                     }
-                    require(vclOutput.isNotEmpty()) { "Composed output picture contains no VCL NAL units" }
+                    require(vclOutput.isNotEmpty() || partsOutput.isNotEmpty()) { "Composed output picture contains no VCL NAL units" }
                     val sample = if (emitSampleData) lengthPrefix(vclOutput, outputNalLengthSize)
                         else ByteArray(0)
                     val retainRewritten = includeAnnexBOutput || !emitSampleData
@@ -344,11 +353,13 @@ internal object HevcTizenGridComposer {
                         sampleData = sample,
                         // Keep only one payload representation when assembling CMAF.
                         vclNals = if (retainRewritten) vclOutput else emptyList(),
-                        evidence = evidence
+                        evidence = evidence,
+                        nalParts = partsOutput
                     )
                     if (!retainRewritten) vclOutput.forEach { it.fill(0) }
                 } catch (failure: Throwable) {
                     vclOutput.forEach { it.fill(0) }
+                    partsOutput.forEach { it.close() }
                     throw failure
                 }
             }
@@ -380,6 +391,7 @@ internal object HevcTizenGridComposer {
             outputPictures.forEach { picture ->
                 picture.sampleData.fill(0)
                 picture.vclNals.forEach { it.fill(0) }
+                picture.nalParts.forEach { it.close() }
             }
             throw failure
         }

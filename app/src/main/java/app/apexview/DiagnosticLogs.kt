@@ -34,11 +34,12 @@ object DiagnosticLogs {
     private var process: java.lang.Process? = null
     private var writer: BufferedWriter? = null
     private var bytes = 0L
-    private var generation = 0
+    @Volatile private var generation = 0
     private var segment = 0
     private var captureId = ""
     private var dirty = false
     private val history = DiagnosticHistory()
+    private val appendQueue = DiagnosticAppendQueue()
     @Volatile var recording = false
         private set
     var status by mutableStateOf("Logging is off")
@@ -55,16 +56,18 @@ object DiagnosticLogs {
         if (enabled) start(context.applicationContext) else stop(context.applicationContext)
     }
 
-    private fun publishStatus(value: String) { main.post { status = value } }
+    private fun publishStatus(value: String, token: Int) {
+        main.post { if (token == generation) status = value }
+    }
 
     private fun start(context: Context) {
         val token: Int
         synchronized(lock) {
             if (worker?.isAlive == true) return
             token = ++generation
+            publishStatus("Starting logging…", token)
             worker = Thread({ capture(context, token) }, "PitwallDiagnostics").apply { isDaemon = true; start() }
         }
-        publishStatus("Starting logging…")
     }
 
     private fun capture(context: Context, token: Int) {
@@ -80,20 +83,21 @@ object DiagnosticLogs {
                 history.clear()
                 openFile(context)
                 flushLocked()
+                appendQueue.start(token)
                 recording = true
             }
             timer.scheduleAtFixedRate(timerTask {
                 synchronized(lock) {
                     if (token != generation) return@synchronized
                     try {
-                        flushSummariesLocked(context)
+                        flushSummariesLocked(context, token)
                     } catch (e: Exception) {
                         Log.e("PitwallDiagnostics", "Periodic write failed", e)
                         child.destroy()
                     }
                 }
             }, 1_000, 1_000)
-            publishStatus("Recording to Download/Pitwall")
+            publishStatus("Recording to Download/Pitwall", token)
             if (Build.VERSION.SDK_INT >= 30) {
                 runCatching {
                     val manager = context.getSystemService(android.app.ActivityManager::class.java)
@@ -123,18 +127,20 @@ object DiagnosticLogs {
             synchronized(lock) {
                 if (token == generation) {
                     writeLocked(context, "CAPTURE_ENDED utc=${Instant.now()}\n")
-                    flushSummariesLocked(context)
-                    publishStatus("Log capture stopped. Turn off and on to retry.")
+                    flushSummariesLocked(context, token, closeQueue = true)
+                    publishStatus("Log capture stopped. Turn off and on to retry.", token)
                 }
             }
         } catch (e: Exception) {
-            synchronized(lock) { if (token == generation) publishStatus("Logging error: ${e.javaClass.simpleName}. Turn off and on to retry.") }
+            synchronized(lock) { if (token == generation) publishStatus("Logging error: ${e.javaClass.simpleName}. Turn off and on to retry.", token) }
             Log.e("PitwallDiagnostics", "Log capture failed", e)
         } finally {
             timer.cancel()
             synchronized(lock) {
                 if (token == generation) {
                     recording = false
+                    runCatching { if (writer != null) flushSummariesLocked(context, token, closeQueue = true) }
+                    appendQueue.drain(token, close = true)
                     runCatching { writer?.close() }; writer = null
                     process?.destroy(); process = null
                     worker = null
@@ -189,7 +195,11 @@ object DiagnosticLogs {
         dirty = false
     }
 
-    private fun flushSummariesLocked(context: Context) {
+    private fun flushSummariesLocked(context: Context, token: Int, closeQueue: Boolean = false) {
+        val pending = appendQueue.drain(token, close = closeQueue)
+        pending.lines.forEach { writeLocked(context, "$it\n") }
+        if (pending.rejected > 0)
+            writeLocked(context, "DIAGNOSTIC_DIRECT_QUEUE_OVERFLOW rejected=${pending.rejected}\n")
         history.drain().forEach { writeLocked(context, "$it\n") }
         flushLocked()
     }
@@ -205,30 +215,42 @@ object DiagnosticLogs {
         history.retain(safe.trimEnd())
     }
 
-    /** Used for diagnostics outside logcat and the uncaught-exception handler. */
+    /** Normal producers never take the disk writer lock. Fatal crash capture is durable best effort. */
     fun append(context: Context, text: String) {
+        if (!text.startsWith("FATAL EXCEPTION")) {
+            appendQueue.offer(text)
+            return
+        }
         synchronized(lock) {
             if (writer == null) return
-            runCatching { writeLocked(context.applicationContext, "$text\n"); flushLocked() }
+            runCatching {
+                flushSummariesLocked(context.applicationContext, generation)
+                writeLocked(context.applicationContext, "$text\n")
+                flushLocked()
+            }
         }
     }
 
     private fun stop(context: Context) {
+        val stoppedToken: Int
         synchronized(lock) {
-            ++generation
+            val oldToken = generation
+            stoppedToken = ++generation
             recording = false
             runCatching {
                 if (writer != null) {
+                    flushSummariesLocked(context, oldToken, closeQueue = true)
                     writeLocked(context, "=== Logging stopped ${Instant.now()} ===\n")
-                    flushSummariesLocked(context)
+                    flushLocked()
                 }
             }
+            appendQueue.drain(oldToken, close = true)
             runCatching { writer?.close() }
             writer = null
             process?.destroy(); process = null
             worker = null
         }
-        publishStatus("Logging is off")
+        publishStatus("Logging is off", stoppedToken)
     }
 
 }

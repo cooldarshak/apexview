@@ -1476,6 +1476,9 @@ class AppState(
         // Only changes Media3's text track selector when preference/owner changed.
         // Explicitly preserve the video decoder budget in every rendering mode.
         applyCaptionPreference()
+        // The active finite archive owner also serves the local Cast relay.
+        // Restrict only speculative work; never change its chosen rendition.
+        protectedCompositionHost?.feed?.updateArchiveThermalStatus(thermal)
         if (castPlaybackHandedOff) {
             tiles.forEach { it.feed.suspendForRemotePlayback(true) }
             return
@@ -6516,12 +6519,17 @@ class AppState(
         // window is not extended by later requests, so scrubbing cannot starve.
         val expensive = nativeComposedCast != null || bakedCastSession != null ||
             seekCastRestartJob?.isActive == true || composedArchiveOriginMs != null ||
+            singleDecoderScenePlayer?.isArchiveVodPlayback == true ||
             (archiveCompositionStarting && f1DashCaptureJob?.isActive == true)
         if (!expensive && pendingControlSeek.targetMs == null) {
             seekToNow(targetMs)
             return
         }
         val ownerContent = leaderTile()?.contentId ?: return
+        // Cancel unrelated speculative clear archive work at the user's latest
+        // scrub target, not after the 80ms coalescing delay. Media3 still seeks
+        // only once to the exact final position.
+        if (singleDecoderSceneActive) singleDecoderScenePlayer?.prioritizeArchiveSeek(targetMs)
         if (pendingControlSeek.offer(targetMs)) {
             controlSeekJob = scope.launch {
                 kotlinx.coroutines.delay(ControlSeekBatch.WINDOW_MS)

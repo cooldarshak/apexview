@@ -235,9 +235,12 @@ class ProductionWiringTests(unittest.TestCase):
         rewriter = contents("app/src/main/java/app/apexview/tiled/HevcSliceHeaderRewriter.kt")
         self.assertIn("HevcTizenGridComposer.composeNalSpans(", composer)
         self.assertIn("HevcBitstream.NalSpan(bytes, offset, nalLength)", composer)
-        self.assertIn("sourceOffset = located.nal.offset", grid)
-        self.assertIn("sourceLength = located.nal.length", grid)
-        self.assertIn("sourceOffset + sourceTailOffset, sourceOffset + sourceLength", rewriter)
+        self.assertIn("HevcSliceHeaderRewriter.rewriteClearParts(", grid)
+        self.assertIn("nal = located.nal", grid)
+        self.assertIn("false, nal.offset, nal.length", rewriter)
+        self.assertIn("tailStart = sourceOffset + sourceTailOffset", rewriter)
+        self.assertIn("output.put(backing, tailStart, copiedTailBytes)", rewriter)
+        self.assertIn("rewritten.verifyHeader(outputSps, outputPps)", grid)
         self.assertIn("(!preserveOpaqueCabacTail && clearNalBytes == sourceLength)", rewriter)
         self.assertIn("cache.readLease(number)", delivery)
         self.assertIn("session.segmentLease(number)", session)
@@ -267,6 +270,38 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("archiveSelectedAudioUri = audioUri", host)
         self.assertIn("archiveSelectedAudioUri = null", host)
 
+    def test_production_cadence_audio_seek_thermal_and_async_log_wiring(self):
+        prefix = "app/src/main/java/app/apexview/"
+        player = contents(prefix + "FeedPlayer.kt")
+        receiver = contents(prefix + "cast/local/PitwallReceiverActivity.kt")
+        self.assertIn("AdaptivePlaybackCadenceObserver(context, sceneCodecCorrelation)", player)
+        self.assertIn("AdaptivePlaybackCadenceObserver(this, correlation)", receiver)
+        self.assertIn("setReceiverOutputDisplay(displayOwner, displayId)", receiver)
+        for name in ("SingleDecoderSceneView", "ProtectedDecoderSceneView"):
+            renderer = contents(prefix + "scene/" + name + ".kt")
+            self.assertIn("recordPipelineWindow(input, now, now - lastLogNs", renderer)
+            self.assertIn("pipelineHealthy()", renderer)
+        self.assertIn("ArchiveAudioSelectionPlan.sameTimeline(", contents(prefix + "tiled/F1HlsFeedCapture.kt"))
+        self.assertIn("ArchiveAudioSelectionPlan.children(audioUri, session.stableAudioUris)", player)
+        self.assertIn("setOverrideForType(override)", player)
+        selection = player.split("internal fun selectArchiveAudio(", 1)[1].split("internal fun releaseArchiveOwnership", 1)[0]
+        self.assertLess(selection.index("applyArchiveAudioTrack(audio, player.currentTracks)"),
+                        selection.index("startArchiveVodPlayback("))
+        state = contents(prefix + "AppState.kt")
+        self.assertIn("singleDecoderScenePlayer?.isArchiveVodPlayback == true", state)
+        self.assertIn("singleDecoderScenePlayer?.prioritizeArchiveSeek(targetMs)", state)
+        self.assertIn("protectedCompositionHost?.feed?.updateArchiveThermalStatus(thermal)", state)
+        session = contents(prefix + "tiled/HevcArchiveVodSession.kt")
+        self.assertIn("ArchiveTimelineSearch.floorIndex(", session)
+        self.assertIn("ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, warmLimit)", session)
+        self.assertIn("candidate - number > warmLimit", session)
+        logs = contents(prefix + "DiagnosticLogs.kt")
+        self.assertIn("appendQueue.offer(text)", logs)
+        self.assertIn("appendQueue.drain(token, close = closeQueue)", logs)
+        self.assertIn("DIAGNOSTIC_DIRECT_QUEUE_OVERFLOW", logs)
+        self.assertIn('text.startsWith("FATAL EXCEPTION")', logs)
+        self.assertIn("if (token == generation) status = value", logs)
+
     def test_clear_and_protected_writers_remain_real_player_sources(self):
         session = contents("app/src/main/java/app/apexview/tiled/HevcArchiveVodSession.kt")
         clear = contents("app/src/main/java/app/apexview/tiled/HevcClearCmafGridComposer.kt")
@@ -274,7 +309,8 @@ class ProductionWiringTests(unittest.TestCase):
         source = contents("app/src/main/java/app/apexview/tiled/ProtectedHevcLiveDashSource.kt")
         viewer = contents("app/src/main/java/app/apexview/Viewer.kt")
         self.assertIn("HevcClearCmafGridComposer.compose(", session)
-        self.assertIn("HevcClearCmafFragmentWriter.writeNalSamples(", clear)
+        self.assertIn("HevcClearCmafFragmentWriter.writeNalParts(", clear)
+        self.assertIn("emitNalParts = true", clear)
         self.assertIn("ProtectedOutputHistoryPolicy.evictions(", protected)
         self.assertIn("takeOwnership = true", source)
         self.assertIn("ProtectedDecoderSceneView(", viewer)
@@ -392,7 +428,7 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("ThinningRenderersFactory(context, outputCadence)", player)
         self.assertIn("outputCadence.composedSingle = true", player)
         self.assertIn("outputCadence.composedSingle = false", player)
-        self.assertIn("composedSingle && canDisplayAll && thermalStatus in 0..1", policy)
+        self.assertIn("composedSingle && pipelineHealthy && canDisplayAll && thermalStatus in 0..1", policy)
         self.assertIn("if (speed <= 1.15f) return media.toFloat()", policy)
         # Codec/DRM producer must be released before wiping the CMAF source it
         # might still be reading; no DRM bypass or per-tile extra player.

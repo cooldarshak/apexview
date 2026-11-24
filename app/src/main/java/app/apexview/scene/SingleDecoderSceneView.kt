@@ -101,7 +101,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             "activeMode=${mode.modeId} activeHz=${mode.refreshRate} displayRefreshHz=$selectedDisplayHz sourceFps=$sourceFps speed=$playbackSpeed " +
             "effectiveFps=${SceneFrameRatePolicy.hint(sourceFps, playbackSpeed)} " +
             "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed,
-                selectedDisplayHz, runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE)} " +
+                selectedDisplayHz, runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE,
+                 pipelineHealthy())} " +
             "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
             "supportedModes=$available sameResolutionIntegralModes=$seamlessMatches " +
             "modeSwitchIssuedByApp=false physicalPresentation=NOT_MEASURED")
@@ -303,6 +304,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var failed = false
     private var rendered = 0L
     private var lastLogNs = 0L
+    private fun pipelineHealthy(): Boolean =
+        codecCorrelation?.allowsAcceleratedOutput(System.nanoTime()) == true
     @Volatile private var codecCorrelation: SceneCodecTimestampCorrelation? = null
     private val frameDemand = SceneFrameDemand()
     private val pacing = SceneFramePacing()
@@ -313,7 +316,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             val callbackStarted = System.nanoTime()
             if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
                     frameTimeNs, scene?.sourceFrameRate ?: 0.0, selectedDisplayHz,
-                    playbackSpeed, thermalForOutput())) {
+                    playbackSpeed, thermalForOutput(), pipelineHealthy())) {
                 pacing.onPacingDeferred()
                 Trace.beginSection("PitwallPacingDefer")
                 try { displayClock?.postFrameCallback(this) } finally { Trace.endSection() }
@@ -348,7 +351,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         if (Build.VERSION.SDK_INT < 30) return
         val surface = outputSurface ?: return
         val fps = SceneFrameRatePolicy.composedOutputHint(
-            scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz, thermalForOutput())
+            scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz, thermalForOutput(), pipelineHealthy())
         if (fps == hintedFrameRate) return
         try {
             if (Build.VERSION.SDK_INT >= 31) {
@@ -609,6 +612,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
             val metrics = pacing.snapshotAndReset()
+            val expectedFps = SceneFrameRatePolicy.composedOutputHint(
+                scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz,
+                thermalForOutput(), pipelineHealthy())
+            codecCorrelation?.recordPipelineWindow(input, now, now - lastLogNs, expectedFps, metrics)
             val correlation = codecCorrelation?.snapshotAndReset(input)
             // Five-second trace samples of GL stages, not video scanout.
             Trace.setCounter("PitwallTextureSceneLatched5s",
@@ -641,6 +648,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 "glQueueP95UpperMs=${metrics.glQueueDelays.percentileUpperMs(95)} " +
                 "glQueueMaxMs=${metrics.glQueueDelays.maxMs.toInt()} " +
                 "glThreadPriority=DISPLAY " +
+                "acceleratedPipelineHealthy=${pipelineHealthy()} expectedWindowFps=$expectedFps " +
                 "codecCorrelationOwned=${correlation != null} codecMatchSemantics=EXACT_PTS_OR_RELEASE " +
                 "codecFrameCallbacks=${correlation?.codecFrames ?: 0} " +
                 "codecPtsMatched=${correlation?.matchedLatches ?: 0} " +
@@ -696,6 +704,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         frameDemand.reset()
         cadenceGate.reset()
         pacing.reset()
+        lastLogNs = 0L
         stopBakedCastOnGl()
         saveClip()
         config = null

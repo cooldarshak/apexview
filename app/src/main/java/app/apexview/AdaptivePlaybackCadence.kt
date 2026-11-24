@@ -14,7 +14,8 @@ import android.os.SystemClock
  */
 internal object AdaptivePlaybackCadence {
     fun outputFps(source: Double, speed: Float, displayHz: Float,
-                  thermalStatus: Int, composedSingle: Boolean): Float {
+                  thermalStatus: Int, composedSingle: Boolean,
+                  pipelineHealthy: Boolean = true): Float {
         val media = source * speed
         if (!source.isFinite() || source <= 0.0 ||
             !speed.isFinite() || speed <= 0f || !media.isFinite() ||
@@ -25,7 +26,7 @@ internal object AdaptivePlaybackCadence {
         // more decoder frames just because a device advertises 120Hz capability.
         val canDisplayAll = displayHz.isFinite() && displayHz > 0f &&
             displayHz + 0.5f >= media && media <= 120.0
-        return if (composedSingle && canDisplayAll && thermalStatus in 0..1)
+        return if (composedSingle && pipelineHealthy && canDisplayAll && thermalStatus in 0..1)
             media.toFloat() else fallback
     }
 }
@@ -34,7 +35,10 @@ internal object AdaptivePlaybackCadence {
  * Decoder-thread observer, with max 1 query per second. Does not install
  * listeners, retain a View, alter display modes or own another codec.
  */
-internal class AdaptivePlaybackCadenceObserver(context: Context) {
+internal class AdaptivePlaybackCadenceObserver(
+    context: Context,
+    private val correlation: app.apexview.scene.SceneCodecTimestampCorrelation? = null,
+) {
     private val displayManager =
         context.applicationContext.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private val power =
@@ -62,6 +66,7 @@ internal class AdaptivePlaybackCadenceObserver(context: Context) {
             lastReadDisplayId = requestedDisplay
         }
         return AdaptivePlaybackCadence.outputFps(
-            sourceFps, speed, displayHz, thermalStatus, composedSingle)
+            sourceFps, speed, displayHz, thermalStatus, composedSingle,
+            pipelineHealthy = correlation?.allowsAcceleratedOutput(System.nanoTime()) == true)
     }
 }

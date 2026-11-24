@@ -37,4 +37,9 @@ class AdaptivePlaybackCadenceTest {
         assertEquals(listOf(75f, 75f, 50f, 50f, 50f, 75f),
             states.map { output(120f, it, true) })
     }
+    @Test fun unknownOrUnhealthyPipelineNeverPromotesEvenOnCool120HzDisplay() {
+        assertEquals(50f, AdaptivePlaybackCadence.outputFps(50.0, 1.5f, 120f, 0, true, false), 0f)
+        assertEquals(50f, AdaptivePlaybackCadence.outputFps(50.0, 1f, 120f, 0, true, false), 0f)
+        assertEquals(75f, AdaptivePlaybackCadence.outputFps(50.0, 1.5f, 120f, 0, true, true), 0f)
+    }
 }

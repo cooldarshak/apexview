@@ -19,9 +19,10 @@ internal object SceneFrameRatePolicy {
      * conflate the media clock with submitted pictures.
      */
     fun composedOutputHint(sourceFramesPerSecond: Double, playbackSpeed: Float = 1f,
-                           displayHz: Float = 0f, thermalStatus: Int = Int.MAX_VALUE): Float =
+                           displayHz: Float = 0f, thermalStatus: Int = Int.MAX_VALUE,
+                           pipelineHealthy: Boolean = true): Float =
         AdaptivePlaybackCadence.outputFps(sourceFramesPerSecond, playbackSpeed,
-            displayHz, thermalStatus, composedSingle = true)
+            displayHz, thermalStatus, composedSingle = true, pipelineHealthy = pipelineHealthy)
 
     /** Integral display-to-video cadence is a diagnostic, NOT observed scanout.
      * The Surface.setFrameRate policy remains seamless-only. */

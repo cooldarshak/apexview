@@ -88,7 +88,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             "sourceFps=$sourceFps speed=$playbackSpeed " +
             "effectiveFps=${SceneFrameRatePolicy.hint(sourceFps, playbackSpeed)} " +
             "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed,
-                selectedDisplayHz, runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE)} " +
+                selectedDisplayHz, runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE,
+                 pipelineHealthy())} " +
             "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
             "supportedModes=$available sameResolutionIntegralModes=$seamlessMatches " +
             "modeSwitchIssuedByApp=false physicalPresentation=NOT_MEASURED")
@@ -180,6 +181,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     private var failed = false
     private var rendered = 0L
     private var lastLogNs = 0L
+    private fun pipelineHealthy(): Boolean =
+        codecCorrelation?.allowsAcceleratedOutput(System.nanoTime()) == true
     // A one-second GL-looper scheduling probe distinguishes a delayed callback
     // from a fast GPU swap. It samples once per second, never once per frame.
     private var nextGlProbeExpectedNs = 0L
@@ -213,7 +216,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             val refreshHz = selectedDisplayHz
             if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
                 frameTimeNanos, scene?.sourceFrameRate ?: 0.0, refreshHz,
-                playbackSpeed, thermalForOutput())) {
+                playbackSpeed, thermalForOutput(), pipelineHealthy())) {
                 pacing.onPacingDeferred()
                 displayClock?.postFrameCallback(this)
                 return@guarded
@@ -469,7 +472,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         // authorized L3 scenes; unsupported OEM surfaces fail harmlessly.
         if (android.os.Build.VERSION.SDK_INT < 30) return
         val rate = SceneFrameRatePolicy.composedOutputHint(
-            scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz, thermalForOutput())
+            scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz, thermalForOutput(), pipelineHealthy())
         if (rate == appliedFrameRateHint) return
         runCatching {
             if (android.os.Build.VERSION.SDK_INT >= 31) {
@@ -546,6 +549,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
             val metrics = pacing.snapshotAndReset()
+            val expectedFps = SceneFrameRatePolicy.composedOutputHint(
+                scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz,
+                thermalForOutput(), pipelineHealthy())
+            codecCorrelation?.recordPipelineWindow(input, now, now - lastLogNs, expectedFps, metrics)
             val correlation = codecCorrelation?.snapshotAndReset(input)
             // Five-second trace samples of GL stages, not video scanout.
             Trace.setCounter("PitwallSurfaceSceneLatched5s",
@@ -559,7 +566,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "sourceFps=${model.sourceFrameRate} speed=$playbackSpeed " +
                 "effectiveFps=${model.sourceFrameRate * playbackSpeed} " +
                 "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(model.sourceFrameRate, playbackSpeed,
-                    selectedDisplayHz, thermalForOutput())} " +
+                    selectedDisplayHz, thermalForOutput(), pipelineHealthy())} " +
                 "intervalPresented=$intervalPresented intervalGaps45ms=$intervalLongGaps " +
                 "intervalSwapsOver18ms=$intervalSwapsOver18ms " +
                 "maxGapMs=$intervalLongestGapMs maxSwapMs=$intervalLongestSwapMs " +
@@ -584,6 +591,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "eglSwapP95UpperMs=${metrics.eglSwapDurations.percentileUpperMs(95)} " +
                 "choreographerDelayP95UpperMs=${metrics.callbackDelays.percentileUpperMs(95)} " +
                 "glQueueP95UpperMs=${metrics.glQueueDelays.percentileUpperMs(95)} " +
+                "acceleratedPipelineHealthy=${pipelineHealthy()} expectedWindowFps=$expectedFps " +
                 "codecCorrelationOwned=${correlation != null} codecMatchSemantics=EXACT_PTS_OR_RELEASE " +
                 "codecFrameCallbacks=${correlation?.codecFrames ?: 0} " +
                 "codecPtsMatched=${correlation?.matchedLatches ?: 0} " +
@@ -631,6 +639,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         frameDemand.reset()
         cadenceGate.reset()
         pacing.reset()
+        lastLogNs = 0L
         nextGlProbeExpectedNs = 0L
         decoderTexture?.setOnFrameAvailableListener(null)
         input?.let { Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_RELEASE " +

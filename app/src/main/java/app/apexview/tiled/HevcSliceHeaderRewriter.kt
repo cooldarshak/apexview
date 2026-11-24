@@ -18,6 +18,71 @@ internal object HevcSliceHeaderRewriter {
         val reencodedClearPayloadBytes: Int
     )
 
+    /**
+     * The new header is owned; the unchanged CABAC tail is borrowed from an
+     * already validated input NAL. Only the clear CMAF writer may retain this
+     * view, synchronously until its final fragment has been written.
+     */
+    internal class Parts internal constructor(
+        private val prefix: ByteArray,
+        private val backing: ByteArray,
+        private val tailStart: Int,
+        val copiedTailBytes: Int,
+        val destinationAddress: Int,
+        val sourceHeaderBytes: Int,
+        val outputHeaderBytes: Int,
+        val sourceTailOffset: Int,
+        val reencodedClearPayloadBytes: Int
+    ) : AutoCloseable {
+        private var closed = false
+        val size = Math.addExact(prefix.size, copiedTailBytes)
+        init {
+            require(prefix.size >= 2 && tailStart >= 0 && copiedTailBytes > 0 &&
+                tailStart <= backing.size && copiedTailBytes <= backing.size - tailStart) {
+                "Rewritten HEVC tail range is out of bounds"
+            }
+        }
+
+        fun materialize(limit: Int = size): ByteArray {
+            check(!closed)
+            require(limit in 1..size)
+            val bytes = ByteArray(limit)
+            val prefixCount = minOf(limit, prefix.size)
+            prefix.copyInto(bytes, 0, 0, prefixCount)
+            if (limit > prefixCount)
+                backing.copyInto(bytes, prefixCount, tailStart, tailStart + limit - prefixCount)
+            return bytes
+        }
+
+        fun writeTo(output: java.nio.ByteBuffer) {
+            check(!closed)
+            output.put(prefix)
+            output.put(backing, tailStart, copiedTailBytes)
+        }
+
+        /** Preserve the original parser's 8194-byte fast path and full fallback. */
+        fun verifyHeader(sps: HevcParameterSets.SpsMetadata,
+                         pps: HevcParameterSets.PpsMetadata): HevcSliceHeaderParser.SliceHeader {
+            val length = minOf(size, 8194)
+            val prefixBytes = materialize(length)
+            try {
+                return try {
+                    HevcSliceHeaderParser.parse(prefixBytes, sps, pps)
+                } catch (failure: IllegalArgumentException) {
+                    if (length == size) throw failure
+                    val all = materialize()
+                    try { HevcSliceHeaderParser.parse(all, sps, pps) } finally { all.fill(0) }
+                }
+            } finally { prefixBytes.fill(0) }
+        }
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            prefix.fill(0) // Source ownership stays with the original CMAF caller.
+        }
+    }
+
     private data class ClearRbsp(
         val bytes: ByteArray,
         val sourceTailOffset: Int
@@ -38,6 +103,45 @@ internal object HevcSliceHeaderRewriter {
         sourceOffset: Int = 0,
         sourceLength: Int = nal.size
     ): Result {
+        val parts = rewriteToParts(nal, sourceSps, sourcePps, outputSps, outputPps,
+            destinationAddress, clearNalBytes, loopFilterAcrossSlicesOverride,
+            parsedSourceHeader, preserveOpaqueCabacTail, sourceOffset, sourceLength)
+        try {
+            return Result(parts.materialize(), parts.destinationAddress, parts.sourceHeaderBytes,
+                parts.outputHeaderBytes, parts.sourceTailOffset, parts.copiedTailBytes,
+                parts.reencodedClearPayloadBytes)
+        } finally { parts.close() }
+    }
+
+    fun rewriteClearParts(
+        nal: HevcBitstream.NalSpan,
+        sourceSps: HevcParameterSets.SpsMetadata,
+        sourcePps: HevcParameterSets.PpsMetadata,
+        outputSps: HevcParameterSets.SpsMetadata,
+        outputPps: HevcParameterSets.PpsMetadata,
+        destinationAddress: Int,
+        loopFilterAcrossSlicesOverride: Boolean?,
+        parsedSourceHeader: HevcSliceHeaderParser.SliceHeader
+    ): Parts = rewriteToParts(nal.backing, sourceSps, sourcePps, outputSps, outputPps,
+        destinationAddress, nal.length, loopFilterAcrossSlicesOverride, parsedSourceHeader,
+        false, nal.offset, nal.length)
+
+
+    private fun rewriteToParts(
+        nal: ByteArray,
+        sourceSps: HevcParameterSets.SpsMetadata,
+        sourcePps: HevcParameterSets.PpsMetadata,
+        outputSps: HevcParameterSets.SpsMetadata,
+        outputPps: HevcParameterSets.PpsMetadata,
+        destinationAddress: Int,
+        clearNalBytes: Int = nal.size,
+        loopFilterAcrossSlicesOverride: Boolean? = null,
+        parsedSourceHeader: HevcSliceHeaderParser.SliceHeader? = null,
+        /** Preserve opaque CBCS CABAC bytes when only the byte-aligned slice header is clear. */
+        preserveOpaqueCabacTail: Boolean = false,
+        sourceOffset: Int = 0,
+        sourceLength: Int = nal.size
+    ): Parts {
         val nalHeader = HevcBitstream.readNalHeader(nal, sourceOffset, sourceLength)
         // Range borrowing is for the independently validated clear CMAF path.
         // Protected callers retain the original complete-NAL / clear-prefix contract.
@@ -194,14 +298,13 @@ internal object HevcSliceHeaderRewriter {
             reencodedCabacBytes = 2
         }
         require(sourceTailOffset in 2 until sourceLength) { "CABAC tail is outside the source NAL" }
-        val outputNal = ByteArray(Math.addExact(2 + escapedHeaderAndPayloadPrefix.size, sourceLength - sourceTailOffset))
-        nal.copyInto(outputNal, 0, sourceOffset, sourceOffset + 2)
-        escapedHeaderAndPayloadPrefix.copyInto(outputNal, 2)
-        nal.copyInto(outputNal, 2 + escapedHeaderAndPayloadPrefix.size,
-            sourceOffset + sourceTailOffset, sourceOffset + sourceLength)
-
-        return Result(
-            nal = outputNal,
+        val prefix = ByteArray(Math.addExact(2, escapedHeaderAndPayloadPrefix.size))
+        nal.copyInto(prefix, 0, sourceOffset, sourceOffset + 2)
+        escapedHeaderAndPayloadPrefix.copyInto(prefix, 2)
+        return Parts(
+            prefix = prefix,
+            backing = nal,
+            tailStart = sourceOffset + sourceTailOffset,
             destinationAddress = destinationAddress,
             sourceHeaderBytes = sourceHeaderBytes,
             outputHeaderBytes = outputHeaderRbsp.size,

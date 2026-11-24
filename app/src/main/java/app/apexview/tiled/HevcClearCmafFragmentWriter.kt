@@ -27,6 +27,13 @@ internal object HevcClearCmafFragmentWriter {
         val sampleFlags: Long
     )
 
+    data class NalPartsSample(
+        val nals: List<HevcSliceHeaderRewriter.Parts>,
+        val durationTicks: Long,
+        val compositionTimeOffsetTicks: Long,
+        val sampleFlags: Long
+    )
+
     private class EncodedSample(
         val size: Int,
         val durationTicks: Long,
@@ -77,6 +84,41 @@ internal object HevcClearCmafFragmentWriter {
                         output.put(((nal.size ushr (shift * 8)) and 0xff).toByte())
                     }
                     output.put(nal)
+                }
+            }
+        }
+        return writePrepared(trackId, sequenceNumber, baseDecodeTimeTicks, encoded,
+            sourceTrackEncrypted, sourceFragmentHasEncryptionMetadata)
+    }
+
+    /** One final CMAF allocation: copy rewritten headers and validated borrowed CABAC tails
+     * directly into mdat, without standalone output NAL arrays. Clear-only gate is unchanged. */
+    fun writeNalParts(
+        trackId: Long,
+        sequenceNumber: Long,
+        baseDecodeTimeTicks: Long,
+        samples: List<NalPartsSample>,
+        nalLengthSize: Int,
+        sourceTrackEncrypted: Boolean,
+        sourceFragmentHasEncryptionMetadata: Boolean
+    ): ByteArray {
+        require(nalLengthSize in 1..4) { "NAL length prefix size must be between 1 and 4" }
+        val maxNalSize = if (nalLengthSize == 4) 0xffff_ffffL else (1L shl (8 * nalLengthSize)) - 1L
+        val encoded = samples.map { sample ->
+            require(sample.nals.isNotEmpty()) { "An output sample must contain a rewritten HEVC NAL" }
+            val size = sample.nals.fold(0L) { bytes, nal ->
+                require(nal.size > 0 && nal.size.toLong() <= maxNalSize) {
+                    "HEVC NAL exceeds the configured length prefix"
+                }
+                Math.addExact(bytes, nalLengthSize.toLong() + nal.size)
+            }
+            require(size <= Int.MAX_VALUE) { "CMAF sample exceeds array capacity" }
+            EncodedSample(size.toInt(), sample.durationTicks, sample.compositionTimeOffsetTicks,
+                sample.sampleFlags) { output ->
+                sample.nals.forEach { nal ->
+                    for (shift in (nalLengthSize - 1) downTo 0)
+                        output.put(((nal.size ushr (shift * 8)) and 0xff).toByte())
+                    nal.writeTo(output)
                 }
             }
         }
@@ -154,9 +196,18 @@ internal object HevcClearCmafFragmentWriter {
         output.put('d'.code.toByte())
         output.put('a'.code.toByte())
         output.put('t'.code.toByte())
-        samples.forEach { sample -> sample.writePayload(output) }
-        check(output.position() == result.size) { "CMAF sample payload did not fill its validated size" }
-        return result
+        try {
+            samples.forEach { sample ->
+                if (Thread.currentThread().isInterrupted)
+                    throw java.io.InterruptedIOException("Clear CMAF packaging cancelled")
+                sample.writePayload(output)
+            }
+            check(output.position() == result.size) { "CMAF sample payload did not fill its validated size" }
+            return result
+        } catch (failure: Throwable) {
+            result.fill(0)
+            throw failure
+        }
     }
 
     private fun buildTrun(samples: List<EncodedSample>, dataOffset: Int): ByteArray {

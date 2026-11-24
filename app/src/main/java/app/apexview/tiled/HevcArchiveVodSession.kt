@@ -39,6 +39,7 @@ internal class HevcArchiveVodSession(
     private val maximumOutputWidth: Int = 4096,
     val audioUri: Uri? = null,
     val audioUris: Map<String, Uri> = emptyMap(),
+    val stableAudioUris: Set<Uri> = emptySet(),
 ) : AutoCloseable {
     class Input(val label: String, val playlist: HlsMediaPlaylist, val format: Format?,
                 val initialization: ByteArray, val report: CmafBoxInspector.Report,
@@ -120,6 +121,14 @@ internal class HevcArchiveVodSession(
     private val warmLock = Any()
     private var warmActiveNumber: Int? = null
     @Volatile private var warmTask: Future<*>? = null
+    @Volatile private var warmLimit = ArchiveBufferPolicy.speculativeWarmLimit(-1)
+
+    fun updateThermalStatus(status: Int) {
+        val next = ArchiveBufferPolicy.speculativeWarmLimit(status)
+        if (warmLimit == next) return
+        warmLimit = next
+        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_PREFETCH_THERMAL status=$status maxFollowing=$next foregroundUnchanged=true")
+    }
     @Volatile private var closed = false
     private val owners = java.util.concurrent.atomic.AtomicInteger(1)
     private val baseReleased = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -177,7 +186,7 @@ internal class HevcArchiveVodSession(
             if (track.encrypted) throw ProtectedArchiveBackendRequired()
             require(track.hevcConfiguration != null) { "Archive input is not HEVC CMAF" }
         }
-        val probe = segmentAt(positionMs.coerceAtLeast(0) * 1000L)
+        val probe = segmentAt(ArchiveTimelineSearch.msToUs(positionMs))
         // Prepare and verify the manifest without borrowing a full extra CMAF copy.
         delivery.obtain(probe, copyForCaller = false)
         // Validate the complete finite manifest with Media3 before any decoder is released.
@@ -199,11 +208,11 @@ internal class HevcArchiveVodSession(
 
     fun dataSourceFactory(): DataSource.Factory = DataSource.Factory { ResourceDataSource(this) }
 
-    fun segmentAt(positionUs: Long): Int = groups.indexOfLast { it.startUs <= positionUs }.coerceAtLeast(0)
+    fun segmentAt(positionUs: Long): Int = ArchiveTimelineSearch.floorIndex(groups.size, positionUs) { groups[it].startUs }
 
     /** Stop stale warm-ahead work as soon as a user seeks to a different fragment. */
     fun prioritizeSeek(positionMs: Long) {
-        val target = segmentAt(positionMs.coerceAtLeast(0) * 1000L)
+        val target = segmentAt(ArchiveTimelineSearch.msToUs(positionMs))
         preemptUnrelatedWarmup(target, seek = true)
     }
 
@@ -227,12 +236,12 @@ internal class HevcArchiveVodSession(
         android.util.Log.i("ApexviewSingleDecoder",
             "ARCHIVE_VOD_REQUEST number=$number cached=$wasCached waitMs=$waitMs")
         synchronized(warmLock) {
-            if (!closed && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
-                val next = ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex)
+            if (!closed && warmLimit > 0 && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
+                val next = ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, warmLimit)
                 warmer.purge()
                 warmTask = warmer.submit {
                     for (candidate in next) {
-                        if (closed || Thread.currentThread().isInterrupted) break
+                        if (closed || Thread.currentThread().isInterrupted || candidate - number > warmLimit) break
                         synchronized(warmLock) { warmActiveNumber = candidate }
                         try {
                             // Prefetch populates the bounded cache, not a DataSource reader.
@@ -267,7 +276,12 @@ internal class HevcArchiveVodSession(
     }
 
     private fun preemptUnrelatedWarmup(number: Int, seek: Boolean = false) {
-        val cached = synchronized(cacheLock) { checkOpen(); cache.contains(number) }
+        val cached = synchronized(cacheLock) {
+            // A UI prefetch-priority hint can race normal session retirement.
+            // Foreground DataSource requests still fail closed as before.
+            if (seek && closed) return
+            checkOpen(); cache.contains(number)
+        }
         synchronized(warmLock) {
             if (warmTask?.isDone == false && ArchiveBufferPolicy.preemptWarmup(
                     number, cached, warmActiveNumber, seek)) {
@@ -451,6 +465,7 @@ internal class HevcArchiveVodSession(
                     "outputBytes=${composed.mediaFragments.last().size} " +
                     "sourceAnnexBBytesAvoided=${composed.sourceAnnexBBytesAvoided} " +
                     "sourceNalCopyBytesAvoided=${composed.sourceNalCopyBytesAvoided} " +
+                    "rewrittenTailStagingBytesAvoided=${composed.rewrittenTailStagingBytesAvoided} " +
                     "durationMs=${groups[number].durationUs / 1000L} " +
                     "worker=$worker clock=PLAYER_REQUEST cache=$cacheEntries cachedBytes=$cachedByteCount")
             } finally {

@@ -327,4 +327,12 @@ class ArchiveBufferPolicyTest {
         val ticks = 1_700_000_000L * 90_000L
         assertEquals(1_700_000_000_000_000L, CmafWindowTiming.ticksToUs(ticks, 90_000))
     }
+
+    @Test fun thermalBudgetLimitsOnlySpeculativeFollowingSegments() {
+        assertEquals(listOf(11, 12), ArchiveBufferPolicy.warmFollowing(10, 20, ArchiveBufferPolicy.speculativeWarmLimit(0)).toList())
+        assertEquals(listOf(11), ArchiveBufferPolicy.warmFollowing(10, 20, ArchiveBufferPolicy.speculativeWarmLimit(2)).toList())
+        assertEquals(listOf(11), ArchiveBufferPolicy.warmFollowing(10, 20, ArchiveBufferPolicy.speculativeWarmLimit(-1)).toList())
+        assertTrue(ArchiveBufferPolicy.warmFollowing(10, 20, ArchiveBufferPolicy.speculativeWarmLimit(3)).isEmpty())
+        assertTrue(ArchiveBufferPolicy.warmFollowing(20, 20, ArchiveBufferPolicy.speculativeWarmLimit(6)).isEmpty())
+    }
 }

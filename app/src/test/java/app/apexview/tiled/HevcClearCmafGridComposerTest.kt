@@ -118,6 +118,7 @@ class HevcClearCmafGridComposerTest {
         assertEquals(2, output.fragmentCount)
         assertEquals(100, output.evidence.size)
         assertTrue("Multifeed must avoid materializing source VCL NALs", output.sourceNalCopyBytesAvoided > 0L)
+        assertTrue("Final CMAF writer must avoid standalone rewritten CABAC tails", output.rewrittenTailStagingBytesAvoided > 0L)
         assertTrue(original.initializationSegment.contentEquals(originalInit))
         original.mediaFragments.zip(originalMedia).forEach { (actual, expected) ->
             assertTrue("Borrowed source media must remain unchanged", actual.contentEquals(expected))

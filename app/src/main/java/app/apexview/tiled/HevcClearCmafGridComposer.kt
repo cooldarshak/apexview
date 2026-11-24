@@ -57,6 +57,7 @@ internal object HevcClearCmafGridComposer {
         val sourceAnnexBBytesAvoided: Long = 0,
         /** Source NAL staging bytes avoided (all passthrough NALs, VCL only for stitching). */
         val sourceNalCopyBytesAvoided: Long = 0,
+        val rewrittenTailStagingBytesAvoided: Long = 0,
     )
 
     private data class SourceSample(
@@ -136,12 +137,13 @@ internal object HevcClearCmafGridComposer {
                 frameRateDenominator = request.frameRateDenominator,
                 outputNalLengthSize = first.config.nalLengthSize,
                 includeAnnexBOutput = false,
-                emitSampleData = false
+                emitSampleData = false,
+                emitNalParts = true
             )
         } finally {
-            // The grid composer creates independently owned rewritten samples.
-            // Drop borrowed views; the calling session owns and zeroes the original
-            // source fragments after all packaging/validation is complete.
+            // The grid composer retains only owned headers and borrowed tail ranges.
+            // Drop its original NAL descriptors; the session keeps the source arrays
+            // immutable and alive until all final fragments have been packaged.
             parsedFeeds.forEach(::releaseNalSpans)
         }
         val rewrittenAt = System.nanoTime()
@@ -183,14 +185,14 @@ internal object HevcClearCmafGridComposer {
                 val count = sourceFragment.samples.size
                 val outputSamples = sourceFragment.samples.mapIndexed { sampleIndex, sourceSample ->
                     val picture = composed.pictures[pictureOffset + sampleIndex]
-                    HevcClearCmafFragmentWriter.NalSample(
-                        nals = picture.vclNals,
+                    HevcClearCmafFragmentWriter.NalPartsSample(
+                        nals = picture.nalParts,
                         durationTicks = sourceSample.duration,
                         compositionTimeOffsetTicks = sourceSample.compositionOffset,
                         sampleFlags = sourceSample.flags
                     )
                 }
-                outputFragments += HevcClearCmafFragmentWriter.writeNalSamples(
+                outputFragments += HevcClearCmafFragmentWriter.writeNalParts(
                     trackId = request.outputTrackId,
                     sequenceNumber = Math.addExact(request.firstOutputSequenceNumber, fragmentIndex.toLong()),
                     baseDecodeTimeTicks = sourceFragment.baseDecodeTime,
@@ -225,6 +227,9 @@ internal object HevcClearCmafGridComposer {
                 nalInspectorMs = parsedFeeds.sumOf { it.nalInspectorNanos } / 1_000_000L,
                 sourceAnnexBBytesAvoided = parsedFeeds.sumOf { it.annexBEquivalentBytes.toLong() },
                 sourceNalCopyBytesAvoided = parsedFeeds.sumOf { it.borrowedVclBytes },
+                rewrittenTailStagingBytesAvoided = composed.pictures.sumOf { picture ->
+                    picture.nalParts.sumOf { it.copiedTailBytes.toLong() }
+                },
             )
             committed = true
             return output
@@ -239,7 +244,10 @@ internal object HevcClearCmafGridComposer {
             // Cover *all* validation failures after rewriting, not only errors
             // in packaging. The final CMAF fragments own their copied bytes; no
             // full rewritten HEVC sample buffers survive successful packaging.
-            composed.pictures.forEach { picture -> picture.vclNals.forEach { it.fill(0) } }
+            composed.pictures.forEach { picture ->
+                picture.vclNals.forEach { it.fill(0) }
+                picture.nalParts.forEach { it.close() }
+            }
         }
     }
 

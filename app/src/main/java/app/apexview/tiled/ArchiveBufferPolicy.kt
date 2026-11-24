@@ -338,9 +338,17 @@ internal object ArchiveBufferPolicy {
     }
 
     /** A finite, cache-sized warm window. Never prefetch beyond the advertised archive. */
-    fun warmFollowing(number: Int, lastIndex: Int): IntRange {
-        require(number >= 0 && lastIndex >= number)
-        return (number + 1)..minOf(lastIndex, number + RETAINED_SEGMENTS - 1)
+    fun warmFollowing(number: Int, lastIndex: Int, limit: Int = RETAINED_SEGMENTS - 1): IntRange {
+        require(number >= 0 && lastIndex >= number && limit in 0 until RETAINED_SEGMENTS)
+        return (number + 1)..minOf(lastIndex, number + limit)
+    }
+
+    /** Android PowerManager status: none/light -> two, moderate/unknown -> one,
+     * severe or worse -> no new speculative group. Foreground is never gated. */
+    fun speculativeWarmLimit(thermalStatus: Int): Int = when {
+        thermalStatus in 0..1 -> RETAINED_SEGMENTS - 1
+        thermalStatus >= 3 -> 0
+        else -> 1
     }
 
     /**

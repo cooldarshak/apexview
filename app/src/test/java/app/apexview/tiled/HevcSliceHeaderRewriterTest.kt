@@ -83,6 +83,30 @@ class HevcSliceHeaderRewriterTest {
         assertEquals(rewritten.sourceTailOffset, ranged.sourceTailOffset)
         assertEquals(rewritten.copiedTailBytes, ranged.copiedTailBytes)
         assertArrayEquals(expectedInput, padded)
+        val span = HevcBitstream.NalSpan(padded, 3, sourceNal.size)
+        val parts = HevcSliceHeaderRewriter.rewriteClearParts(span, sourceSps, sourcePps,
+            outputSps, outputPps, 30, null, HevcSliceHeaderParser.parse(sourceNal, sourceSps, sourcePps))
+        try {
+            assertArrayEquals(rewritten.nal, parts.materialize())
+            val output = java.nio.ByteBuffer.allocate(parts.size)
+            parts.writeTo(output)
+            assertArrayEquals(rewritten.nal, output.array())
+            assertEquals(30, parts.verifyHeader(outputSps, outputPps).sliceSegmentAddress)
+            val contiguous = HevcClearCmafFragmentWriter.writeNalSamples(1, 2, 90000,
+                listOf(HevcClearCmafFragmentWriter.NalSample(listOf(rewritten.nal), 3600, -120, 0x02000000L)),
+                4, false, false)
+            val direct = HevcClearCmafFragmentWriter.writeNalParts(1, 2, 90000,
+                listOf(HevcClearCmafFragmentWriter.NalPartsSample(listOf(parts), 3600, -120, 0x02000000L)),
+                4, false, false)
+            assertArrayEquals(contiguous, direct)
+            assertRejected("protected") {
+                HevcClearCmafFragmentWriter.writeNalParts(1, 2, 90000,
+                    listOf(HevcClearCmafFragmentWriter.NalPartsSample(listOf(parts), 3600, -120, 0x02000000L)),
+                    4, true, false)
+            }
+            assertArrayEquals(expectedInput, padded)
+        } finally { parts.close() }
+        assertArrayEquals(expectedInput, padded)
         assertRejected("fully clear") {
             HevcSliceHeaderRewriter.rewrite(
                 padded, sourceSps, sourcePps, outputSps, outputPps, 30,

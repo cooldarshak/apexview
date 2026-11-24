@@ -92,6 +92,19 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var sceneView: SingleDecoderSceneView? = null
     private var protectedSceneView: ProtectedDecoderSceneView? = null
     private var sceneCodecCorrelation: SceneCodecTimestampCorrelation? = null
+    private var receiverCadence: AdaptivePlaybackCadenceObserver? = null
+    private var receiverDisplayOwner: Any? = null
+
+    private fun setReceiverOutputDisplay(owner: Any, displayId: Int?) {
+        if (displayId == null) {
+            if (receiverDisplayOwner !== owner) return
+            receiverDisplayOwner = null
+            receiverCadence?.activeDisplayId = -1
+        } else {
+            receiverDisplayOwner = owner
+            receiverCadence?.activeDisplayId = displayId
+        }
+    }
     private var widevine: ReceiverWidevine? = null
     private var secureOutput by mutableStateOf(false)
     private var loadingJob: kotlinx.coroutines.Job? = null
@@ -378,7 +391,9 @@ class PitwallReceiverActivity : ComponentActivity() {
             data
         }
         val nextScene = body.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallScene")?.let(CastSceneProtocol::decode)
-        val renderers = ThinningRenderersFactory(this).setEnableDecoderFallback(false)
+        val correlation = SceneCodecTimestampCorrelation()
+        val cadence = AdaptivePlaybackCadenceObserver(this, correlation).apply { composedSingle = nextScene != null }
+        val renderers = ThinningRenderersFactory(this, cadence).setEnableDecoderFallback(false)
             .setMediaCodecSelector(ReceiverCodecSelector())
         val selector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this)
         if (direct) selector.parameters = selector.buildUponParameters()
@@ -393,7 +408,8 @@ class PitwallReceiverActivity : ComponentActivity() {
             .setMediaSourceFactory(DefaultMediaSourceFactory(data).apply { widevine?.sessions?.let { key -> setDrmSessionManagerProvider { key } } })
             .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(5_000, 15_000, 1_000, 2_000).build())
             .build()
-        val correlation = SceneCodecTimestampCorrelation()
+        receiverCadence = cadence
+        receiverDisplayOwner = null
         sceneCodecCorrelation = correlation
         next.setVideoFrameMetadataListener(object : VideoFrameMetadataListener {
             override fun onVideoFrameAboutToBeRendered(
@@ -417,12 +433,14 @@ class PitwallReceiverActivity : ComponentActivity() {
             }
             override fun onVideoDecoderInitialized(eventTime: AnalyticsListener.EventTime, decoderName: String, initializedTimestampMs: Long, initializationDurationMs: Long) {
                 if (player !== next) return
+                correlation.reset()
                 decoderCount++
                 Log.i("PitwallReceiver", "VIDEO_DECODER_INIT name=$decoderName active=$decoderCount sources=${scene?.sources ?: 1}")
                 if (decoderCount > 1) fail("Receiver allocated more than one video decoder")
             }
             override fun onVideoDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
                 if (player !== next) return
+                correlation.reset()
                 decoderCount = (decoderCount - 1).coerceAtLeast(0)
                 Log.i("PitwallReceiver", "VIDEO_DECODER_RELEASE name=$decoderName active=$decoderCount")
             }
@@ -577,6 +595,9 @@ class PitwallReceiverActivity : ComponentActivity() {
         protectedSceneView?.release(); protectedSceneView = null
         sceneCodecCorrelation?.shutdown()
         sceneCodecCorrelation = null
+        receiverCadence?.activeDisplayId = -1
+        receiverCadence = null
+        receiverDisplayOwner = null
         standardView?.player = null; standardView = null
         val previous = player; player = null
         previous?.release()
@@ -626,6 +647,11 @@ class PitwallReceiverActivity : ComponentActivity() {
                             }
                             else if (secureOutput) AndroidView(factory = { ProtectedDecoderSceneView(it).apply {
                                 protectedSceneView = this
+                                val displayOwner = this
+                                onDisplaySelected = { displayId ->
+                                    if (this@PitwallReceiverActivity.player === current && generation == viewGeneration)
+                                        setReceiverOutputDisplay(displayOwner, displayId)
+                                }
                                 onFailure = { reason -> if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) fail(reason) }
                                 onFirstFrame = { if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) reportRendering() }
                                 bind(current, model, desiredSpeed, sceneCodecCorrelation)
@@ -635,6 +661,11 @@ class PitwallReceiverActivity : ComponentActivity() {
                             }, modifier = Modifier.fillMaxSize())
                             else AndroidView(factory = { SingleDecoderSceneView(it).apply {
                                 sceneView = this
+                                val displayOwner = this
+                                onDisplaySelected = { displayId ->
+                                    if (this@PitwallReceiverActivity.player === current && generation == viewGeneration)
+                                        setReceiverOutputDisplay(displayOwner, displayId)
+                                }
                                 onFailure = { reason -> if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) fail(reason) }
                                 onFirstFrame = { if (this@PitwallReceiverActivity.player === current && generation == viewGeneration) reportRendering() }
                                 bind(current, model, desiredSpeed, sceneCodecCorrelation)
