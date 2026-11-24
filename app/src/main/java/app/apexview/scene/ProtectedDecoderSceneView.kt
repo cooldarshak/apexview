@@ -60,7 +60,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         override fun onDisplayChanged(displayId: Int) {
             if (rootView.display?.displayId == displayId) {
                 logDisplayMode("mode-changed")
-                gl.post { if (!released) frameRateOutput?.let(::updateFrameRateHint) }
+                gl.post { if (!released) { cadenceGate.reset(); frameRateOutput?.let(::updateFrameRateHint) } }
             }
         }
     }
@@ -93,7 +93,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed,
                 selectedDisplayHz, runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE,
                  pipelineHealthy())} " +
-            "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
+            "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, actualOutputFps.toDouble(), 1f)} " +
             "supportedModes=$available sameResolutionIntegralModes=$seamlessMatches " +
             "modeSwitchIssuedByApp=false physicalPresentation=NOT_MEASURED")
     }
@@ -258,6 +258,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
 
     fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene,
              speed: Float = 1f, correlation: SceneCodecTimestampCorrelation? = null) {
+        // Retire the previous player before changing its correlation owner.
+        if (player != null && player !== nextPlayer) detachDecoderInput("player-replaced")
         if (codecCorrelation !== correlation) {
             attachedCodecSurface?.let { codecCorrelation?.detach(it) }
             codecCorrelation = correlation
@@ -295,6 +297,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 frameDemand.discardPendingVideo()
                 firstFrameReported = false
             }
+            if (speedChanged) cadenceGate.reset()
             if (firstBinding || atlasChanged) {
                 decoderTexture?.setDefaultBufferSize(nextScene.atlasWidth, nextScene.atlasHeight)
             }

@@ -121,6 +121,7 @@ internal class HevcArchiveVodSession(
         }, "ApexviewVodWarm").apply { isDaemon = true } })
     private val warmLock = Any()
     private var warmActiveNumber: Int? = null
+    private var warmActiveTid: Int? = null
     @Volatile private var warmTask: Future<*>? = null
     @Volatile private var warmLimit = ArchiveBufferPolicy.speculativeWarmLimit(-1)
 
@@ -243,7 +244,10 @@ internal class HevcArchiveVodSession(
                 warmTask = warmer.submit {
                     for (candidate in next) {
                         if (closed || Thread.currentThread().isInterrupted || candidate - number > warmLimit) break
-                        synchronized(warmLock) { warmActiveNumber = candidate }
+                        synchronized(warmLock) {
+                            warmActiveNumber = candidate
+                            warmActiveTid = android.os.Process.myTid()
+                        }
                         try {
                             // Prefetch populates the bounded cache, not a DataSource reader.
                             // Do NOT allocate a second multi-MB ByteArray just to zero it.
@@ -263,7 +267,11 @@ internal class HevcArchiveVodSession(
                                 break
                             }
                         } finally {
-                            synchronized(warmLock) { warmActiveNumber = null }
+                            synchronized(warmLock) {
+                                warmActiveNumber = null
+                                warmActiveTid = null
+                                runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) }
+                            }
                         }
                     }
                 }
@@ -284,6 +292,14 @@ internal class HevcArchiveVodSession(
             checkOpen(); cache.contains(number)
         }
         synchronized(warmLock) {
+            if (!cached && warmActiveNumber == number && warmTask?.isDone == false) {
+                // Playback is joining this single-flight producer, not speculative work anymore.
+                // Promote only this group; its finally block restores background priority.
+                warmActiveTid?.let { tid ->
+                    runCatching { android.os.Process.setThreadPriority(tid, android.os.Process.THREAD_PRIORITY_DEFAULT) }
+                        .onFailure { android.util.Log.w("ApexviewSingleDecoder", "ARCHIVE_VOD_PREFETCH_PROMOTION_UNAVAILABLE") }
+                }
+            }
             if (warmTask?.isDone == false && ArchiveBufferPolicy.preemptWarmup(
                     number, cached, warmActiveNumber, seek)) {
                 warmTask?.cancel(true)
@@ -327,9 +343,16 @@ internal class HevcArchiveVodSession(
             // A finite DASH index may seek directly to any advertised chunk. A continuation
             // fragment cannot be advertised as an independent seek point merely because an
             // earlier GOP was inspected. Never feed a decoder a missing-reference picture.
-            val inspected = inputs.indices.map { i ->
-                CmafBoxInspector.inspect(batches.single()[i], inputs[i].report).fragments.single()
+            val inspectionStarted = System.nanoTime()
+            val inspectedMedia = inputs.indices.map { i ->
+                HevcClearCmafGridComposer.InspectedMedia.inspect(batches.single()[i], validatedInitializations[i])
             }
+            val inspected = inspectedMedia.mapIndexed { i, media ->
+                val report = media.reportFor(batches.single()[i], validatedInitializations[i])
+                require(report.errors.isEmpty()) { "Invalid source CMAF fragment" }
+                report.fragments.single()
+            }
+            val preflightInspectMs = (System.nanoTime() - inspectionStarted) / 1_000_000L
             require(inspected.all { fragment ->
                 fragment.sampleTimings.first().sampleFlags?.let { (it and 0x00010000L) == 0L } == true
             }) {
@@ -376,7 +399,7 @@ internal class HevcArchiveVodSession(
                 // Every pre-composition exception, including feed setup and seek/close
                 // validation, must wipe owned initialization snapshots.
                 val composingFeeds = inputs.mapIndexed { i, input -> HevcClearCmafGridComposer.Feed(
-                    ownedInits.copies[i], batches.map { it[i] }, input.label, validatedInitializations[i]) }
+                    ownedInits.copies[i], batches.map { it[i] }, input.label, validatedInitializations[i], listOf(inspectedMedia[i])) }
                 checkOpen()
                 if (inputs.size == 1) HevcClearCmafGridComposer.passThrough(composingFeeds.single())
                 else HevcClearCmafGridComposer.compose(HevcClearCmafGridComposer.Request(
@@ -467,7 +490,7 @@ internal class HevcArchiveVodSession(
                     "parseMs=${composed.parseMs} rewriteMs=${composed.rewriteMs} packageMs=${composed.packageMs} " +
                     "parseCpuMs=${composed.parseCpuMs} rewriteCpuMs=${composed.rewriteCpuMs} " +
                     "packageCpuMs=${composed.packageCpuMs} " +
-                    "cmafInspectorMs=${composed.cmafInspectorMs} nalInspectorMs=${composed.nalInspectorMs} " +
+                    "cmafInspectorMs=${composed.cmafInspectorMs + preflightInspectMs} reusedCmafReports=${inspectedMedia.size} nalInspectorMs=${composed.nalInspectorMs} " +
                     "producerCpuMs=${((android.os.Debug.threadCpuTimeNanos() - cpuAtStart) / 1_000_000L).coerceAtLeast(0)} " +
                     "processAllocBytesDuringSegment=${allocatedDuringProduction ?: -1L} " +
                     "processGcDuringSegment=${gcDuringProduction ?: -1L} " +

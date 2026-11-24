@@ -38,14 +38,21 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private val thread = HandlerThread("ApexviewSingleScene", Process.THREAD_PRIORITY_DISPLAY).apply { start() }
     private val gl = Handler(thread.looper)
     private val main = Handler(Looper.getMainLooper())
+    private val glProbePending = java.util.concurrent.atomic.AtomicBoolean(false)
     private val glQueueProbe = object : Runnable {
         override fun run() {
             if (released || !isAttachedToWindow) return
-            val postedAtNs = System.nanoTime()
-            gl.post { if (!released) {
-                pacing.onGlQueueProbe(System.nanoTime() - postedAtNs)
-                applyOutputFrameRateHint()
-            } }
+            if (glProbePending.compareAndSet(false, true)) {
+                val postedAtNs = System.nanoTime()
+                if (!gl.post {
+                    try {
+                        if (!released) {
+                            pacing.onGlQueueProbe(System.nanoTime() - postedAtNs)
+                            applyOutputFrameRateHint()
+                        }
+                    } finally { glProbePending.set(false) }
+                }) glProbePending.set(false)
+            }
             main.postDelayed(this, 250L)
         }
     }
@@ -73,7 +80,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         override fun onDisplayChanged(displayId: Int) {
             if (rootView.display?.displayId == displayId) {
                 logDisplayMode("mode-changed")
-                gl.post { if (!released) applyOutputFrameRateHint() }
+                gl.post { if (!released) { cadenceGate.reset(); applyOutputFrameRateHint() } }
             }
         }
     }
@@ -106,7 +113,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed,
                 selectedDisplayHz, runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE,
                  pipelineHealthy())} " +
-            "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
+            "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, actualOutputFps.toDouble(), 1f)} " +
             "supportedModes=$available sameResolutionIntegralModes=$seamlessMatches " +
             "modeSwitchIssuedByApp=false physicalPresentation=NOT_MEASURED")
     }
@@ -449,6 +456,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
 
     fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene, speed: Float = 1f,
              correlation: SceneCodecTimestampCorrelation? = null) {
+        // Retire the previous player before changing its correlation owner.
+        if (player != null && player !== nextPlayer) detachDecoderInput("player-replaced")
         if (codecCorrelation !== correlation) {
             attachedCodecSurface?.let { codecCorrelation?.detach(it) }
             codecCorrelation = correlation
@@ -458,6 +467,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         val speedChanged = playbackSpeed != normalizedSpeed
         playbackSpeed = normalizedSpeed
         val changed = scene != nextScene
+        val firstBinding = scene == null
         val atlasChanged = scene?.sameEncodedAtlasAs(nextScene) == false
         val playerChanged = player != null && player !== nextPlayer
         val bindingChanged = atlasChanged || playerChanged
@@ -484,6 +494,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                     frameDemand.discardPendingVideo()
                     firstFrameReported = false
                     cadenceGate.reset()
+                }
+                if (speedChanged) cadenceGate.reset()
+                if (firstBinding || atlasChanged) {
+                    decoderTexture?.setDefaultBufferSize(nextScene.atlasWidth, nextScene.atlasHeight)
                 }
                 applyOutputFrameRateHint()
                 scheduleDisplayFrame()

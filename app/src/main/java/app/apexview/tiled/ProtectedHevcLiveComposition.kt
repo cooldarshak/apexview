@@ -1097,8 +1097,12 @@ internal object ProtectedHevcLiveComposition {
                 android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
                     ?.let { (it - before).coerceAtLeast(0L) }
             }
+            val composeMs = (System.nanoTime() - composeStartedNs) / 1_000_000L
+            val mediaMs = CmafWindowTiming.ticksToUs(newOutput.durationTicks, newOutput.timescale) / 1000L
             android.util.Log.i("ApexviewSingleDecoder",
-                "PROTECTED_CMAF_SEGMENT composeMs=${(System.nanoTime() - composeStartedNs) / 1_000_000L} " +
+                "PROTECTED_CMAF_SEGMENT composeMs=$composeMs " +
+                "durationMs=$mediaMs composeSlackMs=${mediaMs - composeMs} " +
+                "composeSlackAt1_5xMs=${mediaMs * 2 / 3 - composeMs} " +
                 "alignmentMs=$alignmentElapsedMs pictureComposeMs=$pictureComposeElapsedMs " +
                 "composerThreadCpuMs=${((android.os.Debug.threadCpuTimeNanos() - composeStartedCpuNs) / 1_000_000L).coerceAtLeast(0)} " +
                 "fragmentWriteMs=$fragmentWriteElapsedMs " +

@@ -135,7 +135,14 @@ class HevcClearCmafGridComposerTest {
         // metadata must not change a single output byte or weaken fragment checks.
         val cachedOutput = HevcClearCmafGridComposer.compose(
             HevcClearCmafGridComposer.Request(
-                feeds = feeds.map { it.copy(validatedInitialization = CmafBoxInspector.inspect(it.initializationSegment)) },
+                feeds = feeds.map { feed ->
+                    val init = CmafBoxInspector.inspect(feed.initializationSegment)
+                    val inspected = feed.mediaFragments.map { HevcClearCmafGridComposer.InspectedMedia.inspect(it, init) }
+                    assertTrue(runCatching { inspected.first().reportFor(feed.mediaFragments.first().copyOf(), init) }.isFailure)
+                    assertTrue(runCatching { inspected.first().reportFor(feed.mediaFragments.first(),
+                        CmafBoxInspector.inspect(feed.initializationSegment)) }.isFailure)
+                    feed.copy(validatedInitialization = init, inspectedMedia = inspected)
+                },
                 outputGrid = HevcOutputGridDimensions(columns = 2, rows = 1),
                 cells = listOf(
                     HevcTizenGridComposer.CellSelection(0, 0, 0, 0),

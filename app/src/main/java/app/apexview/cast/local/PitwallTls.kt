@@ -58,14 +58,18 @@ internal object PitwallTls {
         }
     }
 
-    @Synchronized fun identity(): Identity {
+    @Synchronized fun identity(): Identity = identityForAlias(ALIAS)
+
+    /** Separate aliases allow real Android runtime tests without touching the installation identity. */
+    @Synchronized internal fun identityForAlias(alias: String): Identity {
+        require(alias == ALIAS || alias.startsWith("pitwall_tls_test_"))
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        val existing = store.getCertificate(ALIAS) as? X509Certificate
-        if (existing == null || runCatching { existing.checkValidity() }.isFailure) {
-            if (store.containsAlias(ALIAS)) store.deleteEntry(ALIAS)
+        val existing = store.getCertificate(alias) as? X509Certificate
+        if (existing == null || runCatching { validateIdentityCertificate(existing) }.isFailure) {
+            if (store.containsAlias(alias)) store.deleteEntry(alias)
             val now = System.currentTimeMillis()
             val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore")
-            generator.initialize(KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
+            generator.initialize(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
                 .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
                 .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA384, KeyProperties.DIGEST_SHA512)
                 .setCertificateSubject(X500Principal("CN=Pitwall LAN"))
@@ -75,9 +79,16 @@ internal object PitwallTls {
                 .build())
             generator.generateKeyPair()
         }
-        val cert = requireNotNull(store.getCertificate(ALIAS) as? X509Certificate)
-        val key = requireNotNull(store.getKey(ALIAS, null) as? PrivateKey)
+        val cert = requireNotNull(store.getCertificate(alias) as? X509Certificate)
+        val key = requireNotNull(store.getKey(alias, null) as? PrivateKey)
+        validateIdentityCertificate(cert)
         return Identity(key, cert)
+    }
+
+    private fun validateIdentityCertificate(cert: X509Certificate) {
+        cert.checkValidity()
+        require(cert.publicKey.algorithm == "EC") { "Invalid installation key algorithm" }
+        cert.verify(cert.publicKey)
     }
 
     /** Unpinned certificates are allowed ONLY for the provisional control handshake.
@@ -100,31 +111,45 @@ internal object PitwallTls {
     }
 
     class Session internal constructor(private val identity: Identity, private val peer: X509Certificate,
-                                       val code: String) {
+                                       val code: String, private val negotiatedProtocol: String? = null) {
         val trustManager: X509TrustManager = PeerTrust(peer)
         private val pinnedContext by lazy { identity.context(trustManager) }
         val socketFactory get() = pinnedContext.socketFactory
         fun mediaServer(address: InetAddress): ServerSocket =
-            server(pinnedContext, 0, 16, address)
+            server(pinnedContext, 0, 16, address, negotiatedProtocol?.let { arrayOf(it) })
     }
 
     data class Provisional(val socket: SSLSocket, val session: Session)
-    private fun protocols(supported: Array<String>): Array<String> =
-        supported.filter { it == "TLSv1.2" || it == "TLSv1.3" }.toTypedArray().also { require(it.isNotEmpty()) }
-    private fun server(context: SSLContext, port: Int, backlog: Int, address: InetAddress?): SSLServerSocket =
+    private fun protocols(supported: Array<String>, requested: Array<String>? = null): Array<String> =
+        supported.filter { (it == "TLSv1.2" || it == "TLSv1.3") &&
+            (requested == null || it in requested) }.toTypedArray().also { require(it.isNotEmpty()) }
+    private fun server(context: SSLContext, port: Int, backlog: Int, address: InetAddress?, requested: Array<String>? = null): SSLServerSocket =
         (context.serverSocketFactory.createServerSocket(port, backlog, address) as SSLServerSocket).apply {
-            enabledProtocols = protocols(supportedProtocols)
+            enabledProtocols = protocols(supportedProtocols, requested)
             needClientAuth = true
         }
-    fun controlServer(identity: Identity, port: Int): ServerSocket =
-        server(identity.context(PeerTrust()), port, 2, null)
+    fun controlServer(identity: Identity, port: Int, requested: Array<String>? = null): ServerSocket =
+        server(identity.context(PeerTrust()), port, 2, null, requested)
 
-    fun connect(identity: Identity, address: InetAddress, port: Int): Provisional {
-        val socket = identity.context(PeerTrust()).socketFactory.createSocket() as SSLSocket
-        try {
-            socket.connect(InetSocketAddress(address, port), 6_000)
-            return handshake(identity, socket, true)
-        } catch (failure: Throwable) { runCatching { socket.close() }; throw failure }
+    fun connect(identity: Identity, address: InetAddress, port: Int, requested: Array<String>? = null): Provisional {
+        fun attempt(protocols: Array<String>?): Provisional {
+            val socket = identity.context(PeerTrust()).socketFactory.createSocket() as SSLSocket
+            try {
+                socket.enabledProtocols = PitwallTls.protocols(socket.supportedProtocols, protocols)
+                socket.connect(InetSocketAddress(address, port), 6_000)
+                return handshake(identity, socket, true)
+            } catch (failure: Throwable) { runCatching { socket.close() }; throw failure }
+        }
+        try { return attempt(requested) }
+        catch (failure: javax.net.ssl.SSLHandshakeException) {
+            // Some older Android TLS providers cannot complete EC client authentication
+            // under TLS 1.3. Retry once before pairing, with the same trust and key.
+            // A local certificate rejection is never retried.
+            if (requested != null || generateSequence<Throwable>(failure) { it.cause }
+                    .take(8).any { it is CertificateException }) throw failure
+            runCatching { android.util.Log.i("PitwallTls", "TLS_COMPATIBILITY_RETRY protocol=TLSv1.2") }
+            return attempt(arrayOf("TLSv1.2"))
+        }
     }
 
     fun accept(identity: Identity, socket: Socket): Provisional =
@@ -137,7 +162,7 @@ internal object PitwallTls {
 
     private fun handshake(identity: Identity, socket: SSLSocket, phone: Boolean): Provisional {
         socket.useClientMode = phone
-        socket.enabledProtocols = protocols(socket.supportedProtocols)
+        socket.enabledProtocols = protocols(socket.enabledProtocols)
         if (!phone) socket.needClientAuth = true
         socket.soTimeout = HANDSHAKE_TIMEOUT_MS
         try {
@@ -154,6 +179,6 @@ internal object PitwallTls {
             ?: throw CertificateException("Pitwall peer certificate missing")
         val code = if (phone) PitwallPairingCode.fromCertificates(identity.certificate.encoded, peer.encoded)
             else PitwallPairingCode.fromCertificates(peer.encoded, identity.certificate.encoded)
-        return Provisional(socket, Session(identity, peer, code))
+        return Provisional(socket, Session(identity, peer, code, socket.session.protocol))
     }
 }

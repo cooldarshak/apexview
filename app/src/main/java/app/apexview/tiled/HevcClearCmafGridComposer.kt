@@ -16,12 +16,28 @@ import java.nio.ByteOrder
  * resolved sample duration/size/flags/composition offset from trun/tfhd/trex. Unsupported layouts fail closed.
  */
 internal object HevcClearCmafGridComposer {
+    /** Short-lived validated metadata bound to the exact owned media and init report. */
+    class InspectedMedia private constructor(
+        private val bytes: ByteArray, private val init: CmafBoxInspector.Report,
+        private val report: CmafBoxInspector.Report,
+    ) {
+        fun reportFor(source: ByteArray, initialization: CmafBoxInspector.Report): CmafBoxInspector.Report {
+            require(source === bytes && initialization === init) { "CMAF inspection belongs to another fragment" }
+            return report
+        }
+        companion object {
+            fun inspect(bytes: ByteArray, init: CmafBoxInspector.Report) =
+                InspectedMedia(bytes, init, CmafBoxInspector.inspect(bytes, priorInitialization = init))
+        }
+    }
+
     data class Feed(
         val initializationSegment: ByteArray,
         val mediaFragments: List<ByteArray>,
         val label: String,
         /** Validated once against this session's owned initialization bytes, never a different rendition. */
         val validatedInitialization: CmafBoxInspector.Report? = null,
+        val inspectedMedia: List<InspectedMedia>? = null,
     )
 
     data class Request(
@@ -299,10 +315,12 @@ internal object HevcClearCmafGridComposer {
         } else extractParameterSets(feed.initializationSegment, config.nalLengthSize)
         val fragments = mutableListOf<SourceFragment>()
         val metadata = mutableListOf<CmafBoxInspector.FragmentMetadata>()
+        require(feed.inspectedMedia == null || feed.inspectedMedia.size == feed.mediaFragments.size)
         feed.mediaFragments.forEachIndexed { fragmentIndex, bytes ->
             checkNotInterrupted()
             val fragmentInspectStarted = System.nanoTime()
-            val report = CmafBoxInspector.inspect(bytes, priorInitialization = initReport)
+            val report = feed.inspectedMedia?.get(fragmentIndex)?.reportFor(bytes, initReport)
+                ?: CmafBoxInspector.inspect(bytes, priorInitialization = initReport)
             cmafInspectorNanos += System.nanoTime() - fragmentInspectStarted
             require(report.errors.isEmpty()) {
                 "Feed ${feed.label} fragment $fragmentIndex is invalid: ${report.errors.joinToString("; ")}"

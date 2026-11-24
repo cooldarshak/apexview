@@ -21,16 +21,22 @@ internal class SceneFrameCadenceGate {
         // frames/s. Never defer decoder SurfaceTexture.updateTexImage().
         val outputFps = SceneFrameRatePolicy.composedOutputHint(
             sourceFps, playbackSpeed, displayHz, thermalStatus, pipelineHealthy)
-        if (outputFps !in 49f..51f || displayHz !in 90f..165f ||
+        if ((outputFps !in 49f..51f && outputFps !in 74f..76f) || displayHz !in 90f..165f ||
             !displayHz.isFinite() || lastVideoVsyncNs <= 0L ||
             frameTimeNs <= lastVideoVsyncNs
         ) {
             consecutiveDeferrals = 0
             return false
         }
-        // A video frame every ~20ms should not result in an 8.33ms display burst.
-        // The nearest 120Hz slots to a 50fps cadence are 16.67ms and 25ms apart.
-        val earliestNextFrameNs = 15_000_000L
+        // Use the shorter legitimate display interval for a fractional cadence.
+        // 90/50 needs one- and two-vsync gaps; forcing two would cap output at 45fps.
+        // 120/50 needs two- and three-vsync gaps. Never gate 75fps as though it were 50.
+        val shortestSlots = (displayHz / outputFps + 0.005f).toInt()
+        if (shortestSlots < 2) {
+            consecutiveDeferrals = 0
+            return false
+        }
+        val earliestNextFrameNs = (shortestSlots * 1_000_000_000.0 / displayHz).toLong() - 1_500_000L
         if (frameTimeNs - lastVideoVsyncNs >= earliestNextFrameNs || consecutiveDeferrals >= 2) {
             consecutiveDeferrals = 0
             return false

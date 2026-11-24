@@ -98,8 +98,10 @@ class Settings(context: Context) {
     var votePrompt by mutableStateOf(prefs.getBoolean("votePrompt", true))
         private set
 
-    /** Default rendition cap for feeds without their own quality choice. */
-    var videoQuality by mutableStateOf(VideoQuality.fromPreference(prefs.getString("videoQuality", null)))
+    /** Existing explicit caps (including AUTO) always win over a device default. */
+    var videoQuality by mutableStateOf(DevicePlaybackDefaults.quality(
+        prefs.getString("videoQuality", null), isTvDevice(appContext),
+        appContext.getSystemService(android.app.ActivityManager::class.java)?.isLowRamDevice == true))
         private set
 
     private val feedQualityOverrides = androidx.compose.runtime.mutableStateMapOf<String, VideoQuality>().apply {

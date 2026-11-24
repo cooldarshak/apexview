@@ -103,3 +103,10 @@ run_required_instrumentation \
   app.apexview.tiled.ArchiveSegmentDeliveryAndroidTest \
   'OK (2 tests)' "$delivery_report"
 cat "$delivery_report" >> "$report"
+
+# Use real AndroidKeyStore identities, not desktop software keys, for Cast TLS.
+tls_report="${RUNNER_TEMP:?}/pitwall-tls-instrumentation.txt"
+run_required_instrumentation \
+  app.apexview.cast.local.PitwallTlsAndroidTest \
+  'OK (1 test)' "$tls_report"
+cat "$tls_report" >> "$report"

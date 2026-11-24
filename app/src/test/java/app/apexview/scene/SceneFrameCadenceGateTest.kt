@@ -58,6 +58,21 @@ class SceneFrameCadenceGateTest {
         assertFalse(gate.shouldDefer(1_008_333_333L, 50.0, 60f, 1.5f, 0))
     }
 
+    @Test fun fractional90HzCadenceDoesNotForce45fpsCeiling() {
+        val gate = SceneFrameCadenceGate()
+        gate.onVideoDraw(1_000_000_000L)
+        assertFalse(gate.shouldDefer(1_011_111_111L, 50.0, 90f))
+        assertTrue(gate.shouldDefer(1_010_000_000L, 50.0, 100f))
+        assertFalse(gate.shouldDefer(1_020_000_000L, 50.0, 100f))
+    }
+
+    @Test fun full75fpsAt150HzUsesTwoSlotsRatherThanThe50fpsGuard() {
+        val gate = SceneFrameCadenceGate()
+        gate.onVideoDraw(1_000_000_000L)
+        assertTrue(gate.shouldDefer(1_006_666_666L, 50.0, 150f, 1.5f, 0))
+        assertFalse(gate.shouldDefer(1_013_333_333L, 50.0, 150f, 1.5f, 0))
+    }
+
     @Test fun seekAndSurfaceResetDiscardPreviousTimestamp() {
         val gate = SceneFrameCadenceGate()
         gate.onVideoDraw(2_000_000_000L)
