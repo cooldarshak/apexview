@@ -21,7 +21,7 @@ import org.junit.runner.RunWith
 class ArchitectureG0AndroidTest {
     @Test
     fun libraryLoadsAndRejectsInvalidBuffers() {
-        assertEquals(1, ArchitectureG0Probe.loadAndVersion())
+        assertEquals(2, ArchitectureG0Probe.loadAndVersion())
         assertTrue(ArchitectureG0Probe.rejectsBadBuffers())
         ArchitectureG0Probe.Session(32).use { s ->
             val g = s.generation()
@@ -127,6 +127,94 @@ class ArchitectureG0AndroidTest {
             assertTrue(verified >= groups.size)
             Log.i(TAG, "G0 equivalence fixture=$name sha256=$digest groups=${groups.size} checked=$verified")
         }
+    }
+
+    @Test
+    fun batchedClearConversionIncludesPublicationCopyCosts() {
+        val asset = InstrumentationRegistry.getInstrumentation().context.assets
+            .open("source_tiled.hevc").use { it.readBytes() }
+        val group = HevcBitstream.splitAnnexB(asset).map { it.bytes }.take(8)
+        val sample = lengthPrefixed(group, 4)
+        val expected = ByteArray(sample.size)
+        assertEquals(expected.size, jvmConvert(sample, 4, expected))
+        for (count in listOf(1, 4, 16, 64)) {
+            val input = ByteArray(sample.size * count)
+            val reference = ByteArray(expected.size * count)
+            repeat(count) { index ->
+                sample.copyInto(input, index * sample.size)
+                expected.copyInto(reference, index * expected.size)
+            }
+            val nativeOutput = ByteArray(reference.size)
+            val jvmOutput = ByteArray(expected.size)
+            val jvmBatch = ByteArray(reference.size)
+            ArchitectureG0Probe.Session(input.size).use { s ->
+                val g = s.generation()
+                assertTrue(s.load(g, input))
+                assertEquals(reference.size, s.convertBatchLoaded(g, 4, count))
+                assertEquals(reference.size, s.copyOutput(g, nativeOutput))
+                assertArrayEquals(reference, nativeOutput)
+                // Malformed later sample must invalidate publication.
+                val bad = input.copyOf()
+                bad[(count - 1) * sample.size + 4] = 0x80.toByte()
+                assertTrue(s.load(g, bad))
+                assertEquals(ArchitectureG0Probe.INVALID, s.convertBatchLoaded(g, 4, count))
+                assertEquals(ArchitectureG0Probe.INVALID, s.copyOutput(g, nativeOutput))
+                assertTrue(s.load(g, input))
+                val jvmWork = {
+                    repeat(count) { index ->
+                        check(jvmConvert(sample, 4, jvmOutput) == expected.size)
+                        jvmOutput.copyInto(jvmBatch, index * expected.size)
+                    }
+                }
+                val nativeWork = {
+                    check(s.convertBatchLoaded(g, 4, count) == reference.size)
+                }
+                val copyWork = {
+                    check(s.load(g, input))
+                    check(s.convertBatchLoaded(g, 4, count) == reference.size)
+                    check(s.copyOutput(g, nativeOutput) == reference.size)
+                }
+                val singleSession = ArchitectureG0Probe.Session(sample.size)
+                singleSession.use { single ->
+                    val sg = single.generation()
+                    val singleOut = ByteArray(expected.size)
+                    val unbatched = {
+                        repeat(count) { index ->
+                            check(single.load(sg, sample))
+                            check(single.convertLoaded(sg, 4) == expected.size)
+                            check(single.copyOutput(sg, singleOut) == expected.size)
+                            singleOut.copyInto(nativeOutput, index * expected.size)
+                        }
+                    }
+                    // Alternate case order between sample counts to reduce warmup bias.
+                    val measurements = if (count == 1 || count == 16) {
+                        listOf(measureBatch(jvmWork), measureBatch(nativeWork), measureBatch(copyWork), measureBatch(unbatched))
+                    } else {
+                        val u = measureBatch(unbatched); val c = measureBatch(copyWork)
+                        val n = measureBatch(nativeWork); val k = measureBatch(jvmWork)
+                        listOf(k,n,c,u)
+                    }
+                    assertArrayEquals(reference, nativeOutput)
+                    assertArrayEquals(reference, jvmBatch)
+                    val labels = listOf("jvmArray", "rustComputeOnly", "rustCopyInclusive", "rustUnbatchedCopyInclusive")
+                    for ((i, timings) in measurements.withIndex()) {
+                        Log.i(TAG, "G0 batch sdk=${Build.VERSION.SDK_INT} count=$count bytes=${input.size} " +
+                            "case=${labels[i]} p50Ns=${timings[15]} p95Ns=${timings[29]} maxNs=${timings[30]} " +
+                            "jniCalls=${if (i == 0) 0 else if (i == 3) count else 1} " +
+                            "bridgeCopyBytes=${if (i >= 2) input.size.toLong() * 2 else 0}")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun measureBatch(block: () -> Unit): List<Long> {
+        repeat(32) { block() }
+        return LongArray(31) {
+            val start = System.nanoTime()
+            block()
+            System.nanoTime() - start
+        }.sorted()
     }
 
     private fun lengthPrefixed(group: List<ByteArray>, prefix: Int): ByteArray {

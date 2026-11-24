@@ -16,6 +16,8 @@ G.0 second batch on the dedicated branch: diagnostic JNI-RS/DirectByteBuffer, re
 
 Build 844 failed at the new native crash-symbol gate: all four Rust/NDK libraries lacked GNU build IDs. Exact artifact inspected; signed APK identity, version, native library packaging and ZIP alignment passed. Android-only linker flag, early build-ID checks and regression tests added in the dedicated branch. Build 843 remains the verified green baseline; no release acceptance or player change. See G ledger.
 
+Build 845 GREEN (717cc4c): native diagnostic JNI, signed emulator upgrade, all ABI build IDs, symbolication, clear prefix equivalence and existing checks passed. Third G.0 batch adds batched copy-inclusive benchmark and cross-arena lease rejection; candidate pending CI. Existing playback and strict release status unchanged. See dedicated G ledger.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |

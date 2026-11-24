@@ -14,7 +14,7 @@ public final class ArchitectureG0Probe {
     private ArchitectureG0Probe() {}
     private static native int nativeVersion();
     private static native int nativeConvert(ByteBuffer input, int inputLength,
-        int prefix, ByteBuffer output, int outputLimit);
+        int prefix, ByteBuffer output, int outputLimit, int batchCount);
 
     /** Explicit probe; failure is reported to the caller, never hidden as success. */
     public static synchronized int loadAndVersion() {
@@ -28,14 +28,17 @@ public final class ArchitectureG0Probe {
         ByteBuffer b = ByteBuffer.allocateDirect(16);
         a.put(new byte[]{2, 2, 1});
         ByteBuffer readOnly = b.asReadOnlyBuffer();
-        return nativeConvert(ByteBuffer.allocate(16), 3, 1, b, 16) == INVALID
-            && nativeConvert(a, 3, 1, ByteBuffer.allocate(16), 16) == INVALID
-            && nativeConvert(a, 17, 1, b, 16) == INVALID
-            && nativeConvert(a, 3, 1, b, 17) == INVALID
-            && nativeConvert(a, 3, 1, a, 16) == INVALID
-            && nativeConvert(a, 3, 1, readOnly, 16) == INVALID
-            && nativeConvert(a, -1, 1, b, 16) == INVALID
-            && nativeConvert(a, 3, 5, b, 16) == INVALID;
+        return nativeConvert(ByteBuffer.allocate(16), 3, 1, b, 16, 1) == INVALID
+            && nativeConvert(a, 3, 1, ByteBuffer.allocate(16), 16, 1) == INVALID
+            && nativeConvert(a, 17, 1, b, 16, 1) == INVALID
+            && nativeConvert(a, 3, 1, b, 17, 1) == INVALID
+            && nativeConvert(a, 3, 1, a, 16, 1) == INVALID
+            && nativeConvert(a, 3, 1, readOnly, 16, 1) == INVALID
+            && nativeConvert(a, -1, 1, b, 16, 1) == INVALID
+            && nativeConvert(a, 3, 5, b, 16, 1) == INVALID
+            && nativeConvert(a, 3, 1, b, 16, 0) == INVALID
+            && nativeConvert(a, 3, 1, b, 16, 2) == INVALID
+            && nativeConvert(a, 3, 1, b, 16, 65) == INVALID;
     }
 
     /** One owner, bounded private direct buffers, one synchronous native call.
@@ -53,7 +56,7 @@ public final class ArchitectureG0Probe {
             if (capacity <= 0 || capacity > MAX_CAPACITY) {
                 throw new IllegalArgumentException("G.0 capacity out of bounds");
             }
-            if (loadAndVersion() != 1) throw new IllegalStateException("G.0 ABI version mismatch");
+            if (loadAndVersion() != 2) throw new IllegalStateException("G.0 ABI version mismatch");
             input = ByteBuffer.allocateDirect(capacity);
             output = ByteBuffer.allocateDirect(capacity);
         }
@@ -71,10 +74,14 @@ public final class ArchitectureG0Probe {
         }
 
         public synchronized int convertLoaded(long expected, int prefix) {
+            return convertBatchLoaded(expected, prefix, 1);
+        }
+
+        public synchronized int convertBatchLoaded(long expected, int prefix, int count) {
             if (input == null || generation != expected) return STALE;
             outputLength = -1;
             if (loadedLength == 0) return INVALID;
-            int result = nativeConvert(input, loadedLength, prefix, output, output.capacity());
+            int result = nativeConvert(input, loadedLength, prefix, output, output.capacity(), count);
             if (result >= 0) outputLength = result;
             return result;
         }

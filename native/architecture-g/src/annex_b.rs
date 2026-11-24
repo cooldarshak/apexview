@@ -33,26 +33,54 @@ fn walk(input: &[u8], prefix: usize, mut visit: impl FnMut(&[u8]) -> Option<()>)
     Some(())
 }
 
-/// Validate the whole sample before writing; malformed or undersized output
-/// leaves output unchanged. Both buffers are caller-owned and nonoverlapping.
-pub fn convert_length_prefixed(input: &[u8], prefix: usize, output: &mut [u8]) -> Option<usize> {
+fn validated_size(input: &[u8], prefix: usize) -> Option<usize> {
     let mut needed = 0usize;
     walk(input, prefix, |nal| {
         needed = needed.checked_add(4)?.checked_add(nal.len())?;
         Some(())
     })?;
-    if needed > output.len() || needed > MAX_BYTES {
-        return None;
-    }
+    (needed <= MAX_BYTES).then_some(needed)
+}
+
+fn write_validated(input: &[u8], prefix: usize, output: &mut [u8]) -> Option<usize> {
     let mut pos = 0usize;
     walk(input, prefix, |nal| {
-        output[pos..pos + 4].copy_from_slice(&[0, 0, 0, 1]);
-        pos += 4;
-        output[pos..pos + nal.len()].copy_from_slice(nal);
-        pos += nal.len();
+        let end = pos.checked_add(4)?.checked_add(nal.len())?;
+        let dst = output.get_mut(pos..end)?;
+        dst[..4].copy_from_slice(&[0, 0, 0, 1]);
+        dst[4..].copy_from_slice(nal);
+        pos = end;
         Some(())
     })?;
-    Some(needed)
+    Some(pos)
+}
+
+/// Validate the whole sample before writing; malformed or undersized output
+/// leaves output unchanged. Both buffers are caller-owned and nonoverlapping.
+pub fn convert_length_prefixed(input: &[u8], prefix: usize, output: &mut [u8]) -> Option<usize> {
+    let needed = validated_size(input, prefix)?;
+    if needed > output.len() { return None; }
+    write_validated(input, prefix, output)
+}
+
+/// Fixed-size independent samples in one JNI call. Validate every sample
+/// before any write; each sample still has its own NAL-count/range checks.
+/// No descriptor allocation, no merging of sample semantics. Diagnostic only.
+pub fn convert_fixed_batch(input: &[u8], sample_len: usize, count: usize, prefix: usize, output: &mut [u8]) -> Option<usize> {
+    if !(1..=64).contains(&count) || sample_len == 0 ||
+        sample_len.checked_mul(count)? != input.len() || input.len() > MAX_BYTES {
+        return None;
+    }
+    let mut needed = 0usize;
+    for sample in input.chunks_exact(sample_len) {
+        needed = needed.checked_add(validated_size(sample,prefix)?)?;
+    }
+    if needed > output.len() || needed > MAX_BYTES { return None; }
+    let mut pos = 0usize;
+    for sample in input.chunks_exact(sample_len) {
+        pos = pos.checked_add(write_validated(sample,prefix,output.get_mut(pos..)?)?)?;
+    }
+    Some(pos)
 }
 
 #[cfg(test)]
@@ -74,6 +102,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn batch_preserves_independent_samples_and_is_atomic_on_invalid_input() {
+        let sample = [2,2,1];
+        let mut out = [0x55; 24];
+        assert_eq!(convert_fixed_batch(&sample.repeat(4),3,4,1,&mut out),Some(24));
+        assert_eq!(out,[0,0,0,1,2,1].repeat(4).as_slice());
+        let mut out = [0x55; 24];
+        assert_eq!(convert_fixed_batch(&[2,2,1,3,2,1],3,2,1,&mut out),None);
+        assert_eq!(convert_fixed_batch(&sample.repeat(4),3,4,1,&mut out[..23]),None);
+        assert_eq!(convert_fixed_batch(&sample,3,2,1,&mut out),None);
+        assert_eq!(convert_fixed_batch(&sample,3,0,1,&mut out),None);
+        assert_eq!(convert_fixed_batch(&sample,usize::MAX,64,1,&mut out),None);
+        assert_eq!(out,[0x55;24]);
+    }
     #[test]
     fn rejects_without_partial_write() {
         let mut out = [0x55;16];

@@ -89,7 +89,7 @@ run_g0_gate() {
   g0_report="${RUNNER_TEMP:?}/pitwall-g0-api-$sdk-instrumentation.txt"
   if ! run_required_instrumentation \
     app.apexview.tiled.ArchitectureG0AndroidTest \
-    'OK (3 tests)' "$g0_report"; then
+    'OK (4 tests)' "$g0_report"; then
     adb logcat -d -s PitwallG0:I '*:S' >> "$g0_report" || true
     cat "$g0_report"
     return 1

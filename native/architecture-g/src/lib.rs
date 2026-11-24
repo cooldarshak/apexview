@@ -2,7 +2,9 @@
 #![deny(unsafe_code)]
 
 mod annex_b;
-pub use annex_b::convert_length_prefixed;
+pub use annex_b::{convert_length_prefixed, convert_fixed_batch};
+use std::sync::atomic::{AtomicUsize, Ordering};
+static NEXT_ARENA_ID: AtomicUsize = AtomicUsize::new(1);
 
 #[cfg(target_os = "android")]
 #[allow(unsafe_code)]
@@ -40,6 +42,7 @@ pub fn annex_b_size(sample: &[u8], prefix: usize) -> Option<usize> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Lease {
+    arena_id: usize,
     slot: usize,
     serial: u64,
     generation: u64,
@@ -53,6 +56,7 @@ struct Slot {
 /// Single-owner experiment. Rust borrows guard slices; no raw JNI pointers,
 /// shared ownership or production concurrency in this prototype.
 pub struct Arena {
+    id: usize,
     slots: Vec<Slot>,
     generation: u64,
     serial: u64,
@@ -71,12 +75,13 @@ impl Arena {
             bytes.resize(capacity, 0);
             pool.push(Slot { bytes: bytes.into_boxed_slice(), len: 0, owner: None });
         }
-        Some(Self { slots: pool, generation: 0, serial: 0 })
+        let id = NEXT_ARENA_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1)).ok()?;
+        Some(Self { id, slots: pool, generation: 0, serial: 0 })
     }
     pub fn publish(&mut self, data: &[u8]) -> Option<Lease> {
         let index = self.slots.iter().position(|s| s.owner.is_none() && data.len() <= s.bytes.len())?;
         self.serial = self.serial.checked_add(1)?;
-        let lease = Lease { slot: index, serial: self.serial, generation: self.generation };
+        let lease = Lease { arena_id: self.id, slot: index, serial: self.serial, generation: self.generation };
         let slot = &mut self.slots[index];
         slot.bytes[..data.len()].copy_from_slice(data);
         slot.len = data.len();
@@ -117,6 +122,44 @@ mod tests {
         assert_eq!(annex_b_size(&[0],2), None);
         assert_eq!(annex_b_size(&[],5), None);
         assert_eq!(annex_b_size(&[2,9,10].repeat(4097),1), None);
+    }
+    #[test]
+    fn independent_arenas_reject_foreign_leases() {
+        let mut a = Arena::new(1, 32).unwrap();
+        let mut b = Arena::new(1, 32).unwrap();
+        let x = a.publish(b"a").unwrap();
+        let y = b.publish(b"b").unwrap();
+        assert_ne!(x,y);
+        assert!(a.read(y).is_none());
+        assert!(!a.release(y));
+        assert!(b.read(x).is_none());
+        assert!(!b.release(x));
+        assert_eq!(a.read(x), Some(b"a".as_slice()));
+        assert_eq!(b.read(y), Some(b"b".as_slice()));
+    }
+    #[test]
+    fn serialized_concurrent_invalidation_and_release() {
+        use std::sync::{Arc, Barrier, Mutex};
+        use std::thread;
+        let arena = Arc::new(Mutex::new(Arena::new(1, 32).unwrap()));
+        let lease = arena.lock().unwrap().publish(b"old").unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let a = Arc::clone(&arena);
+        let b = Arc::clone(&barrier);
+        let worker = thread::spawn(move || {
+            b.wait();
+            let mut locked = a.lock().unwrap();
+            assert!(locked.read(lease).is_none());
+            assert!(locked.release(lease));
+            let new = locked.publish(b"new").unwrap();
+            assert!(!locked.release(lease));
+            assert_eq!(locked.read(new), Some(b"new".as_slice()));
+            assert!(locked.release(new));
+        });
+        { let mut locked = arena.lock().unwrap(); assert!(locked.invalidate()); assert!(locked.publish(b"blocked").is_none()); }
+        barrier.wait();
+        worker.join().unwrap();
+        assert!(arena.lock().unwrap().publish(b"done").is_some());
     }
     #[test]
     fn lease_generation_exhaustion_and_stale_release() {

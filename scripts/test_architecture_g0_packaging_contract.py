@@ -18,7 +18,7 @@ class ArchitectureG0PackagingContract(unittest.TestCase):
             self.assertIn(gate,wf)
         script=(ROOT/"scripts/run_rendernode_instrumentation.sh").read_text()
         self.assertIn("ArchitectureG0AndroidTest",script)
-        self.assertIn('OK (3 tests)',script)
+        self.assertIn('OK (4 tests)',script)
         self.assertIn("G0 signed upgrade/data retention PASS",script)
 
     def test_build_id_linker_and_early_gate(self):
