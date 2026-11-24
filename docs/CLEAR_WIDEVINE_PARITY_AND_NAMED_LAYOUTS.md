@@ -1,7 +1,9 @@
 # Clear Archive versus Widevine HEVC: coordinated optimization and layout audit
 
+**Current checkpoint (24 November 2026):** [Build 839 GREEN](https://github.com/cooldarshak/apexview/actions/runs/45391665766), source `5090df55`. Native multifeed, map/tower and caption appearance have been observed on phone and TV; TV three-feed stability, Pitwall TLS and baked Google Cast buffering remain open. Physical/release acceptance is not implied by CI. The [current master ledger](PITWALL_PERFORMANCE_AUDIT_PLAN.md) supersedes historical coding percentages and pending instructions below.
+
 Branch: feature/pitwall-performance-audit-plan
-Base: passing Build 650
+Historical comparison baseline: passing Build 650; current status is recorded above
 Validation: existing GitHub Actions Android tests, source audit, prior real S22 Ultra logs. No new synthetic video playback tests were added.
 
 ## Comparison and implementation status

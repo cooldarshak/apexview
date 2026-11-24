@@ -1,5 +1,7 @@
 # S22 Ultra: phone-only aShell measurement of Pitwall playback
 
+**Current checkpoint (24 November 2026):** [Build 839 GREEN](https://github.com/cooldarshak/apexview/actions/runs/45391665766), source `5090df55`. Native multifeed, map/tower and caption appearance have been observed on phone and TV; TV three-feed stability, Pitwall TLS and baked Google Cast buffering remain open. Physical/release acceptance is not implied by CI. The [current master ledger](../PITWALL_PERFORMANCE_AUDIT_PLAN.md) supersedes historical coding percentages and pending instructions below.
+
 No `adb` command, PC, uninstall or root access is required when aShell has
 the device-shell permissions that previously allowed `perfetto` and `logcat`.
 If the device rejects a Perfetto data source, report the error; do not turn

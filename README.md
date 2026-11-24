@@ -41,7 +41,7 @@ Made for the Pixel Fold's inner screen, and works on other Android phones and ta
 - **Android TV remote:** arrows and select move through everything. While watching, left and right
   skip 10 seconds, the other arrows and select bring up the controls, and Back hides them. Feeds
   can't be dragged by hand on a TV; pick a layout instead.
-- **Google Cast:** the standard device picker works in either decoder mode. Cast requests at least 720p per source and rejects smaller actual pictures rather than silently lowering quality. A registered Pitwall Web Receiver can reproduce the phone's video-window geometry using one decoded atlas; without its app ID the Default Media Receiver shows the encoded grid. Separate timing/map UI overlays and protected/live receiver playback remain pending. See [Cast status and receiver setup](docs/SINGLE_DECODER_LAYOUTS_AND_CAST.md).
+- **Google Cast:** clear baked streaming captures the composed video, map, tower and caption overlays into one AVC/AAC HLS stream. It works in the tested clear case, but intermittent buffering remains open. The optional registered Web Receiver is a separate layout route. Protected playback follows authorized native receiver policy. See [Cast status and receiver setup](docs/SINGLE_DECODER_LAYOUTS_AND_CAST.md).
 
 - **Season calendar** in your local time, with optional reminders before each session.
 
@@ -65,7 +65,7 @@ Apexview checks for a new release each time it opens and offers to update itself
 
 ## Build it yourself
 
-You need JDK 17 and the Android SDK (Android Studio brings both).
+Use the JDK and Android SDK versions configured in the repository's current Android CI workflow.
 
 ```bash
 ./gradlew assembleDebug
@@ -117,4 +117,10 @@ MIT; see [LICENSE](LICENSE). Fork it, change it, share it.
 
 ### Free local TV receiver
 
-Open **Settings → TV casting → Receive from phone** on the TV, then tap **Cast** in the phone player and choose the discovered Pitwall TV. The receiver uses one hardware video decoder plus the phone's video-window geometry, with sources verified at least 720p. Phone video/audio stop after the TV renders and the phone remains its controller/relay. No paid Cast registration, IP entry or pairing code is needed. [Setup, FCast extension, Miracast limits and device checklist](docs/LOCAL_TV_RECEIVER.md). Hardware playback on the target TV remains a device validation requirement.
+Open **Settings → TV casting → Receive from phone** on the TV, then tap **Cast** on the phone and choose Pitwall TV. Current Pitwall-to-Pitwall connections require matching pairing codes and mutual TLS; no paid Google Cast registration is required for the native receiver. The current Build 839 phone/TV connection fails with SSLHandshakeException and is under investigation. [Setup and device checklist](docs/LOCAL_TV_RECEIVER.md).
+
+## Engineering status
+
+**Current checkpoint (24 November 2026):** [Build 839 GREEN](https://github.com/cooldarshak/apexview/actions/runs/45391665766), source `5090df55`. Native multifeed, map/tower and caption appearance have been observed on phone and TV; TV three-feed stability, Pitwall TLS and baked Google Cast buffering remain open. Physical/release acceptance is not implied by CI.
+
+The [16-workstream consolidated engineering plan](docs/PITWALL_PERFORMANCE_AUDIT_PLAN.md) is the sole active roadmap. The next 14 follow-up items are recorded there. Build 839 is the tested baseline, not a production release approval.

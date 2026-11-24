@@ -1,5 +1,7 @@
 # Reproducible 50 fps playback and BufferQueue profiling
 
+**Current checkpoint (24 November 2026):** [Build 839 GREEN](https://github.com/cooldarshak/apexview/actions/runs/45391665766), source `5090df55`. Native multifeed, map/tower and caption appearance have been observed on phone and TV; TV three-feed stability, Pitwall TLS and baked Google Cast buffering remain open. Physical/release acceptance is not implied by CI. The [current master ledger](PITWALL_PERFORMANCE_AUDIT_PLAN.md) supersedes historical coding percentages and pending instructions below.
+
 This guide complements `PITWALL_PERFORMANCE_AUDIT_PLAN.md`. Its measurements must come
 from the **same device**, actual source resolutions and chosen display mode. Green CI
 checks bitstream correctness; it does **not** establish on-screen smoothness.
@@ -124,7 +126,6 @@ also requires an external sync test or platform audio trace.
 - [Androidify](https://github.com/android/androidify),
   [Breezy Weather](https://github.com/breezy-weather/breezy-weather),
   [Roborazzi](https://github.com/takahirom/roborazzi): useful for future UI
-  component consistency and visual regression tests. Material 3 Expressive
-  migration is not a playback optimization and is deferred during P0.
+  component consistency and visual regression tests. Material 3 Expressive work is tracked separately in P2.8; it is not evidence of playback performance.
 
 No trace or smoothness result is implied by shipping this configuration.

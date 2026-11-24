@@ -1,8 +1,78 @@
 # PITWALL TV: SINGLE CONSOLIDATED RELEASE AND ACCEPTANCE PLAN
 
+## Current status — 24 November 2026, Build 839
+
+**Only active engineering plan.** Repository: `cooldarshak/apexview`. Stable branch: `main`; working branch: `feature/pitwall-performance-audit-plan`. Both contained the identical Build 839 source tree at the start of this documentation cleanup. Exact tested production commit: [5090df55](https://github.com/cooldarshak/apexview/commit/5090df55d3fbef02703dacb66c514a3a185f8db5), [Build 839 GREEN](https://github.com/cooldarshak/apexview/actions/runs/45391665766), debug app version 1.0.1678. Merged into main via [PR #5](https://github.com/cooldarshak/apexview/pull/5). Documentation-only updates do not establish new binary acceptance.
+
+Build 839 corrected the Build 838 Android overlay capture pixel-test failure. Mandatory automated checks passed on the exact production commit. The earlier 16/16 coding-complete ledger described the then-identified scope, not a guarantee of defect-free behavior. Physical testing has reopened coding work. Do not use old percentages as current status, invent percentages for unestimated new work, or treat a green workflow as release approval.
+
+### Current 16-workstream ledger
+
+| ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |
+| --- | --- | --- | --- |
+| P0.1 | Segment priority and exact seek | Reopened: delivery tail latency and seek attribution | Open; phone seek improvement observed, TV/Cast pending |
+| P0.2 | HEVC memory and delivery | Reopened: TV composition throughput, allocation and native arena feasibility | Open |
+| P0.3 | Video rendering | Reopened: BufferQueue ownership, GPU capture throughput | Open |
+| P0.4 | Map and timing tower | Reopened: map-lock visibility, driver OUT recovery, gear telemetry | Open; native map/tower working |
+| P1.1 | HEVC atlas | Reopened: device-aware throughput/geometry validation | Open; single hardware decoder multifeed demonstrated |
+| P1.2 | Refresh matching | Reopened: full 50/75fps scheduling and output-mode selection | Open |
+| P1.3 | Quality and thermal | Reopened: device defaults, thermal/quality policy | Open |
+| P2.1 | Pitwall Cast | Reopened: TLS, baked Google Cast buffering, capture and local presentation | Open |
+| P2.2 | Coordinator architecture | Previous scope implemented; audit ownership in new Cast/rendering changes | Open |
+| P2.3 | Release and updates | Previous coding scope implemented; no new specific coding defect identified | Open; signed upgrade/release acceptance |
+| P2.4 | Authorization and security | Reopened: Android 12/16 mutual TLS interoperability | Open |
+| P2.5 | Android TV | Reopened: landscape strip, map lock, telemetry, multifeed throughput | Open |
+| P2.6 | Testing and benchmarks | Reopened: regression and matched physical evidence matrix | Open |
+| P2.7 | Core architecture | Previously accepted scope implemented; preserve single-decoder invariant | Closed for previously accepted core scope only |
+| P2.8 | Material 3 Expressive | Reopened: TV layout and lock-control accessibility | Open |
+| P2.9 | Closed captions | Previous coding scope implemented; no new caption-appearance defect reported | Open; appearance confirmed by user on phone/TV; Cast, track/programme and full lifecycle acceptance pending |
+
+Strict release acceptance remains **1/16 closed**; no release approval. Coding percentages for the reopened scope are not estimated. A workstream can return to 100% coding only after all its identified requirements and regression tests are implemented, with hardware acceptance separately tracked.
+
+### Build 839 physical observations and evidence boundaries
+
+- User confirms native TV multifeed playback now starts with Software DRM ON/OFF and experimental clear SurfaceView ON/OFF; native map movement is smooth, tower updates, caption text size and background opacity work on both devices. Three feeds with map/tower still interrupt frequently on TV. This is a compatibility milestone, not endurance acceptance or proof of protected playback for every toggle.
+- Pitwall Cast fails with SSLHandshakeException before playback/pairing completes. Baked Google Cast works for tested clear content with overlays but repeatedly buffers; phone continues producing/displaying the source. TV map lock persists. Main + strip can choose a lower strip instead of main-left/right-strip. Gear is missing in Las Vegas tower and a resumed driver can remain OUT.
+- Earlier and new logs contain mixed APK versions; classify by capture header and process, not filename or test date. S22 Build 839 header is 1.0.1678; older TCL 1.0.1662 is Build 831. The prior audit's TV segment throughput examples include older-build evidence (5.76 s media segments, slow composition/rewrite); remeasure exact Build 839/new candidate on TCL before attributing a quantitative regression to it.
+- Prior phone audit reported median composition 307 → 264 ms, median process allocation 77.6 → 65.1 MB, seek p95 2210 → 1303 ms (831 → 839); uncached request p95 1841 → 2402 ms and slow UI frame share 33.79 → 38.35%. These are observational, not matched A/B results. FrameTimeline primary-window misses reported SurfaceView 24.94%, TextureView 36.50% for 839; these are not video scanout/drop rates. Full scheduler/GPU attribution still pending.
+- Provisional everyday settings from the latest review: single decoder, 1×, normal DRM negotiation (Software DRM OFF), experimental clear SurfaceView ON where supported. If authorized playback fails, diagnose device/licence behavior; use only permitted fallback. On TV begin with single feed or reduced secondary quality. Actual source quality, DRM and renderer must be recorded; the clear experiment does not alter protected output policy.
+
+### Consolidated next implementation batch (14 items; no separate competing plan)
+
+| Item | Priority | Workstreams | Required engineering and acceptance | Status |
+| --- | --- | --- | --- | --- |
+| 1 | P0 | P2.1/P2.4 | Diagnose underlying TLS alert/certificate/key negotiation; test Android 12↔16 TLS 1.2/1.3, pairing/reconnect and pinning; no insecure fallback | Open; failure confirmed, cause unproven |
+| 2 | P0 | P2.1/P0.1 | Baked HLS startup buffer, segment readiness, bounded retention and receiver buffering diagnostics; sustained playback/seek tests | Open |
+| 3 | P0 | P0.3/P2.1 | Independent GPU overlay acquisition, adaptive encoder pacing/backpressure, measured encode and layer latency; keep actual map/tower/CC geometry | Open |
+| 4 | P1 | P2.1/P2.2 | Suppress unnecessary local presentation/audio during baked Cast while retaining required source clock, decoding and composition; lifecycle/recovery tests | Open |
+| 5 | P0 | P0.2/P1.1/P2.5 | Profile TV HEVC parsing/rewrite, GC and scheduling; sustain producer throughput ahead of real segment deadlines | Open |
+| 6 | P0 | P0.2/P1.1 | Architecture G feasibility: benchmark native C++/Rust bounded arena/JNI against existing Kotlin range writer before migration; preserve byte-exact clear/protected invariants, ownership and licensed Widevine | Open; candidate, not proven |
+| 7 | P0 | P0.3 | BufferQueue surface/codec ownership, exact release correlation, latch and physical presentation; no arbitrary pool tuning or warning suppression | Open |
+| 8 | P1 | P1.2 | Measured 50/75fps pacing, actual display mode, A/V synchronization and thermal health; verify 50/100 Hz availability and mode behavior | Open |
+| 9 | P1 | P0.4/P2.5/P2.8 | Locked TV map auto-hide and reveal on chrome/edit/focus navigation without trapping D-pad focus | Open; source cause confirmed |
+| 10 | P1 | P2.5/P2.8 | Main + strip landscape main-left 2/3, right vertical strip 1/3; portrait bottom strip; consistent local/saved/Cast geometry | Open; source cause confirmed |
+| 11 | P1 | P0.4 | Separate temporary stopped, retired and resumed race status; replay/live/Cast tests for sparse deltas and rejoining | Open; permanent latch confirmed |
+| 12 | P1 | P0.4/P2.2 | Tower requests and publishes gear telemetry independently, handles partial/failed/empty archive loads and stale request ownership; validate actual F1 data | Open; likely source lead |
+| 13 | P1 | P1.3/P2.5 | Device-aware safe quality/thermal defaults and renderer/DRM recommendations, verified on phone and TV | Open |
+| 14 | P0 | P2.6 | Coordinated source + regression tests for every confirmed defect, exact SHA CI and matched hardware measurements | Open |
+
+Engineering rules: one coordinated implementation pass, not a sequence of tiny speculative commits; preserve phone/TV, single/multiple decoder, clear and authorized Widevine, Google Cast and Pitwall Cast, existing login and entitlements. No proprietary SDK, paid OpenF1, session-specific patches or insecure TLS/DRM shortcuts. Keep clear capture and protected policy boundaries. Do not restart the app or publish a production release from this documentation update.
+
+### Documentation navigation
+
+- [50 fps device profiling](PITWALL_50FPS_DEVICE_PROFILE.md) and [phone-only aShell capture](perfetto/ASHELL.md): reproducible measurements.
+- [Clear/Widevine parity and named layouts](CLEAR_WIDEVINE_PARITY_AND_NAMED_LAYOUTS.md), [single-decoder layouts and Cast](SINGLE_DECODER_LAYOUTS_AND_CAST.md), [native TV receiver](LOCAL_TV_RECEIVER.md): supporting technical status/setup notes; this master ledger takes precedence.
+- Historical diagnosis, CMAF inspection and reference notes are evidence, not competing execution plans. Obsolete phase plans and Build 819/826 handovers are removed from the working tree; their complete contents remain in the [pre-cleanup Git revision](https://github.com/cooldarshak/apexview/tree/73b51df9ed9996772cf7ed499df7e01649eb9ea0/docs).
+
+---
+
+## Historical engineering record (preserved in full)
+
+Everything below documents earlier implementation checkpoints, decisions, original detailed workstream requirements, research, regressions and acceptance criteria. Historical pending instructions and percentages are NOT the current execution queue. Retain technical invariants and still-applicable acceptance criteria; use the current ledger and 14-item batch above for execution status.
+
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** The consolidated source update is implemented. Physical and release acceptance is open. **Verified starting checkpoint: Build 837**, commit `6d20bccdcfba121f7b0998fdcb8d9dcc492ff539`. Its mandatory source, JVM, Cast, independent HEVC/CMAF, APK and Android instrumentation checks passed. This document is the active project plan. [Build 837](https://github.com/cooldarshak/apexview/actions/runs/45374278181)
+**Historical status:** The consolidated source update was implemented. Physical and release acceptance is open. **Verified starting checkpoint: Build 837**, commit `6d20bccdcfba121f7b0998fdcb8d9dcc492ff539`. Its mandatory source, JVM, Cast, independent HEVC/CMAF, APK and Android instrumentation checks passed. This document is the active project plan. [Build 837](https://github.com/cooldarshak/apexview/actions/runs/45374278181)
 
 ## Build 838 Android rendering correction
 
@@ -16,7 +86,7 @@
 - **TV and release.** Programme switches reject stale track acknowledgements and apply the desired audio when a load starts rendering. Caption language, text size and background opacity use the phone and TV's existing accessible controls. The release audit checked the Build 837 owned-publisher asset, checksum, signer/version, installer, paired TLS, backup and redaction paths. Their remaining gates require real installed APKs, authorized hardware sessions or release approval.
 - **Automation.** The coordinated candidate includes JVM owner/clock and lease regressions, a Media3 extraction test for packaged WebVTT, and a mandatory Android EGL pixel test for the actual Compose layer and moving overlay. The branch workflow is the source of truth for exact-commit CI.
 
-### Current workstream ledger
+### Historical workstream ledger at Build 838 candidate
 
 Coding percentages refer to the identified source requirements. The new commit's exact-source CI is tracked in GitHub Actions. Green CI and the physical/release evidence below are recorded independently.
 
