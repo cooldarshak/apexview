@@ -112,6 +112,7 @@ internal class CmafCastAudio(private val reader: CmafHttpReader, private val lan
         } finally { bytes.fill(0) }
     }
     private fun append(bytes: ByteArray, sourceUs: Long) {
+        var transferred = false
         try {
             val metadata = CmafBoxInspector.inspect(bytes, requireNotNull(report))
             require(metadata.errors.isEmpty() && metadata.fragments.size == 1) { "Cast audio fragment is invalid" }
@@ -122,9 +123,10 @@ internal class CmafCastAudio(private val reader: CmafHttpReader, private val lan
             if (encrypted) require(f.sampleEncryptionBoxPresent && f.sampleEncryptionStructureComplete) { "Cast audio lost its encryption metadata" }
             if (firstSourceUs == null) { firstSourceUs = sourceUs; firstDts = dts }
             segments.lastOrNull()?.let { require(it.dts + it.duration == dts) { "Cast audio has a timeline gap" } }
-            segments += Segment("audio-${++serial}.m4s", bytes.copyOf(), dts, duration)
+            segments += Segment("audio-${++serial}.m4s", bytes, dts, duration)
+            transferred = true
             while (segments.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) segments.removeAt(0).bytes.fill(0)
-        } finally { bytes.fill(0) }
+        } finally { if (!transferred) bytes.fill(0) }
     }
     fun appendTo(video: ProtectedHevcComposedDashPackageBuilder.Package, videoSourceStartUs: Long): ProtectedHevcComposedDashPackageBuilder.Package {
         require(segments.isNotEmpty()) { "No audio is ready" }

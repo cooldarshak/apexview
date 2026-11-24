@@ -13,6 +13,15 @@ internal object CaptionControlProtocol {
         JSONObject().put("action", "captions").put("enabled", enabled)
             .put("language", CaptionPolicy.normalizeLanguage(language))
 
+    fun forLoad(enabled: Boolean, language: String, playbackId: String): JSONObject {
+        require(playbackId.isNotBlank() && playbackId.length <= 80)
+        return encode(enabled, language).put("playbackId", playbackId)
+    }
+
+    fun matchesLoad(body: JSONObject, playbackId: String, requireId: Boolean): Boolean =
+        if (body.has("playbackId")) playbackId.isNotEmpty() && body.optString("playbackId") == playbackId
+        else !requireId
+
     fun decode(body: JSONObject): RemoteCaptionPreference {
         require(body.getString("action") == "captions")
         val raw = body.getString("language")

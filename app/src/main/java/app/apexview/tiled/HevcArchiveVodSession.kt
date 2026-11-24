@@ -40,6 +40,7 @@ internal class HevcArchiveVodSession(
     val audioUri: Uri? = null,
     val audioUris: Map<String, Uri> = emptyMap(),
     val stableAudioUris: Set<Uri> = emptySet(),
+    val captionSource: ArchiveCaptionSource? = null,
 ) : AutoCloseable {
     class Input(val label: String, val playlist: HlsMediaPlaylist, val format: Format?,
                 val initialization: ByteArray, val report: CmafBoxInspector.Report,
@@ -220,7 +221,7 @@ internal class HevcArchiveVodSession(
     fun segment(number: Int): ByteArray =
         requestSegment(number, { delivery.obtain(number, copyForCaller = true)!! }, { it.fill(0) })
 
-    private fun segmentLease(number: Int): ArchiveFragmentLease =
+    internal fun segmentLease(number: Int): ArchiveFragmentLease =
         requestSegment(number, { delivery.obtainLease(number) }, { it.close() })
 
     private fun <T> requestSegment(number: Int, acquire: () -> T, discard: (T) -> Unit): T {

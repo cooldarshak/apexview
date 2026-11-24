@@ -40,6 +40,10 @@ object LoginCookie {
 
     fun readToken(): String? {
         val cookies = CookieManager.getInstance().getCookie("https://account.formula1.com") ?: return null
+        return parseToken(cookies)
+    }
+
+    internal fun parseToken(cookies: String): String? {
         val raw = cookies.split(";")
             .map { it.trim() }
             .firstOrNull { it.startsWith("login-session=") }
@@ -47,7 +51,12 @@ object LoginCookie {
             ?: return null
 
         // The value is JSON, either raw or URL-encoded.
-        for (candidate in listOf(raw, URLDecoder.decode(raw, "UTF-8"))) {
+        val decoded = try {
+            URLDecoder.decode(raw, "UTF-8")
+        } catch (_: IllegalArgumentException) {
+            null // A malformed percent escape must not crash the sign-in callback.
+        }
+        for (candidate in listOfNotNull(raw, decoded).distinct()) {
             try {
                 val token = JSONObject(candidate).optJSONObject("data")?.optString("subscriptionToken")
                 if (!token.isNullOrEmpty()) return token

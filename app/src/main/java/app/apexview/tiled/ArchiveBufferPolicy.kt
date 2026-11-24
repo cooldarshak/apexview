@@ -140,6 +140,12 @@ internal class ArchiveFragmentLease(
         bytes.copyInto(target, targetOffset, sourceOffset, sourceOffset + length)
     }
 
+    @Synchronized fun writeTo(output: java.io.OutputStream, sourceOffset: Int, length: Int) {
+        check(!closed) { "Archive fragment lease is closed" }
+        require(length >= 0 && sourceOffset >= 0 && sourceOffset <= size - length)
+        output.write(bytes, sourceOffset, length)
+    }
+
     @Synchronized override fun close() {
         if (closed) return
         closed = true

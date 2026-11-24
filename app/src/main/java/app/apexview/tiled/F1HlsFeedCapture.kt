@@ -39,7 +39,7 @@ private suspend fun <T, R> mapArchiveFeedsBounded(
 /** Reads the HLS/CMAF actually supplied by player_tm, without another PLAY or media player. */
 internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximumHeight: Int = 2160,
                                 private val maximumOutputWidth: Int = 4096, private val minimumCaptureHeight: Int = 0, fullPictures: Boolean = minimumCaptureHeight > 0) {
-    private data class Offer(val feed: F1DashFeedCapture.Feed, val uri: Uri, val format: Format?, val master: HlsMultivariantPlaylist?, val audioGroupId: String? = null)
+    private data class Offer(val feed: F1DashFeedCapture.Feed, val uri: Uri, val format: Format?, val master: HlsMultivariantPlaylist?, val audioGroupId: String? = null, val subtitleGroupId: String? = null)
     private class Init(val uri: Uri, val offset: Long, val length: Long, val bytes: ByteArray, val report: CmafBoxInspector.Report)
     private val reader = CmafHttpReader(factory)
     private val offers = java.util.concurrent.ConcurrentHashMap<String, List<Offer>>()
@@ -162,13 +162,15 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 Uri.parse(selected.first { it.feed.label == clockLabel }.feed.manifestUrl)
             }
             val selectableAudioUris = if (audio == null) audioUris else audioUris + (clockLabel to audio)
+            val captionSource = archiveCaptionSource(selected.firstOrNull { it.feed.label == clockLabel })
             var session: HevcArchiveVodSession? = null
             val owned = selected.mapIndexed { i, offer -> HevcArchiveVodSession.Input(offer.feed.label, playlists[i], offer.format,
                 inits[i].bytes.copyOf(), inits[i].report,
                 requireNotNull(playlists[i].segments[probeIndexes[i]].initializationSegment)) }
             try {
                 session = HevcArchiveVodSession(reader, owned, clockLabel, maximumOutputWidth = maximumOutputWidth,
-                    audioUri = audio, audioUris = selectableAudioUris, stableAudioUris = stableAudioUris)
+                    audioUri = audio, audioUris = selectableAudioUris, stableAudioUris = stableAudioUris,
+                    captionSource = captionSource)
                 session.prepare(positionMs)
                 coroutineContext.ensureActive()
                 acquired = session
@@ -559,6 +561,47 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 (if (clearOutput == true) clearComposition.outputTiming() else ProtectedHevcLiveComposition.outputTiming(group))?.shifted(offset)
             })
 
+    private suspend fun archiveCaptionSource(offer: Offer?): ArchiveCaptionSource? {
+        offer ?: return null
+        val master = offer.master ?: return null
+        val subtitleGroup = offer.subtitleGroupId ?: return null
+        val variant = master.variants.indexOfFirst { it.url == offer.uri && it.subtitleGroupId == subtitleGroup }
+        if (variant < 0) return null
+        val declared = master.subtitles.withIndex().filter { (_, rendition) ->
+            rendition.groupId == subtitleGroup && rendition.url != null
+        }.take(16)
+        // A missing or protected alternate text playlist must not break clear
+        // video startup. Only independently inspected finite clear offers join
+        // the native archive merge; no request for encryption keys is made.
+        val actual = mapArchiveFeedsBounded(declared) { entry ->
+            try {
+                val media = parse(requireNotNull(entry.value.url), master) as? HlsMediaPlaylist
+                entry.takeIf { media != null && media.hasEndTag && media.segments.isNotEmpty() &&
+                    media.segments.none { segment -> segment.drmInitData != null ||
+                        segment.fullSegmentEncryptionKeyUri != null ||
+                        segment.initializationSegment?.drmInitData != null ||
+                        segment.initializationSegment?.fullSegmentEncryptionKeyUri != null } &&
+                    media.tags.none { it.startsWith("#EXT-X-KEY:") && !it.contains("METHOD=NONE") } }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) {
+                coroutineContext.ensureActive()
+                android.util.Log.w("ApexviewPlaybackOffer", "ARCHIVE_CAPTION_PROBE_FAILED type=${error.javaClass.simpleName}")
+                null
+            }
+        }.filterNotNull()
+        if (actual.isEmpty()) return null
+        val keys = listOf(androidx.media3.common.StreamKey(HlsMultivariantPlaylist.GROUP_INDEX_VARIANT, variant)) +
+            actual.map { androidx.media3.common.StreamKey(HlsMultivariantPlaylist.GROUP_INDEX_SUBTITLE, it.index) }
+        val renditions = actual.map { (_, rendition) ->
+            val language = app.apexview.CaptionPolicy.normalizeLanguage(rendition.format.language)
+                .takeUnless { it == app.apexview.CaptionPolicy.AUTO } ?: "und"
+            ArchiveCaptionRendition(requireNotNull(rendition.url), language,
+                rendition.format.label?.takeIf { it.isNotBlank() }?.take(64) ?: language)
+        }
+        android.util.Log.i("ApexviewPlaybackOffer", "ARCHIVE_CAPTION_SOURCE declaredRenditions=${renditions.size}")
+        return ArchiveCaptionSource(Uri.parse(offer.feed.manifestUrl), keys, renditions)
+    }
+
     private fun parse(uri: Uri, master: HlsMultivariantPlaylist? = null): HlsPlaylist {
         val response = reader.read(uri, MAX_MANIFEST_BYTES)
         try {
@@ -577,7 +620,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             is HlsMultivariantPlaylist -> playlist.variants.filter {
                 it.format.codecs?.split(',')?.any { codec -> codec.trim().startsWith("hvc1") || codec.trim().startsWith("hev1") } == true &&
                     it.format.height in 1..maximumHeight
-            }.map { Offer(feed, it.url, it.format, playlist, it.audioGroupId) }.ifEmpty { throw PermanentCaptureException("${feed.label}: HLS offers no supported HEVC variant") }
+            }.map { Offer(feed, it.url, it.format, playlist, it.audioGroupId, it.subtitleGroupId) }.ifEmpty { throw PermanentCaptureException("${feed.label}: HLS offers no supported HEVC variant") }
             is HlsMediaPlaylist -> {
                 if (playlist.hasEndTag) vodPlaylists[playlist.baseUri] = playlist
                 listOf(Offer(feed, Uri.parse(playlist.baseUri), null, null))

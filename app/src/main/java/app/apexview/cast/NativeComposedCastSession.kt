@@ -69,6 +69,7 @@ internal class NativeComposedCastSession(
         val window = capture.outputWindow(group) ?: return@withContext snapshot
         val pssh = capture.widevinePssh()
         var packaged: ProtectedHevcComposedDashPackageBuilder.Package? = null
+        var windowTransferred = false
         try {
             val shape = requireNotNull(window.sourceGeometry) { "Full source-picture geometry was not prepared" }
             if (sourceStartUs == null) {
@@ -78,8 +79,10 @@ internal class NativeComposedCastSession(
             }
             val selected = feeds.firstOrNull { it.label == audioLabel } ?: feeds.first()
             audio.capture(selected.manifestUrl, sourceUs, live)
-            val video = ProtectedHevcComposedDashPackageBuilder.build(window, pssh, pto, ast, clearOutput = capture.clearOutput)
+            val video = ProtectedHevcComposedDashPackageBuilder.build(window, pssh, pto, ast,
+                clearOutput = capture.clearOutput, takeOwnership = true)
             packaged = video
+            windowTransferred = true
             val merged = audio.appendTo(video, requireNotNull(sourceStartUs))
             // appendTo shares the video byte arrays. The relay now owns this single package.
             packaged = merged
@@ -89,7 +92,7 @@ internal class NativeComposedCastSession(
             protectedOutput = !capture.clearOutput || audio.encrypted
             captured = true
             android.util.Log.i("PitwallCast", "PROTECTED_CMAF_RELAY sources=${feeds.size} source=${shape.displayWidth}x${shape.displayHeight} atlas=${width}x$height encrypted=$protectedOutput frames=${merged.sampleCount} fullPictures=true")
-        } finally { packaged?.zero(); window.zero(); pssh?.fill(0) }
+        } finally { packaged?.zero(); if (!windowTransferred) window.zero(); pssh?.fill(0) }
         snapshot
       }
     }

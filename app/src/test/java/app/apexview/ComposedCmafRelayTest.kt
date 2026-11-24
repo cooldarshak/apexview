@@ -33,6 +33,8 @@ class ComposedCmafRelayTest {
             assertTrue(ranged.first.startsWith("HTTP/1.1 206"))
             assertArrayEquals(bytes.copyOfRange(15, 30), ranged.second)
             assertTrue(get(path, "bytes=900-999").first.startsWith("HTTP/1.1 416"))
+            assertTrue(get(path, "bytes=999999999999999999999-").first.startsWith("HTTP/1.1 416"))
+            assertTrue(get(path, "bytes=0-999999999999999999999").first.startsWith("HTTP/1.1 416"))
             assertTrue(get(uri.path.substringBeforeLast('/') + "/../segment-1.m4s").first.startsWith("HTTP/1.1 404"))
         } finally { relay.close() }
     }

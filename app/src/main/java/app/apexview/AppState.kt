@@ -133,13 +133,15 @@ class AppState(
     }
 
     private fun sendCaptionPreferenceToReceiver() {
-        if (!localChosen || localConnection == null) return
+        if (!localChosen || localConnection == null || localLoadId.isEmpty()) return
         if (!localCaptionsSupported) {
             if (settings.subtitles) message = "Update Pitwall TV on the receiver to enable Cast captions."
             return
         }
         localConnection?.send(app.apexview.cast.local.FcastProtocol.UI_CONTROL,
-            app.apexview.cast.local.CaptionControlProtocol.encode(settings.subtitles, settings.captionLanguage))
+            app.apexview.cast.local.CaptionControlProtocol.encode(settings.subtitles, settings.captionLanguage).apply {
+                if (localCaptionOwnerControl) put("playbackId", localLoadId)
+            })
     }
 
     fun setCaptionsEnabled(enabled: Boolean) {
@@ -187,7 +189,8 @@ class AppState(
     private val usesLayoutCastReceiver get() = BuildConfig.CAST_RECEIVER_APP_ID.isNotEmpty()
     private var googleCastLoadedUrl: String? = null
     private var castPreparationJob: Job? = null
-    private var castPreparationGeneration = 0L
+    private val castCoordinator = app.apexview.cast.CastSessionCoordinator()
+    private val castPreparationGeneration get() = castCoordinator.preparation
     private var castRetryAfter = 0L
     private val retiredCastRelays = mutableListOf<app.apexview.cast.SceneCastRelay>()
     val castingActive: Boolean get() = bakedCastSession != null || castRelay != null || nativeComposedCast != null || directCast != null
@@ -211,11 +214,12 @@ class AppState(
     private var localDiscovery: app.apexview.cast.local.PitwallDiscovery? = null
     private var localConnection: app.apexview.cast.local.FcastConnection? = null
     private var localConnectionJob: Job? = null
-    private var localConnectionGeneration = 0L
+    private val localConnectionGeneration get() = castCoordinator.connection
     private var localReady = false
     private var localTimingSupported = false
     private var localWidevineSupported = false
     private var localCaptionsSupported = false
+    private var localCaptionOwnerControl = false
     private var localMapPredictionSteps = app.apexview.cast.CastTimingProtocol.V1_SEND_PREDICTION_STEPS
     private var localDirectSupported = false
     private data class DirectCast(val tileId: Int, val contentId: Long, val channel: Int, val label: String)
@@ -231,12 +235,11 @@ class AppState(
     internal fun reportCastTowerBounds(x: Float, y: Float, width: Float, height: Float) {
         castTowerBounds = app.apexview.cast.CastTimingProtocol.Panel(x, y, width, height)
     }
-    internal var castTimingEpoch = 0L
-        private set
-    private var localLoadId = ""
+    internal val castTimingEpoch get() = castCoordinator.clockEpoch
+    private var localLoadId: String
+        get() = castCoordinator.playbackId
         set(value) {
-            field = value
-            castTimingEpoch = 0L
+            castCoordinator.beginLoad(value)
             remoteCaptionTracks = emptyList()
         }
     private var localChosen = false
@@ -328,7 +331,7 @@ class AppState(
     }
     internal fun connectLocalCast(device: app.apexview.cast.local.PitwallDevice) {
         stopFullSceneCast()
-        val attempt = ++localConnectionGeneration
+        val attempt = castCoordinator.beginConnection()
         localChosen = true; localReady = false; castDeviceName = device.name
         castPickerOpen = false; castBusy = true
         castStatus = "Connecting to ${device.name}…"; message = castStatus
@@ -384,7 +387,7 @@ class AppState(
                     require(body != null && body.getInt("version") >= 3) { "Receiver does not support the Pitwall FCast connection" }
                     localConnection?.send(protocol.INITIAL, JSONObject().put("displayName", android.os.Build.MODEL)
                         .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1)
-                        .put("pitwallOverlays", 1).put("pitwallCaptions", 1)
+                        .put("pitwallOverlays", 1).put("pitwallCaptions", 1).put("pitwallCaptionOwnerControl", 1)
                         .put("pitwallMapPredictionSteps", app.apexview.cast.CastTimingProtocol.MAX_PREDICTION_STEPS))
                 }
                 protocol.INITIAL -> {
@@ -394,6 +397,7 @@ class AppState(
                         localWidevineSupported = body?.optInt("pitwallWidevine") == 1
                         localDirectSupported = body?.optInt("pitwallDirect") == 1
                         localCaptionsSupported = body?.optInt("pitwallCaptions") == 1
+                        localCaptionOwnerControl = body?.optInt("pitwallCaptionOwnerControl") == 1
                         remoteCaptionTracks = emptyList()
                         localMapPredictionSteps = app.apexview.cast.CastTimingProtocol.predictionStepsForReceiver(
                             body?.optInt("pitwallMapPredictionSteps", 0) ?: 0)
@@ -403,8 +407,27 @@ class AppState(
                         startFullSceneCast()
                     }
                 }
-                protocol.UI_CONTROL -> if (localTimingSupported && body != null) {
-                    if (body.optString("action") == "seek") {
+                protocol.UI_CONTROL -> if (body != null) {
+                    val action = body.optString("action")
+                    if (action == "captions") {
+                        // For baked output the phone is the only real caption
+                        // renderer. A receiver may request settings, never cues.
+                        if (!localCaptionOwnerControl || !castingActive ||
+                            !castCoordinator.accepts(body.optString("playbackId"))) return
+                        val request = app.apexview.cast.local.CaptionControlProtocol.decode(body)
+                        settings.updateCaptionLanguage(request.language)
+                        if (bakedCastSession != null) setCaptionsEnabled(request.enabled)
+                        else {
+                            // Native receiver already applied the preference. Mirror
+                            // it for the phone menu and eventual local handback.
+                            settings.updateSubtitles(request.enabled)
+                            applyCaptionPreference()
+                        }
+                        return
+                    }
+                    if (!localTimingSupported) return
+                    if (body.has("playbackId") && !castCoordinator.accepts(body.optString("playbackId"))) return
+                    if (action == "seek") {
                         val target = body.getDouble("time")
                         require(target.isFinite() && target in 0.0..604800.0)
                         seekTo((target * 1000).toLong())
@@ -462,18 +485,22 @@ class AppState(
                 }
                 protocol.PING -> localConnection?.send(protocol.PONG)
                 protocol.RENDERING -> {
-                    if (body?.optString("playbackId") != localLoadId || !castingActive) return
+                    if (!castCoordinator.accepts(body?.optString("playbackId").orEmpty()) || !castingActive) return
                     castSceneConfirmed = true
-                    if (bakedCastSession == null) handOffCastPlayback()
-                    else android.util.Log.i("PitwallCast", "BAKED_CAST_RECEIVER_CONFIRMED feeds=${bakedCastSession?.feeds} picture=${bakedCastSession?.width}x${bakedCastSession?.height} phonePlayback=ACTIVE")
+                    if (bakedCastSession == null) {
+                        val alreadyHandedOff = castPlaybackHandedOff
+                        handOffCastPlayback()
+                        if (alreadyHandedOff) sendCaptionPreferenceToReceiver()
+                    }
+                    else { sendCaptionPreferenceToReceiver(); android.util.Log.i("PitwallCast", "BAKED_CAST_RECEIVER_CONFIRMED feeds=${bakedCastSession?.feeds} picture=${bakedCastSession?.width}x${bakedCastSession?.height} phonePlayback=ACTIVE") }
                     val height = nativeComposedCast?.geometry?.displayHeight ?: castRelay?.session?.sourceDisplayHeight
                     castStatus = if (bakedCastSession != null) "Streaming the baked phone picture, tower, map and commentary to $castDeviceName."
                         else "Playing on $castDeviceName in the phone video layout." + (height?.let { " ${it}p sources." } ?: "")
                     message = castStatus
                 }
                 protocol.PLAYBACK_UPDATE -> if (localReady && body != null) {
-                    if (body.has("playbackId") && body.optString("playbackId") != localLoadId) return
-                    castTimingEpoch = body.optLong("clockEpoch", 0L)
+                    val packetId = if (body.has("playbackId")) body.optString("playbackId") else null
+                    if (!castCoordinator.acceptClock(packetId, body.optLong("clockEpoch", 0L))) return
                     val wall = body.optLong("wallClockMs", 0)
                     if (wall in 946684800000L..4102444800000L) remoteWallClockBaseMs = wall - (body.optDouble("time", 0.0) * 1000).toLong()
                     val state = body.optInt("state")
@@ -707,7 +734,7 @@ class AppState(
         val originalGoogleReceiver = googleCastRemoteClient
         castBusy = true; castStatus = "Preparing ${castTiles.size} feed${if (castTiles.size == 1) "" else "s"} for the TV…"
         message = castStatus
-        val generation = ++castPreparationGeneration
+        val generation = castCoordinator.beginPreparation()
         castRetryAfter = android.os.SystemClock.elapsedRealtime() + 5_000L
         castPreparationJob = scope.launch {
             var relay: app.apexview.cast.SceneCastRelay? = null
@@ -748,7 +775,8 @@ class AppState(
                     .setAllowCrossProtocolRedirects(true).setDefaultRequestProperties(mapOf(
                         "ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    relay = app.apexview.cast.SceneCastRelay(session, app.apexview.tiled.CmafHttpReader(factory), address)
+                    relay = app.apexview.cast.SceneCastRelay(session, app.apexview.tiled.CmafHttpReader(factory), address,
+                        peer = if (usingLocalReceiver) originalConnection?.socket?.inetAddress else null)
                     (castTiles.firstOrNull { it.audible } ?: clockTile).let {
                         relay!!.selectAudio(it.feed.sourceStream.profileLabel)
                     }
@@ -824,7 +852,7 @@ class AppState(
         val originalConnection = localConnection
         val originalGoogleReceiver = googleCastRemoteClient
         val selected = castTiles.map { it.id to it.feed.sourceStream.profileLabel }
-        val generation = ++castPreparationGeneration
+        val generation = castCoordinator.beginPreparation()
         val old = bakedCastSession
         bakedCastSession = null
         old?.close()
@@ -999,7 +1027,9 @@ class AppState(
         message = reason
     }
     private fun releaseCastRelay(resumeLocal: Boolean = true) {
-        ++castPreparationGeneration
+        castCoordinator.beginPreparation()
+        castCoordinator.endLoad()
+        remoteCaptionTracks = emptyList()
         googleLoading = false; googleHasPlayed = false
         castBusy = false
         val oldBaked = bakedCastSession
@@ -1032,14 +1062,14 @@ class AppState(
         seekCastRestartJob?.cancel(); seekCastRestartJob = null
         castVideoOnlyOffer = false
         googleVideoOnlyConsent = false
-        ++localConnectionGeneration
+        castCoordinator.beginConnection()
         castPreparationJob?.cancel(); castPreparationJob = null
         if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.STOP)
         else runCatching { googleCastRemoteClient?.stop() }
         localConnectionJob?.cancel(); localConnectionJob = null
         val previous = localConnection; localConnection = null; previous?.close()
         localReady = false; localTimingSupported = false; localWidevineSupported = false
-        localDirectSupported = false; localCaptionsSupported = false
+        localDirectSupported = false; localCaptionsSupported = false; localCaptionOwnerControl = false
         remoteCaptionTracks = emptyList()
         localMapPredictionSteps = app.apexview.cast.CastTimingProtocol.V1_SEND_PREDICTION_STEPS
         localChosen = false; googleCastSelected = false
@@ -1113,7 +1143,7 @@ class AppState(
         val audio = selected.firstOrNull { it.audible } ?: selected.first()
         val selection = selected.map { it.id to it.feed.sourceStream.profileLabel }
         castBusy = true; castStatus = "Preparing complete HD feeds and protected audio for the TV…"; message = castStatus
-        val generation = ++castPreparationGeneration
+        val generation = castCoordinator.beginPreparation()
         castRetryAfter = android.os.SystemClock.elapsedRealtime() + 5_000
         castPreparationJob = scope.launch {
             var owned: app.apexview.cast.NativeComposedCastSession? = null

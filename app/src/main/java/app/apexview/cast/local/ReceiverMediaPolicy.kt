@@ -17,4 +17,21 @@ internal object ReceiverMediaPolicy {
         require(uri.port == -1 || uri.port in 1..65535) { "Invalid media port" }
         return uri
     }
+
+    /** Negotiated Pitwall relay resources must stay inside the exact capability directory. */
+    fun validateResource(url: String, peer: InetAddress, origin: URI, pitwall: Boolean): URI {
+        val uri = validate(url, peer)
+        require(uri.scheme == origin.scheme && uri.port == origin.port) { "Media resource left the phone relay" }
+        if (pitwall) {
+            val root = origin.rawPath.substringBeforeLast('/') + "/"
+            require(root.matches(Regex("/(s|p)/[a-f0-9]{48}/")) && uri.rawPath.startsWith(root)) {
+                "Media resource left the selected relay capability"
+            }
+            val name = uri.rawPath.removePrefix(root)
+            require(name.matches(Regex("[A-Za-z0-9.-]{1,80}")) && name !in setOf(".", "..")) {
+                "Invalid relay resource name"
+            }
+        }
+        return uri
+    }
 }

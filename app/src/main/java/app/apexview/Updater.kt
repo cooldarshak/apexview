@@ -31,6 +31,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -64,7 +68,13 @@ class Updater(context: Context, private val scope: CoroutineScope) {
     // Never retain an Activity across installer confirmation or rotation.
     private val context = context.applicationContext
     private val prefs = context.getSharedPreferences("updates", Context.MODE_PRIVATE)
-    private val http = OkHttpClient()
+    private val http = OkHttpClient.Builder()
+        .followSslRedirects(false) // GitHub asset redirects may stay HTTPS, never downgrade to HTTP.
+        .callTimeout(5, java.util.concurrent.TimeUnit.MINUTES)
+        .build()
+    private var checkJob: Job? = null
+    private var installJob: Job? = null
+    private var closed = false
 
     /** A newer release to offer, while the prompt is up. */
     var offered by mutableStateOf<Release?>(null)
@@ -111,6 +121,11 @@ class Updater(context: Context, private val scope: CoroutineScope) {
     }
 
     fun close() {
+        if (closed) return
+        closed = true
+        checkJob?.cancel()
+        installJob?.cancel()
+        http.dispatcher.cancelAll()
         runCatching { context.applicationContext.unregisterReceiver(statusReceiver) }
     }
 
@@ -122,19 +137,29 @@ class Updater(context: Context, private val scope: CoroutineScope) {
             note = failure
             prefs.edit().remove(InstallStatusProtocol.PREF_FAILED_RESULT).apply()
         }
-        scope.launch { check(quiet = true) }
+        startCheck(quiet = true)
     }
 
     /** From Settings: checks now and says what it found. */
     fun checkNow() {
-        scope.launch { check(quiet = false) }
+        startCheck(quiet = false)
+    }
+
+    private fun startCheck(quiet: Boolean) {
+        if (closed || checkJob?.isActive == true || progress != null) return
+        checkJob = scope.launch { check(quiet) }
     }
 
     private suspend fun check(quiet: Boolean) {
-        val release = runCatching { latest() }.getOrElse {
-            if (!quiet) note = "Couldn't check for updates: ${it.message}"
+        val release = try {
+            latest()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            if (!closed && !quiet) note = "Couldn't check for updates: ${safeError(error)}"
             return
         }
+        if (closed || progress != null) return
         prefs.edit().putLong(PREF_CHECKED, System.currentTimeMillis()).apply()
         // Put off with Not now: not offered again on launch for a day.
         val putOff = quiet && release?.version == prefs.getString(PREF_LATER, null) &&
@@ -155,28 +180,32 @@ class Updater(context: Context, private val scope: CoroutineScope) {
         http.newCall(request).execute().use { r ->
             if (r.code == 404) return@withContext null
             if (!r.isSuccessful) throw IOException("GitHub said ${r.code}")
-            val json = JSONObject(r.body?.string().orEmpty())
+            val body = r.body ?: throw IOException("Missing release metadata")
+            val json = JSONObject(body.byteStream().use {
+                ReleaseAssetValidation.readBoundedUtf8(it, MAX_RELEASE_METADATA_BYTES)
+            })
             val assets = json.optJSONArray("assets") ?: return@withContext null
             val entries = (0 until assets.length()).map { assets.getJSONObject(it) }
-            val apk = entries.firstOrNull {
-                ReleaseAssetValidation.validAssetName(it.optString("name"))
-            } ?: return@withContext null
-            val checksum = entries.firstOrNull { it.optString("name") == "SHA256SUMS" }
-                ?: return@withContext null
             val tag = json.optString("tag_name")
             val version = tag.removePrefix("v")
             check(version.matches(Regex("1[.]0[.][0-9]+"))) { "Invalid Pitwall release version" }
+            val apk = entries.singleOrNull { it.optString("name") == "pitwall-tv-$version.apk" }
+                ?: return@withContext null
+            val checksum = entries.singleOrNull { it.optString("name") == "SHA256SUMS" }
+                ?: return@withContext null
+            val size = apk.optLong("size")
+            check(size in 1..MAX_APK_BYTES) { "APK length outside the update budget" }
             val assetUrl = apk.getString("browser_download_url")
             val checksumUrl = checksum.getString("browser_download_url")
-            val approvedPrefix = "https://github.com/${BuildConfig.UPDATE_REPO}/releases/download/$tag/"
-            check(assetUrl.startsWith(approvedPrefix) && checksumUrl.startsWith(approvedPrefix)) {
+            check(ReleaseAssetValidation.officialAssetUrl(BuildConfig.UPDATE_REPO, tag, apk.getString("name"), assetUrl) &&
+                ReleaseAssetValidation.officialAssetUrl(BuildConfig.UPDATE_REPO, tag, "SHA256SUMS", checksumUrl)) {
                 "Release assets are not from the installed Pitwall publisher"
             }
             Release(
                 version = version,
                 notes = json.optString("body").trim(),
                 apkUrl = assetUrl,
-                size = apk.optLong("size"),
+                size = size,
                 filename = apk.getString("name"),
                 checksumsUrl = checksumUrl,
             )
@@ -191,19 +220,36 @@ class Updater(context: Context, private val scope: CoroutineScope) {
 
     /** Downloads the offered release and starts Android's installer on it. */
     fun install() {
+        if (closed || progress != null || installJob?.isActive == true) return
         val release = offered ?: return
         progress = 0f
-        scope.launch {
+        checkJob?.cancel()
+        installJob = scope.launch {
             try {
-                val apk = withContext(Dispatchers.IO) { download(release) }
-                withContext(Dispatchers.IO) { startInstall(apk) }
+                withContext(Dispatchers.IO) {
+                    val apk = download(release)
+                    try {
+                        currentCoroutineContext().ensureActive()
+                        startInstall(apk)
+                    } finally {
+                        apk.delete() // PackageInstaller has its own fsynced copy after commit.
+                    }
+                }
                 offered = null
-            } catch (e: Exception) {
-                progress = null
-                note = "The update didn't download: ${e.message}"
+            } catch (cancelled: CancellationException) {
+                if (!closed) progress = null
+                throw cancelled
+            } catch (error: Exception) {
+                if (!closed) {
+                    progress = null
+                    note = "The update didn't download: ${safeError(error)}"
+                }
             }
         }
     }
+
+    private fun safeError(error: Throwable): String =
+        DiagnosticRedaction.redact(error.message?.take(300) ?: "Update failed").take(200)
 
     private suspend fun download(release: Release): File {
         // Every approved release publishes a checksum beside its signed APK.
@@ -211,16 +257,20 @@ class Updater(context: Context, private val scope: CoroutineScope) {
         val checksums = http.newCall(Request.Builder().url(release.checksumsUrl)
             .header("User-Agent", "Pitwall/${BuildConfig.VERSION_NAME}").build()).execute().use { r ->
             if (!r.isSuccessful) throw IOException("Checksum manifest HTTP ${r.code}")
-            (r.body ?: throw IOException("Missing checksum manifest")).string().take(16_384)
+            (r.body ?: throw IOException("Missing checksum manifest")).byteStream().use {
+                ReleaseAssetValidation.readBoundedUtf8(it, MAX_CHECKSUM_BYTES)
+            }
         }
         val expected = ReleaseAssetValidation.expectedSha256(checksums, release.filename)
-        val file = File(context.cacheDir, "update.apk")
+        val file = File.createTempFile("pitwall-update-", ".apk", context.cacheDir)
         try {
             http.newCall(Request.Builder().url(release.apkUrl).header("User-Agent", "Pitwall")
                 .build()).execute().use { r ->
                 if (!r.isSuccessful) throw IOException("Update HTTP ${r.code}")
                 val body = r.body ?: throw IOException("Empty update body")
-                val total = body.contentLength().takeIf { it > 0 } ?: release.size
+                val total = release.size
+                val declared = body.contentLength()
+                check(declared < 0 || declared == total) { "APK length differs from release metadata" }
                 check(total in 1..MAX_APK_BYTES) { "APK length outside the update budget" }
                 val digest = MessageDigest.getInstance("SHA-256")
                 body.byteStream().use { input ->
@@ -230,10 +280,11 @@ class Updater(context: Context, private val scope: CoroutineScope) {
                         var lastReportedFraction = -1f
                         var lastReportedAtMs = 0L
                         while (true) {
+                            currentCoroutineContext().ensureActive()
                             val n = input.read(buffer)
                             if (n < 0) break
                             received += n
-                            check(received <= MAX_APK_BYTES) { "APK exceeds the update budget" }
+                            check(received <= total && received <= MAX_APK_BYTES) { "APK exceeds the update budget" }
                             digest.update(buffer, 0, n)
                             out.write(buffer, 0, n)
                             val fraction = (received.toFloat() / total).coerceIn(0f, 1f)
@@ -280,21 +331,36 @@ class Updater(context: Context, private val scope: CoroutineScope) {
         }
     }
 
-    private fun startInstall(apk: File) {
+    private suspend fun startInstall(apk: File) {
         val installer = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
             .apply { setAppPackageName(context.packageName) }
         val id = installer.createSession(params)
-        installer.openSession(id).use { session ->
-            session.openWrite("apexview.apk", 0, apk.length()).use { out ->
-                apk.inputStream().use { it.copyTo(out) }
-                session.fsync(out)
+        var committed = false
+        try {
+            installer.openSession(id).use { session ->
+                session.openWrite("apexview.apk", 0, apk.length()).use { out ->
+                    apk.inputStream().use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val n = input.read(buffer)
+                            if (n == -1) break
+                            out.write(buffer, 0, n)
+                        }
+                    }
+                    session.fsync(out)
+                }
+                currentCoroutineContext().ensureActive()
+                val status = PendingIntent.getBroadcast(
+                    context, id, Intent(statusAction).setClass(context, PitwallInstallStatusReceiver::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+                )
+                session.commit(status.intentSender)
+                committed = true
             }
-            val status = PendingIntent.getBroadcast(
-                context, id, Intent(statusAction).setClass(context, PitwallInstallStatusReceiver::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
-            )
-            session.commit(status.intentSender)
+        } finally {
+            if (!committed) runCatching { installer.abandonSession(id) }
         }
     }
 
@@ -303,6 +369,8 @@ class Updater(context: Context, private val scope: CoroutineScope) {
         private const val PREF_LATER = "laterVersion"
         private const val PREF_LATER_AT = "laterAt"
         private const val LATER_MS = 24 * 3_600_000L
+        private const val MAX_RELEASE_METADATA_BYTES = 1024 * 1024
+        private const val MAX_CHECKSUM_BYTES = 16 * 1024
         private const val MAX_APK_BYTES = 250L * 1024 * 1024
 
         /** "0.36" > "0.35", "1.0" > "0.99", "0.35.1" > "0.35". */

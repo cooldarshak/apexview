@@ -502,6 +502,29 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("terminalReason = DiagnosticRedaction.redact(", app)
         self.assertIn("castStatus = DiagnosticRedaction.redact(", app)
 
+    def test_post833_cast_leases_caption_source_and_control_ownership(self):
+        base = "app/src/main/java/app/apexview/"
+        cast = contents(base + "cast/ComposedCmafRelay.kt")
+        archive = contents(base + "cast/SceneCastRelay.kt")
+        native = contents(base + "cast/NativeComposedCastSession.kt")
+        receiver = contents(base + "cast/local/PitwallReceiverActivity.kt")
+        sender = contents(base + "AppState.kt")
+        capture = contents(base + "tiled/F1HlsFeedCapture.kt")
+        player = contents(base + "FeedPlayer.kt")
+        self.assertIn("RelayResourceStore(", cast)
+        self.assertIn("RelayHttpRange.parse(", cast)
+        self.assertIn("session.segmentLease(", archive)
+        self.assertIn("lease.writeTo(output", archive)
+        self.assertIn("takeOwnership = true", native)
+        self.assertIn("if (!windowTransferred) window.zero()", native)
+        self.assertIn("ReceiverMediaPolicy.validateResource(spec.uri.toString()", receiver)
+        self.assertIn("CaptionControlProtocol.matchesLoad(", receiver)
+        self.assertIn("CastSessionCoordinator()", sender)
+        self.assertIn("archiveCaptionSource(", capture)
+        self.assertIn("setOf(C.TRACK_TYPE_TEXT)", player)
+        self.assertIn("ClearCaptionPlaylist.rewrite(", archive)
+        self.assertIn("ClearCaptionPlaylist.isWebVtt(bytes)", archive)
+
 
 if __name__ == "__main__":
     unittest.main()

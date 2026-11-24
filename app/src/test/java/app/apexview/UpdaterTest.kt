@@ -6,6 +6,29 @@ import org.junit.Test
 
 class UpdaterTest {
     @Test
+    fun updateMetadataIsBoundedBeforeAllocationAndNeverTruncated() {
+        org.junit.Assert.assertEquals("abcd",
+            ReleaseAssetValidation.readBoundedUtf8("abcd".byteInputStream(), 4))
+        org.junit.Assert.assertThrows(java.io.IOException::class.java) {
+            ReleaseAssetValidation.readBoundedUtf8("abcde".byteInputStream(), 4)
+        }
+        org.junit.Assert.assertEquals("", ReleaseAssetValidation.readBoundedUtf8("".byteInputStream(), 4))
+    }
+
+    @Test
+    fun officialAssetsBindExactTagFilenameAndHttpsPublisher() {
+        val repo = "cooldarshak/apexview"
+        val tag = "v1.0.706"
+        val name = "pitwall-tv-1.0.706.apk"
+        val url = "https://github.com/$repo/releases/download/$tag/$name"
+        assertTrue(ReleaseAssetValidation.officialAssetUrl(repo, tag, name, url))
+        assertFalse(ReleaseAssetValidation.officialAssetUrl(repo, tag, name, url + "?redirect=1"))
+        assertFalse(ReleaseAssetValidation.officialAssetUrl(repo, tag, name, url.replace("https:", "http:")))
+        assertFalse(ReleaseAssetValidation.officialAssetUrl(repo, tag, "pitwall-tv-1.0.707.apk",
+            url.replace(name, "pitwall-tv-1.0.707.apk")))
+    }
+
+    @Test
     fun checksumManifestBindsExactlyOneOfficialReleaseApk() {
         val digest = "f".repeat(64)
         val manifest = "$digest  pitwall-tv-1.0.706.apk\n" +

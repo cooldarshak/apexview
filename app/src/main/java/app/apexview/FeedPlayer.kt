@@ -974,12 +974,21 @@ class FeedPlayer(
         // Keep native audio AND F1-provided text renditions while replacing only video
         // with the composed HEVC atlas. This does not add any video decoder.
         val audioChildren = ArchiveAudioSelectionPlan.children(audioUri, session.stableAudioUris)
+        val caption = session.captionSource?.takeUnless { it.masterUri == audioUri }
         val audioSources = audioChildren.mapIndexed { index, uri ->
             // Retain primary native captions exactly as before. Alternates are
             // independently verified audio-only renditions, never extra video tracks.
             FilteringMediaSource(archiveAudioSources.createMediaSource(MediaItem.Builder().setUri(uri)
                 .setMimeType(MimeTypes.APPLICATION_M3U8).build()),
                 if (index == 0) setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_TEXT) else setOf(C.TRACK_TYPE_AUDIO))
+        }
+        val captionChild = caption?.let {
+            // HLS master supplies actual text metadata. Filter to the verified
+            // selected variant and its declared subtitle group; no extra video
+            // track or decoder is exposed to the composed player.
+            FilteringMediaSource(archiveAudioSources.createMediaSource(MediaItem.Builder()
+                .setUri(it.masterUri).setMimeType(MimeTypes.APPLICATION_M3U8)
+                .setStreamKeys(it.streamKeys).build()), setOf(C.TRACK_TYPE_TEXT))
         }
         firstFrameRendered = false; error = null; problem = null
         val previousArchive = archiveVodSession
@@ -997,7 +1006,10 @@ class FeedPlayer(
             .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
             .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE).setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, remotePlaybackSuspended).build()
         try {
-            player.setMediaSource(MergingMediaSource(true, true, video, *audioSources.toTypedArray()), positionMs.coerceAtLeast(0))
+            // Keep the audio child indexes stable for native TrackSelectionOverride.
+            // The text child is last, anchored to the same selected HLS variant.
+            val children = audioSources + listOfNotNull(captionChild)
+            player.setMediaSource(MergingMediaSource(true, true, video, *children.toTypedArray()), positionMs.coerceAtLeast(0))
             archiveAudioChildren = audioChildren
             player.playWhenReady = playWhenReady && !remotePlaybackSuspended
             player.prepare()

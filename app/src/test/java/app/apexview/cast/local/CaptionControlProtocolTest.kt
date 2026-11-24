@@ -66,4 +66,14 @@ class CaptionControlProtocolTest {
                 .put("enabled", true))
         }
     }
+    @Test fun bakedCaptionControlIsScopedToTheCurrentLoadAndLegacyIsExplicit() {
+        val command = CaptionControlProtocol.forLoad(true, "en", "load-a")
+        assertTrue(CaptionControlProtocol.matchesLoad(command, "load-a", true))
+        assertFalse(CaptionControlProtocol.matchesLoad(command, "load-b", true))
+        assertFalse(CaptionControlProtocol.matchesLoad(command, "", false))
+        val legacy = CaptionControlProtocol.encode(true, "en")
+        assertFalse(CaptionControlProtocol.matchesLoad(legacy, "load-a", true))
+        assertTrue(CaptionControlProtocol.matchesLoad(legacy, "load-a", false))
+        assertEquals(RemoteCaptionPreference(true, "en"), CaptionControlProtocol.decode(command))
+    }
 }
