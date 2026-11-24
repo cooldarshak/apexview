@@ -84,6 +84,8 @@ jobs:
           report="$RUNNER_TEMP/pitwall-g0"
           mkdir -p "$report/fixtures"
           python3 scripts/test_architecture_g0_fixtures.py --generate "$report/fixtures"
+          python3 scripts/test_architecture_g0_kernel_vectors.py --generate "$report/fixtures/kernel-vectors.txt"
+          echo "PITWALL_G0_KERNEL_VECTORS=$report/fixtures/kernel-vectors.txt" >> "$GITHUB_ENV"
           echo "PITWALL_G0_FIXTURE_DIR=$report/fixtures" >> "$GITHUB_ENV"
           sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
           sdkmanager "ndk;28.2.13676358"
@@ -94,7 +96,8 @@ jobs:
           g++ --version >> "$report/toolchain.txt"
           cargo test --locked
           cargo clippy --locked --all-targets -- -D warnings
-          cargo build --locked --release --bin bench
+          cargo build --locked --release --bins
+          target/release/feasibility_bench "$report/fixtures/kernel-vectors.txt" | tee "$report/kernel-host.txt"
           g++ -std=c++17 -O3 -Wall -Wextra control.cpp -o "$report/control"
           while read -r file prefix expected hash; do
             printf '%s  %s\n' "$hash" "$report/fixtures/$file" | sha256sum -c -
@@ -175,19 +178,31 @@ jobs:
           name: pitwall-full-scene-hevc
           path: ${{ runner.temp }}/pitwall-full-scene.mp4
 
+      - name: Restore pinned Kvazaar tool cache
+        id: kvazaar_cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/pitwall-kvazaar-tool
+          key: pitwall-kvazaar-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-c997f08c805bd7ec82233654e417e06fe7c83cba
+
       - name: Build Kvazaar HEVC encoder with tile support
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          source_dir="$RUNNER_TEMP/kvazaar"
-          git init "$source_dir"
+          tool_dir="$RUNNER_TEMP/pitwall-kvazaar-tool"
+          mkdir -p "$tool_dir"
+          if [ ! -x "$tool_dir/kvazaar" ] || ! "$tool_dir/kvazaar" --version; then
+            source_dir="$RUNNER_TEMP/kvazaar"
+            git init "$source_dir"
           git -C "$source_dir" fetch --depth 1 https://github.com/ultravideo/kvazaar.git c997f08c805bd7ec82233654e417e06fe7c83cba
           git -C "$source_dir" checkout --detach FETCH_HEAD
           cmake -S "$source_dir" -B "$source_dir/ci-build" -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF -DGIT_SUBMODULE=OFF
           cmake --build "$source_dir/ci-build" --target kvazaar-bin --parallel 2
-          "$source_dir/src/kvazaar" --version
-          echo "$source_dir/src" >> "$GITHUB_PATH"
+            install -m 755 "$source_dir/src/kvazaar" "$tool_dir/kvazaar"
+          fi
+          "$tool_dir/kvazaar" --version
+          echo "$tool_dir" >> "$GITHUB_PATH"
 
       - name: Generate and validate synthetic HEVC feed pair
         run: |
@@ -225,7 +240,7 @@ jobs:
           export APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR="$OUTPUT_PARAMETER_DIR"
           echo "APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR=$OUTPUT_PARAMETER_DIR" >> "$GITHUB_ENV"
           chmod +x ./gradlew
-          ./gradlew --no-daemon testDebugUnitTest :macrobenchmark:compileDebugKotlin :macrobenchmark:compileBenchmarkKotlin
+          ./gradlew --daemon --parallel --no-build-cache testDebugUnitTest :macrobenchmark:compileDebugKotlin :macrobenchmark:compileBenchmarkKotlin
           TEST_STATUS=$?
           if [ "$TEST_STATUS" -ne 0 ]; then
             echo "::group::Detailed JVM unit-test failures"
@@ -320,7 +335,8 @@ jobs:
         if: success()
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleBenchmark :macrobenchmark:assembleBenchmark
+          ./gradlew --daemon --parallel --no-build-cache :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleBenchmark :macrobenchmark:assembleBenchmark
+          ./gradlew --stop
 
       - name: Download exact Build 843 signed baseline for G.0 upgrade
         if: github.ref == 'refs/heads/feature/architecture-g-rust-stitching'

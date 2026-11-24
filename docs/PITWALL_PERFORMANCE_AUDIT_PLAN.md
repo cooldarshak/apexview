@@ -18,6 +18,8 @@ Build 844 failed at the new native crash-symbol gate: all four Rust/NDK librarie
 
 Build 845 GREEN (717cc4c): native diagnostic JNI, signed emulator upgrade, all ABI build IDs, symbolication, clear prefix equivalence and existing checks passed. Third G.0 batch adds batched copy-inclusive benchmark and cross-arena lease rejection; candidate pending CI. Existing playback and strict release status unchanged. See dedicated G ledger.
 
+Build 846 GREEN; fourth G.0 candidate adds shared bitreader/box/synthetic metadata vectors and conservative CI tool-cache/Gradle daemon reuse. No test suppression, no playback/DRM changes. Exact CI and physical acceptance pending. See G ledger.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |

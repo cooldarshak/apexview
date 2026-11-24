@@ -51,6 +51,20 @@ class ArchitectureG0PackagingContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "found 2"):
             build_id(notes + notes)
 
+    def test_ci_keeps_all_checks_when_reusing_tools(self):
+        wf=(ROOT/".github/workflows/android-debug-apk.yml").read_text()
+        for required in ("testDebugUnitTest", ":app:assembleDebugAndroidTest",
+                         ":app:assembleBenchmark", ":macrobenchmark:assembleBenchmark",
+                         "api-level: 29", "api-level: 31", "api-level: 36",
+                         "generate_hevc_tile_fixtures.py", "generate_hevc_tile_2x2_fixtures.py",
+                         "generate_hevc_fixtures.py", "verify_architecture_g0_apk.sh",
+                         "cargo test --locked", "cargo clippy --locked", "feasibility_bench"):
+            self.assertIn(required,wf)
+        self.assertEqual(wf.count("--daemon --parallel --no-build-cache"),2)
+        self.assertIn("pitwall-kvazaar-v1-",wf)
+        self.assertIn("c997f08c805bd7ec82233654e417e06fe7c83cba",wf)
+        self.assertIn("if: success() && steps.assemble_apks.outcome == 'success' && env.APK_SIGNING_READY == 'true'",wf)
+
     def test_only_jni_module_can_use_unsafe(self):
         lib=(ROOT/"native/architecture-g/src/lib.rs").read_text()
         self.assertIn("#![deny(unsafe_code)]",lib)

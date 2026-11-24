@@ -2,6 +2,7 @@
 #![deny(unsafe_code)]
 
 mod annex_b;
+pub mod feasibility;
 pub use annex_b::{convert_length_prefixed, convert_fixed_batch};
 use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT_ARENA_ID: AtomicUsize = AtomicUsize::new(1);
