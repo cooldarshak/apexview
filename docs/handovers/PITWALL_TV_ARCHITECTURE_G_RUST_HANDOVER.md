@@ -241,6 +241,26 @@ Initial diagnostic prototype: dependency-free safe Rust sizing kernel, bounded s
 
 G.0.1/2 initial audit in progress; G.0.4 host/ABI prototype only; G.0.5 candidate pins/lock, JNI-RS pending; G.0.6/7 cross-build/CI configured, run pending; G.0.11 single-owner arena prototype, concurrency/JNI pending; G.0.12/13 narrow sizing comparison, broader real fixtures and physical benchmarks pending; G.0.14 single-owner stale-release/exhaustion tests only; G.0.15 64-bit ELF checks configured, APK/runtime pending; other G.0 checks open. G.0.20 go/no-go not reached. Production remains JVM; G-A–G-D not started. Exact CI and physical evidence must be verified; no native APK or speedup claim. Continue G.0 on this branch only.
 
+### Build 843 exact-source feasibility evidence — GREEN
+
+Verified GitHub Actions [run 45441485463](https://github.com/cooldarshak/apexview/actions/runs/45441485463), job 138613513278, exact source [d7734087094a78013f7dfc6d7f8695487942064c](https://github.com/cooldarshak/apexview/commit/d7734087094a78013f7dfc6d7f8695487942064c). All mandatory existing checks green (coordinated change contract, JVM, independent HEVC/CMAF decode/pixel checks, signed APK, RenderNode and API 29/31/36 instrumentation including TLS). New G.0 step succeeded: Rust 1.91.1, cargo-ndk 4.1.2, pinned NDK; two Rust tests passed; Clippy succeeded; all four Android ABI builds and configured 64-bit LOAD alignment checks passed. Host/ELF artifact [14943626918](https://github.com/cooldarshak/apexview/actions/runs/45441485463/artifacts/14943626918); signed JVM-playback APK [14945488087](https://github.com/cooldarshak/apexview/actions/runs/45441485463/artifacts/14945488087); JVM test report [14945428338](https://github.com/cooldarshak/apexview/actions/runs/45441485463/artifacts/14945428338). Native libraries are standalone CI artifacts, **not packaged in the APK**; no JNI invocation or native playback yet.
+
+Host fixture output and timing in nanoseconds per call (p50/p95/p99/max), exact CI log:
+
+| Input bytes / prefix | Expected size (all three agree) | JVM | Rust | C++ |
+| --- | ---: | --- | --- | --- |
+| 6115 / 1 | 6307 | 442/1261/1335/1605 | 108/119/175/193 | 106/114/189/202 |
+| 264266 / 2 | 264522 | 948/1026/1046/1059 | 462/528/548/569 | 434/492/519/521 |
+| 1053092 / 3 | 1053348 | 1972/2409/2831/2962 | 1398/1433/1455/1458 | 1439/1474/1487/1515 |
+
+Rust median elapsed time 75.6%, 51.3%, 29.1% lower vs JVM; Rust vs C++ median +1.9%, +6.5%, -2.8% respectively. Within proposed 10% median C++ tolerance for this narrow kernel only. Batch-average per-call values, not individual-call tails, CPU utilization or end-to-end composition. Prefix sizing jumps across payload bytes; byte size is not amount scanned or copied. Synthetic non-decodable samples, sequential host runs, JVM JIT and optimization differences limit inference; no playback/thermal/DRM proof. Existing independent decode tests cover JVM, not the Rust output. No final G.0 go/no-go.
+
+Additional source audit: CmafHttpReader.read allocates a single exact-sized byte array when content length is known; unknown-length path allocates bounded chunks then copies into a complete byte array. HevcArchiveVodSession records preflightInspectMs, fetchMs, composeMs, verifyMs, totalMs, durationMs and producerSlackMs; ART counters are process-wide, not compositor-exclusive. Initialization cache clones remain; verify publication ownership/read copies and actual callers. ProtectedHevcLiveDashSource supports takeOwnership and avoids duplicate fragment clones in that mode, but its DataSource.read copies from retained bytes to Media3 buffer. These are candidate measurement boundaries, not a proven TV root cause.
+
+G.0.6 four target cross-compiles PASS (actual APK ABI preservation/runtime pending); G.0.7 integrated existing CI PASS; G.0.5 pinned core tools validated, JNI-RS/lock pending; G.0.11/G.0.14 limited single-owner tests PASS; G.0.12/G.0.13 narrow host sizing benchmarks/equivalence PASS, full real fixtures/physical pending; G.0.15 configured ELF check PASS, ZIP alignment and runtime pending. G.0.1/2 partial source audit; G.0.3 physical baseline pending; G.0.4 host/ABI proof passed, diagnostic JNI integration pending; G.0.8/9/10/16/17/18/19/20 open. G.1–G.20 unchanged/not started. Keep production JVM default and no release acceptance changes.
+
+Next physical evidence: use signed Build 843 as JVM baseline (version expected 1.0.1686 from run 843, confirm actual app log header). Prioritize TCL 55C655: same authorized replay, actual primary/secondary resolutions and decoder mode, Software DRM ON if needed, single feed with map/tower then three feeds with overlays OFF and ON at 1x, separate short seek/1.5x test; 30s warmup, 60s stable trace where supported (shorter on constrained TV), export app logs for each case, record visible symptoms and device ABI/API/page size. Repeat comparable scenarios on S22; use existing aShell/Bugjaeger and [Perfetto instructions](../perfetto/ASHELL.md), replace old branch in config URL with the dedicated G branch, record failures without disabling security. Save exact settings/version/actual feed sizes. Baseline collection and JNI/real-fixture work remain required. No new build from this evidence-only update.
+
 ### Benchmarks and decision gate
 
 Use identical algorithms, fixture bytes, outputs, optimization levels, compiler settings and comparable CPU/thermal states. Include realistic clear and synthetic protected-metadata fixtures, source resolutions and multifeed arrangements, not only trivial loops. Benchmark NAL scanning; bitstream read/write; slice-header operations; binary parsing; CMAF fragment assembly; copying/publication; arena allocation; JNI overhead; concurrent buffer ownership. Keep C++ limited to representative kernels; no alternative full player or production C++ engine.
@@ -528,7 +548,7 @@ The user explicitly authorized a new dedicated branch for Architecture G and a c
 | Mobile-only development | Required; Rust-specific end-to-end workflow not yet demonstrated |
 | Rust CI and module | Not implemented in Architecture G |
 | Native engine | Not implemented |
-| G.0, G.1–G.20 | Initial G.0 prototype and CI configured; verification pending. G.1–G.20 not started |
+| G.0, G.1–G.20 | Build 843 initial host/ABI feasibility GREEN; JNI, broader fixtures and physical gates pending. G.1–G.20 not started |
 | Physical Rust benchmark / protected compatibility | Pending |
 | Measured performance gains | None established |
 | Native default or release | Not approved |
