@@ -9,6 +9,28 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## 120Hz and BufferQueue evidence rebaseline, 24 November 2026
+
+**Grounded evidence:** The supplied S22 Ultra log `pitwall-20261124-043242-899.log.txt` covers adaptive 60/96/120Hz and a 120Hz A/B. Media3 HEVC is one active decoder for composed SINGLE and the GLES stage sustains ~250 latches per five seconds in clean 1x samples. In the latest log, **1,096** BufferQueue dequeue timeouts when logged repeat counts are expanded, **799** producer detach warnings and **38** cancel warnings. Most dequeue timeouts are explicitly **mDequeueTimeout=0**, **dequeuedCount=23** and **acquiredCount=0**: these are nonblocking producer refusals, not proof of video freezes. The detach/cancel warnings cluster on decoder release/handoffs. Independent SurfaceFlinger video scanout still is not established by these traces.
+
+**B2 source correctness pass:** Keep the existing G4/G2/G3 improvements and tests in exact-source GREEN Build 827, SHA `518363934b43a49f39f970df7de5e70c7436ba19`. Next coordinated production candidate ensures **both** TextureView and SurfaceView/protected scene explicitly clear the codec's old input surface on the Media3 application thread before the GL SurfaceTexture is destroyed or replaced, and records matching input surface ID and output generation for attach/detach/GL release. Add a GL-stage BufferQueue classifier that never mistakes nonblocking platform queue events for network underbuffering or physically dropped video. Preserve `updateTexImage()` latching independently of Choreographer display callbacks. Correct the **specific 1.5x inconsistency**: `FrameThinner` intentionally limits output to ~source cadence (~50fps), while the old `Surface.setFrameRate` hint advertised 75fps. Report real 75fps media time and use a truthful ~50fps output hint until an independently proven, capability-aware high-FPS policy is implemented. Align paced draw scheduling and add JVM tests for 50/75 fps distinction, fixed/adaptive modes and queue evidence. **Do not force the OS to 60Hz/120Hz.**
+
+| Batch 2 item | Build 827 existing source evidence | Additional validation required for completion |
+| --- | --- | --- |
+| B2.1 Adaptive refresh | Actual Display listener, per-window min/max, cadence gate | New output-hint correctness, fixed/adaptive physical matrix and real presented-layer cadence |
+| B2.2 BufferQueue | Existing GL epoch/latch/submission counters | New input producer-before-consumer ownership, queue identity/log evidence, correlate events with actual stalls |
+| B2.3 Lifecycle | Build 827 surface/host/backend epoch and idempotent release | New detach-before-replace for both output types, teardown/rotation/TV/Cast regression |
+| B2.4 Map/tower UI | Retained hardware layer and row scan optimization | Controlled 120Hz Compose and map/tower trace, improve actual measured hotspots without reducing timing correctness |
+| B2.5 Seeking/1.5x | 80ms latest-target batch, exact Media3 seek | Real large-seek p95 and final frame, speed/audio/caption/tower continuity |
+| B2.6 Memory/thermal | Bounded quad cache, ART GC/thermal logging | 10-minute thermal endurance and actual allocation work by traced allocation stack |
+| B2.7 Buffering | Startup/seek/rebuffer/paused episode classification | Only tune Media3 buffers if independent underbuffering is established |
+| B2.8 A/B | Reversible experimental SurfaceView OFF by default, GL telemetry | Real independent video-layer presentation and controlled matched A/B |
+| B2.9 DRM cleanup | Idempotent release gate | Verify actual MediaDrm unbind ownership, protected F1 L1/L3 + TCL and Cast |
+| B2.10 Rendition disclosure | Input/crop/coded output separation | Actual manual-cap source validation on real offered F1 tracks |
+| B2.11 Tests | Build 827 exact-source GREEN test suite | New lifecycle, pacing and queue evidence JVM checks, production wiring, full green CI + physical matrix |
+
+**Accounting rules:** The first-pass Build 827 is *verified source GREEN*, not 11/11 accepted physical gates. The historical 16-workstream coding ledger is **88.9375%** across original defined milestones, with **1/16 strict release gates CLOSED**. Newly discovered defects or changed requirements can generate new work within a previously 100%-coded milestone. Do not inflate that percentage merely by adding test code; reconcile the ledger only after the complete revised Batch 2 code and all automated checks are verified. Physical acceptance requires the device itself. A docs entry never certifies hardware behavior.
+
 ## Batch 2 coordinated source candidate (24 November 2026; verification pending)
 
 Preflight additions: per-window observed refresh min/max, rejection of missing or mixed refresh evidence in physical matrix, missing single-decoder evidence fails closed, seek-state expiry, old-picture demand invalidation, terminal cleanup finally blocks. These retain physical gates OPEN; app-window refresh observations are not physical video scanout.

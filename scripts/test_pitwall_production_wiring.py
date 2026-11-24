@@ -309,5 +309,33 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("'OK (2 tests)'", instrumentation)
 
 
+    def test_batch2_decoder_producer_detaches_before_texture_consumer_replacement(self):
+        # Real production callsites, not standalone sample/test-only policy.
+        for path, created, destroyed in (
+            ("app/src/main/java/app/apexview/scene/SingleDecoderSceneView.kt",
+             "override fun onSurfaceTextureAvailable", "override fun onSurfaceTextureDestroyed"),
+            ("app/src/main/java/app/apexview/scene/ProtectedDecoderSceneView.kt",
+             "override fun surfaceCreated", "override fun surfaceDestroyed"),
+        ):
+            source = contents(path)
+            self.assertIn("owner.clearVideoSurface(old)", source)
+            self.assertIn("SCENE_CODEC_INPUT_ATTACH", source)
+            self.assertIn("SCENE_CODEC_INPUT_DETACH", source)
+            self.assertIn("SCENE_CODEC_INPUT_RELEASE", source)
+            self.assertIn("bufferQueueStage=", source)
+            self.assertIn("physicalQueueDepth=NOT_MEASURED", source)
+            creation = source.split(created, 1)[1].split("override fun", 1)[0]
+            self.assertLess(creation.index('detachDecoderInput("output-replaced")'),
+                            creation.index("val lifetime = surfaceLifetime.advance()"))
+            self.assertIn("detachDecoderInput(", source.split(destroyed, 1)[1])
+            self.assertIn("SceneFrameRatePolicy.composedOutputHint(", source)
+        stage = contents("app/src/main/java/app/apexview/scene/SceneBufferQueueEvidence.kt")
+        self.assertIn("mDequeueTimeout=0", stage)
+        self.assertNotIn("NETWORK_STARVATION", stage)
+        cadence = contents("app/src/main/java/app/apexview/scene/SceneFrameCadenceGate.kt")
+        self.assertIn("SceneFrameRatePolicy.composedOutputHint", cadence)
+
+
+
 if __name__ == "__main__":
     unittest.main()

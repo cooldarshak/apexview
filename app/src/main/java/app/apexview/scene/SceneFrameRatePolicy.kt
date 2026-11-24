@@ -10,6 +10,19 @@ internal object SceneFrameRatePolicy {
             effective.toFloat() else 0f
     }
 
+    /**
+     * Real composed output cadence for the current FrameThinner policy.
+     * Accelerated 50fps media advances at 75fps at 1.5x but is deliberately
+     * thinned to ~50 output frames/s. Keep the platform vote honest; do not
+     * conflate the media clock with submitted pictures.
+     */
+    fun composedOutputHint(sourceFramesPerSecond: Double, playbackSpeed: Float = 1f): Float {
+        val unthinned = hint(sourceFramesPerSecond, playbackSpeed)
+        return if (unthinned == 0f) 0f
+        else if (playbackSpeed > 1.15f) minOf(unthinned, sourceFramesPerSecond.toFloat())
+        else unthinned
+    }
+
     /** Integral display-to-video cadence is a diagnostic, NOT observed scanout.
      * The Surface.setFrameRate policy remains seamless-only. */
     fun isIntegerRefreshMultiple(

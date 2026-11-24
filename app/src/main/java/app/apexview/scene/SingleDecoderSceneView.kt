@@ -78,6 +78,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         Log.i("ApexviewSingleDecoder", "SCENE_DISPLAY_MODE reason=$reason displayId=${actualDisplay.displayId} " +
             "activeMode=${mode.modeId} activeHz=${mode.refreshRate} displayRefreshHz=$selectedDisplayHz sourceFps=$sourceFps speed=$playbackSpeed " +
             "effectiveFps=${SceneFrameRatePolicy.hint(sourceFps, playbackSpeed)} " +
+            "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed)} " +
             "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
             "supportedModes=$available sameResolutionIntegralModes=$seamlessMatches " +
             "modeSwitchIssuedByApp=false physicalPresentation=NOT_MEASURED")
@@ -87,6 +88,20 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     @Volatile private var scene: VideoScene? = null
     @Volatile private var released = false
     @Volatile private var input: Surface? = null
+
+    /** MediaCodec produces into input; the GL SurfaceTexture consumes it.
+     * Clear the producer on Media3's application thread BEFORE GL disposes
+     * the consumer when the output is replaced, destroyed or released.
+     * DequeueTimeout=0 is nonblocking, not proof of a network stall. */
+    private fun detachDecoderInput(reason: String) {
+        val old = input ?: return
+        val owner = player ?: return
+        owner.clearVideoSurface(old)
+        Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_DETACH " +
+            "renderer=TextureView reason=$reason surfaceId=${System.identityHashCode(old)} " +
+            "outputEpoch=${surfaceLifetime.generation()} owner=Media3 " +
+            "physicalQueueDepth=NOT_MEASURED")
+    }
     var onFailure: (String) -> Unit = {}
     var onFirstFrame: () -> Unit = {}
     var onOutputLost: () -> Unit = {}
@@ -284,7 +299,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private fun applyOutputFrameRateHint() {
         if (Build.VERSION.SDK_INT < 30) return
         val surface = outputSurface ?: return
-        val fps = SceneFrameRatePolicy.hint(scene?.sourceFrameRate ?: 0.0, playbackSpeed)
+        val fps = SceneFrameRatePolicy.composedOutputHint(scene?.sourceFrameRate ?: 0.0, playbackSpeed)
         if (fps == hintedFrameRate) return
         try {
             if (Build.VERSION.SDK_INT >= 31) {
@@ -344,7 +359,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         } else null
         scene = nextScene
         if (player !== nextPlayer) {
-            input?.let { player?.clearVideoSurface(it) }
+            detachDecoderInput("player-replaced")
             player = nextPlayer
             input?.let { nextPlayer.setVideoSurface(it) }
         }
@@ -365,6 +380,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     override fun onSurfaceTextureAvailable(output: SurfaceTexture, width: Int, height: Int) {
+        detachDecoderInput("output-replaced")
         val lifetime = surfaceLifetime.advance()
         val readinessEpoch = outputReadiness.invalidate()
         onOutputLost()
@@ -387,7 +403,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         surfaceLifetime.advance()
         outputReadiness.invalidate()
         onOutputLost()
-        input?.let { player?.clearVideoSurface(it) }
+        detachDecoderInput("output-destroyed")
         codecCorrelation?.reset()
         // GL owns the Surface reference until queued destruction releases it. Clearing it
         // here lost that reference before destroy() and leaked a codec output surface.
@@ -406,7 +422,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         surfaceLifetime.advance()
         outputReadiness.invalidate()
         main.removeCallbacks(glQueueProbe)
-        input?.let { player?.clearVideoSurface(it) }
+        detachDecoderInput("scene-released")
         player = null
         surfaceTextureListener = null
         codecCorrelation?.active = false
@@ -489,7 +505,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                     // swap is blocked. Latch promptly to release the prior codec buffer;
                     // coalesce only the *drawing* onto a Choreographer vsync.
                     val bindStarted = System.nanoTime()
-                    check(EGL14.eglMakeCurrent(display, window, window, contextGl)) { "Scene GL context unavailable" }
+                    check(window != EGL14.EGL_NO_SURFACE &&
+                        EGL14.eglMakeCurrent(display, window, window, contextGl)) { "Scene GL context unavailable" }
                     val eglBindNs = System.nanoTime() - bindStarted
                     val latchStarted = System.nanoTime()
                     Trace.beginSection("PitwallTextureLatch")
@@ -512,6 +529,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         post {
             if (!released && input === surface && surfaceLifetime.matches(lifetime)) {
                 player?.setVideoSurface(surface)
+                Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_ATTACH " +
+                    "renderer=TextureView surfaceId=${System.identityHashCode(surface)} " +
+                    "outputEpoch=$lifetime owner=Media3")
             }
         }
     }
@@ -588,6 +608,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 "plannedCodecReleaseToLatchP95UpperMs=${correlation?.releaseToLatch?.percentileUpperMs(95) ?: 0} " +
                 "codecCallbackToLatchP95UpperMs=${correlation?.callbackToLatch?.percentileUpperMs(95) ?: 0} " +
                 "latchToSwapP95UpperMs=${correlation?.latchToSwap?.percentileUpperMs(95) ?: 0} " +
+                "bufferQueueStage=${SceneBufferQueueEvidence.stage(metrics.latched, metrics.presented, metrics.callbackGaps, metrics.slowSwaps, metrics.unavailableDraws)} " +
+                "bufferQueuePlatformDepth=NOT_MEASURED " +
                 "gpuSubmitNotGpuCompletion=true physicalPresentation=NOT_MEASURED")
             lastLogNs = now
         }
@@ -631,6 +653,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         saveClip()
         config = null
         decoderTexture?.setOnFrameAvailableListener(null)
+        input?.let { Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_RELEASE " +
+            "renderer=TextureView surfaceId=${System.identityHashCode(it)} " +
+            "outputEpoch=${surfaceLifetime.generation()} thread=GL") }
         input?.release(); input = null
         decoderTexture?.release(); decoderTexture = null; hasFrame = false
         firstFrameReported = false

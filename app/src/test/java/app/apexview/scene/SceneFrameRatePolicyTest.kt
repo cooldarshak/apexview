@@ -28,6 +28,16 @@ class SceneFrameRatePolicyTest {
         assertEquals(0f, SceneFrameRatePolicy.hint(50.0, Float.NaN), 0.0001f)
     }
 
+    @Test fun composedHintMatchesThinnedOutputWhileMediaClockStillRunsAtSeventyFive() {
+        assertEquals(50f, SceneFrameRatePolicy.composedOutputHint(50.0, 1f), 0f)
+        assertEquals(50f, SceneFrameRatePolicy.composedOutputHint(50.0, 1.5f), 0f)
+        assertEquals(50f, SceneFrameRatePolicy.composedOutputHint(50.0, 2f), 0f)
+        assertEquals(25f, SceneFrameRatePolicy.composedOutputHint(50.0, 0.5f), 0f)
+        assertEquals(24f, SceneFrameRatePolicy.composedOutputHint(24.0, 2f), 0f)
+        assertEquals(0f, SceneFrameRatePolicy.composedOutputHint(Double.NaN, 1.5f), 0f)
+        assertEquals(75f, SceneFrameRatePolicy.hint(50.0, 1.5f), 0f)
+    }
+
     @Test fun refreshMultipleUsesRealPlaybackSpeedInsteadOfOnlySourceFps() {
         assertTrue(SceneFrameRatePolicy.isIntegerRefreshMultiple(100f, 50.0, 1f))
         assertTrue(SceneFrameRatePolicy.isIntegerRefreshMultiple(50f, 50.0, 1f))

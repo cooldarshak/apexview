@@ -68,6 +68,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             "displayId=${current.displayId} activeMode=${mode.modeId} activeHz=${mode.refreshRate} displayRefreshHz=$selectedDisplayHz " +
             "sourceFps=$sourceFps speed=$playbackSpeed " +
             "effectiveFps=${SceneFrameRatePolicy.hint(sourceFps, playbackSpeed)} " +
+            "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed)} " +
             "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
             "supportedModes=$available sameResolutionIntegralModes=$seamlessMatches " +
             "modeSwitchIssuedByApp=false physicalPresentation=NOT_MEASURED")
@@ -90,6 +91,18 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     @Volatile private var scene: VideoScene? = null
     @Volatile private var released = false
     @Volatile private var input: Surface? = null
+
+    /** Detach codec producer before releasing its SurfaceTexture consumer. */
+    private fun detachDecoderInput(reason: String) {
+        val old = input ?: return
+        val owner = player ?: return
+        owner.clearVideoSurface(old)
+        Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_DETACH " +
+            "renderer=SurfaceView protected=$protectedOutput reason=$reason " +
+            "surfaceId=${System.identityHashCode(old)} " +
+            "outputEpoch=${surfaceLifetime.generation()} owner=Media3 " +
+            "physicalQueueDepth=NOT_MEASURED")
+    }
     var onFailure: (String) -> Unit = {}
     var onFirstFrame: () -> Unit = {}
     var onOutputLost: () -> Unit = {}
@@ -218,7 +231,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         scene = nextScene
         logDisplayMode("bind")
         if (player !== nextPlayer) {
-            input?.let { player?.clearVideoSurface(it) }
+            detachDecoderInput("player-replaced")
             player = nextPlayer
             input?.let { nextPlayer.setVideoSurface(it) }
         }
@@ -240,6 +253,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
+        detachDecoderInput("output-replaced")
         val lifetime = surfaceLifetime.advance()
         val readinessEpoch = outputReadiness.invalidate()
         onOutputLost()
@@ -269,7 +283,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         // on its application thread, then queue GL destruction. Waiting for a
         // 2-second CountDownLatch here froze Compose/TV controls on rotation,
         // stop/start and Cast receiver handoff while eglSwapBuffers was busy.
-        input?.let { player?.clearVideoSurface(it) }
+        detachDecoderInput("output-detached")
         if (!gl.post { destroy() }) {
             Log.w("ApexviewSingleDecoder", "SECURE_EGL_RELEASE_QUEUE_CLOSED")
         }
@@ -403,6 +417,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         post {
             if (!released && input === surface && surfaceLifetime.matches(lifetime)) {
                 player?.setVideoSurface(surface)
+                Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_ATTACH " +
+                    "renderer=SurfaceView protected=$protectedOutput " +
+                    "surfaceId=${System.identityHashCode(surface)} outputEpoch=$lifetime owner=Media3")
             }
         }
     }
@@ -413,7 +430,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         // L1 surfaces deserve the same seamless-only 50 fps pacing hint as
         // authorized L3 scenes; unsupported OEM surfaces fail harmlessly.
         if (android.os.Build.VERSION.SDK_INT < 30) return
-        val rate = SceneFrameRatePolicy.hint(scene?.sourceFrameRate ?: 0.0, playbackSpeed)
+        val rate = SceneFrameRatePolicy.composedOutputHint(scene?.sourceFrameRate ?: 0.0, playbackSpeed)
         if (rate == appliedFrameRateHint) return
         runCatching {
             if (android.os.Build.VERSION.SDK_INT >= 31) {
@@ -502,6 +519,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "windows=${model.windows.size} decoderFrames=$rendered " +
                 "sourceFps=${model.sourceFrameRate} speed=$playbackSpeed " +
                 "effectiveFps=${model.sourceFrameRate * playbackSpeed} " +
+                "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(model.sourceFrameRate, playbackSpeed)} " +
                 "intervalPresented=$intervalPresented intervalGaps45ms=$intervalLongGaps " +
                 "intervalSwapsOver18ms=$intervalSwapsOver18ms " +
                 "maxGapMs=$intervalLongestGapMs maxSwapMs=$intervalLongestSwapMs " +
@@ -534,6 +552,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "plannedCodecReleaseToLatchP95UpperMs=${correlation?.releaseToLatch?.percentileUpperMs(95) ?: 0} " +
                 "codecCallbackToLatchP95UpperMs=${correlation?.callbackToLatch?.percentileUpperMs(95) ?: 0} " +
                 "latchToSwapP95UpperMs=${correlation?.latchToSwap?.percentileUpperMs(95) ?: 0} " +
+                "bufferQueueStage=${SceneBufferQueueEvidence.stage(metrics.latched, metrics.presented, metrics.callbackGaps, metrics.slowSwaps, metrics.unavailableDraws)} " +
+                "bufferQueuePlatformDepth=NOT_MEASURED " +
                 "swapSubmissionsNotPhysicalPresentation=true physicalPresentation=NOT_MEASURED")
             lastLogNs = now
             intervalPresented = 0
@@ -567,6 +587,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         pacing.reset()
         nextGlProbeExpectedNs = 0L
         decoderTexture?.setOnFrameAvailableListener(null)
+        input?.let { Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_RELEASE " +
+            "renderer=SurfaceView protected=$protectedOutput " +
+            "surfaceId=${System.identityHashCode(it)} " +
+            "outputEpoch=${surfaceLifetime.generation()} thread=GL") }
         input?.release(); input = null
         decoderTexture?.release(); decoderTexture = null; hasFrame = false
         firstFrameReported = false
