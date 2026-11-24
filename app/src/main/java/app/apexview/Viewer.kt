@@ -1224,6 +1224,7 @@ internal fun PlaybackVideoCanvas(
             androidx.compose.runtime.key(app.protectedRollingSceneActive, secureRolling, independentClearSurface) {
                 AndroidView(factory = { context ->
                     ProtectedDecoderSceneView(context, protectedOutput = secureRolling).apply {
+                        onDisplaySelected = { displayId -> host.setComposedOutputDisplay(this, displayId) }
                         onFailure = { error ->
                             if (independentClearSurface && !app.protectedRollingSceneActive) {
                                 // On an unsupported clear EGL SurfaceView, restore the
@@ -1243,6 +1244,7 @@ internal fun PlaybackVideoCanvas(
         } else {
             // Capture-compatible TextureView, also the controlled A/B baseline.
             AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
+                onDisplaySelected = { displayId -> host.setComposedOutputDisplay(this, displayId) }
                 onFailure = app::failSingleDecoderScene
                 onOutputSize = app::reportSceneOutputSize
                 onOutputLost = { composedGlReady = false }

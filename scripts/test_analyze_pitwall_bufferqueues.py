@@ -30,6 +30,26 @@ BUFFER_QUEUE_TIMEOUT repeats=11 last=11-24 10:02:59.500 E BufferQueueProducer: [
         self.assertEqual(0, r["app_release_events"])
         self.assertEqual("NOT_MEASURED", r["physical_queue_depth"])
 
+    def test_codec_output_delay_correlates_with_producer_occupancy_without_guessing_root_cause(self):
+        log = """11-24 10:02:53.022 I CCodecBufferChannel: [c2.qti.hevc.decoder#318] start: max output delay 22
+11-24 10:02:53.545 E BufferQueueProducer: [MediaCodec.release](id:abc) dequeueBuffer: waitForFreeSlotThenRelock: timeout. dequeuedCount: 23, acquiredCount: 0, mDequeueTimeout: 0
+11-24 10:03:00.488 E BufferQueueProducer: [SurfaceTexture-1-12058-1](id:def) dequeueBuffer: waitForFreeSlotThenRelock: timeout. dequeuedCount: 21, acquiredCount: 2, mDequeueTimeout: 0
+11-24 10:03:02.988 E MediaDrm: Object Already unbinded
+"""
+        report = analyze(log)
+        self.assertEqual({"c2.qti.hevc.decoder": [22]},
+                         report["codec_max_output_delay_by_name"])
+        self.assertTrue(report["codec_output_delay_near_occupied_slots"])
+        self.assertTrue(report["codec_output_delay_match_does_not_prove_causation"])
+        self.assertEqual([23],
+            report["queue_by_identity"]["MediaCodec.release#abc"]["observed_dequeued_counts"])
+        self.assertEqual([0],
+            report["queue_by_identity"]["MediaCodec.release#abc"]["observed_acquired_counts"])
+        self.assertEqual([21],
+            report["queue_by_identity"]["SurfaceTexture-1-12058-1#def"]["observed_dequeued_counts"])
+        self.assertEqual(1, report["media_drm_double_unbind_warnings"])
+        self.assertEqual("NOT_MEASURED", report["physical_queue_depth"])
+
     def test_unreported_timeout_semantics_not_labeled_nonblocking(self):
         log = "11-24 10:00:00.000 E BufferQueueProducer: [foo] dequeueBuffer: waitForFreeSlotThenRelock: timeout"
         r = analyze(log)

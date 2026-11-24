@@ -4,7 +4,6 @@ import android.content.Context
 import android.hardware.display.DisplayManager
 import android.os.PowerManager
 import android.os.SystemClock
-import android.view.Display
 
 /**
  * Actual *output* frames/s, independent of media timeline rate.
@@ -41,17 +40,26 @@ internal class AdaptivePlaybackCadenceObserver(context: Context) {
     private val power =
         context.applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
     @Volatile var composedSingle: Boolean = false
+    // The scene provides its ACTUAL display ID. DEFAULT_DISPLAY can be wrong
+    // for external monitors / TV handoffs. -1 means no attached output and
+    // disables the unverified high-rate path, without hiding a playback error.
+    @Volatile var activeDisplayId: Int = -1
 
     private var lastReadMs = Long.MIN_VALUE
+    private var lastReadDisplayId = Int.MIN_VALUE
     private var displayHz = 0f
     private var thermalStatus = Int.MAX_VALUE
 
     fun outputFps(sourceFps: Double, speed: Float): Float {
         val now = SystemClock.elapsedRealtime()
-        if (lastReadMs == Long.MIN_VALUE || now < lastReadMs || now - lastReadMs >= 1000L) {
-            displayHz = displayManager.getDisplay(Display.DEFAULT_DISPLAY)?.refreshRate ?: 0f
+        val requestedDisplay = activeDisplayId
+        if (lastReadMs == Long.MIN_VALUE || now < lastReadMs ||
+            now - lastReadMs >= 1000L || requestedDisplay != lastReadDisplayId) {
+            displayHz = if (requestedDisplay >= 0)
+                displayManager.getDisplay(requestedDisplay)?.refreshRate ?: 0f else 0f
             thermalStatus = power.currentThermalStatus
             lastReadMs = now
+            lastReadDisplayId = requestedDisplay
         }
         return AdaptivePlaybackCadence.outputFps(
             sourceFps, speed, displayHz, thermalStatus, composedSingle)

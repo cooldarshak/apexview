@@ -156,6 +156,21 @@ class FeedPlayer(
     // Per-player controller. Never promotes a MULTIPLE-decoder source feed to
     // accelerated full-rate output or creates another decoder/DRM session.
     private val outputCadence = AdaptivePlaybackCadenceObserver(context)
+    // The active scene owns the display-rate decision. A previous renderer
+    // disposed after a TextureView/SurfaceView handoff cannot revoke a newer
+    // scene's selection.
+    private var outputDisplayOwner: Any? = null
+
+    internal fun setComposedOutputDisplay(owner: Any, displayId: Int?) {
+        if (displayId == null) {
+            if (outputDisplayOwner !== owner) return
+            outputDisplayOwner = null
+            outputCadence.activeDisplayId = -1
+        } else {
+            outputDisplayOwner = owner
+            outputCadence.activeDisplayId = displayId
+        }
+    }
     private val initialVideoEnabled = startWithVideo
     private val initialStartPositionMs = startMs
     private lateinit var originalMediaItem: MediaItem
@@ -893,6 +908,8 @@ class FeedPlayer(
         error = null
         problem = null
         var publisherStarted = false
+        val previous = protectedLiveDashSource
+        var handoffInstalled = false
         try {
             // DASH package verification and CBCS resource publication can scan
             // tens of MB. Never execute them on Media3's/UI application looper.
@@ -910,7 +927,6 @@ class FeedPlayer(
                 .setDrmSessionManagerProvider { drmManager }
                 .createMediaSource(mediaItem)
 
-            val previous = protectedLiveDashSource
             protectedLiveDashSource = nextSource
             outputCadence.composedSingle = true
             videoSuppressedByProtectedComposition = false
@@ -920,15 +936,21 @@ class FeedPlayer(
                 .build()
             if (startPositionMs == null) player.setMediaSource(mediaSource)
             else player.setMediaSource(mediaSource, startPositionMs)
-            previous?.release()
             player.playWhenReady = playWhenReady && !remotePlaybackSuspended
             player.prepare()
+            handoffInstalled = true
+            // Retire only after the new Media3 source was successfully installed.
+            previous?.release()
         } catch (error: Throwable) {
             // If cancellation happens before the IO block starts, publish() never
             // receives ownership. Clean that detached encrypted window here.
             if (!publisherStarted) window.zero()
-            nextSource.release()
-            outputCadence.composedSingle = protectedLiveDashSource != null || archiveVodSession != null
+            if (!handoffInstalled) {
+                if (protectedLiveDashSource === nextSource) protectedLiveDashSource = previous
+                nextSource.release()
+                outputCadence.composedSingle =
+                    protectedLiveDashSource != null || archiveVodSession != null
+            }
             throw error
         } finally {
             widevinePssh?.fill(0)
@@ -946,16 +968,25 @@ class FeedPlayer(
         val audio = FilteringMediaSource(archiveAudioSources.createMediaSource(MediaItem.Builder().setUri(audioUri)
             .setMimeType(MimeTypes.APPLICATION_M3U8).build()), setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_TEXT))
         firstFrameRendered = false; error = null; problem = null
-        if (archiveVodSession !== session) archiveVodSession?.close()
+        val previousArchive = archiveVodSession
         archiveVodSession = session
         outputCadence.composedSingle = true
         videoSuppressedByProtectedComposition = false
         videoOn = !remotePlaybackSuspended
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE).setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, remotePlaybackSuspended).build()
-        player.setMediaSource(MergingMediaSource(true, true, video, audio), positionMs.coerceAtLeast(0))
-        player.playWhenReady = playWhenReady && !remotePlaybackSuspended
-        player.prepare()
+        try {
+            player.setMediaSource(MergingMediaSource(true, true, video, audio), positionMs.coerceAtLeast(0))
+            player.playWhenReady = playWhenReady && !remotePlaybackSuspended
+            player.prepare()
+        } catch (failure: Throwable) {
+            if (archiveVodSession === session) archiveVodSession = previousArchive
+            outputCadence.composedSingle =
+                archiveVodSession != null || protectedLiveDashSource != null
+            throw failure
+        }
+        // Media3's loader/source replacement must precede retiring old CMAF bytes.
+        if (previousArchive !== session) previousArchive?.close()
     }
 
     internal fun selectArchiveAudio(label: String): Boolean {
@@ -1087,26 +1118,31 @@ class FeedPlayer(
     /** Restores this player's original feed and releases its bounded composed-media window. */
     fun stopProtectedComposedPlayback(positionMs: Long? = null, playWhenReady: Boolean = true, enableVideo: Boolean = initialVideoEnabled) {
         outputCadence.composedSingle = false
-        protectedLiveDashSource?.release()
+        val priorProtected = protectedLiveDashSource
+        val priorArchive = archiveVodSession
         protectedLiveDashSource = null
-        archiveVodSession?.close()
         archiveVodSession = null
         firstFrameRendered = false; error = null; problem = null
         videoSuppressedByProtectedComposition = false
         val restorePositionMs = positionMs?.coerceAtLeast(0L)
             ?: initialStartPositionMs.takeIf { it != C.TIME_UNSET }
-        if (restorePositionMs == null) {
-            player.setMediaItem(originalMediaItem)
-        } else {
-            player.setMediaItem(originalMediaItem, restorePositionMs)
+        try {
+            if (restorePositionMs == null) {
+                player.setMediaItem(originalMediaItem)
+            } else {
+                player.setMediaItem(originalMediaItem, restorePositionMs)
+            }
+            videoOn = enableVideo && !remotePlaybackSuspended
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setMaxVideoSize(qualityWidth(selectedVideoQuality), qualityHeight(selectedVideoQuality))
+                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enableVideo || remotePlaybackSuspended)
+                .build()
+            player.playWhenReady = playWhenReady && !remotePlaybackSuspended
+            player.prepare()
+        } finally {
+            // Releases the old generations even if Media3 throws while restoring.
+            try { priorProtected?.release() } finally { priorArchive?.close() }
         }
-        videoOn = enableVideo && !remotePlaybackSuspended
-        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setMaxVideoSize(qualityWidth(selectedVideoQuality), qualityHeight(selectedVideoQuality))
-            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enableVideo || remotePlaybackSuspended)
-            .build()
-        player.playWhenReady = playWhenReady && !remotePlaybackSuspended
-        player.prepare()
     }
 
     /** Clears only the source-tile video lock, keeping the TV's normal video budget in charge. */
@@ -1224,6 +1260,8 @@ class FeedPlayer(
         // Media3 (and its DRM session manager) a second time.
         if (!releaseGate.beginRelease()) return
         outputCadence.composedSingle = false
+        outputDisplayOwner = null
+        outputCadence.activeDisplayId = -1
         sceneCodecCorrelation.active = false
         sceneCodecCorrelation.reset()
         val archive = archiveVodSession
@@ -1261,7 +1299,11 @@ class FeedPlayer(
             return "HTTP ${it.responseCode} from ${it.dataSpec.uri.host}"
         }
         val root = chain.last()
-        return "${root.javaClass.simpleName}: ${root.message}"
+        // Network/DRM exceptions can include F1 token-bearing URLs and headers.
+        // This text reaches Compose status, app logs and user-exported diagnostics.
+        return DiagnosticRedaction.redact(
+            "${root.javaClass.simpleName}: ${root.message}"
+        ).take(220)
     }
 
     companion object {

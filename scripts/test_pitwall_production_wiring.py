@@ -373,5 +373,66 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("val cells = mixedAtlas?.cells ?: uniformCells", archive)
 
 
+    def test_batch12_hardening_media3_source_ownership_is_transactional(self):
+        player = contents("app/src/main/java/app/apexview/FeedPlayer.kt")
+        protected = player.split("    internal suspend fun startProtectedComposedPlayback(", 1)[1].split(
+            "    /** One static composed video track", 1)[0]
+        self.assertIn("val previous = protectedLiveDashSource", protected)
+        self.assertIn("if (protectedLiveDashSource === nextSource) protectedLiveDashSource = previous", protected)
+        self.assertIn("if (!handoffInstalled)", protected)
+        self.assertLess(protected.index("player.prepare()"), protected.index("previous?.release()"))
+        clear = player.split("    internal fun startArchiveVodPlayback(", 1)[1].split(
+            "    internal fun selectArchiveAudio", 1)[0]
+        self.assertIn("val previousArchive = archiveVodSession", clear)
+        self.assertIn("if (archiveVodSession === session) archiveVodSession = previousArchive", clear)
+        self.assertLess(clear.index("player.prepare()"), clear.index("previousArchive?.close()"))
+        restore = player.split("    fun stopProtectedComposedPlayback(", 1)[1].split(
+            "    /** Clears only the source-tile video lock", 1)[0]
+        self.assertIn("val priorProtected = protectedLiveDashSource", restore)
+        self.assertIn("val priorArchive = archiveVodSession", restore)
+        self.assertLess(restore.index("player.setMediaItem("), restore.index("priorProtected?.release()"))
+        self.assertLess(restore.index("player.prepare()"), restore.index("priorArchive?.close()"))
+        release = player.split("    fun release() {", 1)[1].split(
+            "    private fun explain(", 1)[0]
+        self.assertLess(release.index("player.release()"), release.index("archive?.close()"))
+        self.assertLess(release.index("player.release()"), release.index("protectedSource?.release()"))
+
+    def test_batch12_hardening_decoder_follows_real_scene_display_not_default_display(self):
+        player = contents("app/src/main/java/app/apexview/FeedPlayer.kt")
+        observer = contents("app/src/main/java/app/apexview/AdaptivePlaybackCadence.kt")
+        viewer = contents("app/src/main/java/app/apexview/Viewer.kt")
+        self.assertIn("@Volatile var activeDisplayId: Int = -1", observer)
+        self.assertIn("displayManager.getDisplay(requestedDisplay)?.refreshRate", observer)
+        self.assertNotIn("Display.DEFAULT_DISPLAY", observer)
+        self.assertIn("setComposedOutputDisplay(owner: Any, displayId: Int?)", player)
+        self.assertIn("if (outputDisplayOwner !== owner) return", player)
+        self.assertIn("outputCadence.activeDisplayId = -1", player)
+        self.assertGreaterEqual(viewer.count(
+            "onDisplaySelected = { displayId -> host.setComposedOutputDisplay(this, displayId) }"), 2)
+        for scene in (
+            "app/src/main/java/app/apexview/scene/SingleDecoderSceneView.kt",
+            "app/src/main/java/app/apexview/scene/ProtectedDecoderSceneView.kt",
+        ):
+            source = contents(scene)
+            self.assertIn("var onDisplaySelected: (Int?) -> Unit", source)
+            self.assertIn("onDisplaySelected(null)", source)
+            self.assertIn("onDisplaySelected(", source)
+
+    def test_batch12_archive_datasource_rejects_malformed_ranges_without_overflow(self):
+        source = contents("app/src/main/java/app/apexview/tiled/HevcArchiveVodSession.kt")
+        self.assertIn("spec.length < 0L && spec.length != C.LENGTH_UNSET.toLong()", source)
+        self.assertIn("val available = body.size.toLong() - spec.position", source)
+        self.assertIn("offset > buffer.size - length", source)
+        self.assertIn("if (cursor >= end) return C.RESULT_END_OF_INPUT", source)
+
+    def test_batch12_hardening_all_error_surface_messages_redact_tokens(self):
+        feed = contents("app/src/main/java/app/apexview/FeedPlayer.kt")
+        app = contents("app/src/main/java/app/apexview/AppState.kt")
+        self.assertIn("return DiagnosticRedaction.redact(", feed)
+        self.assertIn("Composed source initialization failed: ${DiagnosticRedaction.redact(", app)
+        self.assertIn("terminalReason = DiagnosticRedaction.redact(", app)
+        self.assertIn("castStatus = DiagnosticRedaction.redact(", app)
+
+
 if __name__ == "__main__":
     unittest.main()

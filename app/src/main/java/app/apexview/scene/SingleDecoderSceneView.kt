@@ -82,6 +82,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         val actualDisplay = rootView.display ?: return
         val mode = actualDisplay.mode
         selectedDisplayHz = actualDisplay.refreshRate
+        onDisplaySelected(actualDisplay.displayId)
         val sourceFps = scene?.sourceFrameRate ?: 0.0
         val signature = "${actualDisplay.displayId}:${mode.modeId}:${mode.refreshRate}:$selectedDisplayHz:$sourceFps:$playbackSpeed"
         if (signature == previousModeSignature) return
@@ -145,6 +146,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             "renderer=TextureView surfaceId=${System.identityHashCode(surface)} " +
             "inputEpoch=$epoch owner=Media3")
     }
+    var onDisplaySelected: (Int?) -> Unit = {}
     var onFailure: (String) -> Unit = {}
     var onFirstFrame: () -> Unit = {}
     var onOutputLost: () -> Unit = {}
@@ -376,6 +378,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         main.removeCallbacks(glQueueProbe)
         displayManager.unregisterDisplayListener(modeListener)
         previousModeSignature = null
+        onDisplaySelected(null)
         super.onDetachedFromWindow()
     }
 
@@ -464,6 +467,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     fun release() {
         if (released) return
         released = true
+        onDisplaySelected(null)
         surfaceLifetime.advance()
         outputReadiness.invalidate()
         main.removeCallbacks(glQueueProbe)

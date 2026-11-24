@@ -69,6 +69,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val current = rootView.display ?: return
         val mode = current.mode
         selectedDisplayHz = current.refreshRate
+        onDisplaySelected(current.displayId)
         val sourceFps = scene?.sourceFrameRate ?: 0.0
         val signature = "${current.displayId}:${mode.modeId}:${mode.refreshRate}:$selectedDisplayHz:$sourceFps:$playbackSpeed"
         if (signature == previousModeSignature) return
@@ -102,6 +103,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     override fun onDetachedFromWindow() {
         displayManager.unregisterDisplayListener(modeListener)
         previousModeSignature = null
+        onDisplaySelected(null)
         super.onDetachedFromWindow()
     }
 
@@ -142,6 +144,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             "renderer=SurfaceView protected=$protectedOutput surfaceId=${System.identityHashCode(surface)} " +
             "inputEpoch=$epoch owner=Media3")
     }
+    var onDisplaySelected: (Int?) -> Unit = {}
     var onFailure: (String) -> Unit = {}
     var onFirstFrame: () -> Unit = {}
     var onOutputLost: () -> Unit = {}
@@ -332,6 +335,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     fun release() {
         if (released) return
         released = true
+        onDisplaySelected(null)
         surfaceLifetime.advance()
         outputReadiness.invalidate()
         holder.removeCallback(this)

@@ -620,15 +620,30 @@ internal class HevcArchiveVodSession(
                 }
             }
             if (spec.position !in 0..body.size.toLong()) { body.fill(0); throw IOException("Archive range is out of bounds") }
-            bytes = body; cursor = spec.position.toInt()
-            end = if (spec.length == C.LENGTH_UNSET.toLong()) body.size else minOf(body.size.toLong(), spec.position + spec.length).toInt()
+            if (spec.length < 0L && spec.length != C.LENGTH_UNSET.toLong()) {
+                body.fill(0)
+                throw IOException("Invalid archive resource range length")
+            }
+            bytes = body
+            cursor = spec.position.toInt()
+            // Avoid position+length overflow on a malformed DataSpec. Do not
+            // over-read or silently publish a negative length to Media3.
+            val available = body.size.toLong() - spec.position
+            end = (spec.position + if (spec.length == C.LENGTH_UNSET.toLong())
+                available else minOf(available, spec.length)).toInt()
             return (end - cursor).toLong()
         }
         override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            if (offset < 0 || length < 0 || offset > buffer.size - length) {
+                throw IndexOutOfBoundsException("Invalid archive data source read bounds")
+            }
             if (length == 0) return 0
             val body = bytes ?: throw IOException("Archive resource is closed")
-            if (cursor == end) return C.RESULT_END_OF_INPUT
-            val count = minOf(length, end - cursor); body.copyInto(buffer, offset, cursor, cursor + count); cursor += count; return count
+            if (cursor >= end) return C.RESULT_END_OF_INPUT
+            val count = minOf(length, end - cursor)
+            body.copyInto(buffer, offset, cursor, cursor + count)
+            cursor += count
+            return count
         }
         override fun close() { bytes?.fill(0); bytes = null; uri = null; cursor = 0; end = 0 }
     }

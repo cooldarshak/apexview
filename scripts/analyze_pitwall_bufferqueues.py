@@ -15,6 +15,10 @@ from pathlib import Path
 
 STAMP = re.compile(r"(?<!\d)(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)\.(\d\d\d)")
 QUEUE = re.compile(r"BufferQueueProducer:\s*\[([^\]]*)\](?:\(id:([^,)]*))?")
+CODEC_MAX_DELAY = re.compile(
+    r"CCodecBufferChannel:\s*\[([^\]]+)\]\s*(?:start:|updating)\s*max output delay\s*(\d+)")
+DEQUEUED = re.compile(r"\bdequeuedCount:\s*(\d+)")
+ACQUIRED = re.compile(r"\bacquiredCount:\s*(\d+)")
 OWNERSHIP = ("SCENE_CODEC_INPUT_ATTACH", "SCENE_CODEC_INPUT_DETACH", "SCENE_CODEC_INPUT_RELEASE")
 ISSUES = ("dequeueBuffer: waitForFreeSlotThenRelock: timeout",
           "detachBuffer: slot", "cancelBuffer: slot")
@@ -34,8 +38,15 @@ def at_ms(line):
 def analyze(text):
     owners = []
     events = []
+    codec_delays = defaultdict(set)
+    drm_unbind = 0
     for line in text.splitlines():
         moment = at_ms(line)
+        if "MediaDrm: Object Already unbinded" in line:
+            drm_unbind += 1
+        codec = CODEC_MAX_DELAY.search(line)
+        if codec:
+            codec_delays[codec.group(1).split("#", 1)[0]].add(int(codec.group(2)))
         for marker in OWNERSHIP:
             if marker in line:
                 owners.append((moment, marker, line))
@@ -57,26 +68,43 @@ def analyze(text):
         if not count:
             continue
         nonblocking = "mDequeueTimeout: 0" in line
-        events.append((moment, name, identity or "unknown", issue, count, nonblocking))
+        dq = DEQUEUED.search(line)
+        aq = ACQUIRED.search(line)
+        events.append((moment, name, identity or "unknown", issue, count, nonblocking,
+                       int(dq.group(1)) if dq else None,
+                       int(aq.group(1)) if aq else None))
     rows = defaultdict(lambda: {
         "dequeue_timeout": 0, "nonblocking_dequeue_timeout": 0,
         "blocking_or_unknown_dequeue_timeout": 0,
         "detach_not_owned": 0, "cancel_not_owned": 0,
         "near_app_detach_or_release": 0,
+        "observed_dequeued_counts": set(),
+        "observed_acquired_counts": set(),
     })
     release_stamps = [moment for moment, kind, _ in owners
                       if moment is not None and kind != "SCENE_CODEC_INPUT_ATTACH"]
-    for moment, name, identity, issue, count, nonblocking in events:
+    for moment, name, identity, issue, count, nonblocking, dequeued, acquired in events:
         # Name and queue id are essential. Never group unrelated 'SurfaceTexture'
         # producers into one assumed codec output.
         key = name + "#" + identity
         row = rows[key]
         row[issue] += count
+        if dequeued is not None: row["observed_dequeued_counts"].add(dequeued)
+        if acquired is not None: row["observed_acquired_counts"].add(acquired)
         if issue == "dequeue_timeout":
             row["nonblocking_dequeue_timeout" if nonblocking
                 else "blocking_or_unknown_dequeue_timeout"] += count
         if moment is not None and any(abs(moment - stamp) <= 3000 for stamp in release_stamps):
             row["near_app_detach_or_release"] += count
+    reported = {k: {name: sorted(value) if isinstance(value, set) else value
+                    for name, value in row.items()} for k, row in sorted(rows.items())}
+    codec_delay_values = {name: sorted(values) for name, values in sorted(codec_delays.items())}
+    # A matching number is a correlation, not proof the queue belongs to
+    # that specific decoder, nor permission to reduce HEVC DPB/reordering.
+    possible_pool_match = any(
+        abs(dequeued - delay) <= 1 for row in reported.values()
+        for dequeued in row["observed_dequeued_counts"]
+        for values in codec_delay_values.values() for delay in values)
     return {
         "queue_events": sum(row["dequeue_timeout"] + row["detach_not_owned"] +
                             row["cancel_not_owned"] for row in rows.values()),
@@ -85,7 +113,11 @@ def analyze(text):
         "app_attach_events": sum(kind == "SCENE_CODEC_INPUT_ATTACH" for _, kind, _ in owners),
         "app_detach_events": sum(kind == "SCENE_CODEC_INPUT_DETACH" for _, kind, _ in owners),
         "app_release_events": sum(kind == "SCENE_CODEC_INPUT_RELEASE" for _, kind, _ in owners),
-        "queue_by_identity": dict(sorted(rows.items())),
+        "queue_by_identity": reported,
+        "codec_max_output_delay_by_name": codec_delay_values,
+        "codec_output_delay_near_occupied_slots": possible_pool_match,
+        "codec_output_delay_match_does_not_prove_causation": True,
+        "media_drm_double_unbind_warnings": drm_unbind,
         "physical_queue_depth": "NOT_MEASURED",
         "physical_video_frames_dropped": "NOT_MEASURED",
         "teardown_nearby_is_correlation_not_proof": True,

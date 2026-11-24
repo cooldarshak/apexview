@@ -792,7 +792,7 @@ class AppState(
                 if (relay != null && castRelay === relay) releaseCastRelay()
                 relay?.close()
                 android.util.Log.w("PitwallCast", DiagnosticRedaction.redact(error.stackTraceToString()))
-                castStatus = (error.message ?: "Unable to prepare the selected feeds for casting").replace(Regex("https?://\\S+"), "[URL]").take(240)
+                castStatus = DiagnosticRedaction.redact(error.message ?: "Unable to prepare the selected feeds for casting").take(240)
                 message = castStatus
             } finally {
                 ownedSession?.close()
@@ -988,7 +988,7 @@ class AppState(
                 }
             }
         }.onFailure { error ->
-            failGoogleCastLoad("Google Cast load failed: ${(error.message ?: error.javaClass.simpleName).take(160)}")
+            failGoogleCastLoad("Google Cast load failed: ${DiagnosticRedaction.redact(error.message ?: error.javaClass.simpleName).take(160)}")
         }
     }
     private fun failGoogleCastLoad(reason: String) {
@@ -2853,7 +2853,7 @@ class AppState(
                     android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_IGNORED_OBSOLETE_ERROR path=CLEAR class=${error.javaClass.simpleName}")
                     return@launch
                 }
-                failure = (error.message ?: error.javaClass.simpleName).replace(Regex("https?://\\S+"), "[URL]").take(400)
+                failure = DiagnosticRedaction.redact(error.message ?: error.javaClass.simpleName).take(400)
                 val failedAt = phase
                 phase = "FAILED"
                 retryableFailure = when (error) {
@@ -3106,7 +3106,7 @@ class AppState(
                                 throw cancelled
                             } catch (error: Exception) {
                                 window.zero()
-                                throw IOException("Composed source initialization failed: ${error.message}")
+                                throw IOException("Composed source initialization failed: ${DiagnosticRedaction.redact(error.message.orEmpty()).take(180)}")
                             } finally { pssh?.fill(0) }
                         }
                     },
@@ -3261,8 +3261,7 @@ class AppState(
                     return@launch
                 }
                 // Do not log raw network exceptions or their signed URLs.
-                terminalReason = (error.message ?: error.javaClass.simpleName)
-                    .replace(Regex("https?://\\S+"), "[redacted URL]").take(400)
+                terminalReason = DiagnosticRedaction.redact(error.message ?: error.javaClass.simpleName).take(400)
                 retryableFailure = app.apexview.tiled.CaptureFailure.from(error).retryable
                 if (startup.sourceDecodersTouched) restore(startup.hostReplaced) else {
                     selectedTiles.forEach { it.feed.clearProtectedCompositionVideoRole() }
