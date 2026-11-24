@@ -8,6 +8,10 @@ Build 839 corrected the Build 838 Android overlay capture pixel-test failure. Ma
 
 Build 840 completed successfully at [a70fed21](https://github.com/cooldarshak/apexview/commit/a70fed21bfa5759d70d77bbf9cf323b74524de3f), [exact CI](https://github.com/cooldarshak/apexview/actions/runs/45422254393), including JVM, independent HEVC decode, APK and Android instrumentation. This continuation addresses items 1, 5, 7, 8, 13 and 14 in one batch. Architecture G remains deferred. Build 841 [exact CI](https://github.com/cooldarshak/apexview/actions/runs/45426176111) passed the full Kotlin/JVM, independent HEVC/CMAF, signed APK, RenderNode/TextureView/SurfaceView, GPU capture and archive delivery checks. Its new AndroidKeyStore mutual TLS test failed before pairing with SSLHandshakeException (connection closed by peer). Android documentation specifies DIGEST_NONE for TLS prehashed signatures: https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder#setDigests(java.lang.String...). The previous key generator omitted that authorization. Correct it on new and existing installation keys; require a raw ECDSA signing self-test, retain mutual TLS and exact certificate pins. No test suppression. The follow-up also separates Cast muxing from capture and starts archive CarData at partial preview availability. Candidate pending its own exact-source CI.
 
+### Dedicated Architecture G branch checkpoint
+
+On `feature/architecture-g-rust-stitching` only, G.0 initial feasibility work begins. See [the consolidated G ledger](handovers/PITWALL_TV_ARCHITECTURE_G_RUST_HANDOVER.md) for exact prototype and open CI/physical gates. The 16-workstream acceptance remains unchanged. No production engine/default changes; parent and main untouched.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |

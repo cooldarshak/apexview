@@ -11,6 +11,7 @@ on:
       - feature/continuous-baked-scene-cast
       - feature/per-feed-adaptive-hevc-quality
       - feature/pitwall-performance-audit-plan
+      - feature/architecture-g-rust-stitching
     # Documentation-only changes must not spend an Android build run.
     paths-ignore:
       - 'docs/**'
@@ -73,6 +74,50 @@ jobs:
           test -s "$sdk/platforms/android-36/android.jar"
           test -x "$sdk/build-tools/35.0.0/apksigner"
           test -x "$sdk/build-tools/36.0.0/apksigner"
+
+      - name: Architecture G.0 host kernel and Android ABI feasibility
+        if: github.ref == 'refs/heads/feature/architecture-g-rust-stitching'
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/pitwall-g0"
+          mkdir -p "$report/fixtures"
+          python3 scripts/test_architecture_g0_fixtures.py --generate "$report/fixtures"
+          echo "PITWALL_G0_FIXTURE_DIR=$report/fixtures" >> "$GITHUB_ENV"
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          sdkmanager "ndk;28.2.13676358"
+          export ANDROID_NDK_HOME="$sdk/ndk/28.2.13676358"
+          cd native/architecture-g
+          rustup toolchain install 1.91.1 --profile minimal --component rustfmt --component clippy --target aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          rustc -Vv > "$report/toolchain.txt"
+          g++ --version >> "$report/toolchain.txt"
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo build --locked --release --bin bench
+          g++ -std=c++17 -O3 -Wall -Wextra control.cpp -o "$report/control"
+          while read -r file prefix expected hash; do
+            printf '%s  %s\n' "$hash" "$report/fixtures/$file" | sha256sum -c -
+            target/release/bench "$report/fixtures/$file" "$prefix" "$expected" | tee -a "$report/host.txt"
+            "$report/control" "$report/fixtures/$file" "$prefix" "$expected" | tee -a "$report/host.txt"
+          done < "$report/fixtures/manifest.txt"
+          cargo install cargo-ndk --version 4.1.2 --locked
+          cargo ndk --platform 29 -t armeabi-v7a -t arm64-v8a -t x86 -t x86_64 -o "$report/abi" build --locked --release --lib
+          for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+            lib="$report/abi/$abi/libpitwall_g0.so"
+            test -s "$lib"
+            readelf -h -l -n "$lib" > "$report/$abi-elf.txt"
+            if [[ "$abi" == arm64-v8a || "$abi" == x86_64 ]]; then
+              python3 -c 'import sys; lines=open(sys.argv[1]).read().splitlines(); rows=[lines[i+1].split()[-1] for i,l in enumerate(lines) if l.strip().startswith("LOAD")]; assert rows and all(int(v,16)>=16384 for v in rows), rows' "$report/$abi-elf.txt"
+            fi
+          done
+
+      - name: Retain Architecture G.0 host and ELF evidence
+        if: always() && github.ref == 'refs/heads/feature/architecture-g-rust-stitching'
+        uses: actions/upload-artifact@v4
+        with:
+          name: architecture-g0-host-abi
+          path: ${{ runner.temp }}/pitwall-g0
+          if-no-files-found: warn
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

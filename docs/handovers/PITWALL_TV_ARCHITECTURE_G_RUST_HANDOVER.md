@@ -231,6 +231,16 @@ Initial status for every G.0 row: **Not started** (coding/automation/physical ev
 | G.0.19 | Demonstrate complete mobile-only workflow, no PC required |
 | G.0.20 | Evidence-based final feasibility report for selected Rust, comparison with limited C++ control and go/no-go |
 
+### G.0 execution checkpoint — first consolidated feasibility batch (24 November 2026)
+
+Baseline branch ref: 302b52edf8f8a87f670ba1a91b00c20145550351. Parent Actions history verified: 842 success (b9752ac9), 841 failure, 840 success. Source confirms compileSdk 37 / minSdk 29 / targetSdk 36, Media3 1.11.1, OkHttp 4.12.0. Existing debug workflow excludes this new branch until this batch. Preserve all existing CI/signing/DRM/decoder paths; add the branch and feasibility step without removing gates.
+
+Initial audit, not complete: HevcBitstream.NalSpan already borrows backing arrays and materializes only parameter-set spans as needed. HevcClearCmafGridComposer retains borrowed tail ranges and creates output fragment arrays. Existing annexBSizeForSample scans 1–3 byte prefixes; 4-byte fast path defers validation to inspector. ProtectedHevcSampleComposer.Plan.copyInto already supports direct assembly; materialize() allocates an array but actual callers/runtime cost require further audit. HevcArchiveVodSession.ResourceDataSource.read and HevcComposedPlayback.ComposedResourceDataSource.read use byte-array delivery. Inspect active call sites, cache ownership and pinned Media3 internals before changes. No proven current TV root cause. Parent plan notes mixed-build TV traces, including older Build 831; original raw TV traces not present in current turn files. Fresh matched 842/new candidate physical captures required.
+
+Initial diagnostic prototype: dependency-free safe Rust sizing kernel, bounded single-owner slot/lease prototype, negative/lifecycle tests, deterministic synthetic prefix fixtures, actual JVM routine and small C++/Rust host control with warmup and p50/p95/p99/max timing. No protected processing, network, JNI, APK native packaging, settings or DRM changes. Synthetic sizing fixtures are not decodable HEVC; no full composition equivalence yet. Host timing differs from actual Android JIT/thermal/media pipeline. Candidate pins Rust 1.91.1, NDK 28.2.13676358, cargo-ndk 4.1.2; dependency-free lock committed, JNI-RS integration/lock pending. Official Android targets and r28 alignment supported in principle per https://doc.rust-lang.org/rustc/platform-support.html and https://developer.android.com/guide/practices/page-sizes ; AWS confirms client-side rewriting/merging https://aws.amazon.com/blogs/media/f1-sets-new-standard-in-sports-streaming-with-f1-tv-premium-using-aws/ . Remaining reference review open.
+
+G.0.1/2 initial audit in progress; G.0.4 host/ABI prototype only; G.0.5 candidate pins/lock, JNI-RS pending; G.0.6/7 cross-build/CI configured, run pending; G.0.11 single-owner arena prototype, concurrency/JNI pending; G.0.12/13 narrow sizing comparison, broader real fixtures and physical benchmarks pending; G.0.14 single-owner stale-release/exhaustion tests only; G.0.15 64-bit ELF checks configured, APK/runtime pending; other G.0 checks open. G.0.20 go/no-go not reached. Production remains JVM; G-A–G-D not started. Exact CI and physical evidence must be verified; no native APK or speedup claim. Continue G.0 on this branch only.
+
 ### Benchmarks and decision gate
 
 Use identical algorithms, fixture bytes, outputs, optimization levels, compiler settings and comparable CPU/thermal states. Include realistic clear and synthetic protected-metadata fixtures, source resolutions and multifeed arrangements, not only trivial loops. Benchmark NAL scanning; bitstream read/write; slice-header operations; binary parsing; CMAF fragment assembly; copying/publication; arena allocation; JNI overhead; concurrent buffer ownership. Keep C++ limited to representative kernels; no alternative full player or production C++ engine.
@@ -518,7 +528,7 @@ The user explicitly authorized a new dedicated branch for Architecture G and a c
 | Mobile-only development | Required; Rust-specific end-to-end workflow not yet demonstrated |
 | Rust CI and module | Not implemented in Architecture G |
 | Native engine | Not implemented |
-| G.0, G.1–G.20 | Not started |
+| G.0, G.1–G.20 | Initial G.0 prototype and CI configured; verification pending. G.1–G.20 not started |
 | Physical Rust benchmark / protected compatibility | Pending |
 | Measured performance gains | None established |
 | Native default or release | Not approved |
