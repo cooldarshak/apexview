@@ -59,7 +59,7 @@ internal class OverlayTowerSampler(
         val candidate = TowerSample(rows, towerSessionHeader(timing, now), tyres, speeds)
         val previous = last
         val same = previous != null && previous.visuallyEquals(candidate)
-        val changedRows = if (same) 0 else {
+        val changedRows = if (same || probe == null) 0 else {
             previousRowsByNumber.clear()
             previous?.rows?.forEach { (number, state) -> previousRowsByNumber[number] = state }
             rows.count { (number, state) ->

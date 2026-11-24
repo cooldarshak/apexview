@@ -10,6 +10,10 @@ import java.nio.FloatBuffer
  */
 internal class SceneQuadBufferCache {
     private val pairs = ArrayList<Pair<FloatBuffer, FloatBuffer>>()
+    private val active = ArrayList<Pair<FloatBuffer, FloatBuffer>>()
+    // The app supports at most 24 selected feeds; do not retain arbitrary
+    // larger caller geometries. Re-expanding a normal layout reuses its buffers.
+    private companion object { const val MAX_RETAINED_WINDOWS = 24 }
     var allocatedDirectBuffers = 0
         private set
 
@@ -21,10 +25,13 @@ internal class SceneQuadBufferCache {
 
     fun update(model: VideoScene): List<Pair<FloatBuffer, FloatBuffer>> {
         val quads = model.quads()
-        while (pairs.size > quads.size) pairs.removeAt(pairs.lastIndex)
-        while (pairs.size < quads.size) pairs.add(allocate() to allocate())
+        val retainedCount = minOf(quads.size, MAX_RETAINED_WINDOWS)
+        while (pairs.size < retainedCount) pairs.add(allocate() to allocate())
+        active.clear()
         quads.forEachIndexed { index, quad ->
-            val (positions, texcoords) = pairs[index]
+            val pair = pairs.getOrNull(index) ?: (allocate() to allocate())
+            active.add(pair)
+            val (positions, texcoords) = pair
             positions.clear()
             positions.put(quad.positions)
             positions.flip()
@@ -32,6 +39,6 @@ internal class SceneQuadBufferCache {
             texcoords.put(quad.texture)
             texcoords.flip()
         }
-        return pairs
+        return active
     }
 }

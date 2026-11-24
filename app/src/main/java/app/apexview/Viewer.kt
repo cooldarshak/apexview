@@ -1109,7 +1109,10 @@ internal fun PlaybackVideoCanvas(
     )
     val independentClearSurface = clearOutputMode == ClearSceneOutputMode.SURFACE_VIEW
     if (scene != null && host != null) {
-        var composedGlReady by remember(host, secureRolling, independentClearSurface) {
+        // The renderer's callbacks capture this composition's readiness state.
+        // Recreate the whole owner on host/backend changes, not just the Boolean.
+        key(host, app.protectedRollingSceneActive, secureRolling, independentClearSurface) {
+        var composedGlReady by remember {
             mutableStateOf(false)
         }
         // This must happen as soon as the composed scene activates, not after
@@ -1128,7 +1131,7 @@ internal fun PlaybackVideoCanvas(
                     "captureRequiresTexture=$windowCaptureRequired " +
                     "physicalVideoPresentation=NOT_MEASURED")
         }
-        var view by remember(host, independentClearSurface) {
+        var view by remember {
             mutableStateOf<SingleDecoderSceneView?>(null)
         }
         var recordingBounds by remember { mutableStateOf<Rect?>(null) }
@@ -1167,10 +1170,15 @@ internal fun PlaybackVideoCanvas(
             if (!app.replayClipRequested) return@LaunchedEffect
             // The sheet closes and playback chrome finishes fading before the first copy.
             delay(Motion.SCREEN_MS.toLong() + 100L)
+            val clearOutputReady = if (composedGlReady) true else
+                kotlinx.coroutines.withTimeoutOrNull(5_000L) {
+                    while (!composedGlReady) delay(40L)
+                    true
+                } ?: false
             val bounds = viewerBounds
             val source = host.archiveSceneSession
             app.replayClipRequested = false
-            if (!composedGlReady || bounds == null || bounds.isEmpty || source == null || !app.canMakeReplayClip ||
+            if (!clearOutputReady || bounds == null || bounds.isEmpty || source == null || !app.canMakeReplayClip ||
                 !host.player.isPlaying || app.replayClipRunning ||
                 window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0) {
                 app.reportReplayClipStatus("Play a clear replay with timing data loaded before making a clip.")
@@ -1254,6 +1262,7 @@ internal fun PlaybackVideoCanvas(
                 }
             }
         }
+        } // host/backend output owner
     } else if (app.sceneActivationPreparing) {
         // This visible state follows actual capture/decoder readiness, not a delay.
         // Keep source playback budget unchanged; do not reveal an incomplete grid.
@@ -2043,13 +2052,13 @@ private fun VideoQualitySheet(app: AppState) {
                         )
                         val actual = app.actualSourceRendition(label)
                         Text(if (actual == null) {
-                            "Requested ceiling: ${app.settings.videoQualityForFeed(label).label} · Actual rendition appears when single-decoder video starts"
+                            "Requested ceiling: ${app.settings.videoQualityForFeed(label).label} · Actual rendition not yet observed"
                         } else {
                             "Requested ceiling: ${app.settings.videoQualityForFeed(label).label} · Playing: " +
-                                "${actual.first} × ${actual.second} (${actual.second}p)"
+                                "${actual.first} × ${actual.second}px"
                         },
                             style = Type.footnote, modifier = Modifier.padding(top = 6.dp))
-                        if (app.settings.decoderMode == DecoderMode.MULTIPLE) {
+                        if (app.settings.decoderMode == DecoderMode.MULTIPLE || active.size == 1) {
                             tile.feed.sourceQualityNotice?.let { warning ->
                                 Text(warning, style = Type.footnote.copy(color = Ink.live),
                                     modifier = Modifier.padding(top = 6.dp))

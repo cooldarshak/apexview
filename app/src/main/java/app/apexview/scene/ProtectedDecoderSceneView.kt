@@ -38,6 +38,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     private val displayHandler = Handler(Looper.getMainLooper())
     private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private var previousModeSignature: String? = null
+    @Volatile private var selectedDisplayHz = 0f
     private val modeListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = Unit
         override fun onDisplayRemoved(displayId: Int) = Unit
@@ -49,8 +50,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     private fun logDisplayMode(reason: String) {
         val current = rootView.display ?: return
         val mode = current.mode
+        selectedDisplayHz = current.refreshRate
         val sourceFps = scene?.sourceFrameRate ?: 0.0
-        val signature = "${current.displayId}:${mode.modeId}:${mode.refreshRate}:$sourceFps:$playbackSpeed"
+        val signature = "${current.displayId}:${mode.modeId}:${mode.refreshRate}:$selectedDisplayHz:$sourceFps:$playbackSpeed"
         if (signature == previousModeSignature) return
         previousModeSignature = signature
         val modes = current.supportedModes
@@ -63,7 +65,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             sourceFps, playbackSpeed
         ).joinToString(",") { "${it.id}@${it.refreshHz}" }.ifBlank { "none" }
         Log.i("ApexviewSingleDecoder", "SURFACE_SCENE_DISPLAY_MODE reason=$reason protected=$protectedOutput " +
-            "displayId=${current.displayId} activeMode=${mode.modeId} activeHz=${mode.refreshRate} " +
+            "displayId=${current.displayId} activeMode=${mode.modeId} activeHz=${mode.refreshRate} displayRefreshHz=$selectedDisplayHz " +
             "sourceFps=$sourceFps speed=$playbackSpeed " +
             "effectiveFps=${SceneFrameRatePolicy.hint(sourceFps, playbackSpeed)} " +
             "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
@@ -96,6 +98,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     // change must not discard an otherwise valid pending codec attachment.
     private val surfaceLifetime = SceneSurfaceLifetime()
     private var firstFrameReported = false
+    // GL-owned epoch; never read the latest UI generation after an in-flight swap.
+    private var renderEpoch = -1L
     var onOutputSize: (Int, Int) -> Unit = { _, _ -> }
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var contextGl: EGLContext = EGL14.EGL_NO_CONTEXT
@@ -134,6 +138,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     }
 
     private var appliedFrameRateHint = Float.NaN
+    // Holder owns this Surface. Only the GL looper owns its vote/cache.
+    private var frameRateOutput: Surface? = null
     private var lastPresentedAtNs = 0L
     private var lastSourceTimestampNs = 0L
     // Share the same camera-driven, 50fps-aware scheduling and frame metrics
@@ -146,7 +152,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     private val displayFrame = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) = guarded {
             val callbackStartNs = System.nanoTime()
-            val refreshHz = rootView.display?.refreshRate ?: 60f
+            val refreshHz = selectedDisplayHz
             if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
                 frameTimeNanos, scene?.sourceFrameRate ?: 0.0, refreshHz, playbackSpeed)) {
                 pacing.onPacingDeferred()
@@ -196,40 +202,46 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val changed = scene != nextScene
         val firstBinding = scene == null
         val atlasChanged = scene?.sameEncodedAtlasAs(nextScene) == false
-        if (atlasChanged) {
+        val playerChanged = player != null && player !== nextPlayer
+        val bindingChanged = atlasChanged || playerChanged
+        val invalidatedEpoch = if (bindingChanged) {
             codecCorrelation?.reset()
             // Layout-only window changes can reuse the already latched atlas;
             // only a different coded picture must await a fresh decoder frame.
-            outputReadiness.invalidate()
+            val epoch = outputReadiness.invalidate()
             onOutputLost()
-        }
+            epoch
+        } else null
         val normalizedSpeed = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
         val speedChanged = playbackSpeed != normalizedSpeed
         playbackSpeed = normalizedSpeed
         scene = nextScene
         logDisplayMode("bind")
-        if (holder.surface.isValid && (changed || speedChanged)) updateFrameRateHint(holder.surface)
         if (player !== nextPlayer) {
             input?.let { player?.clearVideoSurface(it) }
             player = nextPlayer
             input?.let { nextPlayer.setVideoSurface(it) }
         }
-        if (changed || speedChanged) gl.post { guarded {
-            if (atlasChanged) {
+        if (changed || speedChanged || bindingChanged) gl.post { guarded {
+            if (invalidatedEpoch != null) {
+                renderEpoch = invalidatedEpoch
+                cadenceGate.reset()
                 // New encoded atlas or crop mapping cannot reuse old input pixels.
                 hasFrame = false
+                frameDemand.discardPendingVideo()
                 firstFrameReported = false
             }
             if (firstBinding || atlasChanged) {
                 decoderTexture?.setDefaultBufferSize(nextScene.atlasWidth, nextScene.atlasHeight)
             }
+            frameRateOutput?.let(::updateFrameRateHint)
             scheduleVideoFrame()
         } }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         val lifetime = surfaceLifetime.advance()
-        outputReadiness.invalidate()
+        val readinessEpoch = outputReadiness.invalidate()
         onOutputLost()
         val surface = holder.surface
         gl.post {
@@ -237,7 +249,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             // reaches the GL looper. Never initialize an old or invalid output.
             if (!released && surfaceLifetime.matches(lifetime) && surface.isValid) {
                 failed = false // Only a genuinely new valid EGL surface can recover output.
-                guarded { initialize(surface); scheduleVideoFrame() }
+                guarded { initialize(surface, readinessEpoch); scheduleVideoFrame() }
             }
         }
     }
@@ -274,8 +286,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         detachOutput(); player = null; gl.removeCallbacks(glQueueProbe); thread.quitSafely()
     }
 
-    private fun initialize(output: Surface) {
+    private fun initialize(output: Surface, readinessEpoch: Long) {
         destroy()
+        renderEpoch = readinessEpoch
+        frameRateOutput = output
         display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         check(EGL14.eglInitialize(display, IntArray(2), 0, IntArray(2), 1)) { "EGL initialization failed" }
         if (protectedOutput) check(EGL14.eglQueryString(display, EGL14.EGL_EXTENSIONS)
@@ -420,6 +434,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     private data class SurfaceFrameTiming(val drawNs: Long, val swapNs: Long)
 
     private fun draw(): SurfaceFrameTiming? {
+        val surfaceEpoch = renderEpoch
+        if (!outputReadiness.matches(surfaceEpoch)) return null
         val model = scene ?: return null
         if (window == EGL14.EGL_NO_SURFACE || !EGL14.eglMakeCurrent(display, window, window, contextGl)) return null
         val drawStartNs = System.nanoTime()
@@ -462,7 +478,6 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }
         if (hasFrame && !firstFrameReported) {
             firstFrameReported = true
-            val surfaceEpoch = outputReadiness.generation()
             post {
                 if (!released && outputReadiness.acknowledgeSubmittedFrame(surfaceEpoch)) {
                     Log.i("ApexviewSingleDecoder",
@@ -500,6 +515,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "maxCallbackGapMs=${metrics.maxCallbackGapMs} " +
                 "maxDisplayGapMs=${metrics.maxDisplayGapMs} maxSwapMs=${metrics.maxSwapMs} " +
                 "videoDrawPacingDeferrals=${metrics.pacingDeferrals} " +
+                "coalescedTextureLatches=${frameDemand.takeCoalescedVideoArrivals()} " +
                 "unavailableSurfaceDraws=${metrics.unavailableDraws} " +
                 "sourceTimestampBins13_19_23_30_45_100=${metrics.textureTimestampIntervals.compact()} " +
                 "callbackIntervalsBins13_19_23_30_45_100=${metrics.callbackIntervals.compact()} " +
@@ -554,6 +570,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         input?.release(); input = null
         decoderTexture?.release(); decoderTexture = null; hasFrame = false
         firstFrameReported = false
+        renderEpoch = -1L
         lastPresentedAtNs = 0L
         lastSourceTimestampNs = 0L
         if (display != EGL14.EGL_NO_DISPLAY) {
@@ -581,6 +598,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         display = EGL14.EGL_NO_DISPLAY; contextGl = EGL14.EGL_NO_CONTEXT; window = EGL14.EGL_NO_SURFACE
         texture = 0; program = 0
         appliedFrameRateHint = Float.NaN
+        frameRateOutput = null
         imageUniform = -1; textureMatrixUniform = -1
         positionAttribute = -1; texcoordAttribute = -1
     }

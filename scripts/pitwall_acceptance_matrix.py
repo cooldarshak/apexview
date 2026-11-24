@@ -101,12 +101,21 @@ def validate_groups(cases):
     return groups
 
 
+def refresh_issues(app, expected_hz):
+    observed = app["observed_refresh_hz"]
+    if not observed or app["refresh_unknown_windows"]:
+        return ["display refresh observation incomplete"]
+    if app["refresh_mixed_windows"] or any(abs(hz - expected_hz) > 1.0 for hz in observed):
+        return [f"display refresh mismatch or transition: expected {expected_hz}, observed {observed}"]
+    return []
+
+
 def evaluate(case):
     if not case.app_log.is_file() or not case.timeline_csv.is_file():
         raise ValueError(f"{case.label}: required app log or Perfetto CSV is missing")
     app = app_summary(app_session(case.app_log.read_text(encoding="utf-8", errors="replace"), case.build))
     timeline = timeline_summary(read_timeline(case.timeline_csv))
-    reasons = []
+    reasons = refresh_issues(app, case.display_hz)
     if app["covered_seconds"] < MIN_ENDURANCE_S:
         reasons.append(f"app-window observation {app['covered_seconds']}s < {MIN_ENDURANCE_S}s")
     if timeline["sample_span_s"] < MIN_PERFETTO_S:
@@ -119,7 +128,7 @@ def evaluate(case):
         reasons.append(f"{app['frozen']} frozen UI frames")
     if not timeline["app"]["frames"]:
         reasons.append("app-window FrameTimeline NOT_MEASURED")
-    if case.decoder_mode == "SINGLE" and any(str(v) != "1" for v in app["active_decoders"]):
+    if case.decoder_mode == "SINGLE" and (not app["active_decoders"] or any(str(v) != "1" for v in app["active_decoders"])):
         reasons.append("single-decoder invariant not independently established")
     if max(case.thermal_start, case.thermal_end) >= 3:
         reasons.append("severe thermal status during endurance run")

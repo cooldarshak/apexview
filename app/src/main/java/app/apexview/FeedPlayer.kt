@@ -225,6 +225,10 @@ class FeedPlayer(
 
     private var state = "Starting"
     private var size = ""
+    internal var nativeSourceRendition by mutableStateOf<Pair<Int, Int>?>(null)
+        private set
+    private val releaseGate = PlaybackReleaseGate()
+    private val bufferEpisodes = PlaybackBufferEpisodes()
     private var decoder = ""
     private var lastFeedProfileDiagnostic: String? = null
     var hevcProfileDiagnostic by mutableStateOf<String?>(null)
@@ -527,6 +531,12 @@ class FeedPlayer(
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
+                val now = android.os.SystemClock.elapsedRealtime()
+                bufferEpisodes.onState(now, playbackState == Player.STATE_BUFFERING,
+                    playbackState == Player.STATE_READY, player.playWhenReady)?.let { episode ->
+                    playbackEvent("buffer-episode", "phase=${episode.phase} durationMs=${episode.durationMs} " +
+                        "bufferedDurationMs=${player.totalBufferedDuration} cause=UNATTRIBUTED")
+                }
                 state = when (playbackState) {
                     Player.STATE_BUFFERING -> "Buffering"
                     Player.STATE_READY -> "Playing"
@@ -556,6 +566,7 @@ class FeedPlayer(
             override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
                 if (reason == Player.DISCONTINUITY_REASON_SEEK ||
                     reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) sceneCodecCorrelation.reset()
+                if (reason == Player.DISCONTINUITY_REASON_SEEK) bufferEpisodes.onSeek(android.os.SystemClock.elapsedRealtime())
                 if (DiagnosticLogs.recording && reason == Player.DISCONTINUITY_REASON_SEEK) {
                     pendingSeekAtMs = android.os.SystemClock.elapsedRealtime()
                     seekSequence++
@@ -609,6 +620,10 @@ class FeedPlayer(
                 format: Format,
                 decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
             ) {
+                nativeSourceRendition = if (archiveVodSession == null && protectedLiveDashSource == null &&
+                    format.width > 0 && format.height > 0) format.width to format.height else null
+                playbackEvent("video-input-rendition", "requestedCap=${selectedVideoQuality.label} " +
+                    "inputPixels=${format.width}x${format.height} composed=${archiveVodSession != null || protectedLiveDashSource != null}")
                 captureVideoProfile(format, C.TRACK_TYPE_VIDEO, "video-input")
             }
 
@@ -641,7 +656,7 @@ class FeedPlayer(
 
             override fun onVideoDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
                 activeVideoDecoderCount = (activeVideoDecoderCount - 1).coerceAtLeast(0)
-                if (activeVideoDecoderCount == 0) decoder = ""
+                if (activeVideoDecoderCount == 0) { decoder = ""; nativeSourceRendition = null }
                 refresh()
             }
 
@@ -690,14 +705,20 @@ class FeedPlayer(
                 if (archiveVodSession != null) Log.i("ApexviewSingleDecoder", "ARCHIVE_SURFACE width=$width height=$height")
             }
 
-            private val observedLoads = mutableMapOf<Long, Int>()
+            private val observedLoads = LinkedHashMap<Long, Int>()
 
             override fun onLoadStarted(
                 eventTime: AnalyticsListener.EventTime,
                 loadEventInfo: LoadEventInfo,
                 mediaLoadData: MediaLoadData,
             ) {
-                if (!DiagnosticLogs.recording || firstFrameLogged && pendingSeekAtMs == null) return
+                if (!DiagnosticLogs.recording) { observedLoads.clear(); return }
+                // Include steady playback, but keep the diagnostic map bounded.
+                if (observedLoads.size >= 128) {
+                    val oldest = observedLoads.keys.first()
+                    observedLoads.remove(oldest)
+                    playbackEvent("load-observation-evicted", "load=$oldest reason=bounded-diagnostics")
+                }
                 observedLoads[loadEventInfo.loadTaskId] = seekSequence
                 logLoad("load-start", loadEventInfo, mediaLoadData, seekSequence)
             }
@@ -711,7 +732,8 @@ class FeedPlayer(
             ) {
                 playbackEvent(event, "load=${info.loadTaskId} seek=$seek dataType=${media.dataType} " +
                     "trackType=${media.trackType} startMs=${media.mediaStartTimeMs} endMs=${media.mediaEndTimeMs} " +
-                    "loadUptimeMs=${info.elapsedRealtimeMs} durationMs=${info.loadDurationMs} bytes=${info.bytesLoaded}$detail")
+                    "loadUptimeMs=${info.elapsedRealtimeMs} durationMs=${info.loadDurationMs} bytes=${info.bytesLoaded} " +
+                    "bufferedDurationMs=${player.totalBufferedDuration} playbackState=${player.playbackState}$detail")
             }
 
             override fun onLoadCanceled(
@@ -801,6 +823,7 @@ class FeedPlayer(
 
     internal fun seekFromControls(positionMs: Long) {
         if (!player.isCurrentMediaItemLive && archiveVodSession == null) fit.fastStart = true
+        player.setSeekParameters(androidx.media3.exoplayer.SeekParameters.EXACT)
         player.seekTo(positionMs)
     }
 
@@ -1187,13 +1210,20 @@ class FeedPlayer(
     }
 
     fun release() {
+        // The owner is terminal; repeated stop/remove/dispose must not release
+        // Media3 (and its DRM session manager) a second time.
+        if (!releaseGate.beginRelease()) return
         sceneCodecCorrelation.active = false
         sceneCodecCorrelation.reset()
-        archiveVodSession?.close()
+        val archive = archiveVodSession
         archiveVodSession = null
-        protectedLiveDashSource?.release()
+        val protectedSource = protectedLiveDashSource
         protectedLiveDashSource = null
-        player.release()
+        try {
+            archive?.close()
+        } finally {
+            try { protectedSource?.release() } finally { player.release() }
+        }
     }
 
     /**

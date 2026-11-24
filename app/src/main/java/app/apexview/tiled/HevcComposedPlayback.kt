@@ -83,8 +83,10 @@ internal class HevcComposedPlayback(
         player.pause()
     }
 
+    private val releaseGate = app.apexview.PlaybackReleaseGate()
+
     fun release() {
-        player.release()
+        if (releaseGate.beginRelease()) player.release()
     }
 
     override fun close() = release()

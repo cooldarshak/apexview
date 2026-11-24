@@ -21,7 +21,7 @@ class ComposedSourceRenditionsTest {
         assertEquals(720, actual.getValue("B").second)
         assertNull(QualityDisclosurePolicy.notice(VideoQuality.AUTO, 480))
         assertNull(QualityDisclosurePolicy.notice(VideoQuality.P720, 720))
-        assertNull(QualityDisclosurePolicy.notice(VideoQuality.P480, 540))
+        assertTrue(QualityDisclosurePolicy.notice(VideoQuality.P480, 540)?.contains("exceeds") == true)
     }
 
     @Test fun refusesAmbiguousGeometryWithMissingOrDuplicateSources() {
@@ -71,5 +71,14 @@ class VideoQualityAdvisoryTest {
         org.junit.Assert.assertTrue(auto.contains("Auto quality"))
         org.junit.Assert.assertNull(VideoQualityAdvisory.thermalNotice(
             android.os.PowerManager.THERMAL_STATUS_LIGHT, DecoderMode.SINGLE, VideoQuality.AUTO))
+    }
+
+    @org.junit.Test fun requested480IsNotReportedAsDecoded480WhenSourceIs360() {
+        val lower = QualityDisclosurePolicy.notice(VideoQuality.P480, 360)
+        org.junit.Assert.assertTrue(lower?.contains("360p") == true)
+        org.junit.Assert.assertTrue(lower?.contains("480p") == true)
+        val above = QualityDisclosurePolicy.notice(VideoQuality.P480, 540)
+        org.junit.Assert.assertTrue(above?.contains("exceeds") == true)
+        org.junit.Assert.assertNull(QualityDisclosurePolicy.notice(VideoQuality.AUTO, 360))
     }
 }

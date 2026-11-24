@@ -63,6 +63,9 @@ def summarize(text):
     ui_input_p95_upper = []
     ui_animation_p95_upper = []
     thermal_statuses = set()
+    refresh_observed = set()
+    refresh_unknown_windows = 0
+    refresh_mixed_windows = 0
     protected_active_feeds = set()
     for line in text.splitlines():
         f = fields(line)
@@ -71,6 +74,16 @@ def summarize(text):
             slow += as_int(f.get("slow"))
             frozen += as_int(f.get("frozen700ms"))
             total_ms += as_int(f.get("intervalMs"))
+            try:
+                low = float(f["refreshMinHz"])
+                high = float(f["refreshMaxHz"])
+                if not (0 < low <= high < 1000):
+                    raise ValueError("invalid refresh range")
+                refresh_observed.update((round(low, 2), round(high, 2)))
+                if high - low > 1.0:
+                    refresh_mixed_windows += 1
+            except (KeyError, ValueError):
+                refresh_unknown_windows += 1
             if "inputP95UpperMs" in f:
                 ui_input_p95_upper.append(as_int(f["inputP95UpperMs"]))
             if "animationP95UpperMs" in f:
@@ -149,6 +162,9 @@ def summarize(text):
         "input_p95_bucket_max_ms": max(ui_input_p95_upper) if ui_input_p95_upper else None,
         "animation_p95_bucket_max_ms": max(ui_animation_p95_upper) if ui_animation_p95_upper else None,
         "reported_thermal_statuses": sorted(thermal_statuses),
+        "observed_refresh_hz": sorted(refresh_observed),
+        "refresh_unknown_windows": refresh_unknown_windows,
+        "refresh_mixed_windows": refresh_mixed_windows,
         "archive_requests_total": len(archive_requests),
         "archive_cache_hits": sum(hit for hit, _ in archive_requests),
         "archive_cache_hit_pct": (

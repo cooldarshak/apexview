@@ -7,8 +7,12 @@ package app.apexview.scene
 internal class SceneFrameDemand {
     private var callbackScheduled = false
     private var videoPending = false
+    // Multiple latched images can collapse into one display submission. This
+    // measures coalescing, not codec drops or physical SurfaceFlinger loss.
+    private var coalescedVideoArrivals = 0L
 
     fun videoArrived(): Boolean {
+        if (videoPending) coalescedVideoArrivals++
         videoPending = true
         return requestDraw()
     }
@@ -41,8 +45,14 @@ internal class SceneFrameDemand {
         videoPending = videoPending || hadNewVideo
     }
 
+    /** Old input pixels cannot satisfy a new atlas epoch; preserve the posted callback. */
+    fun discardPendingVideo() { videoPending = false }
+
+    fun takeCoalescedVideoArrivals(): Long = coalescedVideoArrivals.also { coalescedVideoArrivals = 0L }
+
     fun reset() {
         callbackScheduled = false
         videoPending = false
+        coalescedVideoArrivals = 0L
     }
 }

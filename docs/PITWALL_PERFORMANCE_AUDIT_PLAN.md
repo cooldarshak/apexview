@@ -9,6 +9,28 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Batch 2 coordinated source candidate (24 November 2026; verification pending)
+
+Preflight additions: per-window observed refresh min/max, rejection of missing or mixed refresh evidence in physical matrix, missing single-decoder evidence fails closed, seek-state expiry, old-picture demand invalidation, terminal cleanup finally blocks. These retain physical gates OPEN; app-window refresh observations are not physical video scanout.
+
+The Build 826 A/B comparison is confounded by 60/120Hz and touch transitions. App-window lateness is not independent video scanout; ~601 queue timeouts are not 601 freezes or proof of network starvation. Do not increase buffering or force refresh modes on this evidence. This change implements a coordinated set of source corrections and regression tests; **not yet exact-source GREEN, not Batch 2 100%**, and no physical gates close.
+
+| Package | Candidate code / test evidence | Outstanding verification |
+| --- | --- | --- |
+| B2.1 | Both renderers use actual Display.refreshRate from display listener; SurfaceView hint state is GL-owned and tied to its output. Existing seamless-only policy retained. | Controlled 50/60/75/120Hz and touch A/B; compile/CI |
+| B2.2 | GL output epoch validated before draw; coalesced texture latch counts separate from submissions and actual scanout. | Physical producer/consumer queue names and causal attribution; CI |
+| B2.3 | Epoch captured by surface creation/bind; stale in-flight swap cannot acknowledge newer generation; viewer host/backend keys own callbacks. | Full lifecycle and receiver regression, CI |
+| B2.4 | Retain unchanged tower visual keys and skip diagnostic-only row scan when no probe; existing motion and timing cadence retained. | Physical map/tower profile and remaining main-thread hotspots; CI |
+| B2.5 | Fixed 80ms latest-request window only for costly rebuilds, exact Media3 control seek, accumulated skips and cancellable baked Cast restart. | Exact frame/seek p95, 1.5x, no new preview decoder; CI |
+| B2.6 | Retain bounded quad buffer high-water up to 24 windows; log process ART GC counts/time separately from heap and thermal. | Endurance profiling and atlas retention audit; CI |
+| B2.7 | Bounded steady-state Media3 load tracking and separate startup/seek/rebuffer/paused buffer episodes, cause UNATTRIBUTED. Existing load control unchanged pending measured starvation. | Match actual loads to rebuffer/segment timeline; CI |
+| B2.8 | Replay capture waits for actual new clear output submission as baked Cast does; host/backend epoch scoped to renderer owner. | Physical layer IDs, screenshot/replay/Cast and controlled matrix; CI |
+| B2.9 | Terminal FeedPlayer and composed player release is idempotent, no DRM policy change. | Verify actual duplicate MediaDrm warning ownership/order, receiver and secure physical paths; CI |
+| B2.10 | Native selected input format reported separately from composed source crop/atlas; stale protected rendition not reused after stop; below/above-cap disclosure. | Actual F1 rendition and selected track parity; CI |
+| B2.11 | Add JVM tests for epochs, coalescing, bounded buffers, seek, release and buffering, plus production wiring assertions. Existing strict change contract and emulator/HEVC/signing workflow unchanged. | Exact-source green full CI and remaining scenario coverage |
+
+Historical 16-workstream coding estimate remains 88.9375% and 1/16 physical/release gates CLOSED until verified progress supports an update. Do not treat this candidate as eleven closed packages.
+
 ## Build 826 GREEN: Batch 1 Media3 1.11.1 and reversible clear SurfaceView A/B source completion (23 November 2026)
 
 **Code completion for Batch 1: 100% of defined source deliverables; no known code pending for the specified opt-in A/B and aligned dependency migration.** Exact source [Build 826 GitHub Actions SUCCESS](https://github.com/cooldarshak/apexview/actions/runs/45243050523), commit `7c7b824e57458cada105c0c660b0f54e5df52bce`. This is verified source and automated execution, **NOT** 100% physical playback smoothness. The user must run matching Build826 phone/TCL protected/clear, Cast and A/B traces before physical/release gates can close. The previous Build819 unweighted workstream coding baseline is **88.9375% / 11.0625%** and remains recorded, because the new implementation refines already coded workstreams rather than proving remaining P2.1/P2.2/P2.3/P2.4/P2.5/P2.9 are completed. Strict release gates remain **1/16 CLOSED**.

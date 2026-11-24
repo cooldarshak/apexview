@@ -42,4 +42,16 @@ class SceneOutputReadinessTest {
         gate.invalidate()
         assertFalse(gate.isReady())
     }
+
+    @Test fun inFlightSwapRetainsItsOriginalEpochAcrossAtlasChange() {
+        val gate = SceneOutputReadiness()
+        val glEpoch = gate.invalidate()
+        assertTrue(gate.matches(glEpoch))
+        // Main thread invalidates while the original GL swap is blocked.
+        val replacement = gate.invalidate()
+        assertFalse(gate.matches(glEpoch))
+        assertFalse(gate.acknowledgeSubmittedFrame(glEpoch))
+        assertFalse(gate.isReady())
+        assertTrue(gate.acknowledgeSubmittedFrame(replacement))
+    }
 }

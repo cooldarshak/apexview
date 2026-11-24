@@ -45,10 +45,11 @@ internal fun TvTowerRow(
     val (name, lastLap, bestLap, position, interval, leader, gearText, speed, sectors) = content
     // Keep dirty-field keys in a testable pure contract: sector-only changes
     // cannot invalidate the speed/position display list, and vice versa.
-    val visualKeys = towerRegionVisualKeys(
-        driver, state, content, tyre, highlight,
-        currentDensity.density, currentDensity.fontScale
-    )
+    val visualKeys = remember(driver?.color, state, content, tyre?.compound, tyre?.laps,
+        highlight, currentDensity.density, currentDensity.fontScale) {
+        towerRegionVisualKeys(driver, state, content, tyre, highlight,
+            currentDensity.density, currentDensity.fontScale)
+    }
     // RetainedTowerRenderNode now compares immutable visual keys structurally.
     // Passing the actual field data eliminates three remembered identity tokens
     // per row, and preserves existing display lists across equal snapshots.

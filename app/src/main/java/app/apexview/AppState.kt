@@ -70,6 +70,9 @@ class AppState(
 
     private var api = F1TvApi(userAgent, chromeMajor)
     private var f1DashCaptureJob: Job? = null
+    private val pendingControlSeek = ControlSeekBatch()
+    private var controlSeekJob: Job? = null
+    private var seekCastRestartJob: Job? = null
     var singleDecoderDiagnostic by mutableStateOf<String?>(null)
         private set
     /** Attempt-scoped diagnostics must not outlive the decoder/session that produced them. */
@@ -1026,6 +1029,7 @@ class AppState(
         stopCasting(true)
     }
     private fun stopCasting(resumeLocal: Boolean) {
+        seekCastRestartJob?.cancel(); seekCastRestartJob = null
         castVideoOnlyOffer = false
         googleVideoOnlyConsent = false
         ++localConnectionGeneration
@@ -6204,6 +6208,7 @@ class AppState(
     }
 
     fun stopAll() {
+        cancelControlSeek()
         stopExternalDisplay()
         clearExternalDisplayRequest()
         singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
@@ -6376,9 +6381,13 @@ class AppState(
     var qualitySheetOpen by mutableStateOf(false)
     /** Explicit actual protected CMAF source dimensions, also visible on Android TV. */
     private val protectedActualRenditions = androidx.compose.runtime.mutableStateMapOf<String, Pair<Int, Int>>()
-    internal fun actualSourceRendition(label: String): Pair<Int, Int>? =
-        singleDecoderScenePlayer?.archiveSceneSession?.actualSourceDimensions?.get(label)
-            ?: protectedActualRenditions[label]
+    internal fun actualSourceRendition(label: String): Pair<Int, Int>? {
+        singleDecoderScenePlayer?.archiveSceneSession?.let { return it.actualSourceDimensions[label] }
+        if (protectedRollingScene != null) return protectedActualRenditions[label]
+        // Native input format is source evidence only when no composed atlas is active.
+        // A retired protected atlas must never describe a restored native feed.
+        return tiles.firstOrNull { it.feed.sourceStream.profileLabel == label }?.feed?.nativeSourceRendition
+    }
 
     private fun recordProtectedRenditions(
         labels: List<String>, geometry: app.apexview.tiled.ProtectedHevcLiveComposition.SourceGeometry?
@@ -6490,19 +6499,51 @@ class AppState(
             "feed's picture plays while sped up. Back to 1× brings the rest back."
     }
 
+    private fun cancelControlSeek() {
+        controlSeekJob?.cancel(); controlSeekJob = null
+        pendingControlSeek.clear()
+        seekCastRestartJob?.cancel(); seekCastRestartJob = null
+    }
+
     fun skip(deltaMs: Long) {
         val leader = leaderTile() ?: return
-        seekTo((if (castPlaybackHandedOff) castFramePositionMs else leader.feed.player.currentPosition) + deltaMs)
+        val base = pendingControlSeek.targetMs ?: (if (castPlaybackHandedOff) castFramePositionMs else leader.feed.player.currentPosition)
+        seekTo(base + deltaMs)
     }
 
     fun seekTo(targetMs: Long) {
+        // Coalesce only expensive composition/Cast rebuilds. Native direct
+        // playback keeps the immediate exact Media3 seek path. The fixed
+        // window is not extended by later requests, so scrubbing cannot starve.
+        val expensive = nativeComposedCast != null || bakedCastSession != null ||
+            seekCastRestartJob?.isActive == true || composedArchiveOriginMs != null ||
+            (archiveCompositionStarting && f1DashCaptureJob?.isActive == true)
+        if (!expensive && pendingControlSeek.targetMs == null) {
+            seekToNow(targetMs)
+            return
+        }
+        val ownerContent = leaderTile()?.contentId ?: return
+        if (pendingControlSeek.offer(targetMs)) {
+            controlSeekJob = scope.launch {
+                kotlinx.coroutines.delay(ControlSeekBatch.WINDOW_MS)
+                val latest = pendingControlSeek.take()
+                controlSeekJob = null
+                if (latest != null && leaderTile()?.contentId == ownerContent) seekToNow(latest)
+            }
+        }
+        showChrome()
+    }
+
+    private fun seekToNow(targetMs: Long) {
+        val pendingBakedRestart = seekCastRestartJob?.isActive == true
+        seekCastRestartJob?.cancel(); seekCastRestartJob = null
         nativeComposedCast?.let { session ->
             val target = if (session.durationMs > 0) targetMs.coerceIn(0, session.durationMs) else targetMs.coerceAtLeast(0)
             prepareNativeComposedCast(tiles.toList(), target)
             return
         }
-        val restartBaked = bakedCastSession != null
-        if (restartBaked) releaseCastRelay()
+        val restartBaked = bakedCastSession != null || pendingBakedRestart
+        if (bakedCastSession != null) releaseCastRelay()
         if (castingActive) {
             val target = if (durationMs > 0) targetMs.coerceIn(0L, durationMs) else targetMs.coerceAtLeast(0L)
             remoteCastClock.update(target, playing, playbackSpeed, durationMs)
@@ -6542,14 +6583,19 @@ class AppState(
                 target + " content=" + leader.contentId)
         if (restartRollingComposition || restartPreflightComposition)
             startArchiveSingleDecoderComposition(leader.contentId)
-        if (restartBaked) scope.launch {
-            kotlinx.coroutines.delay(1_000)
-            if (tiles.isNotEmpty() && !castingActive) prepareFullSceneCast(false)
+        if (restartBaked) {
+            val ownerContent = leader.contentId
+            seekCastRestartJob = scope.launch {
+                kotlinx.coroutines.delay(1_000)
+                if (leaderTile()?.contentId == ownerContent && !castingActive) prepareFullSceneCast(false)
+                seekCastRestartJob = null
+            }
         }
         showChrome()
     }
 
     fun goLive() {
+        cancelControlSeek()
         if (nativeComposedCast != null) { prepareNativeComposedCast(tiles.toList(), liveEdge = true); return }
         tiles.forEach { it.feed.player.seekToDefaultPosition() }
         showChrome()

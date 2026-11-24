@@ -31,9 +31,10 @@ internal object QualityDisclosurePolicy {
     }
 
     fun notice(requested: VideoQuality, actualHeight: Int): String? {
-        if (requested.targetHeight <= 0 || actualHeight <= 0 ||
-            actualHeight >= requested.targetHeight) return null
-        return "Current source ${actualHeight}p is below the selected ${requested.label} ceiling."
+        if (requested.targetHeight <= 0 || actualHeight <= 0 || actualHeight == requested.targetHeight) return null
+        return if (actualHeight < requested.targetHeight)
+            "Current source ${actualHeight}p is below the selected ${requested.label} ceiling."
+        else "Observed source ${actualHeight}p exceeds the selected ${requested.label} ceiling. Check the offered rendition; the request was not changed."
     }
 }
 

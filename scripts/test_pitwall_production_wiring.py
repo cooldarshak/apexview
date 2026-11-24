@@ -92,6 +92,34 @@ class ProductionWiringTests(unittest.TestCase):
                      "switchingCaptureStateRevertsAndRestoresIndependentLayer"):
             self.assertIn(test, tests)
 
+    def test_batch2_output_epoch_seek_capture_and_measurement_wiring(self):
+        prefix = "app/src/main/java/app/apexview/"
+        for name in ("SingleDecoderSceneView", "ProtectedDecoderSceneView"):
+            renderer = contents(prefix + "scene/" + name + ".kt")
+            self.assertIn("val surfaceEpoch = renderEpoch", renderer)
+            self.assertIn("outputReadiness.matches(surfaceEpoch)", renderer)
+            self.assertIn("acknowledgeSubmittedFrame(surfaceEpoch)", renderer)
+            self.assertNotIn("val surfaceEpoch = outputReadiness.generation()", renderer)
+            self.assertIn("coalescedTextureLatches=", renderer)
+        viewer = contents(prefix + "Viewer.kt")
+        self.assertIn("key(host, app.protectedRollingSceneActive, secureRolling, independentClearSurface)", viewer)
+        self.assertGreaterEqual(viewer.count("kotlinx.coroutines.withTimeoutOrNull(5_000L)"), 2)
+        state = contents(prefix + "AppState.kt")
+        self.assertIn("pendingControlSeek.offer(targetMs)", state)
+        self.assertIn("seekToNow(latest)", state)
+        self.assertIn("fun stopAll() {\n        cancelControlSeek()", state)
+        self.assertIn("seekCastRestartJob?.cancel()", state)
+        self.assertIn("if (protectedRollingScene != null) return protectedActualRenditions[label]", state)
+        player = contents(prefix + "FeedPlayer.kt")
+        self.assertIn("bufferEpisodes.onState", player)
+        self.assertIn("cause=UNATTRIBUTED", player)
+        self.assertIn("SeekParameters.EXACT", player)
+        self.assertIn("releaseGate.beginRelease()", player)
+        self.assertIn("nativeSourceRendition =", player)
+        self.assertIn("observedLoads.size >= 128", player)
+        self.assertIn("processGcCount=", contents(prefix + "WindowFrameDiagnostics.kt"))
+        self.assertIn("MAX_RETAINED_WINDOWS = 24", contents(prefix + "scene/SceneQuadBufferCache.kt"))
+
     def test_thermal_startup_notice_has_initialized_compose_message_state(self):
         # Kotlin executes property initializers and init blocks in source order.
         # Merely compiling a delegated property does not catch an early setter

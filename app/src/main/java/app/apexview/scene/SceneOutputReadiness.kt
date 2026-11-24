@@ -25,5 +25,7 @@ internal class SceneOutputReadiness {
         return true
     }
 
+    @Synchronized fun matches(candidate: Long): Boolean = candidate == generation
+
     @Synchronized fun isReady(): Boolean = ready
 }

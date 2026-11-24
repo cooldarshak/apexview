@@ -47,6 +47,11 @@ class SceneQuadBufferCacheTest {
         cache.update(scene(feeds = 1))
         assertEquals(4, cache.allocatedDirectBuffers)
         cache.update(scene(feeds = 2))
-        assertEquals(6, cache.allocatedDirectBuffers)
+        assertEquals(4, cache.allocatedDirectBuffers)
+        repeat(100) {
+            assertEquals(1, cache.update(scene(feeds = 1)).size)
+            assertEquals(2, cache.update(scene(feeds = 2)).size)
+        }
+        assertEquals(4, cache.allocatedDirectBuffers)
     }
 }

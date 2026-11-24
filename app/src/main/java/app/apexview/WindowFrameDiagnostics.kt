@@ -21,6 +21,8 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
     private var firstDraws = 0
     private var missedReports = 0
     private var maxNs = 0L
+    private var minRefreshHz = Float.POSITIVE_INFINITY
+    private var maxRefreshHz = 0f
     // The refresh mode may change during a session. A deadline fixed at
     // construction misclassifies UI frames after phone/TV mode transitions.
     private fun fallbackDeadlineNs(): Long = FrameDeadlinePolicy.durationNs(
@@ -49,6 +51,11 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
         }
         val now = SystemClock.elapsedRealtime()
         if (started == 0L) started = now
+        val observedHz = window.decorView.display?.refreshRate ?: 0f
+        if (observedHz.isFinite() && observedHz > 0f) {
+            minRefreshHz = minOf(minRefreshHz, observedHz)
+            maxRefreshHz = maxOf(maxRefreshHz, observedHz)
+        }
         val duration = metrics.getMetric(FrameMetrics.TOTAL_DURATION)
         val frameVsyncNs = metrics.getMetric(FrameMetrics.INTENDED_VSYNC_TIMESTAMP)
         if (previousWindowVsyncNs > 0L && frameVsyncNs > previousWindowVsyncNs) {
@@ -105,9 +112,12 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
             val heapCommittedMiB = runtime.totalMemory() / 1_048_576L
             val heapMaxMiB = runtime.maxMemory() / 1_048_576L
             val nativeHeapMiB = android.os.Debug.getNativeHeapAllocatedSize() / 1_048_576L
+            // Cumulative process ART counters, not per-video allocations or a causal claim.
+            val gcCount = runCatching { android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull() }.getOrNull() ?: -1L
+            val gcTimeMs = runCatching { android.os.Debug.getRuntimeStat("art.gc.gc-time")?.toLongOrNull() }.getOrNull() ?: -1L
             Log.i("PitwallFrames", "role=$role uptimeMs=$now intervalMs=${now - started} frames=$frames " +
                 "slow=$slow frozen700ms=$frozen firstDraws=$firstDraws missedReports=$missedReports " +
-                "refreshRate=${window.decorView.display?.refreshRate ?: 0f} maxFrameMs=${maxNs / 1_000_000} " +
+                "refreshRate=$observedHz refreshMinHz=${minRefreshHz.takeIf { it.isFinite() } ?: 0f} refreshMaxHz=$maxRefreshHz maxFrameMs=${maxNs / 1_000_000} " +
                 "frameMeanMs=${total.meanMs.toInt()} frameP95UpperMs=${total.percentileUpperMs(95)} " +
                 "frameP99UpperMs=${total.percentileUpperMs(99)} frameBinsMs13_19_23_30_45_100=${total.compact()} " +
                 "windowIntendedVsyncBins13_19_23_30_45_100=${windowVsync.compact()} " +
@@ -124,6 +134,7 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
                 "gpuAvailable=${Build.VERSION.SDK_INT >= 31} " +
                 "jvmHeapUsedMiB=$heapUsedMiB jvmHeapCommittedMiB=$heapCommittedMiB " +
                 "jvmHeapMaxMiB=$heapMaxMiB nativeHeapAllocatedMiB=$nativeHeapMiB " +
+                "processGcCount=$gcCount processGcTimeMs=$gcTimeMs " +
                 // Raw system thermal classification; -1 means unsupported,
                 // not an inferred cause of decoder or RenderThread stalls.
                 "thermalStatus=${runCatching { power?.currentThermalStatus }.getOrNull() ?: -1}")
@@ -143,6 +154,8 @@ internal class WindowFrameDiagnostics(private val window: Window, private val ro
         firstDraws = 0
         missedReports = 0
         maxNs = 0L
+        minRefreshHz = Float.POSITIVE_INFINITY
+        maxRefreshHz = 0f
         deadlineMissNs = 0L
         longestDeadlineMissNs = 0L
         // Also discard a partial interval when recording is toggled off.

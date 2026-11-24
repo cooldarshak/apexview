@@ -60,9 +60,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private fun logDisplayMode(reason: String) {
         val actualDisplay = rootView.display ?: return
         val mode = actualDisplay.mode
-        selectedDisplayHz = mode.refreshRate
+        selectedDisplayHz = actualDisplay.refreshRate
         val sourceFps = scene?.sourceFrameRate ?: 0.0
-        val signature = "${actualDisplay.displayId}:${mode.modeId}:${mode.refreshRate}:$sourceFps:$playbackSpeed"
+        val signature = "${actualDisplay.displayId}:${mode.modeId}:${mode.refreshRate}:$selectedDisplayHz:$sourceFps:$playbackSpeed"
         if (signature == previousModeSignature) return
         previousModeSignature = signature
         // An available mode is not a selected mode; setFrameRate() is only advice to SurfaceFlinger.
@@ -76,7 +76,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             sourceFps, playbackSpeed
         ).joinToString(",") { "${it.id}@${it.refreshHz}" }.ifBlank { "none" }
         Log.i("ApexviewSingleDecoder", "SCENE_DISPLAY_MODE reason=$reason displayId=${actualDisplay.displayId} " +
-            "activeMode=${mode.modeId} activeHz=${mode.refreshRate} sourceFps=$sourceFps speed=$playbackSpeed " +
+            "activeMode=${mode.modeId} activeHz=${mode.refreshRate} displayRefreshHz=$selectedDisplayHz sourceFps=$sourceFps speed=$playbackSpeed " +
             "effectiveFps=${SceneFrameRatePolicy.hint(sourceFps, playbackSpeed)} " +
             "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
             "supportedModes=$available sameResolutionIntegralModes=$seamlessMatches " +
@@ -95,6 +95,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     // change must not discard an otherwise valid pending codec attachment.
     private val surfaceLifetime = SceneSurfaceLifetime()
     private var firstFrameReported = false
+    // GL-owned epoch; never read the latest UI generation after an in-flight swap.
+    private var renderEpoch = -1L
     var onOutputSize: (Int, Int) -> Unit = { _, _ -> }
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var contextGl: EGLContext = EGL14.EGL_NO_CONTEXT
@@ -330,25 +332,31 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         playbackSpeed = normalizedSpeed
         val changed = scene != nextScene
         val atlasChanged = scene?.sameEncodedAtlasAs(nextScene) == false
-        if (atlasChanged) {
+        val playerChanged = player != null && player !== nextPlayer
+        val bindingChanged = atlasChanged || playerChanged
+        val invalidatedEpoch = if (bindingChanged) {
             codecCorrelation?.reset()
             // Layout-only window changes can reuse the already latched atlas;
             // only a different coded picture must await a fresh decoder frame.
-            outputReadiness.invalidate()
+            val epoch = outputReadiness.invalidate()
             onOutputLost()
-        }
+            epoch
+        } else null
         scene = nextScene
         if (player !== nextPlayer) {
             input?.let { player?.clearVideoSurface(it) }
             player = nextPlayer
             input?.let { nextPlayer.setVideoSurface(it) }
         }
-        if (changed || speedChanged) {
+        if (changed || speedChanged || bindingChanged) {
             main.post { if (!released) logDisplayMode(if (speedChanged) "speed-changed" else "source-changed") }
             gl.post { guarded {
-                if (atlasChanged) {
+                if (invalidatedEpoch != null) {
+                    renderEpoch = invalidatedEpoch
                     hasFrame = false
+                    frameDemand.discardPendingVideo()
                     firstFrameReported = false
+                    cadenceGate.reset()
                 }
                 applyOutputFrameRateHint()
                 scheduleDisplayFrame()
@@ -358,14 +366,14 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
 
     override fun onSurfaceTextureAvailable(output: SurfaceTexture, width: Int, height: Int) {
         val lifetime = surfaceLifetime.advance()
-        outputReadiness.invalidate()
+        val readinessEpoch = outputReadiness.invalidate()
         onOutputLost()
         outputWidth = width; outputHeight = height
         onOutputSize(width, height)
         gl.post {
             if (!released && surfaceLifetime.matches(lifetime)) {
                 failed = false // New valid EGL output may recover a transient loss.
-                guarded { initialize(output); scheduleDisplayFrame() }
+                guarded { initialize(output, readinessEpoch); scheduleDisplayFrame() }
             }
         }
     }
@@ -412,8 +420,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
     }
 
-    private fun initialize(output: SurfaceTexture) {
+    private fun initialize(output: SurfaceTexture, readinessEpoch: Long) {
         destroy()
+        renderEpoch = readinessEpoch
         display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         check(EGL14.eglInitialize(display, IntArray(2), 0, IntArray(2), 1)) { "EGL initialization failed" }
         val configs = arrayOfNulls<EGLConfig>(1)
@@ -510,6 +519,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private data class DrawTiming(val glDrawNs: Long, val swapNs: Long)
 
     private fun draw(): DrawTiming? {
+        val surfaceEpoch = renderEpoch
+        if (!outputReadiness.matches(surfaceEpoch)) return null
         val model = scene ?: return null
         if (window == EGL14.EGL_NO_SURFACE || !EGL14.eglMakeCurrent(display, window, window, contextGl)) return null
         val drawStarted = System.nanoTime()
@@ -525,7 +536,6 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         if (hasFrame) codecCorrelation?.onSwapSubmitted(swapCompleted)
         if (hasFrame && !firstFrameReported) {
             firstFrameReported = true
-            val surfaceEpoch = outputReadiness.generation()
             post {
                 if (!released && outputReadiness.acknowledgeSubmittedFrame(surfaceEpoch)) {
                     Log.i("ApexviewSingleDecoder",
@@ -555,6 +565,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 "surfaceTimestampRegressions=${metrics.surfaceTimestampRegressions} " +
                 "drawsWithoutNewVideo=${metrics.noNewVideoDraws} " +
                 "videoDrawPacingDeferrals=${metrics.pacingDeferrals} " +
+                "coalescedTextureLatches=${frameDemand.takeCoalescedVideoArrivals()} " +
                 "unavailableSurfaceDraws=${metrics.unavailableDraws} " +
                 "callbackIntervalsBins13_19_23_30_45_100=${metrics.callbackIntervals.compact()} " +
                 "sourceTimestampBins13_19_23_30_45_100=${metrics.textureTimestampIntervals.compact()} " +
@@ -623,6 +634,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         input?.release(); input = null
         decoderTexture?.release(); decoderTexture = null; hasFrame = false
         firstFrameReported = false
+        renderEpoch = -1L
         if (display != EGL14.EGL_NO_DISPLAY) {
             // Android can have unbound this GL looper after a rotation, stop or
             // SurfaceFlinger output handoff. GL deletion requires this exact

@@ -1,7 +1,8 @@
 import tempfile
 import unittest
 from pathlib import Path
-from pitwall_acceptance_matrix import Case, validate_groups, MIN_ENDURANCE_S
+from pitwall_acceptance_matrix import Case, validate_groups, MIN_ENDURANCE_S, refresh_issues
+from analyze_pitwall_runtime import summarize
 
 
 class EnduranceMatrixTest(unittest.TestCase):
@@ -37,6 +38,16 @@ class EnduranceMatrixTest(unittest.TestCase):
                                thermal_start=4, thermal_end=4)
         with self.assertRaisesRegex(ValueError, "Thermal excursion"):
             validate_groups(rows)
+
+    def test_refresh_transition_cannot_pass_matching_physical_matrix(self):
+        base = "PitwallFrames: role=player frames=120 intervalMs=2000 "
+        stable = summarize(base + "refreshMinHz=119.88 refreshMaxHz=120.0")
+        self.assertEqual([], refresh_issues(stable, 120))
+        mixed = summarize(base + "refreshMinHz=60 refreshMaxHz=120")
+        self.assertTrue(refresh_issues(mixed, 120))
+        old = summarize(base + "refreshRate=120")
+        self.assertTrue(refresh_issues(old, 120))
+        self.assertTrue(refresh_issues(stable, 60))
 
     def test_does_not_accept_invented_modes_or_missing_capture_metadata(self):
         with self.assertRaisesRegex(ValueError, "Invalid playback"):
