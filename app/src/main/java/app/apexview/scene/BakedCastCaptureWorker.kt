@@ -46,6 +46,9 @@ internal class BakedCastCaptureWorker(
     private var pbuffer: EGLSurface = EGL14.EGL_NO_SURFACE
     private var encoder: ReplayClipEncoder? = null
     private var directCapture: BakedCastGpuCapture? = null
+    private val adaptivePacing = BakedCastCapturePacing.Controller()
+    @Volatile var directFrameReady = false
+        private set
     private val mediaClock = BakedCastMediaClock()
     private var frames = 0L
     private var copyFailures = 0L
@@ -147,7 +150,7 @@ internal class BakedCastCaptureWorker(
                     }
                 }, { error ->
                     useWindowCapture(error)
-                    requestNext()
+                    gl.postDelayed({ requestNext() }, 150L)
                 })
                 return
             }
@@ -180,6 +183,7 @@ internal class BakedCastCaptureWorker(
             maxCopyMs = maxOf(maxCopyMs, (layersReadyNs - requestedAtNs) / 1_000_000L)
             if (mediaClock.originMs == null) session.setOutputSize(width, height, position)
             draw(checkNotNull(encoder), mediaClock.timestampNs(position))
+            directFrameReady = directCapture != null
             frames++
             maxEncoderMs = maxOf(maxEncoderMs, (System.nanoTime() - layersReadyNs) / 1_000_000L)
             if (layersReadyNs - lastReportNs >= 5_000_000_000L) {
@@ -190,11 +194,12 @@ internal class BakedCastCaptureWorker(
                 lastReportNs = layersReadyNs
                 frames = 0; copyFailures = 0; maxCopyMs = 0; maxEncoderMs = 0
             }
-            gl.postDelayed({ requestNext() }, BakedCastCapturePacing.delayMs(requestedAtNs, System.nanoTime()))
+            gl.postDelayed({ requestNext() }, adaptivePacing.nextDelayMs(requestedAtNs, System.nanoTime()))
         } catch (error: Exception) { fail(error) }
     }
 
     private fun useWindowCapture(error: Exception) {
+        directFrameReady = false
         directCapture?.close()
         directCapture = null
         val detail = app.apexview.DiagnosticRedaction.redact(error.message.orEmpty()).take(160)

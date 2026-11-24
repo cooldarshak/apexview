@@ -430,7 +430,7 @@ fun TowerRow(
     // Hundreds of fast-changing Text semantics nodes previously forced a full
     // accessibility-tree diff on nearly every timing sample. Keep one actionable
     // row summary; do not recompute it for speed, gear or micro-sector changes.
-    val summary = remember(driver?.tla, number, state.position, state.inPit, state.retired,
+    val summary = remember(driver?.tla, number, state.position, state.inPit, state.retired, state.stopped,
         last?.time, best?.time, state.ahead, state.toLeader, tyre?.compound, tyre?.laps) {
         TowerAccessibilitySummary.prepare(driver?.tla ?: number, state, tyre)
     }
@@ -513,7 +513,7 @@ fun TowerRow(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("LAST", style = cell.copy(fontSize = 6.sp, color = Ink.secondary), modifier = Modifier.width(19.dp))
                 Text(
-                    when { state.retired -> "OUT"; state.inPit -> "PIT"; else -> last?.time?.ifBlank { "–" } ?: "–" },
+                    when { state.retired -> "OUT"; state.stopped -> "STOP"; state.inPit -> "PIT"; else -> last?.time?.ifBlank { "–" } ?: "–" },
                     style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold, color = if (state.inPit) Color(0xFFFF453A) else lapColor(last?.pace)),
                     maxLines = 1,
                 )

@@ -79,9 +79,12 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             "${it.modeId}:${it.physicalWidth}x${it.physicalHeight}@${it.refreshRate}"
         }
         val active = SceneFrameRatePolicy.Mode(mode.modeId, mode.physicalWidth, mode.physicalHeight, mode.refreshRate)
+        val actualOutputFps = SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed,
+            selectedDisplayHz, runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE,
+            pipelineHealthy())
         val seamlessMatches = SceneFrameRatePolicy.matchingSeamlessModes(
             active, modes.map { SceneFrameRatePolicy.Mode(it.modeId, it.physicalWidth, it.physicalHeight, it.refreshRate) },
-            sourceFps, playbackSpeed
+            actualOutputFps.toDouble(), 1f
         ).joinToString(",") { "${it.id}@${it.refreshHz}" }.ifBlank { "none" }
         Log.i("ApexviewSingleDecoder", "SURFACE_SCENE_DISPLAY_MODE reason=$reason protected=$protectedOutput " +
             "displayId=${current.displayId} activeMode=${mode.modeId} activeHz=${mode.refreshRate} displayRefreshHz=$selectedDisplayHz " +

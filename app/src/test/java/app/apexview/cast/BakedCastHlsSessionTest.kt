@@ -16,7 +16,7 @@ class BakedCastHlsSessionTest {
         val video = byteArrayOf(0, 0, 0, 1, 0x65)
         val audio = byteArrayOf(0xff.toByte(), 0xf1.toByte(), 0x50, 0x80.toByte(), 0, 0xff.toByte(), 0xfc.toByte())
         BakedCastHlsSession("127.0.0.1", InetAddress.getLoopbackAddress()).use { session ->
-            repeat(10) { index ->
+            repeat(32) { index ->
                 val time = index * 1_000_000L
                 session.append(listOf(
                     BakedCastTransportStream.Sample(time, video, video = true, keyFrame = true),
@@ -24,10 +24,12 @@ class BakedCastHlsSessionTest {
                 ), 1_000_000L)
             }
             val playlist = URL(session.url).readText()
-            assertTrue(playlist.contains("#EXT-X-MEDIA-SEQUENCE:5"))
-            assertTrue(playlist.contains("view-9.ts"))
-            assertFalse(playlist.contains("view-4.ts"))
-            val segment = URL(URL(session.url), "view-4.ts").readBytes()
+            assertTrue(playlist.contains("#EXT-X-MEDIA-SEQUENCE:20"))
+            assertTrue(playlist.contains("view-31.ts"))
+            assertFalse(playlist.contains("view-19.ts"))
+            assertEquals(12_000_000L, session.advertisedDurationUs)
+            assertTrue(runCatching { URL(URL(session.url), "view-0.ts").readBytes() }.isFailure)
+            val segment = URL(URL(session.url), "view-19.ts").readBytes()
             assertEquals(0, segment.size % 188)
             val pids = (segment.indices step 188).map { offset ->
                 assertEquals(0x47, segment[offset].toInt() and 255)

@@ -121,7 +121,7 @@ internal class CastTimingReceiver {
                 val version = j.getLong("id")
                 if (version > tableId || currentTable == null) {
                     decodedTable = withContext(Dispatchers.Default) {
-                        CastTimingProtocol.readTable(j.getJSONArray("rows"))
+                        CastTimingProtocol.readTable(j.getJSONArray("rows"), j.optJSONArray("stoppedDrivers"))
                     }
                 }
             }
@@ -178,7 +178,7 @@ internal class CastTimingReceiver {
                     lastTableReceivedMs = SystemClock.elapsedRealtime()
                     return
                 }
-                val updated = decodedTable ?: CastTimingProtocol.readTable(j.getJSONArray("rows"))
+                val updated = decodedTable ?: CastTimingProtocol.readTable(j.getJSONArray("rows"), j.optJSONArray("stoppedDrivers"))
                 tableId = id
                 currentTable = updated
                 tablePackets++

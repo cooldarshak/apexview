@@ -275,8 +275,28 @@ class AppState(
     private var googleCastSelected = true
     private val googleRemoteCallback = object : com.google.android.gms.cast.framework.media.RemoteMediaClient.Callback() {
         override fun onStatusUpdated() {
-            if (!castPlaybackHandedOff || localChosen || googleLoading) return
+            if (localChosen || googleLoading) return
             val remote = googleCastRemoteClient ?: return
+            bakedCastSession?.let { baked ->
+                if (remote.isPlaying && !baked.receiverRendering) {
+                    baked.receiverRendering = true
+                    singleDecoderScenePlayer?.player?.volume = 0f
+                    googleHasPlayed = true
+                    castSceneConfirmed = true
+                    castResources.confirmRendering()
+                }
+                if (castRemoteBuffering != remote.isBuffering) {
+                    castRemoteBuffering = remote.isBuffering
+                    android.util.Log.i("PitwallCast", "BAKED_RECEIVER_BUFFER buffering=$castRemoteBuffering positionMs=${remote.approximateStreamPosition} ${baked.health()}")
+                }
+                if (googleHasPlayed && remote.mediaStatus?.playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
+                    googleCastSelected = false
+                    releaseCastRelay()
+                    castStatus = "TV playback ended. Playback returned to this device."
+                }
+                return
+            }
+            if (!castPlaybackHandedOff) return
             if (remote.isPlaying || remote.isPaused) googleHasPlayed = true
             if (googleHasPlayed && remote.mediaStatus?.playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
                 remoteCastClock.update(remote.approximateStreamPosition, false, playbackSpeed, remote.streamDuration)
@@ -541,7 +561,7 @@ class AppState(
                         handOffCastPlayback()
                         if (alreadyHandedOff) sendCaptionPreferenceToReceiver()
                     }
-                    else { sendCaptionPreferenceToReceiver(); android.util.Log.i("PitwallCast", "BAKED_CAST_RECEIVER_CONFIRMED feeds=${bakedCastSession?.feeds} picture=${bakedCastSession?.width}x${bakedCastSession?.height} phonePlayback=ACTIVE") }
+                    else { bakedCastSession?.receiverRendering = true; singleDecoderScenePlayer?.player?.volume = 0f; sendCaptionPreferenceToReceiver(); android.util.Log.i("PitwallCast", "BAKED_CAST_RECEIVER_CONFIRMED feeds=${bakedCastSession?.feeds} picture=${bakedCastSession?.width}x${bakedCastSession?.height} phonePlayback=ACTIVE") }
                     val height = nativeComposedCast?.geometry?.displayHeight ?: castRelay?.session?.sourceDisplayHeight
                     castStatus = if (bakedCastSession != null) "Streaming the baked phone picture, tower, map and commentary to $castDeviceName."
                         else "Playing on $castDeviceName in the phone video layout." + (height?.let { " ${it}p sources." } ?: "")
@@ -1035,9 +1055,15 @@ class AppState(
             if (result.status.isSuccess) {
                 client.setStreamMute(mutedAll)
                 if (playbackSpeed != 1f) client.setPlaybackRate(playbackSpeed.toDouble())
-                castSceneConfirmed = true
-                castResources.confirmRendering()
-                castStatus = "Google Cast is playing the full baked picture with synchronized commentary."
+                // LOAD acknowledgement alone does not establish rendered playback.
+                if (client.isPlaying) {
+                    session.receiverRendering = true
+                    singleDecoderScenePlayer?.player?.volume = 0f
+                    googleHasPlayed = true
+                    castSceneConfirmed = true
+                    castResources.confirmRendering()
+                }
+                castStatus = "Google Cast accepted the baked picture and commentary."
                 message = castStatus
                 android.util.Log.i("PitwallCast", "BAKED_GOOGLE_CAST_LOADED picture=${session.width}x${session.height} feeds=${session.feeds}")
             } else failGoogleCastLoad("Google Cast rejected the live scene (${result.status.statusCode}).")
@@ -1106,7 +1132,9 @@ class AppState(
         remoteCaptionTracks = emptyList()
         googleLoading = false; googleHasPlayed = false
         castBusy = false
+        bakedCastSession?.receiverRendering = false
         castResources.releaseMedia()
+        castRemoteBuffering = false
         castSceneConfirmed = false
         googleCastLoadedUrl = null
         if (localConnection == null) app.apexview.cast.local.CastConnectionService.stop(context)
@@ -4168,6 +4196,7 @@ class AppState(
         val first = timing == null
         if (!loaded.live && timingWork.speedsFor == loaded.radioBase) loaded.speeds = timingWork.archiveSpeeds
         timing = loaded
+        if (towerOpen) loadSpeeds(loaded)
         if (!first) return
         // A tower reservation is a direct layout constraint, even if the user previously
         // arranged feeds by hand. A map-only reservation retains its existing hand-layout rule.
@@ -5385,6 +5414,7 @@ class AppState(
 
     fun toggleTower() {
         towerOpen = !towerOpen
+        if (towerOpen) timing?.let(::loadSpeeds)
         prefs.edit().putBoolean(PREF_TOWER, towerOpen).apply()
         if ((towerReserve || layoutMode == LayoutMode.TV) && canvasW > 0f && !laptopActive) {
             handPlaced = false
@@ -5890,7 +5920,8 @@ class AppState(
             }
             if (byUser) mutedAll = false
             tiles.forEach { it.audible = it === tile; it.feed.setAudible(false) }
-            owner.setAudible(!mutedAll && !castingActive)
+            if (bakedCastSession != null) owner.player.volume = if (mutedAll || bakedCastSession?.receiverRendering == true) 0f else 1f
+            else owner.setAudible(!mutedAll && !castingActive)
             applyCaptionPreference()
             if (restartBaked) playbackWork.scheduleCastRestart(scope) {
                 if (singleDecoderScenePlayer === owner && !castingActive) prepareFullSceneCast(false)
@@ -5912,7 +5943,9 @@ class AppState(
             if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.SET_VOLUME, JSONObject().put("volume", if (mutedAll) 0 else 1))
             else googleCastRemoteClient?.setStreamMute(mutedAll)
         }
-        if (nativeArchiveTiles.isNotEmpty()) protectedCompositionHost?.feed?.setAudible(!mutedAll && !castingActive)
+        if (bakedCastSession != null) singleDecoderScenePlayer?.player?.volume =
+            if (mutedAll || bakedCastSession?.receiverRendering == true) 0f else 1f
+        else if (nativeArchiveTiles.isNotEmpty()) protectedCompositionHost?.feed?.setAudible(!mutedAll && !castingActive)
         else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll && !castingActive) }
         showChrome()
     }

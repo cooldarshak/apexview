@@ -16,15 +16,22 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
     private var nextSequence = 0L
     private var ended = false
     private val targetDuration = 4L
+    private var retainedUs = 0L
+    private var activeUs = 0L
+    val advertisedDurationUs get() = activeUs
     val url get() = relay.url
 
     fun append(samples: List<BakedCastTransportStream.Sample>, durationUs: Long) {
         check(!ended)
-        require(durationUs in 1..4_000_000L) { "Keep baked Cast segments at or below four seconds" }
+        require(durationUs in 800_000L..4_000_000L) { "Keep baked Cast segments at or below four seconds" }
         val packed = muxer.segment(samples)
         // Keep retired objects available for in-flight fetches, outside the advertised playlist.
         window.addLast(Segment(nextSequence++, durationUs, packed))
-        if (window.size > 8) window.removeFirst()
+        retainedUs += durationUs
+        // Keep at least three target durations advertised, plus retired media for slow clients.
+        while (retainedUs - window.first().durationUs >= 28_000_000L) {
+            retainedUs -= window.removeFirst().durationUs
+        }
         publish()
     }
 
@@ -36,7 +43,14 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
     }
 
     private fun publish() {
-        val active = window.takeLast(5)
+        var duration = 0L
+        val active = window.asReversed().takeWhile {
+            if (duration >= 12_000_000L) false else {
+                duration += it.durationUs
+                true
+            }
+        }.asReversed()
+        activeUs = duration
         val playlist = buildString {
             append("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:$targetDuration\n")
             append("#EXT-X-MEDIA-SEQUENCE:${active.first().sequence}\n#EXT-X-INDEPENDENT-SEGMENTS\n")

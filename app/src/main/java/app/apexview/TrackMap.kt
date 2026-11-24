@@ -406,7 +406,9 @@ internal fun shouldShowMapLockControl(
     mapLocked: Boolean,
     isTv: Boolean,
     temporarilyVisible: Boolean,
-): Boolean = !mapLocked || isTv || temporarilyVisible
+    chromeVisible: Boolean = false,
+    lockFocused: Boolean = false,
+): Boolean = !mapLocked || temporarilyVisible || (isTv && (chromeVisible || lockFocused))
 
 /**
  * The track map in its own window. While arranging it's moved, resized and turned by its track
@@ -421,13 +423,13 @@ fun MapPanelView(app: AppState, timing: SessionTiming) {
     val keepControlsForLayout = app.isTv || app.layoutMode == LayoutMode.TV
     var mapInteractionGeneration by remember(app) { mutableLongStateOf(0L) }
     var lockControlTemporarilyVisible by remember(app) { mutableStateOf(true) }
+    var lockFocused by remember(app) { mutableStateOf(false) }
 
     // Lock the map, then leave the unobtrusive lock affordance visible briefly. Any subsequent
-    // touch anywhere in the map panel restarts the five-second window. TV keeps it available for
-    // D-pad navigation because there is no touch gesture to reveal a hidden control.
-    LaunchedEffect(app.mapLocked, mapInteractionGeneration, app.isTv) {
+    // touch anywhere in the map panel restarts the five-second window. TV reveals it with playback chrome and retains existing D-pad focus.
+    LaunchedEffect(app.mapLocked, mapInteractionGeneration) {
         lockControlTemporarilyVisible = true
-        if (app.mapLocked && !app.isTv) {
+        if (app.mapLocked) {
             delay(MAP_LOCK_CONTROL_AUTO_HIDE_MS)
             lockControlTemporarilyVisible = false
         }
@@ -463,9 +465,11 @@ fun MapPanelView(app: AppState, timing: SessionTiming) {
             app.mapLocked,
             app.isTv,
             lockControlTemporarilyVisible || app.arranging,
+            chromeVisible = app.chromeVisible,
+            lockFocused = lockFocused,
         )
         if (showControls && showLockControl) {
-            MapControls(app, timing)
+            MapControls(app, timing) { lockFocused = it }
         }
     }
 }
@@ -480,7 +484,7 @@ fun TrackMapFill(app: AppState, timing: SessionTiming) {
 
 /** Lock, move grip and resize handle, at the corners of the drawn track. */
 @Composable
-private fun MapControls(app: AppState, timing: SessionTiming) {
+private fun MapControls(app: AppState, timing: SessionTiming, onLockFocus: (Boolean) -> Unit) {
     val panel = app.activeMapPanel
     val density = LocalDensity.current
     val bounds = remember(timing, panel.w, panel.h, panel.rotation) {
@@ -497,7 +501,7 @@ private fun MapControls(app: AppState, timing: SessionTiming) {
         }
 
         // Top-right of the track: lock, and the move grip beside it.
-        MapControl(at(bounds.right, bounds.top).pressable(scaleTo = 1f, onClick = app::toggleMapLock).tvFocusRing()) {
+        MapControl(at(bounds.right, bounds.top).onFocusChanged { onLockFocus(it.isFocused) }.pressable(scaleTo = 1f, onClick = app::toggleMapLock).tvFocusRing()) {
             Icon(
                 if (app.mapLocked) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
                 if (app.mapLocked) "Unlock the map" else "Lock the map",

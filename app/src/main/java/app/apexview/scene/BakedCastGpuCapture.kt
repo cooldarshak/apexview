@@ -33,6 +33,9 @@ internal class BakedCastGpuCapture(
     @Volatile private var closed = false
 
     private class Request(val complete: (BakedCastVideoPlacement) -> Unit, val fail: (Exception) -> Unit) {
+        val startedNs = System.nanoTime()
+        var videoReadyNs = 0L
+        var overlayReadyNs = 0L
         var videoReady = false
         var uiReady = false
         var placement: BakedCastVideoPlacement? = null
@@ -40,15 +43,18 @@ internal class BakedCastGpuCapture(
     }
     private var pending: Request? = null
     private var deliveredFrame = false
+    private var completedRequests = 0
+    private var maxVideoMs = 0L
+    private var maxOverlayMs = 0L
 
     init {
         try {
-            val videoInput = Input(width, height, gl) { pending?.let { it.videoReady = true; complete(it) } }
+            val videoInput = Input(width, height, gl) { pending?.let { it.videoReady = true; it.videoReadyNs = System.nanoTime(); complete(it) } }
             video = videoInput
             videoTarget = VideoTarget(videoInput.surface, width, height) { error ->
                 gl.post { pending?.let { fail(it, error) } }
             }
-            ui = Input(width, height, gl) { pending?.let { it.uiReady = true; complete(it) } }
+            ui = Input(width, height, gl) { pending?.let { it.uiReady = true; it.overlayReadyNs = System.nanoTime(); complete(it) } }
         } catch (error: Exception) {
             close()
             throw error
@@ -82,6 +88,12 @@ internal class BakedCastGpuCapture(
         pending = null
         gl.removeCallbacks(request.timeout)
         deliveredFrame = true
+        maxVideoMs = maxOf(maxVideoMs, (request.videoReadyNs - request.startedNs) / 1_000_000L)
+        maxOverlayMs = maxOf(maxOverlayMs, (request.overlayReadyNs - request.startedNs) / 1_000_000L)
+        if (++completedRequests % 100 == 0) {
+            android.util.Log.i("PitwallCast", "BAKED_GPU_LAYERS maxVideoMs=$maxVideoMs maxOverlayMs=$maxOverlayMs samples=100")
+            maxVideoMs = 0L; maxOverlayMs = 0L
+        }
         request.complete(placement)
     }
 

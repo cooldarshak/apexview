@@ -35,6 +35,7 @@ data class CardState(
     val retired: Boolean = false,
     /** Positive means gained places since the first position observed by this timing stream. */
     val positionChange: Int? = null,
+    val stopped: Boolean = false,
 )
 
 /** The tower shows a single lap. A previous sector supplies only the strip's width. */
@@ -84,9 +85,10 @@ class DriverLaps(
         val inPit: Boolean,
         val toLeader: String?,
         val ahead: String?,
-        /** Out of the race: retired, or stopped on track. */
+        /** Genuine retirement; temporary stop is independent. */
         val retired: Boolean = false,
         val bestLap: SectorCell? = null,
+        val stopped: Boolean = false,
     )
 
     /**
@@ -157,6 +159,7 @@ class DriverLaps(
             ahead = s.ahead,
             bestLap = s.bestLap,
             retired = s.retired,
+            stopped = s.stopped,
             positionChange = states.firstOrNull()?.position?.let { first -> s.position?.let { first - it } },
         )
     }
@@ -200,6 +203,7 @@ object DriverTimingParser {
         var ahead: String? = null
         var inPit = false
         var retired = false
+        var stopped = false
         var laps: Int? = null
         val times = ArrayList<Long>()
         val snaps = ArrayList<DriverLaps.Snapshot>()
@@ -213,13 +217,13 @@ object DriverTimingParser {
 
         private fun matches(previous: DriverLaps.Snapshot): Boolean =
             previous.position == position && previous.gap == gap && previous.inPit == inPit &&
-                previous.toLeader == toLeader && previous.ahead == ahead && previous.retired == retired &&
+                previous.toLeader == toLeader && previous.ahead == ahead && previous.retired == retired && previous.stopped == stopped &&
                 sameCell(previous.lastLap, lastLap) && sameCell(previous.bestLap, bestLap) &&
                 sector.indices.all { sameCell(previous.sectors[it], sector[it]) && sameCell(previous.lapSectors[it], lapSectors[it]) }
 
         fun snap(t: Long) {
             if (snaps.lastOrNull()?.let(::matches) == true) return
-            val copy = DriverLaps.Snapshot(position, sector.toList(), lapSectors.toList(), lastLap, gap, inPit, toLeader, ahead, retired, bestLap)
+            val copy = DriverLaps.Snapshot(position, sector.toList(), lapSectors.toList(), lastLap, gap, inPit, toLeader, ahead, retired, bestLap, stopped)
             if (times.lastOrNull() == t) snaps[snaps.lastIndex] = copy
             else { times += t; snaps += copy }
         }
@@ -357,8 +361,9 @@ object DriverTimingParser {
         d.optString("Position").toIntOrNull()?.let { l.position = it }
         if (d.has("InPit")) l.inPit = d.optBoolean("InPit")
         if (d.optBoolean("PitOut")) l.inPit = false
-        // F1 can clear these transient fields in later deltas; once a driver is out, keep it latched.
-        if (d.optBoolean("Retired") || d.optBoolean("Stopped")) l.retired = true
+        // Sparse deltas do not reset status. Temporary stopping is not retirement.
+        if (d.has("Stopped")) l.stopped = d.optBoolean("Stopped")
+        if (d.optBoolean("Retired")) l.retired = true
         // Qualifying gives the gap to the fastest; races the interval to the car ahead.
         d.optString("TimeDiffToFastest").takeIf { d.has("TimeDiffToFastest") }?.let { l.gap = it.ifEmpty { null } }
         d.optJSONObject("IntervalToPositionAhead")?.let { o ->
@@ -376,6 +381,10 @@ object DriverTimingParser {
         val previousLaps = l.laps
         val staleLap = completed != null && previousLaps != null && completed < previousLaps
         val crossing = completed != null && previousLaps != null && completed > previousLaps
+        if (crossing || d.optBoolean("PitOut")) {
+            if (!d.optBoolean("Retired")) l.retired = false
+            if (!d.optBoolean("Stopped")) l.stopped = false
+        }
         val sectors = d.opt("Sectors")
         if (!staleLap) forEachSector(sectors) { i, sector ->
             // At the line, keep the finished lap intact while applying its final split.

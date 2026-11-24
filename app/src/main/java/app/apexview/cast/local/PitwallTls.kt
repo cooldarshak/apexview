@@ -131,12 +131,25 @@ internal object PitwallTls {
         try { handshake(identity, socket as SSLSocket, false) }
         catch (failure: Throwable) { runCatching { socket.close() }; throw failure }
 
+    internal fun failureClasses(failure: Throwable): String =
+        generateSequence(failure) { current -> current.cause?.takeUnless { it === current } }
+            .take(6).joinToString(">") { it.javaClass.simpleName }
+
     private fun handshake(identity: Identity, socket: SSLSocket, phone: Boolean): Provisional {
         socket.useClientMode = phone
         socket.enabledProtocols = protocols(socket.supportedProtocols)
         if (!phone) socket.needClientAuth = true
         socket.soTimeout = HANDSHAKE_TIMEOUT_MS
-        socket.startHandshake()
+        try {
+            socket.startHandshake()
+        } catch (failure: Exception) {
+            // No peer addresses, certificates, pairing codes or raw exception text.
+            runCatching { android.util.Log.w("PitwallTls",
+                "TLS_HANDSHAKE_FAILURE role=${if (phone) "client" else "server"} protocols=${socket.enabledProtocols.joinToString()} causes=${failureClasses(failure)}") }
+            throw failure
+        }
+        runCatching { android.util.Log.i("PitwallTls",
+            "TLS_HANDSHAKE_OK role=${if (phone) "client" else "server"} protocol=${socket.session.protocol} cipher=${socket.session.cipherSuite}") }
         val peer = socket.session.peerCertificates.singleOrNull() as? X509Certificate
             ?: throw CertificateException("Pitwall peer certificate missing")
         val code = if (phone) PitwallPairingCode.fromCertificates(identity.certificate.encoded, peer.encoded)

@@ -23,11 +23,12 @@ internal class BakedCastArchiveAudio(
     private var nextAudioUs = startPositionUs
     private var lastLoadedSegmentStartUs = Long.MIN_VALUE
     private var closed = false
+    private var completedPlaylist: HlsMediaPlaylist? = null
 
     /** Fetch on IO, not the GL/PixelCopy thread. PTS shares the live scene's zero-based clock. */
     fun readUntil(positionUs: Long): List<BakedCastTransportStream.Sample> {
         check(!closed)
-        val media = readPlaylist(playlistUri)
+        val media = completedPlaylist ?: readPlaylist(playlistUri).also { if (it.hasEndTag) completedPlaylist = it }
         val output = mutableListOf<BakedCastTransportStream.Sample>()
         for (segment in media.segments) {
             val start = segment.relativeStartTimeUs
@@ -125,6 +126,7 @@ internal class BakedCastArchiveAudio(
     override fun close() {
         closed = true
         init.fill(0); init = ByteArray(0)
+        completedPlaylist = null
     }
 }
 

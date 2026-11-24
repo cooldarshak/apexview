@@ -327,7 +327,12 @@ internal class HevcArchiveVodSession(
             // A finite DASH index may seek directly to any advertised chunk. A continuation
             // fragment cannot be advertised as an independent seek point merely because an
             // earlier GOP was inspected. Never feed a decoder a missing-reference picture.
-            require(randomAccess(batches.single())) {
+            val inspected = inputs.indices.map { i ->
+                CmafBoxInspector.inspect(batches.single()[i], inputs[i].report).fragments.single()
+            }
+            require(inspected.all { fragment ->
+                fragment.sampleTimings.first().sampleFlags?.let { (it and 0x00010000L) == 0L } == true
+            }) {
                 "Archive segment starts mid-GOP; independent CMAF segment starts are required for native replay seeking"
             }
             val fetchMs = (System.nanoTime() - started) / 1_000_000L
@@ -343,8 +348,9 @@ internal class HevcArchiveVodSession(
             // Resolve the real per-sample rate before choosing geometry. A smaller
             // atlas that cannot decode at the advertised rate is not eligible.
             val trackScale = requireNotNull(firstTrack.timescale)
-            val firstFragment = CmafBoxInspector.inspect(batches.first().first(), inputs.first().report).fragments.single()
-            val step = firstFragment.sampleTimings.map { requireNotNull(it.durationTicks) }.distinct().single()
+            val firstFragment = inspected.first()
+            val step = requireNotNull(firstFragment.sampleTimings.first().durationTicks)
+            require(firstFragment.sampleTimings.all { it.durationTicks == step }) { "Mixed source sample cadence" }
             require(step > 0L && trackScale > 0L) { "Invalid source sample cadence" }
             val sourceRate = trackScale.toDouble() / step.toDouble()
             val mixedAtlas = if (mixed) requireNotNull(cachedMixedAtlas ?: HevcMixedArchiveAtlasPlan.choose(mixedInputs,
@@ -454,6 +460,8 @@ internal class HevcArchiveVodSession(
                     android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
                         ?.let { (it - first).coerceAtLeast(0L) }
                 }
+                val producerMs = (System.nanoTime() - started) / 1_000_000L
+                val mediaMs = groups[number].durationUs / 1000L
                 android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs " +
                     "composeMs=$compositionMs verifyMs=$verificationMs totalMs=${(System.nanoTime() - started) / 1_000_000L} " +
                     "parseMs=${composed.parseMs} rewriteMs=${composed.rewriteMs} packageMs=${composed.packageMs} " +
@@ -467,7 +475,8 @@ internal class HevcArchiveVodSession(
                     "sourceAnnexBBytesAvoided=${composed.sourceAnnexBBytesAvoided} " +
                     "sourceNalCopyBytesAvoided=${composed.sourceNalCopyBytesAvoided} " +
                     "rewrittenTailStagingBytesAvoided=${composed.rewrittenTailStagingBytesAvoided} " +
-                    "durationMs=${groups[number].durationUs / 1000L} " +
+                    "durationMs=$mediaMs producerSlackMs=${mediaMs - producerMs} " +
+                    "producerSlackAt1_5xMs=${mediaMs * 2 / 3 - producerMs} " +
                     "worker=$worker clock=PLAYER_REQUEST cache=$cacheEntries cachedBytes=$cachedByteCount")
             } finally {
                 composed.initializationSegment.fill(0)

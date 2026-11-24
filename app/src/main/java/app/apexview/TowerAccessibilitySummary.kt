@@ -10,6 +10,7 @@ internal object TowerAccessibilitySummary {
         append("Position ${state.position ?: "unknown"}, $name.")
         when {
             state.retired -> append(" Retired.")
+            state.stopped -> append(" Stopped.")
             state.inPit -> append(" In pit.")
         }
         state.lastLap?.time?.takeIf { it.isNotBlank() }?.let { append(" Last lap $it.") }

@@ -39,7 +39,7 @@ data class CombinedOverlayPlan(
 
 /**
  * Fits n 16:9 tiles into the canvas. In [LayoutMode.FEATURED], slot 0 is the big one and the
- * rest share a strip beside or below it, whichever leaves more picture on screen.
+ * rest share a right-hand strip in landscape or a lower strip in portrait.
  */
 object Layouts {
     internal const val DEFAULT_TV_TOWER_SHARE = 0.34f
@@ -129,16 +129,17 @@ object Layouts {
             // vertically centering the image in the whole left column.
             listOf(tvSingleLandscapeSlot(width, height, feeds.w))
         } else {
-            place(mode, n, feeds.w, feeds.h).map { Slot(it.x + feeds.x, it.y + feeds.y, it.w) }
+            place(mode, n, feeds.w, feeds.h, landscape = !portrait).map { Slot(it.x + feeds.x, it.y + feeds.y, it.w) }
         }
         return CombinedOverlayPlan(slots, feeds, workspace, tower,
             if (tvLandscape && slots.isNotEmpty()) logoMapOver(slots.first()) else map, floating)
     }
 
-    fun place(mode: LayoutMode, n: Int, width: Float, height: Float): List<Slot> = when {
+    fun place(mode: LayoutMode, n: Int, width: Float, height: Float, landscape: Boolean = width > height): List<Slot> = when {
         n == 0 -> emptyList()
         mode == LayoutMode.TILE_TEST && n == 2 -> tileTestPair(width, height)
         mode == LayoutMode.GRID || mode == LayoutMode.TILE_TEST || mode == LayoutMode.SINGLE_DECODER_TEST || n == 1 -> grid(n, 0f, 0f, width, height, center = true)
+        mode == LayoutMode.FEATURED -> mainStrip(n, width, height, landscape)
         else -> featured(n, width, height)
     }
 
@@ -184,6 +185,27 @@ object Layouts {
             val left = ax + (aw - inRow * fit.w) / 2
             Slot(left + (i % fit.cols) * fit.w, top + row * tileH, fit.w)
         }
+    }
+
+    /** Keep the screen orientation when overlay reservations change the feed area. */
+    private fun mainStrip(n: Int, width: Float, height: Float, landscape: Boolean): List<Slot> {
+        val others = n - 1
+        if (landscape) {
+            val mainAreaW = width * 2f / 3f
+            val mainW = min(mainAreaW, height * 16f / 9f)
+            val stripW = min(width - mainAreaW, height / others * 16f / 9f)
+            val stripH = stripW * 9f / 16f
+            val top = (height - others * stripH) / 2f
+            return listOf(Slot((mainAreaW - mainW) / 2f, (height - mainW * 9f / 16f) / 2f, mainW)) +
+                List(others) { i -> Slot(mainAreaW + (width - mainAreaW - stripW) / 2f, top + i * stripH, stripW) }
+        }
+        val mainW = min(width, height * 2f / 3f * 16f / 9f)
+        val mainH = mainW * 9f / 16f
+        val below = bestFit(others, width, height - mainH)
+        val stripH = below.rows * below.w * 9f / 16f
+        val top = (height - mainH - stripH) / 2f
+        return listOf(Slot((width - mainW) / 2f, top, mainW)) +
+            grid(others, 0f, top + mainH, width, stripH, center = false)
     }
 
     private fun featured(n: Int, width: Float, height: Float): List<Slot> {
@@ -241,9 +263,9 @@ object Layouts {
         val candidates = mutableListOf<Arrangement>()
         candidates += place(mode, n, width, height).let { Arrangement(it, largestFree(it, width, height)) }
         for (fraction in listOf(0.25f, 0.3f, 0.35f, 0.4f)) {
-            candidates += place(mode, n, width, height * (1 - fraction))
+            candidates += place(mode, n, width, height * (1 - fraction), width > height)
                 .let { Arrangement(it, largestFree(it, width, height)) }
-            candidates += place(mode, n, width * (1 - fraction), height)
+            candidates += place(mode, n, width * (1 - fraction), height, width > height)
                 .let { Arrangement(it, largestFree(it, width, height)) }
         }
         return candidates
@@ -273,17 +295,17 @@ object Layouts {
         val candidates = mutableListOf<List<Slot>>()
         candidates += place(mode, n, width, height)
         // Exact bands give the tower predictable room at the right or bottom edge.
-        candidates += place(mode, n, (width - panelW).coerceAtLeast(1f), height)
-        candidates += place(mode, n, width, (height - panelH).coerceAtLeast(1f))
+        candidates += place(mode, n, (width - panelW).coerceAtLeast(1f), height, width > height)
+        candidates += place(mode, n, width, (height - panelH).coerceAtLeast(1f), width > height)
         if (minMapSide != null) {
             // Leave a second, non-overlapping band for the map as well.
-            candidates += place(mode, n, (width - panelW).coerceAtLeast(1f), (height - minMapSide).coerceAtLeast(1f))
-            candidates += place(mode, n, (width - minMapSide).coerceAtLeast(1f), (height - panelH).coerceAtLeast(1f))
-            candidates += place(mode, n, (width - panelW).coerceAtLeast(1f), (height - panelH).coerceAtLeast(1f))
+            candidates += place(mode, n, (width - panelW).coerceAtLeast(1f), (height - minMapSide).coerceAtLeast(1f), width > height)
+            candidates += place(mode, n, (width - minMapSide).coerceAtLeast(1f), (height - panelH).coerceAtLeast(1f), width > height)
+            candidates += place(mode, n, (width - panelW).coerceAtLeast(1f), (height - panelH).coerceAtLeast(1f), width > height)
         }
         for (fraction in listOf(0.25f, 0.3f, 0.35f, 0.4f, 0.45f, 0.5f, 0.55f, 0.6f, 0.65f, 0.7f)) {
-            candidates += place(mode, n, width, height * (1f - fraction))
-            candidates += place(mode, n, width * (1f - fraction), height)
+            candidates += place(mode, n, width, height * (1f - fraction), width > height)
+            candidates += place(mode, n, width * (1f - fraction), height, width > height)
         }
 
         if (preferredTower != null) {
@@ -292,7 +314,7 @@ object Layouts {
                 Area(0f, 0f, width, y), Area(0f, y + h, width, height - y - h))
                 .filter { it.w > 1f && it.h > 1f }
                 .forEach { band ->
-                    candidates += place(mode, n, band.w, band.h).map { Slot(it.x + band.x, it.y + band.y, it.w) }
+                    candidates += place(mode, n, band.w, band.h, width > height).map { Slot(it.x + band.x, it.y + band.y, it.w) }
                 }
         }
         var bestKeepsTower = false

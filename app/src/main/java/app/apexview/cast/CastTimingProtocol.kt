@@ -164,7 +164,15 @@ internal object CastTimingProtocol {
                     .put(timing.speeds[n]?.kmhAt(now) ?: JSONObject.NULL).put(timing.speeds[n]?.gearAt(now) ?: JSONObject.NULL))
             }
     }
-    fun readTable(a: JSONArray): Table {
+    fun stoppedDrivers(timing: SessionTiming, now: Long): JSONArray = JSONArray().apply {
+        timing.laps.forEach { (number, laps) ->
+            if (laps.at(now)?.stopped == true) put(number)
+        }
+    }
+    fun readTable(a: JSONArray, stoppedDrivers: JSONArray? = null): Table {
+        val stopped = stoppedDrivers?.let { names ->
+            (0 until names.count(MAX_DRIVERS)).map { names.getString(it) }.toSet()
+        }.orEmpty()
         val tyres = mutableMapOf<String, Tyre?>(); val speeds = mutableMapOf<String, Pair<Int?, Int?>>()
         val rows = (0 until a.count(MAX_DRIVERS)).map { i ->
             val r = a.getJSONArray(i); require(r.length() == 15)
@@ -174,14 +182,15 @@ internal object CastTimingProtocol {
             speeds[n] = r.optionalInt(13)?.coerceIn(0, 500) to r.optionalInt(14)?.coerceIn(0, 8)
             n to CardState(r.optionalInt(1), (0..2).map { readSector(sectors.opt(it)) }, emptyList(), null,
                 readSector(r.opt(5)), r.optionalString(8), r.getBoolean(2), r.optionalString(9), r.optionalString(10),
-                readSector(r.opt(6)), r.getBoolean(3), r.optionalInt(4))
+                readSector(r.opt(6)), r.getBoolean(3), r.optionalInt(4), n in stopped)
         }
         require(rows.map { it.first }.distinct().size == rows.size)
         return Table(rows, tyres, speeds)
     }
     fun encodeFrame(geometryId: String, positionMs: Long, now: Long, density: Float, fontScale: Float,
         app: AppState, timing: SessionTiming?, table: JSONArray, circle: PitCircleData?, stop: PitStopNow?,
-        cars: List<Car>, predictionSteps: Int = V1_SEND_PREDICTION_STEPS): JSONObject {
+        cars: List<Car>, predictionSteps: Int = V1_SEND_PREDICTION_STEPS,
+        stopped: JSONArray = timing?.let { stoppedDrivers(it, now) } ?: JSONArray()): JSONObject {
         require(predictionSteps == V1_SEND_PREDICTION_STEPS || predictionSteps == MAX_PREDICTION_STEPS) {
             "Unsupported Cast prediction horizon"
         }
@@ -206,7 +215,7 @@ internal object CastTimingProtocol {
             } }).put("condition", flags.track.ordinal).put("yellow", JSONArray().apply { flags.yellow.entries.take(64).forEach { put(JSONArray(listOf(it.key, it.value))) } })
             .put("resumption", flags.resumption?.let { JSONArray(listOf(it.announcedUtc, it.atUtc, it.what.safe())) } ?: JSONObject.NULL)
             .put("stop", stop?.let { JSONArray(listOf(it.number, it.carProgress, it.ghostProgress, it.outBehind?.first ?: JSONObject.NULL, it.outBehind?.second ?: 0)) } ?: JSONObject.NULL)
-            .put("circle", encodeCircle(circle)).put("rows", table)
+            .put("circle", encodeCircle(circle)).put("rows", table).put("stoppedDrivers", stopped)
             .put("header", JSONArray(listOf(header.name, header.track, header.color.toArgb(), header.counter, JSONArray(header.weather))))
             .put("message", (timing?.let { noPositionsLine(it, now) } ?: app.mapStatus)?.let(DiagnosticRedaction::redact)?.safe(220) ?: JSONObject.NULL)
     }
@@ -227,7 +236,7 @@ internal object CastTimingProtocol {
         }
     }
 
-    fun decodeFrame(j: JSONObject, table: Table = readTable(j.getJSONArray("rows"))): Frame {
+    fun decodeFrame(j: JSONObject, table: Table = readTable(j.getJSONArray("rows"), j.optJSONArray("stoppedDrivers"))): Frame {
         require(j.getInt("version") == VERSION && j.getString("kind") == "frame")
         val carArray = j.getJSONArray("cars")
         val cars = (0 until carArray.count(MAX_DRIVERS)).map { i -> carArray.getJSONArray(i).let {

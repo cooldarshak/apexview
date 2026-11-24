@@ -56,7 +56,7 @@ internal fun TvTowerRow(
     val fieldKeys = remember(visualKeys.base, visualKeys.sectors, visualKeys.tyre) {
         arrayOf<Any>(visualKeys.base, visualKeys.sectors, visualKeys.tyre)
     }
-    val accessibleSummary = remember(name, state.position, state.inPit, state.retired,
+    val accessibleSummary = remember(name, state.position, state.inPit, state.retired, state.stopped,
         state.lastLap?.time, state.bestLap?.time, state.ahead, state.toLeader,
         tyre?.compound, tyre?.laps) {
         TowerAccessibilitySummary.prepare(name, state, tyre)
@@ -242,6 +242,7 @@ internal data class TowerRowText(
         fun prepare(name: String, state: CardState, kmh: Int?, gear: Int?, speedUnit: String): TowerRowText {
             val lastLap = when {
                 state.retired -> "OUT"
+                state.stopped -> "STOP"
                 state.inPit -> "PIT"
                 else -> state.lastLap?.time?.ifBlank { "–" } ?: "–"
             }

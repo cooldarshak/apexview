@@ -49,6 +49,19 @@ class SpeedTest {
     }
 
     @Test
+    fun gearOnlySamplesAndSpeedStalenessAreIndependent() {
+        val builder = SpeedBuilder()
+        builder.add(1000L, null, 4)
+        builder.add(2000L, 300)
+        builder.add(6000L, 290)
+        val log = builder.build()
+        assertEquals(4, log.gearAt(1000L))
+        assertNull(log.kmhAt(1000L))
+        assertEquals(290, log.kmhAt(6001L))
+        assertNull(log.gearAt(6001L))
+    }
+
+    @Test
     fun milesPerHourAndKilometres() {
         assertEquals(186, speedIn(300, Settings.MPH))
         assertEquals(300, speedIn(300, Settings.KMH))

@@ -33,6 +33,22 @@ class LayoutsTest {
     }
 
     @Test
+    fun landscapeMainAndStripRemainInTheirColumns() {
+        for (count in 2..8) {
+            val slots = Layouts.place(LayoutMode.FEATURED, count, 1920f, 1080f)
+            assertTrue(slots.first().x + slots.first().w <= 1280.01f)
+            assertTrue(slots.drop(1).all { it.x >= 1279.99f })
+            assertTrue(slots.drop(1).zipWithNext().all { (a, b) -> a.y + a.h <= b.y + 0.01f })
+        }
+    }
+
+    @Test
+    fun portraitMainAndStripRemainInTheirRows() {
+        val slots = Layouts.place(LayoutMode.FEATURED, 4, 1080f, 1920f)
+        assertTrue(slots.drop(1).all { it.y >= slots.first().y + slots.first().h - 0.01f })
+    }
+
+    @Test
     fun tileTestingUsesAnEvenTwoFeedGrid() {
         for ((width, height) in listOf(1920f to 1080f, 1080f to 1920f, 1280f to 720f)) {
             val slots = Layouts.place(LayoutMode.TILE_TEST, 2, width, height)

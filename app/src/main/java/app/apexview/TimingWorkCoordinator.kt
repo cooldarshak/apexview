@@ -98,8 +98,24 @@ internal class TimingWorkCoordinator {
         val request = beginSpeed(radioBase) ?: return
         val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                val loaded = fetch()
-                if (completeSpeed(request, loaded)) publish(loaded)
+                var lastFailure: Exception? = null
+                for (attempt in 0..3) {
+                    if (speedRequest !== request || !owns(request.session)) return@launch
+                    try {
+                        val loaded = fetch()
+                        if (loaded.isNotEmpty()) {
+                            if (completeSpeed(request, loaded)) publish(loaded)
+                            return@launch
+                        }
+                        lastFailure = IllegalStateException("Car data archive is empty")
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        lastFailure = error
+                    }
+                    if (attempt < 3) delay(retryDelayMs(attempt))
+                }
+                if (failSpeed(request)) reportFailure(requireNotNull(lastFailure))
             } catch (cancelled: CancellationException) {
                 failSpeed(request)
                 throw cancelled

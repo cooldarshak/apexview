@@ -32,6 +32,13 @@ class PitwallTlsTest {
             store.getCertificate(name) as X509Certificate)
     }
 
+    @Test fun handshakeDiagnosticsContainTypesNotSecretExceptionText() {
+        val failure = javax.net.ssl.SSLHandshakeException("private peer details").apply {
+            initCause(java.security.cert.CertificateException("secret certificate"))
+        }
+        assertEquals("SSLHandshakeException>CertificateException", PitwallTls.failureClasses(failure))
+    }
+
     @Test fun bothControlPeersSeeSameCodeAndOnlyPairedClientReadsMedia() {
         val dir = Files.createTempDirectory("pitwall-tls-test").toFile()
         val executor = Executors.newSingleThreadExecutor()

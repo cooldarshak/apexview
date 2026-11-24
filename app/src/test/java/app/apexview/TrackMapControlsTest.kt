@@ -17,8 +17,10 @@ class TrackMapControlsTest {
     }
 
     @Test
-    fun tvKeepsMapLockControlAvailableForDpadNavigation() {
-        assertTrue(shouldShowMapLockControl(mapLocked = true, isTv = true, temporarilyVisible = false))
+    fun tvHidesIdleLockAndRevealsItForDpadNavigation() {
+        assertFalse(shouldShowMapLockControl(mapLocked = true, isTv = true, temporarilyVisible = false))
+        assertTrue(shouldShowMapLockControl(true, true, false, chromeVisible = true))
+        assertTrue(shouldShowMapLockControl(true, true, false, lockFocused = true))
     }
 
     @Test

@@ -93,9 +93,12 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             "${it.modeId}:${it.physicalWidth}x${it.physicalHeight}@${it.refreshRate}"
         }
         val active = SceneFrameRatePolicy.Mode(mode.modeId, mode.physicalWidth, mode.physicalHeight, mode.refreshRate)
+        val actualOutputFps = SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed,
+            selectedDisplayHz, runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE,
+            pipelineHealthy())
         val seamlessMatches = SceneFrameRatePolicy.matchingSeamlessModes(
             active, modes.map { SceneFrameRatePolicy.Mode(it.modeId, it.physicalWidth, it.physicalHeight, it.refreshRate) },
-            sourceFps, playbackSpeed
+            actualOutputFps.toDouble(), 1f
         ).joinToString(",") { "${it.id}@${it.refreshHz}" }.ifBlank { "none" }
         Log.i("ApexviewSingleDecoder", "SCENE_DISPLAY_MODE reason=$reason displayId=${actualDisplay.displayId} " +
             "activeMode=${mode.modeId} activeHz=${mode.refreshRate} displayRefreshHz=$selectedDisplayHz sourceFps=$sourceFps speed=$playbackSpeed " +
@@ -212,6 +215,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     private fun stopBakedCastOnGl() {
+        lastPreviewRequestNs = 0L
         castWorker?.stop(); castWorker = null; castSession = null
         releaseBakedCastVideoSurface()
     }
@@ -249,7 +253,13 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     private fun detachBakedCastVideo(target: BakedCastGpuCapture.VideoTarget) {
-        gl.post { if (castVideoTarget === target) releaseBakedCastVideoSurface() }
+        gl.post {
+            if (castVideoTarget === target) {
+                releaseBakedCastVideoSurface()
+                lastPreviewRequestNs = 0L
+                scheduleDisplayFrame()
+            }
+        }
     }
 
     private fun releaseBakedCastVideoSurface() {
@@ -355,6 +365,11 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private val frameDemand = SceneFrameDemand()
     private val pacing = SceneFramePacing()
     private val cadenceGate = SceneFrameCadenceGate()
+    private var lastPreviewRequestNs = 0L
+    private var reducedPreviewInWindow = false
+    private fun reduceLocalPreview(): Boolean =
+        castSession?.let { it.receiverRendering && it.previewSuppressionRequested } == true &&
+            castWorker?.directFrameReady == true
     private var displayClock: Choreographer? = null
     private val displayFrame: Choreographer.FrameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNs: Long) = guarded {
@@ -614,7 +629,17 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                     pacing.onTextureLatched(latchedAt, latchedAt - latchStarted, sourceTimestampNs,
                         eglBindNs, callbackArrivalNs = callbackStarted)
                     codecCorrelation?.onTextureLatched(input, sourceTimestampNs, latchedAt)
-                    scheduleDisplayFrame(videoArrived = true)
+                    // Always latch the codec buffer. Reduce only the local preview draws.
+                    if (reduceLocalPreview()) {
+                        reducedPreviewInWindow = true
+                        if (lastPreviewRequestNs == 0L || latchedAt - lastPreviewRequestNs >= 100_000_000L) {
+                            lastPreviewRequestNs = latchedAt
+                            scheduleDisplayFrame(videoArrived = true)
+                        }
+                    } else {
+                        lastPreviewRequestNs = 0L
+                        scheduleDisplayFrame(videoArrived = true)
+                    }
                     } finally { Trace.endSection() }
                 }
             }
@@ -660,7 +685,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             val expectedFps = SceneFrameRatePolicy.composedOutputHint(
                 scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz,
                 thermalForOutput(), pipelineHealthy())
-            codecCorrelation?.recordPipelineWindow(input, now, now - lastLogNs, expectedFps, metrics)
+            if (!reducedPreviewInWindow) codecCorrelation?.recordPipelineWindow(input, now, now - lastLogNs, expectedFps, metrics)
+            else Log.i("ApexviewSingleDecoder", "SCENE_LOCAL_PREVIEW_REDUCED receiver=BAKED_CAST localTargetFps=10")
+            reducedPreviewInWindow = false
             val correlation = codecCorrelation?.snapshotAndReset(input)
             // Five-second trace samples of GL stages, not video scanout.
             Trace.setCounter("PitwallTextureSceneLatched5s",

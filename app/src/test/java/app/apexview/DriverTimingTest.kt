@@ -99,6 +99,22 @@ class DriverTimingTest {
     }
 
     @Test
+    fun stopIsTemporaryAndRetirementClearsOnNewLap() {
+        val stream = listOf(
+            """00:00:01.000{"Lines":{"4":{"Position":"12","NumberOfLaps":3,"Stopped":true}}}""",
+            """00:00:02.000{"Lines":{"4":{"Stopped":false,"Retired":true}}}""",
+            """00:00:03.000{"Lines":{"4":{"Retired":false}}}""",
+            """00:00:04.000{"Lines":{"4":{"NumberOfLaps":4}}}""",
+        ).joinToString("\n")
+        val laps = DriverTimingParser.parse(stream, t0).getValue("4")
+        assertTrue(laps.at(t0 + 1_500)!!.stopped)
+        assertTrue(!laps.at(t0 + 1_500)!!.retired)
+        assertTrue(laps.at(t0 + 3_500)!!.retired)
+        assertTrue(!laps.at(t0 + 4_500)!!.retired)
+        assertTrue(!laps.at(t0 + 4_500)!!.stopped)
+    }
+
+    @Test
     fun aLateFinalSectorStillCountsForTheLapItFinished() {
         val late = listOf(
             "00:00:01.000{\"Lines\":{\"4\":{\"NumberOfLaps\":3}}}",

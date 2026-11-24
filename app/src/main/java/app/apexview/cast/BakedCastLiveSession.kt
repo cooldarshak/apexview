@@ -29,6 +29,11 @@ internal class BakedCastLiveSession(
     private val commentary = ArrayDeque<BakedCastTransportStream.Sample>()
     private var stopped = false
     private var published = 0L
+    private var publishedDurationUs = 0L
+    private var lastPublicationNs = 0L
+    @Volatile var receiverRendering = false
+    @Volatile var previewSuppressionRequested = false
+    @Synchronized fun health(): String = "segments=$published mediaUs=$publishedDurationUs windowUs=${hls.advertisedDurationUs} videoUs=$latestVideoUs audioUs=$latestAudioUs queuedVideo=${video.size} queuedAudio=${commentary.size}"
     private var latestVideoUs = 0L
     private var latestAudioUs = 0L
     private var lastVideoUs = -1L
@@ -87,11 +92,11 @@ internal class BakedCastLiveSession(
     }
 
     @Synchronized private fun publishReadySegments() {
-        if (stopped || video.isEmpty() || commentary.isEmpty()) return
+        while (!stopped && video.isNotEmpty() && commentary.isNotEmpty()) {
         val first = video.first()
         if (!first.keyFrame) return
         // End each segment immediately before the next IDR. Never advertise a mid-GOP segment.
-        val boundary = video.drop(1).firstOrNull { it.keyFrame && it.ptsUs - first.ptsUs >= 800_000 } ?: return
+        val boundary = video.firstOrNull { it.keyFrame && it.ptsUs - first.ptsUs >= 800_000 } ?: return
         if (latestAudioUs < boundary.ptsUs - 50_000) return
         val videoSamples = mutableListOf<BakedCastTransportStream.Sample>()
         while (video.isNotEmpty() && video.first().ptsUs < boundary.ptsUs) videoSamples += video.removeFirst()
@@ -102,9 +107,14 @@ internal class BakedCastLiveSession(
         val duration = boundary.ptsUs - first.ptsUs
         hls.append(videoSamples + audioSamples, duration)
         published++
-        if (!firstSegment.isCompleted) firstSegment.complete(Unit)
-        if (published == 1L || published % 5L == 0L) Log.i("PitwallCast", "BAKED_CAST_SEGMENT count=$published durationUs=$duration " +
+        publishedDurationUs += duration
+        val now = System.nanoTime()
+        val intervalMs = if (lastPublicationNs == 0L) 0L else (now - lastPublicationNs) / 1_000_000
+        lastPublicationNs = now
+        if (!firstSegment.isCompleted && published >= 3 && publishedDurationUs >= 3_000_000L) firstSegment.complete(Unit)
+        if (published <= 3L || published % 5L == 0L) Log.i("PitwallCast", "BAKED_CAST_SEGMENT count=$published durationUs=$duration intervalMs=$intervalMs ${health()} " +
             "picture=${width}x$height feeds=$feeds audioFrames=${audioSamples.size} videoFrames=${videoSamples.size} transport=HLS_AVC_AAC")
+        }
     }
 
     suspend fun awaitPlayable() = firstSegment.await()

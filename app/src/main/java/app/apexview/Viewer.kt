@@ -417,6 +417,10 @@ fun ViewerScreen(app: AppState) {
             else BakedCastVideoPlacement.viewer(1f - sheetSide * AppState.VOTE_SHEET_WIDTH,
                 if (app.inPip) 1f else 1f - lift * band / height, sheetShift / height)
         }
+        LaunchedEffect(bakedSession, app.chromeVisible, app.arranging, app.inPip, app.playing) {
+            bakedSession?.previewSuppressionRequested =
+                !app.chromeVisible && !app.arranging && !app.inPip && app.playing
+        }
         val captureOverlay = remember(bakedSession) {
             bakedSession?.let { BakedCastOverlay({ placement() }, Ink.background.toArgb()) }
         }

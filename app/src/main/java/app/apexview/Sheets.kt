@@ -459,6 +459,11 @@ fun SettingsScreen(app: AppState) {
                     "Software DRM requests Widevine L3. It can allow more simultaneous feeds on some devices; switch it off to use hardware-secure playback."
                 },
             ) {
+                Text(
+                    if (app.isTv) "For multifeed TV playback, start with one decoder and 540p secondary feeds. If buffering persists, reduce secondary quality first. Try normal DRM negotiation; use L3 only if authorized playback requires it."
+                    else "For multifeed phone playback, try one decoder and 1× first. At 1.5×, higher output cadence depends on the actual display refresh, temperature and rendering health.",
+                    style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
                 SwitchRow("Software DRM", s.softwareDrm, s::updateSoftwareDrm)
                 Text("Stream type", style = Type.footnote, modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 2.dp))
                 F1TvApi.PLATFORMS.forEach { platform ->
