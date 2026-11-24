@@ -1,0 +1,437 @@
+# PITWALL TV / APEXVIEW: ARCHITECTURE G ENGINEERING HANDOVER
+**New-chat prompt and consolidated Architecture G plan | 24 November 2026 | Build 842 verified GREEN**
+
+> Instructions to the next engineering chat: read this entire document before acting. Continue the existing project in its existing working branch. Rust is the selected native implementation language. Start with Phase G.0, not a wholesale rewrite. Preserve all existing features and the original 16-workstream plan. Execute implementation only when instructed to proceed. This document is the single active Architecture G handover and engineering ledger; update it in place rather than creating competing G plans.
+
+## 1. Project context and exact starting checkpoint
+
+- Repository: `cooldarshak/apexview`
+- Working branch: `feature/pitwall-performance-audit-plan`
+- Stable branch: `main`
+- Verified working-branch production commit at handover: [b9752ac9115b252c9de1f444662b8eb1252e751e](https://github.com/cooldarshak/apexview/commit/b9752ac9115b252c9de1f444662b8eb1252e751e).
+- Latest verified successful signed APK: [Build 842](https://github.com/cooldarshak/apexview/actions/runs/45432244291). GitHub Actions completed successfully, including Kotlin/JVM tests, independent HEVC/CMAF decode and pixel comparison, signed APK assembly/upload, Android RenderNode/TextureView/SurfaceView and baked capture instrumentation, archive delivery and mutual TLS/legacy identity migration on API 29, 31 and 36.
+- Main at handover: `7d42ae9b3c9178f838717700586bfb7fb50f4ec7`. Do not merge, move or modify main unless explicitly authorized. A subsequent documentation-only commit is not a new tested APK.
+- Authoritative parent plan: [PITWALL_PERFORMANCE_AUDIT_PLAN.md](../PITWALL_PERFORMANCE_AUDIT_PLAN.md). Read all current requirements and still-relevant historical technical constraints, not just the opening status table.
+- Supporting documents: [Build 839 handover](PITWALL_TV_BUILD_839_ENGINEERING_HANDOVER.md), [clear/Widevine parity and named layouts](../CLEAR_WIDEVINE_PARITY_AND_NAMED_LAYOUTS.md), [single-decoder layouts and Cast](../SINGLE_DECODER_LAYOUTS_AND_CAST.md), [HEVC stitching references](../HEVC_STITCHING_REFERENCE_REVIEW.md), [CMAF inspector](../HEVC_CMAF_RUNTIME_INSPECTOR.md), [clear CMAF packaging](../HEVC_CLEAR_CMAF_PACKAGING.md), [50fps profiling](../PITWALL_50FPS_DEVICE_PROFILE.md), [aShell/Perfetto](../perfetto/ASHELL.md) and [local TV receiver](../LOCAL_TV_RECEIVER.md).
+
+Re-fetch branch refs, latest commits, plans, exact CI logs/artifacts and source at the beginning of the new chat. The baseline above is a historical checkpoint, not a guarantee that no new build exists. Never restart the project or create a separate application.
+
+### Previous 14-item batch and 16-workstream status
+
+Build 842 includes the identified coding changes for the 13 selected items; item 6 (Architecture G) was intentionally deferred. This is implementation coverage, not blanket 100% release certification. Build 841 failed real AndroidKeyStore mutual TLS; Build 842 corrected missing DIGEST_NONE for opaque EC TLS signing, migrates old keys once, preserves non-exportable identity and peer pinning, and passed the expanded instrumentation. Affected users may need to pair again following migration. Build 842 also moves baked MPEG-TS mux/publication off the GL callback into a bounded worker, requires 12 seconds of startup media, fences audio cleanup, starts archive CarData on a partial timing preview and tolerates malformed entries. Earlier Build 840/841 improvements include ownership/correlation, cadence, CMAF inspection reuse, warm delivery priority, TV defaults, layout and driver status. Preserve these changes.
+
+| Item | Current source/CI status | Remaining evidence |
+| --- | --- | --- |
+| 1 TLS | Implemented; Android 10/12/16 loopback TLS tests green | Actual Android 12↔16 phone/TV pairing, reconnection and upgrade |
+| 2 Baked HLS buffering | Bounded asynchronous publication and startup/retention policy implemented | Sustained receiver playback, seeks, buffering |
+| 3 GPU capture | Independent overlay acquisition, adaptive pacing, timing diagnostics | Physical throughput and overlay parity |
+| 4 Local presentation/audio | Receiver-confirmed suppression and safe worker retirement | Recovery and A/V continuity |
+| 5 TV HEVC throughput | CMAF reuse, priority and composition slack improvements | Actual TCL throughput and GC attribution |
+| 6 Architecture G | Deferred in previous batch; Rust now selected for the next phase | G.0 and G.1–G.20 |
+| 7 BufferQueue | Surface/codec ownership, timestamp correlation, bounded probes | Physical SurfaceFlinger/FrameTimeline attribution |
+| 8 Frame scheduling | Actual cadence and refresh transition corrections | 50/75fps, 60/120Hz, A/V and thermal measurements |
+| 9 TV map lock | Auto-hide and focus/chrome reveal | Real D-pad navigation |
+| 10 Main + strip | Landscape main-left 2/3, right strip 1/3; portrait bottom | Saved/local/Cast geometry |
+| 11 Driver status | STOP/OUT separation and resume | Live/replay/receiver evidence |
+| 12 Gear telemetry | Independent CarData, sparse gear data, retries and session fences | Actual F1 archive/live coverage |
+| 13 Device defaults | Low-RAM TV 540p, other TV 720p, phone Auto when unset; preferences preserved | Real rendition and thermal results |
+| 14 Verification | Exact Build 842 automated suite passed | Matched physical acceptance matrix |
+
+The original 16-workstream plan remains authoritative for non-G work and release acceptance. The current source coverage must not be confused with a requirement-by-requirement closure audit; strict release acceptance at the checkpoint is 1/16 (previously accepted core scope). Do not overwrite it with invented percentages.
+
+| Original ID | Workstream | Relationship to G / baseline |
+| --- | --- | --- |
+| P0.1 | Segment priority and exact seek | Existing fixes; G.7, G.13, G.14 extend measured delivery |
+| P0.2 | HEVC memory and delivery | G.1–G.12, G.15–G.18; native migration deferred until this project |
+| P0.3 | Video rendering | Preserve current surface ownership and diagnostics; native processing is not a substitute for physical BufferQueue analysis |
+| P0.4 | Map and timing tower | Existing fixes; preserve and test |
+| P1.1 | HEVC atlas | G.3–G.5, G.16, G.20; preserve compatible atlas geometry and decoder count |
+| P1.2 | Refresh matching | Preserve 50/75fps scheduling; measure separately |
+| P1.3 | Quality and thermal | G.17–G.18 plus current defaults |
+| P2.1 | Pitwall/Google Cast | Preserve authenticated local Cast and baked overlays; validate separately |
+| P2.2 | Coordinator architecture | G.6, G.7, G.13 integrate with current ownership and cancellation |
+| P2.3 | Release and updates | G.20, same package/signing/update behavior |
+| P2.4 | Authorization and security | G.5 and G.15; existing login/DRM/TLS invariants |
+| P2.5 | Android TV | G.17–G.20, preserve TV layout and remote behavior |
+| P2.6 | Testing and benchmarks | G.0, G.15, G.16, G.18, exact CI plus physical evidence |
+| P2.7 | Core architecture | Preserve previously accepted one-decoder architecture |
+| P2.8 | Material 3 Expressive UI | Preserve all existing controls and layouts |
+| P2.9 | Closed captions | Preserve rolling HLS captions, alternate programme selection and appearance controls |
+
+## 2. Objective
+
+Improve efficiency, stability and scalability of the existing on-device HEVC stitching engine so playback approaches Netflix/YouTube smoothness, especially on resource-constrained Android TVs. Targets: lower CPU utilization, JVM allocation and GC pressure, memory copying, total process memory, power consumption and thermal load; fewer stutters and frame drops; improved multifeed throughput, seek and feed-switch latency; stable accelerated playback and full race-duration operation. Preserve every existing feature. Quantify improvements; native code is not inherently a universal performance fix.
+
+## 3. Final proposed Architecture G
+
+Official name: **Native Low-Copy On-Device HEVC Stitching with Bounded Memory Arenas**.
+
+Original identified alternative:
+
+```text
+F1 CDN
+  → Pitwall TV shared authenticated HTTP/2 OkHttp pool
+  → native JNI fixed ring-buffer arena
+  → direct ByteBuffer to Media3
+  → existing authorized Widevine CDM
+  → one MediaCodec video decoder
+  → one output surface
+```
+
+Selected implementation:
+
+```text
+F1 CDN
+  ↓
+Existing authenticated OkHttp connection pool (HTTP/2 where negotiated)
+  ↓
+Preallocated bounded Rust input arena
+  ↓
+Rust HEVC/CMAF engine
+  ├─ NAL scanning, VPS/SPS/PPS parsing
+  ├─ Slice-header processing and bit-shifting
+  ├─ Feed synchronization support and exact compatibility checks
+  ├─ CMAF moof/mdat processing and composed sample assembly
+  └─ Encryption metadata validation within existing authorized boundaries
+  ↓
+Bounded reusable native output slots
+  ↓
+Thin JNI bridge / reusable Direct ByteBuffers with explicit leases
+  ↓
+Least-invasive optimized existing Media3 publication
+  ↓
+Existing authorized Widevine CDM for protected content
+  ↓
+One MediaCodec video decoder and one output surface in single-decoder mode
+```
+
+Port the existing stitcher's proven NAL scan, bitstream rewrite and CMAF assembly hot loops, not unrelated authentication, UI, rendering or networking components. Preserve the exact validated algorithms and output invariants. Keep the JVM stitcher as a differential-testing reference and controlled A/B alternative. No cloud hop/server is required. Low-copy deliberately replaces the original aspiration of end-to-end zero-copy: Media3 and MediaCodec may still copy; network-to-native transfers must be counted. Zero per-frame JVM allocations in the stitching hot path is a target, not a promise of no GC across the app. Instant feed switching, no Widevine breakage and elimination of all pauses are not established facts.
+
+## 4. Programming language decision: Rust selected
+
+The user has chosen Rust, not C++, as the native production implementation language. The earlier discussion compared native languages, Google Android research, JNI, multimedia, memory management and production adoption. Rust is the default for G.0 and subsequent G phases subject to feasibility and measured acceptance. Do not start two production ports or silently change the decision. C++ is a small representative benchmark/control and contingency only; if mandatory compatibility or actual playback requirements cannot be met in Rust, document the evidence, investigate the root cause, and seek an explicit architecture decision before changing production language.
+
+Why Rust: native machine-code performance, no GC, ownership and borrowing, compile-time memory safety, safe-Rust data-race prevention, reduced risk of use-after-free/double-free, suitability for concurrent binary parsing, Cargo dependency management, automated testing/fuzzing and long-term maintainability. C++ remains valid and has mature first-party Android NDK/Android Studio integration, multimedia ecosystem/debugging and ARM32 NEON support. Neither language is inherently faster. The architectural improvement comes from bounded native arenas, lower allocation and fewer copies.
+
+Research claims from the previous discussion (verify before quoting): Google's Android engineering publication reportedly found approximately 1,000× lower memory-safety vulnerability density, 4× lower rollback rates for medium/large changes, 25% less code-review time and 20% fewer review revisions. These are Android platform findings with specific definitions, not Pitwall predictions. Verify exact denominators, comparison populations and dates. Review the reported Rust use in Keystore, UWB, networking, virtualization, Google Play services and kernel components; distinguish actual adoption from roadmap. Google favors memory-safe new development rather than indiscriminate C++ rewrites.
+Primary source: https://blog.google/security/rust-in-android-move-fast-fix-things/
+
+## 5. Android mobile and TV compatibility
+
+| Android ABI | Rust target |
+| --- | --- |
+| arm64-v8a | aarch64-linux-android |
+| armeabi-v7a | armv7-linux-androideabi |
+| x86 | i686-linux-android |
+| x86_64 | x86_64-linux-android |
+
+Prioritize ARM64 and ARM32 physical devices; preserve all ABIs already supported by the current APK. Inspect actual ABI list, Android userspace, minSdk, NDK/API selection, installed memory and page size before selecting build flags. A TV can run 32-bit userspace on a 64-bit CPU. Require compatible native ELF and ZIP alignment, runtime behavior on 4KB and 16KB page environments, supported native dependencies and unchanged signed upgrade path. Package Rust as native .so libraries in the existing APK; users need no Rust installation. Avoid hardcoding CPU, vendor or model assumptions. Rust Android targets are supported, but app tooling is less mature than first-party C++ NDK. Verify current supported targets and version compatibility:
+- https://doc.rust-lang.org/rustc/platform-support/android.html
+- https://github.com/android/ndk/issues/1742
+- https://developer.android.com/guide/practices/page-sizes
+
+## 6. Hard mobile-only development constraint
+
+The user develops through ChatGPT Android mobile, Composio, GitHub integration, GitHub Actions, Samsung Galaxy S22 Ultra, TCL 55C655, Bugjaeger, aShell, Android logs and Perfetto. No dedicated laptop or PC. No mandatory Android Studio, local Rust/C++ compiler, local Gradle/CMake, paid cloud development machine or interactive desktop-only debugger. GitHub Actions handles compiling, tests, signed packaging, benchmark execution where feasible and diagnostic processing. Device APK installation, logs, traces and validation are performed from phone/TV. Design a phone-operable workflow for native crashes: build-ID-matched symbols, reproducible fixtures, retained diagnostics, structured logs, offline CI symbolication and tests, rather than requiring local LLDB. Prefer automation and compile-time safety; CI allowances and actual emulator availability still constrain feasibility. Do not promise unrestricted execution or background work.
+
+## 7. Selected technology stack
+
+| Component | Technology |
+| --- | --- |
+| Native stitching engine | Stable Rust |
+| Toolchain/dependency management | Cargo/rustc, pinned rust-toolchain.toml, Cargo.lock |
+| Android native toolchain | Pinned Android NDK |
+| Cross-compilation | Pinned cargo-ndk |
+| JNI | JNI-RS, minimal audited unsafe boundary |
+| High-frequency data transfer | Reusable Direct ByteBuffer plus explicit leases |
+| Memory | Fixed-capacity/adaptive native arenas and bounded queues |
+| HEVC/CMAF | Rust, safe Rust where possible |
+| SIMD | ARM64 NEON only when measured; ARM32 Rust first, optional narrowly scoped audited native kernel only if justified and approved |
+| Networking/authentication | Existing OkHttp and authorized F1 implementation |
+| DRM | Existing Media3/Widevine |
+| Decoding | Existing MediaCodec |
+| UI | Existing Kotlin/Compose |
+| CPU/system/native memory profiling | Simpleperf, Perfetto, heapprofd where supported |
+| Code quality | rustfmt, Clippy, Cargo tests |
+| Verification | Byte-exact differential tests, fuzzing, applicable sanitizers and independent decoder fixtures |
+| CI/CD | Existing GitHub Actions; pinned reproducible versions and retained symbols |
+
+Minimize new dependencies. Commit Cargo.lock, review transitive licenses, pin toolchain and NDK/cargo-ndk/JNI versions after checking compatibility; do not select unverified versions merely because they are latest.
+
+## 8. Research and open-source reference inventory
+
+Reopen these exact references before implementation, verify current source, maturity, licensing and applicability, and record the useful files/algorithms, version or commit, and integration limitations. References are not approved drop-in dependencies. Do not copy code without compatible licensing/attribution; do not bundle entire frameworks where a small safe parser is enough.
+
+| Reference | Engineering relevance and constraints |
+| --- | --- |
+| [Mozilla MP4Parse](https://github.com/mozilla/mp4parse-rust) | Safe ISO BMFF/MP4 parsing, validation and production Rust multimedia experience; assess bounds and supported boxes |
+| [ChromeOS cros-codecs](https://github.com/chromeos/cros-codecs) | H.265 structures and binary parsing; do not adopt ChromeOS hardware decoding in Android |
+| [GStreamer Rust plugins](https://github.com/GStreamer/gst-plugins-rs) | fMP4/CMAF muxing, low latency, buffer management; verify actual implementation |
+| [JNI-RS](https://github.com/jni-rs/jni-rs) | Kotlin/Rust interoperability, Direct ByteBuffer, references, thread and lifetime rules |
+| [cargo-ndk](https://github.com/bbqsrc/cargo-ndk) | ABI builds, packaging and CI |
+| [Mozilla UniFFI](https://github.com/mozilla/uniffi-rs) | Kotlin bindings; compare generated binding costs, prefer minimal direct JNI for hot data |
+| [Mozilla Application Services](https://github.com/mozilla/application-services) | Production Android Rust library integration |
+| [Mullvad VPN](https://github.com/mullvad/mullvadvpn-app) | Compose plus Rust, native packaging/JNI, continuous processing |
+| [Signal libsignal](https://github.com/signalapp/libsignal) | Security-sensitive Rust/JNI and cross-platform NDK |
+| [Jellybeam](https://github.com/packetinspector/jellybeam) | Potential Kotlin/Compose/Media3/Rust Android TV and CI reference; verify repository and maturity, not proof of protected HEVC stitching |
+| [FFmpeg](https://github.com/FFmpeg/FFmpeg) | Multimedia parsing, validation, fixtures and independent decode |
+| [GPAC](https://github.com/gpac/gpac) | ISO BMFF/CMAF reference algorithms |
+| [Bento4](https://github.com/axiomatic-systems/Bento4) | MP4/CMAF box and sample handling |
+
+Official technical sources:
+- https://developer.android.com/training/articles/perf-jni
+- https://developer.android.com/ndk
+- https://developer.android.com/guide/practices/page-sizes
+- https://developer.android.com/ndk/guides/simpleperf
+- https://developer.android.com/ndk/guides/ndk-stack
+- https://developer.android.com/reference/android/media/MediaCodec
+- https://developer.android.com/media/media3
+- https://github.com/androidx/media
+- https://perfetto.dev/
+
+Review earlier project research (Android performance/TV samples, reference HEVC projects and relevant allocation/copy-reduction work) only where applicable. No proprietary SDK, paid OpenF1 or unlicensed code. Links and reported claims from the user's prior discussion are included for Phase G.0 verification, not independently certified in this documentation pass.
+
+## 9. Phase G.0 — mandatory validation before production port
+
+Initial status for every G.0 row: **Not started** (coding/automation/physical evidence open). Treat G.0 as one consolidated phase with meaningful batches and real gates. Build a minimal Rust module and representative benchmarks, not three full engines.
+
+| ID | Required validation and deliverable |
+| --- | --- |
+| G.0.1 | Audit latest JVM stitcher, actual active entry points, clear/protected paths and existing tests |
+| G.0.2 | Identify real remaining allocations/copies, quantify ownership and publication points |
+| G.0.3 | Establish matched CPU/memory/latency baselines on current JVM, both target devices |
+| G.0.4 | Integrate minimal Rust native module behind diagnostic feature gate |
+| G.0.5 | Configure pinned Cargo/rustc/NDK/cargo-ndk/JNI-RS and locked dependencies |
+| G.0.6 | Compile ARM32 and ARM64; preserve all existing ABIs, verify x86_64 emulator |
+| G.0.7 | Integrate into existing GitHub Actions without weakening prior checks |
+| G.0.8 | Verify signed APK packaging and upgrade compatibility |
+| G.0.9 | Verify library loading on S22 and TCL using phone-operable logs |
+| G.0.10 | Verify reusable Direct ByteBuffer interoperability, bounds, read/write ownership |
+| G.0.11 | Prototype fixed-capacity arena, lease/generation and exhaustion behavior |
+| G.0.12 | Representative equivalent JVM/Rust/C++ micro- and fixture benchmarks |
+| G.0.13 | Deterministic output equivalence against current JVM and independent fixtures |
+| G.0.14 | Native ownership/cancellation/seek/close tests including stale lease and races |
+| G.0.15 | 4KB/16KB ELF/APK alignment plus runtime compatibility evidence |
+| G.0.16 | Native crash reporting and build-ID symbolication from mobile-accessible artifacts |
+| G.0.17 | Verify authorized DRM integration unchanged; native prototype does not weaken policy |
+| G.0.18 | Establish physical-device benchmark collection, upload and analysis through phone |
+| G.0.19 | Demonstrate complete mobile-only workflow, no PC required |
+| G.0.20 | Evidence-based final feasibility report for selected Rust, comparison with limited C++ control and go/no-go |
+
+### Benchmarks and decision gate
+
+Use identical algorithms, fixture bytes, outputs, optimization levels, compiler settings and comparable CPU/thermal states. Include realistic clear and synthetic protected-metadata fixtures, source resolutions and multifeed arrangements, not only trivial loops. Benchmark NAL scanning; bitstream read/write; slice-header operations; binary parsing; CMAF fragment assembly; copying/publication; arena allocation; JNI overhead; concurrent buffer ownership. Keep C++ limited to representative kernels; no alternative full player or production C++ engine.
+
+Record p50/p95/p99/max latency, throughput and deadline slack, CPU time, JVM/native allocations and bytes, copied bytes/count by boundary, Java heap/native heap/process PSS/RSS, sustained thermal and power behavior. Distinguish CI host results from ARM physical results; emulator performance is not TCL/S22 evidence. Record fixture hashes, git SHA, versions, ABI, quality/DRM, feed count, speed, device state, capture duration, warmup, repetitions and variance. Compare JVM reference and Rust under equivalent work.
+
+Rust is selected. Go forward if equal or better than C++, or within the proposed approximately 10% trade-off and sufficient actual playback headroom. 10% is not an industry standard; device deadlines and memory ceilings win. If materially slower, profile and correct actual bottlenecks before drawing conclusions. If repeated representative results show an important playback deficit or mandatory compatibility/deployment failure, present evidence and a contingency recommendation to the user. Do not silently change the selected language. G.0 is a real gate; do not assert feasibility merely from a cross-compile or popularity.
+
+## 10. Architecture G master engineering plan — G.1–G.20
+
+All rows start Not started. Update the coding, automated, physical and measured-result columns with exact evidence, not speculative percentages. P0 gates protect correctness, safety and compatibility; P1 work is grouped into coherent follow-up batches. Architecture G extends the original plan; no independent competing roadmap.
+
+| ID | Workstream / required deliverable | Priority | Coding | Automated | Physical / measurement |
+| --- | --- | --- | --- | --- | --- |
+| G.1 | Audit/profile existing JVM stitcher, establish repeatable baseline | P0 | Not started | Pending | Pending |
+| G.2 | Fixed-capacity native input/output memory arenas | P0 | Not started | Pending | Pending |
+| G.3 | Port native HEVC parsing and stitching with exact invariants | P0 | Not started | Pending | Pending |
+| G.4 | Native CMAF moof/mdat assembly, exact sizes/offsets/timestamps | P0 | Not started | Pending | Pending |
+| G.5 | Preserve existing DRM compatibility validations and authorized pipeline | P0 | Not started | Pending | Pending |
+| G.6 | Explicit buffer ownership, leases and lifecycle | P0 | Not started | Pending | Pending |
+| G.7 | Bounded queues, backpressure and deadline-aware producer/consumer coordination | P0 | Not started | Pending | Pending |
+| G.8 | Reusable Direct ByteBuffer integration, checked JNI ownership | P0 | Not started | Pending | Pending |
+| G.9 | Reduce network-to-native copies with measured boundary accounting | P1 | Not started | Pending | Pending |
+| G.10 | Reduce Media3 publication copies without speculative fork | P1 | Not started | Pending | Pending |
+| G.11 | ARM NEON optimization only where profiling justifies it | P1 | Not started | Pending | Pending |
+| G.12 | Allocation-free steady-state stitching hot path where achievable | P1 | Not started | Pending | Pending |
+| G.13 | Cancellation, seek-generation invalidation, stale publication prevention | P1 | Not started | Pending | Pending |
+| G.14 | Compatible feed switching and bounded priority prefetch | P1 | Not started | Pending | Pending |
+| G.15 | Leak detection, fuzzing, sanitizer and safety tests | P0 | Not started | Pending | Pending |
+| G.16 | Byte-for-byte JVM/native differential regression plus independent decode | P0 | Not started | Pending | Pending |
+| G.17 | Adaptive memory budgets for low-RAM devices | P0 | Not started | Pending | Pending |
+| G.18 | Sustained CPU/memory/power/thermal and playback profiling | P0 | Not started | Pending | Pending |
+| G.19 | Preserve every existing playback feature and mode | P0 | Not started | Pending | Pending |
+| G.20 | Android phone/TV ABI, API, alignment and signed update compatibility | P0 | Not started | Pending | Pending |
+
+### Proposed consolidated implementation batches (refine after audit)
+
+- G.0: feasibility, baseline, minimal JNI+arena, pinned toolchain, CI and physical verification. No default-engine change.
+- G-A: correctness foundation — G.1/G.2/G.6/G.7/G.8/G.13/G.15/G.17/G.20; leased bounded memory, cancellation, CI/ABI/diagnostics and controlled engine interface.
+- G-B: exact native HEVC and CMAF port — G.3/G.4/G.5/G.16, with reference-output and independent decode tests; maintain existing authorization and fallback. Start with clear and independently gate protected compatibility.
+- G-C: integration and performance — G.9/G.10/G.11/G.12/G.14, measured copies, frame deadlines, compatible switching and prefetch. Do not optimize unmeasured paths.
+- G-D: parity and production acceptance — G.18/G.19 plus outstanding gates from all earlier rows. Matched A/B physical tests and full-race endurance before making Rust default.
+
+Dependencies overlap intentionally: safety/differential/compatibility checks run throughout, not only in the final batch. User may revise batch boundaries after G.0. Never trigger isolated tiny builds or pretend a failed test is acceptance.
+
+## 11. Native arena and ownership design
+
+Investigate bounded preallocated input/output slabs/ring slots, fixed-capacity pools, explicit producer/consumer state, leases, generation IDs, backpressure, adaptive memory ceilings, overflow/error handling, cancel/seek invalidation, safe shutdown and thread lifecycle. Do not move unbounded JVM memory into native heap. Account for all input, output, scratch, retained JNI views, HTTP buffering, Media3 and codec memory. Include peak and steady-state budget; never reserve an arbitrary large arena for low-RAM TV. Choose capacities from measured actual fragment and feed distributions. Reject malformed or oversized input safely; no unchecked sizes, integer overflow, out-of-bounds or use-after-free.
+
+```text
+FREE → WRITING → READY → READING → RELEASED → FREE
+```
+
+One authoritative owner per writable slot, immutable publication after READY, no recycle until every read lease (Kotlin/Media3/native) ends. Generation changes prevent old seeks from publishing but never invalidate an outstanding pointer early. Bound in-flight work and report backpressure rather than overwriting bytes. On teardown stop accepting work, cancel producers, drain/release leases, join native workers and only then free memory; never block UI/GL unnecessarily. Validate length, capacity, alignment, generation and handle ownership at each JNI transition. Use opaque checked handles, no raw pointers exposed as arbitrary longs. JNI references and thread attach/detach rules must be explicit. Convert native failures to controlled errors, never unwind across JNI, and retain error attribution. Rust memory guarantees stop at unsafe JNI and external owners; keep unsafe localized, documented and reviewed. Test double-release, stale generation, close/read race, queue saturation, repeated seek, cancellation, malformed input, concurrent shutdown and native leak behavior.
+
+## 12. Media3 integration and low-copy limit
+
+Audit the pinned Media3 version and real current custom DataSource/sample delivery, SampleDataQueue, allocator, DecoderInputBuffer, MediaCodec input ownership, DRM and fragment materialization. A native Direct ByteBuffer does not guarantee no copies inside Media3/codec. Map each boundary (network → JVM/native input → parser → assembly → output → Media3 queue → decoder); measure copy count/bytes and allocations, including JNI wrapper allocation. Reuse bounded views rather than creating one wrapper per NAL/frame when feasible. Preserve the existing safe delivery contract and exact seek/length/read semantics. Investigate custom sample delivery only when current APIs and profiling justify it. Prefer the least invasive approach; no Media3 fork or replacement player without separate demonstrated necessity and user approval. Do not claim true end-to-end zero-copy without proof across every boundary.
+
+## 13. DRM and security requirements
+
+Preserve legitimate F1 TV login, entitlement, license acquisition, existing Media3/Widevine CDM and DRM session lifecycle, security-level behavior, secure output, existing encrypted-media compatibility checks and Software DRM setting semantics. Do not decrypt protected media outside the authorized playback pipeline, extract keys, weaken security or bypass DRM. Only process data permitted by existing authorized pipeline; preserve encrypted payload and required metadata invariants. Audit existing validated CBCS ranges, IVs, subsample boundaries, KID/PSSH and alignment checks, and fail closed on unsupported combinations. Do not add speculative protected transformations, export protected pixels/media or send credentials to third parties. Clear output success is not proof of protected compatibility. Verify protected handling separately using existing permitted synthetic metadata fixtures and authorized device playback; never include keys or credentials in diagnostics or benchmark artifacts. Preserve Pitwall mutual TLS/pinning and Google Cast content-policy boundaries.
+
+## 14. Integration and controlled migration
+
+```text
+Existing Playback Coordinator
+  ↓
+Common stitching-engine interface
+  ├─ Existing JVM engine (reference)
+  └─ Rust native engine (diagnostic A/B initially)
+  ↓
+Existing Media3 playback pipeline
+```
+
+Reference JVM engine provides correctness baseline, performance baseline and controlled fallback. Preserve exactly one video decoder in single-decoder mode; engine selection is not decoder-count selection. Multiple-decoder mode remains functional. Prefer feature-gated native selection for controlled A/B, deterministic tests and safe rollback; no silent quality/DRM changes. Keep native module dormant for unsupported modes until explicitly validated; do not hide native errors through unreported fallback. Do not remove working JVM code prematurely. Native default only after G.0, differential, compatibility, authorized playback and physical performance gates pass. Preserve current logs for decoder count, actual source/quality/renderer and frame timing.
+
+## 15. Illustrative repository structure
+
+Adapt to the actual repository; do not duplicate modules or reorganize unrelated application code.
+
+```text
+apexview/
+  app/                         # existing Android application
+  native/
+    Cargo.toml
+    Cargo.lock
+    rust-toolchain.toml
+    src/
+      lib.rs
+      hevc.rs
+      cmaf.rs
+      arena.rs
+      stitcher.rs
+      jni_bridge.rs
+    tests/
+    benches/
+    fuzz/
+  .github/workflows/           # extend existing coordinated workflow
+```
+
+Separate pure Rust algorithms, arena/ownership and JNI. Keep fixture manifests and benchmark contracts reviewable and reproducible. Use the current repository's actual paths discovered during audit.
+
+## 16. GitHub Actions and mobile-operable CI/CD
+
+Extend, do not replace, the existing workflow. Install pinned Rust toolchain, SDK/NDK/cargo-ndk; use locked dependency/cache keys; rustfmt, Clippy, Cargo tests; differential and independent regression tests; applicable fuzzing/sanitizer checks; build all supported ABIs; inspect ELF/ZIP alignment, linked dependencies and native libraries; run existing Kotlin/JVM and emulator tests; package the original signed APK; retain exact matching native debug symbols/build IDs; publish machine-readable benchmark/test reports, redacted diagnostics and symbolication artifacts. Preserve mandatory old gates including Android 10/12/16 TLS and key migration, RenderNode, TextureView/SurfaceView, baked capture, HEVC independent decode and archive delivery. Never weaken gates to obtain green.
+
+CI should allow a phone-only user to install signed APK and access artifacts. Test native library loading and JNI on emulator(s) and real phone/TV; validate 16KB runtime where available and separately report missing hardware evidence. Use caching and meaningful consolidated batches; GitHub Actions limits apply. Protect signing secrets and auth credentials; do not log them or publish protected content. Use reproducible build inputs, compare APK signature, package ID and upgrade behavior; retain symbol artifact matched to exact APK. Where hosted emulators cannot supply an ABI/device/performance result, record blocker, not a false pass.
+
+## 17. Device validation and benchmark matrix
+
+**Samsung Galaxy S22 Ultra:** ARM64, up to 120Hz adaptive. Verify current OS/API, ABI/page size and capabilities from device. Test 60Hz/adaptive 120Hz, portrait/landscape, single/multiple feeds, 1×/1.25×/1.5×/2× where supported, seek/lap seek, sustained multiview and Cast. Use aShell, Bugjaeger and Perfetto from phone.
+
+**TCL 55C655 Android TV:** Android TV 12 reported, approximately 2GB RAM subject to actual verification; inspect actual userspace ABI, available memory/low-RAM status, refresh modes and page size. Test Software DRM ON/OFF where authorized and supported; clear SurfaceView experiment ON/OFF; TextureView/SurfaceView; remote/DPAD and all layouts. Test 1, 3 and more feeds where supported; actual mixed resolutions and per-feed selections; sustained playback. Prior Build 839 user observations: multifeed starts across tested DRM/renderer combinations; three feeds plus map/tower had interruptions. Do not assume Build 842 performance or physical pairing fixed without new captures.
+
+Matched JVM vs Rust A/B: same APK/fixture or exact source versions, source session, quality, clock, codec, render path, speed, layout/overlays, network and thermal conditions; counterbalance test order and record warm/cold results. Run clear and authorized Widevine independently; single and multiple decoder; phone and TV; Google Cast and Pitwall Cast; cold start, seek, restart, feed switch, pause/resume, disconnect, upgrade and full race endurance. For network-dependent cases distinguish CDN stalls from processing delay; record actual frame release/latch/presentation instead of interpreting EGL swaps as scanout. Collect logs/traces in user-accessible artifacts, identify exact build and settings, and report missing evidence. No device-specific hacks.
+
+## 18. Performance goals and acceptance criteria
+
+These are proposed engineering targets, not achieved measurements.
+
+| Metric | Proposed acceptance target |
+| --- | --- |
+| JVM hot-path allocations | Zero steady-state stitching allocations where technically achievable; quantify exceptions |
+| Native heap allocation | Zero steady-state stitching hot-path allocations after setup, bounded memory |
+| Stitching CPU time | Target ≥30% reduction vs matched current JVM baseline |
+| Memory copying | Minimize avoidable copies; count actual copies and bytes |
+| Total process memory | Lower than reference, not JVM-to-native displacement |
+| Native leaks | Zero detected in applicable tests and sustained operation |
+| Video decoder count | Exactly one in single-decoder mode; no regression to multiple decoder |
+| Composed canvas | Preserve existing geometry/resolution behavior |
+| Widevine | No downgrade or authorization change |
+| Audio and features | No A/V regression; all features preserved |
+| Sustained playback | Full race-duration physical validation |
+| Dropped frames/stuttering | Measurable reduction; no unsupported scanout claims |
+| Feed switching / seek | Measurable latency reduction vs reference |
+| Thermal / battery / power | Measurable improvement or no regression |
+| Correctness | Deterministic equivalent output, required byte-exact fixtures, independent decode/pixels and metadata checks |
+| Stability | No new crashes, corruption, lifecycle defects or leaks in agreed acceptance matrix |
+
+For 50fps sources, if every frame is processed:
+
+| Playback speed | Required throughput | Average frame interval |
+| --- | --- | --- |
+| 1× | 50 fps | 20 ms |
+| 1.25× | 62.5 fps | 16 ms |
+| 1.5× | 75 fps | 13.33 ms |
+| 2× | 100 fps | 10 ms |
+
+These are throughput references, not end-to-end deadlines. Segment duration, bursts, feed count, network, buffering, decoder and display add distinct constraints. Measure sustained media-seconds/wall-second, tail latency/deadline slack and actual rendered frames; compare p95/p99 and worst-case behavior, not averages alone. Do not treat microbenchmarks as playback proof. Record measured vs target separately, and explicitly document why any target cannot be achieved on supported hardware.
+
+## 19. Complete feature parity requirement
+
+Retain clear HEVC; authorized Widevine HEVC; single/multiple decoder; single/multifeed; compatible mixed-resolution sources; per-feed quality and adaptive quality; existing composed canvas; Google Cast and Pitwall Cast including baked overlays; commentary selection, A/V synchronization; captions (rolling HLS and alternate programme), CC text size/background opacity; timing tower, track map, gear/speed/lap/driver overlays; TV/main+strip/single/split/grid presets; free/snap layouts; multiple saved named layouts and persistence; positioning/resizing, opacity/font size/dot/abbreviation controls, map lock/DPAD reveal; portrait/landscape; TV remote/DPAD; seek/lap seek/accelerated playback; Continue Watching/delete; login/DRM; all existing settings including Software DRM and clear renderer experiment. Preserve output/screenshot policy, thermal/quality recommendations and receiver compatibility. Verify actual feature wiring in current repo, do not assume earlier implementation is complete or add unsupported mixed-resolution combinations. Test local and Cast geometry, overlay cadence and caption controls. Never trade a working feature for a benchmark score.
+
+## 20. Issues Architecture G will not necessarily solve
+
+Hardware codec throughput limits; vendor MediaCodec defects; secure output and Widevine device policy; display-driven BufferQueue backpressure; surface lifecycle; frame scheduling and 120Hz adaptive behavior; CDN congestion and internet buffering; Google Cast receiver limitations; Media3 internal copies. Continue root-cause investigation in the original plan and isolate effects. A native port cannot by itself guarantee display-level smoothness, instant switching or zero GC across the whole app.
+
+## 21. Architecture G versus cloud stitching
+
+Investigate on-device G first: no added network hop, dedicated cloud costs, server maintenance or free-cloud quota dependency; reuse existing engine and authorized local playback; potential CPU and memory gains. Do not implement cloud stitching in this plan. Cloud remains a separate alternative if measured on-device architecture cannot meet goals, requiring its own authorization/security, cost and latency assessment.
+
+## 22. Hard engineering rules
+
+1. Do not restart project, create duplicate apps or unnecessary branches.
+2. Audit latest repository, plan and CI before changing source.
+3. Preserve original 16-workstream plan; maintain one consolidated G ledger here.
+4. Rust is the chosen production language; validate before port; no full parallel C++ engine.
+5. Group related work into meaningful consolidated changes; no one-/two-line speculative build churn.
+6. Finish agreed coding batch before stopping unless a genuine blocker prevents it; disclose exact unfinished work and verification.
+7. Separate coding, automation, physical acceptance and measured performance. Never assert 100% when partial.
+8. Do not claim speedups, end-to-end zero-copy, instant switching, zero GC, defect-free behavior or hardware acceptance without evidence.
+9. No device-specific hacks, proprietary SDKs, paid OpenF1 or unauthorized dependencies.
+10. Keep login, authorization, DRM, protected output, TLS/pinning, phone, TV and casting intact.
+11. Preserve mobile-only development; no PC or paid development infrastructure requirement.
+12. Use safe Rust wherever possible; audit small unsafe JNI boundaries and never evade safety checks for speed.
+13. Prefer measurable improvements to trends; preserve working functionality during migration.
+14. Keep current signed update and package behavior, tests, and rollback path; do not move main without permission.
+15. Explicitly identify blockers, assumptions and decisions; do not promise unexecuted work or unsupported performance.
+16. Retain one-decoder invariant in single-decoder mode and maintain existing multiple-decoder functionality.
+17. No new source implementation or build from this handover alone. Proceed when explicitly instructed.
+
+## 23. Immediate next-chat execution checklist
+
+1. Connect GitHub and inspect latest main/working branch refs, source, plans, latest successful signed APK and CI logs.
+2. Confirm Build 842 or newer exact baseline; read the existing plan and all relevant handover/reference docs.
+3. Audit current JVM HEVC/CMAF code, protected constraints and Media3 version. Identify genuine remaining allocations/copies and measured bottlenecks after Build 842.
+4. Verify all external references, Rust Android target/toolchain compatibility, page sizes, NDK/JNI/cargo-ndk versions, licenses and actual target ABI.
+5. Update this existing G ledger with evidence, refine measurable acceptance criteria and coherent batch boundaries. Do not create a competing G plan; link from the original plan when implementing G.
+6. Confirm mobile-only CI/device workflow and physical benchmark protocol; identify genuine blockers.
+7. When instructed to implement, begin consolidated Phase G.0. Keep the Rust prototype diagnostic and no production default switch. Establish representative JVM/Rust/C++ control benchmarks and evidence-based go/no-go.
+8. Only after successful G.0, undertake staged G.1–G.20 implementation with reference parity and existing safeguards. If feasibility fails, investigate and report options; do not silently change language or waive gates.
+9. At each consolidated pass verify exact source changes, tests, branch head and workflow result; record physical evidence separately. Do not stop halfway unless blocked.
+
+## 24. Decision and implementation status at this handover
+
+| Item | Status |
+| --- | --- |
+| Latest exact baseline | Build 842 GREEN; b9752ac9115b252c9de1f444662b8eb1252e751e |
+| Existing 13-item coding scope | Addressed in source with green automated suite; real-device acceptance open |
+| Original 16-workstream plan | Preserved; full requirement closure/physical acceptance not certified |
+| Architecture G conceptual design | Discussed and recorded |
+| Language | Rust selected by user |
+| Rust/C++ research | Architectural discussion completed; original references need G.0 verification |
+| Final repository-specific feasibility | G.0 pending |
+| Android mobile/TV support | Supported in principle; actual APK/ABI/runtime proof pending |
+| Mobile-only development | Required; Rust-specific end-to-end workflow not yet demonstrated |
+| Rust CI and module | Not implemented in Architecture G |
+| Native engine | Not implemented |
+| G.0, G.1–G.20 | Not started |
+| Physical Rust benchmark / protected compatibility | Pending |
+| Measured performance gains | None established |
+| Native default or release | Not approved |
+| Main branch | Do not change |
+
+**Final objective:** production-quality, safe, efficient, low-copy Rust stitching that genuinely improves Android phone and TV playback while preserving all existing Pitwall TV features, authorized security boundaries and the mobile-only workflow. Build 842 is the reference, not an excuse to rewrite functioning components. Begin with measured feasibility, then complete the agreed consolidated work.
