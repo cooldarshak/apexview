@@ -33,15 +33,23 @@ internal class FrameThinner {
     private var nextDueUs = C.TIME_UNSET
     /** The stream's own time between frames, learnt from the frames themselves. */
     private var intervalUs = 0L
+    private var previousCapFps = Float.NaN
+
+    fun estimatedSourceFps(): Double = if (intervalUs > 0L) 1_000_000.0 / intervalUs else 0.0
 
     fun reset() {
         lastPtsUs = C.TIME_UNSET
         nextDueUs = C.TIME_UNSET
         intervalUs = 0L
+        previousCapFps = Float.NaN
     }
 
-    /** Whether to show the frame at [ptsUs] while playing at [speed]. */
-    fun keep(ptsUs: Long, speed: Float): Boolean {
+    /**
+     * outputCapFps is the presentation capability, NOT the media timebase.
+     * The default remains source-fps bounded for legacy callers and multiple
+     * decoder mode. Composed SINGLE may use 75fps at 1.5x on a cool 120Hz phone.
+     */
+    fun keep(ptsUs: Long, speed: Float, outputCapFps: Float = Float.NaN): Boolean {
         val last = lastPtsUs
         lastPtsUs = ptsUs
         if (last != C.TIME_UNSET && ptsUs < last) {
@@ -51,14 +59,24 @@ internal class FrameThinner {
             val gap = ptsUs - last
             if (gap in 1..MAX_INTERVAL_US && (intervalUs == 0L || gap < intervalUs)) intervalUs = gap
         }
+        // At an adaptive-mode/thermal change, restart the skip schedule at the
+        // next real picture. Never carry a stale 50fps skip deadline into 75fps.
+        val fallback = if (intervalUs > 0L) 1_000_000f / intervalUs else 0f
+        val cap = outputCapFps.takeIf { it.isFinite() && it > 0f } ?: fallback
+        if (cap > 0f && (!previousCapFps.isFinite() ||
+                kotlin.math.abs(cap - previousCapFps) >= 0.5f)) {
+            nextDueUs = C.TIME_UNSET
+            previousCapFps = cap
+        }
+        val step = if (cap > 0f)
+            ((1_000_000.0 * speed / cap).toLong()).coerceAtLeast(intervalUs)
+        else (intervalUs * speed).toLong()
         val due = nextDueUs
-        // The sync's small nudges around normal speed don't need any skipping.
         if (speed <= THIN_ABOVE || intervalUs == 0L || due == C.TIME_UNSET) {
-            nextDueUs = ptsUs + (intervalUs * speed).toLong()
+            nextDueUs = ptsUs + step
             return true
         }
         if (ptsUs < due - intervalUs / 2) return false
-        val step = (intervalUs * speed).toLong()
         // After a gap (frames the player skipped itself), count on from this one.
         nextDueUs = if (due + step <= ptsUs) ptsUs + step else due + step
         return true
@@ -108,6 +126,7 @@ private class ThinningVideoRenderer(
     fallback: Boolean,
     handler: Handler?,
     listener: VideoRendererEventListener?,
+    private val outputCadence: AdaptivePlaybackCadenceObserver,
 ) : MediaCodecVideoRenderer(
     context, DefaultMediaCodecAdapterFactory(context), selector, joiningMs, fallback, handler, listener,
     DefaultRenderersFactory.MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY,
@@ -165,20 +184,27 @@ private class ThinningVideoRenderer(
     }
 
     override fun renderOutputBufferV21(codec: MediaCodecAdapter, index: Int, presentationTimeUs: Long, releaseTimeNs: Long) {
-        if (thinner.keep(presentationTimeUs, playbackSpeed)) super.renderOutputBufferV21(codec, index, presentationTimeUs, releaseTimeNs)
+        if (thinner.keep(presentationTimeUs, playbackSpeed,
+                outputCadence.outputFps(thinner.estimatedSourceFps(), playbackSpeed)))
+            super.renderOutputBufferV21(codec, index, presentationTimeUs, releaseTimeNs)
         else skipOutputBuffer(codec, index, presentationTimeUs)
     }
 
     @Deprecated("Deprecated in Java")
     override fun renderOutputBuffer(codec: MediaCodecAdapter, index: Int, presentationTimeUs: Long) {
-        if (thinner.keep(presentationTimeUs, playbackSpeed)) @Suppress("DEPRECATION") super.renderOutputBuffer(codec, index, presentationTimeUs)
+        if (thinner.keep(presentationTimeUs, playbackSpeed,
+                outputCadence.outputFps(thinner.estimatedSourceFps(), playbackSpeed)))
+            @Suppress("DEPRECATION") super.renderOutputBuffer(codec, index, presentationTimeUs)
         else skipOutputBuffer(codec, index, presentationTimeUs)
     }
 }
 
 /** The usual renderers, with the video one thinning frames when sped up. */
 @OptIn(UnstableApi::class)
-internal class ThinningRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
+internal class ThinningRenderersFactory(
+    context: Context,
+    private val outputCadence: AdaptivePlaybackCadenceObserver = AdaptivePlaybackCadenceObserver(context),
+) : DefaultRenderersFactory(context) {
     override fun buildVideoRenderers(
         context: Context,
         extensionRendererMode: Int,
@@ -189,6 +215,7 @@ internal class ThinningRenderersFactory(context: Context) : DefaultRenderersFact
         allowedVideoJoiningTimeMs: Long,
         out: ArrayList<Renderer>,
     ) {
-        out.add(ThinningVideoRenderer(context, mediaCodecSelector, allowedVideoJoiningTimeMs, enableDecoderFallback, eventHandler, eventListener))
+        out.add(ThinningVideoRenderer(context, mediaCodecSelector, allowedVideoJoiningTimeMs,
+            enableDecoderFallback, eventHandler, eventListener, outputCadence))
     }
 }

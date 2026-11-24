@@ -17,5 +17,7 @@ class SceneBufferQueueEvidenceTest {
             SceneBufferQueueEvidence.stage(90, 80, 2, 0, 0))
         assertEquals(SceneBufferQueueEvidence.Stage.NO_LATCH_OBSERVED,
             SceneBufferQueueEvidence.stage(0, 0, 0, 0, 0))
+        assertEquals(SceneBufferQueueEvidence.Stage.GL_OUTPUT_UNAVAILABLE,
+            SceneBufferQueueEvidence.stage(0, 0, 0, 0, 2))
     }
 }

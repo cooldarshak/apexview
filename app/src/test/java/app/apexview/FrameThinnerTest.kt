@@ -28,6 +28,31 @@ class FrameThinnerTest {
     }
 
     @Test
+    fun composedSingleAt120HzCanPresentEveryFrameAtOnePointFiveX() {
+        val thinner = FrameThinner()
+        val frames = (0 until 300).count { thinner.keep(it * 20_000L, 1.5f, 75f) }
+        assertEquals(300, frames, 3)
+    }
+
+    @Test
+    fun acceleratedVideoFallsBackTo50OnFixed60HzOrHighThermal() {
+        val thinner = FrameThinner()
+        val frames = (0 until 300).count { thinner.keep(it * 20_000L, 1.5f, 50f) }
+        assertEquals(200, frames, 3)
+    }
+
+    @Test
+    fun suddenRefreshChangeResetsThePacingDeadlineWithoutSeekOrStall() {
+        val thinner = FrameThinner()
+        (0 until 100).forEach { thinner.keep(it * 20_000L, 1.5f, 50f) }
+        // The very first picture after the mode/cap transition must be shown.
+        assertEquals(true, thinner.keep(2_000_000L, 1.5f, 75f))
+        val following = (101 until 201).count { thinner.keep(it * 20_000L, 1.5f, 75f) }
+        assertEquals(100, following, 2)
+        assertEquals(true, thinner.keep(4_020_000L, 1.5f, 50f))
+    }
+
+    @Test
     fun skipsEvenly() {
         val thinner = FrameThinner()
         val pattern = (0 until 12).map { thinner.keep(it * 20_000L, 1.5f) }

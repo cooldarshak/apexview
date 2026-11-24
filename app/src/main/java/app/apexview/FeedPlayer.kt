@@ -153,6 +153,9 @@ class FeedPlayer(
     var driftMs: Long? = null
 
     private val createdAt = android.os.SystemClock.elapsedRealtime()
+    // Per-player controller. Never promotes a MULTIPLE-decoder source feed to
+    // accelerated full-rate output or creates another decoder/DRM session.
+    private val outputCadence = AdaptivePlaybackCadenceObserver(context)
     private val initialVideoEnabled = startWithVideo
     private val initialStartPositionMs = startMs
     private lateinit var originalMediaItem: MediaItem
@@ -445,7 +448,7 @@ class FeedPlayer(
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(DefaultLoadControl.DEFAULT_MIN_BUFFER_MS, DefaultLoadControl.DEFAULT_MAX_BUFFER_MS, 1_000, 2_000)
             .build()
-        player = ExoPlayer.Builder(context, ThinningRenderersFactory(context))
+        player = ExoPlayer.Builder(context, ThinningRenderersFactory(context, outputCadence))
             .setMediaSourceFactory(sources)
             .setLoadControl(loadControl)
             .setTrackSelector(sourceTrackSelector)
@@ -909,6 +912,7 @@ class FeedPlayer(
 
             val previous = protectedLiveDashSource
             protectedLiveDashSource = nextSource
+            outputCadence.composedSingle = true
             videoSuppressedByProtectedComposition = false
             videoOn = !remotePlaybackSuspended
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
@@ -924,6 +928,7 @@ class FeedPlayer(
             // receives ownership. Clean that detached encrypted window here.
             if (!publisherStarted) window.zero()
             nextSource.release()
+            outputCadence.composedSingle = protectedLiveDashSource != null || archiveVodSession != null
             throw error
         } finally {
             widevinePssh?.fill(0)
@@ -943,6 +948,7 @@ class FeedPlayer(
         firstFrameRendered = false; error = null; problem = null
         if (archiveVodSession !== session) archiveVodSession?.close()
         archiveVodSession = session
+        outputCadence.composedSingle = true
         videoSuppressedByProtectedComposition = false
         videoOn = !remotePlaybackSuspended
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
@@ -959,7 +965,10 @@ class FeedPlayer(
         return true
     }
 
-    internal fun releaseArchiveOwnership() { archiveVodSession?.close(); archiveVodSession = null }
+    internal fun releaseArchiveOwnership() {
+        archiveVodSession?.close(); archiveVodSession = null
+        outputCadence.composedSingle = protectedLiveDashSource != null
+    }
 
     internal fun prioritizeArchiveSeek(positionMs: Long) { archiveVodSession?.prioritizeSeek(positionMs) }
 
@@ -1077,6 +1086,7 @@ class FeedPlayer(
 
     /** Restores this player's original feed and releases its bounded composed-media window. */
     fun stopProtectedComposedPlayback(positionMs: Long? = null, playWhenReady: Boolean = true, enableVideo: Boolean = initialVideoEnabled) {
+        outputCadence.composedSingle = false
         protectedLiveDashSource?.release()
         protectedLiveDashSource = null
         archiveVodSession?.close()
@@ -1213,16 +1223,22 @@ class FeedPlayer(
         // The owner is terminal; repeated stop/remove/dispose must not release
         // Media3 (and its DRM session manager) a second time.
         if (!releaseGate.beginRelease()) return
+        outputCadence.composedSingle = false
         sceneCodecCorrelation.active = false
         sceneCodecCorrelation.reset()
         val archive = archiveVodSession
         archiveVodSession = null
         val protectedSource = protectedLiveDashSource
         protectedLiveDashSource = null
+        // Media3 owns the codec producer and DRM session. Close it before
+        // zeroing/releasing the DataSource's backing CMAF buffers. Closing the
+        // source first raced in-flight Media3 reads and codec handoff during
+        // rapid seeks / transitions. The finally chain still closes every
+        // owned source even if a platform player release fails.
         try {
-            archive?.close()
+            player.release()
         } finally {
-            try { protectedSource?.release() } finally { player.release() }
+            try { archive?.close() } finally { protectedSource?.release() }
         }
     }
 

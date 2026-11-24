@@ -1,5 +1,7 @@
 package app.apexview.scene
 
+import app.apexview.AdaptivePlaybackCadence
+
 /** A rendering hint, never a reason to change decoder count or fail video playback. */
 internal object SceneFrameRatePolicy {
     /** Zero removes a stale hint when the scene's media cadence is unknown. */
@@ -16,12 +18,10 @@ internal object SceneFrameRatePolicy {
      * thinned to ~50 output frames/s. Keep the platform vote honest; do not
      * conflate the media clock with submitted pictures.
      */
-    fun composedOutputHint(sourceFramesPerSecond: Double, playbackSpeed: Float = 1f): Float {
-        val unthinned = hint(sourceFramesPerSecond, playbackSpeed)
-        return if (unthinned == 0f) 0f
-        else if (playbackSpeed > 1.15f) minOf(unthinned, sourceFramesPerSecond.toFloat())
-        else unthinned
-    }
+    fun composedOutputHint(sourceFramesPerSecond: Double, playbackSpeed: Float = 1f,
+                           displayHz: Float = 0f, thermalStatus: Int = Int.MAX_VALUE): Float =
+        AdaptivePlaybackCadence.outputFps(sourceFramesPerSecond, playbackSpeed,
+            displayHz, thermalStatus, composedSingle = true)
 
     /** Integral display-to-video cadence is a diagnostic, NOT observed scanout.
      * The Surface.setFrameRate policy remains seamless-only. */

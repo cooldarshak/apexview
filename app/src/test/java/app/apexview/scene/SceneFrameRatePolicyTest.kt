@@ -83,6 +83,15 @@ class SceneFrameRatePolicyTest {
         assertEquals(4, SceneFrameRatePolicy.matchingSeamlessModes(active, available, 50.0, 1f).first().id)
     }
 
+    @Test fun adaptiveModeHintMatchesDecoderOutputAndThermalFallback() {
+        assertEquals(75f, SceneFrameRatePolicy.composedOutputHint(50.0, 1.5f, 120f, 0), 0f)
+        assertEquals(75f, SceneFrameRatePolicy.composedOutputHint(50.0, 1.5f, 96f, 1), 0f)
+        assertEquals(50f, SceneFrameRatePolicy.composedOutputHint(50.0, 1.5f, 60f, 0), 0f)
+        assertEquals(50f, SceneFrameRatePolicy.composedOutputHint(50.0, 1.5f, 120f, 3), 0f)
+        assertEquals(50f, SceneFrameRatePolicy.composedOutputHint(50.0, 1.5f), 0f)
+        assertEquals(75f, SceneFrameRatePolicy.hint(50.0, 1.5f), 0f)
+    }
+
     @Test fun rejectsUnknownOrInvalidCadenceInsteadOfForcingARefreshSwitch() {
         listOf(0.0, -50.0, Double.NaN, Double.POSITIVE_INFINITY, 300.0).forEach {
             assertEquals(0f, SceneFrameRatePolicy.hint(it), 0f)

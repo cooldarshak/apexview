@@ -49,6 +49,19 @@ class EnduranceMatrixTest(unittest.TestCase):
         self.assertTrue(refresh_issues(old, 120))
         self.assertTrue(refresh_issues(stable, 60))
 
+    def test_adaptive_refresh_does_not_confuse_normal_switch_with_fixed_mode_failure(self):
+        base = "PitwallFrames: role=player frames=120 intervalMs=2000 "
+        adaptive = summarize(base + "refreshMinHz=60 refreshMaxHz=120")
+        self.assertEqual([], refresh_issues(adaptive, 120, "ADAPTIVE"))
+        self.assertTrue(refresh_issues(adaptive, 120, "FIXED"))
+        invalid = summarize(base + "refreshMinHz=60 refreshMaxHz=144")
+        self.assertTrue(refresh_issues(invalid, 120, "ADAPTIVE"))
+        unknown = summarize(base + "refreshRate=120")
+        self.assertTrue(refresh_issues(unknown, 120, "ADAPTIVE"))
+        self.assertEqual("ADAPTIVE", self.source(display_policy="ADAPTIVE").display_policy)
+        with self.assertRaisesRegex(ValueError, "Invalid playback"):
+            self.source(display_policy="FORCE_120")
+
     def test_does_not_accept_invented_modes_or_missing_capture_metadata(self):
         with self.assertRaisesRegex(ValueError, "Invalid playback"):
             self.source(decoder_mode="SINGLE_PLUS_HIDDEN_DECODERS")

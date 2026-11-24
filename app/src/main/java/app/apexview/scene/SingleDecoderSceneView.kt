@@ -42,18 +42,39 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         override fun run() {
             if (released || !isAttachedToWindow) return
             val postedAtNs = System.nanoTime()
-            gl.post { if (!released) pacing.onGlQueueProbe(System.nanoTime() - postedAtNs) }
+            gl.post { if (!released) {
+                pacing.onGlQueueProbe(System.nanoTime() - postedAtNs)
+                applyOutputFrameRateHint()
+            } }
             main.postDelayed(this, 250L)
         }
     }
     private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private var previousModeSignature: String? = null
     @Volatile private var selectedDisplayHz = 0f
+    private val outputPower = context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+    private var lastThermalReadMs = Long.MIN_VALUE
+    private var cachedThermal = Int.MAX_VALUE
+
+    /** GL-looper only; refresh at most once per second, never query Binder per frame. */
+    private fun thermalForOutput(): Int {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (lastThermalReadMs == Long.MIN_VALUE || now < lastThermalReadMs ||
+            now - lastThermalReadMs >= 1000L) {
+            cachedThermal = runCatching { outputPower?.currentThermalStatus }
+                .getOrNull() ?: Int.MAX_VALUE
+            lastThermalReadMs = now
+        }
+        return cachedThermal
+    }
     private val modeListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = Unit
         override fun onDisplayRemoved(displayId: Int) = Unit
         override fun onDisplayChanged(displayId: Int) {
-            if (rootView.display?.displayId == displayId) logDisplayMode("mode-changed")
+            if (rootView.display?.displayId == displayId) {
+                logDisplayMode("mode-changed")
+                gl.post { if (!released) applyOutputFrameRateHint() }
+            }
         }
     }
 
@@ -78,7 +99,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         Log.i("ApexviewSingleDecoder", "SCENE_DISPLAY_MODE reason=$reason displayId=${actualDisplay.displayId} " +
             "activeMode=${mode.modeId} activeHz=${mode.refreshRate} displayRefreshHz=$selectedDisplayHz sourceFps=$sourceFps speed=$playbackSpeed " +
             "effectiveFps=${SceneFrameRatePolicy.hint(sourceFps, playbackSpeed)} " +
-            "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed)} " +
+            "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed,
+                selectedDisplayHz, runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE)} " +
             "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
             "supportedModes=$available sameResolutionIntegralModes=$seamlessMatches " +
             "modeSwitchIssuedByApp=false physicalPresentation=NOT_MEASURED")
@@ -93,14 +115,35 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
      * Clear the producer on Media3's application thread BEFORE GL disposes
      * the consumer when the output is replaced, destroyed or released.
      * DequeueTimeout=0 is nonblocking, not proof of a network stall. */
+    private var attachedCodecPlayer: ExoPlayer? = null
+    private var attachedCodecSurface: Surface? = null
+    @Volatile private var inputGeneration = -1L
+
+    /** The Media3 application looper owns attach/detach, never the GL looper. */
     private fun detachDecoderInput(reason: String) {
-        val old = input ?: return
-        val owner = player ?: return
+        val old = attachedCodecSurface ?: return
+        val owner = attachedCodecPlayer ?: return
+        attachedCodecSurface = null
+        attachedCodecPlayer = null
         owner.clearVideoSurface(old)
         Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_DETACH " +
             "renderer=TextureView reason=$reason surfaceId=${System.identityHashCode(old)} " +
-            "outputEpoch=${surfaceLifetime.generation()} owner=Media3 " +
-            "physicalQueueDepth=NOT_MEASURED")
+            "inputEpoch=$inputGeneration outputEpoch=${surfaceLifetime.generation()} " +
+            "owner=Media3 physicalQueueDepth=NOT_MEASURED")
+    }
+
+    private fun attachDecoderInput(surface: Surface, epoch: Long) {
+        if (released || input !== surface || inputGeneration != epoch ||
+            !surfaceLifetime.matches(epoch) || !surface.isValid) return
+        val owner = player ?: return
+        if (attachedCodecPlayer === owner && attachedCodecSurface === surface) return
+        detachDecoderInput("owner-or-surface-changed")
+        owner.setVideoSurface(surface)
+        attachedCodecPlayer = owner
+        attachedCodecSurface = surface
+        Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_ATTACH " +
+            "renderer=TextureView surfaceId=${System.identityHashCode(surface)} " +
+            "inputEpoch=$epoch owner=Media3")
     }
     var onFailure: (String) -> Unit = {}
     var onFirstFrame: () -> Unit = {}
@@ -265,7 +308,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         override fun doFrame(frameTimeNs: Long) = guarded {
             val callbackStarted = System.nanoTime()
             if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
-                    frameTimeNs, scene?.sourceFrameRate ?: 0.0, selectedDisplayHz, playbackSpeed)) {
+                    frameTimeNs, scene?.sourceFrameRate ?: 0.0, selectedDisplayHz,
+                    playbackSpeed, thermalForOutput())) {
                 pacing.onPacingDeferred()
                 Trace.beginSection("PitwallPacingDefer")
                 try { displayClock?.postFrameCallback(this) } finally { Trace.endSection() }
@@ -299,7 +343,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private fun applyOutputFrameRateHint() {
         if (Build.VERSION.SDK_INT < 30) return
         val surface = outputSurface ?: return
-        val fps = SceneFrameRatePolicy.composedOutputHint(scene?.sourceFrameRate ?: 0.0, playbackSpeed)
+        val fps = SceneFrameRatePolicy.composedOutputHint(
+            scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz, thermalForOutput())
         if (fps == hintedFrameRate) return
         try {
             if (Build.VERSION.SDK_INT >= 31) {
@@ -361,7 +406,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         if (player !== nextPlayer) {
             detachDecoderInput("player-replaced")
             player = nextPlayer
-            input?.let { nextPlayer.setVideoSurface(it) }
+            input?.let { attachDecoderInput(it, inputGeneration) }
         }
         if (changed || speedChanged || bindingChanged) {
             main.post { if (!released) logDisplayMode(if (speedChanged) "speed-changed" else "source-changed") }
@@ -526,14 +571,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }, gl)
         val surface = Surface(frames); input = surface
         val lifetime = surfaceLifetime.generation()
-        post {
-            if (!released && input === surface && surfaceLifetime.matches(lifetime)) {
-                player?.setVideoSurface(surface)
-                Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_ATTACH " +
-                    "renderer=TextureView surfaceId=${System.identityHashCode(surface)} " +
-                    "outputEpoch=$lifetime owner=Media3")
-            }
-        }
+        inputGeneration = lifetime
+        post { attachDecoderInput(surface, lifetime) }
     }
 
     private data class DrawTiming(val glDrawNs: Long, val swapNs: Long)
@@ -656,6 +695,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         input?.let { Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_RELEASE " +
             "renderer=TextureView surfaceId=${System.identityHashCode(it)} " +
             "outputEpoch=${surfaceLifetime.generation()} thread=GL") }
+        inputGeneration = -1L
         input?.release(); input = null
         decoderTexture?.release(); decoderTexture = null; hasFrame = false
         firstFrameReported = false

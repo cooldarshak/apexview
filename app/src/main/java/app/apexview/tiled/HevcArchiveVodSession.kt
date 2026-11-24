@@ -68,6 +68,37 @@ internal class HevcArchiveVodSession(
         },
     )
     @Volatile private var cachedMixedAtlas: HevcMixedArchiveAtlasPlan.Plan? = null
+
+    // Sources, SPS/PPS and coded atlas geometry cannot change within this one
+    // finite CMAF session. Previously every ~5.76s segment reallocated source
+    // descriptors, searched the uniform atlas and reconstructed all tile cells.
+    // Keep the immutable geometry once; each fragment still independently
+    // validates its HEVC initialization, sync picture and sample timing.
+    private val sourceTiles by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        inputs.map { input ->
+            val cfg = requireNotNull(input.report.tracks.single { it.handler == "vide" }.hevcConfiguration)
+            HevcMixedArchiveAtlasPlan.Source(cfg.vps.single(), cfg.sps.single(), cfg.pps.single())
+        }
+    }
+    private val uniformAtlasPlan: HevcArchiveAtlasPlan? by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        val sps = sourceTiles.first().sps
+        HevcArchiveAtlasPlan.choose(inputs.size, sps.width, sps.height,
+            maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT)
+    }
+    private val uniformCells: List<HevcTizenGridComposer.CellSelection> by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        val plan = requireNotNull(uniformAtlasPlan) { "No valid equal-source atlas geometry" }
+        val pps = sourceTiles.first().pps
+        val columns = if (pps.tilesEnabled) pps.numTileColumns else 1
+        val rows = if (pps.tilesEnabled) pps.numTileRows else 1
+        (0 until plan.columns * plan.rows).flatMap { slot ->
+            val feed = slot.coerceAtMost(inputs.lastIndex)
+            (0 until rows).flatMap { row -> (0 until columns).map { column ->
+                HevcTizenGridComposer.CellSelection(feed, row * columns + column,
+                    (slot % plan.columns) * columns + column,
+                    (slot / plan.columns) * rows + row)
+            } }
+        }
+    }
     // Never queue foreground network requests behind speculative prefetch I/O. Each lane is
     // bounded to four per-feed requests and seek cancellation interrupts the warm lane.
     private val fetchers = Executors.newFixedThreadPool(inputs.size.coerceIn(1, 4)) { r -> Thread(r, "ApexviewVodFetch").apply { isDaemon = true } }
@@ -262,10 +293,7 @@ internal class HevcArchiveVodSession(
             val sourcePps = config.pps.single()
             val columns = if (sourcePps.tilesEnabled) sourcePps.numTileColumns else 1
             val rows = if (sourcePps.tilesEnabled) sourcePps.numTileRows else 1
-            val mixedInputs = inputs.map { input ->
-                val hvc = requireNotNull(input.report.tracks.single { it.handler == "vide" }.hevcConfiguration)
-                HevcMixedArchiveAtlasPlan.Source(hvc.vps.single(), hvc.sps.single(), hvc.pps.single())
-            }
+            val mixedInputs = sourceTiles
             val mixed = mixedInputs.any { it.sps.width != sourceSps.width || it.sps.height != sourceSps.height }
             // Resolve the real per-sample rate before choosing geometry. A smaller
             // atlas that cannot decode at the advertised rate is not eligible.
@@ -283,17 +311,11 @@ internal class HevcArchiveVodSession(
                 }) {
                 "Selected source resolutions have incompatible HEVC tile geometry for one decoder"
             } else null
-            val atlas = if (mixedAtlas == null) requireNotNull(HevcArchiveAtlasPlan.choose(inputs.size, sourceSps.width, sourceSps.height,
-                maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT)) {
+            val atlas = if (mixedAtlas == null) requireNotNull(uniformAtlasPlan) {
                 "Full archive feeds exceed composed picture size; choose fewer feeds or a lower common HEVC rendition"
             } else null
             val divisor = java.math.BigInteger.valueOf(trackScale).gcd(java.math.BigInteger.valueOf(step)).longValueExact()
-            val cells = mixedAtlas?.cells ?: (0 until (requireNotNull(atlas).columns * atlas.rows)).flatMap { slot ->
-                val feed = slot.coerceAtMost(inputs.lastIndex)
-                (0 until rows).flatMap { row -> (0 until columns).map { col ->
-                HevcTizenGridComposer.CellSelection(feed, row * columns + col,
-                    (slot % atlas.columns) * columns + col, (slot / atlas.columns) * rows + row)
-            } } }
+            val cells = mixedAtlas?.cells ?: uniformCells
             val ownedInits = synchronized(cacheLock) {
                 checkOpen()
                 OwnedArchiveInitializations.snapshot(inputs.map { it.initialization })

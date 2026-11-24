@@ -39,11 +39,29 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private var previousModeSignature: String? = null
     @Volatile private var selectedDisplayHz = 0f
+    private val outputPower = context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+    private var lastThermalReadMs = Long.MIN_VALUE
+    private var cachedThermal = Int.MAX_VALUE
+
+    /** GL-looper only; refresh at most once per second, never query Binder per frame. */
+    private fun thermalForOutput(): Int {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (lastThermalReadMs == Long.MIN_VALUE || now < lastThermalReadMs ||
+            now - lastThermalReadMs >= 1000L) {
+            cachedThermal = runCatching { outputPower?.currentThermalStatus }
+                .getOrNull() ?: Int.MAX_VALUE
+            lastThermalReadMs = now
+        }
+        return cachedThermal
+    }
     private val modeListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = Unit
         override fun onDisplayRemoved(displayId: Int) = Unit
         override fun onDisplayChanged(displayId: Int) {
-            if (rootView.display?.displayId == displayId) logDisplayMode("mode-changed")
+            if (rootView.display?.displayId == displayId) {
+                logDisplayMode("mode-changed")
+                gl.post { if (!released) frameRateOutput?.let(::updateFrameRateHint) }
+            }
         }
     }
 
@@ -68,7 +86,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             "displayId=${current.displayId} activeMode=${mode.modeId} activeHz=${mode.refreshRate} displayRefreshHz=$selectedDisplayHz " +
             "sourceFps=$sourceFps speed=$playbackSpeed " +
             "effectiveFps=${SceneFrameRatePolicy.hint(sourceFps, playbackSpeed)} " +
-            "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed)} " +
+            "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed,
+                selectedDisplayHz, runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE)} " +
             "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, sourceFps, playbackSpeed)} " +
             "supportedModes=$available sameResolutionIntegralModes=$seamlessMatches " +
             "modeSwitchIssuedByApp=false physicalPresentation=NOT_MEASURED")
@@ -93,15 +112,35 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     @Volatile private var input: Surface? = null
 
     /** Detach codec producer before releasing its SurfaceTexture consumer. */
+    private var attachedCodecPlayer: ExoPlayer? = null
+    private var attachedCodecSurface: Surface? = null
+    @Volatile private var inputGeneration = -1L
+
+    /** The Media3 application looper owns attach/detach, never the GL looper. */
     private fun detachDecoderInput(reason: String) {
-        val old = input ?: return
-        val owner = player ?: return
+        val old = attachedCodecSurface ?: return
+        val owner = attachedCodecPlayer ?: return
+        attachedCodecSurface = null
+        attachedCodecPlayer = null
         owner.clearVideoSurface(old)
         Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_DETACH " +
-            "renderer=SurfaceView protected=$protectedOutput reason=$reason " +
-            "surfaceId=${System.identityHashCode(old)} " +
-            "outputEpoch=${surfaceLifetime.generation()} owner=Media3 " +
-            "physicalQueueDepth=NOT_MEASURED")
+            "renderer=SurfaceView protected=$protectedOutput reason=$reason surfaceId=${System.identityHashCode(old)} " +
+            "inputEpoch=$inputGeneration outputEpoch=${surfaceLifetime.generation()} " +
+            "owner=Media3 physicalQueueDepth=NOT_MEASURED")
+    }
+
+    private fun attachDecoderInput(surface: Surface, epoch: Long) {
+        if (released || input !== surface || inputGeneration != epoch ||
+            !surfaceLifetime.matches(epoch) || !surface.isValid) return
+        val owner = player ?: return
+        if (attachedCodecPlayer === owner && attachedCodecSurface === surface) return
+        detachDecoderInput("owner-or-surface-changed")
+        owner.setVideoSurface(surface)
+        attachedCodecPlayer = owner
+        attachedCodecSurface = surface
+        Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_ATTACH " +
+            "renderer=SurfaceView protected=$protectedOutput surfaceId=${System.identityHashCode(surface)} " +
+            "inputEpoch=$epoch owner=Media3")
     }
     var onFailure: (String) -> Unit = {}
     var onFirstFrame: () -> Unit = {}
@@ -145,6 +184,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             val now = System.nanoTime()
             if (nextGlProbeExpectedNs != 0L)
                 pacing.onGlQueueProbe((now - nextGlProbeExpectedNs).coerceAtLeast(0L))
+            frameRateOutput?.let(::updateFrameRateHint)
             nextGlProbeExpectedNs = now + 1_000_000_000L
             gl.postDelayed(this, 1_000L)
         }
@@ -167,7 +207,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             val callbackStartNs = System.nanoTime()
             val refreshHz = selectedDisplayHz
             if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
-                frameTimeNanos, scene?.sourceFrameRate ?: 0.0, refreshHz, playbackSpeed)) {
+                frameTimeNanos, scene?.sourceFrameRate ?: 0.0, refreshHz,
+                playbackSpeed, thermalForOutput())) {
                 pacing.onPacingDeferred()
                 displayClock?.postFrameCallback(this)
                 return@guarded
@@ -233,7 +274,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         if (player !== nextPlayer) {
             detachDecoderInput("player-replaced")
             player = nextPlayer
-            input?.let { nextPlayer.setVideoSurface(it) }
+            input?.let { attachDecoderInput(it, inputGeneration) }
         }
         if (changed || speedChanged || bindingChanged) gl.post { guarded {
             if (invalidatedEpoch != null) {
@@ -414,14 +455,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }, gl)
         val surface = Surface(frames); input = surface
         val lifetime = surfaceLifetime.generation()
-        post {
-            if (!released && input === surface && surfaceLifetime.matches(lifetime)) {
-                player?.setVideoSurface(surface)
-                Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_ATTACH " +
-                    "renderer=SurfaceView protected=$protectedOutput " +
-                    "surfaceId=${System.identityHashCode(surface)} outputEpoch=$lifetime owner=Media3")
-            }
-        }
+        inputGeneration = lifetime
+        post { attachDecoderInput(surface, lifetime) }
     }
 
     private fun updateFrameRateHint(output: Surface) {
@@ -430,7 +465,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         // L1 surfaces deserve the same seamless-only 50 fps pacing hint as
         // authorized L3 scenes; unsupported OEM surfaces fail harmlessly.
         if (android.os.Build.VERSION.SDK_INT < 30) return
-        val rate = SceneFrameRatePolicy.composedOutputHint(scene?.sourceFrameRate ?: 0.0, playbackSpeed)
+        val rate = SceneFrameRatePolicy.composedOutputHint(
+            scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz, thermalForOutput())
         if (rate == appliedFrameRateHint) return
         runCatching {
             if (android.os.Build.VERSION.SDK_INT >= 31) {
@@ -519,7 +555,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "windows=${model.windows.size} decoderFrames=$rendered " +
                 "sourceFps=${model.sourceFrameRate} speed=$playbackSpeed " +
                 "effectiveFps=${model.sourceFrameRate * playbackSpeed} " +
-                "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(model.sourceFrameRate, playbackSpeed)} " +
+                "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(model.sourceFrameRate, playbackSpeed,
+                    selectedDisplayHz, thermalForOutput())} " +
                 "intervalPresented=$intervalPresented intervalGaps45ms=$intervalLongGaps " +
                 "intervalSwapsOver18ms=$intervalSwapsOver18ms " +
                 "maxGapMs=$intervalLongestGapMs maxSwapMs=$intervalLongestSwapMs " +
@@ -591,6 +628,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             "renderer=SurfaceView protected=$protectedOutput " +
             "surfaceId=${System.identityHashCode(it)} " +
             "outputEpoch=${surfaceLifetime.generation()} thread=GL") }
+        inputGeneration = -1L
         input?.release(); input = null
         decoderTexture?.release(); decoderTexture = null; hasFrame = false
         firstFrameReported = false

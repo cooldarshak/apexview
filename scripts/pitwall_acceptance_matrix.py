@@ -9,7 +9,7 @@ video layer in this exporter. A successful tool run is not a release sign-off.
 """
 import argparse
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, MISSING
 from pathlib import Path
 
 from analyze_pitwall_runtime import app_session, summarize as app_summary
@@ -39,10 +39,11 @@ class Case:
     thermal_end: int
     app_log: Path
     timeline_csv: Path
+    display_policy: str = "FIXED"  # FIXED benchmarks, ADAPTIVE compatibility
 
     @staticmethod
     def parse(data, root):
-        required = {f.name for f in Case.__dataclass_fields__.values()}
+        required = {f.name for f in Case.__dataclass_fields__.values() if f.default is MISSING}
         missing = required - set(data)
         if missing:
             raise ValueError("Missing physical-run fields: " + ", ".join(sorted(missing)))
@@ -59,6 +60,7 @@ class Case:
         case = Case(**fields)
         if (case.overlay not in OVERLAYS or case.speed not in SPEEDS or
             case.feed_count < 1 or case.display_hz <= 0 or
+            case.display_policy not in {"FIXED", "ADAPTIVE"} or
             not case.device.strip() or not case.build.strip() or
             not case.content_id.strip() or not case.source_profile.strip() or
             case.decoder_mode not in {"SINGLE", "MULTIPLE"} or
@@ -72,7 +74,7 @@ class Case:
     def comparable(self):
         return (self.device, self.build, self.content_id, self.source_profile,
                 self.decoder_mode, self.protection, self.delivery,
-                self.feed_count, self.display_hz)
+                self.feed_count, self.display_hz, self.display_policy)
 
 
 def validate_groups(cases):
@@ -101,10 +103,19 @@ def validate_groups(cases):
     return groups
 
 
-def refresh_issues(app, expected_hz):
+def refresh_issues(app, expected_hz, display_policy="FIXED"):
     observed = app["observed_refresh_hz"]
     if not observed or app["refresh_unknown_windows"]:
         return ["display refresh observation incomplete"]
+    if display_policy == "ADAPTIVE":
+        # A 120Hz-capable phone may legitimately choose 60, 90, 96 or 120.
+        # Its maximum is a ceiling, NOT a claim every playback frame ran at 120.
+        # Still fail unknown and implausible observations instead of hiding them.
+        if any(hz <= 0 or hz > expected_hz + 1.0 for hz in observed):
+            return [f"adaptive display rate outside declared ceiling {expected_hz}: {observed}"]
+        return []
+    if display_policy != "FIXED":
+        return ["unknown display refresh policy"]
     if app["refresh_mixed_windows"] or any(abs(hz - expected_hz) > 1.0 for hz in observed):
         return [f"display refresh mismatch or transition: expected {expected_hz}, observed {observed}"]
     return []
@@ -115,7 +126,7 @@ def evaluate(case):
         raise ValueError(f"{case.label}: required app log or Perfetto CSV is missing")
     app = app_summary(app_session(case.app_log.read_text(encoding="utf-8", errors="replace"), case.build))
     timeline = timeline_summary(read_timeline(case.timeline_csv))
-    reasons = refresh_issues(app, case.display_hz)
+    reasons = refresh_issues(app, case.display_hz, case.display_policy)
     if app["covered_seconds"] < MIN_ENDURANCE_S:
         reasons.append(f"app-window observation {app['covered_seconds']}s < {MIN_ENDURANCE_S}s")
     if timeline["sample_span_s"] < MIN_PERFETTO_S:
@@ -137,6 +148,9 @@ def evaluate(case):
     video_status = ("SURFACEVIEW_LAYER_PRESENT_SOURCE_CORRELATION_PENDING"
                     if timeline["video"]["frames"] else "NO_INDEPENDENT_VIDEO_LAYER")
     return {"case": case.label, "speed": case.speed, "overlay": case.overlay,
+            "display_policy": case.display_policy,
+            "observed_refresh_hz": app["observed_refresh_hz"],
+            "refresh_transition_windows": app["refresh_mixed_windows"],
             "app_frames": app["frames"], "app_slow_pct": app["slow_pct"],
             "frozen": app["frozen"], "queue_timeouts": app["queue_timeouts"],
             "queue_per_second": app["queue_per_second"],

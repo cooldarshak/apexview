@@ -337,5 +337,41 @@ class ProductionWiringTests(unittest.TestCase):
 
 
 
+    def test_batch2_strict_codec_surface_lease_and_adaptive_output_are_production_wired(self):
+        for path in (
+            "app/src/main/java/app/apexview/scene/SingleDecoderSceneView.kt",
+            "app/src/main/java/app/apexview/scene/ProtectedDecoderSceneView.kt",
+        ):
+            source = contents(path)
+            self.assertIn("attachedCodecPlayer: ExoPlayer?", source)
+            self.assertIn("attachedCodecSurface: Surface?", source)
+            self.assertIn("inputGeneration = lifetime", source)
+            self.assertIn("attachDecoderInput(it, inputGeneration)", source)
+            self.assertIn("!surfaceLifetime.matches(epoch)", source)
+            self.assertIn("!surface.isValid", source)
+            self.assertIn("thermalForOutput()", source)
+            self.assertIn("outputPower?.currentThermalStatus", source)
+            self.assertIn("SceneFrameRatePolicy.composedOutputHint(", source)
+        video = contents("app/src/main/java/app/apexview/FrameThinning.kt")
+        player = contents("app/src/main/java/app/apexview/FeedPlayer.kt")
+        policy = contents("app/src/main/java/app/apexview/AdaptivePlaybackCadence.kt")
+        self.assertIn("outputCadence.outputFps(thinner.estimatedSourceFps(), playbackSpeed)", video)
+        self.assertIn("AdaptivePlaybackCadenceObserver(context)", video)
+        self.assertIn("ThinningRenderersFactory(context, outputCadence)", player)
+        self.assertIn("outputCadence.composedSingle = true", player)
+        self.assertIn("outputCadence.composedSingle = false", player)
+        self.assertIn("composedSingle && canDisplayAll && thermalStatus in 0..1", policy)
+        self.assertIn("if (speed <= 1.15f) return media.toFloat()", policy)
+        # Codec/DRM producer must be released before wiping the CMAF source it
+        # might still be reading; no DRM bypass or per-tile extra player.
+        release = player.split("    fun release() {", 1)[1].split("    private fun explain(", 1)[0]
+        self.assertLess(release.index("player.release()"), release.index("archive?.close()"))
+        archive = contents("app/src/main/java/app/apexview/tiled/HevcArchiveVodSession.kt")
+        self.assertIn("private val uniformAtlasPlan:", archive)
+        self.assertIn("private val uniformCells:", archive)
+        self.assertIn("val mixedInputs = sourceTiles", archive)
+        self.assertIn("val cells = mixedAtlas?.cells ?: uniformCells", archive)
+
+
 if __name__ == "__main__":
     unittest.main()

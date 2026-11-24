@@ -12,8 +12,8 @@ internal object SceneBufferQueueEvidence {
 
     fun stage(latched: Long, submitted: Long, callbackGaps: Long, slowSwaps: Long,
               unavailableDraws: Long): Stage = when {
-        latched == 0L -> Stage.NO_LATCH_OBSERVED
         unavailableDraws > 0L -> Stage.GL_OUTPUT_UNAVAILABLE
+        latched == 0L -> Stage.NO_LATCH_OBSERVED
         slowSwaps > 0L -> Stage.EGL_SWAP_DELAY_OBSERVED
         callbackGaps > 0L -> Stage.CALLBACK_GAP_OBSERVED
         submitted > 0L -> Stage.GL_FLOW_OBSERVED

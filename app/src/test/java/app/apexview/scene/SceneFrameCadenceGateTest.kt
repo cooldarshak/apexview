@@ -49,6 +49,15 @@ class SceneFrameCadenceGateTest {
         assertTrue(gate.shouldDefer(1_008_333_333L, 50.0, 120f, 1f))
     }
 
+    @Test fun coolAdaptiveModeAt75fpsDoesNotImposeStale50fpsPacing() {
+        val gate = SceneFrameCadenceGate()
+        gate.onVideoDraw(1_000_000_000L)
+        assertFalse(gate.shouldDefer(1_008_333_333L, 50.0, 120f, 1.5f, 0))
+        assertFalse(gate.shouldDefer(1_008_333_333L, 50.0, 96f, 1.5f, 1))
+        assertTrue(gate.shouldDefer(1_008_333_333L, 50.0, 120f, 1.5f, 3))
+        assertFalse(gate.shouldDefer(1_008_333_333L, 50.0, 60f, 1.5f, 0))
+    }
+
     @Test fun seekAndSurfaceResetDiscardPreviousTimestamp() {
         val gate = SceneFrameCadenceGate()
         gate.onVideoDraw(2_000_000_000L)
