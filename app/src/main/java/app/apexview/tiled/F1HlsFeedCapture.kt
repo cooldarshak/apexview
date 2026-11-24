@@ -162,7 +162,11 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 Uri.parse(selected.first { it.feed.label == clockLabel }.feed.manifestUrl)
             }
             val selectableAudioUris = if (audio == null) audioUris else audioUris + (clockLabel to audio)
-            val captionSource = archiveCaptionSource(selected.firstOrNull { it.feed.label == clockLabel })
+            val captionSources = mapArchiveFeedsBounded(selected.indices.toList()) { index ->
+                val offer = selected[index]
+                if (offer.feed.label !in selectableAudioUris) null
+                else archiveCaptionSource(offer, playlists[index], clockPlaylist)?.let { offer.feed.label to it }
+            }.filterNotNull().toMap()
             var session: HevcArchiveVodSession? = null
             val owned = selected.mapIndexed { i, offer -> HevcArchiveVodSession.Input(offer.feed.label, playlists[i], offer.format,
                 inits[i].bytes.copyOf(), inits[i].report,
@@ -170,7 +174,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             try {
                 session = HevcArchiveVodSession(reader, owned, clockLabel, maximumOutputWidth = maximumOutputWidth,
                     audioUri = audio, audioUris = selectableAudioUris, stableAudioUris = stableAudioUris,
-                    captionSource = captionSource)
+                    captionSources = captionSources)
                 session.prepare(positionMs)
                 coroutineContext.ensureActive()
                 acquired = session
@@ -256,6 +260,9 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             playlist.segments.indexOfLast { it.relativeStartTimeUs + offset <= targetUs }.coerceAtLeast(0)
         }
     }
+
+    var programmes: Map<String, HlsProgrammeContext> = emptyMap()
+        private set
 
     suspend fun captureAtPosition(group: String, feeds: List<F1DashFeedCapture.Feed>, positionMs: Long, live: Boolean = false, followLiveEdge: Boolean = true): F1DashFeedCapture.Snapshot = withContext(Dispatchers.IO) {
         var format: Format? = null
@@ -507,6 +514,23 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 composeMs = android.os.SystemClock.elapsedRealtime() - composeStartedMs
                 discontinuityGate.commit(labels, discontinuities, aligned.first().absoluteStartUs)
                 previousStartUs = aligned.first().absoluteStartUs
+                programmes = selected.indices.mapNotNull { index ->
+                    val offer = selected[index]
+                    val master = offer.master ?: return@mapNotNull null
+                    val video = tracks[index]
+                    val profile = fragmentProfiles[index].fragments.singleOrNull { it.trackId == video.trackId }
+                        ?: return@mapNotNull null
+                    val mediaStart = profile.sampleTimings.mapNotNull { it.presentationTimeTicks }.minOrNull()
+                        ?: return@mapNotNull null
+                    val scale = video.timescale?.takeIf { it > 0 } ?: return@mapNotNull null
+                    val playlist = playlists[index]
+                    val segment = segments[index]
+                    val sourceStart = aligned[index].absoluteStartUs
+                    offer.feed.label to HlsProgrammeContext(master, offer.audioGroupId, offer.subtitleGroupId,
+                        playlist.startTimeUs.takeIf { playlist.hasProgramDateTime },
+                        sourceStart - segment.relativeStartTimeUs, sourceStart, segment.durationUs,
+                        CmafWindowTiming.ticksToUs(mediaStart, scale), discontinuities[index], live)
+                }.toMap()
                 val allocated = allocatedAtStart?.let { before ->
                     android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
                         ?.let { (it - before).coerceAtLeast(0L) }
@@ -547,6 +571,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     fun widevinePssh(): ByteArray? = pssh?.copyOf()
 
     fun reset() {
+        programmes = emptyMap()
         initializations.values.forEach { it.bytes.fill(0) }; initializations.clear()
         offers.clear(); vodPlaylists.clear(); actual.clear(); previousStartUs = null; discontinuityGate.reset(); mediaToArchiveOffsetUs = null
         pssh?.fill(0); pssh = null; clearOutput = null; clearComposition.reset()
@@ -561,22 +586,25 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 (if (clearOutput == true) clearComposition.outputTiming() else ProtectedHevcLiveComposition.outputTiming(group))?.shifted(offset)
             })
 
-    private suspend fun archiveCaptionSource(offer: Offer?): ArchiveCaptionSource? {
-        offer ?: return null
+    private suspend fun archiveCaptionSource(
+        offer: Offer, programmeVideo: HlsMediaPlaylist, clockVideo: HlsMediaPlaylist,
+    ): ArchiveCaptionSource? {
         val master = offer.master ?: return null
         val subtitleGroup = offer.subtitleGroupId ?: return null
         val variant = master.variants.indexOfFirst { it.url == offer.uri && it.subtitleGroupId == subtitleGroup }
         if (variant < 0) return null
         val declared = master.subtitles.withIndex().filter { (_, rendition) ->
             rendition.groupId == subtitleGroup && rendition.url != null
-        }.take(16)
+        }.take(4)
         // A missing or protected alternate text playlist must not break clear
         // video startup. Only independently inspected finite clear offers join
         // the native archive merge; no request for encryption keys is made.
-        val actual = mapArchiveFeedsBounded(declared) { entry ->
+        val actual = declared.mapNotNull { entry ->
+            coroutineContext.ensureActive()
             try {
                 val media = parse(requireNotNull(entry.value.url), master) as? HlsMediaPlaylist
                 entry.takeIf { media != null && media.hasEndTag && media.segments.isNotEmpty() &&
+                    ArchiveCaptionSource.matchesTimeline(media, programmeVideo, clockVideo) &&
                     media.segments.none { segment -> segment.drmInitData != null ||
                         segment.fullSegmentEncryptionKeyUri != null ||
                         segment.initializationSegment?.drmInitData != null ||
@@ -588,7 +616,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 android.util.Log.w("ApexviewPlaybackOffer", "ARCHIVE_CAPTION_PROBE_FAILED type=${error.javaClass.simpleName}")
                 null
             }
-        }.filterNotNull()
+        }
         if (actual.isEmpty()) return null
         val keys = listOf(androidx.media3.common.StreamKey(HlsMultivariantPlaylist.GROUP_INDEX_VARIANT, variant)) +
             actual.map { androidx.media3.common.StreamKey(HlsMultivariantPlaylist.GROUP_INDEX_SUBTITLE, it.index) }

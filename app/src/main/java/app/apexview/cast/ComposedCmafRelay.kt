@@ -1,6 +1,5 @@
 package app.apexview.cast
 
-import app.apexview.tiled.ProtectedHevcComposedDashPackageBuilder
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.net.InetAddress
@@ -26,11 +25,12 @@ internal class ComposedCmafRelay(address: String, private val peer: InetAddress?
     private val sockets = ConcurrentHashMap.newKeySet<Socket>()
     private val closed = AtomicBoolean(false)
     private val resources = RelayResourceStore()
-    fun publish(next: ProtectedHevcComposedDashPackageBuilder.Package) = publishResources(next.resources)
-
-    internal fun publishResources(next: Map<String, ByteArray>) {
+    internal fun publishResources(
+        next: Map<String, ByteArray>,
+        shared: Map<String, SharedRelayResource> = emptyMap(),
+    ) {
         check(!closed.get())
-        resources.publish(next)
+        resources.publish(next, shared)
     }
     init { accepting.execute {
         while (!closed.get()) {

@@ -56,6 +56,23 @@ class Settings(context: Context) {
     /** Auto follows commentary; explicit language only selects real offered F1 text tracks. */
     var captionLanguage by mutableStateOf(CaptionPolicy.normalizeLanguage(prefs.getString("captionLanguage", CaptionPolicy.AUTO)))
         private set
+    var captionAppearance by mutableStateOf(CaptionAppearance(
+        prefs.getInt("captionTextSize", 100).coerceIn(CaptionAppearance.TEXT_SIZE_RANGE),
+        prefs.getInt("captionBackgroundOpacity", -1).takeIf { it in 0..100 },
+    ))
+        private set
+
+    fun previewCaptionAppearance(value: CaptionAppearance) {
+        captionAppearance = value
+    }
+
+    fun saveCaptionAppearance() {
+        prefs.edit()
+            .putInt("captionTextSize", captionAppearance.textSizePercent)
+            .putInt("captionBackgroundOpacity", captionAppearance.backgroundOpacityPercent ?: -1)
+            .apply()
+    }
+
     var commentary by mutableStateOf(prefs.getString("commentary", "en") ?: "en")
         private set
     var showStats by mutableStateOf(prefs.getBoolean("showStats", false))

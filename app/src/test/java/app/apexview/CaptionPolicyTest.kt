@@ -49,4 +49,11 @@ class CaptionPolicyTest {
         assertNull(CaptionPolicy.owner(feeds, "main", null, null, true))
         assertNull(CaptionPolicy.owner(emptyList<String>(), null, null, null, false))
     }
+    @Test fun alternateProgrammeDoesNotFallBackToUnrelatedCaptions() {
+        assertEquals(3, CaptionPolicy.castProgramme("pitwall-text-3-0"))
+        assertNull(CaptionPolicy.castProgramme("pitwall-text-30-0"))
+        assertNull(CaptionPolicy.preferredIndex("en", "fr", listOf("fr", "und"), listOf(true, false)))
+        assertEquals(0, CaptionPolicy.preferredIndex("auto", "fr", listOf("fr", "und"), listOf(false, true)))
+        assertEquals(1, CaptionPolicy.preferredIndex("auto", "en", listOf("fr", "pt-br"), listOf(false, true)))
+    }
 }

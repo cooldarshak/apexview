@@ -3,8 +3,11 @@ package app.apexview
 import android.app.Activity
 import android.graphics.Rect
 import android.view.WindowManager
+import app.apexview.scene.BakedCastOverlay
+import app.apexview.scene.BakedCastVideoPlacement
 import app.apexview.scene.SingleDecoderSceneView
 import app.apexview.scene.ProtectedDecoderSceneView
+import app.apexview.scene.recordBakedCastOverlay
 import androidx.compose.ui.draw.drawWithContent
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -105,6 +108,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -127,6 +131,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
@@ -406,6 +411,16 @@ fun ViewerScreen(app: AppState) {
                 scaleX = scale; scaleY = scale; transformOrigin = TransformOrigin(0.5f, 1f)
                 translationY = -sheetShift
             }
+        val bakedSession = app.bakedCastSession
+        val placement by rememberUpdatedState {
+            if (fixedVideoGeometry) BakedCastVideoPlacement.viewer(1f, 1f, 0f)
+            else BakedCastVideoPlacement.viewer(1f - sheetSide * AppState.VOTE_SHEET_WIDTH,
+                if (app.inPip) 1f else 1f - lift * band / height, sheetShift / height)
+        }
+        val captureOverlay = remember(bakedSession) {
+            bakedSession?.let { BakedCastOverlay({ placement() }, Ink.background.toArgb()) }
+        }
+        val captureCaptions = captureOverlay != null && app.singleDecoderScenePlayer?.archiveSceneSession != null
         Box(Modifier.fillMaxSize().then(videoTransform)) {
             if (app.castPlaybackHandedOff || app.externalDisplayActive) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -414,10 +429,14 @@ fun ViewerScreen(app: AppState) {
                         Text("Use this phone to control playback and arrange the TV video windows.", style = Type.subhead)
                     }
                 }
-            } else PlaybackVideoCanvas(app, width, height, window, viewerBounds)
+            } else PlaybackVideoCanvas(app, width, height, window, viewerBounds, captureOverlay, captureCaptions)
 
         }
 
+        Box(Modifier.fillMaxSize().recordBakedCastOverlay(captureOverlay)) {
+        if (captureCaptions && !app.castPlaybackHandedOff && !app.externalDisplayActive) {
+            Box(Modifier.fillMaxSize().then(videoTransform)) { ViewerComposedCaptions(app) }
+        }
         Box(Modifier.fillMaxSize()) uiLayer@ {
         // Feeds and map, shrinking toward the bottom while the controls are up so nothing sits
         // under the top bar. Touches inside are in the unshrunk canvas's pixels.
@@ -613,6 +632,7 @@ fun ViewerScreen(app: AppState) {
                 delay(HELP_FIRST_DELAY_MS)
                 if (app.tiles.isNotEmpty()) app.showHelp()
             }
+        }
         }
         }
     }
@@ -1093,6 +1113,7 @@ private fun Messages(app: AppState, modifier: Modifier) {
 internal fun PlaybackVideoCanvas(
     app: AppState, width: Float, height: Float,
     captureWindow: android.view.Window? = null, viewerBounds: Rect? = null,
+    captureOverlay: BakedCastOverlay? = null, captionsInViewerOverlay: Boolean = false,
 ) {
     val scene = app.videoScene(width, height)
     val host = app.singleDecoderScenePlayer ?: app.protectedRollingScenePlayer
@@ -1136,14 +1157,13 @@ internal fun PlaybackVideoCanvas(
         }
         var recordingBounds by remember { mutableStateOf<Rect?>(null) }
         val bakedSession = app.bakedCastSession
-        LaunchedEffect(view, bakedSession) {
+        LaunchedEffect(view, bakedSession, captureOverlay) {
             val target = view ?: return@LaunchedEffect
             if (bakedSession == null) {
                 target.stopBakedCast()
                 return@LaunchedEffect
             }
-            // The Cast button closes its sheet first. Capture from the real window so every
-            // selected feed, timing row, map marker and speed label is part of the one video.
+            // Let the Cast sheet close and the viewer finish positioning its video and overlays.
             delay(Motion.SCREEN_MS.toLong() + 100L)
             // Changing the optional clear SurfaceView to the capture-capable
             // TextureView creates an EGL output epoch. The old fixed animation
@@ -1155,11 +1175,15 @@ internal fun PlaybackVideoCanvas(
                 } ?: false
             val window = captureWindow
             val bounds = viewerBounds
+            val archive = host.archiveSceneSession
             if (!clearOutputReady || window == null || bounds == null || bounds.isEmpty ||
-                host.archiveSceneSession == null ||
+                archive == null || captureOverlay == null ||
                 window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0) {
                 bakedSession.captureFailed("An authorized clear single-decoder viewer is required")
-            } else target.startBakedCast(window, bounds, bakedSession, host.player.currentPosition)
+            } else target.startBakedCast(window, bounds, bakedSession, captureOverlay) {
+                if (host.archiveSceneSession === archive && app.bakedCastSession === bakedSession)
+                    host.player.currentPosition else null
+            }
         }
         DisposableEffect(view) {
             onDispose { view?.stopBakedCast() }
@@ -1255,8 +1279,7 @@ internal fun PlaybackVideoCanvas(
         }
             // Custom clear HEVC and Widevine HEVC scenes do not host PlayerView.
             // Display only actual Media3 cues above the single decoded surface.
-            ComposedCaptionOverlay(app.captionSourceFeed?.player, app.settings.subtitles,
-                Modifier.fillMaxSize())
+            if (!captionsInViewerOverlay) ViewerComposedCaptions(app)
             if (!composedGlReady) {
                 Box(Modifier.fillMaxSize().background(Color(0xFF101017)),
                     contentAlignment = Alignment.Center) {
@@ -1279,6 +1302,13 @@ internal fun PlaybackVideoCanvas(
             key(tile.id) { TileView(app, tile, videoOnly = true, presetSlot = tvStartupSlot(app, width, height)) }
         }
     }
+}
+
+@Composable
+private fun ViewerComposedCaptions(app: AppState) {
+    val captionFeed = app.captionSourceFeed
+    ComposedCaptionOverlay(captionFeed?.player, app.settings.subtitles && captionFeed?.captionOutputReady == true,
+        app.settings.captionAppearance, Modifier.fillMaxSize())
 }
 
 private fun tvStartupSlot(app: AppState, width: Float, height: Float): Slot? =
@@ -1369,7 +1399,10 @@ private fun TileView(
                         }
                     }
                 },
-                update = { it.player = tile.feed.player },
+                update = {
+                    it.player = tile.feed.player
+                    it.subtitleView?.applyCaptionAppearance(app.settings.captionAppearance)
+                },
                 onRelease = { it.player = null },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -1919,7 +1952,10 @@ private fun SpeedSheet(app: AppState) {
 @Composable
 private fun ClosedCaptionsSheet(app: AppState) {
     ModalBottomSheet(
-        onDismissRequest = { app.captionsSheetOpen = false },
+        onDismissRequest = {
+            app.saveCaptionAppearance()
+            app.captionsSheetOpen = false
+        },
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = Ink.surface,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
@@ -1947,6 +1983,8 @@ private fun ClosedCaptionsSheet(app: AppState) {
                 onChange = app::setCaptionsEnabled,
                 modifier = Modifier.focusRequester(focus),
             )
+            CaptionAppearanceControls(app.settings.captionAppearance,
+                app.settings::previewCaptionAppearance, app::saveCaptionAppearance)
             Text("F1 caption track", style = Type.subhead,
                 modifier = Modifier.padding(top = 18.dp, bottom = 8.dp))
             val choices = listOf(CaptionTrackOption(CaptionPolicy.AUTO, "Automatic")) +

@@ -17,6 +17,24 @@ internal object CaptionPolicy {
         normalizeLanguage(selected).takeUnless { it == AUTO }
             ?: normalizeLanguage(commentary).takeUnless { it == AUTO } ?: "en"
 
+    private val castCaptionId = Regex("pitwall-text-([0-5])-[0-3]")
+    fun castProgramme(formatId: String?): Int? =
+        formatId?.let { castCaptionId.matchEntire(it)?.groupValues?.get(1)?.toIntOrNull() }
+
+    /** Explicit language choices never borrow another programme or language. */
+    fun preferredIndex(selected: String, commentary: String, languages: List<String?>, defaults: List<Boolean>): Int? {
+        val language = textLanguage(selected, commentary)
+        val normalized = languages.map(::normalizeLanguage)
+        val exact = normalized.indexOf(language)
+        if (exact >= 0) return exact
+        val base = normalized.indexOfFirst { it.substringBefore('-') == language.substringBefore('-') }
+        if (base >= 0) return base
+        if (normalizeLanguage(selected) != AUTO) return null
+        return defaults.indexOf(true).takeIf { it in languages.indices }
+            ?: normalized.indexOf("und").takeIf { it >= 0 }
+            ?: languages.indices.firstOrNull()
+    }
+
     /**
      * Prefer the composed owner's original audio master for protected playback.
      * The two playback modes route captions to one selected feed, not to every

@@ -75,13 +75,18 @@ class PitwallReceiverActivity : ComponentActivity() {
     // Restore per-TV caption preferences only after super.onCreate().
     private var captionsOn by mutableStateOf(false)
     private var captionLanguage = CaptionPolicy.AUTO
+    private lateinit var captionSettings: Settings
+    private val captionAppearance get() = captionSettings.captionAppearance
     private var receiverCaptionTrackCount by mutableIntStateOf(0)
     private var receiverCaptionTracks by mutableStateOf<List<CaptionTrackOption>>(emptyList())
     private var captionOwnerControl = false
     private var receiverControlsFocused by mutableStateOf(false)
-    private var captionLanguageMenu by mutableStateOf(false)
+    private var captionSettingsMenu by mutableStateOf(false)
     private var pendingNativeAudio: Int? = null
     private var submittedNativeAudio: Int? = null
+    private var confirmedNativeAudio: Int? = null
+    private var nativeProgrammeAudio = false
+    private var receiverCaptionReady by mutableStateOf(false)
 
     private fun isBakedPlayback() = playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optBoolean("pitwallBaked") == true
 
@@ -91,29 +96,59 @@ class PitwallReceiverActivity : ComponentActivity() {
                 status = "Change baked captions on the phone."
                 return
             }
-            connection?.send(FcastProtocol.UI_CONTROL, CaptionControlProtocol.forLoad(enabled, language, playbackId()))
+            connection?.send(FcastProtocol.UI_CONTROL, CaptionControlProtocol.forLoad(enabled, language, playbackId(), captionAppearance))
             return // Wait for the actual phone renderer's acknowledged preference.
         }
         setReceiverCaptions(enabled, language)
         if (captionOwnerControl && playbackId().isNotEmpty())
-            connection?.send(FcastProtocol.UI_CONTROL, CaptionControlProtocol.forLoad(enabled, language, playbackId()))
+            connection?.send(FcastProtocol.UI_CONTROL, CaptionControlProtocol.forLoad(enabled, language, playbackId(), captionAppearance))
     }
+    private fun saveReceiverCaptionAppearance() {
+        captionSettings.saveCaptionAppearance()
+        if (captionOwnerControl && playbackId().isNotEmpty()) {
+            connection?.send(FcastProtocol.UI_CONTROL,
+                CaptionControlProtocol.forLoad(captionsOn, captionLanguage, playbackId(), captionAppearance))
+        }
+    }
+
     private fun setReceiverCaptions(enabled: Boolean, language: String) {
         captionsOn = enabled
         captionLanguage = CaptionPolicy.normalizeLanguage(language)
-        Settings(this).apply {
+        captionSettings.apply {
             updateSubtitles(enabled)
             updateCaptionLanguage(captionLanguage)
         }
-        player?.takeUnless { isBakedPlayback() }?.let { next ->
-            next.trackSelectionParameters = next.trackSelectionParameters.buildUpon()
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !enabled)
-                .setPreferredTextLanguage(CaptionPolicy.textLanguage(captionLanguage, "en"))
-                .setSelectUndeterminedTextLanguage(enabled)
-                .build()
-        }
+        player?.let { updateReceiverCaptions(it, it.currentTracks) }
         Log.i("PitwallReceiver", "CC_STATE enabled=$enabled language=$captionLanguage offered=$receiverCaptionTrackCount")
     }
+    private fun updateReceiverCaptions(current: ExoPlayer, tracks: androidx.media3.common.Tracks) {
+        val programme = confirmedNativeAudio.takeIf { pendingNativeAudio == null }
+        val candidates = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }.flatMap { group ->
+            (0 until group.length).filter { index ->
+                group.isTrackSupported(index) && (!nativeProgrammeAudio ||
+                    programme != null && CaptionPolicy.castProgramme(group.getTrackFormat(index).id) == programme)
+            }.map { group to it }
+        }
+        val formats = candidates.map { (group, index) -> group.getTrackFormat(index) }
+        receiverCaptionTracks = CaptionPolicy.tracks(formats.map { it.language to it.label })
+        receiverCaptionTrackCount = receiverCaptionTracks.size
+        val preference = if (captionsOn && !isBakedPlayback()) CaptionPolicy.preferredIndex(
+            captionLanguage, "en", formats.map { it.language },
+            formats.map { it.selectionFlags and C.SELECTION_FLAG_DEFAULT != 0 },
+        ) else null
+        val selected = preference?.let(candidates::get)
+        receiverCaptionReady = selected?.let { (group, index) -> group.isTrackSelected(index) } == true
+        val previous = current.trackSelectionParameters
+        val updated = previous.buildUpon().clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, selected == null)
+            .apply {
+                selected?.let { (group, index) ->
+                    setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, index))
+                }
+            }.build()
+        if (updated != previous) current.trackSelectionParameters = updated
+    }
+
     private var sceneView: SingleDecoderSceneView? = null
     private var protectedSceneView: ProtectedDecoderSceneView? = null
     private var sceneCodecCorrelation: SceneCodecTimestampCorrelation? = null
@@ -165,9 +200,9 @@ class PitwallReceiverActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val savedCaptions = Settings(this)
-        captionsOn = savedCaptions.subtitles
-        captionLanguage = savedCaptions.captionLanguage
+        captionSettings = Settings(this)
+        captionsOn = captionSettings.subtitles
+        captionLanguage = captionSettings.captionLanguage
         DiagnosticLogs.startIfEnabled(applicationContext)
         if (DiagnosticLogs.isEnabled(applicationContext)) {
             frameDiagnostics = app.apexview.WindowFrameDiagnostics(window, role = "receiver")
@@ -348,6 +383,10 @@ class PitwallReceiverActivity : ComponentActivity() {
                             "captions" -> {
                                 if (!CaptionControlProtocol.matchesLoad(requireNotNull(body), playbackId(), captionOwnerControl)) return
                                 val requested = CaptionControlProtocol.decode(body)
+                                requested.appearance?.let {
+                                    captionSettings.previewCaptionAppearance(it)
+                                    captionSettings.saveCaptionAppearance()
+                                }
                                 setReceiverCaptions(requested.enabled, requested.language)
                             }
                             "nativeAudio" -> {
@@ -355,7 +394,10 @@ class PitwallReceiverActivity : ComponentActivity() {
                                 if (playData?.optJSONObject("metadata")?.optJSONObject("custom")?.has("pitwallAudio") != true) return
                                 pendingNativeAudio = index
                                 submittedNativeAudio = null
-                                player?.let { selectNativeAudio(it, it.currentTracks) }
+                                player?.let {
+                                    selectNativeAudio(it, it.currentTracks)
+                                    updateReceiverCaptions(it, it.currentTracks)
+                                }
                             }
                         }
                         FcastProtocol.TIMING -> if (timingPeer && body != null) {
@@ -465,6 +507,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             }
         }
         val selected = choice?.let { (group, index) -> group.isTrackSelected(index) } == true
+        if (selected) confirmedNativeAudio = requested
         pendingNativeAudio = null; submittedNativeAudio = null
         connection?.send(FcastProtocol.UI_CONTROL, NativeAudioControl.acknowledgment(playbackId(), requested, selected))
         Log.i("PitwallReceiver", "NATIVE_AUDIO_TRACK_SELECTION index=$requested selected=$selected")
@@ -476,6 +519,9 @@ class PitwallReceiverActivity : ComponentActivity() {
         val direct = custom?.optBoolean("pitwallDirect") == true
         submittedNativeAudio = null
         pendingNativeAudio = custom?.optInt("pitwallAudio", -1)?.takeIf { it in 0..5 }
+        nativeProgrammeAudio = pendingNativeAudio != null
+        confirmedNativeAudio = null
+        receiverCaptionReady = false
         val data: DataSource.Factory = if (direct) requireNotNull(widevine).mediaHttp else {
         val peer = requireNotNull(connection).socket.inetAddress
         val origin = ReceiverMediaPolicy.validate(body.getString("url"), peer)
@@ -563,18 +609,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
                 if (player !== next) return
                 selectNativeAudio(next, tracks)
-                val supported = buildList<Pair<String?, String?>> {
-                    tracks.groups.forEach { group ->
-                        if (group.type == C.TRACK_TYPE_TEXT) {
-                            for (index in 0 until group.length) if (group.isTrackSupported(index)) {
-                                val format = group.getTrackFormat(index)
-                                add(format.language to format.label)
-                            }
-                        }
-                    }
-                }
-                receiverCaptionTracks = CaptionPolicy.tracks(supported)
-                receiverCaptionTrackCount = receiverCaptionTracks.size
+                updateReceiverCaptions(next, tracks)
                 Log.i("PitwallReceiver", "CC_TRACKS count=$receiverCaptionTrackCount")
             }
 
@@ -608,7 +643,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             override fun onIsPlayingChanged(isPlaying: Boolean) { if (player === next) sendPlayback() }
         })
         next.trackSelectionParameters = next.trackSelectionParameters.buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !captionsOn || isBakedPlayback())
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
             .setPreferredTextLanguage(CaptionPolicy.textLanguage(captionLanguage, "en"))
             .setSelectUndeterminedTextLanguage(captionsOn)
             .build()
@@ -645,7 +680,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     private fun showReceiverControls() {
         controlsVisible = true
         controlsJob?.cancel()
-        controlsJob = lifecycleScope.launch { delay(4_000); if (!receiverControlsFocused && !captionLanguageMenu) controlsVisible = false }
+        controlsJob = lifecycleScope.launch { delay(4_000); if (!receiverControlsFocused && !captionSettingsMenu) controlsVisible = false }
     }
     // A whole-picture single feed needs no GPU atlas extraction. The native video surface
     // handles buffer presentation while Compose draws the overlays above it.
@@ -698,7 +733,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         loadingRequested = false
         loadingJob?.cancel(); loadingJob = null
         controlsJob?.cancel(); controlsJob = null
-        receiverControlsFocused = false; captionLanguageMenu = false
+        receiverControlsFocused = false; captionSettingsMenu = false
         active = false
         timingState.clear(); timingReported = false; lastTimingHealthAtMs = -1L
         receiverCaptionTracks = emptyList(); receiverCaptionTrackCount = 0
@@ -762,7 +797,13 @@ class PitwallReceiverActivity : ComponentActivity() {
                                             setEnableComposeSurfaceSyncWorkaround(true)
                                             (videoSurfaceView as? android.view.SurfaceView)?.setSecure(secureOutput)
                                         }
-                                    }, update = { it.player = current }, onRelease = {
+                                    }, update = {
+                                        it.player = current
+                                        it.subtitleView?.apply {
+                                            applyCaptionAppearance(captionAppearance)
+                                            visibility = if (receiverCaptionReady) android.view.View.VISIBLE else android.view.View.INVISIBLE
+                                        }
+                                    }, onRelease = {
                                         if (standardView === it) standardView = null; it.player = null
                                     }, modifier = Modifier.offset { androidx.compose.ui.unit.IntOffset((cell.x * scale).toInt(), (cell.y * scale).toInt()) }
                                         .requiredSize(with(density) { (cell.width * scale).toDp() }, with(density) { (cell.height * scale).toDp() }))
@@ -797,7 +838,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                                 it.release()
                             }, modifier = Modifier.fillMaxSize())
                             if (!surfacePlayback(model, isDirectPlayback())) {
-                                ComposedCaptionOverlay(current, captionsOn, Modifier.fillMaxSize())
+                                ComposedCaptionOverlay(current, captionsOn && receiverCaptionReady, captionAppearance, Modifier.fillMaxSize())
                             }
                             if (playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optBoolean("pitwallBaked") != true)
                             CastTimingLayer(timingState, model.width, model.height, remember { { controllerPosition() } }, { number, pit ->
@@ -816,6 +857,12 @@ class PitwallReceiverActivity : ComponentActivity() {
                             }
                         }
                     } else AndroidView(factory = { PlayerView(it).apply { standardView = this; player = current; useController = true } },
+                        update = {
+                            it.subtitleView?.apply {
+                                applyCaptionAppearance(captionAppearance)
+                                visibility = if (receiverCaptionReady) android.view.View.VISIBLE else android.view.View.INVISIBLE
+                            }
+                        },
                         onRelease = { if (standardView === it) standardView = null; it.player = null }, modifier = Modifier.fillMaxSize())
                 }
             } else Column(
@@ -853,24 +900,28 @@ class PitwallReceiverActivity : ComponentActivity() {
                 SecondaryButton(if (captionsOn) "CC on" else "CC off") {
                     requestReceiverCaptions(!captionsOn, captionLanguage)
                 }
-                if (!isBakedPlayback() && receiverCaptionTracks.isNotEmpty()) {
-                    SecondaryButton("Language") { captionLanguageMenu = true }
+                if (!isBakedPlayback() || captionOwnerControl) {
+                    SecondaryButton("Caption settings") { captionSettingsMenu = true }
                 }
-                if (isBakedPlayback()) Text("Captions from phone", style = Type.caption)
             }
         }
-        if (captionLanguageMenu) AlertDialog(
-            onDismissRequest = { captionLanguageMenu = false; showReceiverControls() },
-            title = { Text("Caption language") },
+        if (captionSettingsMenu) AlertDialog(
+            onDismissRequest = { closeCaptionSettings() },
+            title = { Text("Caption settings") },
             text = {
                 Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
-                    TextButton(onClick = { requestReceiverCaptions(true, CaptionPolicy.AUTO); captionLanguageMenu = false }) { Text("Auto") }
-                    receiverCaptionTracks.forEach { track ->
-                        TextButton(onClick = { requestReceiverCaptions(true, track.language); captionLanguageMenu = false }) { Text(track.label) }
+                    CaptionAppearanceControls(captionAppearance, captionSettings::previewCaptionAppearance,
+                        ::saveReceiverCaptionAppearance)
+                    if (!isBakedPlayback() && receiverCaptionTracks.isNotEmpty()) {
+                        Text("Caption language", style = Type.subhead)
+                        TextButton(onClick = { requestReceiverCaptions(true, CaptionPolicy.AUTO); closeCaptionSettings(save = false) }) { Text("Automatic") }
+                        receiverCaptionTracks.forEach { track ->
+                            TextButton(onClick = { requestReceiverCaptions(true, track.language); closeCaptionSettings(save = false) }) { Text(track.label) }
+                        }
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { captionLanguageMenu = false; showReceiverControls() }) { Text("Close") } }
+            confirmButton = { TextButton(onClick = { closeCaptionSettings() }) { Text("Close") } }
         )
         pairingCode?.let { code -> app.apexview.cast.PitwallPairingDialog(code, ::confirmPairing, receiver = true) }
         pending?.let { request -> AlertDialog(onDismissRequest = { deny() }, title = { Text("Play from $senderName?") },
@@ -878,10 +929,16 @@ class PitwallReceiverActivity : ComponentActivity() {
             confirmButton = { TextButton(onClick = { approved = true; pending = null; try { play(request) } catch (e: Exception) { fail(e.message ?: "Unable to play") } }) { Text("Allow") } },
             dismissButton = { TextButton(onClick = { deny() }) { Text("Deny") } }) }
     }
+    private fun closeCaptionSettings(save: Boolean = true) {
+        if (save) saveReceiverCaptionAppearance()
+        captionSettingsMenu = false
+        showReceiverControls()
+    }
+
     private fun deny() { pending = null; connection?.close() }
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         val current = player
-        if (active && pending == null && !captionLanguageMenu && current != null) {
+        if (active && pending == null && !captionSettingsMenu && current != null) {
             showReceiverControls()
             if (receiverControlsFocused && keyCode in setOf(KeyEvent.KEYCODE_DPAD_CENTER,
                     KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,

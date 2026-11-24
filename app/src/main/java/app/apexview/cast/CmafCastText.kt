@@ -4,21 +4,30 @@ import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.exoplayer.dash.manifest.DashManifestParser
 import androidx.media3.exoplayer.dash.manifest.Representation
+import app.apexview.ManifestProtocol
+import app.apexview.tiled.HlsProgrammeContext
 import app.apexview.tiled.CmafBoxInspector
 import app.apexview.tiled.CmafHttpReader
-import app.apexview.tiled.ProtectedHevcComposedDashPackageBuilder
 
 /** Source-declared clear fragmented text, unchanged bytes and source timestamps.
  * Never fetch keys or synthesize captions for an undeclared representation. */
-internal class CmafCastText(private val reader: CmafHttpReader) : AutoCloseable {
-    private data class Piece(val name: String, val bytes: ByteArray, val dts: Long, val duration: Long)
+internal class CmafCastText(
+    private val reader: CmafHttpReader,
+    private val budget: RelayMediaBudget,
+    private val programmeIndex: Int,
+    private val maxTracks: Int,
+) : AutoCloseable {
+    private val hls = HlsCastText(reader, budget, programmeIndex, maxTracks)
+    private var hlsMode = false
+    private val prefix = "text-$programmeIndex"
+    private data class Piece(val name: String, val bytes: SharedRelayResource, val dts: Long, val duration: Long)
     private class Track(val key: String, val index: Int, val language: String, val codec: String,
-                        val init: ByteArray, val report: CmafBoxInspector.Report, val scale: Long,
+                        val init: SharedRelayResource, val report: CmafBoxInspector.Report, val scale: Long,
                         val initKey: String, val pto: Long) {
         val pieces = mutableListOf<Piece>()
         var lastStart: Long? = null
         var serial = 0L
-        fun close() { init.fill(0); pieces.forEach { it.bytes.fill(0) }; pieces.clear() }
+        fun close() { init.close(); pieces.forEach { it.bytes.close() }; pieces.clear() }
     }
     private val tracks = linkedMapOf<String, Track>()
     private var discovered = false
@@ -31,10 +40,16 @@ internal class CmafCastText(private val reader: CmafHttpReader) : AutoCloseable 
             else -> null
         }
     }
-    fun capture(url: String, sourceUs: Long, videoStartUs: Long) {
+    fun capture(url: String, sourceUs: Long, videoStartUs: Long, programme: HlsProgrammeContext?) {
+        if (programme != null) {
+            hlsMode = true
+            hls.capture(programme, videoStartUs)
+            return
+        }
+        if (hlsMode) return
         val response = reader.read(Uri.parse(url), 2 * 1024 * 1024)
         try {
-            if (response.bytes.toString(Charsets.UTF_8).trimStart().startsWith("#EXTM3U")) return
+            if (ManifestProtocol.fromBody(response.bytes) != ManifestProtocol.DASH) return
             val manifest = DashManifestParser().parse(response.uri, response.bytes.inputStream())
             val pi = (0 until manifest.periodCount).lastOrNull { manifest.getPeriod(it).startMs * 1000 <= sourceUs } ?: return
             val period = manifest.getPeriod(pi)
@@ -43,7 +58,7 @@ internal class CmafCastText(private val reader: CmafHttpReader) : AutoCloseable 
                 set.representations.map { "${set.id}:${it.format.id}" to it }
             }.filter { (_, rep) -> rep.format.drmInitData == null && codec(rep) != null && rep.initializationUri != null && rep.index != null }
             for ((key, rep) in candidates) {
-                if (key !in tracks && (discovered || tracks.size >= 4)) continue
+                if (key !in tracks && (discovered || tracks.size >= maxTracks)) continue
                 try {
                     val index = requireNotNull(rep.index)
                     val durationUs = manifest.getPeriodDurationUs(pi)
@@ -70,7 +85,7 @@ internal class CmafCastText(private val reader: CmafHttpReader) : AutoCloseable 
                             val pto = ticks(rep.presentationTimeOffsetUs + videoStartUs - periodUs, scale)
                             require(pto >= 0)
                             val lang = rep.format.language?.takeIf { it.matches(Regex("[A-Za-z0-9-]{1,35}")) } ?: "und"
-                            track = Track(key, tracks.size, lang, requireNotNull(codec(rep)), bytes, report, scale, initKey, pto)
+                            track = Track(key, (0 until maxTracks).first { slot -> tracks.values.none { it.index == slot } }, lang, requireNotNull(codec(rep)), budget.own(bytes), report, scale, initKey, pto)
                             tracks[key] = track; owned = false
                         } finally { if (owned) bytes.fill(0) }
                     }
@@ -94,9 +109,9 @@ internal class CmafCastText(private val reader: CmafHttpReader) : AutoCloseable 
                         require(length > 0 && kotlin.math.abs(dts - ticks(rep.presentationTimeOffsetUs + start - periodUs, t.scale)) <= 1 &&
                             kotlin.math.abs(length - ticks(duration, t.scale)) <= 1)
                         t.pieces.lastOrNull()?.let { require(dts >= it.dts + it.duration) }
-                        t.pieces += Piece("text-${t.index}-${++t.serial}.m4s", bytes, dts, length)
+                        t.pieces += Piece("$prefix-${t.index}-${++t.serial}.m4s", budget.own(bytes), dts, length)
                         transferred = true; t.lastStart = start
-                        while (t.pieces.size > 3) t.pieces.removeAt(0).bytes.fill(0)
+                        while (t.pieces.size > 3) t.pieces.removeAt(0).bytes.close()
                     } finally { if (!transferred) bytes.fill(0) }
                 } catch (failure: Exception) {
                     if (failure is kotlinx.coroutines.CancellationException) throw failure
@@ -107,27 +122,26 @@ internal class CmafCastText(private val reader: CmafHttpReader) : AutoCloseable 
             discovered = true
         } finally { response.bytes.fill(0) }
     }
-    fun appendTo(video: ProtectedHevcComposedDashPackageBuilder.Package): ProtectedHevcComposedDashPackageBuilder.Package {
-        if (tracks.isEmpty()) return video
-        val resources = video.resources.toMutableMap()
-        val xml = StringBuilder()
-        val owned = mutableListOf<ByteArray>()
-        try {
-            for (t in tracks.values) {
-                if (t.pieces.isEmpty()) continue
-                val initName = "text-${t.index}-init.mp4"
-                resources[initName] = t.init.copyOf().also(owned::add)
-                val timeline = t.pieces.joinToString("") { """<S t="${it.dts}" d="${it.duration}"/>""" }
-                val urls = t.pieces.joinToString("") { resources[it.name] = it.bytes.copyOf().also(owned::add); """<SegmentURL media="${it.name}"/>""" }
-                xml.append("""<AdaptationSet id="${100+t.index}" contentType="text" mimeType="application/mp4" lang="${t.language}">
-                    <Representation id="pitwall-text-${t.index}" bandwidth="64000" codecs="${t.codec}">
-                    <SegmentList timescale="${t.scale}" presentationTimeOffset="${t.pto}"><Initialization sourceURL="$initName"/>
-                    <SegmentTimeline>$timeline</SegmentTimeline>$urls</SegmentList></Representation></AdaptationSet>""")
+    fun appendTo(publication: CastDashPublication) {
+        if (hlsMode) { hls.appendTo(publication); return }
+        for (t in tracks.values) {
+            if (t.pieces.isEmpty()) continue
+            val initName = "$prefix-${t.index}-init.mp4"
+            publication.addResource(initName, t.init)
+            val timeline = t.pieces.joinToString("") { """<S t="${it.dts}" d="${it.duration}"/>""" }
+            val urls = t.pieces.joinToString("") {
+                publication.addResource(it.name, it.bytes)
+                """<SegmentURL media="${it.name}"/>"""
             }
-            val manifest = video.manifest.replace("</Period>", "$xml</Period>")
-            resources["manifest.mpd"] = manifest.toByteArray().also(owned::add)
-            return video.copy(manifest = manifest, resources = resources)
-        } catch (failure: Throwable) { owned.forEach { it.fill(0) }; throw failure }
+            publication.addAdaptationSet("""<AdaptationSet id="${100 + programmeIndex * 4 + t.index}" contentType="text" mimeType="application/mp4" lang="${t.language}">
+                <Representation id="pitwall-text-$programmeIndex-${t.index}" bandwidth="64000" codecs="${t.codec}">
+                <SegmentList timescale="${t.scale}" presentationTimeOffset="${t.pto}"><Initialization sourceURL="$initName"/>
+                <SegmentTimeline>$timeline</SegmentTimeline>$urls</SegmentList></Representation></AdaptationSet>""")
+        }
     }
-    override fun close() { tracks.values.forEach { it.close() }; tracks.clear() }
+    override fun close() {
+        hls.close()
+        tracks.values.forEach { it.close() }
+        tracks.clear()
+    }
 }

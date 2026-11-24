@@ -182,6 +182,10 @@ class FeedPlayer(
     private var archiveVodSession: HevcArchiveVodSession? = null
     private var archiveSelectedAudioUri: Uri? = null
     private var archiveAudioChildren: List<Uri> = emptyList()
+    private var archiveCaptionChildren: Map<String, Int> = emptyMap()
+    private var archiveProgrammeLabel: String? = null
+    private var archiveCaptionSelected by mutableStateOf(false)
+    internal val captionOutputReady: Boolean get() = archiveVodSession == null || archiveCaptionSelected
     private lateinit var archiveAudioSources: DefaultMediaSourceFactory
     internal val isArchiveVodPlayback: Boolean get() = archiveVodSession != null
     internal val archiveSceneLabels: List<String> get() = archiveVodSession?.sourceLabels.orEmpty()
@@ -208,11 +212,16 @@ class FeedPlayer(
         val normalized = CaptionPolicy.normalizeLanguage(language)
         val disabled = !enabled || remotePlaybackSuspended
         if (captionsSelected == enabled && selectedCaptionLanguage == normalized &&
-            (C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes) == disabled) return
+            (archiveVodSession != null || (C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes) == disabled)) return
         captionsSelected = enabled
         selectedCaptionLanguage = normalized
         remoteTextWasDisabled = !enabled
+        if (archiveVodSession != null) {
+            applyArchiveCaptionTrack(player.currentTracks)
+            return
+        }
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, disabled)
             .setPreferredTextLanguage(CaptionPolicy.textLanguage(normalized, captionCommentaryLanguage))
             .setSelectUndeterminedTextLanguage(enabled)
@@ -239,7 +248,8 @@ class FeedPlayer(
             player.volume = 0f
         } else {
             videoOn = false // The visibility budget must explicitly re-enable the actual video track.
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            if (archiveVodSession != null) applyArchiveCaptionTrack(player.currentTracks)
+            else player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, remoteTextWasDisabled).build()
         }
         // AppState restores visibility/audio under the existing single/multiple decoder budget.
@@ -384,7 +394,7 @@ class FeedPlayer(
         }
         val http = DefaultHttpDataSource.Factory()
             .setUserAgent(userAgent)
-            .setAllowCrossProtocolRedirects(true)
+            .setAllowCrossProtocolRedirects(false)
 
         val licenseCallback = HttpMediaDrmCallback(stream.licenseUrl, http).apply {
             setKeyRequestProperty("ascendontoken", ascendon)
@@ -529,6 +539,10 @@ class FeedPlayer(
                     }
                 }
                 refreshMissingQualityNotice()
+                if (archiveVodSession != null) {
+                    applyArchiveCaptionTrack(tracks)
+                    return
+                }
                 val offered = buildList {
                     tracks.groups.forEach { group ->
                         if (group.type == C.TRACK_TYPE_TEXT) for (index in 0 until group.length) {
@@ -966,26 +980,31 @@ class FeedPlayer(
     }
 
     /** One static composed video track plus native audio, on this same ExoPlayer and surface. */
-    internal fun startArchiveVodPlayback(session: HevcArchiveVodSession, positionMs: Long, playWhenReady: Boolean, audioOverride: Uri? = null) {
-        val audioUri = requireNotNull(audioOverride ?: session.audioUri) { "Archive native audio was not validated" }
+    internal fun startArchiveVodPlayback(
+        session: HevcArchiveVodSession, positionMs: Long, playWhenReady: Boolean,
+        programme: String = session.clockLabel,
+    ) {
+        val audioUri = requireNotNull(session.audioUris[programme] ?: session.audioUri.takeIf { programme == session.clockLabel }) {
+            "Archive native audio was not validated"
+        }
         val video = DashMediaSource.Factory(session.dataSourceFactory()).setDrmSessionManagerProvider { drmManager }
             .setLoadErrorHandlingPolicy(app.apexview.tiled.ArchiveVodLoadErrorPolicy())
             .createMediaSource(MediaItem.Builder().setUri(HevcArchiveVodSession.MANIFEST_URI).setMimeType(MimeTypes.APPLICATION_MPD).build())
         // Keep native audio AND F1-provided text renditions while replacing only video
         // with the composed HEVC atlas. This does not add any video decoder.
         val audioChildren = ArchiveAudioSelectionPlan.children(audioUri, session.stableAudioUris)
-        val caption = session.captionSource?.takeUnless { it.masterUri == audioUri }
-        val audioSources = audioChildren.mapIndexed { index, uri ->
-            // Retain primary native captions exactly as before. Alternates are
-            // independently verified audio-only renditions, never extra video tracks.
+        val audioSources = audioChildren.map { uri ->
             FilteringMediaSource(archiveAudioSources.createMediaSource(MediaItem.Builder().setUri(uri)
-                .setMimeType(MimeTypes.APPLICATION_M3U8).build()),
-                if (index == 0) setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_TEXT) else setOf(C.TRACK_TYPE_AUDIO))
+                .setMimeType(MimeTypes.APPLICATION_M3U8).build()), setOf(C.TRACK_TYPE_AUDIO))
         }
-        val captionChild = caption?.let {
-            // HLS master supplies actual text metadata. Filter to the verified
-            // selected variant and its declared subtitle group; no extra video
-            // track or decoder is exposed to the composed player.
+        val captionSources = session.captionSources.filterKeys { label ->
+            label == programme || session.audioUris[label] in audioChildren
+        }
+        val captionIndexes = captionSources.keys.withIndex().associate { (index, label) ->
+            label to (audioSources.size + index + 1)
+        }
+        val captionChildren = captionSources.values.map {
+            // Every text child belongs to its own verified programme. None exposes video or audio.
             FilteringMediaSource(archiveAudioSources.createMediaSource(MediaItem.Builder()
                 .setUri(it.masterUri).setMimeType(MimeTypes.APPLICATION_M3U8)
                 .setStreamKeys(it.streamKeys).build()), setOf(C.TRACK_TYPE_TEXT))
@@ -994,9 +1013,15 @@ class FeedPlayer(
         val previousArchive = archiveVodSession
         val previousAudio = archiveSelectedAudioUri
         val previousAudioChildren = archiveAudioChildren
+        val previousProgramme = archiveProgrammeLabel
+        val previousCaptionChildren = archiveCaptionChildren
         val previousSelection = player.trackSelectionParameters
         archiveVodSession = session
         archiveAudioChildren = emptyList() // Old-source track events cannot select a new child.
+        archiveCaptionChildren = emptyMap()
+        archiveProgrammeLabel = programme
+        archiveCaptionSelected = false
+        availableCaptionTracks = emptyList()
         archiveSelectedAudioUri = audioUri
         session.updateThermalStatus(archivePower?.currentThermalStatus ?: -1)
         outputCadence.composedSingle = true
@@ -1004,13 +1029,16 @@ class FeedPlayer(
         videoOn = !remotePlaybackSuspended
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
             .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE).setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, remotePlaybackSuspended).build()
         try {
             // Keep the audio child indexes stable for native TrackSelectionOverride.
-            // The text child is last, anchored to the same selected HLS variant.
-            val children = audioSources + listOfNotNull(captionChild)
-            player.setMediaSource(MergingMediaSource(true, true, video, *children.toTypedArray()), positionMs.coerceAtLeast(0))
+            val children = audioSources + captionChildren
+            // A sparse or shorter text rendition must leave the full video timeline seekable.
+            player.setMediaSource(MergingMediaSource(true, video, *children.toTypedArray()), positionMs.coerceAtLeast(0))
             archiveAudioChildren = audioChildren
+            archiveCaptionChildren = captionIndexes
             player.playWhenReady = playWhenReady && !remotePlaybackSuspended
             player.prepare()
             Log.i("PitwallPlayback", "ARCHIVE_AUDIO_SOURCE_READY stableChildren=${audioChildren.size}")
@@ -1019,6 +1047,9 @@ class FeedPlayer(
                 archiveVodSession = previousArchive
                 archiveSelectedAudioUri = previousAudio
                 archiveAudioChildren = previousAudioChildren
+                archiveCaptionChildren = previousCaptionChildren
+                archiveProgrammeLabel = previousProgramme
+                applyArchiveCaptionTrack(player.currentTracks)
                 player.trackSelectionParameters = previousSelection
             }
             outputCadence.composedSingle =
@@ -1052,23 +1083,52 @@ class FeedPlayer(
         return true
     }
 
+    private fun applyArchiveCaptionTrack(tracks: androidx.media3.common.Tracks) {
+        val child = archiveCaptionChildren[archiveProgrammeLabel]
+        val candidates = tracks.groups.filter {
+            child != null && it.type == C.TRACK_TYPE_TEXT &&
+                ArchiveAudioSelectionPlan.childIndex(it.mediaTrackGroup.id) == child
+        }.flatMap { group ->
+            (0 until group.length).filter { group.isTrackSupported(it) }.map { group to it }
+        }
+        val formats = candidates.map { (group, index) -> group.getTrackFormat(index) }
+        availableCaptionTracks = CaptionPolicy.tracks(formats.map { it.language to it.label })
+        val preferred = if (captionsSelected && !remotePlaybackSuspended) CaptionPolicy.preferredIndex(
+            selectedCaptionLanguage, captionCommentaryLanguage, formats.map { it.language },
+            formats.map { it.selectionFlags and C.SELECTION_FLAG_DEFAULT != 0 },
+        ) else null
+        val selected = preferred?.let(candidates::get)
+        archiveCaptionSelected = selected?.let { (group, index) -> group.isTrackSelected(index) } == true
+        val previous = player.trackSelectionParameters
+        val next = previous.buildUpon().clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, selected == null).apply {
+                selected?.let { (group, index) -> setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index)) }
+            }.build()
+        if (previous != next) player.trackSelectionParameters = next
+    }
+
     internal fun selectArchiveAudio(label: String): Boolean {
         val session = archiveVodSession ?: return false
         val audio = session.audioUris[label] ?: return false
         // Cast handback and repeated selection must not rebuild the same video
         // source, reset its decoder, lose the current CC choice or restart audio.
-        if (archiveSelectedAudioUri == audio && player.playerError == null) return true
+        if (archiveProgrammeLabel == label && player.playerError == null) return true
         if (audio in archiveAudioChildren && player.playerError == null) {
             val prior = archiveSelectedAudioUri
             archiveSelectedAudioUri = audio
-            if (applyArchiveAudioTrack(audio, player.currentTracks)) return true
+            if (audio == prior || applyArchiveAudioTrack(audio, player.currentTracks)) {
+                archiveProgrammeLabel = label
+                archiveCaptionSelected = false
+                applyArchiveCaptionTrack(player.currentTracks)
+                return true
+            }
             archiveSelectedAudioUri = prior
         }
         // A muxed, unverified or unsupported audio rendition must remain
         // selectable through the original native-audio handoff. Never pretend
         // its timeline or track group is verified.
         Log.i("PitwallPlayback", "ARCHIVE_AUDIO_SOURCE_HANDOFF reason=UNVERIFIED_OR_UNAVAILABLE_GROUP")
-        startArchiveVodPlayback(session, player.currentPosition, player.playWhenReady, audio)
+        startArchiveVodPlayback(session, player.currentPosition, player.playWhenReady, label)
         return true
     }
 
@@ -1076,6 +1136,9 @@ class FeedPlayer(
         archiveVodSession?.close(); archiveVodSession = null
         archiveSelectedAudioUri = null
         archiveAudioChildren = emptyList()
+        archiveCaptionChildren = emptyMap()
+        archiveProgrammeLabel = null
+        archiveCaptionSelected = false
         outputCadence.composedSingle = protectedLiveDashSource != null
     }
 
@@ -1203,6 +1266,9 @@ class FeedPlayer(
         archiveVodSession = null
         archiveSelectedAudioUri = null
         archiveAudioChildren = emptyList()
+        archiveCaptionChildren = emptyMap()
+        archiveProgrammeLabel = null
+        archiveCaptionSelected = false
         firstFrameRendered = false; error = null; problem = null
         videoSuppressedByProtectedComposition = false
         val restorePositionMs = positionMs?.coerceAtLeast(0L)
@@ -1349,6 +1415,9 @@ class FeedPlayer(
         archiveVodSession = null
         archiveSelectedAudioUri = null
         archiveAudioChildren = emptyList()
+        archiveCaptionChildren = emptyMap()
+        archiveProgrammeLabel = null
+        archiveCaptionSelected = false
         val protectedSource = protectedLiveDashSource
         protectedLiveDashSource = null
         // Media3 owns the codec producer and DRM session. Close it before

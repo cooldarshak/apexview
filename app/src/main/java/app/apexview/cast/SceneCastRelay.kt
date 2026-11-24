@@ -19,23 +19,29 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal class SceneCastRelay(val session: HevcArchiveVodSession,
                              private val reader: CmafHttpReader, val address: String,
                              private val peer: InetAddress? = null,
-                             tls: app.apexview.cast.local.PitwallTls.Session? = null) : AutoCloseable {
+                             tls: app.apexview.cast.local.PitwallTls.Session? = null,
+                             val programmeLabel: String = session.clockLabel) : AutoCloseable {
     private val random = SecureRandom()
     private val token = ByteArray(24).also(random::nextBytes).joinToString("") { "%02x".format(it) }
     private val scheme = if (tls == null) "http" else "https"
-    private val server = tls?.mediaServer(CastRelayBinding.address(address))
-        ?: ServerSocket(0, 16, CastRelayBinding.address(address))
+    private val lease = session.acquireLease()
+    private val server = try {
+        tls?.mediaServer(CastRelayBinding.address(address)) ?: ServerSocket(0, 16, CastRelayBinding.address(address))
+    } catch (error: Exception) {
+        lease.close()
+        throw error
+    }
     /** Direct HLS URL loaded by Google's Default Media Receiver after the Cast session starts. */
     val googleCastMediaUrl get() = "$scheme://$address:${server.localPort}/s/$token/master.m3u8"
     private val workers = java.util.concurrent.ThreadPoolExecutor(4, 4, 0, java.util.concurrent.TimeUnit.SECONDS,
         java.util.concurrent.ArrayBlockingQueue(8))
     private val accepting = Executors.newSingleThreadExecutor()
     private val stopped = AtomicBoolean(false)
-    private val lease = session.acquireLease()
     private val resources = ConcurrentHashMap<String, Uri>()
     private val audioManifests = ConcurrentHashMap<String, ByteArray>()
     private val activeSockets = ConcurrentHashMap.newKeySet<Socket>()
-    @Volatile private var selectedAudio = session.audioUri
+    private val selectedAudio = session.audioUris[programmeLabel]
+        ?: session.audioUri.takeIf { programmeLabel == session.clockLabel }
     private data class CaptionTrack(val index: Int, val masterTag: String, val playlist: ByteArray,
                                     val segments: List<Uri>)
     @Volatile private var captions: List<CaptionTrack> = emptyList()
@@ -49,8 +55,6 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
             catch (_: RuntimeException) { socket.close(); activeSockets -= socket }
         }
     } }
-
-    fun selectAudio(label: String) { selectedAudio = session.audioUris[label] ?: selectedAudio }
 
     private fun serve(socket: Socket) {
         val input = BufferedInputStream(socket.getInputStream())
@@ -180,7 +184,7 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
     fun validateAudio() { audioManifest(); prepareCaptions() }
 
     private fun prepareCaptions() {
-        val offers = session.captionSource?.renditions.orEmpty().take(16)
+        val offers = session.captionSources[programmeLabel]?.renditions.orEmpty().take(16)
         val verified = mutableListOf<CaptionTrack>()
         var remainingSegments = 32_768
         for ((index, offer) in offers.withIndex()) {

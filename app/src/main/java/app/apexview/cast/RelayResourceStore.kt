@@ -12,7 +12,7 @@ internal class RelayResourceStore(
     private val maxReaders: Int = 3,
 ) : AutoCloseable {
     init { require(maxBytes > 0 && maxResources > 0 && maxReaders > 0) }
-    private class Entry(val bytes: ByteArray) {
+    private class Entry(val bytes: ByteArray, val identity: Any, val release: () -> Unit) {
         var current = true
         var readers = 0
     }
@@ -39,26 +39,54 @@ internal class RelayResourceStore(
     data class Snapshot(val currentBytes: Long, val pinnedBytes: Long, val readers: Int)
     @Synchronized fun snapshot() = Snapshot(current.values.sumOf { it.bytes.size.toLong() }, pinnedBytes, readers)
 
-    @Synchronized fun publish(next: Map<String, ByteArray>) {
+    @Synchronized fun publish(
+        next: Map<String, ByteArray>,
+        shared: Map<String, SharedRelayResource> = emptyMap(),
+    ) {
         check(!closed)
-        require(next.size <= maxResources && next.values.sumOf { it.size.toLong() } <= maxBytes) {
+        require(next.size.toLong() + shared.size <= maxResources &&
+            next.values.sumOf { it.size.toLong() } + shared.values.sumOf { it.size.toLong() } <= maxBytes) {
             "Receiver media window exceeds its bounded memory budget"
         }
-        val existing = IdentityHashMap<ByteArray, Entry>()
-        current.values.forEach { existing[it.bytes] = it }
-        val retired = IdentityHashMap<ByteArray, Boolean>()
-        pinned.filterNot { it.current }.forEach { retired[it.bytes] = true }
-        val seen = IdentityHashMap<ByteArray, Boolean>()
-        val replacement = LinkedHashMap<String, Entry>(next.size)
-        next.forEach { (name, bytes) ->
-            require(name.matches(Regex("[a-zA-Z0-9.-]{1,80}")) && name !in setOf(".", "..") &&
-                bytes.isNotEmpty() && seen.put(bytes, true) == null && !retired.containsKey(bytes)) {
-                "Invalid or previously retired relay resource"
+        val existing = IdentityHashMap<Any, Entry>()
+        current.values.forEach { existing[it.identity] = it }
+        val retired = IdentityHashMap<Any, Entry>()
+        pinned.filterNot { it.current }.forEach { retired[it.identity] = it }
+        val backingOwners = IdentityHashMap<Any, Any>()
+        current.values.forEach { backingOwners[it.bytes] = it.identity }
+        pinned.forEach { backingOwners[it.bytes] = it.identity }
+        val seen = IdentityHashMap<Any, Boolean>()
+        val replacement = LinkedHashMap<String, Entry>(next.size + shared.size)
+        val acquired = mutableListOf<SharedRelayResource.Retained>()
+        fun validate(name: String, identity: Any, backing: Any) {
+            val currentOwner = backingOwners[backing]
+            require(name.matches(resourceName) && name != "." && name != ".." &&
+                name !in replacement && seen.put(backing, true) == null &&
+                (currentOwner == null || currentOwner === identity)) {
+                "Invalid or aliased relay resource"
             }
-            replacement[name] = existing[bytes] ?: Entry(bytes)
+        }
+        try {
+            next.forEach { (name, bytes) ->
+                validate(name, bytes, bytes)
+                require(bytes.isNotEmpty() && !retired.containsKey(bytes)) { "Invalid or previously retired relay resource" }
+                replacement[name] = existing[bytes] ?: Entry(bytes, bytes) { bytes.fill(0) }
+            }
+            shared.forEach { (name, resource) ->
+                validate(name, resource, resource.bufferIdentity)
+                replacement[name] = existing[resource] ?: retired[resource] ?: run {
+                    val handle = resource.retainForRelay()
+                    acquired.add(handle)
+                    Entry(handle.bytes, resource, handle.release)
+                }
+            }
+        } catch (failure: Throwable) {
+            acquired.forEach { it.release() }
+            throw failure
         }
         val retained = replacement.values.toSet()
         val previous = current
+        retained.forEach { it.current = true }
         current = replacement
         previous.values.filterNot { it in retained }.forEach(::retire)
     }
@@ -76,7 +104,7 @@ internal class RelayResourceStore(
                 if (--entry.readers == 0) {
                     pinned.remove(entry)
                     pinnedBytes -= entry.bytes.size
-                    if (!entry.current) entry.bytes.fill(0)
+                    if (!entry.current) entry.release()
                 }
             }
         }
@@ -84,8 +112,10 @@ internal class RelayResourceStore(
 
     private fun retire(entry: Entry) {
         entry.current = false
-        if (entry.readers == 0) entry.bytes.fill(0)
+        if (entry.readers == 0) entry.release()
     }
+
+    private val resourceName = Regex("[a-zA-Z0-9.-]{1,80}")
 
     @Synchronized override fun close() {
         if (closed) return

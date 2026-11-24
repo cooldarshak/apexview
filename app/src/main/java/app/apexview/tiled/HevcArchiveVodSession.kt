@@ -35,12 +35,12 @@ internal class ArchiveVodLoadErrorPolicy : androidx.media3.exoplayer.upstream.De
 internal class HevcArchiveVodSession(
     private val reader: CmafHttpReader,
     private val inputs: List<Input>,
-    private val clockLabel: String,
+    val clockLabel: String,
     private val maximumOutputWidth: Int = 4096,
     val audioUri: Uri? = null,
     val audioUris: Map<String, Uri> = emptyMap(),
     val stableAudioUris: Set<Uri> = emptySet(),
-    val captionSource: ArchiveCaptionSource? = null,
+    val captionSources: Map<String, ArchiveCaptionSource> = emptyMap(),
 ) : AutoCloseable {
     class Input(val label: String, val playlist: HlsMediaPlaylist, val format: Format?,
                 val initialization: ByteArray, val report: CmafBoxInspector.Report,

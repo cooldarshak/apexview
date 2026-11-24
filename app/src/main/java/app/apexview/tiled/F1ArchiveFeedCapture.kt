@@ -13,7 +13,7 @@ internal class F1ArchiveFeedCapture(
     private val minimumHeight: Int = 0, private val maximumHeight: Int = 2160, fullPictures: Boolean = minimumHeight > 0,
 ) : CmafCaptureLifecycle {
     private val factory = dataSourceFactory ?: DefaultHttpDataSource.Factory().setUserAgent(userAgent)
-        .setAllowCrossProtocolRedirects(true)
+        .setAllowCrossProtocolRedirects(false)
         .setDefaultRequestProperties(mapOf("ascendontoken" to ascendon, "entitlementtoken" to entitlement))
     private val dash = F1DashFeedCapture(userAgent, ascendon, entitlement, dataSourceFactory = factory, maximumVideoHeight = maximumHeight, minimumVideoHeight = minimumHeight)
     private val hls = F1HlsFeedCapture(factory, maximumHeight, minimumCaptureHeight = minimumHeight, fullPictures = fullPictures)
@@ -75,6 +75,8 @@ internal class F1ArchiveFeedCapture(
         }
         return snapshot
     }
+
+    val hlsProgrammes get() = if (usingHls) hls.programmes else emptyMap()
 
     fun outputWindow(group: String) = if (usingHls) hls.outputWindow(group) else ProtectedHevcLiveComposition.outputWindow(group)
     fun widevinePssh(): ByteArray? = if (usingHls) hls.widevinePssh() else dash.widevinePssh()

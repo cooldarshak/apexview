@@ -90,6 +90,12 @@ run_required_instrumentation \
   'OK (1 test)' "$texture_report"
 cat "$texture_report" >> "$report"
 
+cast_report="${RUNNER_TEMP:?}/pitwall-baked-cast-instrumentation.txt"
+run_required_instrumentation \
+  app.apexview.scene.BakedCastCaptureAndroidTest \
+  'OK (1 test)' "$cast_report"
+cat "$cast_report" >> "$report"
+
 # Independent Android-runtime coverage for archive delivery and memory ownership.
 # No synthetic hardware codec can substitute for physical F1/Widevine device evidence.
 delivery_report="${RUNNER_TEMP:?}/pitwall-archive-delivery-instrumentation.txt"

@@ -2,14 +2,44 @@
 
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** IN DEVELOPMENT. **Last verified green checkpoint: Build 834** ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45360086795)), exact production SHA **29aadb8c81e423a4a9e5c0d2c8c362f82dbcaa62**. Build 834 passed the delivery, control, captions and release-integrity batch. Build 832 remains the earlier bounded-media milestone. Build 833 verified the streaming clear HEVC writer, archive scheduling, measured cadence, verified stable audio alternatives and bounded diagnostics. Build 821 ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45231217897)) remains the earlier composition-diagnostic ownership milestone. Prior P1.1/P1.2/P1.3/P2.6 milestone: Build 819, production commit `4ab0dbb573315d728aac4724350cd5bdaa4207e6` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45202138705)). The full coordinated P1.1/P1.2/P1.3/P2.6 source contract, Kotlin/JVM/Python/Cast, independent synthetic HEVC/CMAF and FFmpeg checks, signed debug and benchmark APK assemblies, and mandatory emulator RenderNode/SurfaceDecoder instrumentation all passed. This verifies compiled and tested source, not physical device performance, DRM entitlements, or Cast acceptance. P0.3 and P0.4 are **100% complete from the coding perspective**, with **0% known coding pending**. Their physical-performance/release-acceptance gates remain OPEN. Physical acceptance and release gates remain separate. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
-performance and HEVC design material is preserved lower in this document.
-Other `docs/*.md` files are implementation notes, traces, diagnostics,
-technical specifications or test instructions, NOT competing active plans.
+**Status:** The consolidated source update is implemented. Physical and release acceptance is open. **Verified starting checkpoint: Build 837**, commit `6d20bccdcfba121f7b0998fdcb8d9dcc492ff539`. Its mandatory source, JVM, Cast, independent HEVC/CMAF, APK and Android instrumentation checks passed. This document is the active project plan. [Build 837](https://github.com/cooldarshak/apexview/actions/runs/45374278181)
+
+## Consolidated update after Build 837
+
+- **Playback and timing.** The playback coordinator owns feed-offer cancellation, composition replacement, delayed retry and the latest exact seek/Cast restart. Detached capture workers finish before their backend is reset. Each timing open and speed lookup has its own identity. Stale operations cannot publish over a newer request, including when the same race is reopened. Backgrounding during a local feed offer cancels the offer before it can start a player out of view.
+- **Native Cast publication and captions.** The source producer and relay take leases on the same immutable audio/text bytes. Publication is atomic across the MPD, video and sidecars. Failed publication rolls back acquired leases. Retired buffers remain readable while pinned and are cleared on final release. The checked source variant determines the audio and subtitle programme. Rolling HLS WebVTT uses declared timeline boundaries, discontinuity and media sequence, timestamp maps and 33-bit wrap. The receiver selects the matching programme's clear fragmented WebVTT or declared DASH text without another decoder. Finite archive playback selects verified Media3 text children and compatible audio in the composed player.
+- **Clear baked Cast.** The clear scene supplies one requested GPU picture from the existing atlas renderer. Compose records the same live overlays it draws locally, including the map, tower, driver labels and captions. The encoder composites both layers with their original geometry and alpha on its own EGL looper. A bounded clear-window capture path remains available on output acquisition failure and records the reason. Media3 source time drives the AVC timestamps and unchanged AAC commentary at both 1× and 1.5×. The paired receiver starts at the selected speed. Clear screenshots and replay capture remain available. Widevine retains its existing authorized secure output and native receiver paths.
+- **TV and release.** Programme switches reject stale track acknowledgements and apply the desired audio when a load starts rendering. Caption language, text size and background opacity use the phone and TV's existing accessible controls. The release audit checked the Build 837 owned-publisher asset, checksum, signer/version, installer, paired TLS, backup and redaction paths. Their remaining gates require real installed APKs, authorized hardware sessions or release approval.
+- **Automation.** The coordinated candidate includes JVM owner/clock and lease regressions, a Media3 extraction test for packaged WebVTT, and a mandatory Android EGL pixel test for the actual Compose layer and moving overlay. The branch workflow is the source of truth for exact-commit CI.
+
+### Current workstream ledger
+
+Coding percentages refer to the identified source requirements. The new commit's exact-source CI is tracked in GitHub Actions. Green CI and the physical/release evidence below are recorded independently.
+
+| ID | Workstream | Coding | Pending coding | Physical acceptance remaining | Release gate |
+| --- | --- | ---: | ---: | --- | --- |
+| P0.1 | Segment priority and exact seek | 100% | 0% | S22/TCL cold, warm and lap seek at 1×/1.5×. Rolling and Cast transitions | Open |
+| P0.2 | HEVC memory and delivery | 100% | 0% | Sustained heap, native allocations, GC, reader retention and supported 7/8-feed sessions | Open |
+| P0.3 | Video rendering | 100% | 0% | Independent SurfaceFlinger presentation and BufferQueue attribution on S22/TCL and Cast | Open |
+| P0.4 | Map and timing tower | 100% | 0% | Matched 10-minute OFF/MAP/TOWER/BOTH runs, UI deadline, timing freshness and TCL/Cast parity | Open |
+| P1.1 | HEVC atlas | 100% | 0% | Real mixed renditions, coded-picture resolution, decoder workload and thermals | Open |
+| P1.2 | Refresh matching | 100% | 0% | Measured 50/75fps pacing, supported refresh transitions and audio sync | Open |
+| P1.3 | Quality and thermal | 100% | 0% | Real rendition caps, 10-minute power/thermal, GC and buffering | Open |
+| P2.1 | Pitwall Cast | 100% | 0% | S22 → TCL overlay and caption parity, direct EGL on device, 1×/1.5× A/V, seek and reconnect | Open |
+| P2.2 | Coordinator architecture | 100% | 0% | Phone/TV/Cast lifecycle, backgrounding, rotation and repeated player replacement | Open |
+| P2.3 | Release and updates | 100% | 0% | Signed in-place upgrade, installer confirmation and rollback on both devices | Open |
+| P2.4 | Authorization and security | 100% | 0% | Real mutual-TLS pairing/reconnect, backup and log review, authorized Widevine L1/L3 | Open |
+| P2.5 | Android TV | 100% | 0% | TCL single and multifeed playback, tower/map, D-pad, sliders and focus | Open |
+| P2.6 | Testing and benchmarks | 100% | 0% | Run and archive the S22/TCL/Pitwall Cast evidence matrix | Open |
+| P2.7 | Core architecture | 100% | 0% | Previously accepted scope. Keep single-decoder behavior | Closed |
+| P2.8 | Material 3 Expressive | 100% | 0% | TCL, TalkBack, 200% text and reduced-motion acceptance | Open |
+| P2.9 | Closed captions | 100% | 0% | Real F1 caption availability, alignment, languages, appearance and phone/TV/Cast continuity | Open |
+
+**Strict release acceptance: 1/16 closed.** Device measurements will determine physical frame pacing, BufferQueue attribution, A/V alignment, thermal limits and vendor-specific Widevine behavior. Real F1 caption availability remains part of device acceptance.
 
 
 
-## Build 836 CI correction
+## Historical Build 836 CI correction, verified in Build 837
 
 Build 836 stopped at the Python production-wiring suite (80 of 81 tests passed). The active composition diagnostic test counted two occurrences of the old f1DashCapture variable, renamed to playbackWork.capture in the preceding coordinator extraction. Both production identity fences are present. Update the exact two-occurrence assertion to the new owner field; do not skip or weaken the test. Kotlin compilation, TLS loopback and APK assembly did not run in 836. Exact-source CI remains pending; all earlier physical and engineering gates remain unchanged.
 
@@ -637,7 +667,7 @@ Audited historical totals: **44 runs, 10 passed, 34 failed.** These are CI snaps
 - **Code estimates after exact-green 801 (provisional)**: P0.1=96%, P0.2=93%, P2.8=92%. These modest increases recognize passed 801 fixes/tests, NOT hardware acceptance. All three remain unfinished and their release gates remain OPEN. Overall unweighted 16-workstream code estimate = 77.5625%; strict release gates 1/16 closed.
 - **Required next coordinated implementation pass**: repair the still-visible recovery/observability and fairness risks if confirmed, close remaining production tests and wiring, validate full compatibility matrix and document objective evidence. No false 100% and no unsupported physical acceptance.
 
-### Current 16-workstream coding ledger: Build 828 exact-source GREEN
+### Historical 16-workstream coding ledger: Build 828 exact-source GREEN
 
 Coding percent describes implemented and automated-tested source, not hardware acceptance. Build 819 passed exact-source GitHub Actions, including JVM, Python, Cast/HEVC/CMAF, signed APK/benchmark assembly and mandatory Android emulator tests. P1.1/P1.2/P1.3/P2.6 now close at 100% coding; P0.1/P0.2/P0.3/P0.4/P2.8 remain 100% coded. ALL physical release gates except P2.7 remain OPEN.
 
@@ -1119,7 +1149,7 @@ being treated as compiled. The device matrix and 16 release gates
 remain unchanged until real Samsung, TCL and Cast evidence exists.
 
 
-## Current implementation and acceptance ledger (Build 801 green; post-801 guard CI pending)
+## Historical implementation and acceptance ledger (Build 801 green; post-801 guard CI pending)
 
 This ledger supersedes the older historical 66% implementation snapshot
 farther down in this same document. Numeric values are explicitly

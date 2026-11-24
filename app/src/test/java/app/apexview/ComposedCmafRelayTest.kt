@@ -1,6 +1,7 @@
 package app.apexview
 
 import app.apexview.cast.ComposedCmafRelay
+import app.apexview.cast.CastDashPublication
 import app.apexview.cast.local.ReceiverLicenseRequest
 import app.apexview.tiled.ProtectedHevcComposedDashPackageBuilder
 import java.net.InetAddress
@@ -25,7 +26,8 @@ class ComposedCmafRelayTest {
         try {
             val bytes = ByteArray(100) { (it * 3).toByte() }
             val resources = mapOf("manifest.mpd" to "<MPD/>".toByteArray(), "segment-1.m4s" to bytes.copyOf())
-            relay.publish(ProtectedHevcComposedDashPackageBuilder.Package("<MPD/>", resources, 2560, 1472, 10, 1, 1, 0, 1))
+            CastDashPublication(ProtectedHevcComposedDashPackageBuilder.Package("<MPD/>", resources,
+                2560, 1472, 10, 1, 1, 0, 1)).publish(relay)
             assertTrue(get("/manifest.mpd").first.startsWith("HTTP/1.1 404"))
             val path = uri.path.substringBeforeLast('/') + "/segment-1.m4s"
             assertArrayEquals(bytes, get(path).second)

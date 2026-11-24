@@ -135,9 +135,14 @@ class AppState(
             return
         }
         localConnection?.send(app.apexview.cast.local.FcastProtocol.UI_CONTROL,
-            app.apexview.cast.local.CaptionControlProtocol.encode(settings.subtitles, settings.captionLanguage).apply {
+            app.apexview.cast.local.CaptionControlProtocol.encode(settings.subtitles, settings.captionLanguage, settings.captionAppearance).apply {
                 if (localCaptionOwnerControl) put("playbackId", localLoadId)
             })
+    }
+
+    fun saveCaptionAppearance() {
+        settings.saveCaptionAppearance()
+        if (castingActive) sendCaptionPreferenceToReceiver()
     }
 
     fun setCaptionsEnabled(enabled: Boolean) {
@@ -455,6 +460,10 @@ class AppState(
                             !castCoordinator.accepts(body.optString("playbackId"))) return
                         val request = app.apexview.cast.local.CaptionControlProtocol.decode(body)
                         settings.updateCaptionLanguage(request.language)
+                        request.appearance?.let {
+                            settings.previewCaptionAppearance(it)
+                            settings.saveCaptionAppearance()
+                        }
                         if (bakedCastSession != null) setCaptionsEnabled(request.enabled)
                         else {
                             // Native receiver already applied the preference. Mirror
@@ -537,6 +546,10 @@ class AppState(
                     castStatus = if (bakedCastSession != null) "Streaming the baked phone picture, tower, map and commentary to $castDeviceName."
                         else "Playing on $castDeviceName in the phone video layout." + (height?.let { " ${it}p sources." } ?: "")
                     message = castStatus
+                    val native = nativeComposedCast
+                    val wanted = tiles.firstOrNull { it.audible }
+                    if (native != null && wanted != null && wanted.feed.sourceStream.profileLabel != native.audioLabel)
+                        setAudio(wanted)
                 }
                 protocol.PLAYBACK_UPDATE -> if (localReady && body != null) {
                     val packetId = if (body.has("playbackId")) body.optString("playbackId") else null
@@ -772,6 +785,7 @@ class AppState(
         val clockTile = castTiles.firstOrNull { it.id == bigTileId }
             ?: castTiles.firstOrNull { it.audible }
             ?: castTiles.first()
+        val requestedProgramme = castTiles.firstOrNull { it.audible }?.feed?.sourceStream?.profileLabel
         val selection = castTiles.map { it.id to it.feed.sourceStream.profileLabel }
         val usingLocalReceiver = localChosen
         val originalConnection = localConnection
@@ -785,7 +799,7 @@ class AppState(
             var ownedSession: app.apexview.tiled.HevcArchiveVodSession? = null
             try {
                 val expectedLabels = selection.map { it.second }.toSet()
-                val activeComposition = singleDecoderScenePlayer?.archiveSessionForCast()
+                val activeComposition = (singleDecoderScenePlayer?.archiveSessionForCast() ?: castRelay?.session)
                     ?.takeIf { it.sourceLabels.toSet() == expectedLabels && it.sourceLabels.size == expectedLabels.size &&
                         (if (castQuality == null) it.mixedSourceRects.size == expectedLabels.size else
                             castQuality.targetHeight.takeIf { h -> h > 0 }?.let { h -> it.sourceDisplayHeight <= h }
@@ -816,15 +830,14 @@ class AppState(
                     ?.firstOrNull { it is java.net.Inet4Address && !it.isLoopbackAddress }?.hostAddress
                     ?: throw IOException("No local IPv4 receiver address is available.")
                 val factory = androidx.media3.datasource.DefaultHttpDataSource.Factory().setUserAgent(userAgent)
-                    .setAllowCrossProtocolRedirects(true).setDefaultRequestProperties(mapOf(
+                    .setAllowCrossProtocolRedirects(false).setDefaultRequestProperties(mapOf(
                         "ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val programme = requestedProgramme ?: session.clockLabel
                     relay = app.apexview.cast.SceneCastRelay(session, app.apexview.tiled.CmafHttpReader(factory), address,
                         peer = if (usingLocalReceiver) originalConnection?.socket?.inetAddress else null,
-                        tls = if (usingLocalReceiver) requireNotNull(originalConnection?.secureSession) else null)
-                    (castTiles.firstOrNull { it.audible } ?: clockTile).let {
-                        relay!!.selectAudio(it.feed.sourceStream.profileLabel)
-                    }
+                        tls = if (usingLocalReceiver) requireNotNull(originalConnection?.secureSession) else null,
+                        programmeLabel = programme)
                     relay!!.validateAudio()
                 }
                 val layout = if (usingLocalReceiver || usesLayoutCastReceiver) awaitCastLayout { castVideoScene(session) } else null
@@ -836,6 +849,9 @@ class AppState(
                 if (!stillConnected) throw kotlinx.coroutines.CancellationException("Cast session ended during setup")
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                 if (generation != castPreparationGeneration) throw kotlinx.coroutines.CancellationException("Stale cast preparation")
+                if (castTiles.firstOrNull { it.audible }?.feed?.sourceStream?.profileLabel != requestedProgramme) {
+                    throw kotlinx.coroutines.CancellationException("Cast programme changed during setup")
+                }
                 require(tiles.map { it.id to it.feed.sourceStream.profileLabel } == selection) {
                     "Feed selection changed during preparation"
                 }
@@ -895,7 +911,7 @@ class AppState(
         }
         val audible = castTiles.firstOrNull { it.audible }?.feed?.sourceStream?.profileLabel
             ?: castTiles.first().feed.sourceStream.profileLabel
-        val audioUri = archive.audioUris[audible] ?: archive.audioUri
+        val audioUri = archive.audioUris[audible] ?: archive.audioUri.takeIf { audible == archive.clockLabel }
         if (audioUri == null) {
             message = "No clear F1 commentary rendition is available for this replay. Continuous Cast needs real audio."
             return
@@ -928,10 +944,10 @@ class AppState(
                     ?: throw IOException("The phone has no Wi-Fi IPv4 address for Cast.")
                 val peer = if (localChosen) originalConnection?.socket?.inetAddress else null
                 val factory = androidx.media3.datasource.DefaultHttpDataSource.Factory().setUserAgent(userAgent)
-                    .setAllowCrossProtocolRedirects(true).setDefaultRequestProperties(mapOf(
+                    .setAllowCrossProtocolRedirects(false).setDefaultRequestProperties(mapOf(
                         "ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
                 val next = app.apexview.cast.BakedCastLiveSession(address, peer,
-                    app.apexview.tiled.CmafHttpReader(factory), audioUri, castTiles.size, scope,
+                    app.apexview.tiled.CmafHttpReader(factory), audioUri, audible, castTiles.size, scope,
                     tls = if (localChosen) requireNotNull(originalConnection?.secureSession) else null) { reason ->
                     scope.launch {
                         if (bakedCastSession === session && generation == castPreparationGeneration) {
@@ -941,7 +957,7 @@ class AppState(
                     }
                 }
                 session = next
-                bakedCastSession = next // PlaybackVideoCanvas starts capturing this very same viewer window.
+                bakedCastSession = next // PlaybackVideoCanvas binds the clear renderer and live viewer overlays.
                 kotlinx.coroutines.withTimeout(25_000) { next.awaitPlayable() }
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                 check(generation == castPreparationGeneration && bakedCastSession === next) { "Cast source changed" }
@@ -992,7 +1008,7 @@ class AppState(
         castSceneConfirmed = false
         link.send(app.apexview.cast.local.FcastProtocol.PLAY, JSONObject()
             .put("container", "application/x-mpegURL").put("url", session.url)
-            .put("time", 0).put("speed", 1).put("volume", if (mutedAll) 0 else 1)
+            .put("time", 0).put("speed", playbackSpeed).put("volume", if (mutedAll) 0 else 1)
             .put("metadata", JSONObject().put("type", 0).put("title", "Pitwall TV baked live scene")
                 .put("custom", JSONObject().put("pitwallScene", bakedCastScene(session))
                     .put("pitwallBaked", true).put("playbackId", localLoadId))))
@@ -1018,6 +1034,7 @@ class AppState(
             googleLoading = false
             if (result.status.isSuccess) {
                 client.setStreamMute(mutedAll)
+                if (playbackSpeed != 1f) client.setPlaybackRate(playbackSpeed.toDouble())
                 castSceneConfirmed = true
                 castResources.confirmRendering()
                 castStatus = "Google Cast is playing the full baked picture with synchronized commentary."
@@ -1203,7 +1220,7 @@ class AppState(
             var owned: app.apexview.cast.NativeComposedCastSession? = null
             try {
                 val factory = androidx.media3.datasource.DefaultHttpDataSource.Factory().setUserAgent(userAgent)
-                    .setAllowCrossProtocolRedirects(true).setDefaultRequestProperties(mapOf(
+                    .setAllowCrossProtocolRedirects(false).setDefaultRequestProperties(mapOf(
                         "ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
                 owned = app.apexview.cast.NativeComposedCastSession(
                     selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel, it.feed.sourceStream.url,
@@ -1369,8 +1386,10 @@ class AppState(
             var loops = 0
             val timing = app.apexview.cast.CastTimingPublisher(context, this@AppState)
             while (castRelay === relay) {
-                if (tiles.map { it.feed.sourceStream.profileLabel }.toSet() != relay.session.sourceLabels.toSet()) {
-                    // Keep the old relay alive and the phone stopped until replacement is ready.
+                val programme = tiles.firstOrNull { it.audible }?.feed?.sourceStream?.profileLabel
+                val programmeChanged = programme in relay.session.audioUris && programme != relay.programmeLabel
+                if (programmeChanged || tiles.map { it.feed.sourceStream.profileLabel }.toSet() != relay.session.sourceLabels.toSet()) {
+                    // The old load keeps its own audio and caption URLs until the new load takes over.
                     if (!castBusy && android.os.SystemClock.elapsedRealtime() >= castRetryAfter) prepareFullSceneCast(true)
                 }
                 val scene = castVideoScene(relay.session)
@@ -1539,6 +1558,7 @@ class AppState(
     }
 
     fun close() {
+        playbackWork.cancelOffer()
         timingWork.close()
         playbackWork.cancelControlSeek()
         playbackWork.cancelRetry()
@@ -1546,8 +1566,6 @@ class AppState(
         stopLocalDiscovery()
         googleCastRemoteClient?.unregisterCallback(googleRemoteCallback)
         stopProtectedCompositionPresentation(restorePlayer = false)
-        playbackWork.cancelCapture()
-        playbackWork.capture = null
         power?.removeThermalStatusListener(thermalListener)
         updater.close()
     }
@@ -1982,7 +2000,7 @@ class AppState(
     private val timingContentId get() = timingWork.contentId
 
     /** Play sessions by content ID. Every tile of a content shares one. */
-    private val playOfferMutex = Mutex()
+    private val playOfferMutex get() = playbackWork.offerMutex
     private val sessions = mutableMapOf<Long, MultiPlay>()
     /** Contents whose multiview session F1 refused; their feeds use one session each. */
     private val singleSessionOnly = mutableSetOf<Long>()
@@ -2768,8 +2786,7 @@ class AppState(
         val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
         val diagnosticGeneration = compositionDiagnosticOwner.begin()
         singleDecoderDiagnostic = null
-        playbackWork.cancelCapture()
-        playbackWork.capture = capture
+        playbackWork.prepareCapture(capture)
         val startup = ArchiveCompositionStartup()
         var transferred = false
         var released = 0
@@ -2831,7 +2848,7 @@ class AppState(
         archiveCompositionStarting = true
         message = SINGLE_DECODER_ACTIVATING
         diagnostic()
-        playbackWork.captureJob = scope.launch {
+        playbackWork.launchCapture(scope) {
             try {
                 startup.start(
                     preflight = {
@@ -2942,7 +2959,7 @@ class AppState(
             } catch (error: Exception) {
                 if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || playbackWork.capture !== capture) {
                     android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_IGNORED_OBSOLETE_ERROR path=CLEAR class=${error.javaClass.simpleName}")
-                    return@launch
+                    return@launchCapture
                 }
                 failure = DiagnosticRedaction.redact(error.message ?: error.javaClass.simpleName).take(400)
                 val failedAt = phase
@@ -2975,7 +2992,6 @@ class AppState(
                     archiveCompositionStarting = false
                     if (!transferred && !useExistingBackend && settings.decoderMode == DecoderMode.MULTIPLE)
                         selected.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
-                    capture.reset(); playbackWork.capture = null; playbackWork.captureJob = null
                 }
             }
             if (useExistingBackend && compositionDiagnosticOwner.isOwner(diagnosticGeneration))
@@ -2984,11 +3000,9 @@ class AppState(
                 attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
                 val originalIds = selected.map { it.id }
                 android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_RETRY requested=AUTO attempt=${attempt + 1} delayMs=${500L * (attempt + 1)}")
-                playbackWork.retryJob = scope.launch {
-                    kotlinx.coroutines.delay(500L * (attempt + 1))
+                playbackWork.scheduleRetry(scope, 500L * (attempt + 1)) {
                     if (compositionDiagnosticOwner.isOwner(diagnosticGeneration) &&
                         settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && !singleDecoderSceneActive) {
-                        playbackWork.retryJob = null
                         startArchiveSingleDecoderComposition(contentId, attempt + 1)
                     }
                 }
@@ -3034,7 +3048,6 @@ class AppState(
         val group = "archive-content-$contentId-${java.util.UUID.randomUUID()}"
         val diagnosticGeneration = compositionDiagnosticOwner.begin()
         singleDecoderDiagnostic = null
-        playbackWork.cancelCapture()
         val maxHeight = if (mixedRequested) selectedQualities.maxOf { it.targetHeight }
             .takeIf { it > 0 } ?: 1080
         else if (selectedTiles.size > 6 && composedQuality == VideoQuality.AUTO) {
@@ -3053,7 +3066,9 @@ class AppState(
         val evidence = "content=$contentId attempt=${attempt + 1} feeds=${feeds.size}"
         android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_START $evidence path=rolling maxSourceHeight=$maxHeight tclG09=${isTclG09()} " +
             "speed=$playbackSpeed requestedStartupLeadUs=${ArchiveBufferPolicy.protectedLeadUs(playbackSpeed)}")
-        playbackWork.capture = capture
+        playbackWork.prepareCapture(capture) {
+            ProtectedHevcLiveComposition.clearSelection(group, discardInitialization = true)
+        }
         ProtectedHevcLiveComposition.selectFeeds(group, labels, fullPictures = mixedRequested)
         val startup = ArchiveCompositionStartup()
         var lastSnapshot: F1DashFeedCapture.Snapshot? = null
@@ -3116,7 +3131,7 @@ class AppState(
         archiveCompositionStarting = true
         diagnostics()
         message = SINGLE_DECODER_ACTIVATING
-        playbackWork.captureJob = scope.launch {
+        playbackWork.launchCapture(scope) {
             try {
                 startup.start(
                     preflight = {
@@ -3349,7 +3364,7 @@ class AppState(
             } catch (error: Exception) {
                 if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || playbackWork.capture !== capture) {
                     android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_IGNORED_OBSOLETE_ERROR path=PROTECTED class=${error.javaClass.simpleName}")
-                    return@launch
+                    return@launchCapture
                 }
                 // Do not log raw network exceptions or their signed URLs.
                 terminalReason = DiagnosticRedaction.redact(error.message ?: error.javaClass.simpleName).take(400)
@@ -3371,21 +3386,15 @@ class AppState(
                     archiveCompositionStarting = false
                     if (!startup.sourceDecodersTouched && settings.decoderMode == DecoderMode.MULTIPLE)
                         selectedTiles.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
-                    capture.reset()
-                    playbackWork.capture = null
-                    playbackWork.captureJob = null
-                    ProtectedHevcLiveComposition.clearSelection(group)
                 }
             }
             if (retryableFailure && compositionDiagnosticOwner.isOwner(diagnosticGeneration) &&
                 attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
                 val originalIds = selectedTiles.map { it.id }
                 android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_RETRY requested=AUTO attempt=${attempt + 1} delayMs=${500L * (attempt + 1)} backend=PROTECTED")
-                playbackWork.retryJob = scope.launch {
-                    kotlinx.coroutines.delay(500L * (attempt + 1))
+                playbackWork.scheduleRetry(scope, 500L * (attempt + 1)) {
                     if (compositionDiagnosticOwner.isOwner(diagnosticGeneration) &&
                         settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && protectedCompositionHost == null) {
-                        playbackWork.retryJob = null
                         startArchiveSingleDecoderComposition(contentId, attempt + 1)
                     }
                 }
@@ -3414,8 +3423,6 @@ class AppState(
             tile.channel.channelId?.let { "channel-$it" } ?: "default-channel"
         }
         if (labels.distinct().size != labels.size) return
-        val group = "content-$contentId"
-        ProtectedHevcLiveComposition.selectFeeds(group, labels)
         startRealF1DashCapture(contentId, labels)
     }
 
@@ -3438,21 +3445,22 @@ class AppState(
             return
         }
         invalidateCompositionDiagnostic()
-        playbackWork.cancelCapture()
-        playbackWork.capture?.reset()
         val capture = F1DashFeedCapture(
             userAgent = userAgent,
             ascendon = api.ascendon.orEmpty(),
             entitlement = api.entitlement.orEmpty(),
         )
-        playbackWork.capture = capture
-        val group = "content-$contentId"
+        val group = "live-content-$contentId-${java.util.UUID.randomUUID()}"
+        playbackWork.prepareCapture(capture) {
+            ProtectedHevcLiveComposition.clearSelection(group, discardInitialization = true)
+        }
+        ProtectedHevcLiveComposition.selectFeeds(group, labels)
         val selectedTiles = labels.mapNotNull { byLabel[it] }
         val host = selectedTiles.firstOrNull { !it.audible } ?: selectedTiles.first()
         val audioTile = selectedTiles.firstOrNull { it !== host && it.audible }
         if (audioTile != null && host.audible) setAudio(audioTile)
 
-        playbackWork.captureJob = scope.launch {
+        playbackWork.launchCapture(scope) {
             var lastMessage: String? = null
             var composedPlaybackStarted = false
             var expandedVerifiedGeometry: Triple<Int, Int, Double>? = null
@@ -3608,8 +3616,6 @@ class AppState(
         val wasStarting = archiveCompositionStarting
         archiveCompositionStarting = false
         playbackWork.cancelCapture()
-        playbackWork.capture?.reset()
-        playbackWork.capture = null
         val native = nativeArchiveTiles
         protectedRollingScene = null
         val resumePositionMs = if (native.isNotEmpty()) protectedCompositionHost?.feed?.player?.currentPosition
@@ -3665,7 +3671,7 @@ class AppState(
         }
         val picks = requested.take(roomForFeeds)
         val dropped = requested.size - picks.size
-        task("Starting feeds") {
+        task("Starting feeds", playbackOffer = true) {
             val failures = mutableListOf<String>()
             // The catalog already tells us whether this is live or a replay. Start timing
             // immediately instead of waiting for every CONTENT/PLAY request and video prepare.
@@ -3679,6 +3685,8 @@ class AppState(
             val streams = picks.mapNotNull { channel ->
                 try {
                     channel to streamFor(contentId, channel, failures, standalone)
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
                 } catch (e: Exception) {
                     failures += "${channel.title}: ${e.message}"
                     null
@@ -3688,6 +3696,7 @@ class AppState(
                 "PitwallPlayback",
                 "event=offers content=$contentId count=${streams.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - offerStartedMs}",
             )
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
             if (streams.isEmpty()) {
                 if (!hasVideoPlan) {
                     planPromptOpen = true
@@ -3822,7 +3831,10 @@ class AppState(
         // For one TV window ask F1 for its ordinary single-channel presentation.
         if (standalone) {
             try {
-                return@withLock api.contentPlay(contentId, channel.channelId).also { sessions.remove(contentId) }
+                val stream = api.contentPlay(contentId, channel.channelId)
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                sessions.remove(contentId)
+                return@withLock stream
             } catch (e: IOException) {
                 android.util.Log.w("PitwallVideo", "Single-channel offer unavailable. Trying the shared F1 offer.")
                 if (contentId in singleSessionOnly) throw e
@@ -3832,7 +3844,9 @@ class AppState(
             val list = channelsByContent[contentId].orEmpty()
             val default = list.firstOrNull { it.isDefault } ?: list.firstOrNull()
             try {
-                sessions[contentId] = api.multiPlay(contentId, default?.channelId)
+                val offer = api.multiPlay(contentId, default?.channelId)
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                sessions[contentId] = offer
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -3876,239 +3890,188 @@ class AppState(
      * viewer moves on.
      */
     private fun loadTiming(contentId: Long) {
-        val timingOwner = timingWork.begin(contentId)
         replayClockKey = null
         replayClockBaseMs = null
         recordTimingDiagnostic("Starting timing load for content=$contentId", reset = true)
         pitDriver = null
         timing = null
         mapStatus = "Resolving F1 session…"
-        timingWork.timingJob = scope.launch {
-            var attempt = 0
-            while (timingWork.owns(timingOwner)) {
-                val ref = sessionRefs[contentId]
-                val token = api.ascendon
-                val problem = when {
-                    ref == null -> "F1 TV didn't say which session this is"
-                    token == null -> "not signed in to F1's timing yet"
-                    else -> null
-                }
-                recordTimingDiagnostic(
-                    "Session metadata: " + (ref?.let { "meeting=${it.meetingKey}, session=${it.sessionKey}, year=${it.year}" } ?: "missing") +
-                        "; timing token=" + if (token == null) "missing" else "present"
-                )
-                if (problem != null) recordTimingDiagnostic("BLOCKED: $problem")
-                if (problem == null) {
-                    // Prefer F1's catalog signal for a known-live session. Otherwise wait for a
-                    // real, non-placeholder player window before choosing live timing or archive.
-                    val live = catalogTimingSource(
-                        knownLive = contentId in knownLiveContentIds,
-                        knownArchive = contentId in knownArchiveContentIds,
-                        completedLive = contentId in completedLiveTimingContentIds,
-                    ) ?: isLiveStream(contentId, timingOwner)
-                    if (!timingWork.owns(timingOwner)) return@launch
-                    if (live == null) {
-                        mapStatus = "Waiting for the video stream to identify live timing or replay…"
-                        android.util.Log.i("ApexviewTiming", "content=$contentId: player timeline not ready; keeping timing source undecided")
-                        kotlinx.coroutines.delay(1_000)
-                        continue
-                    }
-                    recordTimingDiagnostic("Source selected: " + if (live) "LIVE" else "ARCHIVE")
-                    if (live) {
-                        // Show the transport stage immediately. A TV with no program clock used to
-                        // sit on the generic "Loading" label while the socket was still starting.
-                        mapStatus = "Connecting to F1 live timing…"
-                        android.util.Log.i(
-                            "ApexviewTiming",
-                            "content=$contentId live source; meeting=${ref!!.meetingKey}, session=${ref.sessionKey}, circuit=${ref.circuitKey}",
-                        )
-                        // Runs until the viewer moves on, reconnecting itself; back here only
-                        // if it failed outright or F1 ends this live timing session.
-                        followLive(contentId, ref, token!!, timingOwner)
-                        if (!timingWork.owns(timingOwner)) return@launch
-                        kotlinx.coroutines.delay(mapRetryDelayMs(attempt++))
-                        continue
-                    }
-                    mapStatus = "Loading F1 timing archive…"
-                    val trace = timingDiagnosticStartedAtMs
-                    try {
-                        // When the picture was broadcast: identifies the session if the title can't.
-                        val savedPosition = pendingResume?.takeIf { it.contentId == contentId && !it.live }?.positionMs
-                        val initial = replayPlayhead(contentId, savedPosition)
-                        val playhead = java.util.concurrent.atomic.AtomicReference(initial)
-                        recordTimingDiagnostic(
-                            "Archive lookup: videoClock=${initial.videoUtcMs ?: "unavailable"} positionMs=${initial.positionMs} " +
-                                "catalogStart=${ref!!.sessionStartUtcMs ?: "unavailable"} attempt=$attempt"
-                        )
-                        var towerReadyMs: Long? = null
-                        var mapReadyMs: Long? = null
-                        var lastClockBase: Long? = null
-                        var lastClockSource: String? = null
-                        var budgetReported = false
-                        var oneSecondReported = false
-                        var videoClockObserved = false
-                        fun inspectPlayback() {
-                            if (!timingWork.owns(timingOwner)) return
-                            val sample = replayPlayhead(contentId, savedPosition)
-                            playhead.set(sample)
-                            val base = sample.videoUtcMs?.minus(sample.positionMs)
-                            val clockSource = when {
-                                base == null -> "archive-estimate"
-                                sample.cachedVideoClock -> "cached-video"
-                                else -> "video"
-                            }
-                            if (clockSource == "video") videoClockObserved = true
-                            if (clockSource != lastClockSource || base != lastClockBase) {
-                                lastClockSource = clockSource
-                                lastClockBase = base
-                                recordTimingDiagnostic("Replay clock source=$clockSource " +
-                                    "baseUtcMs=$base positionMs=${sample.positionMs} offsetMs=${sample.offsetMs}")
-                            }
-                            val session = timing
-                            val elapsed = android.os.SystemClock.elapsedRealtime() - trace
-                            val clock = session?.let { sample.utcAt(it.startUtcMs) }
-                            if (session != null && clock != null && leaderTile()?.contentId == contentId) {
-                                if (towerReadyMs == null) {
-                                    val rows = session.laps.count { it.value.at(clock)?.position != null }
-                                    if (rows > 0) {
-                                        towerReadyMs = elapsed
-                                        recordTimingDiagnostic("Replay tower ready utcMs=$clock rankedRows=$rows")
-                                    }
-                                }
-                                if (mapReadyMs == null && session.outline.size >= 8) {
-                                    val cars = session.tracks.count { it.value.hasPositionAt(clock) }
-                                    if (cars > 0) {
-                                        mapReadyMs = elapsed
-                                        recordTimingDiagnostic("Replay map ready utcMs=$clock positionedCars=$cars")
-                                    }
-                                }
-                            }
-                            val budget = when {
-                                !oneSecondReported && elapsed >= 1_000 -> 1
-                                !budgetReported && elapsed >= 5_000 -> 5
-                                else -> null
-                            }
-                            if (budget != null) {
-                                if (budget == 1) oneSecondReported = true else budgetReported = true
-                                val rows = if (session == null || clock == null) 0 else
-                                    session.laps.count { it.value.at(clock)?.position != null }
-                                val cars = if (session == null || clock == null || session.outline.size < 8) 0 else
-                                    session.tracks.count { it.value.hasPositionAt(clock) }
-                                recordTimingDiagnostic("Replay ${budget}s checkpoint towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs " +
-                                    "clockUtcMs=$clock positionMs=${sample.positionMs} rankedRows=$rows positionedCars=$cars " +
-                                    "trackFromUtcMs=${session?.firstTrackUtc} trackThroughUtcMs=${session?.lastTrackUtc}")
-                            }
-                        }
-                        var archiveComplete = false
-                        val clockJob = launch {
-                            do {
-                                inspectPlayback()
-                                kotlinx.coroutines.delay(if (oneSecondReported) 200 else 50)
-                            } while (!archiveComplete || towerReadyMs == null || mapReadyMs == null ||
-                                !budgetReported || !videoClockObserved)
-                        }
-                        try {
-                            val loaded = LiveTimingArchive(token!!, userAgent).load(
-                                ref = ref!!,
-                                watchedUtc = initial.videoUtcMs,
-                                replayPositionMs = initial.positionMs,
-                                positionScratchDir = context.cacheDir,
-                                replayCache = ReplayCoreCache(context.cacheDir, contentId),
-                                timingOffsetMs = initial.offsetMs,
-                                playhead = playhead::get,
-                                traceId = trace,
-                                onProgress = { status ->
-                                    if (timingWork.owns(timingOwner)) {
-                                        if (timing?.outline?.size?.let { it >= 8 } != true) mapStatus = status
-                                        recordTimingDiagnostic(status)
-                                    }
-                                },
-                                onPartial = { partial ->
-                                    if (timingWork.owns(timingOwner)) {
-                                        showTiming(partial)
-                                        inspectPlayback()
-                                        // Cache the actual replay window once the independently
-                                        // parsed map and timing tower both have usable data.
-                                        // The remainder of the archive continues loading.
-                                        if (partial.tracks.isNotEmpty() && partial.laps.isNotEmpty() &&
-                                            partial.outline.size >= 8) {
-                                            saveReplayPreview(contentId, playhead.get().positionMs)
-                                        }
-                                        recordTimingDiagnostic(
-                                            "Partial data: drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
-                                                "cars=${partial.tracks.size}, outlinePoints=${partial.outline.size / 2} " +
-                                                "trackFromUtcMs=${partial.firstTrackUtc} trackThroughUtcMs=${partial.lastTrackUtc}"
-                                        )
-                                        mapStatus = when {
-                                            partial.outline.size >= 8 -> null
-                                            partial.tracks.isEmpty() -> "Loading track positions…"
-                                            else -> "Track data loaded; waiting for a usable circuit outline…"
-                                        }
-                                    }
-                                },
-                            )
-                            if (!timingWork.owns(timingOwner)) return@launch
-                            showTiming(loaded)
-                            saveReplayPreview(contentId, castFramePositionMs)
-                            archiveComplete = true
-                            inspectPlayback()
-                            recordTimingDiagnostic(
-                                "Archive complete: drivers=${loaded.drivers.size}, laps=${loaded.laps.size}, " +
-                                    "cars=${loaded.tracks.size}, outlinePoints=${loaded.outline.size / 2} " +
-                                    "towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs"
-                            )
-                            launch(kotlinx.coroutines.Dispatchers.IO) { rememberOutline(loaded) }
-                            mapStatus = if (loaded.outline.isEmpty()) "Couldn't trace the track; showing cars only" else null
-                            // The cached archive may finish before Media3 supplies the playhead.
-                            // Continue observing briefly so the first usable rows and dots still have a timestamp.
-                            if (towerReadyMs == null || mapReadyMs == null || !budgetReported || !videoClockObserved) {
-                                val observed = kotlinx.coroutines.withTimeoutOrNull(15_000) { clockJob.join(); true }
-                                if (observed == null) recordTimingDiagnostic(
-                                    "Replay readiness observation ended towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs"
-                                )
-                            }
-                            return@launch
-                        } finally {
-                            clockJob.cancel()
-                        }
-                    } catch (e: kotlinx.coroutines.CancellationException) {
-                        android.util.Log.i("ApexviewTiming", "Replay cancelled content=$contentId trace=$trace")
-                        throw e
-                    } catch (e: Exception) {
-                        if (!timingWork.owns(timingOwner)) return@launch
-                        recordTimingDiagnostic("ARCHIVE ERROR: ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
-                        mapStatus = "Archive failed: ${e.javaClass.simpleName}: ${e.message}. Retrying…"
-                    }
-                } else {
-                    mapStatus = "Map unavailable: $problem. Trying again…"
-                }
-                kotlinx.coroutines.delay(mapRetryDelayMs(attempt++))
+        timingWork.load(
+            scope, contentId,
+            target = {
+                TimingWorkCoordinator.Target(sessionRefs[contentId], api.ascendon, catalogTimingSource(
+                    knownLive = contentId in knownLiveContentIds,
+                    knownArchive = contentId in knownArchiveContentIds,
+                    completedLive = contentId in completedLiveTimingContentIds,
+                ))
+            },
+            probeLive = { owner -> isLiveStream(contentId, owner) },
+            report = { status, detail -> mapStatus = status; recordTimingDiagnostic(detail) },
+            diagnostic = { recordTimingDiagnostic(it) },
+            live = { owner, ref, token -> followLive(contentId, ref, token, owner) },
+            replay = { owner, ref, token, attempt -> followReplayTiming(owner, ref, token, attempt) },
+        )
+    }
+
+    private suspend fun followReplayTiming(
+        timingOwner: TimingWorkCoordinator.Session, ref: SessionRef, token: String, attempt: Int,
+    ): Unit = kotlinx.coroutines.coroutineScope {
+        val contentId = timingOwner.contentId
+        val trace = timingDiagnosticStartedAtMs
+        // When the picture was broadcast: identifies the session if the title can't.
+        val savedPosition = pendingResume?.takeIf { it.contentId == contentId && !it.live }?.positionMs
+        val initial = replayPlayhead(contentId, savedPosition)
+        val playhead = java.util.concurrent.atomic.AtomicReference(initial)
+        recordTimingDiagnostic(
+            "Archive lookup: videoClock=${initial.videoUtcMs ?: "unavailable"} positionMs=${initial.positionMs} " +
+                "catalogStart=${ref.sessionStartUtcMs ?: "unavailable"} attempt=$attempt"
+        )
+        var towerReadyMs: Long? = null
+        var mapReadyMs: Long? = null
+        var lastClockBase: Long? = null
+        var lastClockSource: String? = null
+        var budgetReported = false
+        var oneSecondReported = false
+        var videoClockObserved = false
+        fun inspectPlayback() {
+            if (!timingWork.owns(timingOwner)) return
+            val sample = replayPlayhead(contentId, savedPosition)
+            playhead.set(sample)
+            val base = sample.videoUtcMs?.minus(sample.positionMs)
+            val clockSource = when {
+                base == null -> "archive-estimate"
+                sample.cachedVideoClock -> "cached-video"
+                else -> "video"
             }
+            if (clockSource == "video") videoClockObserved = true
+            if (clockSource != lastClockSource || base != lastClockBase) {
+                lastClockSource = clockSource
+                lastClockBase = base
+                recordTimingDiagnostic("Replay clock source=$clockSource " +
+                    "baseUtcMs=$base positionMs=${sample.positionMs} offsetMs=${sample.offsetMs}")
+            }
+            val session = timing
+            val elapsed = android.os.SystemClock.elapsedRealtime() - trace
+            val clock = session?.let { sample.utcAt(it.startUtcMs) }
+            if (session != null && clock != null && leaderTile()?.contentId == contentId) {
+                if (towerReadyMs == null) {
+                    val rows = session.laps.count { it.value.at(clock)?.position != null }
+                    if (rows > 0) {
+                        towerReadyMs = elapsed
+                        recordTimingDiagnostic("Replay tower ready utcMs=$clock rankedRows=$rows")
+                    }
+                }
+                if (mapReadyMs == null && session.outline.size >= 8) {
+                    val cars = session.tracks.count { it.value.hasPositionAt(clock) }
+                    if (cars > 0) {
+                        mapReadyMs = elapsed
+                        recordTimingDiagnostic("Replay map ready utcMs=$clock positionedCars=$cars")
+                    }
+                }
+            }
+            val budget = when {
+                !oneSecondReported && elapsed >= 1_000 -> 1
+                !budgetReported && elapsed >= 5_000 -> 5
+                else -> null
+            }
+            if (budget != null) {
+                if (budget == 1) oneSecondReported = true else budgetReported = true
+                val rows = if (session == null || clock == null) 0 else
+                    session.laps.count { it.value.at(clock)?.position != null }
+                val cars = if (session == null || clock == null || session.outline.size < 8) 0 else
+                    session.tracks.count { it.value.hasPositionAt(clock) }
+                recordTimingDiagnostic("Replay ${budget}s checkpoint towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs " +
+                    "clockUtcMs=$clock positionMs=${sample.positionMs} rankedRows=$rows positionedCars=$cars " +
+                    "trackFromUtcMs=${session?.firstTrackUtc} trackThroughUtcMs=${session?.lastTrackUtc}")
+            }
+        }
+        var archiveComplete = false
+        val clockJob = launch {
+            do {
+                inspectPlayback()
+                kotlinx.coroutines.delay(if (oneSecondReported) 200 else 50)
+            } while (!archiveComplete || towerReadyMs == null || mapReadyMs == null ||
+                !budgetReported || !videoClockObserved)
+        }
+        try {
+            val loaded = LiveTimingArchive(token, userAgent).load(
+                ref = ref,
+                watchedUtc = initial.videoUtcMs,
+                replayPositionMs = initial.positionMs,
+                positionScratchDir = context.cacheDir,
+                replayCache = ReplayCoreCache(context.cacheDir, contentId),
+                timingOffsetMs = initial.offsetMs,
+                playhead = playhead::get,
+                traceId = trace,
+                onProgress = { status ->
+                    if (timingWork.owns(timingOwner)) {
+                        if (timing?.outline?.size?.let { it >= 8 } != true) mapStatus = status
+                        recordTimingDiagnostic(status)
+                    }
+                },
+                onPartial = { partial ->
+                    if (timingWork.owns(timingOwner)) {
+                        showTiming(partial)
+                        inspectPlayback()
+                        // Cache the actual replay window once the independently
+                        // parsed map and timing tower both have usable data.
+                        // The remainder of the archive continues loading.
+                        if (partial.tracks.isNotEmpty() && partial.laps.isNotEmpty() &&
+                            partial.outline.size >= 8) {
+                            saveReplayPreview(contentId, playhead.get().positionMs)
+                        }
+                        recordTimingDiagnostic(
+                            "Partial data: drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
+                                "cars=${partial.tracks.size}, outlinePoints=${partial.outline.size / 2} " +
+                                "trackFromUtcMs=${partial.firstTrackUtc} trackThroughUtcMs=${partial.lastTrackUtc}"
+                        )
+                        mapStatus = when {
+                            partial.outline.size >= 8 -> null
+                            partial.tracks.isEmpty() -> "Loading track positions…"
+                            else -> "Track data loaded; waiting for a usable circuit outline…"
+                        }
+                    }
+                },
+            )
+            if (!timingWork.owns(timingOwner)) return@coroutineScope
+            showTiming(loaded)
+            saveReplayPreview(contentId, castFramePositionMs)
+            archiveComplete = true
+            inspectPlayback()
+            recordTimingDiagnostic(
+                "Archive complete: drivers=${loaded.drivers.size}, laps=${loaded.laps.size}, " +
+                    "cars=${loaded.tracks.size}, outlinePoints=${loaded.outline.size / 2} " +
+                    "towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs"
+            )
+            launch(kotlinx.coroutines.Dispatchers.IO) { rememberOutline(loaded) }
+            mapStatus = if (loaded.outline.isEmpty()) "Couldn't trace the track; showing cars only" else null
+            // The cached archive may finish before Media3 supplies the playhead.
+            // Continue observing briefly so the first usable rows and dots still have a timestamp.
+            if (towerReadyMs == null || mapReadyMs == null || !budgetReported || !videoClockObserved) {
+                val observed = kotlinx.coroutines.withTimeoutOrNull(15_000) { clockJob.join(); true }
+                if (observed == null) recordTimingDiagnostic(
+                    "Replay readiness observation ended towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs"
+                )
+            }
+            return@coroutineScope
+        } finally {
+            clockJob.cancel()
         }
     }
 
-
-    /** A replay's car speeds, fetched the first time an onboard wants them. Without them, no speed shows. */
+    /** A replay's car speeds, fetched the first time an onboard wants them. */
     fun loadSpeeds(session: SessionTiming) {
         if (session.live || session.radioBase.isBlank() || session.archivePartial || timing !== session) return
         val token = api.ascendon ?: return
-        val request = timingWork.beginSpeed(session.radioBase) ?: return
-        timingWork.speedJob = scope.launch {
-            try {
-                val loaded = LiveTimingArchive(token, userAgent).loadSpeeds(session.radioBase)
-                if (timingWork.completeSpeed(request, loaded)) {
-                    timing?.takeIf { !it.live && it.radioBase == session.radioBase }?.speeds = loaded
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                timingWork.failSpeed(request)
-                throw e
-            } catch (e: Exception) {
-                timingWork.failSpeed(request)
-                android.util.Log.w("ApexviewLive", "car data: ${e.javaClass.simpleName}")
-            }
-        }
+        timingWork.loadSpeeds(
+            scope, session.radioBase,
+            fetch = { LiveTimingArchive(token, userAgent).loadSpeeds(session.radioBase) },
+            publish = { loaded ->
+                timing?.takeIf { !it.live && it.radioBase == session.radioBase }?.speeds = loaded
+            },
+            reportFailure = { android.util.Log.w("ApexviewLive", "car data: ${it.javaClass.simpleName}") },
+        )
     }
-
 
     /**
      * Whether the stream on screen is live. Known once the player has read the stream's playlist,
@@ -4412,9 +4375,10 @@ class AppState(
         val restartComposition = settings.decoderMode == DecoderMode.SINGLE || isTv && playbackWork.captureJob != null
         // The feed up top in laptop mode switched from its own menu: offer the way back too.
         if (laptopActive && tile.id == bigTileId) rememberBroadcast()
-        task("Switching to ${channel.title}") {
+        task("Switching to ${channel.title}", playbackOffer = true) {
             val failures = mutableListOf<String>()
             val stream = streamFor(tile.contentId, channel, failures, standalone = isTclG09() && tiles.size == 1)
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
             if (tile !in tiles) return@task
             val old = tile.feed
             // Start where the tile was (switching the leader from the start once pulled every
@@ -4492,7 +4456,6 @@ class AppState(
         if (!singleDecoderSceneActive && !protectedRollingSceneActive) {
             invalidateCompositionDiagnostic()
             playbackWork.cancelCapture()
-            playbackWork.capture = null
             HevcFeedProfileCapture.clearTileTestSelection()
             clearLocalHevcComposition()
         }
@@ -5881,6 +5844,7 @@ class AppState(
             if (!castSceneConfirmed || castBusy) return
             val index = session.selectAudio(tile.feed.sourceStream.profileLabel)
             if (index != null && localLoadId.isNotEmpty()) {
+                remoteCaptionTracks = emptyList()
                 localConnection?.send(app.apexview.cast.local.FcastProtocol.UI_CONTROL,
                     app.apexview.cast.local.NativeAudioControl.command(localLoadId, index))
                 localConnection?.send(app.apexview.cast.local.FcastProtocol.SET_VOLUME,
@@ -5889,22 +5853,20 @@ class AppState(
             return
         }
         castRelay?.let { relay ->
+            val label = tile.feed.sourceStream.profileLabel
             val selected = tiles.map { it.feed.sourceStream.profileLabel }
             if (selected.size == relay.session.sourceLabels.size && selected.toSet() == relay.session.sourceLabels.toSet()) {
-                relay.selectAudio(tile.feed.sourceStream.profileLabel)
-                googleCastLoadedUrl = null
-                runCatching {
-                    if (localChosen) loadLocalCastMedia(relay) else loadGoogleCastMedia(relay)
-                }.onFailure { error ->
-                    android.util.Log.w("PitwallCast", DiagnosticRedaction.redact(error.stackTraceToString()))
-                    castStatus = "Unable to update TV audio. Use Retry casting or reconnect the TV."
-                    message = castStatus
+                if (label !in relay.session.audioUris) {
+                    message = "This audio feed is unavailable on the TV."
+                    return
                 }
-            } else {
-                // Removing the audible feed changes the selected set before its replacement relay
-                // is ready. The scene-update job rebuilds that set using the new audible tile below.
-                castStatus = "Updating selected feeds and audio on the TV…"
+                tiles.forEach { it.audible = it === tile }
+                applyCaptionPreference()
+                if (label != relay.programmeLabel) prepareFullSceneCast(true)
+                return
             }
+            // Removing the audible feed requires a new relay for the new feed set.
+            castStatus = "Updating selected feeds and audio on the TV…"
         }
         if (castPlaybackHandedOff) {
             if (byUser) mutedAll = false
@@ -5914,7 +5876,15 @@ class AppState(
         }
         if (singleDecoderSceneActive) {
             val owner = protectedCompositionHost?.feed ?: return
-            if (!owner.selectArchiveAudio(tile.feed.sourceStream.profileLabel)) {
+            val label = tile.feed.sourceStream.profileLabel
+            val session = bakedCastSession
+            val restartBaked = session != null && label != session.programmeLabel
+            if (restartBaked && label !in owner.archiveSceneSession?.audioUris.orEmpty()) {
+                message = "This commentary is unavailable for clear Cast."
+                return
+            }
+            if (restartBaked) releaseCastRelay()
+            if (!owner.selectArchiveAudio(label)) {
                 message = "This audio feed is unavailable in the current composition."
                 return
             }
@@ -5922,6 +5892,9 @@ class AppState(
             tiles.forEach { it.audible = it === tile; it.feed.setAudible(false) }
             owner.setAudible(!mutedAll && !castingActive)
             applyCaptionPreference()
+            if (restartBaked) playbackWork.scheduleCastRestart(scope) {
+                if (singleDecoderScenePlayer === owner && !castingActive) prepareFullSceneCast(false)
+            }
             return
         }
         if (byUser) mutedAll = false
@@ -6215,6 +6188,7 @@ class AppState(
     /** Leaving the app without a pop-out (or closing the pop-out) pauses everything. */
     fun pauseForBackground() {
         if (castPlaybackHandedOff || localChosen && localConnection != null || externalDisplayActive || externalDisplayRequested && android.os.SystemClock.elapsedRealtime() < externalRequestDeadline) { saveWatch(); return }
+        playbackWork.cancelOffer()
         saveWatch()
         if (tiles.isNotEmpty() && playing) togglePlay()
     }
@@ -6236,6 +6210,7 @@ class AppState(
     }
 
     fun remove(tile: Tile) {
+        playbackWork.cancelOffer()
         // Even a failed/finished preflight with no active job can have a terminal
         // diagnostic. Removing a feed changes ownership unconditionally.
         invalidateCompositionDiagnostic()
@@ -6257,6 +6232,7 @@ class AppState(
         if (focusTileId == tile.id) focusTileId = null
         if (tile.audible) setAudio(tiles.first())
         if (bigTileId == tile.id) bigTileId = null
+        leaderTile()?.contentId?.takeIf { it != timingContentId }?.let(::loadTiming)
         // The rest close up to fill the space.
         handPlaced = false
         layoutRequest++
@@ -6292,6 +6268,7 @@ class AppState(
     }
 
     fun stopAll() {
+        playbackWork.cancelOffer()
         cancelControlSeek()
         stopExternalDisplay()
         clearExternalDisplayRequest()
@@ -6304,8 +6281,6 @@ class AppState(
         votePromptOpen = false
         nextLive = null
         liveAtStart = null
-        playbackWork.cancelCapture()
-        playbackWork.capture = null
         ProtectedHevcLiveComposition.clearAll()
         HevcFeedProfileCapture.clearTileTestSelection()
         tiles.forEach { it.feed.release() }
@@ -6434,7 +6409,10 @@ class AppState(
             // Restart the live stream at the new viewer clock after pause, without a stale
             // source timeline continuing to drive the commentator ahead of the picture.
             releaseCastRelay()
-            scope.launch { kotlinx.coroutines.delay(600); if (tiles.isNotEmpty()) prepareFullSceneCast(false) }
+            val owner = leaderTile()
+            playbackWork.scheduleCastRestart(scope) {
+                if (owner != null && leaderTile() === owner && playing && !castingActive) prepareFullSceneCast(false)
+            }
         }
         showChrome()
     }
@@ -6600,18 +6578,13 @@ class AppState(
             seekToNow(targetMs)
             return
         }
-        val ownerContent = leaderTile()?.contentId ?: return
+        val owner = leaderTile() ?: return
         // Cancel unrelated speculative clear archive work at the user's latest
         // scrub target, not after the 80ms coalescing delay. Media3 still seeks
         // only once to the exact final position.
         if (singleDecoderSceneActive) singleDecoderScenePlayer?.prioritizeArchiveSeek(targetMs)
-        if (playbackWork.pendingSeek.offer(targetMs)) {
-            playbackWork.seekJob = scope.launch {
-                kotlinx.coroutines.delay(ControlSeekBatch.WINDOW_MS)
-                val latest = playbackWork.pendingSeek.take()
-                playbackWork.seekJob = null
-                if (latest != null && leaderTile()?.contentId == ownerContent) seekToNow(latest)
-            }
+        playbackWork.coalesceSeek(scope, targetMs) { latest ->
+            if (leaderTile() === owner) seekToNow(latest)
         }
         showChrome()
     }
@@ -6665,13 +6638,8 @@ class AppState(
                 target + " content=" + leader.contentId)
         if (restartRollingComposition || restartPreflightComposition)
             startArchiveSingleDecoderComposition(leader.contentId)
-        if (restartBaked) {
-            val ownerContent = leader.contentId
-            playbackWork.castRestartJob = scope.launch {
-                kotlinx.coroutines.delay(1_000)
-                if (leaderTile()?.contentId == ownerContent && !castingActive) prepareFullSceneCast(false)
-                playbackWork.castRestartJob = null
-            }
+        if (restartBaked) playbackWork.scheduleCastRestart(scope) {
+            if (leaderTile() === leader && !castingActive) prepareFullSceneCast(false)
         }
         showChrome()
     }
@@ -6747,20 +6715,33 @@ class AppState(
         message = null
     }
 
-    private fun task(what: String, block: suspend () -> Unit) {
-        scope.launch {
+    private var runningTasks = 0
+    private var taskMessageOwner: Any? = null
+
+    private fun task(what: String, playbackOffer: Boolean = false, block: suspend () -> Unit) {
+        val run: suspend CoroutineScope.() -> Unit = {
+            runningTasks++
             busy = true
+            val owner = Any()
+            taskMessageOwner = owner
             val progress = "$what..."
             message = progress
             try {
                 block()
-                if (message == progress) message = null
+                if (taskMessageOwner === owner && message == progress) message = null
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                if (taskMessageOwner === owner && message == progress) message = null
+                throw cancelled
             } catch (e: Exception) {
-                message = "$what failed: ${e.message}"
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                if (taskMessageOwner === owner) message = "$what failed: ${e.message}"
             } finally {
-                busy = false
+                if (taskMessageOwner === owner) taskMessageOwner = null
+                runningTasks--
+                busy = runningTasks > 0
             }
         }
+        if (playbackOffer) playbackWork.launchOffer(scope, run) else scope.launch(block = run)
     }
 
     companion object {
@@ -6811,8 +6792,7 @@ class AppState(
         private const val LIVE_CHECK_TRIES = 240
 
         /** How long the map waits before trying again, after its [attempt]th failure (from 0). */
-        internal fun mapRetryDelayMs(attempt: Int): Long = MAP_RETRY_MS.getOrElse(attempt) { MAP_RETRY_MS.last() }
-        private val MAP_RETRY_MS = listOf(3_000L, 10_000L, 30_000L, 60_000L)
+        internal fun mapRetryDelayMs(attempt: Int): Long = TimingWorkCoordinator.retryDelayMs(attempt)
         /** The feeds' volume while a radio clip plays: silent, so the radio is clear. */
         private const val RADIO_DUCK = 0f
         private const val PREF_RECENTS = "recents"

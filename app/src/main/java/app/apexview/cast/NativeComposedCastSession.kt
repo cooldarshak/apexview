@@ -28,11 +28,13 @@ internal class NativeComposedCastSession(
     val sourceLabels = feeds.map { it.label }
     private val group = "cast-${UUID.randomUUID()}"
     val compositionGroup: String get() = group
+    init { require(feeds.size in 2..6 && sourceLabels.distinct().size == feeds.size) }
     private val capture = F1ArchiveFeedCapture(userAgent, ascendon, entitlement, factory, 0, preferredHeight, fullPictures = true)
     private val initialAudioIndex = feeds.indexOfFirst { it.label == audioLabel }.also { require(it >= 0) }
     private val audioReader = CmafHttpReader(factory)
-    private val textTracks = CmafCastText(audioReader)
-    private val audioTracks = linkedMapOf(initialAudioIndex to CmafCastAudio(audioReader, language, initialAudioIndex))
+    private val sidecars = RelayMediaBudget()
+    private val textTracks = linkedMapOf<Int, CmafCastText>()
+    private val audioTracks = linkedMapOf(initialAudioIndex to CmafCastAudio(audioReader, language, initialAudioIndex, sidecars))
     private val audio get() = audioTracks.getValue(initialAudioIndex)
     @Volatile var audioLabel: String = audioLabel
         private set
@@ -65,7 +67,6 @@ internal class NativeComposedCastSession(
     var protectedOutput = true
         private set
     init {
-        require(feeds.size in 2..6)
         ProtectedHevcLiveComposition.selectFeeds(group, sourceLabels, fullPictures = true)
     }
     suspend fun update(phoneClockMs: Long): F1DashFeedCapture.Snapshot = withContext(Dispatchers.IO) {
@@ -92,20 +93,22 @@ internal class NativeComposedCastSession(
                 val actualHls = snapshot.actualManifests.values.firstOrNull() == ManifestProtocol.HLS
                 originMs = sourceUs / 1000 + if (live) if (actualHls) hlsClockOffsetMs else dashClockOffsetMs else 0L
             }
+            val programmes = capture.hlsProgrammes
             val selected = feeds[initialAudioIndex]
-            audio.capture(selected.manifestUrl, sourceUs, live)
+            audio.capture(selected.manifestUrl, sourceUs, live, programmes[selected.label])
             if (!captured) {
                 // Freeze representation identities before the receiver prepares
                 // its dynamic Period. Alternates never appear/disappear mid-load.
                 for (index in feeds.indices) {
                     if (index == initialAudioIndex) continue
                     coroutineContext.ensureActive()
-                    val alternate = CmafCastAudio(audioReader, language, index)
+                    val alternate = audioTracks[index] ?: CmafCastAudio(audioReader, language, index, sidecars)
                     try {
-                        alternate.capture(feeds[index].manifestUrl, sourceUs, live)
+                        alternate.capture(feeds[index].manifestUrl, sourceUs, live, programmes[feeds[index].label])
                         if (alternate.compatibleWith(audio)) audioTracks[index] = alternate
-                        else alternate.close()
+                        else { audioTracks.remove(index); alternate.close() }
                     } catch (failure: Exception) {
+                        audioTracks.remove(index)
                         alternate.close()
                         coroutineContext.ensureActive()
                         android.util.Log.i("PitwallCast", "NATIVE_AUDIO_ALTERNATE_UNAVAILABLE index=$index type=${failure.javaClass.simpleName}")
@@ -115,7 +118,7 @@ internal class NativeComposedCastSession(
                 for ((index, alternate) in audioTracks) {
                     if (index == initialAudioIndex) continue
                     coroutineContext.ensureActive()
-                    try { alternate.capture(feeds[index].manifestUrl, sourceUs, live) }
+                    try { alternate.capture(feeds[index].manifestUrl, sourceUs, live, programmes[feeds[index].label]) }
                     catch (failure: Exception) {
                         coroutineContext.ensureActive()
                         if (index == selectedAudioIndex) throw failure
@@ -123,35 +126,31 @@ internal class NativeComposedCastSession(
                     }
                 }
             }
-            try {
-                textTracks.capture(selected.manifestUrl, sourceUs, requireNotNull(sourceStartUs))
-            } catch (failure: Exception) {
-                coroutineContext.ensureActive()
-                android.util.Log.w("PitwallCast", "NATIVE_TEXT_MANIFEST_UNAVAILABLE type=${failure.javaClass.simpleName}")
+            for (index in audioTracks.keys) {
+                val feed = feeds[index]
+                if (snapshot.actualManifests[feed.label] == ManifestProtocol.HLS && feed.label !in programmes) continue
+                val captions = textTracks.getOrPut(index) { CmafCastText(audioReader, sidecars, index, (8 / feeds.size).coerceIn(1, 4)) }
+                try {
+                    captions.capture(feed.manifestUrl, sourceUs, requireNotNull(sourceStartUs), programmes[feed.label])
+                } catch (failure: Exception) {
+                    coroutineContext.ensureActive()
+                    android.util.Log.w("PitwallCast", "NATIVE_TEXT_MANIFEST_UNAVAILABLE index=$index type=${failure.javaClass.simpleName}")
+                }
             }
             val video = ProtectedHevcComposedDashPackageBuilder.build(window, pssh, pto, ast,
                 clearOutput = capture.clearOutput, takeOwnership = true)
             packaged = video
             windowTransferred = true
-            var merged = video
-            for (track in audioTracks.values) {
-                val previousManifest = merged.resources["manifest.mpd"]
-                merged = track.appendTo(merged, requireNotNull(sourceStartUs))
-                packaged = merged
-                previousManifest?.fill(0)
-            }
-            val previousManifest = merged.resources["manifest.mpd"]
-            val withText = textTracks.appendTo(merged)
-            if (withText !== merged) {
-                merged = withText; packaged = merged; previousManifest?.fill(0)
-            }
+            val publication = CastDashPublication(video)
+            for (track in audioTracks.values) track.appendTo(publication, requireNotNull(sourceStartUs))
+            textTracks.values.forEach { it.appendTo(publication) }
             check(!closed); coroutineContext.ensureActive()
-            relay.publish(merged); packaged = null
+            publication.publish(relay); packaged = null
             selectableAudioIndices = audioTracks.filterValues { it.latestSourceUs == sourceUs }.keys.toSet()
-            geometry = shape; width = merged.width; height = merged.height
+            geometry = shape; width = video.width; height = video.height
             protectedOutput = !capture.clearOutput || audioTracks.values.any { it.encrypted }
             captured = true
-            android.util.Log.i("PitwallCast", "PROTECTED_CMAF_RELAY sources=${feeds.size} source=${shape.displayWidth}x${shape.displayHeight} atlas=${width}x$height encrypted=$protectedOutput frames=${merged.sampleCount} fullPictures=true")
+            android.util.Log.i("PitwallCast", "PROTECTED_CMAF_RELAY sources=${feeds.size} source=${shape.displayWidth}x${shape.displayHeight} atlas=${width}x$height encrypted=$protectedOutput frames=${video.sampleCount} fullPictures=true sharedPublicationBytes=${publication.reusedBytes} sharedRetainedBytes=${sidecars.bytesInUse()}")
         } finally { packaged?.zero(); if (!windowTransferred) window.zero(); pssh?.fill(0) }
         snapshot
       }
@@ -160,7 +159,7 @@ internal class NativeComposedCastSession(
         if (closed) return
         closed = true; relay.close()
         cleanup.launch {
-            try { gate.withLock { capture.reset(); audioTracks.values.forEach { it.close() }; audioTracks.clear(); textTracks.close(); ProtectedHevcLiveComposition.clearSelection(group, discardInitialization = true) } }
+            try { gate.withLock { capture.reset(); audioTracks.values.forEach { it.close() }; audioTracks.clear(); textTracks.values.forEach { it.close() }; textTracks.clear(); ProtectedHevcLiveComposition.clearSelection(group, discardInitialization = true) } }
             finally { cleanup.cancel() }
         }
     }

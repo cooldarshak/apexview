@@ -50,4 +50,50 @@ class RelayResourceStoreTest {
         for (range in listOf("bytes=999999999999999999999-", "bytes=0-999999999999999999999", "bytes=10-9", "bytes=-10", "bytes=0-100", "bytes=0-1,3-4"))
             assertNull(RelayHttpRange.parse(range, 100))
     }
+
+    @Test fun producerAndRollingRelayShareOneBackingUntilTheLastReaderCloses() {
+        val budget = RelayMediaBudget(6)
+        val store = RelayResourceStore(16)
+        val bytes = byteArrayOf(10, 20, 30)
+        val audio = budget.own(bytes)
+        store.publish(mapOf("manifest.mpd" to byteArrayOf(1)), mapOf("audio.m4s" to audio))
+        val lease = requireNotNull(store.acquire("audio.m4s"))
+        store.publish(mapOf("manifest.mpd" to byteArrayOf(2)), mapOf("audio.m4s" to audio))
+        assertEquals(3L, budget.bytesInUse())
+        audio.close()
+        store.publish(mapOf("manifest.mpd" to byteArrayOf(3)))
+        assertNull(store.acquire("audio.m4s"))
+        val output = ByteArrayOutputStream()
+        lease.writeTo(output, 0, 3)
+        assertArrayEquals(byteArrayOf(10, 20, 30), output.toByteArray())
+        assertThrows(IllegalArgumentException::class.java) { budget.own(ByteArray(4)) }
+        store.close()
+        assertArrayEquals(byteArrayOf(10, 20, 30), bytes)
+        lease.close()
+        assertEquals(0L, budget.bytesInUse())
+        assertArrayEquals(ByteArray(3), bytes)
+    }
+
+    @Test fun failedPublicationRollsBackSharedReferencesAndKeepsTheCurrentWindow() {
+        val budget = RelayMediaBudget(12)
+        val store = RelayResourceStore(16)
+        val current = byteArrayOf(1)
+        store.publish(mapOf("manifest.mpd" to current))
+        val next = byteArrayOf(2, 3)
+        val first = budget.own(next)
+        val retired = budget.own(byteArrayOf(4))
+        retired.close()
+        assertThrows(IllegalStateException::class.java) {
+            store.publish(emptyMap(), mapOf("next" to first, "retired" to retired))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            store.publish(mapOf("aliased" to next), mapOf("next" to first))
+        }
+        assertEquals(1L, store.snapshot().currentBytes)
+        assertArrayEquals(byteArrayOf(1), current)
+        first.close()
+        assertArrayEquals(ByteArray(2), next)
+        assertEquals(0L, budget.bytesInUse())
+        store.close()
+    }
 }

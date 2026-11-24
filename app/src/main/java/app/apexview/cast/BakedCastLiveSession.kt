@@ -15,7 +15,7 @@ import kotlinx.coroutines.launch
 /** One continuously captured, baked phone picture + original authorized AAC commentary. */
 internal class BakedCastLiveSession(
     address: String, peer: InetAddress?, reader: CmafHttpReader, audioUri: Uri,
-    val feeds: Int, scope: CoroutineScope,
+    val programmeLabel: String, val feeds: Int, scope: CoroutineScope,
     tls: app.apexview.cast.local.PitwallTls.Session? = null,
     private val onFailure: (String) -> Unit,
 ) : AutoCloseable {
@@ -63,9 +63,11 @@ internal class BakedCastLiveSession(
 
     @Synchronized fun setOutputSize(w: Int, h: Int, playbackPositionMs: Long) {
         require(w > 0 && h > 0 && playbackPositionMs >= 0)
+        check(!stopped && audio == null) { "Clear Cast output already anchored or closed" }
+        val sourceStartUs = Math.multiplyExact(playbackPositionMs, 1_000L)
         width = w; height = h
         sourceStartMs = playbackPositionMs
-        audio = BakedCastArchiveAudio(audioReader, audioSource, sourceStartMs * 1000)
+        audio = BakedCastArchiveAudio(audioReader, audioSource, sourceStartUs)
         Log.i("PitwallCast", "BAKED_CAST_SOURCE_CLOCK startMs=$sourceStartMs encoderPicture=${width}x$height")
     }
 
@@ -119,16 +121,17 @@ internal class BakedCastLiveSession(
         onFailure(reason)
     }
 
+    private var closed = false
+
     @Synchronized override fun close() {
-        if (stopped) {
-            audioJob.cancel(); runCatching { audio?.close() }; runCatching { hls.close() }
-            return
-        }
+        if (closed) return
+        closed = true
         stopped = true
         if (!firstSegment.isCompleted) firstSegment.cancel()
         audioJob.cancel()
         runCatching { hls.end() }; runCatching { hls.close() }
-        audio?.close()
+        runCatching { audio?.close() }
+        audio = null
         video.clear(); commentary.clear()
     }
 }

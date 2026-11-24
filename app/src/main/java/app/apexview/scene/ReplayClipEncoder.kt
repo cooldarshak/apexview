@@ -38,7 +38,8 @@ internal class ReplayClipEncoder(
     private var lastPresentationUs = 0L
     // PixelCopy may still own the bitmap when a clip is cancelled. Let its callback release
     // the final reference instead of recycling the bitmap while that copy is pending.
-    val pixels = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    private var bitmap: Bitmap? = null
+    val pixels: Bitmap get() = bitmap ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap = it }
     private var codec: MediaCodec? = null
     private var input: android.view.Surface? = null
     private var muxer: MediaMuxer? = null
@@ -104,10 +105,7 @@ internal class ReplayClipEncoder(
     }
 
     /** Returns true after submitting the last frame. The display is rebound by the caller. */
-    fun frame(timestampNs: Long) {
-        if (firstNs < 0) firstNs = timestampNs
-        check(EGL14.eglMakeCurrent(display, egl, egl, glContext)) { "Encoder surface unavailable" }
-        val elapsedNs = timestampNs - firstNs
+    fun frame(timestampNs: Long) = frame(timestampNs) {
         GLES20.glViewport(0, 0, width, height)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
@@ -127,6 +125,13 @@ internal class ReplayClipEncoder(
         quad.position(2)
         GLES20.glVertexAttribPointer(uv, 2, GLES20.GL_FLOAT, false, 16, quad)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+    }
+
+    fun frame(timestampNs: Long, draw: () -> Unit) {
+        if (firstNs < 0) firstNs = timestampNs
+        check(EGL14.eglMakeCurrent(display, egl, egl, glContext)) { "Encoder surface unavailable" }
+        draw()
+        val elapsedNs = timestampNs - firstNs
         check(EGLExt.eglPresentationTimeANDROID(display, egl, elapsedNs))
         check(EGL14.eglSwapBuffers(display, egl)) { "Encoder frame submission failed" }
         drain(end = false)
@@ -212,7 +217,7 @@ internal class ReplayClipEncoder(
     /** Live sessions never publish a MediaStore file; stop without finalizing an MP4. */
     fun stopCast() {
         check(castSample != null)
-        close()
+        try { close() } finally { bitmap?.recycle(); bitmap = null }
     }
 
 }

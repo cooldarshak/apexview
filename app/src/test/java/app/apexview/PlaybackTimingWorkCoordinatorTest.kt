@@ -1,6 +1,13 @@
 package app.apexview
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -21,7 +28,7 @@ class PlaybackTimingWorkCoordinatorTest {
         assertTrue(speed.isCancelled)
         val current = requireNotNull(work.beginSpeed("race"))
         assertFalse(work.completeSpeed(request, emptyMap()))
-        work.failSpeed(request)
+        assertFalse(work.failSpeed(request))
         assertEquals("race", work.speedsFor)
         assertTrue(work.completeSpeed(current, emptyMap()))
         work.close()
@@ -34,33 +41,55 @@ class PlaybackTimingWorkCoordinatorTest {
         work.begin(7)
         val first = requireNotNull(work.beginSpeed("race"))
         assertNull(work.beginSpeed("race"))
-        work.failSpeed(first)
+        assertTrue(work.failSpeed(first))
         val second = requireNotNull(work.beginSpeed("race"))
         assertFalse(work.completeSpeed(first, emptyMap()))
         assertTrue(work.completeSpeed(second, emptyMap()))
     }
-    @Test fun cancelSeekClearsBothJobsAndTargetWithoutTouchingCapture() {
-        val work = PlaybackWorkCoordinator()
-        val seek = Job()
-        val restart = Job()
-        val capture = Job()
-        val retry = Job()
-        work.seekJob = seek
-        work.castRestartJob = restart
-        work.captureJob = capture
-        work.retryJob = retry
-        assertTrue(work.pendingSeek.offer(5000))
+    @Test fun cancelSeekClearsTheLatestTargetAndStillAllowsAReplacementSeek() = runBlocking {
+        val work = PlaybackWorkCoordinator(this)
+        val cancelled = CompletableDeferred<Long>()
+        work.coalesceSeek(this, 5000) { cancelled.complete(it) }
+        work.scheduleCastRestart(this) { cancelled.complete(0) }
         work.cancelControlSeek()
-        assertTrue(seek.isCancelled)
-        assertTrue(restart.isCancelled)
         assertNull(work.pendingSeek.targetMs)
-        assertNull(work.seekJob)
         assertNull(work.castRestartJob)
-        assertTrue(capture.isActive)
-        assertTrue(retry.isActive)
-        work.cancelCapture()
-        work.cancelRetry()
-        assertTrue(capture.isCancelled)
-        assertTrue(retry.isCancelled)
+        val result = CompletableDeferred<Long>()
+        work.coalesceSeek(this, 6000) { result.complete(it) }
+        work.coalesceSeek(this, 7001) { error("A coalesced seek must use its existing owner") }
+        assertEquals(7001L, withTimeout(1500) { result.await() })
+        assertFalse(cancelled.isCompleted)
+    }
+
+    @Test fun captureIsRetiredOnlyAfterItsOldWorkerStopsAndReplacementWaits() = runBlocking {
+        val work = PlaybackWorkCoordinator(this)
+        val firstStarted = CompletableDeferred<Unit>()
+        val firstFinished = CompletableDeferred<Unit>()
+        val allowDrain = CompletableDeferred<Unit>()
+        val firstErased = CompletableDeferred<Unit>()
+        val replacementStarted = CompletableDeferred<Unit>()
+        val first = object : app.apexview.tiled.CmafCaptureLifecycle {
+            override fun reset() { assertTrue(firstFinished.isCompleted); firstErased.complete(Unit) }
+        }
+        val second = object : app.apexview.tiled.CmafCaptureLifecycle {
+            override fun reset() = Unit
+        }
+        work.prepareCapture(first)
+        work.launchCapture(this) {
+            firstStarted.complete(Unit)
+            try { awaitCancellation() } finally {
+                withContext(NonCancellable) { allowDrain.await(); firstFinished.complete(Unit) }
+            }
+        }
+        firstStarted.await()
+        work.prepareCapture(second)
+        work.launchCapture(this) { replacementStarted.complete(Unit) }
+        yield()
+        assertSame(second, work.capture)
+        assertFalse(firstErased.isCompleted)
+        assertFalse(replacementStarted.isCompleted)
+        allowDrain.complete(Unit)
+        withTimeout(1500) { replacementStarted.await() }
+        assertTrue(firstErased.isCompleted)
     }
 }

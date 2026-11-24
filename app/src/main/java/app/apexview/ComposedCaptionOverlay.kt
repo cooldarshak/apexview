@@ -18,7 +18,9 @@ import androidx.media3.ui.SubtitleView
  */
 @OptIn(UnstableApi::class)
 @Composable
-internal fun ComposedCaptionOverlay(player: Player?, enabled: Boolean, modifier: Modifier = Modifier) {
+internal fun ComposedCaptionOverlay(
+    player: Player?, enabled: Boolean, appearance: CaptionAppearance, modifier: Modifier = Modifier,
+) {
     var cues by remember(player) { mutableStateOf<List<Cue>>(emptyList()) }
     DisposableEffect(player, enabled) {
         if (player == null || !enabled) {
@@ -41,12 +43,13 @@ internal fun ComposedCaptionOverlay(player: Player?, enabled: Boolean, modifier:
                 isClickable = false
                 isFocusable = false
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                setUserDefaultStyle()
-                setUserDefaultTextSize()
                 setBottomPaddingFraction(0.13f)
             }
         },
-        update = { it.setCues(cues) },
+        update = {
+            it.applyCaptionAppearance(appearance)
+            it.setCues(cues)
+        },
         modifier = modifier,
     )
 }

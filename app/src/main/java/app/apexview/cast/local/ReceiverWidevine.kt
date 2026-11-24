@@ -59,11 +59,11 @@ internal class ReceiverWidevine private constructor(private val drm: FrameworkMe
                 request.channels.map { requireNotNull(play.streamsByChannel[it]) }
             }
             val urls = streams.map { it.licenseUrl }
-            val media = DefaultHttpDataSource.Factory().setUserAgent(agent).setAllowCrossProtocolRedirects(true)
+            val media = DefaultHttpDataSource.Factory().setUserAgent(agent).setAllowCrossProtocolRedirects(false)
                 .setDefaultRequestProperties(mapOf("ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
             if (urls.all { it.isNullOrBlank() }) return ReceiverWidevine(null, null, false, streams.first(), media)
             require(urls.all { !it.isNullOrBlank() } && urls.distinct().size == 1) { "Selected channels do not share the TV's authorized Widevine licence" }
-            val http = DefaultHttpDataSource.Factory().setUserAgent(agent).setAllowCrossProtocolRedirects(true)
+            val http = DefaultHttpDataSource.Factory().setUserAgent(agent).setAllowCrossProtocolRedirects(false)
             val callback = HttpMediaDrmCallback(urls.first(), http).apply {
                 setKeyRequestProperty("ascendontoken", api.ascendon.orEmpty())
                 setKeyRequestProperty("entitlementtoken", api.entitlement.orEmpty())

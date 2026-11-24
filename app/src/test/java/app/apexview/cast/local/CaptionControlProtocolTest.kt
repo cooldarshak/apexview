@@ -3,6 +3,7 @@ package app.apexview.cast.local
 import org.json.JSONArray
 import org.json.JSONObject
 import app.apexview.CaptionTrackOption
+import app.apexview.CaptionAppearance
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -75,5 +76,15 @@ class CaptionControlProtocolTest {
         assertFalse(CaptionControlProtocol.matchesLoad(legacy, "load-a", true))
         assertTrue(CaptionControlProtocol.matchesLoad(legacy, "load-a", false))
         assertEquals(RemoteCaptionPreference(true, "en"), CaptionControlProtocol.decode(command))
+    }
+    @Test fun appearanceRoundTripsAndRejectsOutOfBoundsValues() {
+        val style = CaptionAppearance(135, 0)
+        val packet = CaptionControlProtocol.forLoad(true, "en", "load-a", style)
+        assertTrue(CaptionControlProtocol.matchesLoad(packet, "load-a", true))
+        assertEquals(style, CaptionControlProtocol.decode(packet).appearance)
+        val defaults = CaptionControlProtocol.forLoad(false, "auto", "load-b", CaptionAppearance())
+        assertEquals(CaptionAppearance(), CaptionControlProtocol.decode(defaults).appearance)
+        packet.getJSONObject("appearance").put("textSize", 201)
+        assertThrows(IllegalArgumentException::class.java) { CaptionControlProtocol.decode(packet) }
     }
 }

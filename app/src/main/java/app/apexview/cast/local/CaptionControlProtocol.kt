@@ -1,21 +1,30 @@
 package app.apexview.cast.local
 
+import app.apexview.CaptionAppearance
 import app.apexview.CaptionPolicy
 import app.apexview.CaptionTrackOption
 import org.json.JSONArray
 import org.json.JSONObject
 
 /** Only the viewer preference travels over the local control socket, never DRM keys or cue content. */
-internal data class RemoteCaptionPreference(val enabled: Boolean, val language: String)
+internal data class RemoteCaptionPreference(
+    val enabled: Boolean, val language: String, val appearance: CaptionAppearance? = null,
+)
 
 internal object CaptionControlProtocol {
-    fun encode(enabled: Boolean, language: String): JSONObject =
+    fun encode(enabled: Boolean, language: String, appearance: CaptionAppearance? = null): JSONObject =
         JSONObject().put("action", "captions").put("enabled", enabled)
-            .put("language", CaptionPolicy.normalizeLanguage(language))
+            .put("language", CaptionPolicy.normalizeLanguage(language)).apply {
+                if (appearance != null) put("appearance", JSONObject()
+                    .put("textSize", appearance.textSizePercent)
+                    .put("backgroundOpacity", appearance.backgroundOpacityPercent ?: -1))
+            }
 
-    fun forLoad(enabled: Boolean, language: String, playbackId: String): JSONObject {
+    fun forLoad(
+        enabled: Boolean, language: String, playbackId: String, appearance: CaptionAppearance? = null,
+    ): JSONObject {
         require(playbackId.isNotBlank() && playbackId.length <= 80)
-        return encode(enabled, language).put("playbackId", playbackId)
+        return encode(enabled, language, appearance).put("playbackId", playbackId)
     }
 
     fun matchesLoad(body: JSONObject, playbackId: String, requireId: Boolean): Boolean =
@@ -26,7 +35,13 @@ internal object CaptionControlProtocol {
         require(body.getString("action") == "captions")
         val raw = body.getString("language")
         require(raw.length <= 16 && raw == CaptionPolicy.normalizeLanguage(raw)) { "Invalid caption language" }
-        return RemoteCaptionPreference(body.getBoolean("enabled"), raw)
+        val appearance = if (body.has("appearance")) body.getJSONObject("appearance").let { style ->
+            val size = style.get("textSize")
+            val opacity = style.get("backgroundOpacity")
+            require(size is Int && opacity is Int) { "Invalid caption appearance" }
+            CaptionAppearance(size, opacity.takeUnless { it == -1 })
+        } else null
+        return RemoteCaptionPreference(body.getBoolean("enabled"), raw, appearance)
     }
 }
 /**

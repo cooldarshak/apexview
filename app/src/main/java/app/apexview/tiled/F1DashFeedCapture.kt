@@ -97,7 +97,7 @@ internal class F1DashFeedCapture(
 
     private val httpFactory: DataSource.Factory = dataSourceFactory ?: DefaultHttpDataSource.Factory()
         .setUserAgent(userAgent)
-        .setAllowCrossProtocolRedirects(true)
+        .setAllowCrossProtocolRedirects(false)
         .setDefaultRequestProperties(
             mapOf(
                 "ascendontoken" to ascendon,

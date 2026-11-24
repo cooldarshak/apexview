@@ -7,14 +7,17 @@ import androidx.media3.common.util.UriUtil
 import androidx.media3.exoplayer.dash.manifest.DashManifestParser
 import androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist
 import androidx.media3.exoplayer.hls.playlist.HlsMultivariantPlaylist
+import androidx.media3.exoplayer.hls.playlist.HlsPlaylist
 import androidx.media3.exoplayer.hls.playlist.HlsPlaylistParser
 import app.apexview.tiled.*
 import java.util.Base64
 import kotlin.math.abs
 
 /** Relays the selected original CMAF audio unchanged. All CDN credentials stay on the phone. */
-internal class CmafCastAudio(private val reader: CmafHttpReader, private val language: String,
-                             val trackIndex: Int = 0) : AutoCloseable {
+internal class CmafCastAudio(
+    private val reader: CmafHttpReader, private val language: String, val trackIndex: Int,
+    private val budget: RelayMediaBudget,
+) : AutoCloseable {
     init { require(trackIndex in 0..5) }
     private val namespace = "audio-$trackIndex"
     val representationId = "pitwall-audio-$trackIndex"
@@ -38,8 +41,9 @@ internal class CmafCastAudio(private val reader: CmafHttpReader, private val lan
                     requireNotNull(manifestPssh).contentEquals(requireNotNull(primary.manifestPssh)))) &&
             kotlin.math.abs(requireNotNull(firstSourceUs) - requireNotNull(primary.firstSourceUs)) <= 250_000L
     }
-    data class Segment(val name: String, val bytes: ByteArray, val dts: Long, val duration: Long)
-    private var init = ByteArray(0)
+    private data class Segment(val name: String, val bytes: SharedRelayResource, val dts: Long, val duration: Long)
+    private var init: SharedRelayResource? = null
+    private var protectionXml = ""
     private var initKey = ""
     private var report: CmafBoxInspector.Report? = null
     private var format: Format? = null
@@ -53,13 +57,18 @@ internal class CmafCastAudio(private val reader: CmafHttpReader, private val lan
     var encrypted: Boolean = false
         private set
 
-    fun capture(url: String, sourceUs: Long, live: Boolean) {
+    fun capture(url: String, sourceUs: Long, live: Boolean, programme: HlsProgrammeContext?) {
         if (lastSourceUs == sourceUs) return
-        val response = reader.read(Uri.parse(url), 2 * 1024 * 1024)
-        try {
-            if (response.bytes.toString(Charsets.UTF_8).trimStart().startsWith("#EXTM3U")) hls(response.uri, response.bytes, sourceUs, live)
-            else dash(response.uri, response.bytes, sourceUs)
-        } finally { response.bytes.fill(0) }
+        if (programme != null) {
+            hls(programme.master, sourceUs, live, programme)
+        } else {
+            val response = reader.read(Uri.parse(url), 2 * 1024 * 1024)
+            try {
+                if (app.apexview.ManifestProtocol.fromBody(response.bytes) == app.apexview.ManifestProtocol.HLS)
+                    hls(HlsPlaylistParser().parse(response.uri, response.bytes.inputStream()), sourceUs, live, null)
+                else dash(response.uri, response.bytes, sourceUs)
+            } finally { response.bytes.fill(0) }
+        }
         lastSourceUs = sourceUs
     }
     private fun dash(uri: Uri, bytes: ByteArray, sourceUs: Long) {
@@ -82,19 +91,17 @@ internal class CmafCastAudio(private val reader: CmafHttpReader, private val lan
         val segment = index.getSegmentUrl(number)
         append(reader.read(segment.resolveUri(base), 8 * 1024 * 1024, segment.start, segment.length).bytes, start)
     }
-    private fun hls(uri: Uri, bytes: ByteArray, sourceUs: Long, live: Boolean) {
-        val playlist = HlsPlaylistParser().parse(uri, bytes.inputStream())
-        var base = uri
+    private fun hls(playlist: HlsPlaylist, sourceUs: Long, live: Boolean, programme: HlsProgrammeContext?) {
         val media = when (playlist) {
             is HlsMediaPlaylist -> playlist
             is HlsMultivariantPlaylist -> {
-                val rendition = playlist.audios.filter { it.url != null }
+                val rendition = playlist.audios.filter { it.url != null &&
+                    (programme == null || it.groupId == programme.audioGroup) }
                     .maxWithOrNull(compareBy<HlsMultivariantPlaylist.Rendition> { it.format.language == language }
                         .thenBy { (it.format.selectionFlags and C.SELECTION_FLAG_DEFAULT) != 0 })
                     ?: throw PermanentCaptureException("Casting requires a separate native audio rendition")
                 acceptFormat(rendition.format)
-                base = rendition.url!!
-                val response = reader.read(base, 2 * 1024 * 1024)
+                val response = reader.read(requireNotNull(rendition.url), 2 * 1024 * 1024)
                 try { HlsPlaylistParser(playlist, null).parse(response.uri, response.bytes.inputStream()) as? HlsMediaPlaylist
                     ?: throw PermanentCaptureException("Audio rendition did not return a media playlist") }
                 finally { response.bytes.fill(0) }
@@ -103,7 +110,9 @@ internal class CmafCastAudio(private val reader: CmafHttpReader, private val lan
         }
         val origin = if (live) {
             require(media.hasProgramDateTime) { "Live audio requires program date time" }; media.startTimeUs
-        } else 0L
+        } else if (programme != null && media.hasProgramDateTime && programme.playlistUtcStartUs != null)
+            Math.addExact(programme.playlistSourceStartUs, Math.subtractExact(media.startTimeUs, programme.playlistUtcStartUs))
+        else 0L
         val segment = media.segments.minByOrNull { abs(origin + it.relativeStartTimeUs - sourceUs) }
             ?: throw PermanentCaptureException("Audio playlist is empty")
         segment.drmInitData?.let { acceptPssh(it) }
@@ -111,9 +120,8 @@ internal class CmafCastAudio(private val reader: CmafHttpReader, private val lan
         require(abs(start - sourceUs) <= 250_000L) { "Audio and composed video timelines are not aligned" }
         require(segment.fullSegmentEncryptionKeyUri == null) { "HLS AES-128 key retrieval is not supported" }
         val map = requireNotNull(segment.initializationSegment) { "Audio is not CMAF" }
-        base = Uri.parse(media.baseUri)
-        installInit(UriUtil.resolveToUri(base.toString(), map.url), map.byteRangeOffset, map.byteRangeLength)
-        append(reader.read(UriUtil.resolveToUri(base.toString(), segment.url), 8 * 1024 * 1024,
+        installInit(UriUtil.resolveToUri(media.baseUri, map.url), map.byteRangeOffset, map.byteRangeLength)
+        append(reader.read(UriUtil.resolveToUri(media.baseUri, segment.url), 8 * 1024 * 1024,
             segment.byteRangeOffset, segment.byteRangeLength).bytes, start)
     }
     private fun acceptFormat(next: Format) {
@@ -148,7 +156,12 @@ internal class CmafCastAudio(private val reader: CmafHttpReader, private val lan
             val track = inspected.tracks.single()
             require(!track.encrypted || track.protectionScheme in setOf("cenc", "cbcs")) { "Cast audio protection is unsupported" }
             val verifiedTimescale = requireNotNull(track.timescale).also { require(it > 0) }
-            init = bytes; report = inspected; initKey = key; encrypted = track.encrypted
+            val protection = if (track.encrypted)
+                ProtectedHevcComposedDashPackageBuilder.protectionXml(bytes, manifestPssh, requireNotNull(track.protectionScheme))
+            else ""
+            init = budget.own(bytes)
+            protectionXml = protection
+            report = inspected; initKey = key; encrypted = track.encrypted
             timescale = verifiedTimescale
             transferred = true
         } finally { if (!transferred) bytes.fill(0) }
@@ -168,35 +181,37 @@ internal class CmafCastAudio(private val reader: CmafHttpReader, private val lan
             require(dts >= 0 && dts <= Long.MAX_VALUE - duration)
             segments.lastOrNull()?.let { require(Math.addExact(it.dts, it.duration) == dts) { "Cast audio has a timeline gap" } }
             if (firstSourceUs == null) { firstSourceUs = sourceUs; firstDts = dts }
-            segments += Segment("$namespace-${++serial}.m4s", bytes, dts, duration)
+            val retained = budget.own(bytes)
+            segments += Segment("$namespace-${++serial}.m4s", retained, dts, duration)
             transferred = true
-            while (segments.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) segments.removeAt(0).bytes.fill(0)
+            while (segments.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) segments.removeAt(0).bytes.close()
         } finally { if (!transferred) bytes.fill(0) }
     }
-    fun appendTo(video: ProtectedHevcComposedDashPackageBuilder.Package, videoSourceStartUs: Long): ProtectedHevcComposedDashPackageBuilder.Package {
+    fun appendTo(publication: CastDashPublication, videoSourceStartUs: Long) {
         require(segments.isNotEmpty()) { "No audio is ready" }
-        val offsetUs = requireNotNull(firstSourceUs) - videoSourceStartUs
-        val pto = firstDts - scale(offsetUs)
+        val offsetUs = Math.subtractExact(requireNotNull(firstSourceUs), videoSourceStartUs)
+        val pto = Math.subtractExact(firstDts, scale(offsetUs))
         require(pto >= 0)
-        val resources = video.resources.toMutableMap()
-        val protection = if (encrypted) ProtectedHevcComposedDashPackageBuilder.protectionXml(init, manifestPssh, requireNotNull(report!!.tracks.single().protectionScheme)) else ""
         val timeline = segments.joinToString("") { "<S t=\"${it.dts}\" d=\"${it.duration}\"/>" }
         val urls = segments.joinToString("") { "<SegmentURL media=\"${it.name}\"/>" }
         val codec = format?.codecs?.takeIf { it.matches(Regex("[A-Za-z0-9.,]+")) } ?: "mp4a.40.2"
-        val audio = """<AdaptationSet id="${10 + trackIndex}" contentType="audio" mimeType="audio/mp4" segmentAlignment="true">$protection
+        val audio = """<AdaptationSet id="${10 + trackIndex}" contentType="audio" mimeType="audio/mp4" segmentAlignment="true">$protectionXml
           <Representation id="$representationId" bandwidth="${format?.bitrate?.coerceAtLeast(1) ?: 128000}" codecs="$codec">
             <SegmentList timescale="$timescale" presentationTimeOffset="$pto"><Initialization sourceURL="$namespace-init.mp4"/>
               <SegmentTimeline>$timeline</SegmentTimeline>$urls</SegmentList></Representation></AdaptationSet>"""
-        val manifest = video.manifest.replace("</Period>", "$audio</Period>")
-        val owned = mutableListOf<ByteArray>()
-        try {
-            resources["$namespace-init.mp4"] = init.copyOf().also(owned::add)
-            segments.forEach { resources[it.name] = it.bytes.copyOf().also(owned::add) }
-            resources["manifest.mpd"] = manifest.toByteArray().also(owned::add)
-            return video.copy(manifest = manifest, resources = resources)
-        } catch (failure: Throwable) { owned.forEach { it.fill(0) }; throw failure }
+        publication.addResource("$namespace-init.mp4", requireNotNull(init))
+        segments.forEach { publication.addResource(it.name, it.bytes) }
+        publication.addAdaptationSet(audio)
     }
     private fun scale(us: Long): Long = java.math.BigInteger.valueOf(us).multiply(java.math.BigInteger.valueOf(timescale))
         .divide(java.math.BigInteger.valueOf(1_000_000)).longValueExact()
-    override fun close() { init.fill(0); init = ByteArray(0); segments.forEach { it.bytes.fill(0) }; segments.clear(); manifestPssh?.fill(0) }
+    override fun close() {
+        init?.close()
+        init = null
+        segments.forEach { it.bytes.close() }
+        segments.clear()
+        manifestPssh?.fill(0)
+        manifestPssh = null
+        protectionXml = ""
+    }
 }

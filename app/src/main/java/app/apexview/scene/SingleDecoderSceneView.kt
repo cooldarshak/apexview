@@ -171,13 +171,15 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var clipResult: ((String) -> Unit)? = null
     @Volatile private var castWorker: BakedCastCaptureWorker? = null
     @Volatile private var castSession: BakedCastLiveSession? = null
+    private var castVideoTarget: BakedCastGpuCapture.VideoTarget? = null
+    private var castVideoSurface = EGL14.EGL_NO_SURFACE
 
     /**
-     * Capture every visible clear viewer layer, including Compose map and tower,
-     * on an independent encoder EGL thread. The decoded HEVC SurfaceTexture
-     * must never wait for a 25fps PixelCopy, GLES texture upload or AVC drain.
+     * The independent encoder receives one rendered clear scene on demand.
+     * Only this looper may read the decoded HEVC SurfaceTexture.
      */
-    fun startBakedCast(source: Window, bounds: Rect, session: BakedCastLiveSession, playbackPositionMs: Long) {
+    fun startBakedCast(source: Window, bounds: Rect, session: BakedCastLiveSession,
+                       overlay: BakedCastOverlay, playbackPositionMs: () -> Long?) {
         gl.post {
             if (castSession === session) return@post
             stopBakedCastOnGl()
@@ -193,11 +195,11 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 val width = ((bounds.width() * scale).toInt() and -2).coerceAtLeast(2)
                 val height = ((bounds.height() * scale).toInt() and -2).coerceAtLeast(2)
                 val worker = BakedCastCaptureWorker(
-                    context.applicationContext, source, Rect(bounds), width, height, session
+                    context.applicationContext, source, Rect(bounds), width, height, session, overlay,
+                    ::drawBakedCastVideo, ::detachBakedCastVideo, playbackPositionMs,
                 )
                 castWorker = worker
                 castSession = session
-                session.setOutputSize(width, height, playbackPositionMs)
                 worker.start()
             } catch (error: Exception) {
                 session.captureFailed(error.message ?: error.javaClass.simpleName)
@@ -211,6 +213,49 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
 
     private fun stopBakedCastOnGl() {
         castWorker?.stop(); castWorker = null; castSession = null
+        releaseBakedCastVideoSurface()
+    }
+
+    private fun drawBakedCastVideo(target: BakedCastGpuCapture.VideoTarget) {
+        if (!gl.post {
+            if (target.closed) return@post
+            try {
+                val model = checkNotNull(scene)
+                check(!released && hasFrame && window != EGL14.EGL_NO_SURFACE) { "Clear scene output is unavailable" }
+                val changed = castVideoTarget !== target
+                if (changed) {
+                    releaseBakedCastVideoSurface()
+                    val selected = checkNotNull(config)
+                    castVideoSurface = EGL14.eglCreateWindowSurface(display, selected, target.surface,
+                        intArrayOf(EGL14.EGL_NONE), 0)
+                    castVideoTarget = target
+                }
+                val output = castVideoSurface
+                check(output != EGL14.EGL_NO_SURFACE && EGL14.eglMakeCurrent(display, output, output, contextGl)) {
+                    "Unable to bind clear Cast video output"
+                }
+                if (changed) EGL14.eglSwapInterval(display, 0)
+                GLES20.glViewport(0, 0, target.width, target.height)
+                GLES20.glClearColor(0f, 0f, 0f, 1f)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                drawVideo(model)
+                check(EGL14.eglSwapBuffers(display, output)) { "Clear Cast video output swap failed" }
+            } catch (error: Exception) {
+                if (!target.closed) target.fail(error)
+            } finally {
+                if (window != EGL14.EGL_NO_SURFACE) EGL14.eglMakeCurrent(display, window, window, contextGl)
+            }
+        }) target.fail(IllegalStateException("Clear scene has already closed"))
+    }
+
+    private fun detachBakedCastVideo(target: BakedCastGpuCapture.VideoTarget) {
+        gl.post { if (castVideoTarget === target) releaseBakedCastVideoSurface() }
+    }
+
+    private fun releaseBakedCastVideoSurface() {
+        if (castVideoSurface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, castVideoSurface)
+        castVideoTarget = null
+        castVideoSurface = EGL14.EGL_NO_SURFACE
     }
 
     fun startReplayClip(source: Window, bounds: Rect, result: (String) -> Unit) {
@@ -705,7 +750,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         cadenceGate.reset()
         pacing.reset()
         lastLogNs = 0L
+        val endedCapture = castSession
         stopBakedCastOnGl()
+        endedCapture?.captureFailed("The viewer video output was replaced")
         saveClip()
         config = null
         decoderTexture?.setOnFrameAvailableListener(null)

@@ -9,6 +9,7 @@ import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.os.Process
 import android.util.Log
 import android.view.PixelCopy
@@ -17,10 +18,9 @@ import android.view.WindowManager
 import app.apexview.cast.BakedCastLiveSession
 
 /**
- * Captures the complete authorized CLEAR viewer window, including all Compose
- * overlays, without stealing the HEVC presentation GL looper. This owns its
- * *own* EGL context and AVC encoder; it does not create another video decoder.
- * Protected/Widevine Cast must not pass through this class.
+ * Encodes the authorized clear video scene and its live viewer layers on an
+ * independent EGL looper. The full-window capture remains available if the
+ * device cannot supply the direct GPU layers.
  */
 internal class BakedCastCaptureWorker(
     private val context: Context,
@@ -29,10 +29,15 @@ internal class BakedCastCaptureWorker(
     private val width: Int,
     private val height: Int,
     private val session: BakedCastLiveSession,
+    private val overlay: BakedCastOverlay,
+    private val drawVideo: (BakedCastGpuCapture.VideoTarget) -> Unit,
+    private val detachVideo: (BakedCastGpuCapture.VideoTarget) -> Unit,
+    private val playbackPositionMs: () -> Long?,
 ) {
     private val thread = HandlerThread("PitwallBakedCastEncoder",
         Process.THREAD_PRIORITY_DISPLAY).apply { start() }
     private val gl = Handler(thread.looper)
+    private val main = Handler(Looper.getMainLooper())
     @Volatile private var stopped = false
     private var cleaned = false
     private val captureLifetime = CaptureRequestLifetime()
@@ -40,6 +45,8 @@ internal class BakedCastCaptureWorker(
     private var contextGl: EGLContext = EGL14.EGL_NO_CONTEXT
     private var pbuffer: EGLSurface = EGL14.EGL_NO_SURFACE
     private var encoder: ReplayClipEncoder? = null
+    private var directCapture: BakedCastGpuCapture? = null
+    private val mediaClock = BakedCastMediaClock()
     private var frames = 0L
     private var copyFailures = 0L
     private var maxCopyMs = 0L
@@ -101,50 +108,62 @@ internal class BakedCastCaptureWorker(
         }
         encoder = ReplayClipEncoder(context, display, contextGl, config, width, height,
             castSample = session::videoSample)
+        try {
+            directCapture = BakedCastGpuCapture(gl, width, height, overlay, drawVideo, detachVideo)
+        } catch (error: Exception) { useWindowCapture(error) }
         Log.i("PitwallCast", "BAKED_CAST_ENCODER_READY output=${width}x$height " +
-            "thread=INDEPENDENT_EGL codec=AVC sceneDecoderUnblocked=true")
+            "thread=INDEPENDENT_EGL codec=AVC captureRequestsInFlight=1 timestampDomain=SOURCE_MEDIA")
     }
 
     private fun requestNext() {
         if (stopped) return
+        // Media3's current position belongs to its application looper. The clear
+        // commentary remains in source time, including during 1.5× playback.
+        main.post {
+            if (stopped) return@post
+            val position = runCatching { playbackPositionMs() }.getOrNull()
+            gl.post capture@ {
+                if (stopped) return@capture
+                when {
+                    position == null -> fail(IllegalStateException("Clear Cast playback ended"))
+                    mediaClock.canCapture(position) -> requestFrame(position)
+                    else -> gl.postDelayed({ requestNext() }, BakedCastCapturePacing.delayMs(0, 0))
+                }
+            }
+        }
+    }
+
+    private fun requestFrame(position: Long) {
         try {
             check(window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE == 0) {
                 "Viewer became protected during clear Cast"
             }
-            val encoder = checkNotNull(encoder)
             val requestedAtNs = System.nanoTime()
+            val direct = directCapture
+            if (direct != null) {
+                direct.requestFrame({ placement ->
+                    submitFrame(position, requestedAtNs) { encoder, timestamp ->
+                        encoder.frame(timestamp) { direct.draw(placement) }
+                    }
+                }, { error ->
+                    useWindowCapture(error)
+                    requestNext()
+                })
+                return
+            }
+            val encoder = checkNotNull(encoder)
             check(captureLifetime.begin()) { "Capture request already active or stopping" }
             try {
-            PixelCopy.request(window, Rect(bounds), encoder.pixels, { status ->
-                captureLifetime.complete()
-                if (stopped) { cleanup(); return@request }
-                if (status != PixelCopy.SUCCESS) {
-                    copyFailures++
-                    fail(IllegalStateException("Clear viewer PixelCopy $status"))
-                    return@request
-                }
-                try {
-                    val copyCompletedNs = System.nanoTime()
-                    maxCopyMs = maxOf(maxCopyMs, (copyCompletedNs - requestedAtNs) / 1_000_000L)
-                    val encodingStartedNs = System.nanoTime()
-                    encoder.frame(requestedAtNs)
-                    frames++
-                    maxEncoderMs = maxOf(maxEncoderMs,
-                        (System.nanoTime() - encodingStartedNs) / 1_000_000L)
-                    if (copyCompletedNs - lastReportNs >= 5_000_000_000L) {
-                        Log.i("PitwallCast", "BAKED_CAST_CAPTURE_HEALTH frames=$frames " +
-                            "copyFailures=$copyFailures maxCopyMs=$maxCopyMs " +
-                            "maxEncodeMs=$maxEncoderMs rendererThread=INDEPENDENT_EGL " +
-                            "physicalPresentation=NOT_MEASURED")
-                        lastReportNs = copyCompletedNs
-                        frames = 0; copyFailures = 0; maxCopyMs = 0; maxEncoderMs = 0
+                PixelCopy.request(window, Rect(bounds), encoder.pixels, { status ->
+                    captureLifetime.complete()
+                    if (stopped) { cleanup(); return@request }
+                    if (status != PixelCopy.SUCCESS) {
+                        copyFailures++
+                        fail(IllegalStateException("Clear viewer PixelCopy $status"))
+                        return@request
                     }
-                    gl.postDelayed({ requestNext() },
-                        BakedCastCapturePacing.delayMs(requestedAtNs, System.nanoTime()))
-                } catch (error: Exception) {
-                    fail(error)
-                }
-            }, gl)
+                    submitFrame(position, requestedAtNs, ReplayClipEncoder::frame)
+                }, gl)
             } catch (error: Exception) {
                 captureLifetime.complete()
                 throw error
@@ -152,6 +171,33 @@ internal class BakedCastCaptureWorker(
         } catch (error: Exception) {
             fail(error)
         }
+    }
+
+    private fun submitFrame(position: Long, requestedAtNs: Long, draw: (ReplayClipEncoder, Long) -> Unit) {
+        if (stopped) return
+        try {
+            val layersReadyNs = System.nanoTime()
+            maxCopyMs = maxOf(maxCopyMs, (layersReadyNs - requestedAtNs) / 1_000_000L)
+            if (mediaClock.originMs == null) session.setOutputSize(width, height, position)
+            draw(checkNotNull(encoder), mediaClock.timestampNs(position))
+            frames++
+            maxEncoderMs = maxOf(maxEncoderMs, (System.nanoTime() - layersReadyNs) / 1_000_000L)
+            if (layersReadyNs - lastReportNs >= 5_000_000_000L) {
+                val source = if (directCapture == null) "WINDOW_PIXEL_COPY" else "DIRECT_EGL_WITH_VIEWER_OVERLAYS"
+                Log.i("PitwallCast", "BAKED_CAST_CAPTURE_HEALTH source=$source frames=$frames " +
+                    "copyFailures=$copyFailures maxLayerAcquireMs=$maxCopyMs maxEncodeMs=$maxEncoderMs " +
+                    "rendererThread=INDEPENDENT_EGL physicalPresentation=NOT_MEASURED")
+                lastReportNs = layersReadyNs
+                frames = 0; copyFailures = 0; maxCopyMs = 0; maxEncoderMs = 0
+            }
+            gl.postDelayed({ requestNext() }, BakedCastCapturePacing.delayMs(requestedAtNs, System.nanoTime()))
+        } catch (error: Exception) { fail(error) }
+    }
+
+    private fun useWindowCapture(error: Exception) {
+        directCapture?.close()
+        directCapture = null
+        Log.w("PitwallCast", "BAKED_CAST_CAPTURE_PATH source=WINDOW_PIXEL_COPY cause=${error.javaClass.simpleName}")
     }
 
     private fun fail(error: Exception) {
@@ -171,11 +217,11 @@ internal class BakedCastCaptureWorker(
                 pbuffer != EGL14.EGL_NO_SURFACE) {
                 EGL14.eglMakeCurrent(display, pbuffer, pbuffer, contextGl)
             }
-            encoder?.stopCast()
+            try { directCapture?.close() } finally { encoder?.stopCast() }
         } catch (error: Exception) {
             Log.w("PitwallCast", "BAKED_CAST_WORKER_CLEANUP ${error.javaClass.simpleName}")
         } finally {
-            encoder?.pixels?.recycle()
+            directCapture = null
             encoder = null
             if (display != EGL14.EGL_NO_DISPLAY) {
                 EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
