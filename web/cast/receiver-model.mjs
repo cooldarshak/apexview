@@ -1,0 +1,1 @@
+../../app/src/main/assets/cast/receiver-model.mjs

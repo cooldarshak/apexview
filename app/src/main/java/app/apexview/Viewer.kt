@@ -1,6 +1,16 @@
 package app.apexview
 
 import android.app.Activity
+import android.graphics.Rect
+import android.view.WindowManager
+import app.apexview.scene.BakedCastOverlay
+import app.apexview.scene.BakedCastVideoPlacement
+import app.apexview.scene.SingleDecoderSceneView
+import app.apexview.scene.ProtectedDecoderSceneView
+import app.apexview.scene.recordBakedCastOverlay
+import androidx.compose.ui.draw.drawWithContent
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.os.Build
 import android.view.LayoutInflater
 import android.view.RoundedCorner
@@ -37,11 +47,14 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -50,6 +63,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -69,11 +83,21 @@ import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Replay10
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.VideoLibrary
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -84,11 +108,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -103,18 +131,22 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import app.apexview.cast.GoogleCastPlayerButton
 import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -144,8 +176,6 @@ private const val LIVE_EDGE_MS = 30_000L
 private val CARD_MIN_TILE = 230.dp
 private val CARD_MAX_WIDTH = 250.dp
 private val CARD_MARGIN = 10.dp
-/** What the speed needs beside the card: its own width and the margins. */
-private val SPEED_ROOM = 100.dp
 
 /** Corner radius of the physical screen, so the edge ribbon can follow it. 0 if unknown. */
 @Composable
@@ -250,6 +280,51 @@ fun ViewerScreen(app: AppState) {
             delay(500)
         }
     }
+    // Device-only P0 observability: a standalone TV feed with both overlays
+    // must never be diagnosed as successful from phone-side Cast metrics.
+    // Sample the actual Media3 player and surface choice every five seconds.
+    LaunchedEffect(app.isTv, app.tiles.size, app.towerOpen, app.mapMode) {
+        if (app.isTv) {
+            var lastPlayer: androidx.media3.common.Player? = null
+            var lastRendered = -1
+            var lastDropped = -1
+            var lastPositionMs = -1L
+            while (true) {
+                val tile = app.tiles.singleOrNull()
+                if (tile != null && app.towerOpen && app.mapMode != MapMode.OFF) {
+                    val p = tile.feed.player
+                    val size = p.videoSize
+                    val counters = p.videoDecoderCounters
+                    val rendered = counters?.renderedOutputBufferCount ?: -1
+                    val dropped = counters?.droppedBufferCount ?: -1
+                    // Codec buffer-output evidence is not physical SurfaceFlinger
+                    // present timestamps. The latter still needs a TCL trace.
+                    val same = lastPlayer === p
+                    val renderedDelta = if (same && lastRendered >= 0 && rendered >= lastRendered)
+                        rendered - lastRendered else -1
+                    val droppedDelta = if (same && lastDropped >= 0 && dropped >= lastDropped)
+                        dropped - lastDropped else -1
+                    val positionDelta = if (same && lastPositionMs >= 0 && p.currentPosition >= lastPositionMs)
+                        p.currentPosition - lastPositionMs else -1
+                    android.util.Log.i("PitwallTvHealth",
+                        "TV_SINGLE_OVERLAY_VIDEO_HEALTH playerState=${p.playbackState} " +
+                            "isPlaying=${p.isPlaying} loading=${p.isLoading} playWhenReady=${p.playWhenReady} " +
+                            "visibleVideo=${tile.feed.showingVideo} softwareDrm=${tile.feed.usesSoftwareDrm} " +
+                            "mode=${app.settings.decoderMode} map=${app.mapMode} tower=${app.towerOpen} " +
+                            "video=${size.width}x${size.height} positionMs=${p.currentPosition} " +
+                            "positionDeltaMs=$positionDelta decoderRenderedDelta=$renderedDelta " +
+                            "decoderDroppedDelta=$droppedDelta physicalDisplayPresentation=NOT_MEASURED")
+                    lastPlayer = p
+                    lastRendered = rendered
+                    lastDropped = dropped
+                    lastPositionMs = p.currentPosition
+                } else {
+                    lastPlayer = null; lastRendered = -1; lastDropped = -1; lastPositionMs = -1L
+                }
+                delay(5_000L)
+            }
+        }
+    }
     LaunchedEffect(app.audioHintCount) {
         delay(AUDIO_HINT_MS)
         app.dismissAudioHint()
@@ -262,19 +337,30 @@ fun ViewerScreen(app: AppState) {
     val cutouts = rememberCutouts()
     // The controls and the feeds move together: one curve, one duration. While arranging the
     // feeds stay full size, so what you place is where it ends up.
-    val motion = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
+    val reducedMotion = LocalReduceMotion.current
+    val screenMotionMs = if (reducedMotion) 0 else Motion.SCREEN_MS
+    val chromeMotionMs = if (reducedMotion) 0 else Motion.CHROME_MS
+    val motion = tween<Float>(screenMotionMs, easing = EaseOut)
     // Laptop mode keeps the stream still: the controls lie over its top edge instead.
     // SurfaceView is the recommended Android TV output, but scaling its parent while the
     // controls animate can desynchronise its surface from Compose. TV chrome overlays in place.
+    val fixedVideoGeometry = app.isTv || app.layoutMode == LayoutMode.TV
     val lift by animateFloatAsState(
-        if (!app.isTv && app.chromeVisible && !app.arranging && !app.laptopActive) 1f else 0f,
+        if (!fixedVideoGeometry && app.chromeVisible && !app.arranging && !app.laptopActive) 1f else 0f,
         motion,
         label = "lift",
     )
 
+    val window = (view.context as Activity).window
+    var viewerBounds by remember { mutableStateOf<Rect?>(null) }
     BoxWithConstraints(
         Modifier
             .fillMaxSize()
+            .onGloballyPositioned { coordinates ->
+                val bounds = coordinates.boundsInWindow()
+                viewerBounds = Rect(bounds.left.roundToInt(), bounds.top.roundToInt(),
+                    bounds.right.roundToInt(), bounds.bottom.roundToInt())
+            }
             .background(Ink.background)
             .onFocusChanged { app.controlsFocused = it.hasFocus }
             .pointerInput(Unit) { detectTapGestures(onTap = { app.toggleChrome() }) }
@@ -283,7 +369,9 @@ fun ViewerScreen(app: AppState) {
         val height = constraints.maxHeight.toFloat()
         val density = LocalDensity.current
         val edgeInset = with(density) { 30.dp.toPx() }
-        val band = with(density) { CONTROLS_BAND.toPx() }
+        val compactChrome = ChromeLayoutPolicy.compact(
+            with(density) { width.toDp().value }, density.fontScale)
+        val band = with(density) { (CONTROLS_BAND + if (compactChrome) 48.dp else 0.dp).toPx() }
         val narrow = with(density) { width.toDp() } < VOTE_SIDE_SHEET
         val compactWidth = with(density) { width.toDp() } < 600.dp
         // The vote sheet rises over the bottom of a narrow screen: the feeds glide up to the top
@@ -299,8 +387,12 @@ fun ViewerScreen(app: AppState) {
         // Android doesn't change the window's size and report leaving the pop-out at the same moment,
         // so its size also counts by itself. Taken for the screen, it left the feeds laid out small.
         val popOutSized = isPopOutSized(view, width, height)
-        LaunchedEffect(app.layoutRequest, app.inPip, popOutSized) { if (!app.inPip && !popOutSized) app.layoutIfRequested(width, height) }
-        LaunchedEffect(width, height, app.inPip) { if (!app.inPip && !popOutSized) app.onCanvasResized(width, height) }
+        LaunchedEffect(width, height, app.layoutRequest, app.inPip, popOutSized) {
+            if (!app.inPip && !popOutSized) {
+                app.onCanvasResized(width, height)
+                app.layoutIfRequested(width, height)
+            }
+        }
         // Once the window has settled after the pop-out, feeds left small are fitted again.
         LaunchedEffect(app.inPip) {
             if (!app.inPip) {
@@ -309,31 +401,58 @@ fun ViewerScreen(app: AppState) {
             }
         }
 
+        val videoTransform = if (fixedVideoGeometry) Modifier else Modifier
+            .graphicsLayer {
+                val k = 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
+                scaleX = k; scaleY = k; transformOrigin = TransformOrigin(0f, 0.5f)
+            }
+            .graphicsLayer {
+                val scale = if (app.inPip) 1f else 1f - lift * band / height
+                scaleX = scale; scaleY = scale; transformOrigin = TransformOrigin(0.5f, 1f)
+                translationY = -sheetShift
+            }
+        val bakedSession = app.bakedCastSession
+        val placement by rememberUpdatedState {
+            if (fixedVideoGeometry) BakedCastVideoPlacement.viewer(1f, 1f, 0f)
+            else BakedCastVideoPlacement.viewer(1f - sheetSide * AppState.VOTE_SHEET_WIDTH,
+                if (app.inPip) 1f else 1f - lift * band / height, sheetShift / height)
+        }
+        val captureOverlay = remember(bakedSession) {
+            bakedSession?.let { BakedCastOverlay({ placement() }, Ink.background.toArgb()) }
+        }
+        val captureCaptions = captureOverlay != null && app.singleDecoderScenePlayer?.archiveSceneSession != null
+        Box(Modifier.fillMaxSize().then(videoTransform)) {
+            if (app.castPlaybackHandedOff || app.externalDisplayActive) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Playing on ${if (app.externalDisplayActive) app.externalDisplayName else app.castDeviceName}", style = Type.title2)
+                        Text("Use this phone to control playback and arrange the TV video windows.", style = Type.subhead)
+                    }
+                }
+            } else PlaybackVideoCanvas(app, width, height, window, viewerBounds, captureOverlay, captureCaptions)
+
+        }
+
+        Box(Modifier.fillMaxSize().recordBakedCastOverlay(captureOverlay)) {
+        if (captureCaptions && !app.castPlaybackHandedOff && !app.externalDisplayActive) {
+            Box(Modifier.fillMaxSize().then(videoTransform)) { ViewerComposedCaptions(app) }
+        }
+        Box(Modifier.fillMaxSize()) uiLayer@ {
         // Feeds and map, shrinking toward the bottom while the controls are up so nothing sits
         // under the top bar. Touches inside are in the unshrunk canvas's pixels.
         Box(
             Modifier
                 .fillMaxSize()
-                .graphicsLayer {
-                    val k = if (app.isTv) 1f else 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
-                    scaleX = k
-                    scaleY = k
-                    transformOrigin = TransformOrigin(0f, 0.5f)
-                }
-                .graphicsLayer {
-                    val scale = if (app.inPip || app.isTv) 1f else 1f - lift * band / height
-                    scaleX = scale
-                    scaleY = scale
-                    transformOrigin = TransformOrigin(0.5f, 1f)
-                    translationY = if (app.isTv) 0f else -sheetShift
-                }
+                .then(videoTransform)
                 .mapGestures(app, density)
         ) {
             // The pop-out is this same screen with one feed filling it: the feed keeps its video
             // surface, so its decoder carries on rather than restarting from the next keyframe.
             val popped = if (app.inPip) app.pipTile() else null
             app.tiles.forEach { tile ->
-                if (popped == null || tile === popped) key(tile.id) { TileView(app, tile) }
+                if (!tile.protectedCompositionHidden && (popped == null || tile === popped)) {
+                    key(tile.id) { TileView(app, tile, controlsOnly = true, presetSlot = tvStartupSlot(app, width, height)) }
+                }
             }
             if (app.inPip) return@Box
 
@@ -344,8 +463,8 @@ fun ViewerScreen(app: AppState) {
             // The last hinge seen, so the panel still knows its place while it leaves.
             var lastHinge by remember { mutableStateOf(app.hinge) }
             app.hinge?.let { lastHinge = it }
-            val swap = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
-            val slide = tween<IntOffset>(Motion.SCREEN_MS, easing = EaseOut)
+            val swap = tween<Float>(screenMotionMs, easing = EaseOut)
+            val slide = tween<IntOffset>(screenMotionMs, easing = EaseOut)
             AnimatedVisibility(
                 laptop,
                 Modifier.zIndex(1e9f),
@@ -366,7 +485,55 @@ fun ViewerScreen(app: AppState) {
             }
             // The feeds' headers, above the map so its cars never cover a speaker or a menu.
             Box(Modifier.fillMaxSize().zIndex(1.5e9f)) {
-                app.tiles.forEach { tile -> key(tile.id) { TileHeader(app, tile) } }
+                app.tiles.filterNot { it.protectedCompositionHidden }.forEach { tile ->
+                    key(tile.id) { TileHeader(app, tile) }
+                }
+            }
+            // Tile-test diagnostics belong to the whole test surface, not the first feed.
+            // This keeps both selected feed reports readable in side-by-side layouts.
+            if (app.layoutMode == LayoutMode.TILE_TEST) {
+                val context = LocalContext.current
+                val inspectorText = HevcFeedProfileCapture.diagnostic
+                Box(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .heightIn(max = 220.dp)
+                        .zIndex(1.6e9f)
+                        .background(Color.Black.copy(alpha = 0.78f))
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "F1 STREAM INSPECTOR",
+                                style = Type.caption.copy(color = Ink.secondary, fontWeight = FontWeight.Bold)
+                            )
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                "COPY REPORT",
+                                style = Type.caption.copy(color = Ink.primary, fontWeight = FontWeight.Bold),
+                                modifier = Modifier
+                                    .pressable {
+                                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                        clipboard.setPrimaryClip(ClipData.newPlainText("ApexView HEVC stream diagnostics", inspectorText))
+                                        android.widget.Toast.makeText(context, "Inspector report copied", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                            )
+                        }
+                        Text(
+                            inspectorText,
+                            style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow)
+                        )
+                    }
+                }
+            }
+            if (app.trackLogoAnchored && app.towerOpen) app.timing?.takeIf { it.laps.isNotEmpty() }?.let { timing ->
+                // Keep the tracker visible and movable over the sidebar as well as over video.
+                Box(Modifier.zIndex(5e8f)) {
+                    TowerPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height)
+                }
             }
             // Above every tile (their z grows by one per touch), below the controls.
             app.timing?.let { timing ->
@@ -387,42 +554,31 @@ fun ViewerScreen(app: AppState) {
             if (!laptop && app.layoutMode == LayoutMode.TV && tvPlan != null) {
                 val status = app.mapStatus ?: "Waiting for timing data…"
                 if (app.towerOpen && (app.timing == null || app.timing?.laps?.isEmpty() == true)) {
-                    TvOverlayPending("TIMING", tvPlan.tower, status)
+                    val spot = app.towerSpot
+                    val area = if (spot.w > 0f && spot.h > 0f) Area(spot.x, spot.y, spot.w, spot.h) else tvPlan.tower
+                    TvOverlayPending(null, area, status, app.timingDiagnostics, app.tvDecoderDiagnostic)
                 }
                 if (app.mapMode == MapMode.TRACK &&
                     (app.timing == null || (app.timing?.outline?.size ?: 0) < 8)
                 ) {
-                    TvOverlayPending("TRACK MAP", tvPlan.map, status)
+                    TvOverlayPending("TRACK MAP", tvPlan.map, status, app.timingDiagnostics, app.tvDecoderDiagnostic)
                 }
             }
         }
 
-        if (app.inPip) return@BoxWithConstraints
+        if (app.inPip) return@uiLayer
 
         // Over the feeds and the map, under the controls; it doesn't shrink with the feeds.
         if (app.radioOpen) app.timing?.let { timing ->
             Box(Modifier.zIndex(CHROME_Z - 1)) { RadioPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height) }
         }
         // Laptop mode has the tower below the hinge already.
-        if (app.towerOpen && !app.laptopActive) app.timing?.takeIf { it.laps.isNotEmpty() }?.let { timing ->
+        if (app.towerOpen && !app.laptopActive && !app.trackLogoAnchored) app.timing?.takeIf { it.laps.isNotEmpty() }?.let { timing ->
             if (app.combinedOverlayPlan != null) {
                 // The tower is outside mapGestures so dragging it cannot accidentally grab the
                 // circuit underneath. Apply the same transforms as the feed/map canvas instead.
                 Box(
-                    Modifier.fillMaxSize()
-                        .graphicsLayer {
-                            val k = 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
-                            scaleX = k
-                            scaleY = k
-                            transformOrigin = TransformOrigin(0f, 0.5f)
-                        }
-                        .graphicsLayer {
-                            val scale = if (app.inPip) 1f else 1f - lift * band / height
-                            scaleX = scale
-                            scaleY = scale
-                            transformOrigin = TransformOrigin(0.5f, 1f)
-                            translationY = -sheetShift
-                        }
+                    Modifier.fillMaxSize().then(videoTransform)
                         .zIndex(CHROME_Z - 1)
                 ) {
                     TowerPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height)
@@ -437,7 +593,7 @@ fun ViewerScreen(app: AppState) {
         // No feed on screen with F1's graphics: the time left goes up top, clear of the edge map
         // and below the controls when they're up. Laptop mode has it in its lower panel.
         if (app.countdownOverScreen) app.timing?.let { timing ->
-            val below by animateDpAsState(if (app.chromeVisible) 72.dp else 38.dp, tween(Motion.SCREEN_MS, easing = EaseOut), label = "countdown")
+            val below by animateDpAsState(if (app.chromeVisible) 72.dp else 38.dp, tween(screenMotionMs, easing = EaseOut), label = "countdown")
             SessionCountdown(
                 app, timing,
                 Type.title2.copy(shadow = overlayShadow),
@@ -445,9 +601,9 @@ fun ViewerScreen(app: AppState) {
             )
         }
 
-        val fade = motion
+        val fade = tween<Float>(chromeMotionMs, easing = EaseOut)
         val topBand = with(density) { 64.dp.toPx() }
-        val bottomBand = with(density) { 110.dp.toPx() }
+        val bottomBand = with(density) { 150.dp.toPx() }
         AnimatedVisibility(
             app.chromeVisible,
             Modifier.zIndex(CHROME_Z).align(Alignment.TopCenter),
@@ -460,7 +616,9 @@ fun ViewerScreen(app: AppState) {
             enter = fadeIn(fade), exit = fadeOut(fade),
         ) { BottomChrome(app, clearOf(cutouts, width, height - bottomBand, height)) }
 
-        Messages(app, Modifier.zIndex(CHROME_Z + 1).align(Alignment.Center))
+        if (!app.replayClipRunning) Messages(app, Modifier.zIndex(CHROME_Z + 1).align(Alignment.Center))
+        else Box(Modifier.fillMaxSize().zIndex(CHROME_Z + 3)
+            .pointerInput(Unit) { detectTapGestures(onTap = { app.replayClipStopRequested = true }) })
         // In the corner, or centred where the screen is too narrow for a corner to mean much.
         VotePrompt(app, Modifier.zIndex(CHROME_Z + 1).align(if (compactWidth) Alignment.BottomCenter else Alignment.BottomEnd))
         NextLivePrompt(app, Modifier.zIndex(CHROME_Z + 1).align(if (compactWidth) Alignment.BottomCenter else Alignment.BottomEnd))
@@ -475,12 +633,16 @@ fun ViewerScreen(app: AppState) {
                 if (app.tiles.isNotEmpty()) app.showHelp()
             }
         }
+        }
+        }
     }
 
     app.tileMenu?.let { TileMenuSheet(app, it) }
     if (app.mapSheetOpen) MapSheet(app)
     if (app.layoutSheetOpen) LayoutSheet(app)
     if (app.speedSheetOpen) SpeedSheet(app)
+    if (app.qualitySheetOpen) VideoQualitySheet(app)
+    if (app.captionsSheetOpen) ClosedCaptionsSheet(app)
     LaptopPrompt(app)
 }
 
@@ -496,7 +658,7 @@ private fun Modifier.mapGestures(app: AppState, density: androidx.compose.ui.uni
     val window = app.laptopActive || app.mapMode.inWindow
     // Floating overlay mode is independently movable; it must not depend on the feed layout's
     // Snap/Free arranging toggle. Docked mode remains fixed.
-    if (!(app.arranging || app.combinedOverlaysFloating) || app.mapLocked || !window || timing == null || app.combinedOverlaysDocked) return this
+    if (!(app.arranging || app.combinedOverlaysFloating) || app.mapLocked || !window || timing == null || (app.combinedOverlaysDocked && !app.trackLogoAnchored)) return this
     // Keyed on the circuit, not the timing: live timing is replaced every couple of seconds, and
     // restarting this mid-gesture used to leave the map "grabbed", so feeds wouldn't move again.
     return pointerInput(timing.circuitKey, timing.outline.size, app.arranging, app.combinedOverlaysFloating, app.mapLocked, app.laptopActive, circle) {
@@ -540,11 +702,17 @@ private fun Modifier.mapGestures(app: AppState, density: androidx.compose.ui.uni
 
 @Composable
 private fun Glyph(icon: ImageVector, description: String, size: Int = 24, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Box(
-        modifier.pressable(scaleTo = 0.88f, onClick = onClick).size(44.dp),
-        contentAlignment = Alignment.Center,
+    // A real Material 3 button provides selection semantics, accessible touch
+    // behavior and keyboard focus without introducing animation into video GL.
+    IconButton(
+        onClick = onClick,
+        modifier = modifier.tvFocusRing().size(48.dp),
+        colors = IconButtonDefaults.iconButtonColors(
+            containerColor = Ink.surfaceHigh.copy(alpha = 0.42f),
+            contentColor = Ink.primary,
+        ),
     ) {
-        Icon(icon, contentDescription = description, tint = Ink.primary, modifier = Modifier.size(size.dp))
+        Icon(icon, contentDescription = description, modifier = Modifier.size(size.dp))
     }
 }
 
@@ -559,58 +727,126 @@ private fun Modifier.clear(of: Clearance, base: androidx.compose.ui.unit.Dp): Mo
     )
 }
 
+/**
+ * Keep every playback action available on narrow phones and 200% font settings.
+ * The primary row keeps transport/navigation visible, while the secondary row
+ * scrolls horizontally rather than clipping the tower, map, layout and radio.
+ */
+@Composable
+private fun TopChromeExtraActions(app: AppState, compact: Boolean) {
+    if (compact) {
+        if (app.singleDecoderFailure != null) {
+            Glyph(Icons.Rounded.Refresh, "Retry single decoder", onClick = app::retrySingleDecoder)
+        }
+        Glyph(Icons.Rounded.GridView, "Layout: ${app.layoutMode.label}",
+            modifier = Modifier.helpAnchor(app, "layout")) {
+            app.layoutSheetOpen = true; app.showChrome()
+        }
+    } else if (app.isTv || LocalConfiguration.current.screenWidthDp >
+        LocalConfiguration.current.screenHeightDp) {
+        Row(
+            Modifier
+                .helpAnchor(app, "layout")
+                .pressable { app.layoutSheetOpen = true; app.showChrome() }
+                .clip(RoundedCornerShape(10.dp))
+                .background(Ink.surfaceHigh.copy(alpha = 0.72f))
+                .padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(Icons.Rounded.GridView, contentDescription = "Layout", tint = Ink.primary,
+                modifier = Modifier.size(20.dp))
+            Text("Layout", style = Type.subhead.copy(color = Ink.primary))
+        }
+    } else {
+        Glyph(Icons.Rounded.GridView, "Layout: ${app.layoutMode.label}",
+            modifier = Modifier.helpAnchor(app, "layout")) {
+            app.layoutSheetOpen = true; app.showChrome()
+        }
+    }
+    if (app.timing != null) Glyph(Icons.Rounded.Headset,
+        if (app.radioOpen) "Hide team radio" else "Team radio",
+        modifier = Modifier.helpAnchor(app, "radio-button"), onClick = app::toggleRadio)
+    if (app.timing?.laps?.isNotEmpty() == true && !app.laptopActive) {
+        Glyph(Icons.Rounded.FormatListNumbered,
+            if (app.towerOpen) "Hide timing tower" else "Show timing tower",
+            onClick = app::toggleTower)
+    }
+    if (app.timing != null || app.mapStatus != null) {
+        Glyph(Icons.Rounded.Map, "Track map", modifier = Modifier.helpAnchor(app, "map")) {
+            app.mapSheetOpen = true
+        }
+    }
+    if (!app.isTv) Glyph(Icons.Rounded.HelpOutline, "What everything does", 22,
+        onClick = app::showHelp)
+}
+
 @Composable
 private fun TopChrome(app: AppState, cutout: Clearance) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            // Taller and darker than the bar itself, so the buttons read over any picture; the
-            // feeds have already moved down out of the way.
-            .background(
-                Brush.verticalGradient(
-                    0f to Color.Black.copy(alpha = 0.92f),
-                    0.55f to Color.Black.copy(alpha = 0.6f),
-                    1f to Color.Transparent,
-                )
+    // Map/tower keep-clear zones consume real dp. Full screen width is not toolbar width.
+    val compact = ChromeLayoutPolicy.compactWithClearance(
+        screenWidthDp = LocalConfiguration.current.screenWidthDp.toFloat(),
+        fontScale = LocalDensity.current.fontScale,
+        startClearancePx = cutout.start, endClearancePx = cutout.end,
+        density = LocalDensity.current.density,
+    )
+    val chromeModifier = Modifier
+        .fillMaxWidth()
+        .background(
+            Brush.verticalGradient(
+                0f to Color.Black.copy(alpha = 0.92f),
+                0.55f to Color.Black.copy(alpha = 0.6f),
+                1f to Color.Transparent,
             )
-            .clear(cutout, 8.dp)
-            .padding(top = 6.dp, bottom = 34.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Glyph(Icons.Rounded.Close, "Stop watching", modifier = Modifier.helpAnchor(app, "close"), onClick = app::stopAll)
-        Text(
-            app.playingTitle,
-            style = Type.headline,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
         )
-        if (!app.isTv) Glyph(if (app.arranging) Icons.Rounded.LockOpen else Icons.Rounded.Lock, if (app.arranging) "Lock layout" else "Unlock to move and resize", modifier = Modifier.helpAnchor(app, "lock"), onClick = app::toggleArranging)
-        Glyph(Icons.Rounded.Add, "Add a feed", modifier = Modifier.helpAnchor(app, "add")) { app.openPickerForPlaying() }
-        if (app.isTv || LocalConfiguration.current.screenWidthDp > LocalConfiguration.current.screenHeightDp) {
-            Row(
-                Modifier
-                    .helpAnchor(app, "layout")
-                    .pressable { app.layoutSheetOpen = true; app.showChrome() }
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Ink.surfaceHigh.copy(alpha = 0.72f))
-                    .padding(horizontal = 10.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Icon(Icons.Rounded.GridView, contentDescription = "Layout", tint = Ink.primary, modifier = Modifier.size(20.dp))
-                Text("Layout", style = Type.subhead.copy(color = Ink.primary))
+        .clear(cutout, 8.dp)
+        .padding(top = 6.dp, bottom = 24.dp)
+
+    if (compact) {
+        Column(chromeModifier) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Glyph(Icons.Rounded.Close, "Stop watching",
+                    modifier = Modifier.helpAnchor(app, "close"), onClick = app::stopAll)
+                Text(app.playingTitle, style = Type.headline, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
+                GoogleCastPlayerButton(app)
+                Glyph(if (app.arranging) Icons.Rounded.LockOpen else Icons.Rounded.Lock,
+                    if (app.arranging) "Lock layout" else "Unlock to move and resize",
+                    modifier = Modifier.helpAnchor(app, "lock"), onClick = app::toggleArranging)
+                Glyph(Icons.Rounded.Add, "Add a feed",
+                    modifier = Modifier.helpAnchor(app, "add")) { app.openPickerForPlaying() }
             }
-        } else {
-            Glyph(Icons.Rounded.GridView, "Layout: ${app.layoutMode.label}", modifier = Modifier.helpAnchor(app, "layout")) { app.layoutSheetOpen = true; app.showChrome() }
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TopChromeExtraActions(app, compact = true)
+            }
         }
-        if (app.timing != null) Glyph(Icons.Rounded.Headset, if (app.radioOpen) "Hide team radio" else "Team radio", modifier = Modifier.helpAnchor(app, "radio-button"), onClick = app::toggleRadio)
-        if (app.timing?.laps?.isNotEmpty() == true && !app.laptopActive) Glyph(Icons.Rounded.FormatListNumbered, if (app.towerOpen) "Hide timing" else "Timing", onClick = app::toggleTower)
-        if (app.timing != null || app.mapStatus != null) Glyph(Icons.Rounded.Map, "Track map", modifier = Modifier.helpAnchor(app, "map")) { app.mapSheetOpen = true }
-        if (!app.isTv) Glyph(Icons.Rounded.HelpOutline, "What everything does", 22, onClick = app::showHelp)
+    } else {
+        Row(chromeModifier, verticalAlignment = Alignment.CenterVertically) {
+            Glyph(Icons.Rounded.Close, "Stop watching",
+                modifier = Modifier.helpAnchor(app, "close"), onClick = app::stopAll)
+            Text(app.playingTitle, style = Type.headline, maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
+            GoogleCastPlayerButton(app)
+            Glyph(if (app.arranging) Icons.Rounded.LockOpen else Icons.Rounded.Lock,
+                if (app.arranging) "Lock layout" else "Unlock to move and resize",
+                modifier = Modifier.helpAnchor(app, "lock"), onClick = app::toggleArranging)
+            if (app.singleDecoderFailure != null) {
+                Glyph(Icons.Rounded.Refresh, "Retry single decoder", onClick = app::retrySingleDecoder)
+            }
+            Glyph(Icons.Rounded.Add, "Add a feed",
+                modifier = Modifier.helpAnchor(app, "add")) { app.openPickerForPlaying() }
+            TopChromeExtraActions(app, compact = false)
+        }
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun BottomChrome(app: AppState, cutout: Clearance) {
     var scrubbing by remember { mutableStateOf<Float?>(null) }
@@ -679,29 +915,80 @@ private fun BottomChrome(app: AppState, cutout: Clearance) {
                 )
             }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            val shown = scrubbing?.let { (it * duration).toLong() } ?: app.positionMs
-            val behind = (duration - shown).coerceAtLeast(0)
+        val shown = scrubbing?.let { (it * duration).toLong() } ?: app.positionMs
+        val behind = (duration - shown).coerceAtLeast(0)
+        val compact = ChromeLayoutPolicy.compact(
+            LocalConfiguration.current.screenWidthDp.toFloat(), LocalDensity.current.fontScale)
+        val progress: @Composable () -> Unit = {
             when {
-                // Within a few seconds of the edge counts as live: the player itself sits a little back.
                 app.isLive && (duration <= 0 || behind < LIVE_EDGE_MS) -> LiveMark()
-                app.isLive -> Text("−" + clock(behind) + " behind live", style = Type.footnote.copy(color = Ink.primary))
+                app.isLive -> Text("−" + clock(behind) + " behind live",
+                    style = Type.footnote.copy(color = Ink.primary))
                 else -> Text(clock(shown), style = Type.footnote.copy(color = Ink.primary))
             }
-            Spacer(Modifier.weight(1f))
-            Glyph(Icons.Rounded.Replay10, "Back 10 seconds", 28) { app.skip(-10_000) }
-            Spacer(Modifier.width(12.dp))
-            Glyph(if (app.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, if (app.playing) "Pause" else "Play", 36, Modifier.focusRequester(playButton), onClick = app::togglePlay)
-            Spacer(Modifier.width(12.dp))
-            Glyph(Icons.Rounded.Forward10, "Forward 10 seconds", 28) { app.skip(10_000) }
-            Spacer(Modifier.weight(1f))
+        }
+        val remaining: @Composable () -> Unit = {
             if (app.isLive) {
-                Text("Go live", style = Type.footnote.copy(color = Ink.primary), modifier = Modifier.pressable(onClick = app::goLive).padding(8.dp))
+                Text("Go live", style = Type.footnote.copy(color = Ink.primary),
+                    modifier = Modifier.pressable(onClick = app::goLive)
+                        .heightIn(min = 48.dp).padding(8.dp))
             } else {
-                Text("−" + clock((duration - shown).coerceAtLeast(0)), style = Type.footnote.copy(color = Ink.primary))
+                Text("−" + clock((duration - shown).coerceAtLeast(0)),
+                    style = Type.footnote.copy(color = Ink.primary))
             }
-            Spacer(Modifier.width(4.dp))
+        }
+        val transport: @Composable () -> Unit = {
+            Glyph(Icons.Rounded.Replay10, "Back 10 seconds", 28) { app.skip(-10_000) }
+            Glyph(if (app.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                if (app.playing) "Pause" else "Play", 36,
+                Modifier.focusRequester(playButton), onClick = app::togglePlay)
+            Glyph(Icons.Rounded.Forward10, "Forward 10 seconds", 28) { app.skip(10_000) }
+        }
+        if (compact) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                progress()
+                Spacer(Modifier.weight(1f))
+                remaining()
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically) {
+                transport()
+                Glyph(if (app.mutedAll) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp,
+                    if (app.mutedAll) "Unmute" else "Mute all",
+                    modifier = Modifier.helpAnchor(app, "mute"), onClick = app::toggleMuteAll)
+            }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                progress()
+                Spacer(Modifier.weight(1f))
+                transport()
+                Spacer(Modifier.weight(1f))
+                remaining()
+                Glyph(if (app.mutedAll) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp,
+                    if (app.mutedAll) "Unmute" else "Mute all",
+                    modifier = Modifier.helpAnchor(app, "mute"), onClick = app::toggleMuteAll)
+            }
+        }
+        // Video controls stay on the first row at narrow phone and Android TV widths.
+        // Quality, speed and CC form a separate focusable row instead of overflowing it.
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             // The speed, always shown; bright when it isn't normal.
+            Text(
+                "Quality ${app.settings.videoQuality.label}",
+                style = Type.footnote.copy(
+                    color = if (app.settings.videoQuality == VideoQuality.AUTO) Ink.secondary else Ink.primary,
+                    fontWeight = if (app.settings.videoQuality == VideoQuality.AUTO) null else FontWeight.SemiBold,
+                ),
+                modifier = Modifier
+                    .semantics { contentDescription = "Video quality ${app.settings.videoQuality.label}" }
+                    .pressable { app.qualitySheetOpen = true; app.showChrome() }
+                    .padding(8.dp),
+            )
             Text(
                 speedLabel(app.playbackSpeed),
                 style = Type.footnote.copy(color = if (app.playbackSpeed == 1f) Ink.secondary else Ink.primary, fontWeight = if (app.playbackSpeed == 1f) null else FontWeight.SemiBold),
@@ -710,7 +997,25 @@ private fun BottomChrome(app: AppState, cutout: Clearance) {
                     .pressable { app.speedSheetOpen = true; app.showChrome() }
                     .padding(8.dp),
             )
-            Glyph(if (app.mutedAll) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp, if (app.mutedAll) "Unmute" else "Mute all", modifier = Modifier.helpAnchor(app, "mute"), onClick = app::toggleMuteAll)
+            FilledTonalButton(
+                onClick = { app.captionsSheetOpen = true; app.showChrome() },
+                modifier = Modifier.tvFocusRing().heightIn(min = 48.dp)
+                    .semantics {
+                        contentDescription = if (app.settings.subtitles)
+                            "Closed captions on. Choose caption track"
+                        else "Closed captions off. Choose caption track"
+                    },
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = if (app.settings.subtitles) Ink.accent else Ink.surfaceHigh,
+                    contentColor = Ink.primary,
+                ),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    horizontal = 16.dp, vertical = 9.dp),
+            ) {
+                Text(if (app.settings.subtitles) "CC on" else "CC off",
+                    style = Type.footnote.copy(fontWeight = FontWeight.SemiBold))
+            }
         }
     }
 }
@@ -803,6 +1108,214 @@ private fun Messages(app: AppState, modifier: Modifier) {
     )
 }
 
+/** Binds existing players on exactly one display. It never allocates another player. */
+@Composable
+internal fun PlaybackVideoCanvas(
+    app: AppState, width: Float, height: Float,
+    captureWindow: android.view.Window? = null, viewerBounds: Rect? = null,
+    captureOverlay: BakedCastOverlay? = null, captionsInViewerOverlay: Boolean = false,
+) {
+    val scene = app.videoScene(width, height)
+    val host = app.singleDecoderScenePlayer ?: app.protectedRollingScenePlayer
+    val secureRolling = app.protectedRollingSceneActive && host != null && !host.usesSoftwareDrm
+    // Window PixelCopy is used for baked Cast and replay. Independently
+    // composited clear SurfaceView is A/B-only and must not silently break
+    // that existing capture path or the selected SINGLE decoder preference.
+    val windowCaptureRequired = app.bakedCastSession != null || app.castingActive ||
+        app.replayClipRequested || app.replayClipRunning || app.externalDisplayActive
+    val clearOutputMode = selectClearSceneOutput(
+        app.settings.clearSceneSurfaceExperiment,
+        protectedRollingScene = app.protectedRollingSceneActive,
+        windowCaptureRequired = windowCaptureRequired,
+    )
+    val independentClearSurface = clearOutputMode == ClearSceneOutputMode.SURFACE_VIEW
+    if (scene != null && host != null) {
+        // The renderer's callbacks capture this composition's readiness state.
+        // Recreate the whole owner on host/backend changes, not just the Boolean.
+        key(host, app.protectedRollingSceneActive, secureRolling, independentClearSurface) {
+        var composedGlReady by remember {
+            mutableStateOf(false)
+        }
+        // This must happen as soon as the composed scene activates, not after
+        // a later user interaction. It also provides direct evidence that the
+        // decoded atlas is routed into the full-canvas compositor.
+        LaunchedEffect(host, scene.sources, scene.atlasWidth, scene.atlasHeight,
+            app.protectedRollingSceneActive, independentClearSurface, windowCaptureRequired) {
+            val renderer = if (app.protectedRollingSceneActive || independentClearSurface)
+                "SurfaceView" else "TextureView"
+            android.util.Log.i("ApexviewSingleDecoder",
+                "F1_SCENE_UI_BOUND outputCanvas=${width.toInt()}x${height.toInt()} " +
+                    "atlas=${scene.atlasWidth}x${scene.atlasHeight} " +
+                    "sources=${scene.sources} windows=${scene.windows.size} " +
+                    "backend=${if (app.protectedRollingSceneActive) "ROLLING_PROTECTED" else "CLEAR_ARCHIVE"} " +
+                    "renderer=$renderer clearSurfaceAB=$independentClearSurface " +
+                    "captureRequiresTexture=$windowCaptureRequired " +
+                    "physicalVideoPresentation=NOT_MEASURED")
+        }
+        var view by remember {
+            mutableStateOf<SingleDecoderSceneView?>(null)
+        }
+        var recordingBounds by remember { mutableStateOf<Rect?>(null) }
+        val bakedSession = app.bakedCastSession
+        LaunchedEffect(view, bakedSession, captureOverlay) {
+            val target = view ?: return@LaunchedEffect
+            if (bakedSession == null) {
+                target.stopBakedCast()
+                return@LaunchedEffect
+            }
+            // Let the Cast sheet close and the viewer finish positioning its video and overlays.
+            delay(Motion.SCREEN_MS.toLong() + 100L)
+            // Changing the optional clear SurfaceView to the capture-capable
+            // TextureView creates an EGL output epoch. The old fixed animation
+            // delay is not proof a new decoded picture reached that epoch.
+            val clearOutputReady = if (composedGlReady) true else
+                kotlinx.coroutines.withTimeoutOrNull(5_000L) {
+                    while (!composedGlReady) delay(40L)
+                    true
+                } ?: false
+            val window = captureWindow
+            val bounds = viewerBounds
+            val archive = host.archiveSceneSession
+            if (!clearOutputReady || window == null || bounds == null || bounds.isEmpty ||
+                archive == null || captureOverlay == null ||
+                window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0) {
+                bakedSession.captureFailed("An authorized clear single-decoder viewer is required")
+            } else target.startBakedCast(window, bounds, bakedSession, captureOverlay) {
+                if (host.archiveSceneSession === archive && app.bakedCastSession === bakedSession)
+                    host.player.currentPosition else null
+            }
+        }
+        DisposableEffect(view) {
+            onDispose { view?.stopBakedCast() }
+        }
+        LaunchedEffect(view, app.replayClipRequested) {
+            val target = view ?: return@LaunchedEffect
+            val window = captureWindow ?: return@LaunchedEffect
+            if (!app.replayClipRequested) return@LaunchedEffect
+            // The sheet closes and playback chrome finishes fading before the first copy.
+            delay(Motion.SCREEN_MS.toLong() + 100L)
+            val clearOutputReady = if (composedGlReady) true else
+                kotlinx.coroutines.withTimeoutOrNull(5_000L) {
+                    while (!composedGlReady) delay(40L)
+                    true
+                } ?: false
+            val bounds = viewerBounds
+            val source = host.archiveSceneSession
+            app.replayClipRequested = false
+            if (!clearOutputReady || bounds == null || bounds.isEmpty || source == null || !app.canMakeReplayClip ||
+                !host.player.isPlaying || app.replayClipRunning ||
+                window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0) {
+                app.reportReplayClipStatus("Play a clear replay with timing data loaded before making a clip.")
+                return@LaunchedEffect
+            }
+            recordingBounds = bounds
+            app.replayClipStopRequested = false
+            app.replayClipRunning = true
+            target.startReplayClip(window, bounds) { result ->
+                app.replayClipRunning = false
+                app.replayClipStopRequested = false
+                app.reportReplayClipStatus(result)
+            }
+        }
+        LaunchedEffect(view, host, app.replayClipRunning, viewerBounds) {
+            val target = view ?: return@LaunchedEffect
+            if (!app.replayClipRunning) return@LaunchedEffect
+            val source = host.archiveSceneSession
+            var lastPosition = host.player.currentPosition
+            while (app.replayClipRunning) {
+                val position = host.player.currentPosition
+                if (source == null || host.archiveSceneSession !== source || position < lastPosition ||
+                    position - lastPosition > 1_000 || app.castingActive || app.externalDisplayActive ||
+                    app.chromeVisible || app.inPip || app.layoutSheetOpen || app.helpOpen || viewerBounds != recordingBounds ||
+                    app.replayClipStopRequested || host.player.playbackState == androidx.media3.common.Player.STATE_ENDED) {
+                    target.finishReplayClip()
+                    break
+                }
+                lastPosition = position
+                delay(80)
+            }
+        }
+        Box(Modifier.fillMaxSize()) {
+        if (app.protectedRollingSceneActive || independentClearSurface) {
+            // Reuse the tested protected scene's *nonsecure* GLES path for clear
+            // A/B. Still one decoder input, one atlas, one independent output.
+            // Rolling composition is one decoded atlas, but uses an independent
+            // SurfaceFlinger video layer. TextureView composition depends on
+            // main-window HWUI frames; a busy tower/map was visibly stalling
+            // the 50fps video even while the decoder rendered every frame.
+            // L1 always uses protected EGL; only authorized L3 may use normal
+            // EGL and the nonsecure video output surface.
+            androidx.compose.runtime.key(app.protectedRollingSceneActive, secureRolling, independentClearSurface) {
+                AndroidView(factory = { context ->
+                    ProtectedDecoderSceneView(context, protectedOutput = secureRolling).apply {
+                        onDisplaySelected = { displayId -> host.setComposedOutputDisplay(this, displayId) }
+                        onFailure = { error ->
+                            if (independentClearSurface && !app.protectedRollingSceneActive) {
+                                // On an unsupported clear EGL SurfaceView, restore the
+                                // original path. Never fallback to MULTIPLE/less secure DRM.
+                                android.util.Log.e("ApexviewSingleDecoder",
+                                    "CLEAR_SURFACE_AB_REVERT reason=$error")
+                                app.settings.updateClearSceneSurfaceExperiment(false)
+                            } else app.failSingleDecoderScene(error)
+                        }
+                        onOutputSize = app::reportSceneOutputSize
+                        onOutputLost = { composedGlReady = false }
+                        onFirstFrame = { composedGlReady = true }
+                    }
+                }, update = { it.bind(host.player, scene, app.playbackSpeed, host.sceneCodecCorrelation) },
+                    onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
+            }
+        } else {
+            // Capture-compatible TextureView, also the controlled A/B baseline.
+            AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
+                onDisplaySelected = { displayId -> host.setComposedOutputDisplay(this, displayId) }
+                onFailure = app::failSingleDecoderScene
+                onOutputSize = app::reportSceneOutputSize
+                onOutputLost = { composedGlReady = false }
+                onFirstFrame = { composedGlReady = true }
+                view = this
+            } }, update = { it.bind(host.player, scene, app.playbackSpeed, host.sceneCodecCorrelation) },
+                onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
+        }
+            // Custom clear HEVC and Widevine HEVC scenes do not host PlayerView.
+            // Display only actual Media3 cues above the single decoded surface.
+            if (!captionsInViewerOverlay) ViewerComposedCaptions(app)
+            if (!composedGlReady) {
+                Box(Modifier.fillMaxSize().background(Color(0xFF101017)),
+                    contentAlignment = Alignment.Center) {
+                    Text("Preparing composed video", style = Type.subhead.copy(color = Ink.primary))
+                }
+            }
+        }
+        } // host/backend output owner
+    } else if (app.sceneActivationPreparing) {
+        // This visible state follows actual capture/decoder readiness, not a delay.
+        // Keep source playback budget unchanged; do not reveal an incomplete grid.
+        Box(Modifier.fillMaxSize().background(Color(0xFF101017)),
+            contentAlignment = Alignment.Center) {
+            Text("Preparing ${app.tiles.size}-feed single-decoder scene",
+                style = Type.subhead.copy(color = Ink.primary))
+        }
+    } else {
+        val popped = if (app.inPip) app.pipTile() else null
+        app.tiles.filter { !it.protectedCompositionHidden && (popped == null || it === popped) }.forEach { tile ->
+            key(tile.id) { TileView(app, tile, videoOnly = true, presetSlot = tvStartupSlot(app, width, height)) }
+        }
+    }
+}
+
+@Composable
+private fun ViewerComposedCaptions(app: AppState) {
+    val captionFeed = app.captionSourceFeed
+    ComposedCaptionOverlay(captionFeed?.player, app.settings.subtitles && captionFeed?.captionOutputReady == true,
+        app.settings.captionAppearance, Modifier.fillMaxSize())
+}
+
+private fun tvStartupSlot(app: AppState, width: Float, height: Float): Slot? =
+    if (app.layoutMode == LayoutMode.TV && width > height && !app.laptopActive &&
+        app.tiles.singleOrNull()?.hasLayoutSlot == false && app.singleDecoderScenePlayer == null
+    ) Layouts.tvSingleLandscapeSlot(width, height, width - app.tvTowerWidthFor(width)) else null
+
 private fun clock(ms: Long): String {
     val s = ms / 1000
     return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%d:%02d".format(s / 60, s % 60)
@@ -818,9 +1331,14 @@ private val overlayShadow = androidx.compose.ui.graphics.Shadow(Color.Black, blu
  */
 @OptIn(UnstableApi::class)
 @Composable
-private fun TileView(app: AppState, tile: Tile) {
+private fun TileView(
+    app: AppState, tile: Tile, videoOnly: Boolean = false, controlsOnly: Boolean = false,
+    presetSlot: Slot? = null,
+) {
+    if (videoOnly && presetSlot == null && !tile.hasLayoutSlot && !app.inPip) return
     val density = LocalDensity.current
-    LaunchedEffect(tile.id) {
+    val presentedFeed = app.singleDecoderScenePlayer ?: app.protectedRollingScenePlayer ?: tile.feed
+    if (!videoOnly) LaunchedEffect(tile.id) {
         while (true) {
             tile.feed.refresh()
             delay(1000)
@@ -832,30 +1350,65 @@ private fun TileView(app: AppState, tile: Tile) {
             .then(
                 if (app.inPip) Modifier.fillMaxSize()
                 else Modifier
-                    .offset { IntOffset(tile.x.roundToInt(), tile.y.roundToInt()) }
-                    .requiredSize(with(density) { tile.w.toDp() }, with(density) { tile.h.toDp() })
+                    .offset { IntOffset((presetSlot?.x ?: tile.x).roundToInt(), (presetSlot?.y ?: tile.y).roundToInt()) }
+                    .requiredSize(
+                        with(density) { (presetSlot?.w ?: tile.w).toDp() },
+                        with(density) { (presetSlot?.h ?: tile.h).toDp() },
+                    )
             )
             .zIndex(tile.z)
             .helpAnchor(app, "tile:${tile.id}")
-            .background(Color.Black)
+            .then(if (controlsOnly) Modifier else Modifier.background(Color.Black))
+            .then(if (!controlsOnly || app.inPip) Modifier else Modifier.drawWithContent {
+                // Video is drawn in a separate layer. Its higher windows must still occlude
+                // a lower window's labels/cards, just as they did inside each old PlayerView.
+                // Keep the input layer transparent, so masking it never covers the video.
+                val index = app.tiles.indexOf(tile)
+                drawContext.canvas.save()
+                app.tiles.forEachIndexed { otherIndex, other ->
+                    if (!other.protectedCompositionHidden &&
+                        (other.z > tile.z || other.z == tile.z && otherIndex > index)) {
+                        drawContext.canvas.clipRect(other.x - tile.x, other.y - tile.y,
+                            other.x + other.w - tile.x, other.y + other.h - tile.y,
+                            androidx.compose.ui.graphics.ClipOp.Difference)
+                    }
+                }
+                drawContent()
+                drawContext.canvas.restore()
+            })
     ) {
-        // A switched feed can use a different DRM level. Recreate PlayerView as well as the
-        // player binding so an L1 player is never attached to a TextureView (or vice versa).
-        key(tile.id, tile.feed.usesSoftwareDrm) {
+        // A single L3 feed uses SurfaceView so Android can compose video independently of
+        // the timing/map overlays. Multiple L3 feeds retain TextureView for correct tile overlap
+        // and z-order. L1 always uses SurfaceView for secure output.
+        if (!controlsOnly) {
+        val textureView = useTextureViewForFeed(tile.feed.usesSoftwareDrm, app.tiles.count { !it.protectedCompositionHidden })
+        key(tile.id, textureView) {
             AndroidView(
                 factory = { context ->
-                    val layout = if (tile.feed.usesSoftwareDrm) R.layout.player_texture else R.layout.player_surface
+                    val layout = if (textureView) R.layout.player_texture else R.layout.player_surface
                     (LayoutInflater.from(context).inflate(layout, null) as PlayerView).apply {
                         // Media3 1.5 made this workaround opt-in. Without it, PlayerView inside
                         // Compose AndroidView can stretch, crop or leak its SurfaceView surface.
-                        if (!tile.feed.usesSoftwareDrm) setEnableComposeSurfaceSyncWorkaround(true)
+                        if (!textureView) setEnableComposeSurfaceSyncWorkaround(true)
+                        addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+                            val width = right - left
+                            val height = bottom - top
+                            if (DiagnosticLogs.recording && (width != oldRight - oldLeft || height != oldBottom - oldTop)) {
+                                android.util.Log.i("PitwallLayout", "playerView tile=${tile.id} size=${width}x$height")
+                            }
+                        }
                     }
                 },
-                update = { it.player = tile.feed.player },
+                update = {
+                    it.player = tile.feed.player
+                    it.subtitleView?.applyCaptionAppearance(app.settings.captionAppearance)
+                },
                 onRelease = { it.player = null },
                 modifier = Modifier.fillMaxSize(),
             )
         }
+        }
+        if (videoOnly) return@Box
         if (app.inPip) return@Box
 
         Box(
@@ -869,11 +1422,11 @@ private fun TileView(app: AppState, tile: Tile) {
                         onLongPress = { app.openTileMenu(tile); app.showChrome() },
                     )
                 }
-                .then(if (app.arranging) Modifier.arrangeGestures(app, tile) else Modifier)
+                .then(if (app.arranging && presetSlot == null) Modifier.arrangeGestures(app, tile) else Modifier)
         )
 
         // Tapped as the feed the next car picked on the map replaces: a soft light runs round it.
-        val targeted = app.targetTile === tile
+        val targeted = app.settings.mapDriverSelection && app.targetTile === tile
         LaunchedEffect(app.targetCount, targeted) {
             if (targeted) {
                 delay(TARGET_MS)
@@ -882,36 +1435,37 @@ private fun TileView(app: AppState, tile: Tile) {
         }
         TargetGlow(targeted)
 
-        // The broadcast-style timing card on onboards.
+        // One retained information badge per onboard, irrespective of TV/Grid/Split layout.
+        // The source data and sector colours are the same as the previous bottom DriverCard.
         val number = tile.channel.racingNumber?.toString()
         val timing = app.timing
         val tileWidth = with(density) { tile.w.toDp() }
-        if (number != null && timing != null && timing.laps.isNotEmpty() && tileWidth >= CARD_MIN_TILE) {
-            DriverCard(
-                app, timing, number, tile.channel.driverName,
-                Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(start = CARD_MARGIN, bottom = if (app.settings.showStats) 28.dp else CARD_MARGIN)
-                    .width(minOf(CARD_MAX_WIDTH, tileWidth - CARD_MARGIN * 2)),
+        val tileHeight = with(density) { tile.h.toDp() }
+        if (number != null && timing != null) {
+            val narrow = tileWidth < CARD_MIN_TILE
+            val badgeWidth = (tileWidth - 8.dp).coerceAtLeast(1.dp)
+                .coerceAtMost(if (narrow) 230.dp else 420.dp)
+            val assumedHeight = (if (narrow) 30f else 45f) * app.speedReadoutScale
+            val badgePosition = OnboardBadgeGeometry.position(
+                tileWidth.value, tileHeight.value, badgeWidth.value, assumedHeight,
+                app.onboardBadgeAnchor, app.onboardBadgeXOffsetDp,
+                app.onboardBadgeYOffsetDp,
             )
-        }
-        if (number != null && timing != null && !app.arranging) {
-            // On a feed too narrow for both, it sits above the card rather than on it.
-            val overCard = timing.laps.isNotEmpty() && tileWidth in CARD_MIN_TILE..(CARD_MAX_WIDTH + SPEED_ROOM)
-            SpeedReadout(
-                app, timing, number,
-                Modifier.align(Alignment.BottomEnd).padding(
-                    end = CARD_MARGIN,
-                    bottom = if (overCard) 66.dp else if (app.settings.showStats) 28.dp else CARD_MARGIN,
-                ),
+            OnboardInfoBadge(
+                app, timing, number, tile.channel.driverName,
+                Modifier.align(Alignment.TopStart)
+                    .offset(x = badgePosition.first.dp, y = badgePosition.second.dp)
+                    .width(badgeWidth),
+                compact = narrow, availableWidthDp = badgeWidth.value,
             )
         }
 
-        val fade = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
+        val reducedMotion = LocalReduceMotion.current
+        val fade = tween<Float>(if (reducedMotion) 0 else Motion.SCREEN_MS, easing = EaseOut)
         AnimatedVisibility(
             app.audioHint === tile,
             Modifier.align(Alignment.BottomEnd).padding(end = 52.dp, bottom = if (number != null) 46.dp else 10.dp),
-            enter = fadeIn(fade), exit = fadeOut(tween(600, easing = EaseOut)),
+            enter = fadeIn(fade), exit = fadeOut(tween(if (reducedMotion) 0 else 600, easing = EaseOut)),
         ) {
             Row(
                 Modifier
@@ -951,11 +1505,11 @@ private fun TileView(app: AppState, tile: Tile) {
             )
         }
 
-        if (tile.feed.problem == null && !tile.coolingOff && !tile.heldForSpeed && !tile.heldForDecoder) {
-            BufferingRing(tile.feed, Modifier.align(Alignment.Center))
+        if (presentedFeed.problem == null && !tile.coolingOff && !tile.heldForSpeed && !tile.heldForDecoder) {
+            BufferingRing(presentedFeed, Modifier.align(Alignment.Center))
         }
 
-        tile.feed.problem?.let { problem ->
+        presentedFeed.problem?.let { problem ->
             Text(
                 problem,
                 style = Type.subhead.copy(color = Ink.primary, shadow = overlayShadow, textAlign = androidx.compose.ui.text.style.TextAlign.Center),
@@ -963,18 +1517,52 @@ private fun TileView(app: AppState, tile: Tile) {
             )
         }
 
-        if (app.settings.showStats) {
-            Text(
-                tile.feed.status,
-                style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow),
-                modifier = Modifier.align(Alignment.BottomStart).padding(start = 10.dp, end = 48.dp, bottom = 8.dp),
-            )
+        // Tile testing is a diagnostic workflow, so keep its gate report visible even when
+        // the user's general playback statistics overlay is disabled.
+        if (app.settings.showStats || app.layoutMode == LayoutMode.TILE_TEST) {
+            Column(
+                Modifier.align(Alignment.BottomStart).padding(start = 10.dp, end = 48.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    presentedFeed.status,
+                    style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow),
+                    maxLines = 1
+                )
+                tile.feed.hevcProfileDiagnostic?.let { profile ->
+                    Text(
+                        profile,
+                        style = Type.caption.copy(color = Ink.primary, shadow = overlayShadow),
+                        maxLines = 2
+                    )
+                }
+            }
         }
 
-        AnimatedVisibility(app.chromeVisible && app.arranging, Modifier.align(Alignment.BottomEnd), enter = fadeIn(fade), exit = fadeOut(fade)) {
+        val tvMainResize = app.tvLandscapeLayout && tile.id == app.bigTileIdForUi
+        AnimatedVisibility(app.chromeVisible && app.arranging && (!app.tvLandscapeLayout || tvMainResize),
+            Modifier.align(Alignment.BottomEnd), enter = fadeIn(fade), exit = fadeOut(fade)) {
+            var remoteResize by remember { mutableStateOf(false) }
+            val remoteHandle = if (tvMainResize && app.isTv) Modifier
+                .onKeyEvent { event ->
+                    if (!remoteResize || (event.key != Key.DirectionLeft && event.key != Key.DirectionRight)) return@onKeyEvent false
+                    if (event.type == KeyEventType.KeyDown) {
+                        val step = with(density) { 16.dp.toPx() }
+                        val delta = if (event.key == Key.DirectionRight) step else -step
+                        app.updateTowerWidth(app.tvTowerWidthPx - delta)
+                        app.finishTowerResize()
+                        app.showChrome()
+                    }
+                    true
+                }
+                .onFocusChanged { if (!it.isFocused) remoteResize = false }
+                .pressable(scaleTo = 1f) { remoteResize = !remoteResize }
+                .semantics { contentDescription = if (remoteResize) "Resize main video with Left or Right" else "Resize main video" }
+            else Modifier
             Box(
                 Modifier
-                    .size(44.dp)
+                    .size(48.dp)
+                    .then(remoteHandle)
                     .pointerInput(tile.id) {
                         detectDragGestures(
                             onDragStart = { app.beginArrange(tile) },
@@ -997,9 +1585,15 @@ private fun TileView(app: AppState, tile: Tile) {
     }
 }
 
-/** A visible TV placeholder while live/archive timing is being resolved. */
+/** A visible TV diagnostic panel while live/archive timing is being resolved. */
 @Composable
-private fun TvOverlayPending(title: String, area: Area, status: String) {
+private fun TvOverlayPending(
+    title: String?,
+    area: Area,
+    status: String,
+    diagnostics: List<String>,
+    decoderDiagnostic: String,
+) {
     val density = LocalDensity.current
     Box(
         Modifier
@@ -1012,9 +1606,17 @@ private fun TvOverlayPending(title: String, area: Area, status: String) {
             .background(Color(0xE6101010))
             .padding(12.dp),
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(title, style = Type.subhead.copy(color = Ink.primary, fontWeight = FontWeight.Bold))
-            Text(status, style = Type.footnote.copy(color = Ink.secondary), maxLines = 3)
+        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            if (title != null) Text(title, style = Type.subhead.copy(color = Ink.primary, fontWeight = FontWeight.Bold))
+            Text(status, style = Type.footnote.copy(color = Ink.secondary), maxLines = 2)
+            Text(decoderDiagnostic, style = Type.caption.copy(color = Ink.secondary), maxLines = 2)
+            diagnostics.takeLast(4).forEach { line ->
+                Text(
+                    line,
+                    style = Type.caption.copy(color = Ink.secondary),
+                    maxLines = 1,
+                )
+            }
         }
     }
 }
@@ -1052,14 +1654,21 @@ private fun Modifier.arrangeGestures(app: AppState, tile: Tile) = pointerInput(t
 /** A light that runs round the tile's border, fading in, and out when [on] ends. */
 @Composable
 private fun TargetGlow(on: Boolean) {
-    val alpha by animateFloatAsState(if (on) 1f else 0f, tween(Motion.SCREEN_MS * 2, easing = EaseOut), label = "glow")
+    val reducedMotion = LocalReduceMotion.current
+    val alpha by animateFloatAsState(if (on) 1f else 0f,
+        tween(if (reducedMotion) 0 else Motion.SCREEN_MS * 2, easing = EaseOut), label = "glow")
     if (alpha == 0f) return
-    val spin = rememberInfiniteTransition(label = "glow-spin")
-    val angle by spin.animateFloat(
-        0f, 360f,
-        infiniteRepeatable(tween(2_400, easing = androidx.compose.animation.core.LinearEasing)),
-        label = "glow-angle",
-    )
+    // A static bright focus border is still visible when Android removes
+    // animations, but no infinite frame scheduling/CPU work remains.
+    val angle = if (reducedMotion) 0f else {
+        val spin = rememberInfiniteTransition(label = "glow-spin")
+        val animated by spin.animateFloat(
+            0f, 360f,
+            infiniteRepeatable(tween(2_400, easing = androidx.compose.animation.core.LinearEasing)),
+            label = "glow-angle",
+        )
+        animated
+    }
     Canvas(Modifier.fillMaxSize()) {
         // A sweep gradient can't be turned, so the bright stretch is moved round by building the
         // gradient's stops from the angle: bright at the angle, fading to nothing opposite it.
@@ -1088,7 +1697,7 @@ private fun TargetGlow(on: Boolean) {
 @Composable
 private fun TileHeader(app: AppState, tile: Tile) {
     val density = LocalDensity.current
-    val fade = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
+    val fade = tween<Float>(if (LocalReduceMotion.current) 0 else Motion.SCREEN_MS, easing = EaseOut)
     Box(
         Modifier
             .offset { IntOffset(tile.x.roundToInt(), tile.y.roundToInt()) }
@@ -1106,7 +1715,11 @@ private fun TileHeader(app: AppState, tile: Tile) {
                 // Takes the width left over, so what follows sits at the feed's right edge.
                 Box(Modifier.weight(1f)) {
                     Row(
-                        Modifier.pressable { app.openTileMenu(tile); app.showChrome() }.padding(vertical = 8.dp),
+                        Modifier.tvFocusRing()
+                            .semantics { contentDescription = "Change ${tile.channel.title} feed" }
+                            .pressable { app.openTileMenu(tile); app.showChrome() }
+                            .heightIn(min = 48.dp)
+                            .padding(vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         tile.channel.teamColor?.let {
@@ -1140,7 +1753,11 @@ private fun TileHeader(app: AppState, tile: Tile) {
 private fun ChannelRow(app: AppState, tile: Tile, channel: Channel) {
     val current = channel == tile.channel
     Row(
-        Modifier.fillMaxWidth().pressable(scaleTo = 0.99f) { app.chooseFeed(tile, channel) }.padding(vertical = 12.dp),
+        Modifier.fillMaxWidth()
+            .tvFocusRing()
+            .semantics { role = Role.RadioButton; selected = current }
+            .pressable(scaleTo = 0.99f) { app.chooseFeed(tile, channel) }
+            .heightIn(min = 56.dp).padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.size(10.dp).clip(CircleShape).background(channel.teamColor?.let { Color(it) } ?: Color.Transparent))
@@ -1224,7 +1841,7 @@ internal fun KeepSystemBarsHidden(enabled: Boolean = true) {
 
 /** A row of choices, one picked, in the style of iOS's segmented control. */
 @Composable
-private fun <T> Segments(
+internal fun <T> Segments(
     options: List<T>,
     chosen: T,
     label: (T) -> String,
@@ -1232,19 +1849,29 @@ private fun <T> Segments(
     focus: FocusRequester? = null,
     onPick: (T) -> Unit,
 ) {
-    Row(modifier.clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(3.dp)) {
+    Row(modifier.clip(RoundedCornerShape(12.dp))
+        .background(androidx.compose.material3.MaterialTheme.colorScheme.surfaceContainerLow)
+        .padding(3.dp)) {
         options.forEach { option ->
             val on = option == chosen
             Box(
                 Modifier
                     .then(if (on && focus != null) Modifier.focusRequester(focus) else Modifier)
+                    .tvFocusRing()
+                    .semantics { role = Role.RadioButton; selected = on }
                     .pressable { onPick(option) }
+                    .heightIn(min = 48.dp)
                     .clip(RoundedCornerShape(9.dp))
-                    .background(if (on) Ink.surfaceHigh else Color.Transparent)
-                    .padding(horizontal = 22.dp, vertical = 9.dp),
+                    .background(if (on)
+                        androidx.compose.material3.MaterialTheme.colorScheme.secondaryContainer
+                        else Color.Transparent)
+                    .padding(horizontal = 18.dp, vertical = 9.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(label(option), style = Type.subhead.copy(color = if (on) Ink.primary else Ink.secondary))
+                Text(label(option), style = Type.subhead.copy(
+                    color = if (on)
+                        androidx.compose.material3.MaterialTheme.colorScheme.onSecondaryContainer
+                    else androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant))
             }
         }
     }
@@ -1276,20 +1903,33 @@ private fun SpeedSheet(app: AppState) {
                 .padding(bottom = 24.dp)
         ) {
             Text("Playback speed", style = Type.title2)
-            Row(Modifier.padding(top = 20.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(3.dp)) {
+            Row(Modifier.padding(top = 20.dp).fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .clip(RoundedCornerShape(12.dp))
+                .background(androidx.compose.material3.MaterialTheme.colorScheme.surfaceContainerLow)
+                .padding(3.dp)) {
                 AppState.SPEEDS.forEach { speed ->
                     val on = speed == app.playbackSpeed
                     Box(
                         Modifier
-                            .weight(1f)
+                            .widthIn(min = if (LocalDensity.current.fontScale >= 1.5f) 96.dp else 68.dp)
                             .then(if (on) Modifier.focusRequester(current) else Modifier)
+                            .tvFocusRing()
+                            .semantics { role = Role.RadioButton; selected = on }
                             .pressable { app.chooseSpeed(speed) }
+                            .heightIn(min = 48.dp)
                             .clip(RoundedCornerShape(9.dp))
-                            .background(if (on) Ink.surfaceHigh else Color.Transparent)
-                            .padding(vertical = 9.dp),
+                            .background(if (on)
+                                androidx.compose.material3.MaterialTheme.colorScheme.secondaryContainer
+                                else Color.Transparent)
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(speedLabel(speed), style = Type.subhead.copy(color = if (on) Ink.primary else Ink.secondary), maxLines = 1)
+                        Text(speedLabel(speed), style = Type.subhead.copy(
+                            color = if (on)
+                                androidx.compose.material3.MaterialTheme.colorScheme.onSecondaryContainer
+                            else androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant),
+                            maxLines = 1)
                     }
                 }
             }
@@ -1306,10 +1946,259 @@ private fun SpeedSheet(app: AppState) {
     }
 }
 
+
+/** Track choices are discovered from the authorized F1 manifest, not assumed languages. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ClosedCaptionsSheet(app: AppState) {
+    ModalBottomSheet(
+        onDismissRequest = {
+            app.saveCaptionAppearance()
+            app.captionsSheetOpen = false
+        },
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = Ink.surface,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+    ) {
+        KeepSystemBarsHidden()
+        val focus = remember { FocusRequester() }
+        LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+        Column(
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                .navigationBarsPadding().padding(horizontal = 20.dp, vertical = 12.dp)
+                .padding(bottom = 24.dp),
+        ) {
+            Text("Closed captions", style = Type.title2)
+            Text(
+                "Captions are shown only when F1 offers a text track for the selected feed. " +
+                    "They follow your playback position and are independent of the video decoder.",
+                style = Type.footnote,
+                modifier = Modifier.padding(top = 8.dp, bottom = 18.dp),
+            )
+            // Reuse settings' single labeled Switch semantics. Previously the
+            // label and inner Switch were separate TalkBack/remote focus nodes.
+            SwitchRow(
+                "Show captions",
+                checked = app.settings.subtitles,
+                onChange = app::setCaptionsEnabled,
+                modifier = Modifier.focusRequester(focus),
+            )
+            CaptionAppearanceControls(app.settings.captionAppearance,
+                app.settings::previewCaptionAppearance, app::saveCaptionAppearance)
+            Text("F1 caption track", style = Type.subhead,
+                modifier = Modifier.padding(top = 18.dp, bottom = 8.dp))
+            val choices = listOf(CaptionTrackOption(CaptionPolicy.AUTO, "Automatic")) +
+                app.currentCaptionTracks.filter { it.language != CaptionPolicy.AUTO }
+            if (app.currentCaptionTracks.isEmpty()) {
+                Text(
+                    "No caption track has been advertised by the current playback source or TV receiver yet. " +
+                        "You can enable CC now and it will appear if F1 supplies one.",
+                    style = Type.footnote,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
+            }
+            choices.forEach { track ->
+                val isSelected = app.settings.subtitles && app.settings.captionLanguage == track.language
+                Row(
+                    Modifier.fillMaxWidth()
+                        .tvFocusRing()
+                        .semantics { role = Role.RadioButton; selected = isSelected }
+                        .pressable { app.setCaptionLanguage(track.language) }
+                        .heightIn(min = 56.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(if (isSelected) Ink.surfaceHigh else Color.Transparent)
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(track.label, style = Type.body, modifier = Modifier.weight(1f))
+                    if (isSelected) Text("Selected", style = Type.footnote.copy(color = Ink.accent))
+                }
+            }
+            Text(
+                "For Pitwall Cast, the TV uses captions available in its authorized stream. " +
+                    "If the TV video contains no text track, captions cannot be invented.",
+                style = Type.footnote,
+                modifier = Modifier.padding(top = 14.dp),
+            )
+        }
+    }
+}
+
+/** Global default, plus independent persistent quality requests for individual F1 feeds. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VideoQualitySheet(app: AppState) {
+    ModalBottomSheet(
+        onDismissRequest = { app.qualitySheetOpen = false },
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = Ink.surface,
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+    ) {
+        KeepSystemBarsHidden()
+        val current = remember { FocusRequester() }
+        LaunchedEffect(Unit) { runCatching { current.requestFocus() } }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp)
+        ) {
+            Text("Video quality", style = Type.title2)
+            Text("Default for all feeds", style = Type.subhead, modifier = Modifier.padding(top = 14.dp))
+            Segments(
+                options = VideoQuality.values().toList(),
+                chosen = app.settings.videoQuality,
+                label = { it.label },
+                modifier = Modifier.padding(top = 12.dp).fillMaxWidth().horizontalScroll(rememberScrollState()),
+                focus = current,
+                onPick = app::chooseVideoQuality,
+            )
+            Text(
+                when (app.settings.videoQuality) {
+                    VideoQuality.AUTO -> "Auto selects a rendition using the feed size and available bandwidth."
+                    else -> "Feeds without an override request at most ${app.settings.videoQuality.label}. Actual quality depends on the F1 renditions available."
+                },
+                style = Type.footnote,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+            VideoQualityAdvisory.atlasNotice(app.activeAtlasQualityEvidence())?.let { notice ->
+                Text(notice, style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
+            }
+            VideoQualityAdvisory.thermalNotice(app.thermal, app.settings.decoderMode,
+                app.settings.videoQuality)?.let { notice ->
+                Text(notice, style = Type.footnote.copy(color = Ink.live),
+                    modifier = Modifier.padding(top = 8.dp))
+            }
+            val active = app.tiles.distinctBy { it.feed.sourceStream.profileLabel }
+                .sortedBy { if (it.id == app.bigTileIdForUi) 0 else 1 }
+            if (active.isNotEmpty()) {
+                Text("Each feed", style = Type.title2, modifier = Modifier.padding(top = 24.dp))
+                Text("Choose a quality for each feed, independent of its screen position. Default inherits the selection above.",
+                    style = Type.footnote, modifier = Modifier.padding(top = 8.dp))
+                active.forEach { tile ->
+                    val label = tile.feed.sourceStream.profileLabel
+                    Column(Modifier.padding(top = 18.dp)) {
+                        Text((if (tile.id == app.bigTileIdForUi) "Main · " else "") + label,
+                            style = Type.subhead)
+                        Segments(
+                            options = listOf<VideoQuality?>(null) + VideoQuality.entries,
+                            chosen = app.settings.feedVideoQualityOverride(label),
+                            label = { it?.label ?: "Default" },
+                            modifier = Modifier.padding(top = 8.dp).fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            onPick = { app.chooseFeedVideoQuality(tile.id, it) },
+                        )
+                        val actual = app.actualSourceRendition(label)
+                        Text(if (actual == null) {
+                            "Requested ceiling: ${app.settings.videoQualityForFeed(label).label} · Actual rendition not yet observed"
+                        } else {
+                            "Requested ceiling: ${app.settings.videoQualityForFeed(label).label} · Playing: " +
+                                "${actual.first} × ${actual.second}px"
+                        },
+                            style = Type.footnote, modifier = Modifier.padding(top = 6.dp))
+                        if (app.settings.decoderMode == DecoderMode.MULTIPLE || active.size == 1) {
+                            tile.feed.sourceQualityNotice?.let { warning ->
+                                Text(warning, style = Type.footnote.copy(color = Ink.live),
+                                    modifier = Modifier.padding(top = 6.dp))
+                            }
+                        }
+                        VideoQualityAdvisory.tileNotice(actual, tile.w, tile.h)?.let { evidence ->
+                            Text(evidence, style = Type.footnote,
+                                modifier = Modifier.padding(top = 4.dp))
+                        }
+                        actual?.let { played ->
+                            QualityDisclosurePolicy.notice(app.settings.videoQualityForFeed(label),
+                                played.second)?.let { notice ->
+                                Text(notice, style = Type.footnote.copy(color = Ink.live),
+                                    modifier = Modifier.padding(top = 4.dp))
+                            }
+                        }
+                    }
+                }
+                if (app.settings.decoderMode == DecoderMode.SINGLE && active.size > 1 &&
+                    PerFeedQualityPolicy.commonDecoderQuality(active.map { app.settings.videoQualityForFeed(it.feed.sourceStream.profileLabel) }) == null) {
+                    Text("Mixed quality uses the one-decoder HEVC atlas when source tiles are compatible. " +
+                        "An incompatible stream will show its exact composition failure rather than opening extra decoders.",
+                        style = Type.footnote, modifier = Modifier.padding(top = 16.dp))
+                }
+            }
+        }
+    }
+}
+
 /** Built-in layouts, the saved one, saving the current arrangement, and Snap or Free arranging. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LayoutSheet(app: AppState) {
+    val backupContext = LocalContext.current
+    LaunchedEffect(Unit) { app.migrateLegacyLayoutsIfNeeded() }
+    val exportLayouts = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                requireNotNull(backupContext.contentResolver.openOutputStream(uri)).use { stream ->
+                    stream.write(app.exportNamedLayouts().toByteArray(Charsets.UTF_8))
+                }
+            }.onSuccess { app.reportLayoutMessage("Saved layout backup") }
+                .onFailure { app.reportLayoutMessage("Could not export layouts: ${it.javaClass.simpleName}") }
+        }
+    }
+    val importLayouts = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                requireNotNull(backupContext.contentResolver.openInputStream(uri)).use { stream ->
+                    stream.bufferedReader().use { it.readText() }
+                }
+            }.onSuccess { app.importNamedLayouts(it) }
+                .onFailure { app.reportLayoutMessage("Could not open layout backup: ${it.javaClass.simpleName}") }
+        }
+    }
+    var nameDialog by remember { mutableStateOf(false) }
+    var nameValue by remember { mutableStateOf("") }
+    var editingId by remember { mutableStateOf<String?>(null) }
+    var deleteId by remember { mutableStateOf<String?>(null) }
+    if (nameDialog) {
+        AlertDialog(
+            onDismissRequest = { nameDialog = false },
+            title = { Text(if (editingId == null) "Save named layout" else "Rename layout") },
+            text = {
+                OutlinedTextField(
+                    value = nameValue,
+                    onValueChange = { if (it.length <= 48) nameValue = it },
+                    label = { Text("Layout name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (nameValue.trim().isNotEmpty()) {
+                        val id = editingId
+                        if (id == null) app.saveNamedLayout(nameValue)
+                        else app.renameNamedLayout(id, nameValue)
+                        nameDialog = false
+                    }
+                }) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { nameDialog = false }) { Text("Cancel") } }
+        )
+    }
+    deleteId?.let { id ->
+        AlertDialog(
+            onDismissRequest = { deleteId = null },
+            title = { Text("Delete saved layout?") },
+            text = { Text("This removes the named preset, including its map and tower positions.") },
+            confirmButton = {
+                TextButton(onClick = { app.deleteNamedLayout(id); deleteId = null }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { deleteId = null }) { Text("Cancel") } }
+        )
+    }
     ModalBottomSheet(
         onDismissRequest = { app.layoutSheetOpen = false },
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -1324,9 +2213,30 @@ private fun LayoutSheet(app: AppState) {
                 .padding(horizontal = 20.dp).padding(bottom = 24.dp)
         ) {
             Text("Layout", style = Type.title2)
+            if (app.tiles.isNotEmpty()) {
+                Text("Current feeds: ${app.tiles.size}", style = Type.footnote,
+                    modifier = Modifier.padding(top = 12.dp))
+                if (app.tiles.size == 1 && app.singleDecoderDiagnostic == null) {
+                    Text("Presentation: native single-feed player", style = Type.footnote)
+                }
+                app.singleDecoderDiagnostic?.let { diagnostic ->
+                    Text(diagnostic, style = Type.footnote)
+                }
+                Text("Active video decoders (app callbacks): ${app.observedActiveVideoDecoders}", style = Type.footnote)
+            }
+            if (app.canMakeReplayClip && !app.replayClipRunning) {
+                Row(Modifier.padding(top = 12.dp)) {
+                    SecondaryButton("Start replay recording") {
+                        app.layoutSheetOpen = false
+                        app.chromeVisible = false
+                        app.replayClipRequested = true
+                    }
+                }
+                Text("Video only. Tap the replay or press OK on the remote to stop and save.", style = Type.footnote)
+            }
             val n = app.tiles.size
             val hasSaved = app.savedLayout(n) != null
-            val modes = LayoutMode.entries.filter { it != LayoutMode.CUSTOM || hasSaved }
+            val modes = LayoutMode.entries.filter { it != LayoutMode.SINGLE_DECODER_TEST && it != LayoutMode.TILE_TEST && (it != LayoutMode.CUSTOM || hasSaved) }
             Segments(
                 modes, app.layoutMode, { it.label },
                 Modifier.padding(top = 20.dp), selectedLayout,
@@ -1334,7 +2244,11 @@ private fun LayoutSheet(app: AppState) {
             Text(
                 when {
                     app.layoutMode == LayoutMode.TV ->
-                        "Video fills the left two-thirds. The timing tower stays at the top-right, with the track map below. This is saved as the default for new sessions."
+                        "Unlock the layout to resize the main video. The timing tower uses the remaining width."
+                    app.layoutMode == LayoutMode.TILE_TEST ->
+                        "Choose exactly two feeds from the same F1 session. The feed picker opens so you can select them manually. The app compares their HEVC tile parameters and reports whether the current 2×1 test assembler accepts them. Normal playback remains unchanged."
+                    app.layoutMode == LayoutMode.SINGLE_DECODER_TEST ->
+                        "Run Single-decoder test while 2–4 feeds from the same archive are playing. ApexView validates the actual manifests, HEVC, DRM and aligned CMAF output before releasing source video decoders. Reopen Layout to see the result. A failed preflight keeps normal playback running."
                     hasSaved ->
                         "My layout is the one you saved for $n feed${if (n == 1) "" else "s"} with the phone ${app.wayUp}."
                     else ->
@@ -1344,13 +2258,68 @@ private fun LayoutSheet(app: AppState) {
                 modifier = Modifier.padding(top = 10.dp),
             )
             Row(Modifier.padding(top = 16.dp)) {
-                SecondaryButton("Save this layout") { app.saveLayoutAsDefault(); app.layoutSheetOpen = false }
+                SecondaryButton("Save as named layout") {
+                    editingId = null
+                    nameValue = "My layout ${app.namedLayouts.size + 1}"
+                    nameDialog = true
+                }
             }
             Text(
-                "Every stream with $n feed${if (n == 1) "" else "s"} will start like this, the map included. Main + strip and Grid stay as they are.",
+                "Save as many named arrangements as needed, including video positions, the track map and timing tower. A saved layout can be loaded or set as the default for its feed count and orientation.",
                 style = Type.footnote,
                 modifier = Modifier.padding(top = 8.dp),
             )
+            if (app.namedLayouts.isNotEmpty()) {
+                Text("Saved layouts", style = Type.headline,
+                    modifier = Modifier.padding(top = 20.dp))
+                app.namedLayouts.forEach { preset ->
+                    val compatible = preset.feedCount == n &&
+                        preset.landscape == (app.canvasSize.first > app.canvasSize.second)
+                    Column(
+                        Modifier.fillMaxWidth().padding(top = 10.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Ink.background).padding(12.dp)
+                    ) {
+                        Text(preset.name +
+                            if (preset.id == app.defaultNamedLayoutId) " · Default" else "",
+                            style = Type.subhead)
+                        Text("${preset.feedCount} feeds · ${if (preset.landscape) "Landscape" else "Portrait"}" +
+                            if (compatible) "" else " · Open a matching layout to load",
+                            style = Type.footnote)
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                                .padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            if (compatible) SecondaryButton("Load") {
+                                app.loadNamedLayout(preset.id)
+                            }
+                            SecondaryButton("Default") { app.makeNamedLayoutDefault(preset.id) }
+                            SecondaryButton("Rename") {
+                                editingId = preset.id
+                                nameValue = preset.name
+                                nameDialog = true
+                            }
+                            SecondaryButton("Delete") { deleteId = preset.id }
+                        }
+                    }
+                }
+            }
+            Text("Layout backups", style = Type.headline,
+                modifier = Modifier.padding(top = 20.dp))
+            Row(Modifier.padding(top = 10.dp).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SecondaryButton("Export layouts") {
+                    runCatching { exportLayouts.launch("pitwall-layouts.json") }
+                        .onFailure { app.reportLayoutMessage("File export is unavailable on this device") }
+                }
+                SecondaryButton("Import layouts") {
+                    runCatching { importLayouts.launch(arrayOf("application/json", "text/*")) }
+                        .onFailure { app.reportLayoutMessage("File import is unavailable on this device") }
+                }
+            }
+            Text("Android Auto Backup restores named layouts when the device's backup and restore service is enabled. Exporting a copy is additional protection if cloud backup is disabled. No F1 credentials or Widevine keys are included.",
+                style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
 
             Column(Modifier.padding(top = 20.dp).clip(RoundedCornerShape(12.dp)).background(Ink.background).padding(vertical = 4.dp)) {
                 SwitchRow("Laptop mode when half-folded", app.laptopEnabled, app::chooseLaptop)
@@ -1431,18 +2400,21 @@ private fun MapSheet(app: AppState) {
         val config = LocalConfiguration.current
         val selectedMapMode = remember { FocusRequester() }
         LaunchedEffect(Unit) { runCatching { selectedMapMode.requestFocus() } }
-        val combinedWorkspace = app.combinedOverlayPlan?.takeIf { it.floating }?.workspace
-        val maxTowerWidthDp = combinedWorkspace?.let { with(density) { it.w.toDp().value } }
-            ?: (config.screenWidthDp - 32f).coerceAtLeast(AppState.TOWER_MIN_WIDTH_DP)
+        val combinedWorkspace = app.combinedOverlayPlan?.workspace
+        val widthRange = with(density) {
+            val widthPx = app.canvasSize.first.takeIf { it > 0f } ?: config.screenWidthDp.dp.toPx()
+            app.towerWidthRange(widthPx).let { it.start.toDp().value..it.endInclusive.toDp().value }
+        }
+        val maxTowerWidthDp = widthRange.endInclusive
         val maxTowerHeightDp = combinedWorkspace?.let { with(density) { it.h.toDp().value } }
-            ?: (config.screenHeightDp - 40f).coerceAtLeast(AppState.TOWER_MIN_HEIGHT_DP)
-        val minTowerWidthDp = minOf(AppState.TOWER_MIN_WIDTH_DP, maxTowerWidthDp)
+            ?: config.screenHeightDp.toFloat()
         val minTowerHeightDp = minOf(AppState.TOWER_MIN_HEIGHT_DP, maxTowerHeightDp)
         val defaultTowerWidthDp = minOf(AppState.TOWER_DEFAULT_WIDTH_DP, maxTowerWidthDp)
         val defaultTowerHeightDp = minOf(AppState.TOWER_DEFAULT_HEIGHT_DP, maxTowerHeightDp)
         val towerWidthDp = with(density) {
-            (app.towerSpot.w.takeIf { it > 0f } ?: defaultTowerWidthDp.dp.toPx()).toDp().value
-        }.coerceIn(minTowerWidthDp, maxTowerWidthDp)
+            val widthPx = if (app.tvLandscapeLayout) app.tvTowerWidthPx else app.towerSpot.w
+            (widthPx.takeIf { it > 0f } ?: defaultTowerWidthDp.dp.toPx()).toDp().value
+        }.coerceIn(widthRange)
         val towerHeightDp = with(density) {
             (app.towerSpot.h.takeIf { it > 0f } ?: defaultTowerHeightDp.dp.toPx()).toDp().value
         }.coerceIn(minTowerHeightDp, maxTowerHeightDp)
@@ -1512,6 +2484,7 @@ private fun MapSheet(app: AppState) {
                         )
                     }
                 }
+                SwitchRow("Select driver dots", app.settings.mapDriverSelection, app.settings::updateMapDriverSelection)
                 Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("Timing", style = Type.headline)
@@ -1534,7 +2507,7 @@ private fun MapSheet(app: AppState) {
                         if (!app.combinedOverlaysDocked) {
                             SwitchRow("Lock the map in place", app.mapLocked) { app.toggleMapLock() }
                         }
-                        SwitchRow("Keep feeds clear of the map", app.mapReserve, app::chooseMapReserve)
+                        if (!app.trackLogoAnchored) SwitchRow("Keep feeds clear of the map", app.mapReserve, app::chooseMapReserve)
                     }
                     Text(
                         if (app.mapMode == MapMode.TRACK) "Locked, the map stays put while you arrange the feeds under it. Kept clear, the feeds make room for it instead of lying under it."
@@ -1550,24 +2523,24 @@ private fun MapSheet(app: AppState) {
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("Driver dot size", style = Type.body, modifier = Modifier.weight(1f))
-                            Text("%.0f dp".format(app.mapDotSizeDp), style = Type.footnote)
+                            Text("%.1f dp".format(app.mapDotSizeDp), style = Type.footnote)
                         }
                         AppleSlider(
                             value = app.mapDotSizeDp,
                             onValueChange = app::updateMapDotSize,
-                            valueRange = 3f..8f,
+                            valueRange = AppState.MIN_MAP_DOT_SIZE..AppState.MAX_MAP_DOT_SIZE,
                             trackColor = Ink.surfaceHigh,
                         )
                     }
                     Column(Modifier.padding(top = 8.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("Driver abbreviation size", style = Type.body, modifier = Modifier.weight(1f))
-                            Text("%.0f sp".format(app.mapLabelSizeSp), style = Type.footnote)
+                            Text("%.1f sp".format(app.mapLabelSizeSp), style = Type.footnote)
                         }
                         AppleSlider(
                             value = app.mapLabelSizeSp,
                             onValueChange = app::updateMapLabelSize,
-                            valueRange = 7f..12f,
+                            valueRange = AppState.MIN_MAP_LABEL_SIZE..AppState.MAX_MAP_LABEL_SIZE,
                             trackColor = Ink.surfaceHigh,
                         )
                     }
@@ -1587,6 +2560,73 @@ private fun MapSheet(app: AppState) {
                     style = Type.footnote,
                     modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 2.dp, bottom = 4.dp),
                 )
+            }
+            Column(
+                Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
+                    .background(Ink.background).padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                Text("Unified onboard information badge", style = Type.subhead)
+                Text("One row: position, number, driver, lap, gap and speed. Actual sector colours remain directly below.",
+                    style = Type.footnote, modifier = Modifier.padding(top = 4.dp, bottom = 8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Badge size", style = Type.body, modifier = Modifier.weight(1f))
+                    Text("%d%%".format((app.speedReadoutScale * 100f).toInt()), style = Type.footnote)
+                }
+                AppleSlider(
+                    value = app.speedReadoutScale,
+                    onValueChange = app::updateSpeedReadoutScale,
+                    valueRange = SpeedReadoutScale.MIN..SpeedReadoutScale.MAX,
+                    trackColor = Ink.surfaceHigh,
+                )
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Corner anchor", style = Type.body, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { app.updateOnboardBadgeAnchor(OnboardBadgeAnchor.TOP_LEFT) },
+                        modifier = Modifier.tvFocusRing()) {
+                        Text("Top-left", color = if (app.onboardBadgeAnchor == OnboardBadgeAnchor.TOP_LEFT)
+                            Ink.primary else Ink.secondary)
+                    }
+                    TextButton(onClick = { app.updateOnboardBadgeAnchor(OnboardBadgeAnchor.TOP_RIGHT) },
+                        modifier = Modifier.tvFocusRing()) {
+                        Text("Top-right", color = if (app.onboardBadgeAnchor == OnboardBadgeAnchor.TOP_RIGHT)
+                            Ink.primary else Ink.secondary)
+                    }
+                }
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Horizontal offset", style = Type.body, modifier = Modifier.weight(1f))
+                    Text("%.0f dp".format(app.onboardBadgeXOffsetDp), style = Type.footnote)
+                }
+                AppleSlider(
+                    value = app.onboardBadgeXOffsetDp,
+                    onValueChange = app::updateOnboardBadgeXOffset,
+                    valueRange = -OnboardBadgeGeometry.OFFSET_LIMIT_DP..
+                        OnboardBadgeGeometry.OFFSET_LIMIT_DP,
+                    trackColor = Ink.surfaceHigh,
+                )
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Vertical offset", style = Type.body, modifier = Modifier.weight(1f))
+                    Text("%.0f dp".format(app.onboardBadgeYOffsetDp), style = Type.footnote)
+                }
+                AppleSlider(
+                    value = app.onboardBadgeYOffsetDp,
+                    onValueChange = app::updateOnboardBadgeYOffset,
+                    valueRange = -OnboardBadgeGeometry.OFFSET_LIMIT_DP..
+                        OnboardBadgeGeometry.OFFSET_LIMIT_DP,
+                    trackColor = Ink.surfaceHigh,
+                )
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Badge opacity", style = Type.body, modifier = Modifier.weight(1f))
+                    Text("%d%%".format((app.onboardBadgeOpacity * 100f).toInt()),
+                        style = Type.footnote)
+                }
+                AppleSlider(
+                    value = app.onboardBadgeOpacity,
+                    onValueChange = app::updateOnboardBadgeOpacity,
+                    valueRange = 0.2f..1f,
+                    trackColor = Ink.surfaceHigh,
+                )
+                TextButton(onClick = app::resetOnboardBadge, modifier = Modifier.tvFocusRing()) {
+                    Text("Reset onboard badge position and appearance")
+                }
             }
             if (app.towerOpen) {
                 Column(
@@ -1614,27 +2654,22 @@ private fun MapSheet(app: AppState) {
                         trackColor = Ink.surfaceHigh,
                     )
                 }
-                if (!app.combinedOverlaysDocked) {
-                    Column(
-                        Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
-                            .background(Ink.background).padding(horizontal = 16.dp, vertical = 12.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Width", style = Type.body, modifier = Modifier.weight(1f))
-                            Text("%.0f dp".format(towerWidthDp), style = Type.footnote)
-                        }
-                        AppleSlider(
-                            value = towerWidthDp,
-                            onValueChange = { value ->
-                                app.updateTowerSize(
-                                    with(density) { value.dp.toPx() },
-                                    with(density) { towerHeightDp.dp.toPx() },
-                                )
-                            },
-                            valueRange = minTowerWidthDp..maxTowerWidthDp,
-                            onValueChangeFinished = app::finishTowerResize,
-                            trackColor = Ink.surfaceHigh,
-                        )
+                Column(
+                    Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
+                        .background(Ink.background).padding(horizontal = 16.dp, vertical = 12.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Width", style = Type.body, modifier = Modifier.weight(1f))
+                        Text("%.0f dp".format(towerWidthDp), style = Type.footnote)
+                    }
+                    AppleSlider(
+                        value = towerWidthDp,
+                        onValueChange = { value -> app.updateTowerWidth(with(density) { value.dp.toPx() }) },
+                        valueRange = widthRange,
+                        onValueChangeFinished = app::finishTowerResize,
+                        trackColor = Ink.surfaceHigh,
+                    )
+                    if (!app.tvLandscapeLayout) {
                         Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text("Height", style = Type.body, modifier = Modifier.weight(1f))
                             Text("%.0f dp".format(towerHeightDp), style = Type.footnote)
@@ -1651,26 +2686,18 @@ private fun MapSheet(app: AppState) {
                             onValueChangeFinished = app::finishTowerResize,
                             trackColor = Ink.surfaceHigh,
                         )
-                        Text(
-                            "Minimum width is 300 dp where the available screen area allows it, keeping the sector and tyre columns visible. You can also drag the tower header to move it and its corner grip to resize it.",
-                            style = Type.footnote,
-                            modifier = Modifier.padding(top = 8.dp),
-                        )
                     }
-                } else {
                     Text(
-                        "This layout fixes the tower and map in their own sections. Choose Move and overlap to resize and place them freely.",
+                        "Unlock the layout to use the tower handles. Drag on touch, or press OK on a handle, use the arrows, then press OK to finish.",
                         style = Type.footnote,
                         modifier = Modifier.padding(top = 8.dp),
                     )
                 }
-                Column(
+                if (!app.tvLandscapeLayout) Column(
                     Modifier.padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
                         .background(Ink.background).padding(vertical = 4.dp)
                 ) {
-                    if (!app.combinedOverlaysDocked) {
-                        SwitchRow("Lock the timing tower in place", app.towerLocked) { app.toggleTowerLock() }
-                    }
+                    SwitchRow("Lock the timing tower in place", app.towerLocked) { app.toggleTowerLock() }
                     SwitchRow("Keep feeds clear of the timing tower", app.towerReserve, app::chooseTowerReserve)
                 }
                 Text(
@@ -1698,7 +2725,9 @@ private fun BufferingRing(feed: FeedPlayer, modifier: Modifier) {
             shown = false
         }
     }
-    val alpha by animateFloatAsState(if (shown) 1f else 0f, tween(Motion.SCREEN_MS, easing = EaseOut), label = "buffering")
+    val alpha by animateFloatAsState(if (shown) 1f else 0f,
+        tween(if (LocalReduceMotion.current) 0 else Motion.SCREEN_MS, easing = EaseOut),
+        label = "buffering")
     if (alpha > 0f) {
         androidx.compose.material3.CircularProgressIndicator(
             modifier = modifier.size(36.dp).graphicsLayer { this.alpha = alpha },
@@ -1725,12 +2754,13 @@ private val VOTE_SIDE_SHEET = 840.dp
  */
 @Composable
 private fun NextLivePrompt(app: AppState, modifier: Modifier) {
-    val fade = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
-    val slide = tween<IntOffset>(Motion.SCREEN_MS, easing = EaseOut)
+    val durationMs = if (LocalReduceMotion.current) 0 else Motion.SCREEN_MS
+    val fade = tween<Float>(durationMs, easing = EaseOut)
+    val slide = tween<IntOffset>(durationMs, easing = EaseOut)
     // Clear of the playback controls while they're up.
     val lift by animateDpAsState(
         if (app.chromeVisible && !app.arranging) 110.dp else 0.dp,
-        tween(Motion.SCREEN_MS, easing = EaseOut),
+        tween(durationMs, easing = EaseOut),
         label = "nextLift",
     )
     // Kept while it fades out.
@@ -1774,18 +2804,19 @@ private fun NextLivePrompt(app: AppState, modifier: Modifier) {
 @Composable
 private fun VotePrompt(app: AppState, modifier: Modifier) {
     val activity = LocalContext.current as Activity
+    val durationMs = if (LocalReduceMotion.current) 0 else Motion.SCREEN_MS
     LaunchedEffect(app.votePromptOpen) {
         if (app.votePromptOpen) {
             delay(VOTE_PROMPT_MS)
             app.dismissVotePrompt()
         }
     }
-    val fade = tween<Float>(Motion.SCREEN_MS, easing = EaseOut)
-    val slide = tween<IntOffset>(Motion.SCREEN_MS, easing = EaseOut)
+    val fade = tween<Float>(durationMs, easing = EaseOut)
+    val slide = tween<IntOffset>(durationMs, easing = EaseOut)
     // Clear of the playback controls while they're up.
     val lift by animateDpAsState(
         if (app.chromeVisible && !app.arranging) 110.dp else 0.dp,
-        tween(Motion.SCREEN_MS, easing = EaseOut),
+        tween(durationMs, easing = EaseOut),
         label = "voteLift",
     )
     AnimatedVisibility(

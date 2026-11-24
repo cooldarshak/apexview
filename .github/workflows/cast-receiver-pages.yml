@@ -1,0 +1,44 @@
+name: Publish Cast layout receiver
+
+on:
+  push:
+    branches: [feature/hevc-stitching-poc]
+    paths:
+      - web/cast/**
+      - app/src/main/assets/cast/receiver-model.mjs
+      - tools/package_cast_receiver.py
+      - tools/test_cast_layout_receiver.mjs
+      - .github/workflows/cast-receiver-pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: cast-receiver-pages
+  cancel-in-progress: true
+
+jobs:
+  receiver:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate receiver geometry and CAF protocol
+        run: |
+          node tools/test_cast_receiver.mjs
+          node tools/test_cast_layout_receiver.mjs
+          node --check web/cast/receiver.mjs
+      - name: Package static receiver
+        run: python3 tools/package_cast_receiver.py --output-dir _site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - name: Deploy receiver
+        id: deployment
+        uses: actions/deploy-pages@v4

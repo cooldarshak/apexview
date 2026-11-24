@@ -1,0 +1,184 @@
+name: Pitwall verified release
+
+# Production publishing is never a side effect of a source push or a green APK.
+# The user's TCL+phone acceptance must be documented and manually approved.
+on:
+  workflow_dispatch:
+    inputs:
+      accepted_debug_run_id:
+        description: "Successful Android debug APK workflow run ID from this branch"
+        required: true
+        type: string
+      accepted_commit_sha:
+        description: "Exact 40-character accepted source commit SHA"
+        required: true
+        type: string
+      hardware_acceptance_issue:
+        description: "Closed repo issue labelled pitwall-hardware-accepted with full 16-gate evidence"
+        required: true
+        type: string
+      publish:
+        description: "Publish release assets after all validation (otherwise build a candidate only)"
+        required: true
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      accepted_debug_run_id:
+        description: 'Green debug workflow run ID from this branch'
+        required: true
+        type: string
+      accepted_commit_sha:
+        description: 'Exact accepted source SHA'
+        required: true
+        type: string
+      hardware_acceptance_issue:
+        description: 'Closed issue with all 16 hardware/release gates'
+        required: true
+        type: string
+      publish:
+        description: 'Publish signed artifacts after acceptance'
+        required: true
+        type: boolean
+permissions:
+  contents: write
+  actions: read
+  issues: read
+
+jobs:
+  verified-release:
+    name: Validate signed production release
+    runs-on: ubuntu-24.04
+    environment: pitwall-production
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PITWALL_OFFICIAL_RELEASE: "true"
+      ACCEPTED_RUN_ID: ${{ inputs.accepted_debug_run_id }}
+      ACCEPTED_SHA: ${{ inputs.accepted_commit_sha }}
+      ACCEPTANCE_ISSUE: ${{ inputs.hardware_acceptance_issue }}
+      SIGNER_SHA256: ${{ secrets.PITWALL_EXPECTED_SIGNER_SHA256 }}
+      APK_SIGNING_KEYSTORE_BASE64: ${{ secrets.APK_SIGNING_KEYSTORE_BASE64 }}
+      APK_SIGNING_STORE_PASSWORD: ${{ secrets.APK_SIGNING_STORE_PASSWORD }}
+      APK_SIGNING_KEY_ALIAS: ${{ secrets.APK_SIGNING_KEY_ALIAS }}
+      APK_SIGNING_KEY_PASSWORD: ${{ secrets.APK_SIGNING_KEY_PASSWORD }}
+    steps:
+      - name: Check out the requested accepted source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.accepted_commit_sha }}
+          persist-credentials: false
+
+      - name: Enforce green source build and documented physical acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ACCEPTED_SHA" =~ ^[a-fA-F0-9]{40}$ ]] || exit 1
+          [[ "$ACCEPTED_RUN_ID" =~ ^[0-9]+$ ]] || exit 1
+          [[ "$ACCEPTANCE_ISSUE" =~ ^[0-9]+$ ]] || exit 1
+          test "$(git rev-parse HEAD)" = "$ACCEPTED_SHA"
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ACCEPTED_RUN_ID")"
+          test "$(jq -r .name <<< "$run_json")" = "Android debug APK"
+          test "$(jq -r .head_sha <<< "$run_json")" = "$ACCEPTED_SHA"
+          test "$(jq -r .head_branch <<< "$run_json")" = "feature/pitwall-performance-audit-plan"
+          test "$(jq -r .conclusion <<< "$run_json")" = "success"
+          branch_json="$(gh api "repos/$GITHUB_REPOSITORY/branches/feature/pitwall-performance-audit-plan")"
+          test "$(jq -r .commit.sha <<< "$branch_json")" = "$ACCEPTED_SHA" || {
+            echo "::error::Accepted source is no longer the current release branch HEAD"; exit 1;
+          }
+          run_number="$(jq -er .run_number <<< "$run_json")"
+          [[ "$run_number" =~ ^[0-9]+$ ]] && (( run_number > 0 ))
+          issue="$(gh api "repos/$GITHUB_REPOSITORY/issues/$ACCEPTANCE_ISSUE")"
+          test "$(jq -r .state <<< "$issue")" = "closed"
+          jq -e '[.labels[].name] | index("pitwall-hardware-accepted") != null' <<< "$issue" >/dev/null
+          # A human acceptance issue documents actual TCL and phone behavior,
+          # not a synthetic suite or a chat claim.
+          for marker in "TCL 55C655" "Galaxy S22 Ultra" "Widevine" "Pitwall Cast" \
+              "SINGLE" "MULTIPLE" "closed captions" "Material 3" "16 gates"; do
+            grep -qiF "$marker" <<< "$(jq -r .body <<< "$issue")"
+          done
+          # The issue's label and a few search terms are not proof of all
+          # release gates. Require each gate's explicit PASS + HTTPS evidence
+          # tied to this exact accepted commit and debug workflow run.
+          printf '%s' "$issue" | python3 scripts/validate_pitwall_acceptance.py \
+            --sha "$ACCEPTED_SHA" --run "$ACCEPTED_RUN_ID"
+          echo "PITWALL_VERIFIED_DEBUG_RUN_NUMBER=$run_number" >> "$GITHUB_ENV"
+          echo "PITWALL_VERSION=1.0.$((run_number * 2 + 1))" >> "$GITHUB_ENV"
+          echo "Source, green debug build and recorded acceptance matched." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Java and Android tools
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install the tested SDK/build tools
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0" "build-tools;36.0.0"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Configure mandatory persistent signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in APK_SIGNING_KEYSTORE_BASE64 APK_SIGNING_STORE_PASSWORD APK_SIGNING_KEY_ALIAS APK_SIGNING_KEY_PASSWORD SIGNER_SHA256; do
+            [[ -n "${!key:-}" ]] || { echo "::error::Missing mandatory release secret $key"; exit 1; }
+          done
+          [[ "$SIGNER_SHA256" =~ ^([a-fA-F0-9]{2}:){31}[a-fA-F0-9]{2}$|^[a-fA-F0-9]{64}$ ]] || exit 1
+          keystore="$RUNNER_TEMP/pitwall-official-key.p12"
+          printf '%s' "$APK_SIGNING_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          test -s "$keystore"
+          {
+            echo "storeFile=$keystore"
+            echo "storePassword=$APK_SIGNING_STORE_PASSWORD"
+            echo "keyAlias=$APK_SIGNING_KEY_ALIAS"
+            echo "keyPassword=$APK_SIGNING_KEY_PASSWORD"
+          } > keystore.properties
+          chmod 600 keystore.properties "$keystore"
+
+      - name: Compile, test and assemble release under accepted build number
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon testDebugUnitTest assembleRelease
+          apk="$(find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -print -quit)"
+          test -n "$apk" && test -s "$apk"
+          mkdir -p "$RUNNER_TEMP/pitwall-candidate"
+          dest="$RUNNER_TEMP/pitwall-candidate/pitwall-tv-$PITWALL_VERSION.apk"
+          cp "$apk" "$dest"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$dest" > "$RUNNER_TEMP/pitwall-signature.txt"
+          actual="$(sed -nE 's/^Signer #1 certificate SHA-256 digest: ([a-fA-F0-9]+)/\1/p' "$RUNNER_TEMP/pitwall-signature.txt" | head -1)"
+          [[ "$actual" =~ ^[a-fA-F0-9]{64}$ ]] || exit 1
+          expected="$(tr -d ':' <<< "$SIGNER_SHA256" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected" || { echo "::error::Release signer differs from installed Pitwall signer"; exit 1; }
+          (cd "$RUNNER_TEMP/pitwall-candidate" && sha256sum "pitwall-tv-$PITWALL_VERSION.apk" > SHA256SUMS)
+          echo "Verified signed release candidate $PITWALL_VERSION from accepted debug workflow." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload signed verified release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: pitwall-official-release-candidate
+          path: ${{ runner.temp }}/pitwall-candidate/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish the official GitHub release only on explicit request
+        if: ${{ inputs.publish }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$PITWALL_VERSION"
+          test -z "$(gh release view "v$version" --json tagName --jq .tagName 2>/dev/null || true)" || {
+            echo "::error::Release tag exists; refusing to replace signed APK"; exit 1;
+          }
+          gh release create "v$version" \
+            "$RUNNER_TEMP/pitwall-candidate/pitwall-tv-$version.apk" \
+            "$RUNNER_TEMP/pitwall-candidate/SHA256SUMS" \
+            --repo "$GITHUB_REPOSITORY" --target "$ACCEPTED_SHA" \
+            --title "Pitwall TV $version" \
+            --notes "Device acceptance: issue #$ACCEPTANCE_ISSUE. CI: run $ACCEPTED_RUN_ID. Commit: $ACCEPTED_SHA."

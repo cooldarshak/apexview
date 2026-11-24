@@ -127,9 +127,70 @@ class DriverTimingTest {
     }
 
     @Test
+    fun keepsSparseMiniSectorSlotsAndShowsOnlyThisLapsProgress() {
+        val primary = listOf(
+            """00:00:01.000{"Lines":{"16":{"Position":"1","NumberOfLaps":0}}}""",
+            """00:01:12.000{"Lines":{"16":{"NumberOfLaps":1,"Sectors":{"2":{"Value":"23.021"}}}}}""",
+            """00:01:12.600{"Lines":{"16":{"NumberOfLaps":0,"Sectors":{"2":{"Value":"23.021"}}}}}""",
+        ).joinToString("\n")
+        val supplement = listOf(
+            """00:00:10.000{"Lines":{"16":{"Sectors":{"0":{"Segments":{"2":{"Status":2049}}}}}}}""",
+            """00:00:11.000{"Lines":{"16":{"Sectors":{"0":{"Value":"","Segments":{"0":{"Status":2048}}}}}}}""",
+            """00:00:35.000{"Lines":{"16":{"Sectors":{"1":{"Segments":{"1":{"Status":2049}}}}}}}""",
+            """00:01:00.000{"Lines":{"16":{"Sectors":{"2":{"Segments":{"0":{"Status":2048}}}}}}}""",
+            """00:01:12.300{"Lines":{"16":{"Sectors":{"0":{"Segments":{"0":{"Status":2048}}}}}}}""",
+            """00:01:13.000{"Lines":{"16":{"Sectors":{"2":{"Segments":{"2":{"Status":2051}}}}}}}""",
+            """00:01:14.000{"Lines":{"16":{"Sectors":{"1":{"Segments":{"0":{"Status":2048}}}}}}}""",
+        ).joinToString("\n")
+        val laps = DriverTimingParser.parse(primary, t0, supplement).getValue("16")
+        assertEquals(listOf(0, 0, 2049), laps.at(t0 + 10_000)!!.towerSector(0)!!.segments)
+        assertEquals(listOf(2048, 0, 2049), laps.at(t0 + 11_000)!!.towerSector(0)!!.segments)
+        assertNull(laps.at(t0 + 11_000)!!.towerSector(1))
+        assertEquals(listOf(0, 2049), laps.at(t0 + 35_000)!!.towerSector(1)!!.segments)
+        assertNull(laps.at(t0 + 35_000)!!.towerSector(2))
+        val newLap = laps.at(t0 + 73_000)!!
+        assertEquals(2, laps.lapAt(t0 + 73_000))
+        assertEquals(listOf(2048, 0, 0), newLap.towerSector(0)!!.segments)
+        assertEquals(listOf(0, 0), newLap.towerSector(1)!!.segments)
+        assertEquals(listOf(0, 0, 0), newLap.towerSector(2)!!.segments)
+        assertEquals("", newLap.towerSector(2)!!.time)
+        assertEquals(listOf(2048, 0, 2051), newLap.lapSectors[2]!!.segments)
+        assertEquals(listOf(2048, 0), laps.at(t0 + 74_000)!!.towerSector(1)!!.segments)
+    }
+
+    @Test
     fun newLapClearsTheSectors() {
         val s = laps.at(t0 + 202_000)!!
         assertTrue(s.sectors.all { it == null })
         assertEquals("1:21.024", s.lastLap!!.time)
+    }
+    @Test
+    fun timingTopicsAreMergedByTimestampRatherThanFileOrder() {
+        val primary = listOf(
+            """00:00:01.000{"Lines":{"16":{"Position":"1"}}}""",
+            """00:00:03.000{"Lines":{"16":{"Position":"3"}}}""",
+        ).joinToString("\n")
+        val supplement = listOf(
+            """00:00:02.000{"Lines":{"16":{"Position":"2"}}}""",
+            """00:00:04.000{"Lines":{"16":{"Position":"4"}}}""",
+        ).joinToString("\n")
+
+        val laps = DriverTimingParser.parse(primary, t0, supplement).getValue("16")
+        assertEquals(2, laps.at(t0 + 2_500)!!.position)
+        assertEquals(4, laps.at(t0 + 4_500)!!.position)
+    }
+
+    @Test
+    fun outOfOrderTopicFallsBackToChronologicalSorting() {
+        val primary = listOf(
+            """00:00:03.000{"Lines":{"16":{"Position":"3"}}}""",
+            """00:00:01.000{"Lines":{"16":{"Position":"1"}}}""",
+        ).joinToString("\n")
+        val supplement = """00:00:02.000{"Lines":{"16":{"Position":"2"}}}"""
+
+        val laps = DriverTimingParser.parse(primary, t0, supplement).getValue("16")
+        assertEquals(1, laps.at(t0 + 1_500)!!.position)
+        assertEquals(2, laps.at(t0 + 2_500)!!.position)
+        assertEquals(3, laps.at(t0 + 3_500)!!.position)
     }
 }

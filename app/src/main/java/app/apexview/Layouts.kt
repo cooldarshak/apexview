@@ -8,11 +8,15 @@ data class Slot(val x: Float, val y: Float, val w: Float) {
     val h get() = w * 9f / 16f
 }
 
+enum class DecoderMode(val label: String) { MULTIPLE("Multiple decoders"), SINGLE("Single decoder") }
+
 enum class LayoutMode(val label: String) {
     FEATURED("Main + strip"),
     GRID("Grid"),
     /** Broadcast-style TV view: video left, timing tower top-right, track map below. */
     TV("TV"),
+    TILE_TEST("Tile testing"),
+    SINGLE_DECODER_TEST("Single-decoder test"),
     /** The arrangement saved with Save layout; falls back to main + strip where there's none. */
     CUSTOM("My layout"),
 }
@@ -38,6 +42,31 @@ data class CombinedOverlayPlan(
  * rest share a strip beside or below it, whichever leaves more picture on screen.
  */
 object Layouts {
+    internal const val DEFAULT_TV_TOWER_SHARE = 0.34f
+
+    internal fun tvTowerWidthRange(width: Float) = width * 0.20f..width * 0.60f
+
+    internal fun tvSingleLandscapeSlot(width: Float, height: Float, feedWidth: Float = width - width * DEFAULT_TV_TOWER_SHARE): Slot {
+        val videoTop = height * 0.09375f
+        val videoHeight = height * (1f - 0.09375f - 0.0625f)
+        return Slot(0f, videoTop, min(feedWidth, videoHeight * 16f / 9f))
+    }
+
+    internal fun logoMapOver(main: Slot): Area {
+        val width = main.w * 0.35f
+        return Area(main.x + main.w - width - main.w * 0.015f, main.y + main.h * 0.015f, width, main.h * 0.32f)
+    }
+
+    internal fun fitMapInside(map: Area, bounds: Area): Area {
+        val width = map.w.coerceIn(min(1f, bounds.w), bounds.w)
+        val height = map.h.coerceIn(min(1f, bounds.h), bounds.h)
+        return Area(
+            map.x.coerceIn(bounds.x, (bounds.x + bounds.w - width).coerceAtLeast(bounds.x)),
+            map.y.coerceIn(bounds.y, (bounds.y + bounds.h - height).coerceAtLeast(bounds.y)),
+            width, height,
+        )
+    }
+
     /**
      * Gives the video feeds a dedicated main area and reserves the rest for the timing tower and
      * map together. Portrait uses stacked horizontal bands; landscape uses a right-hand sidebar.
@@ -49,6 +78,7 @@ object Layouts {
         width: Float,
         height: Float,
         overlayMode: OverlayLayoutMode,
+        tvTowerWidth: Float = width * DEFAULT_TV_TOWER_SHARE,
     ): CombinedOverlayPlan {
         val portrait = height >= width
         val floating = overlayMode == OverlayLayoutMode.FLOATING
@@ -58,17 +88,17 @@ object Layouts {
         val map: Area
         val tvLandscape = mode == LayoutMode.TV && !portrait && !floating
         if (tvLandscape) {
-            // Match the TV broadcast composition: a slim title strip across the top, the
-            // main 16:9 picture below it on the left, timing at the top-right, map beneath it,
-            // and a small black margin at the bottom.
+            // Keep the 16:9 picture on the left and timing in the full right column.
+            // The tracker overlays the main video's logo corner.
             val titleBand = height * 0.09375f
             val bottomMargin = height * 0.0625f
-            val feedWidth = width * 0.66f
-            val towerBottom = height * 0.65625f
+            val towerWidth = tvTowerWidth.coerceIn(tvTowerWidthRange(width))
+            val feedWidth = width - towerWidth
+
             feeds = Area(0f, titleBand, feedWidth, height - titleBand - bottomMargin)
-            workspace = Area(feedWidth, 0f, width - feedWidth, height)
-            tower = Area(workspace.x, 0f, workspace.w, towerBottom)
-            map = Area(workspace.x, towerBottom, workspace.w, height - bottomMargin - towerBottom)
+            workspace = Area(feedWidth, 0f, towerWidth, height)
+            tower = workspace
+            map = logoMapOver(tvSingleLandscapeSlot(width, height, feedWidth))
         } else if (portrait) {
             val feedFraction = if (floating) 0.50f else 0.34f
             feeds = Area(0f, 0f, width, height * feedFraction)
@@ -97,17 +127,36 @@ object Layouts {
         val slots = if (tvLandscape && n == 1) {
             // The broadcast feed starts immediately below the top title band rather than
             // vertically centering the image in the whole left column.
-            listOf(Slot(feeds.x, feeds.y, min(feeds.w, feeds.h * 16f / 9f)))
+            listOf(tvSingleLandscapeSlot(width, height, feeds.w))
         } else {
             place(mode, n, feeds.w, feeds.h).map { Slot(it.x + feeds.x, it.y + feeds.y, it.w) }
         }
-        return CombinedOverlayPlan(slots, feeds, workspace, tower, map, floating)
+        return CombinedOverlayPlan(slots, feeds, workspace, tower,
+            if (tvLandscape && slots.isNotEmpty()) logoMapOver(slots.first()) else map, floating)
     }
 
     fun place(mode: LayoutMode, n: Int, width: Float, height: Float): List<Slot> = when {
         n == 0 -> emptyList()
-        mode == LayoutMode.GRID || n == 1 -> grid(n, 0f, 0f, width, height, center = true)
+        mode == LayoutMode.TILE_TEST && n == 2 -> tileTestPair(width, height)
+        mode == LayoutMode.GRID || mode == LayoutMode.TILE_TEST || mode == LayoutMode.SINGLE_DECODER_TEST || n == 1 -> grid(n, 0f, 0f, width, height, center = true)
         else -> featured(n, width, height)
+    }
+
+    /** Two feeds side-by-side on landscape TV, stacked on portrait phones. */
+    private fun tileTestPair(width: Float, height: Float): List<Slot> {
+        val portrait = height >= width
+        val tileW = if (portrait) min(width, height / 2f * 16f / 9f)
+            else min(width / 2f, height * 16f / 9f)
+        val tileH = tileW * 9f / 16f
+        return if (portrait) {
+            val left = (width - tileW) / 2f
+            val top = (height - 2f * tileH) / 2f
+            listOf(Slot(left, top, tileW), Slot(left, top + tileH, tileW))
+        } else {
+            val left = (width - 2f * tileW) / 2f
+            val top = (height - tileH) / 2f
+            listOf(Slot(left, top, tileW), Slot(left + tileW, top, tileW))
+        }
     }
 
     private class Fit(val cols: Int, val rows: Int, val w: Float)
@@ -216,6 +265,7 @@ object Layouts {
         towerWidth: Float,
         towerHeight: Float,
         mapMinSide: Float? = null,
+        preferredTower: Area? = null,
     ): OverlayArrangement {
         val panelW = towerWidth.coerceIn(1f, width)
         val panelH = towerHeight.coerceIn(1f, height)
@@ -236,12 +286,25 @@ object Layouts {
             candidates += place(mode, n, width * (1f - fraction), height)
         }
 
+        if (preferredTower != null) {
+            val (x, y, w, h) = preferredTower
+            listOf(Area(0f, 0f, x, height), Area(x + w, 0f, width - x - w, height),
+                Area(0f, 0f, width, y), Area(0f, y + h, width, height - y - h))
+                .filter { it.w > 1f && it.h > 1f }
+                .forEach { band ->
+                    candidates += place(mode, n, band.w, band.h).map { Slot(it.x + band.x, it.y + band.y, it.w) }
+                }
+        }
+        var bestKeepsTower = false
         var best: OverlayArrangement? = null
         var bestScore = Double.NEGATIVE_INFINITY
         candidates.forEach { slots ->
             val free = freeAreas(slots, width, height)
             free.filter { it.w >= panelW && it.h >= panelH }.forEach gapLoop@ { gap ->
-                val tower = Area(gap.x, gap.y, panelW, panelH)
+                val preferred = preferredTower?.takeIf {
+                    it.x >= gap.x && it.y >= gap.y && it.x + it.w <= gap.x + gap.w && it.y + it.h <= gap.y + gap.h
+                }
+                val tower = preferred ?: Area(gap.x, gap.y, panelW, panelH)
                 val map = if (minMapSide == null) null else free
                     .filter { area ->
                         area.w >= minMapSide && area.h >= minMapSide && !area.overlaps(tower)
@@ -250,7 +313,8 @@ object Layouts {
                 if (minMapSide != null && map == null) return@gapLoop
                 val picture = slots.sumOf { (it.w * it.h).toDouble() }
                 val score = picture + panelW.toDouble() * panelH + (map?.let { it.w.toDouble() * it.h } ?: 0.0)
-                if (score > bestScore) {
+                if (preferred != null && !bestKeepsTower || (preferred != null) == bestKeepsTower && score > bestScore) {
+                    bestKeepsTower = preferred != null
                     bestScore = score
                     best = OverlayArrangement(slots, tower, map)
                 }
@@ -300,4 +364,20 @@ data class Area(val x: Float, val y: Float, val w: Float, val h: Float) {
     fun overlaps(s: Slot) = x < s.x + s.w - 1 && s.x < x + w - 1 && y < s.y + s.h - 1 && s.y < y + h - 1
     fun overlaps(other: Area) = x < other.x + other.w - 1 && other.x < x + w - 1 &&
         y < other.y + other.h - 1 && other.y < y + h - 1
+}
+
+internal enum class TowerEdit { MOVE, HEIGHT, SIZE }
+
+/** Resizing can grow back into the workspace when the panel is already against an edge. */
+internal fun Area.adjustTower(
+    edit: TowerEdit, dx: Float, dy: Float, bounds: Area,
+    minWidth: Float, minHeight: Float, maxWidth: Float, maxHeight: Float,
+): Area {
+    val width = (w + if (edit == TowerEdit.SIZE) dx else 0f).coerceIn(minWidth, maxWidth)
+    val height = (h + if (edit != TowerEdit.MOVE) dy else 0f).coerceIn(minHeight, maxHeight)
+    val left = (x + if (edit == TowerEdit.MOVE) dx else 0f)
+        .coerceIn(bounds.x, (bounds.x + bounds.w - width).coerceAtLeast(bounds.x))
+    val top = (y + if (edit == TowerEdit.MOVE) dy else 0f)
+        .coerceIn(bounds.y, (bounds.y + bounds.h - height).coerceAtLeast(bounds.y))
+    return Area(left, top, width, height)
 }

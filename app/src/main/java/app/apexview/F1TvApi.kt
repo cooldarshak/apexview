@@ -118,11 +118,39 @@ data class WeekendContent(
 }
 
 /** What contentPlay returns: the stream, and the Widevine license URL when the stream is protected. */
-data class PlayInfo(val url: String, val licenseUrl: String?, val streamType: String)
+data class PlayInfo(
+    val url: String,
+    val licenseUrl: String?,
+    val streamType: String,
+    /** Only standard, authorised single-feed contentPlay streams may emit the HEVC POC diagnostic. */
+    val allowHevcProfileProbe: Boolean = false,
+    /** Sanitised label only. Never contains a stream or licence URL. */
+    val profileLabel: String = "feed",
+    /** Scope key prevents captures from different sessions being compared. */
+    val profileGroup: String = "session",
+    val requestedPlatform: String = "unknown",
+    val playerType: String = "unknown",
+    val offerDiagnostic: String = "",
+    /** Alternative from this very same F1 CONTENT/PLAY channel. A URL is NOT proof of clear media. */
+    val authorizedHlsCandidateUrl: String? = null,
+)
 
 /** One play session holding every feed of a content, keyed by channel ID. */
-data class MultiPlay(val feeds: Map<Int, String>, val licenseUrl: String?, val streamType: String) {
-    fun stream(url: String) = PlayInfo(url, licenseUrl, streamType)
+data class MultiPlay(
+    val feeds: Map<Int, String>, val licenseUrl: String?, val streamType: String,
+    val streamsByChannel: Map<Int, PlayInfo> = emptyMap(),
+) {
+    /** The observer reads only Media3's parsed Format/DRM callbacks, never URLs or protected samples. */
+    fun stream(url: String, channelId: Int?, contentId: Long): PlayInfo =
+        streamsByChannel.values.firstOrNull { it.url == url &&
+            (channelId == null || it.profileLabel == "channel-$channelId") } ?: PlayInfo(
+        url = url,
+        licenseUrl = licenseUrl,
+        streamType = streamType,
+        allowHevcProfileProbe = true,
+        profileLabel = channelId?.let { "channel-$it" } ?: "default-channel",
+        profileGroup = "content-$contentId"
+    )
 }
 
 /**
@@ -538,31 +566,51 @@ class F1TvApi(private val userAgent: String, private val chromeMajor: String) {
         )
     }
 
-    /** One feed in its own play session (`player_bm`, the web app's single player). */
-    suspend fun contentPlay(contentId: Long, channelId: Int?): PlayInfo = withContext(Dispatchers.IO) {
+    /** One feed in its own play session (`player_bm`) or the authorised Premium multiview session (`player_tm`). */
+    suspend fun contentPlay(contentId: Long, channelId: Int?, fallback: Boolean = false): PlayInfo = withContext(Dispatchers.IO) {
         val result = play(contentId, "player_bm", channelId)
-        PlayInfo(
-            url = result.getString("url"),
-            licenseUrl = text(result, "laURL").ifEmpty { null },
-            streamType = text(result, "streamType"),
-        )
+        resolvePlayOffer(result, result, contentId, channelId, "player_bm", fallback)
     }
 
-    /**
-     * Every feed in one play session (`player_tm`, the web app's Premium multiview). Asked with the
-     * default channel, as the web app and eXViewer do. A second PLAY request can end the first
-     * session, so all tiles should come from this one call.
-     */
+    /** All channel offers come from one authorised PLAY. Never open extra sessions for preflight. */
     suspend fun multiPlay(contentId: Long, defaultChannelId: Int?): MultiPlay = withContext(Dispatchers.IO) {
         val result = play(contentId, "player_tm", defaultChannelId)
         val feeds = result.getJSONObject("tme").getJSONArray("feeds")
+        val streams = (0 until feeds.length()).associate { i ->
+            val feed = feeds.getJSONObject(i)
+            val id = feed.getJSONObject("metadata").getInt("channel_id")
+            id to resolvePlayOffer(feed, result, contentId, id, "player_tm", false)
+        }
         MultiPlay(
-            feeds = (0 until feeds.length()).associate { i ->
-                val feed = feeds.getJSONObject(i)
-                feed.getJSONObject("metadata").getInt("channel_id") to feed.getString("url")
-            },
-            licenseUrl = text(result, "laURL").ifEmpty { null },
+            feeds = streams.mapValues { it.value.url },
+            licenseUrl = text(result, "laURL").ifEmpty { text(result, "laUrl") }.ifEmpty { null },
             streamType = text(result, "streamType"),
+            streamsByChannel = streams,
+        )
+    }
+
+    private fun resolvePlayOffer(
+        channel: JSONObject, result: JSONObject, contentId: Long, channelId: Int?, player: String, fallback: Boolean
+    ): PlayInfo {
+        val reported = text(result, "streamType")
+        val offers = PlaybackOffers.read(channel, reported, text(result, "laURL").ifEmpty { text(result, "laUrl") }.ifEmpty { null })
+        val selected = PlaybackOffers.preferred(offers, preferDash = platform.endsWith("DASH"))
+        val diagnostic = PlaybackOffers.diagnostic(platform, player, contentId, channelId, reported, offers, selected, fallback)
+        android.util.Log.i("ApexviewPlaybackOffer", diagnostic +
+            " responseFields=" + result.keys().asSequence().map(PlaybackOffers::safeLabel).sorted().joinToString(",") +
+            " feedFields=" + channel.keys().asSequence().map(PlaybackOffers::safeLabel).sorted().joinToString(","))
+        if (selected == null) throw IOException("F1 returned no usable offer for channel ${channelId ?: "default"}")
+        return PlayInfo(
+            url = selected.url,
+            licenseUrl = selected.licenseUrl,
+            streamType = selected.streamType,
+            allowHevcProfileProbe = true,
+            profileLabel = channelId?.let { "channel-$it" } ?: "default-channel",
+            profileGroup = "content-$contentId",
+            requestedPlatform = platform,
+            playerType = player,
+            offerDiagnostic = diagnostic,
+            authorizedHlsCandidateUrl = PlaybackOffers.hlsCandidate(offers)?.url,
         )
     }
 

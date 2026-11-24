@@ -13,9 +13,10 @@ Made for the Pixel Fold's inner screen, and works on other Android phones and ta
 
 ## What it does
 
-- **Multiview, your way.** Up to four feeds (broadcast, F1 Live, onboards, data and tracker
-  channels), with F1 TV Premium. Main + strip, grid, or drag and resize freely with magnetic snapping. Save a layout
-  as your default.
+- **Multiview, your way.** Multiple-decoder mode supports up to four feeds. Single-decoder
+  archive mode can select up to 24, subject to compatible source feeds and the device's HEVC
+  output size limits. Protected composition currently supports up to six. Main + strip, grid, or
+  drag and resize freely with magnetic snapping. Save a layout as your default.
 - **Track map.** Every car on track, as a map you can move, turn and resize, or as a ribbon
   round the edge of the screen. Turn numbers, start and finish lines. Works on replays and live.
 - **Flags on the map:** yellow sectors, safety car and VSC, red flags, and a countdown to an
@@ -40,6 +41,8 @@ Made for the Pixel Fold's inner screen, and works on other Android phones and ta
 - **Android TV remote:** arrows and select move through everything. While watching, left and right
   skip 10 seconds, the other arrows and select bring up the controls, and Back hides them. Feeds
   can't be dragged by hand on a TV; pick a layout instead.
+- **Google Cast:** the standard device picker works in either decoder mode. Cast requests at least 720p per source and rejects smaller actual pictures rather than silently lowering quality. A registered Pitwall Web Receiver can reproduce the phone's video-window geometry using one decoded atlas; without its app ID the Default Media Receiver shows the encoded grid. Separate timing/map UI overlays and protected/live receiver playback remain pending. See [Cast status and receiver setup](docs/SINGLE_DECODER_LAYOUTS_AND_CAST.md).
+
 - **Season calendar** in your local time, with optional reminders before each session.
 
 Tap the **?** in the viewer's top bar for a guide to every gesture.
@@ -110,3 +113,8 @@ only sent if you submit it.
 ## License
 
 MIT; see [LICENSE](LICENSE). Fork it, change it, share it.
+
+
+### Free local TV receiver
+
+Open **Settings → TV casting → Receive from phone** on the TV, then tap **Cast** in the phone player and choose the discovered Pitwall TV. The receiver uses one hardware video decoder plus the phone's video-window geometry, with sources verified at least 720p. Phone video/audio stop after the TV renders and the phone remains its controller/relay. No paid Cast registration, IP entry or pairing code is needed. [Setup, FCast extension, Miracast limits and device checklist](docs/LOCAL_TV_RECEIVER.md). Hardware playback on the target TV remains a device validation requirement.

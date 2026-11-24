@@ -7,7 +7,7 @@ import org.json.JSONObject
 enum class Pace { NONE, YELLOW, GREEN, PURPLE }
 
 /** A sector time plus the F1 micro-sector status strip and its previous value. */
-class SectorCell(
+data class SectorCell(
     val time: String,
     val pace: Pace,
     val segments: List<Int> = emptyList(),
@@ -15,7 +15,7 @@ class SectorCell(
 )
 
 /** What a driver's timing card shows at one moment. */
-class CardState(
+data class CardState(
     val position: Int?,
     /** S1..S3 of the lap in progress; null where not yet set. */
     val sectors: List<SectorCell?>,
@@ -37,19 +37,44 @@ class CardState(
     val positionChange: Int? = null,
 )
 
+/** The tower shows a single lap. A previous sector supplies only the strip's width. */
+internal fun CardState.towerSector(index: Int): SectorCell? {
+    val current = sectors.getOrNull(index)
+    val previousCount = lapSectors.getOrNull(index)?.segments?.size ?: 0
+    val currentCount = current?.segments?.size ?: 0
+    if (previousCount <= currentCount) return current
+    val strip = List(previousCount) { current?.segments?.getOrNull(it) ?: 0 }
+    return SectorCell(current?.time.orEmpty(), current?.pace ?: Pace.NONE, strip, current?.previousTime.orEmpty())
+}
+
 /**
  * One driver's timing through the session, as recorded snapshots: each change to the sectors,
  * last lap, gap, position or pit status keeps a full copy of the state, so [at] is a lookup
  * rather than a replay.
  */
+/** Last sample at or before the playback clock. Handles repeated timestamps. */
+internal fun LongArray.floorIndex(utcMs: Long): Int {
+    var low = 0
+    var high = size
+    while (low < high) {
+        val mid = (low + high) ushr 1
+        if (this[mid] <= utcMs) low = mid + 1 else high = mid
+    }
+    return low - 1
+}
+
 class DriverLaps(
-    private val times: LongArray,
-    private val states: List<Snapshot>,
-    private val crossings: LongArray,
+    internal val times: LongArray,
+    internal val states: List<Snapshot>,
+    internal val crossings: LongArray,
     /** When the driver's completed-lap count changed, and to what (F1's NumberOfLaps). */
-    private val lapTimes: LongArray = LongArray(0),
-    private val lapCounts: IntArray = IntArray(0),
+    internal val lapTimes: LongArray = LongArray(0),
+    internal val lapCounts: IntArray = IntArray(0),
 ) {
+    internal fun shiftedBy(offsetMs: Long) = DriverLaps(
+        times.shiftedBy(offsetMs), states, crossings.shiftedBy(offsetMs), lapTimes.shiftedBy(offsetMs), lapCounts,
+    )
+
     class Snapshot(
         val position: Int?,
         val sectors: List<SectorCell?>,
@@ -70,7 +95,7 @@ class DriverLaps(
      * earlier). Counting crossings instead started every live session at lap 1.
      */
     fun lapAt(utcMs: Long): Int? {
-        val i = lapTimes.indexOfLast { it <= utcMs }
+        val i = lapTimes.floorIndex(utcMs)
         return if (i < 0) null else lapCounts[i] + 1
     }
 
@@ -102,35 +127,29 @@ class DriverLaps(
             .filter { (start, end) -> end - start in MIN_LAP_MS..MAX_LAP_MS }
 
     /** Whether the driver was out of the race at [utcMs]. */
-    fun retiredAt(utcMs: Long): Boolean = times.indexOfLast { it <= utcMs }.let { it >= 0 && states[it].retired }
+    fun retiredAt(utcMs: Long): Boolean = times.floorIndex(utcMs).let { it >= 0 && states[it].retired }
 
     /** When the driver's current spell in the pit lane began, if they're in it at [utcMs]. */
     fun inPitSince(utcMs: Long): Long? {
-        var i = times.indexOfLast { it <= utcMs }
+        var i = times.floorIndex(utcMs)
         if (i < 0 || !states[i].inPit) return null
         while (i > 0 && states[i - 1].inPit) i--
         return times[i]
     }
 
     /** When the driver last crossed the line, by [utcMs]. */
-    fun lastCrossing(utcMs: Long): Long? = crossings.lastOrNull { it <= utcMs }
+    fun lastCrossing(utcMs: Long): Long? = crossings.getOrNull(crossings.floorIndex(utcMs))
 
-    fun at(utcMs: Long): CardState? {
-        var i = -1
-        var lo = 0
-        var hi = times.size - 1
-        while (lo <= hi) {
-            val mid = (lo + hi) ushr 1
-            if (times[mid] <= utcMs) { i = mid; lo = mid + 1 } else hi = mid - 1
-        }
+    fun at(utcMs: Long, includeRunningTime: Boolean = true): CardState? {
+        val i = times.floorIndex(utcMs)
         if (i < 0) return null
         val s = states[i]
-        val lapStart = crossings.lastOrNull { it <= utcMs }
+        val lapStart = if (includeRunningTime && !s.inPit) lastCrossing(utcMs) else null
         return CardState(
             position = s.position,
             sectors = s.sectors,
             lapSectors = s.lapSectors,
-            runningMs = if (s.inPit || lapStart == null) null else utcMs - lapStart,
+            runningMs = lapStart?.let { utcMs - it },
             lastLap = s.lastLap,
             gap = s.gap,
             inPit = s.inPit,
@@ -149,6 +168,8 @@ class DriverLaps(
     }
 }
 
+internal fun LongArray.shiftedBy(offsetMs: Long) = LongArray(size) { this[it] + offsetMs }
+
 /**
  * Builds every driver's [DriverLaps] from F1's TimingData and TimingDataF1 streams. Lines are "HH:MM:SS.mmm" +
  * JSON; the first is a full snapshot, the rest are partial updates under Lines.<number>. Sectors
@@ -157,6 +178,7 @@ class DriverLaps(
  */
 object DriverTimingParser {
     private const val LATE_SECTOR_MS = 3_000L
+    private const val MAX_MINI_SECTORS = 64
 
     private class Live {
         var position: Int? = null
@@ -171,7 +193,7 @@ object DriverTimingParser {
         var bestLap: SectorCell? = null
         var bestLapValue = ""
         val bestLapFlags = BooleanArray(2)
-        val sectorSegments = Array(3) { sortedMapOf<Int, Int>() }
+        val sectorSegments = Array(3) { emptyList<Int>() }
         val sectorPrevious = Array(3) { "" }
         var gap: String? = null
         var toLeader: String? = null
@@ -185,15 +207,23 @@ object DriverTimingParser {
         val lapTimes = ArrayList<Long>()
         val lapCounts = ArrayList<Int>()
 
+        private fun sameCell(a: SectorCell?, b: SectorCell?): Boolean =
+            a === b || (a != null && b != null && a.time == b.time && a.pace == b.pace &&
+                a.segments == b.segments && a.previousTime == b.previousTime)
+
+        private fun matches(previous: DriverLaps.Snapshot): Boolean =
+            previous.position == position && previous.gap == gap && previous.inPit == inPit &&
+                previous.toLeader == toLeader && previous.ahead == ahead && previous.retired == retired &&
+                sameCell(previous.lastLap, lastLap) && sameCell(previous.bestLap, bestLap) &&
+                sector.indices.all { sameCell(previous.sectors[it], sector[it]) && sameCell(previous.lapSectors[it], lapSectors[it]) }
+
         fun snap(t: Long) {
+            if (snaps.lastOrNull()?.let(::matches) == true) return
             val copy = DriverLaps.Snapshot(position, sector.toList(), lapSectors.toList(), lastLap, gap, inPit, toLeader, ahead, retired, bestLap)
-            if (times.isNotEmpty() && times.last() == t) {
-                snaps[snaps.lastIndex] = copy
-            } else {
-                times += t
-                snaps += copy
-            }
+            if (times.lastOrNull() == t) snaps[snaps.lastIndex] = copy
+            else { times += t; snaps += copy }
         }
+
     }
 
     /**
@@ -201,26 +231,126 @@ object DriverTimingParser {
      * F1 publishes micro-sector segment status on the latter. Events are ordered by UTC so a
      * delayed snapshot from one topic cannot roll back a newer update from the other.
      */
-    fun parse(stream: String, streamStart: Long, timingF1: String = ""): Map<String, DriverLaps> {
-        val drivers = mutableMapOf<String, Live>()
-        val events = sequenceOf(0 to stream, 1 to timingF1).flatMap { (source, text) ->
-            text.lineSequence().mapNotNull { line ->
-                val prefix = streamPrefixLength(line)
-                if (line.length <= prefix) null
-                else runCatching { Triple(streamStart + offsetMs(line), source, line) }.getOrNull()
-            }
-        }.sortedWith(compareBy<Triple<Long, Int, String>> { it.first }.thenBy { it.second })
-        events.forEach { (t, _, line) ->
+    private data class TimedLine(val time: Long, val source: Int, val line: String, val prefix: Int)
+
+    private fun timedLines(text: String, source: Int, streamStart: Long): Sequence<TimedLine> =
+        text.lineSequence().mapNotNull { line ->
             val prefix = streamPrefixLength(line)
-            val lines = runCatching { JSONObject(line.substring(prefix)).optJSONObject("Lines") }.getOrNull() ?: return@forEach
+            if (line.length <= prefix) null
+            else runCatching { TimedLine(streamStart + streamOffsetMs(line, prefix), source, line, prefix) }.getOrNull()
+        }
+
+    private fun materialize(drivers: Map<String, Live>, copySnapshots: Boolean) =
+        drivers.mapValues { (_, driver) ->
+            DriverLaps(driver.times.toLongArray(), if (copySnapshots) driver.snaps.toList() else driver.snaps,
+                driver.crossings.toLongArray(), driver.lapTimes.toLongArray(), driver.lapCounts.toIntArray())
+        }
+
+    /** Publish the playhead's prefix, then keep following it while the archive is loading. */
+    internal fun previews(
+        lines: Iterator<String>,
+        streamStart: Long,
+        targetUtc: () -> Long,
+        checkActive: () -> Unit,
+    ): Sequence<DriverTimingPreview> = sequence {
+        val drivers = mutableMapOf<String, Live>()
+        val states = StateHistoryAccumulator()
+        var through = Long.MIN_VALUE
+        var publishedThrough: Long? = null
+        while (lines.hasNext()) {
+            checkActive()
+            val line = lines.next()
+            val prefix = streamPrefixLength(line)
+            if (prefix >= line.length) continue
+            val time = streamStart + streamOffsetMs(line, prefix)
+            if (time < through) return@sequence  // Use the full ordered merge for a disordered archive.
+            through = time
+            val rows = runCatching { JSONObject(line.substring(prefix)).optJSONObject("Lines") }.getOrNull()
+                ?: continue
+            states.accept(rows, time)
+            rows.keys().forEach { number ->
+                val row = rows.optJSONObject(number) ?: return@forEach
+                val driver = drivers.getOrPut(number) { Live() }
+                apply(driver, row, time)
+                driver.snap(time)
+            }
+            val target = targetUtc()
+            val last = publishedThrough
+            val needsPreview = last == null || target > last + 5_000L ||
+                last - target < TOWER_PREVIEW_LOOKAHEAD_MS && time - last >= TOWER_PREVIEW_LOOKAHEAD_MS
+            if (time >= target && needsPreview && drivers.values.any { it.position != null }) {
+                publishedThrough = time
+                yield(DriverTimingPreview(time, DriverTimingParse(materialize(drivers, copySnapshots = true), states.finish())))
+            }
+        }
+    }
+
+    fun parse(stream: String, streamStart: Long, timingF1: String = ""): Map<String, DriverLaps> =
+        parse(stream, streamStart, timingF1, null)
+
+    internal fun parse(
+        stream: String,
+        streamStart: Long,
+        timingF1: String,
+        stateHistory: StateHistoryAccumulator?,
+        checkpoint: ((String) -> Unit)? = null,
+        checkActive: () -> Unit = {},
+        onProgress: ((Long, () -> Map<String, DriverLaps>) -> Unit)? = null,
+    ): Map<String, DriverLaps> {
+        val drivers = mutableMapOf<String, Live>()
+
+        var records = 0
+        var invalidJson = 0
+        var missingLines = 0
+        fun consume(event: TimedLine) {
+            checkActive()
+            records++
+            if (records == 1 || records % 1024 == 0) {
+                checkpoint?.invoke("merge records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size}")
+            }
+            val json = runCatching { JSONObject(event.line.substring(event.prefix)) }.getOrNull() ?: run { invalidJson++; return }
+            val lines = json.optJSONObject("Lines") ?: run { missingLines++; return }
+            if (event.source == 0) stateHistory?.accept(lines, event.time)
             lines.keys().forEach { number ->
                 val d = lines.optJSONObject(number) ?: return@forEach
                 val live = drivers.getOrPut(number) { Live() }
-                apply(live, d, t)
-                live.snap(t)
+                apply(live, d, event.time)
+                live.snap(event.time)
             }
+            if (records % 1024 == 0) onProgress?.invoke(event.time) { materialize(drivers, copySnapshots = true) }
         }
-        return drivers.mapValues { (_, l) -> DriverLaps(l.times.toLongArray(), l.snaps, l.crossings.toLongArray(), l.lapTimes.toLongArray(), l.lapCounts.toIntArray()) }
+
+        checkpoint?.invoke("checking timestamp order primaryChars=${stream.length} supplementChars=${timingF1.length}")
+        if (timingStreamIsChronological(stream, checkActive) && timingStreamIsChronological(timingF1, checkActive)) {
+            checkpoint?.invoke("merging chronological streams")
+            // Merge the two sorted topics with one pending line per source. This avoids creating
+            // and sorting a large in-memory Event list on Android TV for multi-megabyte archives.
+            val primary = timedLines(stream, 0, streamStart).iterator()
+            val supplement = timedLines(timingF1, 1, streamStart).iterator()
+            var a = if (primary.hasNext()) primary.next() else null
+            var b = if (supplement.hasNext()) supplement.next() else null
+            while (a != null || b != null) {
+                val takePrimary = b == null || (a != null &&
+                    (a.time < b.time || (a.time == b.time && a.source <= b.source)))
+                if (takePrimary) {
+                    consume(a!!)
+                    a = if (primary.hasNext()) primary.next() else null
+                } else {
+                    consume(b!!)
+                    b = if (supplement.hasNext()) supplement.next() else null
+                }
+            }
+        } else {
+            checkpoint?.invoke("sorting out-of-order streams")
+            // Preserve the previous defensive behaviour for malformed/out-of-order archives.
+            timedLines(stream, 0, streamStart)
+                .plus(timedLines(timingF1, 1, streamStart))
+                .sortedWith(compareBy<TimedLine> { it.time }.thenBy { it.source })
+                .forEach(::consume)
+        }
+
+        checkpoint?.invoke("building history records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size}")
+        return materialize(drivers, copySnapshots = false)
     }
 
     private fun apply(l: Live, d: JSONObject, t: Long) {
@@ -242,11 +372,15 @@ object DriverTimingParser {
         d.optJSONObject("IntervalToPositionAhead")?.let { o -> if (o.has("Value")) l.ahead = o.optString("Value").ifEmpty { null } }
         if (d.has("TimeDiffToPositionAhead")) l.ahead = d.optString("TimeDiffToPositionAhead").ifEmpty { null }
 
-        when (val sectors = d.opt("Sectors")) {
-            is JSONArray -> for (i in 0 until minOf(3, sectors.length())) sectors.optJSONObject(i)?.let { applySector(l, i, it, t) }
-            is JSONObject -> sectors.keys().forEach { k ->
-                val i = k.toIntOrNull() ?: return@forEach
-                if (i in 0..2) sectors.optJSONObject(k)?.let { applySector(l, i, it, t) }
+        val completed = d.optInt("NumberOfLaps", -1).takeIf { it >= 0 }
+        val previousLaps = l.laps
+        val staleLap = completed != null && previousLaps != null && completed < previousLaps
+        val crossing = completed != null && previousLaps != null && completed > previousLaps
+        val sectors = d.opt("Sectors")
+        if (!staleLap) forEachSector(sectors) { i, sector ->
+            // At the line, keep the finished lap intact while applying its final split.
+            if (!crossing || sector.optString("Value").isNotEmpty() || i == 2 && !sector.has("Value")) {
+                applySector(l, i, sector, t)
             }
         }
         latestObject(d.opt("Stats"))?.let { stats ->
@@ -272,54 +406,66 @@ object DriverTimingParser {
             if (o.has("OverallFastest")) l.bestLapFlags[1] = o.optBoolean("OverallFastest")
             l.bestLap = l.bestLapValue.takeIf { it.isNotEmpty() }?.let { SectorCell(it, pace(l.bestLapFlags)) }
         }
-        // After the sectors, so a final sector sent with the crossing still counts for the lap
-        // it finished. F1 leaves the old sectors up well into the next lap; the card doesn't.
-        if (d.has("NumberOfLaps")) {
-            val n = d.optInt("NumberOfLaps")
-            if (l.laps != null && n > l.laps!!) {
-                l.crossings += t
-                l.crossedAt = t
-                l.sector.copyInto(l.lapSectors)
-                l.sector.fill(null)
-                l.sectorValue.fill("")
-                l.sectorPrevious.fill("")
-                l.sectorSegments.forEach { it.clear() }
-                l.sectorFlags.forEach { it.fill(false) }
+        if (crossing) {
+            l.crossings += t
+            l.crossedAt = t
+            l.sector.copyInto(l.lapSectors)
+            l.sector.fill(null)
+            l.sectorValue.fill("")
+            l.sectorPrevious.fill("")
+            l.sectorSegments.fill(emptyList())
+            l.sectorFlags.forEach { it.fill(false) }
+            // A batched update can also contain the beginning of the new lap.
+            forEachSector(sectors) { i, sector ->
+                if (i < 2 && sector.optString("Value").isEmpty()) applySector(l, i, sector, t)
             }
-            l.laps = n
-            if (l.lapCounts.lastOrNull() != n) {
-                l.lapTimes += t
-                l.lapCounts += n
+        }
+        if (completed != null && !staleLap && l.lapCounts.lastOrNull() != completed) {
+            l.laps = completed
+            l.lapTimes += t
+            l.lapCounts += completed
+        }
+    }
+
+    private inline fun forEachSector(sectors: Any?, apply: (Int, JSONObject) -> Unit) {
+        when (sectors) {
+            is JSONArray -> for (i in 0 until minOf(3, sectors.length())) {
+                sectors.optJSONObject(i)?.let { apply(i, it) }
+            }
+            is JSONObject -> for (i in 0..2) {
+                sectors.optJSONObject(i.toString())?.let { apply(i, it) }
             }
         }
     }
 
     private fun applySector(l: Live, i: Int, o: JSONObject, t: Long) {
-        // The last sector can land just after the crossing: it belongs to the lap just done.
+        // The last split can arrive after the crossing, even after the new S1 has started.
         val crossed = l.crossedAt
-        if (i == 2 && crossed != null && t - crossed in 1..LATE_SECTOR_MS && l.sector[0] == null) {
-            val value = o.optString("Value")
-            if (value.isNotEmpty()) {
-                val flags = booleanArrayOf(o.optBoolean("PersonalFastest"), o.optBoolean("OverallFastest"))
-                val segments = mutableListOf<Int>()
-                when (val rawSegments = o.opt("Segments")) {
-                    is JSONArray -> for (n in 0 until rawSegments.length()) {
-                        rawSegments.optJSONObject(n)?.optInt("Status", -1)?.takeIf { it >= 0 }?.let { segments += it }
-                    }
-                    is JSONObject -> rawSegments.keys().forEach { key ->
-                        rawSegments.optJSONObject(key)?.optInt("Status", -1)?.takeIf { it >= 0 }?.let { segments += it }
-                    }
+        if (i == 2 && crossed != null && t - crossed in 0..LATE_SECTOR_MS) {
+            val previous = l.lapSectors[i]
+            val reported = o.optString("Value")
+            val existing = previous?.segments.orEmpty()
+            val segments = mergeSegments(existing, o.opt("Segments"), keepCleared = false)
+            if (reported.isNotEmpty() || segments !== existing) {
+                val pace = when {
+                    o.optBoolean("OverallFastest") -> Pace.PURPLE
+                    o.optBoolean("PersonalFastest") -> Pace.GREEN
+                    reported.isEmpty() || !o.has("OverallFastest") && !o.has("PersonalFastest") ->
+                        previous?.pace?.takeUnless { it == Pace.NONE } ?: if (reported.isEmpty()) Pace.NONE else Pace.YELLOW
+                    else -> Pace.YELLOW
                 }
-                l.lapSectors[2] = SectorCell(value, pace(flags), segments, o.optString("PreviousValue"))
+                l.lapSectors[i] = SectorCell(reported.ifEmpty { previous?.time.orEmpty() }, pace, segments,
+                    o.optString("PreviousValue").ifEmpty { previous?.previousTime.orEmpty() })
             }
             return
         }
         if (o.has("Value")) {
             val value = o.optString("Value")
-            // A sector emptied means a new lap: its flags and micro-segments no longer apply.
-            if (value.isEmpty()) {
+            // An empty value also occurs in an in-progress split. Only a completed split
+            // changing to empty clears fallback state when no explicit zero statuses arrive.
+            if (value.isEmpty() && l.sectorValue[i].isNotEmpty()) {
                 l.sectorFlags[i].fill(false)
-                l.sectorSegments[i].clear()
+                l.sectorSegments[i] = emptyList()
                 l.sectorPrevious[i] = ""
             }
             l.sectorValue[i] = value
@@ -327,21 +473,31 @@ object DriverTimingParser {
         if (o.has("PreviousValue")) l.sectorPrevious[i] = o.optString("PreviousValue")
         if (o.has("PersonalFastest")) l.sectorFlags[i][0] = o.optBoolean("PersonalFastest")
         if (o.has("OverallFastest")) l.sectorFlags[i][1] = o.optBoolean("OverallFastest")
-        when (val rawSegments = o.opt("Segments")) {
-            is JSONArray -> for (n in 0 until rawSegments.length()) {
-                val status = rawSegments.optJSONObject(n)?.optInt("Status", -1) ?: -1
-                if (status >= 0) l.sectorSegments[i][n] = status
-            }
-            is JSONObject -> rawSegments.keys().forEach { key ->
-                val index = key.toIntOrNull() ?: return@forEach
-                val status = rawSegments.optJSONObject(key)?.optInt("Status", -1) ?: -1
-                if (index >= 0 && status >= 0) l.sectorSegments[i][index] = status
+        val segments = mergeSegments(l.sectorSegments[i], o.opt("Segments"))
+        l.sectorSegments[i] = segments
+        l.sector[i] = if (l.sectorValue[i].isNotEmpty() || segments.isNotEmpty()) {
+            SectorCell(l.sectorValue[i], if (l.sectorValue[i].isEmpty()) Pace.NONE else pace(l.sectorFlags[i]), segments, l.sectorPrevious[i])
+        } else null
+    }
+
+    private fun mergeSegments(previous: List<Int>, raw: Any?, keepCleared: Boolean = true): List<Int> {
+        var changed: MutableList<Int>? = null
+        fun set(index: Int, segment: JSONObject?) {
+            if (index !in 0 until MAX_MINI_SECTORS) return
+            val status = segment?.optInt("Status", -1) ?: return
+            if (status !in 0..4096 || status == 0 && !keepCleared) return
+            if ((changed ?: previous).getOrNull(index) == status) return
+            val next = changed ?: previous.toMutableList().also { changed = it }
+            repeat((index + 1 - next.size).coerceAtLeast(0)) { next.add(0) }
+            next[index] = status
+        }
+        when (raw) {
+            is JSONArray -> for (i in 0 until minOf(raw.length(), MAX_MINI_SECTORS)) set(i, raw.optJSONObject(i))
+            is JSONObject -> raw.keys().forEach { key ->
+                key.toIntOrNull()?.let { set(it, raw.optJSONObject(key)) }
             }
         }
-        val segmentValues = l.sectorSegments[i].toSortedMap().values.toList()
-        l.sector[i] = if (l.sectorValue[i].isNotEmpty() || segmentValues.isNotEmpty()) {
-            SectorCell(l.sectorValue[i], if (l.sectorValue[i].isEmpty()) Pace.NONE else pace(l.sectorFlags[i]), segmentValues, l.sectorPrevious[i])
-        } else null
+        return changed ?: previous
     }
 
     /** Latest qualifying-part entry in F1's keyed-object or array delta shapes. */
@@ -369,7 +525,7 @@ class Tyre(val compound: String, val laps: Int)
 /** One driver's tyres through the session. */
 class TyreLog(private val times: LongArray, private val tyres: List<Tyre>) {
     fun at(utcMs: Long): Tyre? {
-        val i = times.indexOfLast { it <= utcMs }
+        val i = times.floorIndex(utcMs)
         return if (i < 0) null else tyres[i]
     }
 }

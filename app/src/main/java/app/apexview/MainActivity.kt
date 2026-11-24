@@ -1,5 +1,9 @@
 package app.apexview
 
+import app.apexview.cast.PitwallCastSheet
+import app.apexview.cast.PitwallPairingDialog
+import app.apexview.cast.local.ExternalDisplayController
+import app.apexview.cast.local.CastConnectionService
 import android.app.Activity
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
@@ -17,7 +21,7 @@ import android.view.LayoutInflater
 import android.os.Bundle
 import android.webkit.WebSettings
 import android.webkit.WebView
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -43,15 +47,37 @@ import androidx.media3.ui.PlayerView
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.google.android.gms.cast.framework.CastContext
+import com.google.android.gms.cast.framework.CastSession
+import com.google.android.gms.cast.framework.SessionManagerListener
 import kotlinx.coroutines.launch
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private lateinit var app: AppState
+    private var castContext: CastContext? = null
+    private var externalDisplay: ExternalDisplayController? = null
+    private var frameDiagnostics: WindowFrameDiagnostics? = null
+    private val castSessionListener = object : SessionManagerListener<CastSession> {
+        override fun onSessionStarting(session: CastSession) = Unit
+        override fun onSessionStarted(session: CastSession, sessionId: String) =
+            app.onGoogleCastSessionAvailable(session)
+        override fun onSessionStartFailed(session: CastSession, error: Int) =
+            app.onGoogleCastStartFailed("Google Cast could not start (error $error). Check the receiver connection and try again.")
+        override fun onSessionEnding(session: CastSession) = Unit
+        override fun onSessionEnded(session: CastSession, error: Int) = app.onGoogleCastSessionEnded()
+        override fun onSessionResuming(session: CastSession, sessionId: String) = Unit
+        override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) =
+            app.onGoogleCastSessionAvailable(session)
+        override fun onSessionResumeFailed(session: CastSession, error: Int) =
+            app.onGoogleCastStartFailed("Google Cast could not reconnect (error $error). Choose the device again.")
+        override fun onSessionSuspended(session: CastSession, reason: Int) = Unit
+    }
     private val login = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         app.onLoginFinished()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        DiagnosticLogs.startIfEnabled(applicationContext)
         CrashReports.install(applicationContext)
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -60,6 +86,8 @@ class MainActivity : ComponentActivity() {
         app = AppState(this, lifecycleScope, userAgent, chromeMajor) {
             login.launch(Intent(this, LoginActivity::class.java))
         }
+        externalDisplay = ExternalDisplayController(this, app)
+        bindGoogleCast()
         setContent { AppTheme { Root(app) } }
         app.restore()
         app.updater.checkOnLaunch()
@@ -86,10 +114,24 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        lifecycleScope.launch {
+            repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+                while (true) {
+                    if (DiagnosticLogs.isEnabled(applicationContext)) {
+                        if (frameDiagnostics == null) frameDiagnostics = WindowFrameDiagnostics(window)
+                        if (DiagnosticLogs.recording) app.logPlaybackSample()
+                    } else {
+                        frameDiagnostics?.close()
+                        frameDiagnostics = null
+                    }
+                    kotlinx.coroutines.delay(2_000)
+                }
+            }
+        }
         addOnPictureInPictureModeChangedListener { app.setPip(it.isInPictureInPictureMode) }
         ContextCompat.registerReceiver(
             this, pipControls,
-            IntentFilter().apply { listOf(PIP_BACK, PIP_PLAY, PIP_FORWARD).forEach(::addAction) },
+            IntentFilter().apply { listOf(PIP_BACK, PIP_PLAY, PIP_FORWARD, CastConnectionService.STOP_CONNECTION).forEach(::addAction) },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
     }
@@ -105,6 +147,7 @@ class MainActivity : ComponentActivity() {
                 PIP_BACK -> app.skip(-10_000)
                 PIP_PLAY -> app.togglePlay()
                 PIP_FORWARD -> app.skip(10_000)
+                CastConnectionService.STOP_CONNECTION -> app.stopFullSceneCast()
             }
         }
     }
@@ -129,13 +172,27 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         app.onResumed()
+        externalDisplay?.update()
+        castContext?.sessionManager?.currentCastSession?.let(app::onGoogleCastSessionAvailable)
     }
 
     override fun onDestroy() {
+        frameDiagnostics?.close()
+        frameDiagnostics = null
+        externalDisplay?.close(); externalDisplay = null
+        castContext?.sessionManager?.removeSessionManagerListener(castSessionListener, CastSession::class.java)
+        castContext = null
         unregisterReceiver(pipControls)
         app.stopAll()
         app.close()
         super.onDestroy()
+    }
+
+    private fun bindGoogleCast() {
+        val instance = runCatching { CastContext.getSharedInstance(applicationContext) }.getOrNull()
+        castContext = instance
+        app.updateGoogleCastAvailability(instance != null)
+        instance?.sessionManager?.addSessionManagerListener(castSessionListener, CastSession::class.java)
     }
 }
 
@@ -187,15 +244,19 @@ private fun PipSetup(app: AppState) {
 
 @Composable
 private fun Root(app: AppState) {
+    val reducedMotion = LocalReduceMotion.current
     PipSetup(app)
     val watching = app.tiles.isNotEmpty() && !app.browsing
-    BackHandler(enabled = app.auth == AuthState.SIGNED_IN) {
+    val handlesBack = !app.isTv || app.backStack.size > 1 || app.tiles.isNotEmpty() ||
+        app.picker != null || app.tileMenu != null || app.mapSheetOpen
+    BackHandler(enabled = app.auth == AuthState.SIGNED_IN && handlesBack) {
         when {
             app.tileMenu != null -> app.closeTileMenu()
             app.mapSheetOpen -> app.mapSheetOpen = false
+            watching && app.picker == null && app.arranging -> app.toggleArranging()
             watching && app.picker == null && app.isTv && app.chromeVisible -> app.chromeVisible = false
             watching && app.picker == null -> app.stopAll()
-            !app.back() -> Unit
+            else -> app.back()
         }
     }
 
@@ -206,7 +267,10 @@ private fun Root(app: AppState) {
             AuthState.SIGNED_IN -> {
                 AnimatedContent(
                     targetState = watching,
-                    transitionSpec = { fadeIn(tween(Motion.SCREEN_MS, easing = EaseOut)) togetherWith fadeOut(tween(Motion.FADE_MS)) },
+                    transitionSpec = {
+                        fadeIn(tween(if (reducedMotion) 0 else Motion.SCREEN_MS, easing = EaseOut)) togetherWith
+                            fadeOut(tween(if (reducedMotion) 0 else Motion.FADE_MS))
+                    },
                     label = "viewer",
                 ) { showViewer ->
                     when {
@@ -216,6 +280,9 @@ private fun Root(app: AppState) {
                 }
             }
         }
+        if (!app.inPip && app.tvCastingMenuOpen) TvCastingMenu(app)
+        if (!app.inPip && app.castPickerOpen) PitwallCastSheet(app)
+        if (!app.inPip) app.castPairingCode?.let { PitwallPairingDialog(it, app::confirmCastPairing) }
         if (!app.inPip) app.picker?.let { FeedPickerSheet(app, it) }
         // Offered while browsing, never over a stream being watched.
         if (!app.inPip && !watching) UpdatePrompt(app.updater)
@@ -232,13 +299,16 @@ private fun Root(app: AppState) {
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun Browse(app: AppState) {
+    val reducedMotion = LocalReduceMotion.current
     SharedTransitionLayout {
         AnimatedContent(
             targetState = app.backStack.toList(),
             transitionSpec = {
                 val forward = targetState.size >= initialState.size
-                val enter = tween<Float>(Motion.SCREEN_MS, delayMillis = 60, easing = EaseOut)
-                val exit = tween<Float>(Motion.FADE_MS, easing = EaseOut)
+                val enter = tween<Float>(
+                    if (reducedMotion) 0 else Motion.SCREEN_MS,
+                    delayMillis = if (reducedMotion) 0 else 60, easing = EaseOut)
+                val exit = tween<Float>(if (reducedMotion) 0 else Motion.FADE_MS, easing = EaseOut)
                 if (forward) {
                     (fadeIn(enter) + scaleIn(enter, initialScale = 0.98f)) togetherWith fadeOut(exit)
                 } else {

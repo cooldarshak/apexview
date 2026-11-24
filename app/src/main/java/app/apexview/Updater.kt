@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageInstaller
+import android.content.pm.PackageManager
 import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -30,6 +31,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -39,9 +44,17 @@ import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.security.MessageDigest
 
 /** A published version: its number, what changed, and where its APK is. */
-class Release(val version: String, val notes: String, val apkUrl: String, val size: Long)
+class Release(
+    val version: String,
+    val notes: String,
+    val apkUrl: String,
+    val size: Long,
+    val filename: String,
+    val checksumsUrl: String,
+)
 
 /**
  * Keeps the app current from its GitHub releases. Each launch it asks GitHub for the latest
@@ -51,9 +64,17 @@ class Release(val version: String, val notes: String, val apkUrl: String, val si
  * to confirm (and, the first time, to allow this app to install updates). Releases must be signed
  * with the same key as the installed app, or Android refuses them.
  */
-class Updater(private val context: Context, private val scope: CoroutineScope) {
+class Updater(context: Context, private val scope: CoroutineScope) {
+    // Never retain an Activity across installer confirmation or rotation.
+    private val context = context.applicationContext
     private val prefs = context.getSharedPreferences("updates", Context.MODE_PRIVATE)
-    private val http = OkHttpClient()
+    private val http = OkHttpClient.Builder()
+        .followSslRedirects(false) // GitHub asset redirects may stay HTTPS, never downgrade to HTTP.
+        .callTimeout(5, java.util.concurrent.TimeUnit.MINUTES)
+        .build()
+    private var checkJob: Job? = null
+    private var installJob: Job? = null
+    private var closed = false
 
     /** A newer release to offer, while the prompt is up. */
     var offered by mutableStateOf<Release?>(null)
@@ -66,49 +87,79 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
         private set
 
     private val statusAction = context.packageName + ".INSTALL_STATUS"
+    private val statusUiAction = InstallStatusProtocol.uiAction(context.packageName)
+
+    // Register on application context and release on AppState.close(), including
+    // configuration changes. Keeping one anonymous receiver for every recreated
+    // activity leaked the old updater and its held activity context.
+    private val statusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, intent: Intent) {
+            when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
+                PackageInstaller.STATUS_SUCCESS -> {
+                    progress = null
+                    prefs.edit().remove(InstallStatusProtocol.PREF_FAILED_RESULT).apply()
+                }
+                PackageInstaller.STATUS_PENDING_USER_ACTION -> Unit // The persistent receiver opens system confirmation.
+                else -> {
+                    progress = null
+                    note = InstallStatusProtocol.failureMessage(intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE))
+                    prefs.edit().remove(InstallStatusProtocol.PREF_FAILED_RESULT).apply()
+                }
+            }
+        }
+    }
 
     init {
-        // The installer reports back here; when it needs the user's say-so it hands over a screen.
+        // PackageInstaller requires an application receiver that survives the
+        // temporary foreground-to-system-installer activity transition.
         ContextCompat.registerReceiver(
             context.applicationContext,
-            object : BroadcastReceiver() {
-                override fun onReceive(c: Context, intent: Intent) {
-                    when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
-                        PackageInstaller.STATUS_PENDING_USER_ACTION -> {
-                            @Suppress("DEPRECATION")
-                            val confirm = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
-                            else intent.getParcelableExtra(Intent.EXTRA_INTENT)
-                            confirm?.let { context.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-                        }
-                        PackageInstaller.STATUS_SUCCESS -> progress = null
-                        else -> {
-                            progress = null
-                            note = "The update didn't install: " +
-                                (intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "Android refused it")
-                        }
-                    }
-                }
-            },
-            IntentFilter(statusAction),
+            statusReceiver,
+            IntentFilter(statusUiAction),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
     }
 
+    fun close() {
+        if (closed) return
+        closed = true
+        checkJob?.cancel()
+        installJob?.cancel()
+        http.dispatcher.cancelAll()
+        runCatching { context.applicationContext.unregisterReceiver(statusReceiver) }
+    }
+
     /** On launch. */
     fun checkOnLaunch() {
-        scope.launch { check(quiet = true) }
+        // The manifest receiver can finish while no Activity (and therefore no
+        // Compose state observer) is alive; surface failures on next launch.
+        prefs.getString(InstallStatusProtocol.PREF_FAILED_RESULT, null)?.let { failure ->
+            note = failure
+            prefs.edit().remove(InstallStatusProtocol.PREF_FAILED_RESULT).apply()
+        }
+        startCheck(quiet = true)
     }
 
     /** From Settings: checks now and says what it found. */
     fun checkNow() {
-        scope.launch { check(quiet = false) }
+        startCheck(quiet = false)
+    }
+
+    private fun startCheck(quiet: Boolean) {
+        if (closed || checkJob?.isActive == true || progress != null) return
+        checkJob = scope.launch { check(quiet) }
     }
 
     private suspend fun check(quiet: Boolean) {
-        val release = runCatching { latest() }.getOrElse {
-            if (!quiet) note = "Couldn't check for updates: ${it.message}"
+        val release = try {
+            latest()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            if (!closed && !quiet) note = "Couldn't check for updates: ${safeError(error)}"
             return
         }
+        if (closed || progress != null) return
         prefs.edit().putLong(PREF_CHECKED, System.currentTimeMillis()).apply()
         // Put off with Not now: not offered again on launch for a day.
         val putOff = quiet && release?.version == prefs.getString(PREF_LATER, null) &&
@@ -124,20 +175,39 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
         val request = Request.Builder()
             .url("https://api.github.com/repos/${BuildConfig.UPDATE_REPO}/releases/latest")
             .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", "Apexview/${BuildConfig.VERSION_NAME}")
+            .header("User-Agent", "Pitwall/${BuildConfig.VERSION_NAME}")
             .build()
         http.newCall(request).execute().use { r ->
             if (r.code == 404) return@withContext null
             if (!r.isSuccessful) throw IOException("GitHub said ${r.code}")
-            val json = JSONObject(r.body?.string().orEmpty())
+            val body = r.body ?: throw IOException("Missing release metadata")
+            val json = JSONObject(body.byteStream().use {
+                ReleaseAssetValidation.readBoundedUtf8(it, MAX_RELEASE_METADATA_BYTES)
+            })
             val assets = json.optJSONArray("assets") ?: return@withContext null
-            val apk = (0 until assets.length()).map { assets.getJSONObject(it) }
-                .firstOrNull { it.optString("name").endsWith(".apk") } ?: return@withContext null
+            val entries = (0 until assets.length()).map { assets.getJSONObject(it) }
+            val tag = json.optString("tag_name")
+            val version = tag.removePrefix("v")
+            check(version.matches(Regex("1[.]0[.][0-9]+"))) { "Invalid Pitwall release version" }
+            val apk = entries.singleOrNull { it.optString("name") == "pitwall-tv-$version.apk" }
+                ?: return@withContext null
+            val checksum = entries.singleOrNull { it.optString("name") == "SHA256SUMS" }
+                ?: return@withContext null
+            val size = apk.optLong("size")
+            check(size in 1..MAX_APK_BYTES) { "APK length outside the update budget" }
+            val assetUrl = apk.getString("browser_download_url")
+            val checksumUrl = checksum.getString("browser_download_url")
+            check(ReleaseAssetValidation.officialAssetUrl(BuildConfig.UPDATE_REPO, tag, apk.getString("name"), assetUrl) &&
+                ReleaseAssetValidation.officialAssetUrl(BuildConfig.UPDATE_REPO, tag, "SHA256SUMS", checksumUrl)) {
+                "Release assets are not from the installed Pitwall publisher"
+            }
             Release(
-                version = json.optString("tag_name").removePrefix("v"),
+                version = version,
                 notes = json.optString("body").trim(),
-                apkUrl = apk.getString("browser_download_url"),
-                size = apk.optLong("size"),
+                apkUrl = assetUrl,
+                size = size,
+                filename = apk.getString("name"),
+                checksumsUrl = checksumUrl,
             )
         }
     }
@@ -150,58 +220,147 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
 
     /** Downloads the offered release and starts Android's installer on it. */
     fun install() {
+        if (closed || progress != null || installJob?.isActive == true) return
         val release = offered ?: return
         progress = 0f
-        scope.launch {
+        checkJob?.cancel()
+        installJob = scope.launch {
             try {
-                val apk = withContext(Dispatchers.IO) { download(release) }
-                withContext(Dispatchers.IO) { startInstall(apk) }
-                offered = null
-            } catch (e: Exception) {
-                progress = null
-                note = "The update didn't download: ${e.message}"
-            }
-        }
-    }
-
-    private fun download(release: Release): File {
-        val file = File(context.cacheDir, "update.apk")
-        http.newCall(Request.Builder().url(release.apkUrl).header("User-Agent", "Apexview").build()).execute().use { r ->
-            if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
-            val body = r.body ?: throw IOException("empty download")
-            val total = body.contentLength().takeIf { it > 0 } ?: release.size
-            body.byteStream().use { input ->
-                file.outputStream().use { out ->
-                    val buffer = ByteArray(64 * 1024)
-                    var done = 0L
-                    while (true) {
-                        val n = input.read(buffer)
-                        if (n < 0) break
-                        out.write(buffer, 0, n)
-                        done += n
-                        if (total > 0) progress = (done.toFloat() / total).coerceIn(0f, 1f)
+                withContext(Dispatchers.IO) {
+                    val apk = download(release)
+                    try {
+                        currentCoroutineContext().ensureActive()
+                        startInstall(apk)
+                    } finally {
+                        apk.delete() // PackageInstaller has its own fsynced copy after commit.
                     }
+                }
+                offered = null
+            } catch (cancelled: CancellationException) {
+                if (!closed) progress = null
+                throw cancelled
+            } catch (error: Exception) {
+                if (!closed) {
+                    progress = null
+                    note = "The update didn't download: ${safeError(error)}"
                 }
             }
         }
-        return file
     }
 
-    private fun startInstall(apk: File) {
+    private fun safeError(error: Throwable): String =
+        DiagnosticRedaction.redact(error.message?.take(300) ?: "Update failed").take(200)
+
+    private suspend fun download(release: Release): File {
+        // Every approved release publishes a checksum beside its signed APK.
+        // Fail closed on absent/corrupted APKs before invoking Android's installer.
+        val checksums = http.newCall(Request.Builder().url(release.checksumsUrl)
+            .header("User-Agent", "Pitwall/${BuildConfig.VERSION_NAME}").build()).execute().use { r ->
+            if (!r.isSuccessful) throw IOException("Checksum manifest HTTP ${r.code}")
+            (r.body ?: throw IOException("Missing checksum manifest")).byteStream().use {
+                ReleaseAssetValidation.readBoundedUtf8(it, MAX_CHECKSUM_BYTES)
+            }
+        }
+        val expected = ReleaseAssetValidation.expectedSha256(checksums, release.filename)
+        val file = File.createTempFile("pitwall-update-", ".apk", context.cacheDir)
+        try {
+            http.newCall(Request.Builder().url(release.apkUrl).header("User-Agent", "Pitwall")
+                .build()).execute().use { r ->
+                if (!r.isSuccessful) throw IOException("Update HTTP ${r.code}")
+                val body = r.body ?: throw IOException("Empty update body")
+                val total = release.size
+                val declared = body.contentLength()
+                check(declared < 0 || declared == total) { "APK length differs from release metadata" }
+                check(total in 1..MAX_APK_BYTES) { "APK length outside the update budget" }
+                val digest = MessageDigest.getInstance("SHA-256")
+                body.byteStream().use { input ->
+                    file.outputStream().use { out ->
+                        val buffer = ByteArray(64 * 1024)
+                        var received = 0L
+                        var lastReportedFraction = -1f
+                        var lastReportedAtMs = 0L
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            received += n
+                            check(received <= total && received <= MAX_APK_BYTES) { "APK exceeds the update budget" }
+                            digest.update(buffer, 0, n)
+                            out.write(buffer, 0, n)
+                            val fraction = (received.toFloat() / total).coerceIn(0f, 1f)
+                            val elapsedMs = android.os.SystemClock.elapsedRealtime()
+                            if (UpdateProgressPolicy.shouldPublish(
+                                    fraction, lastReportedFraction, elapsedMs - lastReportedAtMs
+                                )) {
+                                // Bound Compose snapshot updates and deliver on Main,
+                                // never for every 64KB byte-buffer read on IO.
+                                withContext(Dispatchers.Main.immediate) { progress = fraction }
+                                lastReportedFraction = fraction
+                                lastReportedAtMs = elapsedMs
+                            }
+                        }
+                        check(received == total) { "Incomplete APK download" }
+                    }
+                }
+                val actual = digest.digest().joinToString("") { "%02x".format(it) }
+                check(expected == actual) { "APK SHA-256 does not match its release" }
+                withContext(Dispatchers.Main.immediate) { progress = 1f }
+            }
+            verifyPackageIdentity(file)
+            return file
+        } catch (error: Exception) {
+            file.delete()
+            throw error
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun verifyPackageIdentity(apk: File) {
+        val pm = context.packageManager
+        val flags = PackageManager.GET_SIGNING_CERTIFICATES
+        val candidate = pm.getPackageArchiveInfo(apk.absolutePath, flags)
+            ?: throw IOException("Downloaded file is not an Android APK")
+        val installed = pm.getPackageInfo(context.packageName, flags)
+        check(candidate.packageName == context.packageName) { "APK package identity mismatch" }
+        check(candidate.longVersionCode > installed.longVersionCode) { "APK is not a newer build" }
+        val updateSigners = candidate.signingInfo?.apkContentsSigners.orEmpty()
+        val installedSigners = installed.signingInfo?.apkContentsSigners.orEmpty()
+        check(updateSigners.isNotEmpty() && installedSigners.isNotEmpty() &&
+            updateSigners.contentEquals(installedSigners)) {
+            "APK certificate does not match the installed Pitwall app"
+        }
+    }
+
+    private suspend fun startInstall(apk: File) {
         val installer = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
             .apply { setAppPackageName(context.packageName) }
         val id = installer.createSession(params)
-        installer.openSession(id).use { session ->
-            session.openWrite("apexview.apk", 0, apk.length()).use { out ->
-                apk.inputStream().use { it.copyTo(out) }
-                session.fsync(out)
+        var committed = false
+        try {
+            installer.openSession(id).use { session ->
+                session.openWrite("apexview.apk", 0, apk.length()).use { out ->
+                    apk.inputStream().use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val n = input.read(buffer)
+                            if (n == -1) break
+                            out.write(buffer, 0, n)
+                        }
+                    }
+                    session.fsync(out)
+                }
+                currentCoroutineContext().ensureActive()
+                val status = PendingIntent.getBroadcast(
+                    context, id, Intent(statusAction).setClass(context, PitwallInstallStatusReceiver::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+                )
+                session.commit(status.intentSender)
+                committed = true
             }
-            val status = PendingIntent.getBroadcast(
-                context, id, Intent(statusAction).setPackage(context.packageName),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
-            )
-            session.commit(status.intentSender)
+        } finally {
+            if (!committed) runCatching { installer.abandonSession(id) }
         }
     }
 
@@ -210,6 +369,9 @@ class Updater(private val context: Context, private val scope: CoroutineScope) {
         private const val PREF_LATER = "laterVersion"
         private const val PREF_LATER_AT = "laterAt"
         private const val LATER_MS = 24 * 3_600_000L
+        private const val MAX_RELEASE_METADATA_BYTES = 1024 * 1024
+        private const val MAX_CHECKSUM_BYTES = 16 * 1024
+        private const val MAX_APK_BYTES = 250L * 1024 * 1024
 
         /** "0.36" > "0.35", "1.0" > "0.99", "0.35.1" > "0.35". */
         fun isNewer(candidate: String, current: String): Boolean {
@@ -250,7 +412,7 @@ fun UpdatePrompt(updater: Updater) {
                 }
                 return@Column
             }
-            Text("Apexview ${release.version} is out", style = Type.title2)
+            Text("Pitwall TV ${release.version} is out", style = Type.title2)
             Text("You have ${BuildConfig.VERSION_NAME}.", style = Type.subhead, modifier = Modifier.padding(top = 4.dp))
             if (release.notes.isNotEmpty()) {
                 Box(Modifier.padding(top = 16.dp).heightIn(max = 220.dp).verticalScroll(rememberScrollState())) {

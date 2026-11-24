@@ -23,6 +23,28 @@ class LiveTimingTest {
     private val t0 = Instant.parse("2026-10-24T20:00:00Z").toEpochMilli()
 
     @Test
+    fun cachedSeasonIndexNeedsTheExactPublishedSession() {
+        val index = org.json.JSONObject(
+            """{"Meetings":[{"Sessions":[{"Key":42,"Type":"Race","Path":"2026/Race/"},{"Key":43,"Type":"Practice"}]}]}"""
+        )
+        assertEquals("2026/Race/" to "Race", archive.exactArchiveSession(42, index))
+        assertNull(archive.exactArchiveSession(43, index))
+        assertNull(archive.exactArchiveSession(44, index))
+    }
+
+    @Test
+    fun positionPreviewFollowsACorrectedArchiveClock() {
+        val window = ReplayPositionWindow(4_781_048L)
+        assertEquals(4_901_048L, window.lastMs)
+        assertEquals(false, window.retarget(4_782_000L))
+        assertTrue(window.retarget(7_644_032L))
+        assertEquals(7_554_032L, window.firstMs)
+        assertEquals(7_764_032L, window.lastMs)
+        assertTrue(window.retarget(5_000L))
+        assertEquals(0L, window.firstMs)
+    }
+
+    @Test
     fun leavingThePitsWithoutPitOutStillCountsAsOut() {
         val stream = listOf(
             "00:00:01.000{\"Lines\":{\"4\":{\"InPit\":true,\"NumberOfLaps\":0}}}",
@@ -95,6 +117,17 @@ class LiveTimingTest {
         assertTrue("points: $points", points in 340..380)
         val gap = hypot(outline[0] - outline[outline.size - 2], outline[1] - outline[outline.size - 1])
         assertTrue("loop gap $gap", gap < 300)
+    }
+
+    @Test
+    fun positionParserReportsMalformedRecordsWithoutDiscardingValidCars() {
+        val report = archive.parsePositionsDetailed(positionStream() + "00:00:00.000\"not-base64!\"\n")
+
+        assertTrue(report.inputRecords > report.decodedRecords)
+        assertTrue(report.decodedRecords > 0)
+        assertEquals(1, report.malformedRecords)
+        assertTrue(report.positionSamples > 0)
+        assertEquals(setOf("44", "1"), report.tracks.keys)
     }
 
     @Test

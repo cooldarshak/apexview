@@ -33,6 +33,27 @@ class LayoutsTest {
     }
 
     @Test
+    fun tileTestingUsesAnEvenTwoFeedGrid() {
+        for ((width, height) in listOf(1920f to 1080f, 1080f to 1920f, 1280f to 720f)) {
+            val slots = Layouts.place(LayoutMode.TILE_TEST, 2, width, height)
+            assertEquals(2, slots.size)
+            assertTrue(slots.all { it.x >= -0.5f && it.y >= -0.5f })
+            assertTrue(slots.none { a -> slots.any { b ->
+                a !== b && a.x < b.x + b.w - 1 && b.x < a.x + a.w - 1 &&
+                    a.y < b.y + b.h - 1 && b.y < a.y + a.h - 1
+            } })
+            assertTrue(slots.all { it.w > 0f && it.h > 0f })
+            if (width >= height) {
+                assertTrue(slots[1].x > slots[0].x)
+                assertEquals(slots[0].y, slots[1].y, 0.1f)
+            } else {
+                assertEquals(slots[0].x, slots[1].x, 0.1f)
+                assertTrue(slots[1].y > slots[0].y)
+            }
+        }
+    }
+
+    @Test
     fun mapGetsRealSpaceNextToFourFeeds() {
         for (mode in LayoutMode.entries) {
             for ((sw, sh) in listOf(w to h, 2208f to 1840f, 1840f to 2208f)) {
@@ -68,7 +89,9 @@ class LayoutsTest {
                     assertTrue(plan.workspace.x + plan.workspace.w <= width + 0.5f)
                     assertTrue(plan.workspace.y + plan.workspace.h <= height + 0.5f)
                     assertTrue("Tower outside workspace: ${plan.tower}", plan.tower.x >= plan.workspace.x && plan.tower.y >= plan.workspace.y)
-                    assertTrue("Map outside workspace: ${plan.map}", plan.map.x >= plan.workspace.x && plan.map.y >= plan.workspace.y)
+                    if (mode != LayoutMode.TV || height >= width) {
+                        assertTrue("Map outside workspace: ${plan.map}", plan.map.x >= plan.workspace.x && plan.map.y >= plan.workspace.y)
+                    }
                     assertTrue(!plan.tower.overlaps(plan.map))
                     assertTrue(plan.slots.none { plan.workspace.overlaps(it) })
                     plan.slots.forEach { slot ->
@@ -82,8 +105,8 @@ class LayoutsTest {
     }
 
     @Test
-    fun tvLandscapeLayoutKeepsVideoLeftTowerTopRightAndMapBelow() {
-        for ((width, height) in listOf(1920f to 1080f, 1280f to 720f, 3840f to 2160f)) {
+    fun tvLandscapeLayoutKeepsFullHeightTowerAndMapOverTheMainVideo() {
+        for ((width, height) in listOf(1920f to 1080f, 1280f to 720f, 3840f to 2160f, 2316f to 1080f)) {
             for (feedCount in 1..4) {
                 val plan = Layouts.withCombinedOverlays(
                     LayoutMode.TV, feedCount, width, height, OverlayLayoutMode.DOCKED,
@@ -94,8 +117,12 @@ class LayoutsTest {
                 assertEquals(plan.feeds.w, plan.workspace.x, 0.01f)
                 assertEquals(0f, plan.tower.y, 0.01f)
                 assertEquals(plan.workspace.x, plan.tower.x, 0.01f)
-                assertEquals(plan.tower.y + plan.tower.h, plan.map.y, 0.5f)
-                assertTrue(plan.map.y + plan.map.h <= height + 0.5f)
+                assertEquals(height, plan.tower.h, 0.5f)
+                val main = plan.slots.first()
+                assertTrue(plan.map.x > main.x + main.w / 2f)
+                assertTrue(plan.map.x + plan.map.w <= main.x + main.w)
+                assertTrue(plan.map.y >= main.y && plan.map.y + plan.map.h <= main.y + main.h)
+                assertTrue(!plan.tower.overlaps(plan.map))
                 assertTrue(plan.slots.all { slot ->
                     slot.x >= plan.feeds.x - 0.5f && slot.y >= plan.feeds.y - 0.5f &&
                         slot.x + slot.w <= plan.feeds.x + plan.feeds.w + 0.5f &&
@@ -223,18 +250,61 @@ class LayoutsTest {
         assertEquals(plan.feeds.w, plan.workspace.x, 0.1f)
         assertEquals(width - plan.feeds.w, plan.workspace.w, 1f)
         assertEquals(0f, plan.tower.y, 0.1f)
-        assertEquals(height * 0.65625f, plan.tower.h, 1f)
-        assertEquals(plan.tower.y + plan.tower.h, plan.map.y, 0.1f)
-        assertEquals(height * 0.28125f, plan.map.h, 1f)
-        assertEquals(height * 0.0625f, height - plan.map.y - plan.map.h, 1f)
+        assertEquals(height, plan.tower.h, 1f)
+        assertTrue(plan.map.x > width * 0.4f)
+        assertTrue(plan.map.x + plan.map.w <= plan.feeds.w)
         assertTrue(!plan.tower.overlaps(plan.map))
         assertEquals(1, plan.slots.size)
         val video = plan.slots.single()
         assertEquals(0f, video.x, 0.1f)
         assertEquals(plan.feeds.y, video.y, 0.1f)
         assertEquals(plan.feeds.w, video.w, 1f)
+        assertEquals(video, Layouts.tvSingleLandscapeSlot(width, height))
+        assertTrue(Area(video.x, video.y, video.w, video.h).overlaps(plan.map))
         assertEquals(9f / 16f, video.h / video.w, 0.001f)
         assertTrue(video.x + video.w <= plan.feeds.x + plan.feeds.w + 1f)
+    }
+
+    @Test
+    fun tvSidebarAndSingleFeedTradeWidthAtSixteenByNine() {
+        val width = 1920f
+        val height = 1080f
+        for (share in listOf(0.20f, 0.34f, 0.60f)) {
+            val plan = Layouts.withCombinedOverlays(
+                LayoutMode.TV, 1, width, height, OverlayLayoutMode.DOCKED, tvTowerWidth = width * share,
+            )
+            assertEquals(plan.tower.x, plan.slots.single().w, 0.1f)
+            assertEquals(width, plan.slots.single().w + plan.tower.w, 0.1f)
+        }
+    }
+
+    @Test
+    fun trackerStartsOverTheLogoAndCanMovePastTheRightEdgeOfTheVideo() {
+        for (mode in listOf(LayoutMode.TV, LayoutMode.FEATURED, LayoutMode.GRID)) {
+            val main = if (mode == LayoutMode.TV) Layouts.tvSingleLandscapeSlot(2316f, 1080f)
+                else Layouts.place(mode, 3, 2316f, 1080f).first()
+            val video = Area(main.x, main.y, main.w, main.h)
+            val anchor = Layouts.logoMapOver(main)
+            assertTrue(anchor.x > video.x + video.w / 2)
+            assertEquals(anchor, Layouts.fitMapInside(anchor, video))
+            val screen = Area(0f, 0f, 2316f, 1080f)
+            val moved = Layouts.fitMapInside(anchor.copy(x = 3000f, y = -50f), screen)
+            assertTrue(moved.x + moved.w > video.x + video.w)
+            assertEquals(screen.w, moved.x + moved.w, 0.01f)
+            assertEquals(screen.y, moved.y, 0.01f)
+        }
+    }
+
+    @Test
+    fun landscapeTowerWidthChangesTheFeedAreaAndKeepsTheSidebarDocked() {
+        val narrow = Layouts.withCombinedOverlays(LayoutMode.TV, 1, 1920f, 1080f, OverlayLayoutMode.DOCKED, 400f)
+        val wide = Layouts.withCombinedOverlays(LayoutMode.TV, 1, 1920f, 1080f, OverlayLayoutMode.DOCKED, 900f)
+        assertEquals(400f, narrow.tower.w)
+        assertEquals(900f, wide.tower.w)
+        assertEquals(1920f, wide.tower.x + wide.tower.w)
+        assertEquals(1080f, wide.tower.h)
+        assertTrue(wide.slots.single().w < narrow.slots.single().w)
+        assertTrue(!wide.tower.overlaps(wide.slots.single()))
     }
 
     @Test

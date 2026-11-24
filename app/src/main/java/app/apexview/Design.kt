@@ -8,10 +8,17 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SliderState
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.Shapes
+import androidx.compose.material3.Typography
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,27 +54,30 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 
 /**
- * The app's look, after Apple's TV app: black canvas, artwork carries the color, white type in a
- * few sizes, one easing curve. Separation comes from type and space, not lines and boxes.
+ * Pitwall's racing-first Material 3 Expressive design tokens. The video canvas
+ * stays neutral and visually stable; interactive chrome carries the stronger
+ * racing accent, depth, accessible type, shapes, and remote focus ring.
  */
 object Ink {
-    val background = Color(0xFF000000)
-    /** Raised surfaces: sheets, settings groups, cards without artwork. */
-    val surface = Color(0xFF1C1C1E)
-    val surfaceHigh = Color(0xFF2C2C2E)
-    val primary = Color(0xFFFFFFFF)
-    /** Apple's secondary label: white at 60%. */
-    val secondary = Color(0x99EBEBF5)
-    val tertiary = Color(0x4DEBEBF5)
-    /** Only for LIVE and errors. */
-    val live = Color(0xFFFF3B30)
+    val background = Color(0xFF07090D)
+    /** Panels stay dark enough not to compete with 50 fps video windows. */
+    val surface = Color(0xFF151922)
+    val surfaceHigh = Color(0xFF282F3A)
+    val surfaceLow = Color(0xFF10141B)
+    val outline = Color(0xFF515D6F)
+    val primary = Color(0xFFF7F8FC)
+    val secondary = Color(0xFFBAC3D2)
+    val tertiary = Color(0xFF8390A2)
+    val accent = Color(0xFFE10600)
+    /** Race red remains a semantic live/error color as well as a brand accent. */
+    val live = Color(0xFFFF453A)
 }
 
 /**
- * Apple's type ramp. Tracking is per size: large text tighter, small text slightly looser.
+ * Compact video-first typography; larger text and touch targets live in browsing and settings.
  */
 object Type {
     val largeTitle = TextStyle(fontSize = 34.sp, lineHeight = 40.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.02).em, color = Ink.primary)
@@ -84,9 +94,15 @@ object Type {
 val EaseOut = CubicBezierEasing(0.23f, 1f, 0.32f, 1f)
 
 object Motion {
-    const val PRESS_MS = 120
+    const val PRESS_MS = 90
     const val SCREEN_MS = 380
     const val FADE_MS = 220
+    // Browsing should respond quickly even when the video player runs at 50fps.
+    // Keep the longer SCREEN_MS for protected SurfaceView/video geometry moves.
+    const val BROWSE_NAV_MS = 240
+    const val BROWSE_FADE_MS = 140
+    // Fast control feedback without changing protected video geometry motion.
+    const val CHROME_MS = 140
 }
 
 /**
@@ -97,27 +113,60 @@ object Motion {
 @OptIn(ExperimentalFoundationApi::class)
 internal val PhoneScrolling = object : BringIntoViewSpec {}
 
+/** Accessibility: respect Android's system-wide Remove Animations setting. */
+internal val LocalReduceMotion = compositionLocalOf { false }
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun AppTheme(content: @Composable () -> Unit) {
-    CompositionLocalProvider(LocalBringIntoViewSpec provides PhoneScrolling) { Theme(content) }
+    val reducedMotion = !android.animation.ValueAnimator.areAnimatorsEnabled()
+    CompositionLocalProvider(
+        LocalBringIntoViewSpec provides PhoneScrolling,
+        LocalReduceMotion provides reducedMotion,
+    ) { Theme(content) }
 }
 
 @Composable
 private fun Theme(content: @Composable () -> Unit) {
-    MaterialTheme(
+    // Genuine stable Material 3 Expressive theme, including the platform's
+    // expressive shape/motion defaults. Keep Pitwall's high-contrast racing palette
+    // and app-owned reduced-motion settings; video rendering is unchanged.
+    MaterialExpressiveTheme(
         colorScheme = darkColorScheme(
             background = Ink.background,
             surface = Ink.surface,
             surfaceContainer = Ink.surface,
-            surfaceContainerLow = Ink.surface,
+            surfaceContainerLowest = Ink.background,
+            surfaceContainerLow = Ink.surfaceLow,
             surfaceContainerHigh = Ink.surfaceHigh,
-            primary = Ink.primary,
-            onPrimary = Color.Black,
+            outline = Ink.outline,
+            outlineVariant = Ink.surfaceHigh,
+            primary = Ink.accent,
+            onPrimary = Color.White,
+            secondary = Ink.secondary,
+            onSecondary = Ink.background,
             onSurface = Ink.primary,
             onSurfaceVariant = Ink.secondary,
+            surfaceVariant = Ink.surfaceHigh,
             secondaryContainer = Ink.surfaceHigh,
             onSecondaryContainer = Ink.primary,
+            error = Ink.live,
+        ),
+        shapes = Shapes(
+            small = RoundedCornerShape(12.dp),
+            medium = RoundedCornerShape(18.dp),
+            large = RoundedCornerShape(28.dp),
+            extraLarge = RoundedCornerShape(36.dp),
+        ),
+        typography = Typography(
+            displayLarge = Type.largeTitle,
+            headlineLarge = Type.title1,
+            headlineMedium = Type.title2,
+            titleLarge = Type.headline,
+            bodyLarge = Type.body,
+            bodyMedium = Type.subhead,
+            labelLarge = Type.footnote,
+            labelMedium = Type.caption,
         ),
         content = content,
     )
@@ -137,9 +186,10 @@ fun Modifier.pressable(enabled: Boolean = true, scaleTo: Float = 0.97f, onClick:
     val context = LocalContext.current
     val isTv = remember(context) { context.packageManager.hasSystemFeature("android.software.leanback") }
     val ringed = focused && (isTv || LocalInputModeManager.current.inputMode == InputMode.Keyboard)
+    val reducedMotion = LocalReduceMotion.current
     val scale by animateFloatAsState(
         if (pressed && enabled) scaleTo else if (ringed) FOCUS_SCALE else 1f,
-        tween(Motion.PRESS_MS, easing = EaseOut),
+        tween(if (reducedMotion) 0 else Motion.PRESS_MS, easing = EaseOut),
         label = "press",
     )
     this
@@ -201,7 +251,7 @@ internal fun sliderDpadValue(
     return (value + direction * span / 100f * multiplier).coerceIn(min, max)
 }
 
-/** iOS-style slider: a round white thumb on a thin track, instead of Material's bar thumb. */
+/** Compact racing-themed Material 3 slider retaining explicit TV arrow-key control. */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun AppleSlider(
@@ -214,29 +264,47 @@ fun AppleSlider(
     /** The remote is on it: the thumb grows, without moving anything around it. */
     emphasised: Boolean = false,
 ) {
-    val thumbScale by animateFloatAsState(if (emphasised) 1.5f else 1f, tween(Motion.PRESS_MS, easing = EaseOut), label = "thumb")
+    val reducedMotion = LocalReduceMotion.current
+    val thumbScale by animateFloatAsState(if (emphasised) 1.5f else 1f,
+        tween(if (reducedMotion) 0 else Motion.PRESS_MS, easing = EaseOut), label = "thumb")
     var dpadRepeats by remember { mutableIntStateOf(0) }
+    // Material 3 1.5 moved custom thumb/track slots to the state-based overload.
+    // Preserve two-way external state (remote, app settings, restore) as well as
+    // direct drag updates. An active gesture must not be reset by recomposition.
+    val sliderState = remember(valueRange) { SliderState(value = value, trackRange = valueRange) }
+    SideEffect {
+        if (!sliderState.isDragging && sliderState.value != value) sliderState.value = value
+    }
     androidx.compose.material3.Slider(
-        value = value,
-        onValueChange = onValueChange,
+        state = sliderState,
+        onValueChange = { updated ->
+            sliderState.value = updated
+            onValueChange(updated)
+        },
         modifier = modifier
             .tvFocusRing()
             .onFocusChanged { if (!it.isFocused) dpadRepeats = 0 }
-            .onKeyEvent { event ->
+            // Preview intercepts TCL D-pad events before Material3 consumes
+            // its own arrow keys. Do not also seek the active media player.
+            .onPreviewKeyEvent { event ->
                 when (event.key) {
                     Key.DirectionLeft, Key.DirectionRight -> when (event.type) {
                         KeyEventType.KeyDown -> {
                             dpadRepeats++
                             val direction = if (event.key == Key.DirectionLeft) -1 else 1
-                            onValueChange(
-                                sliderDpadValue(
-                                    value,
-                                    valueRange.start,
-                                    valueRange.endInclusive,
-                                    direction,
-                                    dpadRepeats,
-                                )
+                            // Change the Material-owned state immediately before notifying
+                            // the app. Holding a physical remote key can send events faster
+                            // than the parent Compose snapshot recomposes; do not step from
+                            // the stale externally-supplied value for every repeated key.
+                            val next = sliderDpadValue(
+                                sliderState.value,
+                                valueRange.start,
+                                valueRange.endInclusive,
+                                direction,
+                                dpadRepeats,
                             )
+                            sliderState.value = next
+                            onValueChange(next)
                             true
                         }
                         KeyEventType.KeyUp -> {
@@ -250,7 +318,6 @@ fun AppleSlider(
                 }
             }
             .focusable(),
-        valueRange = valueRange,
         onValueChangeFinished = onValueChangeFinished,
         thumb = {
             androidx.compose.foundation.layout.Box(
@@ -262,13 +329,13 @@ fun AppleSlider(
             )
         },
         track = { state ->
-            val span = state.valueRange.endInclusive - state.valueRange.start
-            val fraction = if (span == 0f) 0f else ((state.value - state.valueRange.start) / span).coerceIn(0f, 1f)
+            val span = state.trackRange.endInclusive - state.trackRange.start
+            val fraction = if (span == 0f) 0f else ((state.value - state.trackRange.start) / span).coerceIn(0f, 1f)
             androidx.compose.foundation.layout.Box(
-                Modifier.fillMaxWidth().height(4.dp).background(trackColor, androidx.compose.foundation.shape.RoundedCornerShape(2.dp))
+                Modifier.fillMaxWidth().height(6.dp).background(trackColor, androidx.compose.foundation.shape.RoundedCornerShape(3.dp))
             ) {
                 androidx.compose.foundation.layout.Box(
-                    Modifier.fillMaxWidth(fraction).fillMaxHeight().background(Color.White, androidx.compose.foundation.shape.RoundedCornerShape(2.dp))
+                    Modifier.fillMaxWidth(fraction).fillMaxHeight().background(Ink.accent, androidx.compose.foundation.shape.RoundedCornerShape(3.dp))
                 )
             }
         },

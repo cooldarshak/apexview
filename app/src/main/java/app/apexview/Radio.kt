@@ -20,6 +20,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.OpenWith
+import androidx.compose.material.icons.rounded.SwapVert
+import androidx.compose.material.icons.rounded.ZoomOutMap
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Icon
@@ -30,14 +33,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -48,7 +55,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -224,10 +230,8 @@ internal fun FloatingPanel(
     minHeight: androidx.compose.ui.unit.Dp = PANEL_MIN_HEIGHT,
     /** Optional reserved area that contains the complete panel and its resize gestures. */
     bounds: Area? = null,
-    /** Replaces the tall title bar with a slim move/resize strip, used by the timing tower. */
-    compactHeader: Boolean = false,
-    /** Optional compact-header height, scaled to the TV canvas in the broadcast layout. */
-    compactHeaderHeight: androidx.compose.ui.unit.Dp? = null,
+    /** The tower uses edit handles over the table. */
+    tower: Boolean = false,
     /** Opacity of the complete panel, including its contents. */
     opacity: Float = 1f,
     /** When locked, its header and resize grip no longer change the panel's place or size. */
@@ -241,13 +245,14 @@ internal fun FloatingPanel(
         minOf(maxWidth, bounds?.let { it.w.toDp() } ?: (width.toDp() - 32.dp))
     }
     val panelHeight = with(density) { minOf(maxHeight, bounds?.let { it.h.toDp() } ?: maxHeight) }
+    val defaultPanelWidth = if (tower) minOf(AppState.TOWER_DEFAULT_WIDTH_DP.dp, panelWidth) else panelWidth
     val effectiveMinWidth = minWidth.coerceAtMost(panelWidth)
     val effectiveMinHeight = minHeight.coerceAtMost(panelHeight)
     if (spot.x < 0f) {
         with(density) {
-            val w = panelWidth.toPx()
+            val w = defaultPanelWidth.toPx()
             val h = panelHeight.toPx()
-            val saved = spot.saved()
+            val saved = spot.saved(width, height)
             if (saved != null && saved.size >= 4 && saved[2] > 0f && saved[3] > 0f) {
                 spot.w = saved[2] * width
                 spot.h = saved[3] * height
@@ -271,24 +276,21 @@ internal fun FloatingPanel(
                     spot.y = height - h - 120.dp.toPx()
                 }
             }
-            val minX = bounds?.x ?: 0f
-            val minY = bounds?.y ?: 0f
-            val maxX = bounds?.let { it.x + it.w - w } ?: (width - w)
-            val maxY = bounds?.let { it.y + it.h - h } ?: (height - h)
-            spot.x = spot.x.coerceIn(minX, maxX.coerceAtLeast(minX))
-            spot.y = spot.y.coerceIn(minY, maxY.coerceAtLeast(minY))
         }
     }
     val shownWidth = if (spot.w > 0f) with(density) {
         spot.w.toDp().coerceIn(effectiveMinWidth, panelWidth)
-    } else panelWidth
+    } else defaultPanelWidth
     val shownHeight = if (spot.h > 0f) with(density) {
         spot.h.toDp().coerceIn(effectiveMinHeight, panelHeight)
     } else panelHeight
     val shownWidthPx = with(density) { shownWidth.toPx() }
     val shownHeightPx = with(density) { shownHeight.toPx() }
-    if (spot.w > 0f) spot.w = shownWidthPx
-    if (spot.h > 0f) spot.h = shownHeightPx
+    if (spot === app.towerSpot) androidx.compose.runtime.SideEffect {
+        app.reportCastTowerBounds(spot.x, spot.y, shownWidthPx, shownHeightPx)
+    }
+    if (tower || spot.w > 0f) spot.w = shownWidthPx
+    if (tower || spot.h > 0f) spot.h = shownHeightPx
     val minX = bounds?.x ?: 0f
     val minY = bounds?.y ?: 0f
     spot.x = spot.x.coerceIn(minX, (bounds?.let { it.x + it.w - shownWidthPx } ?: (width - shownWidthPx)).coerceAtLeast(minX))
@@ -316,7 +318,7 @@ internal fun FloatingPanel(
                 .clip(RoundedCornerShape(16.dp))
                 .background(Color.Black.copy(alpha = 0.72f))
         ) {
-            Row(
+            if (!tower) Row(
                 Modifier
                     .fillMaxWidth()
                     .then(
@@ -344,80 +346,13 @@ internal fun FloatingPanel(
                             }
                         }
                     )
-                    .height(if (compactHeader) compactHeaderHeight ?: 22.dp else HEADER_HEIGHT)
-                    .padding(start = if (compactHeader) 6.dp else 16.dp, end = 4.dp),
+                    .height(HEADER_HEIGHT)
+                    .padding(start = 16.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (compactHeader) {
-                    if (!locked) {
-                        Text(
-                            "MOVE",
-                            style = Type.caption.copy(fontSize = 7.sp, color = Ink.secondary, fontWeight = FontWeight.Bold),
-                            modifier = Modifier
-                                .padding(horizontal = 7.dp, vertical = 1.dp)
-                                .onKeyEvent { event ->
-                                    when (event.key) {
-                                        Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
-                                            if (event.type == KeyEventType.KeyDown) {
-                                                val step = with(density) { 18.dp.toPx() }
-                                                val dx = when (event.key) { Key.DirectionLeft -> -step; Key.DirectionRight -> step; else -> 0f }
-                                                val dy = when (event.key) { Key.DirectionUp -> -step; Key.DirectionDown -> step; else -> 0f }
-                                                val minX = bounds?.x ?: 0f
-                                                val minY = bounds?.y ?: 0f
-                                                val maxX = bounds?.let { it.x + it.w - boxW } ?: (width - boxW)
-                                                val maxY = bounds?.let { it.y + it.h - boxH } ?: (height - boxH)
-                                                spot.x = (spot.x + dx).coerceIn(minX, maxX.coerceAtLeast(minX))
-                                                spot.y = (spot.y + dy).coerceIn(minY, maxY.coerceAtLeast(minY))
-                                            } else if (event.type == KeyEventType.KeyUp) spot.store(width, height)
-                                            true
-                                        }
-                                        else -> false
-                                    }
-                                }
-                                .pressable(scaleTo = 1f) {},
-                        )
-                        Text(
-                            "SIZE",
-                            style = Type.caption.copy(fontSize = 7.sp, color = Ink.secondary, fontWeight = FontWeight.Bold),
-                            modifier = Modifier
-                                .padding(horizontal = 7.dp, vertical = 1.dp)
-                                .onKeyEvent { event ->
-                                    when (event.key) {
-                                        Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown -> {
-                                            if (event.type == KeyEventType.KeyDown) {
-                                                val step = with(density) { 18.dp.toPx() }
-                                                val dx = when (event.key) { Key.DirectionLeft -> -step; Key.DirectionRight -> step; else -> 0f }
-                                                val dy = when (event.key) { Key.DirectionUp -> -step; Key.DirectionDown -> step; else -> 0f }
-                                                val minW = with(density) { effectiveMinWidth.toPx() }
-                                                val minH = with(density) { effectiveMinHeight.toPx() }
-                                                val maxW = bounds?.let { it.x + it.w - spot.x } ?: (width - spot.x)
-                                                val maxH = bounds?.let { it.y + it.h - spot.y } ?: (height - spot.y)
-                                                spot.w = (spot.w.takeIf { it > 0f } ?: boxW).let { (it + dx).coerceIn(minW, maxW.coerceAtLeast(minW)) }
-                                                spot.h = (spot.h.takeIf { it > 0f } ?: boxH).let { (it + dy).coerceIn(minH, maxH.coerceAtLeast(minH)) }
-                                            } else if (event.type == KeyEventType.KeyUp) {
-                                                spot.store(width, height)
-                                                onResizeFinished()
-                                            }
-                                            true
-                                        }
-                                        else -> false
-                                    }
-                                }
-                                .pressable(scaleTo = 1f) {},
-                        )
-                    }
-                    Text(
-                        title,
-                        style = Type.headline.copy(fontSize = if (app.layoutMode == LayoutMode.TV) 18.sp else 10.sp),
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        modifier = Modifier.weight(1f),
-                    )
-                } else {
-                    Text(title, style = Type.headline, modifier = Modifier.weight(1f))
-                }
+                Text(title, style = Type.headline, modifier = Modifier.weight(1f))
                 Box(
-                    Modifier.size(if (compactHeader) 24.dp else 36.dp).pressable(onClick = onClose),
+                    Modifier.size(36.dp).pressable(onClick = onClose),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(Icons.Rounded.Close, closeLabel, tint = Ink.secondary, modifier = Modifier.size(16.dp))
@@ -426,7 +361,39 @@ internal fun FloatingPanel(
             content()
         }
         // The corner grip: drag to resize, edges snapping like the feeds'.
-        if (!locked) Box(
+        if (tower && !locked && app.arranging && app.tvLandscapeLayout) {
+            TowerEditHandle(Modifier.align(Alignment.CenterStart), minOf(54.dp, shownWidth / 3f),
+                Icons.Rounded.ZoomOutMap, "Change timing tower width",
+                { Area(spot.x, spot.y, spot.w, spot.h) },
+                { start, delta -> app.updateTowerWidth(start.w - delta.x) }, app::finishTowerResize)
+        } else if (tower && !locked && app.arranging) {
+            val region = bounds ?: Area(0f, 0f, width, height)
+            val maximumWidth = with(density) { panelWidth.toPx() }
+            val maximumHeight = with(density) { panelHeight.toPx() }
+            fun update(original: Area, edit: TowerEdit, delta: Offset, snap: Boolean = false) {
+                val adjusted = original.adjustTower(edit, delta.x, delta.y, region,
+                    minWidthPx, with(density) { effectiveMinHeight.toPx() }, maximumWidth, maximumHeight)
+                val area = if (snap && app.snapMode && edit == TowerEdit.MOVE) {
+                    val (xs, ys) = snapLines(app, width, height, feedScale)
+                    with(density) {
+                        adjusted.adjustTower(edit, pull(listOf(adjusted.x, adjusted.x + adjusted.w), xs, SNAP.toPx()),
+                            pull(listOf(adjusted.y, adjusted.y + adjusted.h), ys, SNAP.toPx()), region,
+                            minWidthPx, effectiveMinHeight.toPx(), maximumWidth, maximumHeight)
+                    }
+                } else adjusted
+                app.applyTowerEdit(area)
+            }
+            fun current() = Area(spot.x, spot.y, spot.w, spot.h)
+            val target = minOf(54.dp, shownWidth / 3f)
+            TowerEditHandle(Modifier.align(Alignment.CenterStart), target, Icons.Rounded.OpenWith, "Move timing tower",
+                ::current, { original, delta -> update(original, TowerEdit.MOVE, delta) },
+                { update(current(), TowerEdit.MOVE, Offset.Zero, snap = true); app.finishTowerResize() })
+            TowerEditHandle(Modifier.align(Alignment.BottomCenter), target, Icons.Rounded.SwapVert, "Change timing tower height",
+                ::current, { original, delta -> update(original, TowerEdit.HEIGHT, delta) }, app::finishTowerResize)
+            TowerEditHandle(Modifier.align(Alignment.BottomEnd), target, Icons.Rounded.ZoomOutMap, "Resize timing tower",
+                ::current, { original, delta -> update(original, TowerEdit.SIZE, delta) }, app::finishTowerResize)
+        }
+        if (!tower && !locked) Box(
             Modifier
                 .align(Alignment.BottomEnd)
                 .size(36.dp)
@@ -459,6 +426,71 @@ internal fun FloatingPanel(
                 drawLine(c, androidx.compose.ui.geometry.Offset(size.width, 0f), androidx.compose.ui.geometry.Offset(0f, size.height), stroke)
                 drawLine(c, androidx.compose.ui.geometry.Offset(size.width, size.height / 2), androidx.compose.ui.geometry.Offset(size.width / 2, size.height), stroke)
             }
+        }
+    }
+}
+
+
+@Composable
+private fun TowerEditHandle(
+    modifier: Modifier,
+    target: androidx.compose.ui.unit.Dp,
+    icon: ImageVector,
+    label: String,
+    current: () -> Area,
+    adjust: (Area, Offset) -> Unit,
+    finish: () -> Unit,
+) {
+    var adjusting by remember { mutableStateOf(false) }
+    val currentArea by rememberUpdatedState(current)
+    val adjustArea by rememberUpdatedState(adjust)
+    val finishEdit by rememberUpdatedState(finish)
+    val step = with(LocalDensity.current) { 16.dp.toPx() }
+    Box(
+        modifier.size(target)
+            .onFocusChanged {
+                if (!it.isFocused && adjusting) {
+                    adjusting = false
+                    finishEdit()
+                }
+            }
+            .onKeyEvent { event ->
+                if (!adjusting) return@onKeyEvent false
+                val delta = when (event.key) {
+                    Key.DirectionLeft -> Offset(-step, 0f)
+                    Key.DirectionRight -> Offset(step, 0f)
+                    Key.DirectionUp -> Offset(0f, -step)
+                    Key.DirectionDown -> Offset(0f, step)
+                    else -> return@onKeyEvent false
+                }
+                if (event.type == KeyEventType.KeyDown) adjustArea(currentArea(), delta)
+                true
+            }
+            .pointerInput(Unit) {
+                var start: Area? = null
+                var total = Offset.Zero
+                detectDragGestures(
+                    onDragStart = { start = currentArea(); total = Offset.Zero },
+                    onDragEnd = { finishEdit() },
+                    onDragCancel = { finishEdit() },
+                ) { change, drag ->
+                    change.consume()
+                    total += drag
+                    start?.let { adjustArea(it, total) }
+                }
+            }
+            .pressable(scaleTo = 1f) {
+                adjusting = !adjusting
+                if (!adjusting) finishEdit()
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier.size(36.dp).clip(RoundedCornerShape(10.dp))
+                .background(if (adjusting) Color(0xFF168BFF) else Color.Black.copy(alpha = 0.86f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, if (adjusting) "$label, press OK to finish" else label, tint = Color.White, modifier = Modifier.size(22.dp))
         }
     }
 }

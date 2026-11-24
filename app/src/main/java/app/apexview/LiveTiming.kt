@@ -5,7 +5,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -34,6 +40,30 @@ data class SessionRef(
 /** Prefer the video's exact clock, but never lose the catalog's session-start fallback. */
 internal fun archiveLookupTime(watchedUtc: Long?, sessionStartUtcMs: Long?): Long? =
     watchedUtc ?: sessionStartUtcMs
+
+internal data class ReplayPlayhead(
+    val positionMs: Long,
+    val videoUtcMs: Long?,
+    val offsetMs: Long,
+    val cachedVideoClock: Boolean = false,
+) {
+    fun utcAt(archiveStart: Long): Long = (videoUtcMs ?: archiveStart + positionMs) + offsetMs
+}
+
+/** Keeps a streaming preview centered when the manifest clock corrects a replay estimate. */
+internal class ReplayPositionWindow(initialTargetMs: Long) {
+    var targetMs = initialTargetMs.coerceAtLeast(0L)
+        private set
+    val firstMs get() = (targetMs - 90_000L).coerceAtLeast(0L)
+    val lastMs get() = targetMs + 120_000L
+
+    fun retarget(currentMs: Long): Boolean {
+        val next = currentMs.coerceAtLeast(0L)
+        if (abs(next - targetMs) < 30_000L) return false
+        targetMs = next
+        return true
+    }
+}
 
 enum class LapState { UNKNOWN, PIT, OUT_LAP, PUSH, COOL_DOWN, KNOCKED_OUT }
 
@@ -143,6 +173,9 @@ class TrackFlags(
 class TrackGeometry(val outline: FloatArray) {
     private val n = outline.size / 2
     private val along = FloatArray(n)
+    // Exact nearest-point queries now use a retained balanced spatial index.
+    // The result is identical to the prior linear scan, including vertex ties.
+    private val vertexIndex = OverlayVertexIndex(outline)
     val length: Float
 
     /**
@@ -165,17 +198,7 @@ class TrackGeometry(val outline: FloatArray) {
     private fun dist(a: Int, b: Int) =
         hypot(outline[a * 2] - outline[b * 2], outline[a * 2 + 1] - outline[b * 2 + 1])
 
-    fun nearestIndex(x: Float, y: Float): Int {
-        var best = 0
-        var bestD = Float.MAX_VALUE
-        for (i in 0 until n) {
-            val dx = outline[i * 2] - x
-            val dy = outline[i * 2 + 1] - y
-            val d = dx * dx + dy * dy
-            if (d < bestD) { bestD = d; best = i }
-        }
-        return best
-    }
+    fun nearestIndex(x: Float, y: Float): Int = vertexIndex.nearest(x, y)
 
     /**
      * The point [f] of the way round the lap (0..1 from the loop's first point) and the unit
@@ -184,19 +207,24 @@ class TrackGeometry(val outline: FloatArray) {
     fun pointAt(f: Float): FloatArray {
         if (n < 2 || length == 0f) return floatArrayOf(0f, 0f, 1f, 0f)
         val target = f.mod(1f) * length
-        for (i in 0 until n) {
-            val j = (i + 1) % n
-            val end = if (j == 0) length else along[j]
-            if (target <= end || j == 0) {
-                val span = end - along[i]
-                val k = if (span == 0f) 0f else ((target - along[i]) / span).coerceIn(0f, 1f)
-                val ax = outline[i * 2]; val ay = outline[i * 2 + 1]
-                val bx = outline[j * 2]; val by = outline[j * 2 + 1]
-                val len = hypot(bx - ax, by - ay).coerceAtLeast(0.001f)
-                return floatArrayOf(ax + (bx - ax) * k, ay + (by - ay) * k, (bx - ax) / len, (by - ay) / len)
-            }
+        // First segment whose ending distance >= target, including exact vertex
+        // boundaries. Preserve the old normal/direction at corners.
+        var low = 1
+        var high = n
+        while (low < high) {
+            val mid = (low + high) ushr 1
+            val end = if (mid == n) length else along[mid]
+            if (end < target) low = mid + 1 else high = mid
         }
-        return floatArrayOf(outline[0], outline[1], 1f, 0f)
+        val i = (low - 1).coerceIn(0, n - 1)
+        val j = (i + 1) % n
+        val end = if (j == 0) length else along[j]
+        val span = end - along[i]
+        val k = if (span == 0f) 0f else ((target - along[i]) / span).coerceIn(0f, 1f)
+        val ax = outline[i * 2]; val ay = outline[i * 2 + 1]
+        val bx = outline[j * 2]; val by = outline[j * 2 + 1]
+        val len = hypot(bx - ax, by - ay).coerceAtLeast(0.001f)
+        return floatArrayOf(ax + (bx - ax) * k, ay + (by - ay) * k, (bx - ax) / len, (by - ay) / len)
     }
 
     /** Projected onto the nearest segment, so the value moves smoothly between outline points. */
@@ -205,7 +233,9 @@ class TrackGeometry(val outline: FloatArray) {
         val i = nearestIndex(x, y)
         var best = along[i]
         var bestD = Float.MAX_VALUE
-        for (j in listOf((i - 1 + n) % n, i)) {
+        // Avoid allocating a two-element list for every car-position projection.
+        for (side in 0..1) {
+            val j = if (side == 0) (i - 1 + n) % n else i
             val k = (j + 1) % n
             val ax = outline[j * 2]; val ay = outline[j * 2 + 1]
             val bx = outline[k * 2]; val by = outline[k * 2 + 1]
@@ -226,21 +256,36 @@ class TrackGeometry(val outline: FloatArray) {
 }
 
 /** One car's positions over the session, in archive coordinates (1/10 m). */
-class DriverTrack(private val t: LongArray, private val x: FloatArray, private val y: FloatArray, private val n: Int) {
+class DriverTrack(
+    internal val t: LongArray,
+    internal val x: FloatArray,
+    internal val y: FloatArray,
+    internal val n: Int,
+) {
     val startMs get() = if (n > 0) t[0] else 0L
     val endMs get() = if (n > 0) t[n - 1] else 0L
 
-    /** Position at [utcMs], interpolated between samples. Null outside the data or across gaps. */
-    fun at(utcMs: Long): Pair<Float, Float>? {
-        if (n == 0 || utcMs < t[0] || utcMs > t[n - 1]) return null
+    /** Shared exact interval lookup; readiness checks never allocate marker coordinates. */
+    private fun validBracketStart(utcMs: Long): Int {
+        if (n == 0 || utcMs < t[0] || utcMs > t[n - 1]) return -1
         var lo = 0
         var hi = n - 1
         while (hi - lo > 1) {
             val mid = (lo + hi) ushr 1
             if (t[mid] <= utcMs) lo = mid else hi = mid
         }
+        return if (t[hi] - t[lo] > MAX_GAP_MS) -1 else lo
+    }
+
+    /** True exactly when at(time) can render a marker, without allocating a Pair. */
+    fun hasPositionAt(utcMs: Long): Boolean = validBracketStart(utcMs) >= 0
+
+    /** Position at [utcMs], interpolated between samples. Null outside the data or across gaps. */
+    fun at(utcMs: Long): Pair<Float, Float>? {
+        val lo = validBracketStart(utcMs)
+        if (lo < 0) return null
+        val hi = if (lo + 1 < n) lo + 1 else lo
         val span = t[hi] - t[lo]
-        if (span > MAX_GAP_MS) return null
         val f = if (span == 0L) 0f else (utcMs - t[lo]).toFloat() / span
         return Pair(x[lo] + (x[hi] - x[lo]) * f, y[lo] + (y[hi] - y[lo]) * f)
     }
@@ -255,15 +300,9 @@ class DriverTrack(private val t: LongArray, private val x: FloatArray, private v
 }
 
 /** A driver's lap states as they changed through the session. */
-class StateLog(private val t: LongArray, private val s: Array<LapState>) {
-    fun at(utcMs: Long): LapState {
-        var result = LapState.UNKNOWN
-        for (i in t.indices) {
-            if (t[i] > utcMs) break
-            result = s[i]
-        }
-        return result
-    }
+class StateLog(internal val t: LongArray, internal val s: Array<LapState>) {
+    fun at(utcMs: Long): LapState = s.getOrNull(t.floorIndex(utcMs)) ?: LapState.UNKNOWN
+    internal fun shiftedBy(offsetMs: Long) = StateLog(t.shiftedBy(offsetMs), s)
 }
 
 /** A car's speed and gear through a session, from F1 CarData (speed in km/h). */
@@ -366,6 +405,10 @@ class SessionTiming(
     val weather: WeatherLog = WeatherLog.NONE,
 ) {
     val geometry = TrackGeometry(outline)
+    val firstTrackUtc: Long? = tracks.values.minOfOrNull { it.startMs }
+    val lastTrackUtc: Long? = tracks.values.maxOfOrNull { it.endMs }
+    var archivePartial = false
+
 
     /** Each car's speed, by racing number. */
     var speeds by mutableStateOf<Map<String, SpeedLog>>(emptyMap())
@@ -483,6 +526,55 @@ class SessionClock(private val marks: List<Mark>, private val parts: List<Pair<L
 /** Lap states per driver, plus every moment a car crossed the line (to locate it). */
 class StateParse(val states: Map<String, StateLog>, val crossings: List<Pair<String, Long>>)
 
+/** Keeps the tower and lap-state histories from one JSON parse of the large TimingData stream. */
+internal class StateHistoryAccumulator {
+    private val crossings = mutableListOf<Pair<String, Long>>()
+    private val times = mutableMapOf<String, MutableList<Long>>()
+    private val values = mutableMapOf<String, MutableList<LapState>>()
+    private val current = mutableMapOf<String, LapState>()
+    private val laps = mutableMapOf<String, Int>()
+
+    fun accept(lines: JSONObject, time: Long) {
+        lines.keys().forEach { number ->
+            val driver = lines.optJSONObject(number) ?: return@forEach
+            if (!driver.has("InPit") && !driver.has("PitOut") && !driver.has("NumberOfLaps") && !driver.has("KnockedOut")) return@forEach
+            var state = current[number] ?: LapState.UNKNOWN
+            if (driver.optBoolean("InPit")) state = LapState.PIT
+            if (driver.optBoolean("PitOut") || (driver.has("InPit") && !driver.optBoolean("InPit") && state == LapState.PIT)) {
+                state = LapState.OUT_LAP
+            }
+            if (driver.has("NumberOfLaps")) {
+                val count = driver.optInt("NumberOfLaps", -1)
+                val previous = laps[number]
+                if (count >= (previous ?: 0)) laps[number] = count
+                if (previous != null && count > previous) {
+                    crossings += number to time
+                    state = when (state) {
+                        LapState.OUT_LAP, LapState.COOL_DOWN -> LapState.PUSH
+                        LapState.PUSH -> LapState.COOL_DOWN
+                        else -> state
+                    }
+                }
+            }
+            if (driver.optBoolean("KnockedOut")) state = LapState.KNOCKED_OUT
+            if (state != current[number]) {
+                current[number] = state
+                times.getOrPut(number) { mutableListOf() }.add(time)
+                values.getOrPut(number) { mutableListOf() }.add(state)
+            }
+        }
+    }
+
+    fun finish() = StateParse(
+        states = times.mapValues { (number, t) -> StateLog(t.toLongArray(), values.getValue(number).toTypedArray()) },
+        crossings = crossings.toList(),
+    )
+}
+
+internal data class DriverTimingParse(val laps: Map<String, DriverLaps>, val states: StateParse)
+internal data class DriverTimingPreview(val throughUtcMs: Long, val history: DriverTimingParse)
+internal const val TOWER_PREVIEW_LOOKAHEAD_MS = 60_000L
+
 /**
  * Reads a past session from F1's live timing archive (livetiming.formula1.com/static). The archive
  * now needs the F1 TV subscription token as a Bearer header, the way FastF1 sends it.
@@ -495,7 +587,6 @@ class StateParse(val states: Map<String, StateLog>, val crossings: List<Pair<Str
  * 2026 Mexico race's radio was all "1.02:32:50.914"). Read as a fixed 12 characters, every line
  * from that point on was dropped, and the radio stopped there.
  */
-private val STREAM_PREFIX = Regex("""^\uFEFF?(?:(\d+)\.)?(\d{2}):(\d{2}):(\d{2})\.(\d{3})""")
 
 /** How many characters the prefix takes, so the payload starts there; the whole line if it has none. */
 /** A picture this close before the first positions still shows the cars where they first appear. */
@@ -522,72 +613,698 @@ internal fun rebaseStream(stream: String, archiveStart: Long, newStart: Long, un
     return out.toString()
 }
 
-internal fun streamPrefixLength(line: String): Int = STREAM_PREFIX.find(line)?.range?.last?.plus(1) ?: line.length
+// The archive prefixes are fixed ASCII fields. Avoid creating native regex matchers per record.
+private fun archivePrefixEnd(line: String, from: Int = 0, until: Int = line.length): Int {
+    val start = if (from < until && line[from] == '\uFEFF') from + 1 else from
+    var hour = start
+    while (hour < until && line[hour] in '0'..'9') hour++
+    if (hour < until && line[hour] == '.') hour++ else hour = start
+    val end = hour + 12
+    if (end > until) return -1
+    for (i in 0 until 12) {
+        val ch = line[hour + i]
+        if (when (i) { 2, 5 -> ch != ':'; 8 -> ch != '.'; else -> ch !in '0'..'9' }) return -1
+    }
+    return end
+}
+
+internal fun streamPrefixLength(line: String): Int = archivePrefixEnd(line).takeIf { it >= 0 } ?: line.length
 
 /** The line's offset from the stream's start, in ms. */
 internal fun streamOffsetMs(line: String): Long {
-    val g = STREAM_PREFIX.find(line)?.groupValues ?: throw IllegalArgumentException("no stream offset")
-    val days = g[1].ifEmpty { "0" }.toLong()
-    return (((days * 24 + g[2].toLong()) * 60 + g[3].toLong()) * 60 + g[4].toLong()) * 1000 + g[5].toLong()
+    val end = archivePrefixEnd(line)
+    require(end >= 0) { "no stream offset" }
+    return streamOffsetMs(line, end)
 }
+
+internal fun streamOffsetMs(line: String, end: Int): Long = streamOffsetMs(line, 0, end)
+
+private fun streamOffsetMs(line: String, from: Int, end: Int): Long {
+    val hour = end - 12
+    val start = if (line[from] == '\uFEFF') from + 1 else from
+    var days = 0L
+    for (i in start until hour - 1) days = days * 10 + (line[i] - '0')
+    fun pair(i: Int) = (line[i] - '0') * 10 + (line[i + 1] - '0')
+    return (((days * 24 + pair(hour)) * 60 + pair(hour + 3)) * 60 + pair(hour + 6)) * 1000 +
+        pair(end - 3) * 10 + (line[end - 1] - '0')
+}
+
+/** Check ordering without allocating a substring for every line of the archive. */
+internal fun timingStreamIsChronological(text: String, checkActive: () -> Unit): Boolean {
+    var start = 0
+    var previous = Long.MIN_VALUE
+    var records = 0
+    while (start < text.length) {
+        if (records++ % 256 == 0) checkActive()
+        var end = start
+        while (end < text.length && text[end] != '\n' && text[end] != '\r') end++
+        val prefix = archivePrefixEnd(text, start, end)
+        if (prefix in 0 until end) {
+            val offset = streamOffsetMs(text, start, prefix)
+            if (offset < previous) return false
+            previous = offset
+        }
+        start = end + 1
+    }
+    return true
+}
+
+/** Main-looper publication order for independently parsed track and timing previews. */
+internal class TimingPreviewEpochs {
+    private var latest = 0L
+    @Synchronized fun next(): Long = ++latest
+    @Synchronized fun isCurrent(epoch: Long): Boolean = epoch == latest
+}
+
+private data class TimingPreviewSnapshot(
+    val epoch: Long,
+    val tracks: Map<String, DriverTrack>,
+    val outline: FloatArray,
+    val states: Map<String, StateLog>,
+    val laps: Map<String, DriverLaps>,
+    val startUtcMs: Long,
+)
 
 class LiveTimingArchive(private val token: String, private val userAgent: String) {
 
     /** [watchedUtc]: when the video on screen was broadcast, if known; finds the session by time. */
-    suspend fun load(ref: SessionRef, watchedUtc: Long? = null): SessionTiming = withContext(Dispatchers.IO) {
-        val (path, type) = findSession(ref, watchedUtc)
-        val drivers = parseDrivers(JSONObject(fetch(path + "DriverList.json")))
-        val positions = fetch(path + "Position.z.jsonStream")
-        val tracks = parsePositions(positions)
-        if (tracks.isEmpty()) throw IOException("The archive has no car positions for this session")
+    internal suspend fun load(
+        ref: SessionRef,
+        watchedUtc: Long? = null,
+        replayPositionMs: Long = 0,
+        positionScratchDir: java.io.File? = null,
+        replayCache: ReplayCoreCache? = null,
+        timingOffsetMs: Long = 0,
+        playhead: () -> ReplayPlayhead? = { null },
+        traceId: Long = 0,
+        onProgress: suspend (String) -> Unit = {},
+        onPartial: suspend (SessionTiming) -> Unit = {},
+    ): SessionTiming = withContext(Dispatchers.IO) {
+        suspend fun progress(status: String) {
+            withContext(Dispatchers.Main) { onProgress(status) }
+        }
+        suspend fun publish(session: SessionTiming) {
+            withContext(Dispatchers.Main) { onPartial(session) }
+        }
+        suspend fun fetchStage(path: String, label: String = path.substringAfterLast('/')): String {
+            progress("GET $label…")
+            val started = android.os.SystemClock.elapsedRealtime()
+            return try {
+                val body = fetch(path)
+                progress("OK $label · ${body.length} chars · ${android.os.SystemClock.elapsedRealtime() - started}ms")
+                body
+            } catch (e: Exception) {
+                progress("FAIL $label · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                throw e
+            }
+        }
+        suspend fun fetchOptionalStage(path: String, label: String = path.substringAfterLast('/')): String? =
+            try {
+                fetchStage(path, label)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
 
-        // The heartbeat ties the streams' offsets to the clock. The 2026 Mexico race's put them
-        // 33 hours late, leaving the laps a day and a half away from the cars; where the cars'
-        // own timestamps disagree with it by more than a minute, they're the ones to trust.
-        val streamStart = streamStart(fetch(path + "Heartbeat.jsonStream"), positions)
-        val timingStream = runCatching { fetch(path + "TimingData.jsonStream") }.getOrNull()
-        val timingF1Stream = runCatching { fetch(path + "TimingDataF1.jsonStream") }.getOrNull().orEmpty()
-        val weather = runCatching { WeatherParser.parse(fetch(path + "WeatherData.jsonStream"), streamStart) }.getOrDefault(WeatherLog.NONE)
-        val parsed = timingStream?.let { runCatching { parseStates(it, streamStart) }.getOrNull() }
-            ?: StateParse(emptyMap(), emptyList())
-        val laps = timingStream?.let { runCatching { DriverTimingParser.parse(it, streamStart, timingF1Stream) }.getOrNull() }.orEmpty()
+        val availableCircuit = java.util.concurrent.atomic.AtomicReference<Circuit?>()
+        val circuitTask = async {
+            ref.circuitKey?.let { runCatching { fetchCircuit(it, ref.year) }.getOrNull() }
+                .also(availableCircuit::set)
+        }
+        fun targetUtc(startUtc: Long) =
+            (playhead() ?: ReplayPlayhead(replayPositionMs, watchedUtc, timingOffsetMs)).utcAt(startUtc)
+        suspend fun archiveSession(): Pair<String, String> {
+            val cachedIndex = positionScratchDir?.let { java.io.File(it, "timing-season-${ref.year}.json") }
+            if (ref.sessionKey != null && cachedIndex != null &&
+                cachedIndex.length() in 1..MAX_SEASON_INDEX_BYTES &&
+                System.currentTimeMillis() - cachedIndex.lastModified() in 0..SEASON_INDEX_MAX_AGE_MS
+            ) {
+                val cached = runCatching {
+                    exactArchiveSession(ref.sessionKey, JSONObject(cachedIndex.readText()))
+                }.getOrNull()
+                if (cached != null) {
+                    progress("Timing season index hit · ${ref.year}")
+                    return cached
+                }
+            }
+            val raw = fetchStage("${ref.year}/Index.json")
+            val index = JSONObject(raw)
+            val session = findSession(ref, watchedUtc, index)
+            if (cachedIndex != null && raw.length <= MAX_SEASON_INDEX_BYTES) runCatching {
+                val temporary = java.io.File.createTempFile("timing-season-", ".tmp", positionScratchDir)
+                try {
+                    temporary.writeText(raw)
+                    temporary.renameTo(cachedIndex)
+                } finally {
+                    temporary.delete()
+                }
+            }
+            return session
+        }
+        suspend fun loadCore(): ReplayCore = coroutineScope {
+            val (path, type) = archiveSession()
+            progress("Archive session resolved: $path · type=$type")
+            val driverTask = async { parseDrivers(JSONObject(fetchStage(path + "DriverList.json"))) }
+            val heartbeatTask = async { parseStreamStart(fetchStage(path + "Heartbeat.jsonStream")) }
+            val positionClock = CompletableDeferred<Long?>()
+            var partialClock: Long? = null
+            var partialTracks: Map<String, DriverTrack> = emptyMap()
+            var partialOutline = FloatArray(0)
+            var partialHistory = DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
+            fun checkpoint(stage: String, detail: String) {
+                val heap = Runtime.getRuntime()
+                android.util.Log.i("ApexviewTiming", "trace=$traceId archive=$path stage=$stage $detail " +
+                    "heapUsedMiB=${(heap.totalMemory() - heap.freeMemory()) / 1048576} " +
+                    "heapMaxMiB=${heap.maxMemory() / 1048576}")
+            }
+            suspend fun <T> traceStage(stage: String, block: suspend ((String) -> Unit) -> T): T = coroutineScope {
+                val started = android.os.SystemClock.elapsedRealtime()
+                val last = java.util.concurrent.atomic.AtomicReference("starting")
+                val report: (String) -> Unit = { detail ->
+                    last.set(detail)
+                    checkpoint(stage, detail)
+                }
+                val heartbeatJob = launch(Dispatchers.IO) {
+                    while (true) {
+                        delay(10_000)
+                        val seconds = (android.os.SystemClock.elapsedRealtime() - started) / 1000
+                        checkpoint(stage, "still running after ${seconds}s · last=${last.get()}")
+                    }
+                }
+                report("begin")
+                try {
+                    block(report).also { report("complete elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}") }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    report("cancelled")
+                    throw e
+                } catch (e: Exception) {
+                    report("failed type=${e.javaClass.simpleName} at ${e.stackTrace.firstOrNull()}")
+                    throw e
+                } finally {
+                    heartbeatJob.cancel()
+                }
+            }
+            // Map/track geometry index initialization must never block TV's UI
+            // looper. Drop old previews when positions and tower arrive out of order.
+            val previewEpochs = TimingPreviewEpochs()
+            // Position parser can enqueue several partial updates while the
+            // previous Compose/RenderNode publication is suspended. Latest
+            // complete preview wins; an older map cannot replace a newer one.
+            val positionPreviewEpochs = TimingPreviewEpochs()
+            suspend fun publishTopics() {
+                val drivers = driverTask.await()
+                val initialStart = heartbeatTask.await()
+                val snapshot = withContext(Dispatchers.Main.immediate) {
+                    TimingPreviewSnapshot(
+                        epoch = previewEpochs.next(),
+                        tracks = partialTracks,
+                        outline = partialOutline,
+                        states = partialHistory.states.states,
+                        laps = partialHistory.laps,
+                        startUtcMs = partialClock ?: initialStart,
+                    )
+                }
+                checkpoint("publish-overlays",
+                    "towerDrivers=${snapshot.laps.size} cars=${snapshot.tracks.size} outlinePoints=${snapshot.outline.size / 2}")
+                val preview = withContext(Dispatchers.Default) {
+                    SessionTiming(
+                        type = type, drivers = drivers, tracks = snapshot.tracks,
+                        states = snapshot.states, outline = snapshot.outline,
+                        hasStartFinish = false, corners = emptyList(), startUtcMs = snapshot.startUtcMs,
+                        circuitKey = ref.circuitKey, laps = snapshot.laps, radioBase = BASE + path,
+                    ).apply { archivePartial = true }
+                }
+                withContext(Dispatchers.Main.immediate) {
+                    if (previewEpochs.isCurrent(snapshot.epoch)) {
+                        onPartial(preview)
+                    } else {
+                        checkpoint("publish-overlays", "dropped outdated preview epoch=${snapshot.epoch}")
+                    }
+                }
+            }
+            val positionsTask = async(Dispatchers.IO) {
+                progress("Streaming and parsing Position.z.jsonStream…")
+                val job = coroutineContext
+                try {
+                    traceStage("map-position-stream") { report ->
+                        report("opening HTTP stream")
+                        val topic = path + "Position.z.jsonStream"
+                        suspend fun publishTracks(snapshot: Map<String, DriverTrack>, outline: FloatArray,
+                                                  start: Long, previewEpoch: Long) {
+                            withContext(Dispatchers.Main.immediate) {
+                                if (!positionPreviewEpochs.isCurrent(previewEpoch)) {
+                                    checkpoint("map-position-preview", "discarded stale preview epoch=$previewEpoch")
+                                    return@withContext
+                                }
+                                val target = targetUtc(start)
+                                val covered = partialTracks.values.any { it.hasPositionAt(target) }
+                                if (!covered || snapshot.values.any { it.hasPositionAt(target) }) {
+                                    partialTracks = snapshot
+                                    partialOutline = outline
+                                    publishTopics()
+                                }
+                            }
+                        }
+                        open(topic).bufferedReader().use { reader ->
+                            val heartbeatStart = heartbeatTask.await()
+                            val firstLines = reader.lineSequence().take(100).onEach { job.ensureActive() }.toList()
+                            val positionStart = positionsStreamStart(firstLines.joinToString("\n"))
+                            positionClock.complete(positionStart)
+                            val initialStart = positionStart
+                                ?.takeIf { abs(it - heartbeatStart) > STREAM_START_SLACK_MS } ?: heartbeatStart
+                            fun parseFull(lines: Sequence<String>): PositionParseReport {
+                                var lastPreviewAt = -1_000L
+                                var previewOutline = FloatArray(0)
+                                var lastTraceAt = -1_000L
+                                var publishedThrough: Long? = null
+                                val thread = android.os.Process.myTid()
+                                val previousPriority = android.os.Process.getThreadPriority(thread)
+                                try {
+                                    android.os.Process.setThreadPriority(thread, android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                                    return parsePositionLines(lines, { job.ensureActive() }, report) { builders ->
+                                        val now = android.os.SystemClock.elapsedRealtime()
+                                        val target = targetUtc(initialStart)
+                                        if (now - lastPreviewAt < 400 || publishedThrough?.let { target <= it - 10_000 } == true) {
+                                            return@parsePositionLines
+                                        }
+                                        val snapshot = builders.mapValues { it.value.build() }
+                                        val covering = snapshot.values.filter { it.hasPositionAt(target) }
+                                        if (covering.isEmpty()) return@parsePositionLines
+                                        if (previewOutline.isEmpty()) {
+                                            previewOutline = availableCircuit.get()?.outline ?: FloatArray(0)
+                                            if (previewOutline.isEmpty() && now - lastTraceAt >= 750) {
+                                                previewOutline = traceOutline(builders.values.toList())
+                                                lastTraceAt = now
+                                            }
+                                        }
+                                        if (previewOutline.size < 8) return@parsePositionLines
+                                        lastPreviewAt = now
+                                        publishedThrough = covering.maxOf { it.endMs }
+                                        val outline = previewOutline
+                                        report("position preview targetUtcMs=$target cars=${covering.size} throughUtcMs=$publishedThrough")
+                                        val previewEpoch = positionPreviewEpochs.next()
+                                        launch { publishTracks(snapshot, outline, initialStart, previewEpoch) }
+                                    }
+                                } finally {
+                                    android.os.Process.setThreadPriority(thread, previousPriority)
+                                }
+                            }
+                            val offset = targetUtc(initialStart) - initialStart
+                            if (positionScratchDir == null || offset < 180_000L) {
+                                report("single-pass position decode offsetMs=$offset")
+                                return@traceStage parseFull(firstLines.asSequence() + reader.lineSequence())
+                            }
+                            val spool = java.io.File.createTempFile("replay-positions-", ".stream", positionScratchDir)
+                            try {
+                                spool.bufferedWriter().use { writer ->
+                                    var chars = 0L
+                                    fun copy(line: String): String {
+                                        job.ensureActive()
+                                        chars += line.length + 1L
+                                        if (chars > 64L * 1024 * 1024) throw IOException("Position archive exceeds 64 MiB")
+                                        writer.write(line)
+                                        writer.newLine()
+                                        return line
+                                    }
+                                    val wanted = ReplayPositionWindow(targetUtc(initialStart) - initialStart)
+                                    // Bound startup work to a few minutes of positions near the replay clock.
+                                    // Copy the remaining data through to disk for seeks and full history.
+                                    report("streaming position window targetMs=${wanted.targetMs}")
+                                    val incoming = (firstLines.asSequence() + reader.lineSequence()).map(::copy)
+                                    val records = incoming.iterator()
+                                    val window = sequence {
+                                        while (records.hasNext()) {
+                                            val line = records.next()
+                                            val prefix = streamPrefixLength(line)
+                                            if (prefix >= line.length) continue
+                                            val offset = streamOffsetMs(line, prefix)
+                                            if (wanted.retarget(targetUtc(initialStart) - initialStart)) {
+                                                report("retargeted position window offsetMs=$offset targetMs=${wanted.targetMs}")
+                                            }
+                                            if (offset > wanted.lastMs) break
+                                            if (offset >= wanted.firstMs) yield(line)
+                                        }
+                                    }
+                                    var previewSent = false
+                                    var lastPreviewCheckMs = -1_000L
+                                    val initial = parsePositionLines(window, { job.ensureActive() }) { builders ->
+                                        val now = android.os.SystemClock.elapsedRealtime()
+                                        if (!previewSent && now - lastPreviewCheckMs >= 250) {
+                                            lastPreviewCheckMs = now
+                                            val currentUtc = targetUtc(initialStart)
+                                            val snapshot = builders.mapValues { it.value.build() }
+                                            val positioned = snapshot.values.count { it.hasPositionAt(currentUtc) }
+                                            if (positioned > 0) {
+                                                val remoteShape = availableCircuit.get()?.outline
+                                                val shape = remoteShape?.takeIf { it.size >= 8 }
+                                                    ?: traceOutline(builders.values.toList())
+                                                if (shape.size >= 8) {
+                                                    previewSent = true
+                                                    report("position window ready before lookahead targetUtcMs=$currentUtc cars=$positioned")
+                                                    val previewEpoch = positionPreviewEpochs.next()
+                                                    launch { publishTracks(snapshot, shape, initialStart, previewEpoch) }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    val traced = traceOutline(initial.tracks.values.toList())
+                                    val outline = when {
+                                        traced.isNotEmpty() -> traced
+                                        circuitTask.isCompleted -> circuitTask.await()?.outline ?: traced
+                                        else -> traced
+                                    }
+                                    if (outline.size >= 8 && initial.tracks.isNotEmpty()) {
+                                        val previewEpoch = positionPreviewEpochs.next()
+                                        publishTracks(initial.tracks.mapValues { it.value.build() }, outline,
+                                            initialStart, previewEpoch)
+                                    }
+                                    report("position window available cars=${initial.tracks.size} outlinePoints=${outline.size / 2}")
+                                    while (records.hasNext()) records.next()
+                                }
+                                spool.bufferedReader().useLines { parseFull(it) }
+                            } finally {
+                                spool.delete()
+                            }
+                        }
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    progress("PARSE FAIL positions · ${e.javaClass.simpleName}: ${e.message}")
+                    PositionParseReport(emptyMap(), 0, 0, 0, 0)
+                } finally {
+                    positionClock.complete(null)
+                }
+            }
+            val historyTask = async(Dispatchers.IO) {
+                val primaryPreview = CompletableDeferred<Unit>()
+                val heartbeatStart = heartbeatTask.await()
+                val initialStart = withTimeoutOrNull(4_000L) { positionClock.await() }
+                    ?.takeIf { abs(it - heartbeatStart) > STREAM_START_SLACK_MS } ?: heartbeatStart
+                if (initialStart != heartbeatStart) {
+                    checkpoint("tower-clock", "position clock correctionMs=${initialStart - heartbeatStart}")
+                }
+                val timingTask = async {
+                    val topic = path + "TimingData.jsonStream"
+                    val started = android.os.SystemClock.elapsedRealtime()
+                    val job = coroutineContext
+                    checkpoint("tower-download", "opening HTTP stream")
+                    try {
+                        open(topic).bufferedReader().use { reader ->
+                            val start = initialStart
+                            val text = StringBuilder()
+                            val lines = reader.lineSequence().map { line ->
+                                job.ensureActive()
+                                text.appendLine(line)
+                                line
+                            }.iterator()
+                            fun previewTarget(): Long {
+                                val clock = playhead()
+                                // A resumed race can start far from the heartbeat estimate.
+                                if (clock != null && clock.positionMs >= 180_000L && clock.videoUtcMs == null &&
+                                    android.os.SystemClock.elapsedRealtime() - started < 3_000L
+                                ) return Long.MAX_VALUE
+                                return targetUtc(start)
+                            }
+                            for (preview in DriverTimingParser.previews(lines, start, ::previewTarget, { job.ensureActive() })) {
+                                val elapsed = android.os.SystemClock.elapsedRealtime() - started
+                                checkpoint("tower-preview", "drivers=${preview.history.laps.size} throughUtcMs=${preview.throughUtcMs} elapsedMs=$elapsed")
+                                withContext(Dispatchers.Main) {
+                                    partialClock = initialStart
+                                    partialHistory = preview.history
+                                    publishTopics()
+                                }
+                                primaryPreview.complete(Unit)
+                                val clock = playhead()
+                                val videoClockReady = clock != null && clock.videoUtcMs != null && !clock.cachedVideoClock
+                                if ((videoClockReady || elapsed >= 10_000L) &&
+                                    preview.throughUtcMs - targetUtc(start) >= TOWER_PREVIEW_LOOKAHEAD_MS
+                                ) break
+                            }
+                            primaryPreview.complete(Unit)
+                            while (lines.hasNext()) lines.next()
+                            progress("OK TimingData.jsonStream · ${text.length} chars · ${android.os.SystemClock.elapsedRealtime() - started}ms")
+                            text.toString()
+                        }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        primaryPreview.complete(Unit)
+                        progress("FAIL TimingData.jsonStream · ${error.javaClass.simpleName}: ${error.message}")
+                        null
+                    }
+                }
+                val timingF1Task = async {
+                    // Let the primary standings and position streams start before optional mini-sectors.
+                    withTimeoutOrNull(1_500L) { primaryPreview.await() }
+                    fetchOptionalStage(path + "TimingDataF1.jsonStream").orEmpty()
+                }
+                val timingStream = timingTask.await()
+                val timingF1Stream = timingF1Task.await()
+                val history = if (timingStream == null) {
+                    progress("TimingData unavailable; timing tower history could not be loaded")
+                    DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
+                } else withContext(Dispatchers.Default) {
+                    progress("PARSING timing tower and lap history · ${timingStream.length} chars")
+                    val started = android.os.SystemClock.elapsedRealtime()
+                    try {
+                        val accumulator = StateHistoryAccumulator()
+                        val laps = traceStage("tower-history") { report ->
+                            val job = kotlin.coroutines.coroutineContext
+                            var publishedTarget: Long? = null
+                            val threadId = android.os.Process.myTid()
+                            val priority = android.os.Process.getThreadPriority(threadId)
+                            try {
+                                android.os.Process.setThreadPriority(threadId, android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                                DriverTimingParser.parse(timingStream, initialStart, timingF1Stream, accumulator, report,
+                                    checkActive = { job.ensureActive() }) { through, buildLaps ->
+                                    val target = targetUtc(initialStart)
+                                    if (through >= target && publishedTarget?.let { abs(target - it) < 30_000L } != true) {
+                                        val laps = buildLaps()
+                                        if (laps.values.any { it.at(target)?.position != null }) {
+                                            publishedTarget = target
+                                            val snapshot = DriverTimingParse(laps, accumulator.finish())
+                                            launch(Dispatchers.Main) {
+                                                partialClock = initialStart
+                                                partialHistory = snapshot
+                                                publishTopics()
+                                            }
+                                        }
+                                    }
+                                }
+                            } finally {
+                                android.os.Process.setThreadPriority(threadId, priority)
+                            }
+                        }
+                        DriverTimingParse(laps, accumulator.finish()).also {
+                            progress("PARSED timing history · towerDrivers=${it.laps.size} stateDrivers=${it.states.states.size} · ${android.os.SystemClock.elapsedRealtime() - started}ms")
+                        }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        progress("PARSE FAIL timing history · ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                        DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    partialClock = initialStart
+                    partialHistory = history
+                    publishTopics()
+                }
+                Triple(timingStream, history, initialStart)
+            }
+            val drivers = driverTask.await()
+            val initialStart = heartbeatTask.await()
+            withContext(Dispatchers.Main) { publishTopics() }
+            // Download and parse the map while the single bounded timing-history parser runs. The
+            // tower and lap-state histories share each decoded JSON object, avoiding two concurrent
+            // full passes over this multi-megabyte stream on lower-memory Android TV devices.
+            progress("Loading track positions while timing history parses…")
+            val positionParseStarted = android.os.SystemClock.elapsedRealtime()
+            val positionReport = positionsTask.await()
+            val tracks = positionReport.tracks
+            progress(
+                "PARSED positions · records=${positionReport.decodedRecords}/${positionReport.inputRecords}, " +
+                    "samples=${positionReport.positionSamples}, cars=${tracks.size}, malformed=${positionReport.malformedRecords} · " +
+                    "${android.os.SystemClock.elapsedRealtime() - positionParseStarted}ms"
+            )
+            if (tracks.isEmpty()) {
+                progress("Track positions unavailable; continuing to load timing tower")
+            }
 
-        val built = tracks.mapValues { it.value.build() }
-        val traced = traceOutline(tracks.values.toList())
-        val line = findStartFinish(traced, parsed.crossings, built)
-        val outline = if (line != null) startAt(traced, line) else traced
-        // Turn numbers and marshal sectors are a nice extra from a third party; the map works without them.
-        val circuit = ref.circuitKey?.let { runCatching { fetchCircuit(it, ref.year) }.getOrNull() }
+            val geometryStarted = android.os.SystemClock.elapsedRealtime()
+            progress("Building the track map while timing tower finishes · cars=${tracks.size}")
+            val built = withContext(Dispatchers.Default) {
+                traceStage("map-track-arrays") { _ -> tracks.mapValues { it.value.build() } }
+            }
+            val traced = withContext(Dispatchers.Default) {
+                traceStage("map-outline") { _ -> traceOutline(tracks.values.toList()) }
+            }
+            withContext(Dispatchers.Main) {
+                partialTracks = built
+                if (traced.isNotEmpty()) partialOutline = traced
+                publishTopics()
+            }
+            progress(if (tracks.isEmpty()) "Track positions unavailable; loading timing history…" else "Track map available · loading timing history…")
+
+            val (timingStream, initialHistory, historyStart) = historyTask.await()
+            // Heartbeat anchors the stream clock. Some sessions have bad offsets; the cars' own
+            // timestamps win when they disagree with it by more than a minute.
+            val streamStart = positionReport.streamStart?.takeIf { abs(it - initialStart) > STREAM_START_SLACK_MS } ?: initialStart
+            val clockShift = streamStart - historyStart
+            val history = if (clockShift == 0L) {
+                initialHistory
+            } else {
+                progress("Timing clock corrected by ${clockShift}ms · shifting indexed timestamps")
+                DriverTimingParse(
+                    initialHistory.laps.mapValues { it.value.shiftedBy(clockShift) },
+                    StateParse(
+                        initialHistory.states.states.mapValues { it.value.shiftedBy(clockShift) },
+                        initialHistory.states.crossings.map { (driver, time) -> driver to (time + clockShift) },
+                    ),
+                )
+            }
+
+            progress(
+                "TRACK GEOMETRY · samples=${tracks.values.sumOf { it.size }}, outlinePoints=${traced.size / 2} · " +
+                    "${android.os.SystemClock.elapsedRealtime() - geometryStarted}ms"
+            )
+            val line = traceStage("start-finish") { _ -> findStartFinish(traced, history.states.crossings, built) }
+            val outline = when {
+                line != null -> startAt(traced, line)
+                traced.isNotEmpty() -> traced
+                circuitTask.isCompleted -> circuitTask.await()?.outline ?: traced
+                else -> traced
+            }
+            ReplayCore(
+                path, type, drivers, built, history.states.states,
+                outline, line != null, streamStart, history.laps,
+                if (type.contains("Qualifying", ignoreCase = true)) {
+                    traceStage("session-parts") { _ -> parseParts(timingStream.orEmpty(), streamStart) }
+                } else emptyList(),
+            )
+        }
+
+        val loadJob = kotlin.coroutines.coroutineContext
+        fun ReplayCore.partial() = SessionTiming(
+            type = type, drivers = drivers, tracks = tracks, states = states, outline = outline,
+            hasStartFinish = hasStartFinish, corners = emptyList(), startUtcMs = startUtc,
+            circuitKey = ref.circuitKey, laps = laps, radioBase = BASE + path,
+        ).apply { archivePartial = true }
+        val previewStarted = android.os.SystemClock.elapsedRealtime()
+        replayCache?.readPreview(replayPositionMs) { loadJob.ensureActive() }?.let { preview ->
+            publish(preview.partial())
+            progress("Replay startup snapshot hit · ${android.os.SystemClock.elapsedRealtime() - previewStarted}ms")
+        }
+        val cacheStarted = android.os.SystemClock.elapsedRealtime()
+        val cached = replayCache?.read { loadJob.ensureActive() }
+        progress(
+            "Replay index ${if (cached == null) "miss" else "hit"} · " +
+                "${android.os.SystemClock.elapsedRealtime() - cacheStarted}ms"
+        )
+        val core = cached ?: loadCore()
+        val path = core.path
+        val type = core.type
+        val drivers = core.drivers
+        val built = core.tracks
+        val streamStart = core.startUtc
+        val laps = core.laps
+        val states = core.states
+        var outline = core.outline
+        // Publish the traced map immediately. Optional external circuit lookup may provide a
+        // better outline/corner labels, but it must not hold up a usable map or timing tower.
+        publish(core.partial())
+
+        if (cached == null && replayCache != null && core.outline.size >= 8 &&
+            core.tracks.isNotEmpty() && core.laps.isNotEmpty()
+        ) launch {
+            val writeJob = kotlin.coroutines.coroutineContext
+            val started = android.os.SystemClock.elapsedRealtime()
+            val saved = replayCache.write(core) { writeJob.ensureActive() }
+            progress("Replay index ${if (saved) "saved" else "write failed"} · ${android.os.SystemClock.elapsedRealtime() - started}ms")
+        }
+
+        val isRace = type.contains("Race", ignoreCase = true)
+        val metadataIo = Dispatchers.IO.limitedParallelism(4)
+        fun topic(name: String) = async(metadataIo) { fetchOptionalStage(path + name) }
+        val weatherTask = topic("WeatherData.jsonStream")
+        val statusTask = topic("SessionStatus.jsonStream")
+        val controlTask = topic("RaceControlMessages.jsonStream")
+        val sessionInfoTask = topic("SessionInfo.json")
+        val flagsTask = topic("TrackStatus.jsonStream")
+        val tyresTask = topic("TimingAppData.jsonStream")
+        val radioTask = topic("TeamRadio.jsonStream")
+        val lapCountTask = if (isRace) topic("LapCount.jsonStream") else null
+        val clockTask = topic("ExtrapolatedClock.jsonStream")
+
+        progress("Loading circuit outline and corner metadata…")
+        val circuitStarted = android.os.SystemClock.elapsedRealtime()
+        val circuit = circuitTask.await()
+        progress("Circuit metadata ${if (circuit == null) "unavailable" else "loaded"} · ${android.os.SystemClock.elapsedRealtime() - circuitStarted}ms")
         val corners = circuit?.corners.orEmpty()
+        if (outline.size < 8 && (circuit?.outline?.size ?: 0) >= 8) outline = circuit!!.outline
+        if (circuit != null) {
+            publish(
+                SessionTiming(
+                    type = type,
+                    drivers = drivers,
+                    tracks = built,
+                    states = states,
+                    outline = outline,
+                    hasStartFinish = core.hasStartFinish,
+                    corners = corners,
+                    startUtcMs = streamStart,
+                    circuitKey = ref.circuitKey,
+                    laps = laps,
+                    radioBase = BASE + path,
+                ).apply { archivePartial = true }
+            )
+        }
 
-        val started = runCatching { parseSessionStarted(fetch(path + "SessionStatus.jsonStream"), streamStart) }.getOrNull()
-        val control = runCatching { fetch(path + "RaceControlMessages.jsonStream") }.getOrNull()
+        progress(
+            if (outline.size >= 8) "Loading optional race details…"
+            else "Timing tower data is loaded, but F1 has not provided a usable circuit outline for the map…"
+        )
+        val weather = weatherTask.await()?.let {
+            runCatching { WeatherParser.parse(it, streamStart) }.getOrNull()
+        } ?: WeatherLog.NONE
+        val started = statusTask.await()?.let {
+            runCatching { parseSessionStarted(it, streamStart) }.getOrNull()
+        }
+        val control = controlTask.await()
         val chequered = control?.let { runCatching { parseChequered(it, streamStart) }.getOrNull() }
         // Restart times come in the track's local time; the session's offset from GMT turns them to UTC.
-        val gmtOffset = runCatching { JSONObject(fetch(path + "SessionInfo.json")).optString("GmtOffset") }.getOrNull()
+        val gmtOffset = sessionInfoTask.await()?.let {
+            runCatching { JSONObject(it).optString("GmtOffset") }.getOrNull()
+        }
         val flags = TrackFlags(
             control?.let { runCatching { parseSectorFlags(it, streamStart) }.getOrNull() }.orEmpty(),
-            runCatching { parseTrackStatus(fetch(path + "TrackStatus.jsonStream"), streamStart) }.getOrDefault(emptyList()),
+            flagsTask.await()?.let {
+                runCatching { parseTrackStatus(it, streamStart) }.getOrDefault(emptyList())
+            }.orEmpty(),
             control?.let { runCatching { parseSafetyCarIn(it, streamStart) }.getOrNull() }.orEmpty(),
             control?.let { c -> gmtOffset?.let { runCatching { parseResumptions(c, streamStart, it) }.getOrNull() } }.orEmpty(),
             control?.let { runCatching { parseRedFlags(it, streamStart) }.getOrNull() }.orEmpty(),
         )
-        val tyres = runCatching { TyreParser.parse(fetch(path + "TimingAppData.jsonStream"), streamStart) }.getOrDefault(emptyMap())
-        val radio = runCatching { parseRadio(fetch(path + "TeamRadio.jsonStream")) }
-            .onSuccess { android.util.Log.i("ApexviewRadio", "archive radio for $path: ${it.size} clips") }
-            .onFailure { android.util.Log.w("ApexviewRadio", "archive radio for $path: ${it.message}") }
-            .getOrDefault(emptyList())
-        val isRace = type.contains("Race", ignoreCase = true)
-        val totalLaps = if (isRace) runCatching { parseTotalLaps(fetch(path + "LapCount.jsonStream")) }.getOrNull() else null
-        val grid = if (isRace && line != null) findGrid(TrackGeometry(outline), built, chequered) else null
+        val tyres = tyresTask.await()?.let {
+            runCatching { TyreParser.parse(it, streamStart) }.getOrNull()
+        }.orEmpty()
+        val radio = radioTask.await()?.let {
+            runCatching { parseRadio(it) }.getOrDefault(emptyList())
+        }.orEmpty()
+        android.util.Log.i("ApexviewRadio", "archive radio for $path: ${radio.size} clips")
+        val totalLaps = lapCountTask?.await()?.let { runCatching { parseTotalLaps(it) }.getOrNull() }
+        val clock = clockTask.await()?.let { runCatching { parseClock(it, streamStart) }.getOrNull() }.orEmpty()
+        val grid = if (isRace && core.hasStartFinish) findGrid(TrackGeometry(outline), built, chequered) else null
 
         SessionTiming(
             type = type,
             drivers = drivers,
             tracks = built,
-            states = parsed.states,
+            states = states,
             outline = outline,
-            hasStartFinish = line != null,
+            hasStartFinish = core.hasStartFinish,
             corners = corners,
             startUtcMs = streamStart,
             circuitKey = ref.circuitKey,
@@ -600,9 +1317,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             marshalSectors = circuit?.sectors.orEmpty(),
             flags = flags,
             totalLaps = totalLaps,
-            clock = runCatching {
-                SessionClock(parseClock(fetch(path + "ExtrapolatedClock.jsonStream"), streamStart), parseParts(timingStream.orEmpty(), streamStart))
-            }.getOrDefault(SessionClock.NONE),
+            clock = SessionClock(clock, core.parts),
             weather = weather,
         ).also { it.startLine = grid?.startLine }
     }
@@ -793,7 +1508,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
     /** Which part of qualifying is running, as TimingData says when it changes. */
     internal fun parseParts(stream: String, streamStart: Long): List<Pair<Long, Int>> =
         stream.lineSequence().mapNotNull { line ->
-            if (line.length <= streamPrefixLength(line)) return@mapNotNull null
+            if (!line.contains("\"SessionPart\"") || line.length <= streamPrefixLength(line)) return@mapNotNull null
             val part = SESSION_PART.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: return@mapNotNull null
             streamStart + offsetMs(line) to part
         }.toList()
@@ -914,10 +1629,25 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         }
     }
 
+    internal fun exactArchiveSession(sessionKey: Int, index: JSONObject): Pair<String, String>? {
+        val meetings = index.getJSONArray("Meetings")
+        for (i in 0 until meetings.length()) {
+            val sessions = meetings.getJSONObject(i).getJSONArray("Sessions")
+            for (j in 0 until sessions.length()) {
+                val session = sessions.getJSONObject(j)
+                val path = session.optString("Path")
+                if (session.optInt("Key") == sessionKey && path.isNotBlank()) {
+                    return path to session.optString("Type")
+                }
+            }
+        }
+        return null
+    }
+
     /** Finds the session's archive path by F1's session key, else by meeting and session name. */
-    private fun findSession(ref: SessionRef, watchedUtc: Long?): Pair<String, String> {
+    private fun findSession(ref: SessionRef, watchedUtc: Long?, index: JSONObject): Pair<String, String> {
         val lookupUtc = archiveLookupTime(watchedUtc, ref.sessionStartUtcMs)
-        val meetings = JSONObject(fetch("${ref.year}/Index.json")).getJSONArray("Meetings")
+        val meetings = index.getJSONArray("Meetings")
         var byName: Pair<String, String>? = null
         var byNameLength = 0
         // The meeting's sessions with their start times, for when the name doesn't say which;
@@ -1001,14 +1731,63 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         return result
     }
 
-    internal fun parsePositions(stream: String): Map<String, TrackBuilder> {
+    internal data class PositionParseReport(
+        val tracks: Map<String, TrackBuilder>,
+        val inputRecords: Int,
+        val decodedRecords: Int,
+        val malformedRecords: Int,
+        val positionSamples: Int,
+        val streamStart: Long? = null,
+    )
+
+    internal fun parsePositions(stream: String): Map<String, TrackBuilder> =
+        parsePositionsDetailed(stream).tracks
+
+    internal fun parsePositionsDetailed(stream: String): PositionParseReport =
+        parsePositionLines(stream.lineSequence())
+
+    private fun parsePositionLines(
+        lines: Sequence<String>,
+        checkActive: () -> Unit = {},
+        checkpoint: ((String) -> Unit)? = null,
+        onProgress: ((Map<String, TrackBuilder>) -> Unit)? = null,
+    ): PositionParseReport {
+        val starts = ArrayList<Long>(START_SAMPLES)
         val tracks = mutableMapOf<String, TrackBuilder>()
-        stream.lineSequence().forEach { line ->
-            if (line.length <= streamPrefixLength(line)) return@forEach
-            val json = runCatching { JSONObject(inflate(line.substring(streamPrefixLength(line)))) }.getOrNull() ?: return@forEach
-            addPositions(json, tracks)
+        var inputRecords = 0
+        var decodedRecords = 0
+        var malformedRecords = 0
+        var positionSamples = 0
+        ArchiveInflater().use { inflater ->
+            lines.forEach { raw ->
+                checkActive()
+                val line = raw.removePrefix("\uFEFF")
+                val prefix = streamPrefixLength(line)
+                if (line.length <= prefix) return@forEach
+                inputRecords++
+                if (inputRecords == 1 || inputRecords % 1024 == 0) {
+                    checkpoint?.invoke("records=$inputRecords decoded=$decodedRecords malformed=$malformedRecords samples=$positionSamples cars=${tracks.size}")
+                }
+                val json = try {
+                    JSONObject(inflater.decode(line.substring(prefix)))
+                } catch (_: Exception) {
+                    malformedRecords++
+                    return@forEach
+                }
+                val samples = json.optJSONArray("Position")
+                if (samples == null) {
+                    malformedRecords++
+                    return@forEach
+                }
+                if (starts.size < START_SAMPLES) positionStart(line, samples)?.let(starts::add)
+                decodedRecords++
+                positionSamples += samples.length()
+                addPositions(json, tracks)
+                if (decodedRecords == 1 || decodedRecords % 32 == 0) onProgress?.invoke(tracks)
+            }
         }
-        return tracks
+        return PositionParseReport(tracks, inputRecords, decodedRecords, malformedRecords, positionSamples,
+            starts.sorted().let { it.getOrNull(it.size / 2) })
     }
 
     /**
@@ -1085,12 +1864,16 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             if (line.length <= streamPrefixLength(line)) return@mapNotNull null
             val json = runCatching { JSONObject(inflate(line.substring(streamPrefixLength(line)))) }.getOrNull() ?: return@mapNotNull null
             val samples = json.optJSONArray("Position") ?: return@mapNotNull null
-            val latest = (0 until samples.length()).mapNotNull { i ->
-                runCatching { Instant.parse(samples.getJSONObject(i).getString("Timestamp")).toEpochMilli() }.getOrNull()
-            }.maxOrNull() ?: return@mapNotNull null
-            runCatching { latest - offsetMs(line) }.getOrNull()
+            positionStart(line, samples)
         }.take(START_SAMPLES).toList().sorted()
         return if (starts.isEmpty()) null else starts[starts.size / 2]
+    }
+
+    private fun positionStart(line: String, samples: org.json.JSONArray): Long? {
+        val latest = (0 until samples.length()).mapNotNull { i ->
+            runCatching { Instant.parse(samples.getJSONObject(i).getString("Timestamp")).toEpochMilli() }.getOrNull()
+        }.maxOrNull() ?: return null
+        return runCatching { latest - offsetMs(line) }.getOrNull()
     }
 
     internal fun parseStates(stream: String, streamStart: Long): StateParse {
@@ -1101,6 +1884,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         val laps = mutableMapOf<String, Int>()
 
         stream.lineSequence().forEach { line ->
+            // Sector and gap updates cannot change lap state.
+            if (!line.contains("\"InPit\"") && !line.contains("\"PitOut\"") &&
+                !line.contains("\"NumberOfLaps\"") && !line.contains("\"KnockedOut\"")) return@forEach
             if (line.length <= streamPrefixLength(line)) return@forEach
             val lines = runCatching { JSONObject(line.substring(streamPrefixLength(line))).optJSONObject("Lines") }.getOrNull()
                 ?: return@forEach
@@ -1173,7 +1959,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
     internal fun fetchStream(path: String): String = fetch(path)
 
     private fun fetch(path: String): String =
-        open(path).use { it.readBytes() }.toString(Charsets.UTF_8).removePrefix("﻿")
+        open(path).bufferedReader(Charsets.UTF_8).use { it.readText() }.removePrefix("﻿")
 
     private fun open(path: String): java.io.InputStream {
         val conn = URL(BASE + path).openConnection() as HttpURLConnection
@@ -1187,22 +1973,25 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         return conn.inputStream
     }
 
-    internal fun inflate(quoted: String): String {
-        val bytes = Base64.getDecoder().decode(quoted.trim().trim('"'))
-        val inflater = Inflater(true)
-        try {
-            inflater.setInput(bytes)
-            val out = ByteArrayOutputStream(bytes.size * 4)
-            val buffer = ByteArray(8192)
+    internal fun inflate(quoted: String): String = ArchiveInflater().use { it.decode(quoted) }
+
+    private class ArchiveInflater : AutoCloseable {
+        private val inflater = Inflater(true)
+        private val buffer = ByteArray(8192)
+        private val output = ByteArrayOutputStream()
+        fun decode(quoted: String): String {
+            inflater.reset()
+            output.reset()
+            inflater.setInput(Base64.getDecoder().decode(quoted.trim().trim('"')))
             while (!inflater.finished()) {
-                val n = inflater.inflate(buffer)
-                if (n == 0 && (inflater.needsInput() || inflater.needsDictionary())) break
-                out.write(buffer, 0, n)
+                val count = inflater.inflate(buffer)
+                if (count == 0 && !inflater.finished()) throw IOException("Incomplete or stalled compressed timing record")
+                output.write(buffer, 0, count)
             }
-            return out.toString("UTF-8").removePrefix("﻿")
-        } finally {
-            inflater.end()
+            return output.toString("UTF-8").removePrefix("\uFEFF")
         }
+
+        override fun close() = inflater.end()
     }
 
     private fun offsetMs(line: String): Long = streamOffsetMs(line)
@@ -1214,6 +2003,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         internal const val BASE = "https://livetiming.formula1.com/static/"
         /** Lines read to find a stream's start. */
         private const val START_SAMPLES = 50
+        private const val MAX_SEASON_INDEX_BYTES = 2L * 1024L * 1024L
+        private const val SEASON_INDEX_MAX_AGE_MS = 24L * 60L * 60_000L
         /** The heartbeat and the car positions may disagree by this much before the cars win. */
         private const val STREAM_START_SLACK_MS = 60_000L
         private val SESSION_PART = Regex("\"SessionPart\":(\\d+)")

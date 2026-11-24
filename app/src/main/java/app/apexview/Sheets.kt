@@ -3,8 +3,13 @@ package app.apexview
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -31,6 +36,13 @@ import androidx.compose.material.icons.rounded.ArrowBackIosNew
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -45,10 +57,12 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 
 private val Rounded = RoundedCornerShape(14.dp)
 
@@ -77,56 +91,86 @@ fun FeedPickerSheet(app: AppState, picker: FeedPicker) {
         // Over the viewer (adding a feed), the status bar stays hidden; while browsing it shows.
         KeepSystemBarsHidden(enabled = app.tiles.isNotEmpty() && !app.browsing)
         Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
-            Column(
-                Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)
-            ) {
-                Text(picker.title, style = Type.title2)
-                Text(
-                    picker.note ?: when {
-                        app.singleFeedPlan -> "Your F1 TV plan may only play one feed at a time. Watching several at once needs F1 TV Premium."
-                        app.tiles.isEmpty() -> "Pick up to 4. You can switch any of them while watching."
-                        else -> "Feeds on screen are already picked. Unpick one to make room for another."
-                    },
-                    style = Type.footnote.copy(color = if (picker.note != null || app.singleFeedPlan) Ink.primary else Ink.secondary),
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-
+            // Eager FlowRow/verticalScroll used to compose all onboards
+            // even when they were off-screen. Keep the same picker actions,
+            // but virtualize the driver cards in keyed, adaptive lazy rows.
+            BoxWithConstraints(Modifier.weight(1f, fill = false).fillMaxWidth()) {
+                val cardWidthDp = FeedPickerLayoutPolicy.cardWidthDp(maxWidth.value,
+                    LocalDensity.current.fontScale)
+                val columns = FeedPickerLayoutPolicy.columns(maxWidth.value,
+                    LocalDensity.current.fontScale)
                 val channels = picker.channels
-                when {
-                    picker.error != null -> Text(picker.error!!, style = Type.subhead, modifier = Modifier.padding(vertical = 24.dp))
-                    channels == null -> Text("Loading feeds…", style = Type.subhead, modifier = Modifier.padding(vertical = 24.dp))
-                    else -> {
-                        val broadcast = channels.filter { it.racingNumber == null }
-                        val onboards = channels.filter { it.racingNumber != null }
-
-                        if (broadcast.isNotEmpty()) {
-                            Text("Broadcast", style = Type.headline, modifier = Modifier.padding(top = 24.dp, bottom = 10.dp))
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                broadcast.forEach { channel ->
-                                    val (name, about) = describe(channel)
-                                    PickCard(app, picker, channel, Modifier.widthIn(min = 150.dp, max = 220.dp)) { onColor ->
-                                        Text(name, style = Type.headline.copy(color = onColor))
-                                        about?.let { Text(it, style = Type.footnote.copy(color = onColor.copy(alpha = 0.65f))) }
+                val broadcast = channels?.filter { it.racingNumber == null }.orEmpty()
+                val onboards = channels?.filter { it.racingNumber != null }.orEmpty()
+                val onboardRows = onboards.chunked(columns)
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    item(key = "picker-heading") { Text(picker.title, style = Type.title2) }
+                    item(key = "picker-help") {
+                        Text(
+                            picker.note ?: when {
+                                app.layoutMode == LayoutMode.TILE_TEST ->
+                                    "Tile testing: select exactly two feeds from this session. Existing feeds are already selected. Unselect extras or add a second feed, then confirm."
+                                app.singleFeedPlan -> "Your F1 TV plan may only play one feed at a time. Watching several at once needs F1 TV Premium."
+                                app.tiles.isEmpty() -> "Pick up to ${app.feedSelectionLimit} feeds in ${app.settings.decoderMode.label.lowercase()} mode. You can switch feeds while watching."
+                                else -> "Feeds on screen are already picked. Unpick one to make room for another."
+                            },
+                            style = Type.footnote.copy(color = if (picker.note != null || app.singleFeedPlan) Ink.primary else Ink.secondary),
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                    when {
+                        picker.error != null -> item(key = "picker-error") {
+                            Text(picker.error!!, style = Type.subhead, modifier = Modifier.padding(vertical = 24.dp))
+                        }
+                        channels == null -> item(key = "picker-loading") {
+                            Text("Loading feeds…", style = Type.subhead, modifier = Modifier.padding(vertical = 24.dp))
+                        }
+                        else -> {
+                            if (broadcast.isNotEmpty()) {
+                                item(key = "broadcast-heading") {
+                                    Text("Broadcast", style = Type.headline, modifier = Modifier.padding(top = 24.dp))
+                                }
+                                item(key = "broadcast-feeds") {
+                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        broadcast.forEach { channel ->
+                                            val (name, about) = describe(channel)
+                                            PickCard(app, picker, channel, Modifier.widthIn(min = 150.dp, max = 220.dp)) { onColor ->
+                                                Text(name, style = Type.headline.copy(color = onColor))
+                                                about?.let { Text(it, style = Type.footnote.copy(color = onColor.copy(alpha = 0.65f))) }
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        }
-                        if (onboards.isNotEmpty()) {
-                            Text("Onboards", style = Type.headline, modifier = Modifier.padding(top = 24.dp, bottom = 10.dp))
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                onboards.forEach { channel ->
-                                    PickCard(app, picker, channel, Modifier.width(104.dp)) { onColor ->
-                                        Text(
-                                            "${channel.racingNumber}",
-                                            style = Type.title1.copy(color = channel.teamColor?.let { Color(it) } ?: onColor),
-                                        )
-                                        Text(channel.tla ?: "", style = Type.headline.copy(color = onColor))
-                                        Text(channel.driverName ?: "", style = Type.caption.copy(color = onColor.copy(alpha = 0.65f)), maxLines = 1)
+                            if (onboardRows.isNotEmpty()) {
+                                item(key = "onboard-heading") {
+                                    Text("Onboards", style = Type.headline, modifier = Modifier.padding(top = 24.dp))
+                                }
+                                items(
+                                    count = onboardRows.size,
+                                    key = { i -> "onboard-row-${onboardRows[i].first().racingNumber}" },
+                                    contentType = { "onboard-row" },
+                                ) { i ->
+                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        onboardRows[i].forEach { channel ->
+                                            PickCard(app, picker, channel, Modifier.width(cardWidthDp.dp)) { onColor ->
+                                                Text(
+                                                    "${channel.racingNumber}",
+                                                    style = Type.title1.copy(color = channel.teamColor?.let { Color(it) } ?: onColor),
+                                                )
+                                                Text(channel.tla ?: "", style = Type.headline.copy(color = onColor))
+                                                Text(channel.driverName ?: "", style = Type.caption.copy(color = onColor.copy(alpha = 0.65f)), maxLines = 1)
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            item(key = "picker-bottom-space") { Spacer(Modifier.height(16.dp)) }
                         }
-                        Spacer(Modifier.height(16.dp))
                     }
                 }
             }
@@ -145,8 +189,12 @@ fun FeedPickerSheet(app: AppState, picker: FeedPicker) {
                 }
                 return@Column
             }
+            val tileTest = app.layoutMode == LayoutMode.TILE_TEST
+            val picked = app.pickedCount(picker)
             PrimaryButton(
                 when {
+                    tileTest && picked == 2 -> "Test these 2 feeds"
+                    tileTest -> "Choose exactly 2 feeds ($picked/2)"
                     adds == 0 && drops == 0 -> "Pick a feed"
                     app.tiles.isEmpty() -> if (adds == 1) "Watch 1 feed" else "Watch $adds feeds"
                     drops == 0 -> if (adds == 1) "Add 1 feed" else "Add $adds feeds"
@@ -154,7 +202,7 @@ fun FeedPickerSheet(app: AppState, picker: FeedPicker) {
                     else -> "Update feeds"
                 },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
-                enabled = adds > 0 || drops > 0,
+                enabled = if (tileTest) picker.channels != null && picked == 2 else adds > 0 || drops > 0,
                 onClick = { app.watchPicked() },
             )
         }
@@ -173,20 +221,59 @@ private fun PickCard(
     val dropping = channel in picker.removing
     // On screen counts as picked until unpicked.
     val picked = channel in picker.selected || (playing && !dropping)
-    val background by animateColorAsState(if (picked) Ink.primary else Ink.surfaceHigh, tween(Motion.PRESS_MS * 2, easing = EaseOut), label = "pick")
-    val onColor = if (picked) Color.Black else Ink.primary
+    val reducedMotion = LocalReduceMotion.current
+    val background by animateColorAsState(
+        if (picked) Ink.accent.copy(alpha = 0.30f)
+        else MaterialTheme.colorScheme.surfaceContainerHigh,
+        tween(if (reducedMotion) 0 else Motion.PRESS_MS * 2, easing = EaseOut), label = "pick")
     Box(
         modifier
+            // F1 feeds are multiselect options. Expose the checked state to
+            // TalkBack and keep the existing single D-pad press target.
+            .semantics { role = Role.Checkbox; toggleableState = ToggleableState(picked) }
             .pressable { app.togglePick(channel) }
-            .clip(Rounded)
+            .clip(RoundedCornerShape(22.dp))
             .background(background)
-            .padding(14.dp)
+            .padding(16.dp)
     ) {
-        Column { content(onColor) }
+        Column { content(Ink.primary) }
         when {
-            playing && !dropping -> Text("On", style = Type.caption.copy(color = Color.Black), modifier = Modifier.align(Alignment.TopEnd))
-            dropping -> Text("Off", style = Type.caption, modifier = Modifier.align(Alignment.TopEnd))
-            picked -> Icon(Icons.Rounded.Check, null, tint = Color.Black, modifier = Modifier.align(Alignment.TopEnd).size(18.dp))
+            playing && !dropping -> Text("On", style = Type.caption,
+                modifier = Modifier.align(Alignment.TopEnd))
+            dropping -> Text("Off", style = Type.caption,
+                modifier = Modifier.align(Alignment.TopEnd))
+            picked -> Icon(Icons.Rounded.Check, "Selected feed", tint = Ink.primary,
+                modifier = Modifier.align(Alignment.TopEnd).size(20.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun TvCastingMenu(app: AppState) {
+    val firstAction = remember { androidx.compose.ui.focus.FocusRequester() }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    fun choose(action: () -> Unit) {
+        app.tvCastingMenuOpen = false
+        action()
+    }
+    ModalBottomSheet(
+        onDismissRequest = { app.tvCastingMenuOpen = false },
+        sheetState = sheetState,
+        containerColor = Ink.background,
+    ) {
+        androidx.compose.runtime.LaunchedEffect(sheetState.currentValue) {
+            if (app.isTv && sheetState.currentValue == androidx.compose.material3.SheetValue.Expanded) {
+                firstAction.requestFocus()
+            }
+        }
+        Column(Modifier.navigationBarsPadding().verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
+            Group("TV casting", footer = "Pitwall TV connects over your local network. Compatible replays use the phone layout and one TV video decoder. Your device handles screen mirroring.") {
+                SettingRow("Receive from phone", onClick = { choose(app::openTvReceiver) },
+                    modifier = Modifier.focusRequester(firstAction))
+                SettingRow("Find a TV", onClick = { choose(app::openCastPicker) })
+                SettingRow("Screen mirroring / Smart View", onClick = { choose(app::openMiracast) })
+            }
         }
     }
 }
@@ -195,21 +282,36 @@ private fun PickCard(
 
 @Composable
 private fun Group(title: String, footer: String? = null, content: @Composable () -> Unit) {
-    Text(title, style = Type.subhead, modifier = Modifier.padding(start = 36.dp, end = 20.dp, top = 28.dp, bottom = 8.dp))
-    Column(
-        Modifier.padding(horizontal = 20.dp).fillMaxWidth().clip(Rounded).background(Ink.surface).padding(vertical = 6.dp)
-    ) { content() }
-    footer?.let { Text(it, style = Type.footnote, modifier = Modifier.padding(start = 36.dp, end = 36.dp, top = 8.dp)) }
+    Column(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
+        Text(title, style = Type.headline.copy(color = Ink.primary, fontWeight = FontWeight.SemiBold),
+            modifier = Modifier.padding(start = 32.dp, end = 20.dp, top = 28.dp, bottom = 12.dp))
+        Column(
+            Modifier.padding(horizontal = 20.dp).fillMaxWidth()
+                .clip(androidx.compose.material3.MaterialTheme.shapes.large)
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .padding(vertical = 8.dp)
+        ) { content() }
+        footer?.let {
+            Text(it, style = Type.footnote, modifier = Modifier.padding(start = 36.dp, end = 36.dp, top = 8.dp))
+        }
+    }
 }
 
 @Composable
-private fun SettingRow(label: String, value: String? = null, valueColor: Color = Ink.secondary, onClick: (() -> Unit)? = null, trailing: @Composable (() -> Unit)? = null) {
+private fun SettingRow(label: String, value: String? = null, valueColor: Color = Ink.secondary,
+    onClick: (() -> Unit)? = null, modifier: Modifier = Modifier, selected: Boolean = false,
+    trailing: @Composable (() -> Unit)? = null,
+) {
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
+            .padding(horizontal = 6.dp, vertical = 2.dp)
             .then(if (onClick != null) Modifier.pressable(scaleTo = 0.99f, onClick = onClick) else Modifier)
-            .heightIn(min = 50.dp)
-            .padding(horizontal = 16.dp),
+            .clip(RoundedCornerShape(18.dp))
+            .background(if (selected) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)
+                else Color.Transparent)
+            .heightIn(min = 60.dp)
+            .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, style = Type.body, modifier = Modifier.weight(1f))
@@ -218,15 +320,35 @@ private fun SettingRow(label: String, value: String? = null, valueColor: Color =
     }
 }
 
+/** Backwards-compatible signature: callers may pass a callback or trailing lambda. */
 @Composable
-internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    SettingRow(label, onClick = { onChange(!checked) }) {
+internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) =
+    SwitchRow(label, checked, modifier = Modifier, onChange = onChange)
+
+/** Caption sheets may attach their own initial TV FocusRequester without a second focus target. */
+@Composable
+internal fun SwitchRow(
+    label: String, checked: Boolean, modifier: Modifier,
+    onChange: (Boolean) -> Unit,
+) {
+    // A single toggleable focus target, not a clickable row containing a second
+    // unlabeled focusable Switch. TalkBack and TCL D-pad both announce one control.
+    Row(
+        modifier.fillMaxWidth()
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+            .tvFocusRing()
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onChange)
+            .heightIn(min = 60.dp)
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = Type.body, modifier = Modifier.weight(1f))
         Switch(
             checked = checked,
-            onCheckedChange = onChange,
-            modifier = Modifier.tvFocusRing(),
+            onCheckedChange = null,
+            modifier = Modifier.clearAndSetSemantics {},
             colors = SwitchDefaults.colors(
-                checkedTrackColor = Color(0xFF30D158),
+                checkedTrackColor = Ink.accent,
                 checkedThumbColor = Color.White,
                 uncheckedTrackColor = Ink.surfaceHigh,
                 uncheckedThumbColor = Color.White,
@@ -237,9 +359,19 @@ internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> U
 }
 
 @Composable
-private fun ChoiceRow(label: String, chosen: Boolean, onClick: () -> Unit) {
-    SettingRow(label, onClick = onClick) {
-        if (chosen) Icon(Icons.Rounded.Check, null, tint = Ink.primary, modifier = Modifier.size(20.dp))
+internal fun ChoiceRow(label: String, chosen: Boolean, onClick: () -> Unit) {
+    // A selected tint alone is not enough: screen readers and remote users
+    // need the same explicit single-select state as segmented Material controls.
+    SettingRow(
+        label, onClick = onClick, selected = chosen,
+        modifier = Modifier.semantics { role = Role.RadioButton; selected = chosen },
+    ) {
+        if (chosen) {
+            Box(Modifier.size(26.dp).clip(androidx.compose.foundation.shape.CircleShape)
+                .background(Ink.accent), contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.Check, null, tint = Color.White, modifier = Modifier.size(18.dp))
+            }
+        }
     }
 }
 
@@ -255,10 +387,12 @@ fun SettingsScreen(app: AppState) {
     val span = with(density) { 50.dp.toPx() }
     val page = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
     Box(Modifier.fillMaxSize().background(Ink.background)) {
-    LazyColumn(Modifier.fillMaxSize().underTopBar(page), state = list) {
+    LazyColumn(Modifier.fillMaxSize().underTopBar(page), state = list,
+        horizontalAlignment = Alignment.CenterHorizontally) {
         item {
-            Spacer(Modifier.statusBarsPadding().height(60.dp))
-            Text("Settings", style = Type.largeTitle, modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
+            Spacer(Modifier.statusBarsPadding().height(BrowseLayoutPolicy.topBarHeightDp(density.fontScale).dp))
+            Text("Settings", style = Type.largeTitle,
+                modifier = Modifier.widthIn(max = 860.dp).fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp))
         }
         item {
             Group("Account") {
@@ -270,13 +404,24 @@ fun SettingsScreen(app: AppState) {
             }
         }
         item {
-            Group("Playback", footer = "Applies to feeds you start from now on.") {
+            Group("Video decoder", footer = "Your choice is remembered. Single decoder needs compatible archive feeds from one session. If activation fails, source video playback stays stopped until you retry or switch modes.") {
+                DecoderMode.entries.forEach { mode ->
+                    ChoiceRow(mode.label, s.decoderMode == mode) { app.setDecoderPreference(mode) }
+                }
+                if (s.decoderMode == DecoderMode.SINGLE && app.decoderMode == DecoderMode.MULTIPLE && app.tiles.isNotEmpty()) {
+                    Text("The current stream is using normal playback. The saved choice will be tried again for the next compatible selection.",
+                        style = Type.footnote, modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp))
+                }
+            }
+        }
+        item {
+            Group("Playback", footer = "Caption changes apply immediately to the selected feed; available languages depend on F1's source.") {
                 Text("Commentary", style = Type.footnote, modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 2.dp))
                 Settings.COMMENTARY.forEach { (code, name) ->
                     ChoiceRow(name, s.commentary == code) { s.updateCommentary(code) }
                 }
                 Spacer(Modifier.height(6.dp))
-                SwitchRow("Subtitles", s.subtitles, s::updateSubtitles)
+                SwitchRow("Closed captions", s.subtitles, app::setCaptionsEnabled)
                 SwitchRow("Stream stats on tiles", s.showStats, s::updateShowStats)
             }
         }
@@ -299,6 +444,7 @@ fun SettingsScreen(app: AppState) {
                 "Track map",
                 footer = "How far the map runs behind the picture. F1 stamps its video about 7 seconds after its timing data.",
             ) {
+                SwitchRow("Select driver dots", app.settings.mapDriverSelection, app.settings::updateMapDriverSelection)
                 SettingRow("Timing offset", "%+.0f s".format(app.mapOffsetMs / 1000f))
                 SettingRow("Reset to −7 s", onClick = { app.nudgeMapOffset(-7_000L - app.mapOffsetMs) })
             }
@@ -325,6 +471,20 @@ fun SettingsScreen(app: AppState) {
             }
         }
         item {
+            Group("Diagnostics", footer = "Records app and playback logs to Download/Pitwall while the app runs. Files rotate at 5 MB. Full system logs require ADB. Logs stay on this device.") {
+                SwitchRow("Enable diagnostic logs", s.diagnosticLogging, s::updateDiagnosticLogging)
+                SwitchRow("Experimental clear-video SurfaceView (A/B)",
+                    s.clearSceneSurfaceExperiment, s::updateClearSceneSurfaceExperiment)
+                Text(
+                    "OFF keeps the proven TextureView. ON tests independent clear-video SurfaceView. " +
+                        "Cast, replay clipping and external-display capture automatically use TextureView. " +
+                        "Secure Widevine output is unchanged.",
+                    style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+                SettingRow("Log status", DiagnosticLogs.status)
+            }
+        }
+        item {
             Group("Updates", footer = "Apexview checks for a new version each time it opens.") {
                 SettingRow("Check for updates", onClick = app.updater::checkNow)
             }
@@ -342,7 +502,7 @@ fun SettingsScreen(app: AppState) {
             Text(
                 "Apexview ${BuildConfig.VERSION_NAME} · built ${BuildConfig.BUILT_AT}",
                 style = Type.caption,
-                modifier = Modifier.padding(start = 36.dp, top = 28.dp, bottom = 40.dp),
+                modifier = Modifier.widthIn(max = 860.dp).fillMaxWidth().padding(start = 36.dp, top = 28.dp, bottom = 40.dp),
             )
         }
     }

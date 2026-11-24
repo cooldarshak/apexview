@@ -46,9 +46,18 @@ import androidx.compose.material.icons.rounded.ArrowBackIosNew
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -59,6 +68,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -88,6 +98,7 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -102,63 +113,70 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private val CardShape = RoundedCornerShape(12.dp)
+private val CardShape = RoundedCornerShape(24.dp)
 private val Grayscale = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
-private val ButtonShape = RoundedCornerShape(14.dp)
+private val ButtonShape = RoundedCornerShape(28.dp)
 private val SidePadding = 20.dp
+
+/** Balance browsing section gaps on narrow portrait screens. */
+@Composable
+private fun BrowseSectionGap() {
+    val config = LocalConfiguration.current
+    val portrait = config.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+    Spacer(Modifier.height(BrowseLayoutPolicy.sectionGapDp(portrait, config.screenWidthDp.toFloat()).dp))
+}
 
 // Pieces.
 
-/** White on black, Apple TV's primary action. */
+/** Material 3 action semantics, elevation and state feedback on mobile and TV. */
 @Composable
 fun PrimaryButton(text: String, icon: ImageVector? = null, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
-    Row(
-        modifier
-            .pressable(enabled = enabled, onClick = onClick)
-            .clip(ButtonShape)
-            .background(if (enabled) Ink.primary else Ink.surfaceHigh)
-            .heightIn(min = 50.dp)
-            .padding(horizontal = 22.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
+    Button(
+        onClick = onClick, enabled = enabled,
+        modifier = modifier.tvFocusRing().heightIn(min = 56.dp),
+        shape = ButtonShape,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Ink.accent, contentColor = Color.White,
+            disabledContainerColor = Ink.surfaceHigh, disabledContentColor = Ink.tertiary,
+        ),
+        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
+        elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp, pressedElevation = 0.dp),
     ) {
-        val color = if (enabled) Color.Black else Ink.tertiary
         if (icon != null) {
-            Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(22.dp))
-            Spacer(Modifier.width(6.dp))
+            Icon(icon, contentDescription = null, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.width(8.dp))
         }
-        Text(text, style = Type.headline.copy(color = color))
-    }
-}
-
-/** Translucent dark, for actions over artwork. */
-@Composable
-fun SecondaryButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Box(
-        modifier
-            .pressable(onClick = onClick)
-            .clip(ButtonShape)
-            .background(Color.White.copy(alpha = 0.16f))
-            .heightIn(min = 50.dp)
-            .padding(horizontal = 22.dp),
-        contentAlignment = Alignment.Center,
-    ) {
         Text(text, style = Type.headline)
     }
 }
 
-/** A round glyph button that floats over artwork. */
+/** Tonal actions stay readable above race artwork without competing with video. */
+@Composable
+fun SecondaryButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    FilledTonalButton(
+        onClick = onClick,
+        modifier = modifier.tvFocusRing().heightIn(min = 56.dp),
+        shape = ButtonShape,
+        colors = ButtonDefaults.filledTonalButtonColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+        ),
+        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
+    ) { Text(text, style = Type.headline) }
+}
+
+/** A minimum 48dp, semantic icon action with TV D-pad focus feedback. */
 @Composable
 fun GlyphButton(icon: ImageVector, description: String, modifier: Modifier = Modifier, backdrop: Float = 1f, onClick: () -> Unit) {
-    Box(
-        modifier
-            .pressable(scaleTo = 0.9f, onClick = onClick)
-            .size(40.dp)
-            .clip(CircleShape)
-            .background(Color.Black.copy(alpha = 0.35f * backdrop)),
-        contentAlignment = Alignment.Center,
+    FilledTonalIconButton(
+        onClick = onClick,
+        modifier = modifier.tvFocusRing().size(48.dp),
+        colors = IconButtonDefaults.filledTonalIconButtonColors(
+            containerColor = Color.Black.copy(alpha = 0.3f + 0.4f * backdrop.coerceIn(0f, 1f)),
+            contentColor = Ink.primary,
+        ),
     ) {
-        Icon(icon, contentDescription = description, tint = Ink.primary, modifier = Modifier.size(20.dp))
+        Icon(icon, contentDescription = description, modifier = Modifier.size(22.dp))
     }
 }
 
@@ -189,13 +207,22 @@ private fun ArtCard(
     artKey: String? = null,
     onClick: () -> Unit,
 ) {
+    val config = LocalConfiguration.current
+    val portrait = config.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+    val fontScale = LocalDensity.current.fontScale
+    val compactPortrait = BrowseLayoutPolicy.compactPortrait(
+        portrait, config.screenWidthDp.toFloat(),
+    ) && fontScale < 1.75f
     Column(
         Modifier
             .width(width)
             .pressable(enabled = !upcoming, onClick = onClick)
             .graphicsLayer { alpha = if (dimmed || upcoming) 0.55f else 1f }
+            .clip(if (compactPortrait) RoundedCornerShape(20.dp) else CardShape)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .padding(8.dp)
     ) {
-        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).sharedArt(artKey, cornerRadius = 12).clip(CardShape).background(Ink.surface)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).sharedArt(artKey, cornerRadius = 18).clip(RoundedCornerShape(18.dp)).background(Ink.surface)) {
             AsyncImage(
                 model = F1TvApi.picture(image, 640, 360),
                 contentDescription = null,
@@ -218,10 +245,14 @@ private fun ArtCard(
                 }
             }
         }
-        Spacer(Modifier.height(8.dp))
-        Text(title, style = Type.headline, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.height(if (compactPortrait) 7.dp else 8.dp))
+        Text(title, style = Type.headline,
+            maxLines = BrowseLayoutPolicy.cardTitleMaxLines(portrait, config.screenWidthDp.toFloat()),
+            overflow = TextOverflow.Ellipsis)
         if (!subtitle.isNullOrEmpty()) {
-            Text(subtitle, style = Type.footnote, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, style = Type.footnote,
+                maxLines = BrowseLayoutPolicy.cardSubtitleMaxLines(portrait, config.screenWidthDp.toFloat(), fontScale),
+                overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -242,19 +273,26 @@ private fun <T> Shelf(
     posters: Boolean = false,
     /** A link by the title, such as View all. */
     action: Pair<String, () -> Unit>? = null,
+    itemKey: ((T) -> Any)? = null,
     card: @Composable (T, Dp) -> Unit,
 ) {
     if (items.isEmpty()) return
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val wide = maxWidth >= 600.dp
-        val perRow = if (posters) (if (wide) 5.3f else 2.6f) else if (wide) 3.3f else 1.7f
-        val cardWidth = ((maxWidth - SidePadding * 2 - 12.dp * perRow.toInt()) / perRow).coerceIn(if (posters) 120.dp else 200.dp, 360.dp)
+        // Width is the real viewport; only compact portrait uses multiple smaller cards.
+        val compactPortrait = BrowseLayoutPolicy.compactPortrait(
+            LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT,
+            maxWidth.value,
+        )
+        val cardWidth = BrowseLayoutPolicy.cardWidthDp(
+            maxWidth.value, posters, LocalDensity.current.fontScale, portrait = compactPortrait).dp
         Column {
             Row(
                 Modifier.fillMaxWidth().padding(start = SidePadding, end = SidePadding, bottom = 12.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
-                Text(title, style = Type.title2, modifier = Modifier.weight(1f))
+                Text(title, style = if (compactPortrait)
+                    Type.headline.copy(fontSize = 19.sp, lineHeight = 24.sp) else Type.title2,
+                    modifier = Modifier.weight(1f))
                 action?.let { (label, onClick) -> HeaderAction(label, onClick) }
             }
             LazyRow(
@@ -262,7 +300,7 @@ private fun <T> Shelf(
                 contentPadding = PaddingValues(horizontal = SidePadding),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                items(items) { card(it, cardWidth) }
+                items(items, key = itemKey) { card(it, cardWidth) }
             }
         }
     }
@@ -293,7 +331,7 @@ internal fun TopBar(
             .focusProperties { if (below != null) down = below }
             .drawBehind { drawRect(Color.Black.copy(alpha = 0.82f * fill())) }
             .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
-            .height(60.dp)
+            .height(BrowseLayoutPolicy.topBarHeightDp(LocalDensity.current.fontScale).dp)
             .padding(horizontal = 12.dp)
     ) {
         leading?.let { Box(Modifier.align(Alignment.CenterStart)) { it(1f - fill()) } }
@@ -320,6 +358,7 @@ internal fun Modifier.underTopBar(requester: FocusRequester) = focusRequester(re
  * links the artwork to the card it was opened from, so one grows into the other.
  */
 @Composable
+@OptIn(ExperimentalComposeUiApi::class)
 internal fun ArtPage(
     image: String?,
     artKey: String?,
@@ -331,15 +370,22 @@ internal fun ArtPage(
     backdrop: (@Composable () -> Unit)? = null,
     /** In place of [hero]'s column: the whole hero area, for content that fills it. */
     heroBox: (@Composable BoxScope.() -> Unit)? = null,
+    tvHeaderFocus: FocusRequester? = null,
     hero: @Composable ColumnScope.() -> Unit = {},
     rows: LazyListScope.() -> Unit,
 ) {
     val density = LocalDensity.current
     val context = LocalContext.current
+    val reducedMotion = LocalReduceMotion.current
     val screenHeight = LocalConfiguration.current.screenHeightDp.dp
     val page = remember { FocusRequester() }
     BoxWithConstraints(Modifier.fillMaxSize().background(Ink.background)) {
-        val heroHeight = minOf(maxWidth * 9f / 16f, screenHeight * 0.62f).coerceAtLeast(320.dp)
+        val compactPortrait = BrowseLayoutPolicy.compactPortrait(
+            LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT,
+            maxWidth.value,
+        )
+        val heroHeight = BrowseLayoutPolicy.heroHeightDp(
+            maxWidth.value, screenHeight.value, density.fontScale, portrait = compactPortrait).dp
         val heroPx = with(density) { heroHeight.toPx() }
         // How far the page has scrolled, capped once the artwork is fully covered.
         val scrolled by remember(heroPx) {
@@ -353,11 +399,11 @@ internal fun ArtPage(
             if (backdrop != null) backdrop()
             else AsyncImage(
                 // The card's smaller image, already in memory, stands in until this size loads.
-                model = remember(image) {
+                model = remember(image, reducedMotion) {
                     ImageRequest.Builder(context)
                         .data(F1TvApi.picture(image, 1920, 1080))
                         .placeholderMemoryCacheKey(F1TvApi.picture(image, 640, 360))
-                        .crossfade(Motion.FADE_MS)
+                        .crossfade(if (reducedMotion) 0 else Motion.BROWSE_FADE_MS)
                         .build()
                 },
                 contentDescription = null,
@@ -366,7 +412,13 @@ internal fun ArtPage(
             )
             Box(
                 Modifier.fillMaxSize().background(
-                    Brush.verticalGradient(
+                    if (compactPortrait) Brush.verticalGradient(
+                        // Poster art already contains lettering that must not fight the title.
+                        0f to Color.Black.copy(alpha = 0.24f),
+                        0.22f to Color.Black.copy(alpha = 0.58f),
+                        0.6f to Color.Black.copy(alpha = 0.82f),
+                        1f to Ink.background,
+                    ) else Brush.verticalGradient(
                         0f to Color.Black.copy(alpha = 0.35f),
                         0.25f to Color.Transparent,
                         0.5f to Color.Transparent,
@@ -387,7 +439,19 @@ internal fun ArtPage(
             )
         }
 
-        LazyColumn(state = listState, modifier = Modifier.fillMaxSize().underTopBar(page), contentPadding = PaddingValues(bottom = 40.dp)) {
+        val listArea = if (tvHeaderFocus == null) Modifier else Modifier
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
+            .padding(top = BrowseLayoutPolicy.topBarHeightDp(density.fontScale).dp)
+            .focusProperties {
+                exit = { direction ->
+                    if (direction == FocusDirection.Up) tvHeaderFocus else FocusRequester.Default
+                }
+            }
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize().then(listArea).underTopBar(page),
+            contentPadding = PaddingValues(bottom = 40.dp),
+        ) {
             item {
                 Box(Modifier.fillMaxWidth().height(heroHeight)) {
                     if (heroBox != null) heroBox()
@@ -402,8 +466,8 @@ internal fun ArtPage(
 
         TopBar(
             title = title,
-            fill = { ((scrolled - heroPx * 0.35f) / (heroPx * 0.35f)).coerceIn(0f, 1f) },
-            titleIn = { ((scrolled - heroPx * 0.62f) / (heroPx * 0.2f)).coerceIn(0f, 1f) },
+            fill = { if (tvHeaderFocus != null) 1f else ((scrolled - heroPx * 0.35f) / (heroPx * 0.35f)).coerceIn(0f, 1f) },
+            titleIn = { if (tvHeaderFocus != null) 1f else ((scrolled - heroPx * 0.62f) / (heroPx * 0.2f)).coerceIn(0f, 1f) },
             leading = leading,
             trailing = trailing,
             below = page,
@@ -484,12 +548,15 @@ private fun WeekendSchedule(
 /** The link beside a row's title: white with an arrow, so it reads as something to tap. */
 @Composable
 private fun HeaderAction(label: String, onClick: () -> Unit) {
-    Row(
-        Modifier.pressable(onClick = onClick).padding(start = 12.dp, top = 4.dp, bottom = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier.tvFocusRing().heightIn(min = 48.dp),
+        colors = ButtonDefaults.textButtonColors(contentColor = Ink.primary),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
     ) {
         Text(label, style = Type.headline)
-        Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = Ink.primary, modifier = Modifier.size(24.dp))
+        Icon(Icons.Rounded.ChevronRight, contentDescription = null,
+            modifier = Modifier.size(22.dp))
     }
 }
 
@@ -504,7 +571,7 @@ private fun ScheduleRow(app: AppState, item: CatalogItem) {
         Modifier
             .fillMaxWidth()
             .height(IntrinsicSize.Min)
-            .heightIn(min = 40.dp)
+            .heightIn(min = 68.dp)
             .pressable {
                 when {
                     playable -> app.watch(item)
@@ -512,28 +579,40 @@ private fun ScheduleRow(app: AppState, item: CatalogItem) {
                     else -> Toast.makeText(context, "The ${item.title} replay isn't up yet.", Toast.LENGTH_SHORT).show()
                 }
             }
-            .clip(RoundedCornerShape(4.dp))
-            .background(if (playable) ScheduleReady else Ink.surface),
+            .clip(RoundedCornerShape(18.dp))
+            .background(if (playable) MaterialTheme.colorScheme.surfaceContainerHigh
+                else MaterialTheme.colorScheme.surfaceContainerLow),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Watchable now is lit in red; still to come stays dark and grey.
-        Box(Modifier.width(3.dp).fillMaxHeight().background(if (playable) ScheduleRed else Ink.tertiary))
-        Box(Modifier.width(23.dp).fillMaxHeight().background(if (playable) ScheduleTab else Ink.surfaceHigh), contentAlignment = Alignment.Center) {
-            Text("F1", style = Type.caption.copy(fontSize = 11.sp, color = if (playable) Ink.primary else Ink.secondary, fontWeight = FontWeight.Bold))
+        // The F1 tab, live semantic red and the original session/time remain.
+        Box(Modifier.width(4.dp).fillMaxHeight()
+            .background(if (playable) ScheduleRed else Ink.tertiary))
+        Box(
+            Modifier.padding(start = 12.dp, top = 10.dp, bottom = 10.dp)
+                .size(42.dp).clip(RoundedCornerShape(14.dp))
+                .background(if (playable) ScheduleTab else Ink.surfaceHigh),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("F1", style = Type.subhead.copy(color = Ink.primary,
+                fontWeight = FontWeight.Bold))
         }
         Text(
             item.title,
-            style = Type.footnote.copy(color = if (playable) Ink.primary else Ink.secondary, fontWeight = FontWeight.Medium, lineHeight = 16.sp),
+            style = Type.subhead.copy(
+                color = if (playable) Ink.primary else Ink.secondary,
+                fontWeight = FontWeight.SemiBold,
+            ),
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp, vertical = 4.dp),
+            modifier = Modifier.weight(1f).padding(horizontal = 14.dp, vertical = 12.dp),
         )
-        Box(Modifier.width(1.dp).fillMaxHeight().padding(vertical = 12.dp).background(Ink.tertiary))
-        Box(Modifier.padding(horizontal = 8.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.padding(end = 14.dp), contentAlignment = Alignment.Center) {
             when {
                 item.live -> LiveMark()
-                playable -> Icon(Icons.Rounded.Replay, contentDescription = "Watch", tint = Ink.primary, modifier = Modifier.size(18.dp))
-                else -> Text(time, style = Type.footnote.copy(color = Ink.secondary, fontWeight = FontWeight.SemiBold))
+                playable -> Icon(Icons.Rounded.Replay, contentDescription = "Watch",
+                    tint = Ink.primary, modifier = Modifier.size(22.dp))
+                else -> Text(time, style = Type.footnote.copy(color = Ink.secondary,
+                    fontWeight = FontWeight.SemiBold))
             }
         }
     }
@@ -577,10 +656,11 @@ fun SignInScreen(app: AppState) {
             Modifier.align(Alignment.BottomStart).navigationBarsPadding().padding(SidePadding).widthIn(max = 480.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Apexview", style = Type.largeTitle)
+            Text("Pitwall TV", style = Type.largeTitle)
             Text("Every feed of every session, arranged the way you want. Sign in with your F1 TV account.", style = Type.subhead)
             Spacer(Modifier.height(8.dp))
             PrimaryButton("Sign in", modifier = Modifier.fillMaxWidth(), enabled = !app.busy, onClick = app::startLogin)
+            SecondaryButton("Receive from phone", Modifier.fillMaxWidth(), onClick = app::openTvReceiver)
             if (useToken) {
                 OutlinedTextField(
                     value = app.pastedToken,
@@ -611,6 +691,18 @@ fun SignInScreen(app: AppState) {
 
 @Composable
 fun HomeScreen(app: AppState) {
+    val configuration = LocalConfiguration.current
+    val fontScale = LocalDensity.current.fontScale
+    LaunchedEffect(configuration.orientation, configuration.screenWidthDp, configuration.screenHeightDp, fontScale) {
+        val portrait = configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+        android.util.Log.i("PitwallBrowse", "HOME_GEOMETRY portrait=$portrait " +
+            "widthDp=${configuration.screenWidthDp} heightDp=${configuration.screenHeightDp} " +
+            "fontScale=$fontScale cardDp=" +
+            BrowseLayoutPolicy.cardWidthDp(configuration.screenWidthDp.toFloat(), false, fontScale, portrait) +
+            " heroDp=" + BrowseLayoutPolicy.heroHeightDp(configuration.screenWidthDp.toFloat(),
+                configuration.screenHeightDp.toFloat(), fontScale, portrait))
+    }
+    val headerFocus = remember { FocusRequester() }
     val now = System.currentTimeMillis()
     val latest = app.latestWeekend(now)
     val latestContent = latest?.let { app.weekendContent[it.meetingKey] }
@@ -619,6 +711,7 @@ fun HomeScreen(app: AppState) {
         listOfNotNull(app.featuredWeekend(now)?.let { Pick("${roundLabel(it)} · ${dates(it)}", weekend = it) })
     }
     val count = picks.size
+    val reducedMotion = LocalReduceMotion.current
     // Endless both ways: the pager starts among many copies of the picks. A new first pick (a
     // session going live) starts it over, so that's what shows even if the count stays the same.
     val pager = key(count, picks.firstOrNull()?.item?.contentId) { rememberPagerState(initialPage = if (count > 1) count * 500 else 0) { if (count > 1) count * 1000 else count } }
@@ -626,27 +719,39 @@ fun HomeScreen(app: AppState) {
     // A remote on one of the slide's buttons: turning would take the button away from under it.
     var heroFocused by remember { mutableStateOf(false) }
     // Turns on its own, and waits a full turn again after you swipe.
-    LaunchedEffect(pager, pager.settledPage, dragged, heroFocused) {
-        if (count < 2 || dragged || heroFocused) return@LaunchedEffect
+    LaunchedEffect(pager, pager.settledPage, dragged, heroFocused, reducedMotion) {
+        // The automatic carousel is nonessential movement. Android's Remove
+        // Animations setting disables it without hiding any F1 session cards.
+        if (count < 2 || dragged || heroFocused || reducedMotion) return@LaunchedEffect
         delay(CAROUSEL_MS)
-        pager.animateScrollToPage(pager.currentPage + 1, animationSpec = tween(Motion.SCREEN_MS * 2, easing = EaseOut))
+        pager.animateScrollToPage(pager.currentPage + 1, animationSpec = tween(Motion.BROWSE_NAV_MS * 2, easing = EaseOut))
     }
-    // Every slide's artwork loads ahead, so turning never waits on it.
+    // Keep the selected slide and immediate neighbours warm, rather than
+    // decoding EVERY 1920x1080 carousel image into cache when Home opens.
+    // A 640x360 placeholder is already the memory-cache key used by
+    // CarouselArt, which loads its actual full-resolution artwork on demand.
     val context = LocalContext.current
-    LaunchedEffect(picks) {
-        picks.forEach { pick ->
-            F1TvApi.picture(pickImage(pick), 1920, 1080)?.let { context.imageLoader.enqueue(ImageRequest.Builder(context).data(it).build()) }
+    LaunchedEffect(picks, pager.settledPage) {
+        carouselPrefetchIndices(pager.settledPage, picks.size).forEach { index ->
+            F1TvApi.picture(pickImage(picks[index]), 640, 360)?.let { image ->
+                context.imageLoader.enqueue(ImageRequest.Builder(context).data(image).build())
+            }
         }
     }
 
     ArtPage(
         image = null,
         artKey = null,
-        title = "Apexview",
+        title = "Pitwall TV",
         listState = app.homeList,
+        tvHeaderFocus = headerFocus.takeIf { app.isTv },
         trailing = { backdrop ->
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                GlyphButton(Icons.Rounded.CalendarMonth, "Calendar and past seasons", backdrop = backdrop) { app.open(Screen.Calendar) }
+                GlyphButton(
+                    Icons.Rounded.CalendarMonth, "Calendar and past seasons",
+                    modifier = Modifier.focusRequester(headerFocus), backdrop = backdrop,
+                ) { app.open(Screen.Calendar) }
+                GlyphButton(Icons.Rounded.Cast, "TV casting", backdrop = backdrop) { app.tvCastingMenuOpen = true }
                 GlyphButton(Icons.Rounded.Settings, "Settings", backdrop = backdrop) { app.open(Screen.Settings) }
             }
         },
@@ -680,21 +785,34 @@ fun HomeScreen(app: AppState) {
         fun continueWatching() {
             app.recents.toList().takeIf { it.isNotEmpty() && app.tiles.isEmpty() }?.let { recents ->
                 item {
-                    Shelf(app, "Continue watching", recents) { it, width ->
-                        val left = (it.durationMs - it.positionMs).coerceAtLeast(0) / 1000
-                        val weekend = it.title.substringBefore(" · ")
-                        ArtCard(
-                            it.image,
-                            it.title.substringAfter(" · "),
-                            if (it.live) "$weekend · Live"
-                            else "$weekend · " + (if (left >= 3600) "${left / 3600}h ${left / 60 % 60}m left" else "${left / 60}m left"),
-                            width,
-                            live = it.live,
-                            progress = if (it.live || it.durationMs <= 0) null else it.positionMs.toFloat() / it.durationMs,
-                            onClick = { app.resumeWatching(it) },
-                        )
+                    Shelf(app, "Continue watching", recents, itemKey = { it.contentId }) { saved, width ->
+                        val left = (saved.durationMs - saved.positionMs).coerceAtLeast(0) / 1000
+                        val weekend = saved.title.substringBefore(" · ")
+                        Box(Modifier.width(width)) {
+                            ArtCard(
+                                saved.image,
+                                saved.title.substringAfter(" · "),
+                                if (saved.live) "$weekend · Live"
+                                else "$weekend · " + (if (left >= 3600) "${left / 3600}h ${left / 60 % 60}m left" else "${left / 60}m left"),
+                                width,
+                                live = saved.live,
+                                progress = if (saved.live || saved.durationMs <= 0) null else saved.positionMs.toFloat() / saved.durationMs,
+                                onClick = { app.resumeWatching(saved) },
+                            )
+                            Box(
+                                Modifier.align(Alignment.TopEnd).padding(4.dp).size(48.dp)
+                                    .pressable(scaleTo = 1f) { app.removeContinueWatching(saved.contentId) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Box(Modifier.size(30.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.75f)),
+                                    contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Rounded.Close, "Remove ${saved.title} from Continue watching",
+                                        tint = Color.White, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        }
                     }
-                    Spacer(Modifier.height(28.dp))
+                    BrowseSectionGap()
                 }
             }
         }
@@ -709,7 +827,7 @@ fun HomeScreen(app: AppState) {
                         app.watch(item)
                     }
                 }
-                Spacer(Modifier.height(28.dp))
+                BrowseSectionGap()
             }
         }
 
@@ -720,7 +838,7 @@ fun HomeScreen(app: AppState) {
             // The weekend's schedule under the carousel, as on F1 TV's home page, until the weekend ends.
             if (!latestContent.scheduleOver(now)) item {
                 WeekendSchedule(app, latest, latestContent.schedule, latestContent.sessions, latest.name, action = "Weekend" to { app.open(Screen.Weekend(latest)) })
-                Spacer(Modifier.height(28.dp))
+                BrowseSectionGap()
             }
         } else if (latest != null && latestContent != null && latestContent.sessions.isNotEmpty()) {
             item {
@@ -729,7 +847,7 @@ fun HomeScreen(app: AppState) {
                         app.watch(item)
                     }
                 }
-                Spacer(Modifier.height(28.dp))
+                BrowseSectionGap()
             }
         }
 
@@ -757,7 +875,7 @@ fun HomeScreen(app: AppState) {
                     app.open(Screen.Weekend(w, key))
                 }
             }
-            Spacer(Modifier.height(28.dp))
+            BrowseSectionGap()
         }
 
         item {
@@ -767,7 +885,7 @@ fun HomeScreen(app: AppState) {
                     app.open(Screen.Weekend(w, key))
                 }
             }
-            Spacer(Modifier.height(28.dp))
+            BrowseSectionGap()
         }
 
         f1Rows.firstOrNull { it.tag == CatalogRow.ARCHIVE }?.let { row ->
@@ -777,7 +895,7 @@ fun HomeScreen(app: AppState) {
 
         item {
             SeasonsShelf(app)
-            Spacer(Modifier.height(28.dp))
+            BrowseSectionGap()
         }
 
         (f1Rows.filter { it.posters } + f1Rows.filter { !it.posters && it.tag != CatalogRow.ARCHIVE && it !in weekendRows }).forEach { row ->
@@ -808,7 +926,7 @@ private fun VideoShelf(app: AppState, title: String, items: List<CatalogItem>, k
         if (posters) PosterCard(item, width) { app.watch(item) }
         else ArtCard(item.image, item.title, sessionLine(item), width, live = item.live, upcoming = item.upcoming) { app.watch(item) }
     }
-    Spacer(Modifier.height(28.dp))
+    BrowseSectionGap()
 }
 
 /** A show's or documentary's portrait artwork, which carries its own title. */
@@ -870,17 +988,18 @@ private fun SeasonsShelf(app: AppState) {
 private fun CarouselArt(picks: List<Pick>, pager: PagerState) {
     if (picks.isEmpty()) return
     val context = LocalContext.current
+    val reducedMotion = LocalReduceMotion.current
     val base by remember(pager) { derivedStateOf { floor(pager.currentPage + pager.currentPageOffsetFraction).toInt() } }
     Box(Modifier.fillMaxSize().clipToBounds()) {
         for (page in base..base + 1) {
             key(page) {
                 val image = pickImage(picks[page.mod(picks.size)])
                 AsyncImage(
-                    model = remember(image) {
+                    model = remember(image, reducedMotion) {
                         ImageRequest.Builder(context)
                             .data(F1TvApi.picture(image, 1920, 1080))
                             .placeholderMemoryCacheKey(F1TvApi.picture(image, 640, 360))
-                            .crossfade(Motion.FADE_MS)
+                            .crossfade(if (reducedMotion) 0 else Motion.BROWSE_FADE_MS)
                             .build()
                     },
                     contentDescription = null,
@@ -897,6 +1016,11 @@ private fun CarouselArt(picks: List<Pick>, pager: PagerState) {
 /** One slide's words and buttons: why it's here, what it is, and how to watch it. */
 @Composable
 private fun PickHero(app: AppState, pick: Pick) {
+    val config = LocalConfiguration.current
+    val compactPortrait = BrowseLayoutPolicy.compactPortrait(
+        config.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT,
+        config.screenWidthDp.toFloat(),
+    )
     val item = pick.item
     val resume = pick.resume
     val weekend = pick.weekend
@@ -922,9 +1046,11 @@ private fun PickHero(app: AppState, pick: Pick) {
         }
         else -> weekend?.place.orEmpty()
     }
-    Text(title, style = Type.largeTitle, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+    Text(title, style = if (compactPortrait)
+        Type.title1.copy(fontSize = 30.sp, lineHeight = 36.sp) else Type.largeTitle,
+        maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
     if (line.isNotEmpty()) Text(line, style = Type.subhead, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    Spacer(Modifier.height(16.dp))
+    Spacer(Modifier.height(if (compactPortrait) 12.dp else 16.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         when {
             resume != null -> PrimaryButton("Resume", Icons.Rounded.PlayArrow) { app.resumeWatching(resume) }
@@ -950,7 +1076,9 @@ private fun PageDots(count: Int, pager: PagerState, modifier: Modifier) {
     Row(modifier, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         repeat(count) { i ->
             val on = pager.currentPage.mod(count) == i
-            Box(Modifier.size(6.dp).clip(CircleShape).background(if (on) Ink.primary else Ink.tertiary))
+            Box(Modifier.width(if (on) 24.dp else 8.dp).height(8.dp)
+                .clip(CircleShape)
+                .background(if (on) Ink.accent else Ink.tertiary.copy(alpha = 0.65f)))
         }
     }
 }
@@ -958,6 +1086,7 @@ private fun PageDots(count: Int, pager: PagerState, modifier: Modifier) {
 @Composable
 fun WeekendScreen(app: AppState, weekend: WeekendInfo, artKey: String?) {
     val content = app.weekendContent[weekend.meetingKey]
+    val fadeDurationMs = if (LocalReduceMotion.current) 0 else Motion.BROWSE_FADE_MS
     ArtPage(
         image = weekend.image,
         artKey = artKey,
@@ -972,7 +1101,9 @@ fun WeekendScreen(app: AppState, weekend: WeekendInfo, artKey: String?) {
     ) {
         item { Spacer(Modifier.height(20.dp)) }
         item {
-            AnimatedVisibility(content == null, enter = fadeIn(tween(Motion.FADE_MS)), exit = fadeOut(tween(Motion.FADE_MS))) {
+            AnimatedVisibility(content == null,
+                enter = fadeIn(tween(fadeDurationMs)),
+                exit = fadeOut(tween(fadeDurationMs))) {
                 Text("Loading sessions…", style = Type.subhead, modifier = Modifier.padding(horizontal = SidePadding))
             }
         }
@@ -991,10 +1122,16 @@ fun WeekendScreen(app: AppState, weekend: WeekendInfo, artKey: String?) {
                 // (live and replays, press conferences, past races here).
                 item {
                     WeekendSchedule(app, weekend, content.schedule, content.sessions, "Schedule")
-                    Spacer(Modifier.height(28.dp))
+                    BrowseSectionGap()
                 }
-                content.rows.forEach { row ->
-                    item { VideoShelf(app, rowTitle(row.title), row.items, key = "w${weekend.meetingKey}-${row.title}") }
+                content.rows.forEachIndexed { index, row ->
+                    item(
+                        key = "weekend-${weekend.meetingKey}-shelf-${row.title}-$index",
+                        contentType = "video-shelf",
+                    ) {
+                        VideoShelf(app, rowTitle(row.title), row.items,
+                            key = "w${weekend.meetingKey}-${row.title}")
+                    }
                 }
             } else {
                 val sessionsShelf: @Composable () -> Unit = {
@@ -1016,7 +1153,7 @@ fun WeekendScreen(app: AppState, weekend: WeekendInfo, artKey: String?) {
                 val videosFirst = content.sessions.all { it.upcoming } && content.videos.any { !it.upcoming }
                 item {
                     if (videosFirst) videosShelf() else sessionsShelf()
-                    Spacer(Modifier.height(28.dp))
+                    BrowseSectionGap()
                 }
                 item { if (videosFirst) sessionsShelf() else videosShelf() }
             }
@@ -1043,7 +1180,11 @@ fun CollectionScreen(app: AppState, pageId: Int, title: String) {
     ) {
         item { Spacer(Modifier.height(20.dp)) }
         if (page == null) item { Text("Loading…", style = Type.subhead, modifier = Modifier.padding(horizontal = SidePadding)) }
-        page?.rows?.forEach { row -> item { VideoShelf(app, row.title, row.items, key = "c$pageId-${row.title}") } }
+        page?.rows?.forEachIndexed { index, row ->
+            item(key = "collection-$pageId-shelf-${row.title}-$index", contentType = "video-shelf") {
+                VideoShelf(app, row.title, row.items, key = "c$pageId-${row.title}")
+            }
+        }
     }
 }
 
@@ -1067,7 +1208,9 @@ fun ArchiveScreen(app: AppState) {
         item { Spacer(Modifier.height(20.dp)) }
         if (races == null) item { Text("Loading…", style = Type.subhead, modifier = Modifier.padding(horizontal = SidePadding)) }
         races.orEmpty().groupBy { it.year }.toSortedMap(compareByDescending { it }).forEach { (year, list) ->
-            item { VideoShelf(app, if (year > 0) "$year" else "More races", list, key = "archive-$year") }
+            item(key = "archive-shelf-$year", contentType = "video-shelf") {
+                VideoShelf(app, if (year > 0) "$year" else "More races", list, key = "archive-$year")
+            }
         }
     }
 }

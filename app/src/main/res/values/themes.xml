@@ -1,0 +1,11 @@
+<resources>
+    <!-- MediaRouter's chooser is a Fragment dialog and reads the activity theme, not the
+         themed MediaRouteButton context. Its AppCompat colorPrimary must be opaque. -->
+    <style name="Theme.Pitwall" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="colorPrimary">#15151D</item>
+        <item name="colorPrimaryDark">#101017</item>
+        <item name="colorAccent">#E10600</item>
+        <item name="android:colorBackground">#101017</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

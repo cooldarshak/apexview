@@ -44,7 +44,7 @@ private val labelShadow = Shadow(Color.Black, blurRadius = 8f)
 private val BAR_HELP = listOf(
     "close" to ("Close" to "stop watching"),
     "lock" to ("Arrange" to "move, resize, snap"),
-    "add" to ("Add" to "more feeds, up to 4"),
+    "add" to ("Add" to "more feeds, up to the limit for your decoder mode"),
     "layout" to ("Layout" to "presets, save your own"),
     "radio-button" to ("Radio" to "team radio, transcribed"),
     "map" to ("Map" to "style, timing, opacity"),

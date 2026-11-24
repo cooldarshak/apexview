@@ -10,27 +10,64 @@ val keystoreProps = Properties().apply {
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    // Conscrypt on JDK 21 reads InetAddress.holder during the real loopback
+    // certificate handshake. Open java.net only in the forked test JVM.
+    jvmArgs("--add-opens=java.base/java.net=ALL-UNNAMED")
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showStandardStreams = true
+    }
 }
 
 android {
     namespace = "app.apexview"
-    compileSdk = 35
+    // Compose 1.13 and Material3 1.5 AAR metadata require Android API 37.
+    // Preserve targetSdk 36 and minSdk 29 for phone and TCL parity.
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "app.apexview_custom"
         minSdk = 29
-        targetSdk = 35
+        targetSdk = 36
         // CI builds get a monotonically increasing version code so a same-signature APK installs
         // over the previous one instead of being rejected as a downgrade.
         val ciRun = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
-        versionCode = 100_000 + ciRun
-        versionName = "1.0.$ciRun"
+        // Manual official releases MUST reuse the verified green debug build
+        // number. GitHub workflow run numbers are independent between workflows;
+        // using the new release workflow's counter would downgrade the APK.
+        val verifiedRun = System.getenv("PITWALL_VERIFIED_DEBUG_RUN_NUMBER")
+            ?.takeIf { it.isNotBlank() }?.toIntOrNull()
+        require(verifiedRun == null || verifiedRun in 1..1_000_000) {
+            "Invalid accepted debug build number for a Pitwall release"
+        }
+        val appRun = verifiedRun ?: ciRun
+        require(appRun in 0..1_000_000) { "Pitwall build number exceeds the supported release range" }
+        // Debug numbers are even; the signed official APK for the accepted
+        // same-code build is odd and therefore installs over that debug APK.
+        // The NEXT debug run is even again and still upgrades in place.
+        // Keeping versionName in the same numerical sequence also makes the
+        // existing GitHub updater offer a same-source accepted release.
+        val isOfficial = System.getenv("PITWALL_OFFICIAL_RELEASE") == "true"
+        require(!isOfficial || verifiedRun != null) { "Official releases require an accepted green debug run" }
+        val versionSerial = appRun * 2 + if (isOfficial) 1 else 0
+        versionCode = 100_000 + versionSerial
+        versionName = "1.0.$versionSerial"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         val builtAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("MMM d, HH:mm"))
+        val castReceiverId = System.getenv("PITWALL_CAST_RECEIVER_ID").orEmpty().trim().uppercase()
+        require(castReceiverId.isEmpty() || castReceiverId.matches(Regex("[0-9A-F]{8}"))) {
+            "PITWALL_CAST_RECEIVER_ID must be the eight-character app ID from the Google Cast Console"
+        }
+        buildConfigField("String", "CAST_RECEIVER_APP_ID", "\"$castReceiverId\"")
         buildConfigField("String", "BUILT_AT", "\"$builtAt\"")
         // Where updates come from (owner/repo on GitHub). A fork points this at its own releases.
-        buildConfigField("String", "UPDATE_REPO", "\"mikeyyy0/apexview\"")
+        buildConfigField("String", "UPDATE_REPO", "\"cooldarshak/apexview\"")
     }
 
     signingConfigs {
@@ -60,6 +97,15 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("release")
         }
+        // Release-equivalent, non-debuggable app for physical FrameTimingMetric runs.
+        // Keep the same signing identity when a persistent CI key is configured.
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = if (keystoreProps.isNotEmpty()) signingConfigs.getByName("release")
+                else signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
+            isDebuggable = false
+        }
         // The release build under its own app ID, to smoke-test shrinking on a phone without
         // replacing the installed app.
         create("smoke") {
@@ -74,13 +120,34 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
 
     testOptions {
         unitTests.isReturnDefaultValues = true
         unitTests.isIncludeAndroidResources = true
+        unitTests.all {
+            // Robolectric fetches android-all-instrumented outside Gradle's resolver. CI
+            // runners can receive HTTP 429 from both Maven Central endpoints. Use Google's
+            // documented mirror of Maven Central for these runtime-only test SDK jars.
+            it.systemProperty("robolectric.dependency.repo.url", "https://maven-central.storage-download.googleapis.com/maven2")
+            it.systemProperty("robolectric.dependency.repo.id", "googleMavenCentralMirror")
+            // Robolectric 4.16.1 supports Android 16 / API 36 on JDK 21. Some
+            // tests inherit an older maximum SDK from Compose test libraries.
+            // Run the application test runtime on API 36 explicitly instead
+            // of downgrading the shipping targetSdk or skipping tests.
+            it.systemProperty("robolectric.enabledSdks", "36")
+        }
+    }
+
+    // CI generates this disposable MP4 from the complementary synthetic tile slices.
+    // It is included only in the instrumentation APK and never shipped in the app.
+    val hevcTileFixtureDirectory = System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")
+    if (!hevcTileFixtureDirectory.isNullOrBlank()) {
+        sourceSets.getByName("androidTest").assets.srcDir(hevcTileFixtureDirectory)
     }
 
     buildFeatures {
@@ -90,22 +157,32 @@ android {
 }
 
 dependencies {
-    val media3 = "1.5.1"
+    val media3 = "1.11.1"
 
-    implementation(platform("androidx.compose:compose-bom:2024.12.01"))
+    implementation(platform("androidx.compose:compose-bom:2026.11.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
-    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material3:material3:1.5.0")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("io.coil-kt:coil-compose:2.7.0")
-    implementation("androidx.activity:activity-compose:1.9.3")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.activity:activity-compose:1.11.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.4")
+    // The app uses the Android Cast sender UI and Default Media Receiver for the composed
+    // archive HEVC stream. Scene/layout customization remains receiver-side.
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    // Cast transitive ranges can otherwise resolve prerelease libraries that require
+    // a newer Android Gradle plugin and SDK than this project supports.
+    implementation("androidx.mediarouter:mediarouter") { version { strictly("1.7.0") } }
+    implementation("androidx.core:core:1.17.0")
+    implementation("androidx.core:core-ktx:1.17.0")
+    implementation("com.google.android.gms:play-services-cast-framework:22.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     implementation("androidx.media3:media3-exoplayer:$media3")
     implementation("androidx.media3:media3-exoplayer-dash:$media3")
     implementation("androidx.media3:media3-exoplayer-hls:$media3")
     implementation("androidx.media3:media3-ui:$media3")
+    implementation("androidx.media3:media3-datasource-okhttp:$media3")
     // WebSocket for F1's live timing feed (SignalR Core).
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // Fold posture (half-open like a laptop) for laptop mode.
@@ -113,11 +190,14 @@ dependencies {
     // Chrome sheet for the Driver of the Day vote, so the race stays on screen.
     implementation("androidx.browser:browser:1.8.0")
 
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+
     testImplementation("junit:junit:4.13.2")
     // Real org.json for JVM tests; android.jar only has stubs.
     testImplementation("org.json:json:20240303")
     // Compose on the JVM, for what a remote's arrow keys reach.
-    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

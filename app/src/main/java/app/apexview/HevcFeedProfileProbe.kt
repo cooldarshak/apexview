@@ -1,0 +1,823 @@
+package app.apexview
+
+import androidx.media3.common.Format
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import java.security.MessageDigest
+import androidx.media3.common.MimeTypes
+import app.apexview.tiled.HevcBitstream
+import app.apexview.tiled.HevcParameterSets
+import app.apexview.tiled.HevcParameterSetCompatibility
+import app.apexview.tiled.CmafBoxInspector
+import app.apexview.tiled.HevcFeedCompatibility
+import app.apexview.tiled.HevcFragmentCompatibility
+import app.apexview.tiled.HevcFragmentTimelineAlignment
+
+/**
+ * Sanitised read-only summary of the codec configuration Media3 already parsed for a video track.
+ *
+ * Only VPS/SPS/PPS metadata is returned. Raw initialization data is not retained or logged. This
+ * helper never sees media sample payloads, manifest URLs, DRM init data, licence responses, KIDs
+ * or IV values.
+ */
+internal object HevcFeedProfileProbe {
+    data class Snapshot(
+        val label: String,
+        val group: String,
+        val deliveryType: String,
+        val observedMediaChunkDurationsMs: List<Long>,
+        val summary: String,
+        val mime: String?,
+        val codecs: String?,
+        val width: Int,
+        val height: Int,
+        val frameRate: Float,
+        val parameterSetFingerprint: String?,
+        val parsedParameterCounts: String,
+        val parsedVps: List<HevcParameterSets.VpsMetadata>,
+        val parsedSps: List<HevcParameterSets.SpsMetadata>,
+        val parsedPps: List<HevcParameterSets.PpsMetadata>,
+        val drmSecurityLevel: String?,
+        val widevineKeysLoaded: Boolean,
+        val videoDecoderName: String?,
+        val firstFrameRendered: Boolean
+    )
+
+    fun summarize(trackType: Int, format: Format): String = inspect(trackType, format).summary
+
+    fun inspect(trackType: Int, format: Format, label: String = "feed", group: String = "session"): Snapshot {
+        val initializationData = format.initializationData
+        val nals = initializationData.flatMap { csd ->
+            runCatching { HevcBitstream.splitAnnexB(csd) }.getOrElse {
+                listOfNotNull(
+                    runCatching { HevcBitstream.parseNalHeader(csd) }.getOrNull()
+                        ?.takeIf { nal -> nal.type in 32..34 }
+                )
+            }
+        }.filter { it.type in 32..34 }
+
+        val vpsUnits = nals.filter { it.type == 32 }
+        val spsUnits = nals.filter { it.type == 33 }
+        val ppsUnits = nals.filter { it.type == 34 }
+
+        val vps = vpsUnits.mapNotNull { nal ->
+            runCatching { HevcParameterSets.parseVps(nal.bytes) }.getOrNull()
+        }
+        val sps = spsUnits.mapNotNull { nal ->
+            runCatching { HevcParameterSets.parseSps(nal.bytes) }.getOrNull()
+        }
+        val spsById = sps.associateBy { it.spsId }
+        val pps = ppsUnits.mapNotNull { nal ->
+            val preliminary = runCatching { HevcParameterSets.parsePps(nal.bytes) }.getOrNull()
+                ?: return@mapNotNull null
+            val referenceSps = spsById[preliminary.spsId]
+            if (referenceSps == null) preliminary
+            else runCatching { HevcParameterSets.parsePps(nal.bytes, referenceSps) }.getOrDefault(preliminary)
+        }
+
+        val vpsSummary = vps.joinToString("|") {
+            "id=${it.vpsId},layers=${it.maxLayers},subLayers=${it.maxSubLayers}," +
+                "ptl=${it.profileTierLevel.profileIdc}/${it.profileTierLevel.levelIdc}," +
+                "ordering=${it.subLayerOrderingInfoPresent},maxDPB=${it.maxDecPicBuffering}," +
+                "timing=${it.timingInfoPresent},hrd=${it.hrdParameters.size},extension=${it.extensionPresent}"
+        }.ifEmpty { "unavailable" }
+        val spsSummary = sps.joinToString("|") {
+            "id=${it.spsId},vps=${it.vpsId},profile=${it.profileTierLevel.profileIdc}/${it.profileTierLevel.levelIdc}," +
+                "size=${it.width}x${it.height},display=${it.displayWidth}x${it.displayHeight}," +
+                "chroma=${it.chromaFormatIdc},bitDepth=${it.bitDepthLuma}/${it.bitDepthChroma}," +
+                "pocBits=${it.log2MaxPicOrderCntLsb},ctb=${it.ctbSize},ctbGrid=${it.picWidthInCtbs}x${it.picHeightInCtbs}," +
+                "vui=${it.vuiParametersPresent},spsExtension=${it.spsExtensionPresent}"
+        }.ifEmpty { "unavailable" }
+        val ppsSummary = pps.joinToString("|") {
+            "id=${it.ppsId},sps=${it.spsId},tiles=${it.tilesEnabled},tileGrid=${it.numTileColumns}x${it.numTileRows}," +
+                "tileColumns=${it.tileColumnWidthsInCtbs},tileRows=${it.tileRowHeightsInCtbs}," +
+                "entropySync=${it.entropyCodingSyncEnabled},dependentSlices=${it.dependentSliceSegmentsEnabled}," +
+                "weighted=${it.weightedPredictionEnabled}/${it.weightedBipredictionEnabled}," +
+                "deblockOverride=${it.deblockingFilterOverrideEnabled},listModification=${it.listsModificationPresent}," +
+                "sliceHeaderExtension=${it.sliceSegmentHeaderExtensionPresent},extension=${it.extensionPresent}"
+        }.ifEmpty { "unavailable" }
+
+        val parsedCounts = "${vps.size}/${sps.size}/${pps.size}"
+        // Hash individual parameter NALs, then hash their sorted fingerprints. The result is
+        // independent of CSD array/NAL ordering while preserving duplicate counts.
+        val unitFingerprints = nals.map { nal ->
+            val digest = MessageDigest.getInstance("SHA-256")
+            digest.update(nal.type.toByte())
+            digest.update(nal.bytes)
+            digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+        }.sorted()
+        val fingerprint = unitFingerprints.takeIf { it.isNotEmpty() }?.let { units ->
+            val digest = MessageDigest.getInstance("SHA-256")
+            units.forEach { unit ->
+                digest.update(unit.toByteArray(Charsets.US_ASCII))
+                digest.update(0.toByte())
+            }
+            digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+        }
+        val summary = "F1_HEVC_PROFILE label=$label trackType=$trackType mime=${format.sampleMimeType ?: "?"} " +
+            "codecs=${format.codecs ?: "?"} size=${format.width}x${format.height} " +
+            "frameRate=${format.frameRate} initializationDataCount=${initializationData.size} " +
+            "parameterNalCounts=${vpsUnits.size}/${spsUnits.size}/${ppsUnits.size} " +
+            "parsedParameterCounts=$parsedCounts parameterSetFingerprint=${fingerprint ?: "unavailable"} " +
+            "vps={$vpsSummary} sps={$spsSummary} pps={$ppsSummary}"
+        return Snapshot(
+            label = label,
+            group = group,
+            deliveryType = "UNKNOWN",
+            observedMediaChunkDurationsMs = emptyList(),
+            summary = summary,
+            mime = format.sampleMimeType,
+            codecs = format.codecs,
+            width = format.width,
+            height = format.height,
+            frameRate = format.frameRate,
+            parameterSetFingerprint = fingerprint,
+            parsedParameterCounts = parsedCounts,
+            parsedVps = vps,
+            parsedSps = sps,
+            parsedPps = pps,
+            drmSecurityLevel = null,
+            widevineKeysLoaded = false,
+            videoDecoderName = null,
+            firstFrameRendered = false
+        )
+    }
+}
+
+
+/**
+ * Volatile, in-memory comparison of sanitised codec and CMAF metadata from one F1 content session.
+ * It is not proof of encrypted-stream stitching or secure-surface feasibility.
+ */
+internal object HevcFeedProfileCapture {
+    private data class FeedProgress(
+        var drmSecurityLevel: String? = null,
+        var keysLoaded: Boolean = false,
+        var videoDecoderName: String? = null,
+        var firstFrameRendered: Boolean = false,
+        var deliveryType: String = "UNKNOWN",
+        val chunkDurationsMs: MutableList<Long> = mutableListOf()
+    )
+
+    private val profiles = linkedMapOf<String, HevcFeedProfileProbe.Snapshot>()
+    private val feedProgress = linkedMapOf<String, FeedProgress>()
+    private data class ObservedCmafFragment(
+        val track: CmafBoxInspector.TrackMetadata,
+        val fragment: CmafBoxInspector.FragmentMetadata
+    )
+    private data class CmafFeedProgress(
+        val videoTracks: MutableMap<Long, CmafBoxInspector.TrackMetadata> = linkedMapOf(),
+        // Keep a bounded catalogue: F1 can switch representations while a player is alive,
+        // and track IDs are routinely reused across those init segments.
+        val initializationReports: MutableList<CmafBoxInspector.Report> = mutableListOf(),
+        val videoTrackCandidates: MutableList<CmafBoxInspector.TrackMetadata> = mutableListOf(),
+        // Keep an ordered, bounded window. A single "latest" fragment cannot establish whether
+        // two feed timelines differ by a stable offset or are simply at different live positions.
+        val fragmentHistory: MutableList<ObservedCmafFragment> = mutableListOf(),
+        var initSegmentsObserved: Int = 0,
+        var mediaFragmentsObserved: Int = 0,
+        var parseFailures: Int = 0,
+        var overLimitSegments: Int = 0
+    )
+    private val cmafProgress = linkedMapOf<String, CmafFeedProgress>()
+    private var activeGroup: String? = null
+    private var tileTestLabels: List<String> = emptyList()
+    var diagnostic by mutableStateOf("HEVC_PROFILE_WAITING_FOR_FEED_A_AND_FEED_B")
+        private set
+
+    private fun selectGroup(group: String) {
+        if (activeGroup != group) {
+            profiles.clear()
+            feedProgress.clear()
+            cmafProgress.clear()
+            tileTestLabels = emptyList()
+            activeGroup = group
+        }
+    }
+
+    @Synchronized
+    fun registerFeed(group: String, label: String) {
+        selectGroup(group)
+        feedProgress.getOrPut(label) { FeedProgress() }
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun selectTileTestFeeds(group: String, labels: List<String>) {
+        selectGroup(group)
+        tileTestLabels = labels.distinct().take(2)
+        tileTestLabels.forEach { label ->
+            feedProgress.getOrPut(label) { FeedProgress() }
+            cmafProgress[label]?.let {
+                it.fragmentHistory.clear()
+                it.mediaFragmentsObserved = 0
+            }
+        }
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun clearTileTestSelection() {
+        tileTestLabels = emptyList()
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun shouldCaptureCmafInit(group: String, label: String): Boolean =
+        activeGroup == group && label in feedProgress
+
+    @Synchronized
+    fun shouldCaptureCmaf(group: String, label: String): Boolean =
+        activeGroup == group && tileTestLabels.size == 2 && label in tileTestLabels
+
+    private fun matchesSelectedMediaFormat(
+        track: CmafBoxInspector.TrackMetadata,
+        expected: HevcFeedProfileProbe.Snapshot
+    ): Boolean {
+        val sampleEntryDimensionsMatch =
+            track.width == expected.width && track.height == expected.height
+        val codecDimensionsMatch = track.hevcConfiguration?.sps.orEmpty().any { sps ->
+            (sps.width == expected.width && sps.height == expected.height) ||
+                (sps.displayWidth == expected.width && sps.displayHeight == expected.height)
+        }
+        // Sample-entry dimensions can be display-scaled independently of the HEVC SPS coded
+        // dimensions. Accept either exact representation match, never a merely "single candidate".
+        return sampleEntryDimensionsMatch || codecDimensionsMatch
+    }
+
+    @Synchronized
+    fun cmafInitializationReport(group: String, label: String): CmafBoxInspector.Report? {
+        if (activeGroup != group) return null
+        val state = cmafProgress[label] ?: return null
+        val expected = profiles[label]
+        val reports = state.initializationReports
+        if (reports.isEmpty()) return null
+        if (expected != null) {
+            val matching = reports.filter { report ->
+                report.tracks.any { track ->
+                    track.handler == "vide" && matchesSelectedMediaFormat(track, expected)
+                }
+            }
+            // Never fall back to a lone but differently sized representation. Media3's selected
+            // format is authoritative for the player; a 480x270 init segment must not be treated
+            // as the init segment for a 1920x1080 stream just because it arrived first.
+            return matching.singleOrNull()
+        }
+        // Without a selected Media3 format, only a single observed representation is unambiguous.
+        return reports.singleOrNull()
+    }
+
+    @Synchronized
+    fun recordCmafParseFailure(group: String, label: String) {
+        if (!shouldCaptureCmafInit(group, label)) return
+        cmafProgress.getOrPut(label) { CmafFeedProgress() }.parseFailures++
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun recordCmafCaptureSkipped(group: String, label: String) {
+        if (!shouldCaptureCmafInit(group, label)) return
+        cmafProgress.getOrPut(label) { CmafFeedProgress() }.overLimitSegments++
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun recordCmafReport(group: String, label: String, report: CmafBoxInspector.Report) {
+        if (!shouldCaptureCmafInit(group, label)) return
+        val progress = cmafProgress.getOrPut(label) { CmafFeedProgress() }
+        val videoTracks = report.tracks.filter { track ->
+            track.handler == "vide" && (track.hevcConfiguration != null ||
+                track.sampleEntry in setOf("hvc1", "hev1", "encv", "dvhe", "dvh1"))
+        }
+        if (report.initializationSegmentPresent && videoTracks.isNotEmpty()) {
+            progress.initSegmentsObserved++
+            val signature = videoTracks.map { track ->
+                listOf(track.trackId, track.width, track.height, track.timescale,
+                    track.sampleEntry, track.hevcConfiguration?.parameterSetFingerprints)
+            }.toString()
+            val alreadyKnown = progress.initializationReports.any { existing ->
+                existing.tracks.filter { it.handler == "vide" }.map { track ->
+                    listOf(track.trackId, track.width, track.height, track.timescale,
+                        track.sampleEntry, track.hevcConfiguration?.parameterSetFingerprints)
+                }.toString() == signature
+            }
+            if (!alreadyKnown) progress.initializationReports.add(report)
+            while (progress.initializationReports.size > 12) progress.initializationReports.removeAt(0)
+            videoTracks.forEach { track ->
+                if (progress.videoTrackCandidates.none { existing ->
+                    existing.trackId == track.trackId && existing.width == track.width &&
+                        existing.height == track.height && existing.timescale == track.timescale &&
+                        existing.hevcConfiguration?.parameterSetFingerprints ==
+                            track.hevcConfiguration?.parameterSetFingerprints
+                }) {
+                    progress.videoTrackCandidates.add(track)
+                }
+                track.trackId?.let { progress.videoTracks[it] = track }
+            }
+            while (progress.videoTrackCandidates.size > 16) progress.videoTrackCandidates.removeAt(0)
+        }
+        val selectedForTileTest = shouldCaptureCmaf(group, label)
+        val fragments = if (selectedForTileTest) report.fragments else emptyList()
+        if (fragments.isNotEmpty()) {
+            val reportVideoTracks = report.tracks.filter { it.handler == "vide" }
+            fragments.forEach { fragment ->
+                val matchingTrack = reportVideoTracks.singleOrNull { it.trackId == fragment.trackId }
+                if (matchingTrack != null) {
+                    progress.mediaFragmentsObserved++
+                    progress.fragmentHistory.add(ObservedCmafFragment(matchingTrack, fragment))
+                }
+            }
+            while (progress.fragmentHistory.size > 24) progress.fragmentHistory.removeAt(0)
+        }
+        if (report.errors.isNotEmpty()) {
+            progress.parseFailures += report.errors.size.coerceAtMost(8)
+        }
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun record(snapshot: HevcFeedProfileProbe.Snapshot) {
+        selectGroup(snapshot.group)
+        val progress = feedProgress.getOrPut(snapshot.label) { FeedProgress() }
+        progress.drmSecurityLevel = snapshot.drmSecurityLevel ?: progress.drmSecurityLevel
+        progress.keysLoaded = progress.keysLoaded || snapshot.widevineKeysLoaded
+        progress.videoDecoderName = snapshot.videoDecoderName ?: progress.videoDecoderName
+        progress.firstFrameRendered = progress.firstFrameRendered || snapshot.firstFrameRendered
+        if (snapshot.deliveryType != "UNKNOWN") progress.deliveryType = snapshot.deliveryType
+        if (snapshot.observedMediaChunkDurationsMs.isNotEmpty()) {
+            progress.chunkDurationsMs.clear()
+            progress.chunkDurationsMs.addAll(snapshot.observedMediaChunkDurationsMs.takeLast(8))
+        }
+        val enriched = snapshot.copy(
+            deliveryType = progress.deliveryType,
+            observedMediaChunkDurationsMs = progress.chunkDurationsMs.toList(),
+            drmSecurityLevel = progress.drmSecurityLevel,
+            widevineKeysLoaded = progress.keysLoaded,
+            videoDecoderName = progress.videoDecoderName,
+            firstFrameRendered = progress.firstFrameRendered
+        )
+        profiles.remove(snapshot.label)
+        profiles[snapshot.label] = enriched
+        // Diagnostics render a profile together with its progress. Evict both atomically;
+        // retaining eight profiles but only four progress entries crashed the fifth feed.
+        while (profiles.size > AppState.MAX_SINGLE_DECODER_FEEDS) {
+            val oldest = profiles.keys.first()
+            profiles.remove(oldest)
+            feedProgress.remove(oldest)
+        }
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun updateMediaChunkDuration(group: String, label: String, deliveryType: String, durationMs: Long) {
+        if (activeGroup != group || durationMs !in 1_000L..12_000L) return
+        val progress = feedProgress.getOrPut(label) { FeedProgress() }
+        progress.deliveryType = deliveryType
+        progress.chunkDurationsMs.add(durationMs)
+        while (progress.chunkDurationsMs.size > 8) progress.chunkDurationsMs.removeAt(0)
+        profiles[label]?.let { current ->
+            profiles[label] = current.copy(
+                deliveryType = progress.deliveryType,
+                observedMediaChunkDurationsMs = progress.chunkDurationsMs.toList()
+            )
+        }
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun updateVideoDecoder(group: String, label: String, decoderName: String) {
+        if (activeGroup != group) return
+        val safeName = decoderName.filter { it.isLetterOrDigit() || it in "._-" }.take(96)
+        if (safeName.isBlank()) return
+        val progress = feedProgress.getOrPut(label) { FeedProgress() }
+        progress.videoDecoderName = safeName
+        profiles[label]?.let { profiles[label] = it.copy(videoDecoderName = safeName) }
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun updateFirstFrameRendered(group: String, label: String) {
+        if (activeGroup != group) return
+        val progress = feedProgress.getOrPut(label) { FeedProgress() }
+        progress.firstFrameRendered = true
+        profiles[label]?.let { profiles[label] = it.copy(firstFrameRendered = true) }
+        diagnostic = buildDiagnostic()
+    }
+
+    @Synchronized
+    fun updateDrm(group: String, label: String, securityLevel: String, keysLoaded: Boolean) {
+        if (activeGroup != group) return
+        val progress = feedProgress.getOrPut(label) { FeedProgress() }
+        progress.drmSecurityLevel = securityLevel.takeIf { it.isNotBlank() } ?: progress.drmSecurityLevel
+        progress.keysLoaded = progress.keysLoaded || keysLoaded
+        profiles[label]?.let {
+            profiles[label] = it.copy(
+                drmSecurityLevel = progress.drmSecurityLevel,
+                widevineKeysLoaded = progress.keysLoaded
+            )
+        }
+        diagnostic = buildDiagnostic()
+    }
+
+    private fun progressLine(label: String): String {
+        val progress = feedProgress.getValue(label)
+        val state = if (label in profiles) "FORMAT_CAPTURED" else "WAITING_FOR_VIDEO_INPUT_FORMAT"
+        return "$label: $state; DRM=${progress.drmSecurityLevel ?: "not-observed"}; " +
+            "keysLoadedEventObserved=${progress.keysLoaded}; decoder=${progress.videoDecoderName ?: "not-observed"}; " +
+            "firstFrameRendered=${progress.firstFrameRendered}"
+    }
+
+    private fun compareParsedParameterSets(
+        first: HevcFeedProfileProbe.Snapshot,
+        second: HevcFeedProfileProbe.Snapshot
+    ): String {
+        if (first.parsedVps.isEmpty() || first.parsedSps.isEmpty() || first.parsedPps.isEmpty() ||
+            second.parsedVps.isEmpty() || second.parsedSps.isEmpty() || second.parsedPps.isEmpty()) {
+            return "INCOMPLETE: one or more VPS/SPS/PPS sets could not be parsed"
+        }
+        val reasons = mutableListOf<String>()
+        val firstVps = first.parsedVps.associateBy { it.vpsId }
+        val secondVps = second.parsedVps.associateBy { it.vpsId }
+        val firstSps = first.parsedSps.associateBy { it.spsId }
+        val secondSps = second.parsedSps.associateBy { it.spsId }
+        val firstPps = first.parsedPps.associateBy { it.ppsId }
+        val secondPps = second.parsedPps.associateBy { it.ppsId }
+
+        if (firstVps.size != first.parsedVps.size || secondVps.size != second.parsedVps.size ||
+            firstSps.size != first.parsedSps.size || secondSps.size != second.parsedSps.size ||
+            firstPps.size != first.parsedPps.size || secondPps.size != second.parsedPps.size) {
+            reasons += "duplicate parameter-set IDs are present"
+        }
+        if (firstVps != secondVps) reasons += "VPS IDs or metadata differ"
+        if (firstSps != secondSps) reasons += "SPS IDs or metadata differ"
+        if (firstPps != secondPps) reasons += "PPS IDs or metadata differ"
+
+        firstPps.forEach { (ppsId, firstPpsMetadata) ->
+            val secondPpsMetadata = secondPps[ppsId] ?: return@forEach
+            val firstSpsMetadata = firstSps[firstPpsMetadata.spsId]
+            val secondSpsMetadata = secondSps[secondPpsMetadata.spsId]
+            if (firstSpsMetadata == null || secondSpsMetadata == null) {
+                reasons += "PPS $ppsId references a missing SPS"
+                return@forEach
+            }
+            val firstVpsMetadata = firstVps[firstSpsMetadata.vpsId]
+            val secondVpsMetadata = secondVps[secondSpsMetadata.vpsId]
+            if (firstVpsMetadata == null || secondVpsMetadata == null) {
+                reasons += "SPS ${firstSpsMetadata.spsId} references a missing VPS"
+                return@forEach
+            }
+            val gate = HevcParameterSetCompatibility.compare(
+                firstVpsMetadata, firstSpsMetadata, firstPpsMetadata,
+                secondVpsMetadata, secondSpsMetadata, secondPpsMetadata
+            )
+            if (!gate.compatible) reasons += gate.reasons.map { "PPS $ppsId: $it" }
+        }
+        listOf(first, second).forEach { profile ->
+            if (profile.parsedPps.isEmpty()) {
+                reasons += "${profile.label}: source tile layout is unavailable"
+            } else {
+                profile.parsedPps.forEach { pps ->
+                    val tileCount = pps.numTileColumns.toLong() * pps.numTileRows.toLong()
+                    val sourceSps = profile.parsedSps.singleOrNull { it.spsId == pps.spsId }
+                    val isTizenSingleCell = sourceSps?.width == 960 && sourceSps.height == 544
+                    if ((!pps.tilesEnabled || tileCount < 2L) && !isTizenSingleCell) {
+                        reasons += "${profile.label} PPS ${pps.ppsId}: no multi-tile grid and full-frame source is not the supported 960x544 single-cell profile"
+                    }
+                }
+            }
+        }
+        return if (reasons.isEmpty()) "PASS" else "REJECT: ${reasons.distinct().joinToString("; ")}"
+    }
+
+    private fun tileMetadataLines(profile: HevcFeedProfileProbe.Snapshot): List<String> {
+        if (profile.parsedPps.isEmpty()) {
+            val sps = profile.parsedSps.singleOrNull()
+            return listOf(
+                "${profile.label}: HEVC_TILE_METADATA pps=unavailable tilesEnabled=unavailable " +
+                    "numTileColumns=unavailable numTileRows=unavailable " +
+                    "ctbPictureWidthInCtbs=${sps?.picWidthInCtbs ?: "unavailable"} " +
+                    "ctbPictureHeightInCtbs=${sps?.picHeightInCtbs ?: "unavailable"} " +
+                    "tileColumnWidthsInCtbs=unavailable tileRowHeightsInCtbs=unavailable " +
+                    "deblockingFilterOverrideEnabled=unavailable"
+            )
+        }
+
+        return profile.parsedPps.sortedBy { it.ppsId }.map { pps ->
+            val matchingSps = profile.parsedSps.filter { it.spsId == pps.spsId }
+            val sps = matchingSps.singleOrNull()
+            "${profile.label}: HEVC_TILE_METADATA ppsId=${pps.ppsId} spsId=${pps.spsId} " +
+                "tilesEnabled=${pps.tilesEnabled} numTileColumns=${pps.numTileColumns} " +
+                "numTileRows=${pps.numTileRows} " +
+                "ctbPictureWidthInCtbs=${sps?.picWidthInCtbs ?: "unavailable"} " +
+                "ctbPictureHeightInCtbs=${sps?.picHeightInCtbs ?: "unavailable"} " +
+                "tileColumnWidthsInCtbs=${pps.tileColumnWidthsInCtbs ?: "unavailable"} " +
+                "tileRowHeightsInCtbs=${pps.tileRowHeightsInCtbs ?: "unavailable"} " +
+                "deblockingFilterOverrideEnabled=${pps.deblockingFilterOverrideEnabled} " +
+                "deblockingFilterControlPresent=${pps.deblockingFilterControlPresent}" +
+                if (matchingSps.size > 1) " spsMetadata=ambiguous" else ""
+        }
+    }
+
+    /**
+     * Compares every parsed PPS field, keyed by PPS id. This is parsed metadata equality,
+     * not a byte-for-byte comparison of the original PPS NAL units.
+     */
+    private fun parsedPpsStructuresIdentical(
+        first: HevcFeedProfileProbe.Snapshot,
+        second: HevcFeedProfileProbe.Snapshot
+    ): String {
+        if (first.parsedPps.isEmpty() || second.parsedPps.isEmpty()) {
+            return "UNKNOWN (one or both feeds have no parsed PPS)"
+        }
+        val firstById = first.parsedPps.associateBy { it.ppsId }
+        val secondById = second.parsedPps.associateBy { it.ppsId }
+        if (firstById.size != first.parsedPps.size || secondById.size != second.parsedPps.size) {
+            return "UNKNOWN (duplicate PPS ids)"
+        }
+        return (firstById == secondById).toString()
+    }
+
+    private fun buildDiagnostic(): String {
+        val profile = buildHevcProfileDiagnostic()
+        val cmaf = buildCmafDiagnostic()
+        return if (cmaf.isBlank()) profile else "$profile\n\n$cmaf"
+    }
+
+    private fun buildHevcProfileDiagnostic(): String {
+        val captured = if (tileTestLabels.size == 2) {
+            val selected = tileTestLabels.mapNotNull(profiles::get)
+            if (selected.size < 2) {
+                return (listOf("TILE_TEST_WAITING_FOR_SELECTED_FEED_FORMATS") +
+                    tileTestLabels.map { label ->
+                        feedProgress.getOrPut(label) { FeedProgress() }
+                        progressLine(label)
+                    }).joinToString("\n")
+            }
+            selected
+        } else profiles.values.toList()
+        if (captured.isEmpty()) {
+            if (feedProgress.isEmpty()) return "HEVC_PROFILE_WAITING_FOR_FEED_A_AND_FEED_B"
+            return (listOf("HEVC_PROFILE_WAITING_FOR_VIDEO_INPUT_FORMAT") +
+                feedProgress.keys.map(::progressLine)).joinToString("\n")
+        }
+        if (captured.size == 1) {
+            val first = captured.single()
+            val pending = feedProgress.keys.filter { it !in profiles }
+            return (listOf(
+                "HEVC_PROFILE_CAPTURED",
+                "${first.label}: ${first.mime ?: "?"} ${first.codecs ?: "?"} ${first.width}x${first.height}@${first.frameRate}fps; " +
+                    "delivery=${first.deliveryType}; chunksMs=${first.observedMediaChunkDurationsMs}; " +
+                    "VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}"
+            ) + tileMetadataLines(first) + listOf(
+                progressLine(first.label),
+                if (pending.isEmpty()) "HEVC_PROFILE_WAITING_FOR_FEED_B"
+                else pending.joinToString("\n", prefix = "HEVC_PROFILE_WAITING_FOR_VIDEO_INPUT_FORMAT\n") { progressLine(it) }
+            )).joinToString("\n")
+        }
+        val first = captured[0]
+        val second = captured[1]
+        val reasons = buildList {
+            if (first.mime != second.mime) add("MIME differs")
+            if (first.codecs != second.codecs) add("codec string differs")
+            if (first.width <= 0 || first.height <= 0 || second.width <= 0 || second.height <= 0) {
+                add("video dimensions unavailable")
+            } else if (first.width != second.width || first.height != second.height) {
+                add("dimensions differ")
+            }
+            if (first.mime?.equals("video/hevc", ignoreCase = true) != true ||
+                second.mime?.equals("video/hevc", ignoreCase = true) != true) {
+                add("one or both tracks are not identified as HEVC")
+            }
+            if (first.codecs.isNullOrBlank() || second.codecs.isNullOrBlank()) add("codec string unavailable")
+            val firstCounts = first.parsedParameterCounts.split('/').mapNotNull { it.toIntOrNull() }
+            val secondCounts = second.parsedParameterCounts.split('/').mapNotNull { it.toIntOrNull() }
+            if (firstCounts.size != 3 || secondCounts.size != 3 ||
+                firstCounts.any { it <= 0 } || secondCounts.any { it <= 0 }) {
+                add("VPS/SPS/PPS parsing is incomplete")
+            }
+            if (first.parameterSetFingerprint == null || second.parameterSetFingerprint == null) {
+                add("parameter-set fingerprint unavailable")
+            } else if (first.parameterSetFingerprint != second.parameterSetFingerprint) {
+                add("VPS/SPS/PPS fingerprint differs")
+            }
+            if (first.parsedParameterCounts != second.parsedParameterCounts) add("parsed parameter counts differ")
+            if (first.frameRate > 0f && second.frameRate > 0f && first.frameRate != second.frameRate) {
+                add("reported frame rates differ")
+            }
+        }
+        val result = if (reasons.isEmpty()) "HEVC_FORMAT_MATCH" else "HEVC_FORMAT_MISMATCH"
+        fun drm(profile: HevcFeedProfileProbe.Snapshot) =
+            "DRM=${profile.drmSecurityLevel ?: "not-observed"},keysLoadedEventObserved=${profile.widevineKeysLoaded}," +
+                "decoder=${profile.videoDecoderName ?: "not-observed"},firstFrameRendered=${profile.firstFrameRendered}"
+        val parameterGate = compareParsedParameterSets(first, second)
+        return buildList {
+            add(result)
+            add("HEVC_TILE_ASSEMBLER_GATE=$parameterGate")
+            add(
+                "${first.label}: ${first.mime ?: "?"} ${first.codecs ?: "?"} ${first.width}x${first.height}@${first.frameRate}fps; " +
+                    "VPS/SPS/PPS=${first.parsedParameterCounts}; fingerprint=${first.parameterSetFingerprint ?: "unavailable"}; " +
+                    "delivery=${first.deliveryType}; chunksMs=${first.observedMediaChunkDurationsMs}"
+            )
+            addAll(tileMetadataLines(first))
+            add("${first.label}: ${drm(first)}")
+            add(
+                "${second.label}: ${second.mime ?: "?"} ${second.codecs ?: "?"} ${second.width}x${second.height}@${second.frameRate}fps; " +
+                    "VPS/SPS/PPS=${second.parsedParameterCounts}; fingerprint=${second.parameterSetFingerprint ?: "unavailable"}; " +
+                    "delivery=${second.deliveryType}; chunksMs=${second.observedMediaChunkDurationsMs}"
+            )
+            addAll(tileMetadataLines(second))
+            add("${second.label}: ${drm(second)}")
+            add("HEVC_TILE_PARSED_PPS_STRUCTURES_IDENTICAL=${parsedPpsStructuresIdentical(first, second)}")
+            add(
+                if (reasons.isEmpty()) "CMAF timing, encryption layout and secure-surface feasibility remain unverified."
+                else "Mismatch reasons: ${reasons.joinToString("; ")}. CMAF timing, encryption layout and secure-surface feasibility remain unverified."
+            )
+        }.joinToString("\n")
+    }
+    /**
+     * Runtime CMAF observations are metadata-only. Sample payloads are not parsed; for Widevine
+     * content the KID and IV values are never read or displayed, and no protected bytes are saved.
+     */
+    private fun buildCmafDiagnostic(): String {
+        if (tileTestLabels.size != 2) return ""
+        val states = tileTestLabels.map { label -> label to cmafProgress[label] }
+        fun selectedTrack(label: String, state: CmafFeedProgress?): CmafBoxInspector.TrackMetadata? {
+            val candidates = state?.videoTrackCandidates.orEmpty()
+            val expected = profiles[label]
+            val exact = if (expected == null) emptyList() else candidates.filter {
+                matchesSelectedMediaFormat(it, expected)
+            }
+            return when {
+                exact.size == 1 -> exact.single()
+                exact.size > 1 -> null
+                expected == null && candidates.size == 1 -> candidates.single()
+                else -> null
+            }
+        }
+        fun sameRepresentation(
+            first: CmafBoxInspector.TrackMetadata,
+            second: CmafBoxInspector.TrackMetadata
+        ): Boolean = first.trackId == second.trackId &&
+            first.width == second.width && first.height == second.height &&
+            first.timescale == second.timescale && first.sampleEntry == second.sampleEntry &&
+            first.originalFormat == second.originalFormat &&
+            first.trackEncryption == second.trackEncryption &&
+            first.seigSampleGroupDescription == second.seigSampleGroupDescription &&
+            first.seigSampleGroupDescriptionStructureComplete ==
+                second.seigSampleGroupDescriptionStructureComplete &&
+            first.hevcConfiguration?.parameterSetFingerprints ==
+                second.hevcConfiguration?.parameterSetFingerprints
+        fun fragmentsFor(
+            state: CmafFeedProgress?,
+            track: CmafBoxInspector.TrackMetadata?
+        ): List<CmafBoxInspector.FragmentMetadata> {
+            if (state == null || track == null) return emptyList()
+            return state.fragmentHistory.filter { sameRepresentation(it.track, track) }
+                .map { it.fragment }
+        }
+        val lines = mutableListOf(
+            "F1_CMAF_READ_ONLY_INSPECTOR=ACTIVE",
+            "CMAF_CAPTURE_SCOPE=two selected feeds; bounded in-memory ISO-BMFF metadata only"
+        )
+        states.forEach { (label, state) ->
+            val expected = profiles[label]
+            val candidates = state?.videoTrackCandidates.orEmpty()
+            val track = selectedTrack(label, state)
+            val feedFragments = fragmentsFor(state, track)
+            val fragment = feedFragments.lastOrNull()
+            if (track == null) {
+                if (candidates.isNotEmpty() && expected != null &&
+                    candidates.none { matchesSelectedMediaFormat(it, expected) }) {
+                    lines += "$label: CMAF_REPRESENTATION_NOT_FOUND; Media3Format=${expected.width}x${expected.height}; observed=" +
+                        candidates.joinToString("|") { candidate ->
+                            val spsSizes = candidate.hevcConfiguration?.sps.orEmpty()
+                                .joinToString(",") { "${it.width}x${it.height}" }.ifEmpty { "unknown" }
+                            "${candidate.width ?: 0}x${candidate.height ?: 0}/sps=$spsSizes/track=${candidate.trackId ?: "?"}/timescale=${candidate.timescale ?: "?"}"
+                        }
+                } else if (candidates.size > 1) {
+                    lines += "$label: CMAF_REPRESENTATION_AMBIGUOUS; Media3Format=${expected?.width ?: "unknown"}x${expected?.height ?: "unknown"}; candidates=" +
+                        candidates.joinToString("|") { "${it.width ?: 0}x${it.height ?: 0}/track=${it.trackId ?: "?"}/timescale=${it.timescale ?: "?"}" }
+                }
+                lines += "$label: CMAF_INIT=WAITING; initSegments=${state?.initSegmentsObserved ?: 0}; mediaFragments=${state?.mediaFragmentsObserved ?: 0}; parseFailures=${state?.parseFailures ?: 0}; overLimit=${state?.overLimitSegments ?: 0}"
+            } else {
+                val config = track.hevcConfiguration
+                val pps = config?.pps?.singleOrNull()
+                val protection = track.trackEncryption
+                lines += "$label: trackId=${track.trackId}; codec=${track.originalFormat ?: track.sampleEntry ?: "unknown"}; ${track.width ?: 0}x${track.height ?: 0}; timescale=${track.timescale ?: "unknown"}; scheme=${track.protectionScheme ?: "none"}; encrypted=${track.encrypted}"
+                lines += "$label: hvcC VPS/SPS/PPS=${config?.vps?.size ?: 0}/${config?.sps?.size ?: 0}/${config?.pps?.size ?: 0}; tileGrid=${pps?.numTileColumns ?: "unknown"}x${pps?.numTileRows ?: "unknown"}; tileColumnsCTB=${pps?.tileColumnWidthsInCtbs ?: "unknown"}"
+                val ivMode = when {
+                    protection == null -> "NOT_SIGNALED"
+                    !protection.defaultIsProtected -> "DEFAULT_CLEAR"
+                    protection.perSampleIvSize > 0 -> "PER_SAMPLE"
+                    protection.constantIvSize != null -> "CONSTANT"
+                    else -> "UNRESOLVED"
+                }
+                lines += "$label: tencPresent=${protection != null}; protected=${protection?.defaultIsProtected ?: "unknown"}; ivMode=$ivMode; perSampleIvSize=${protection?.perSampleIvSize ?: "unknown"}; constantIvSize=${protection?.constantIvSize ?: "unknown"}; pattern=${protection?.cryptByteBlock ?: 0}/${protection?.skipByteBlock ?: 0}; initSegments=${state?.initSegmentsObserved ?: 0}; mediaFragments=${state?.mediaFragmentsObserved ?: 0}"
+                if (fragment != null) {
+                    val firstSample = fragment.sampleTimings.firstOrNull()
+                    val firstBase = feedFragments.firstOrNull()?.baseDecodeTimeTicks
+                    val lastBase = feedFragments.lastOrNull()?.baseDecodeTimeTicks
+                    lines += "$label: fragmentSamples=${fragment.sampleCount}; baseDecodeTicks=${fragment.baseDecodeTimeTicks ?: "unknown"}; firstDts=${firstSample?.decodeTimeTicks ?: "unknown"}; firstPts=${firstSample?.presentationTimeTicks ?: "unknown"}; firstDurationTicks=${firstSample?.durationTicks ?: "unknown"}; timingComplete=${fragment.timingComplete}"
+                    lines += "$label: orderedFragmentWindow=${feedFragments.size}; firstBaseDecodeTicks=${firstBase ?: "unknown"}; lastBaseDecodeTicks=${lastBase ?: "unknown"}"
+                    val sampleIvSizes = fragment.sampleEncryptionMetadata
+                        .map { it.ivSize }.distinct().sorted().ifEmpty { listOf(-1) }
+                    val subsampleRangeCounts = fragment.sampleEncryptionMetadata
+                        .mapNotNull { it.subsampleRanges?.size }.distinct().sorted().ifEmpty { listOf(-1) }
+                    val auxiliary = fragment.sampleAuxiliaryMetadata
+                    val seigLayout = fragment.sampleGroupEncryptionMetadata?.entries.orEmpty()
+                        .map { entry ->
+                            "protected=${entry.isProtected},ivSize=${entry.perSampleIvSize},constantIvSize=${entry.constantIvSize ?: "none"},pattern=${entry.cryptByteBlock}/${entry.skipByteBlock}"
+                        }.distinct()
+                    lines += "$label: senc=${fragment.sampleEncryptionBoxPresent}; subsample=${fragment.subsampleEncryptionSignalled ?: "unknown"}; encryptionStructureComplete=${fragment.sampleEncryptionStructureComplete}; rangesCoverSamples=${fragment.sampleEncryptionRangesCoverSamples}; sampleIvSizes=${if (sampleIvSizes == listOf(-1)) "unavailable" else sampleIvSizes}; subsampleRangeCounts=${if (subsampleRangeCounts == listOf(-1)) "unavailable" else subsampleRangeCounts}; saizSaioComplete=${fragment.sampleAuxiliaryInfoStructureComplete}; saizSampleCount=${auxiliary?.saizSampleCount ?: "unknown"}; saizDefaultSize=${auxiliary?.defaultSampleInfoSize ?: "unknown"}; saizSizeClasses=${auxiliary?.sampleInfoSizes?.distinct()?.sorted() ?: "unknown"}; saioEntryCount=${auxiliary?.saioOffsets?.size ?: "unknown"}; auxiliaryRecordsComplete=${fragment.sampleAuxiliaryPayloadStructureComplete}; auxiliaryRecordSamples=${fragment.sampleAuxiliaryPayloadSampleCount}; seigComplete=${fragment.sampleGroupEncryptionStructureComplete}; seigLayout=${seigLayout.ifEmpty { listOf("unavailable") }}"
+                } else {
+                    lines += "$label: CMAF_MEDIA_FRAGMENT=WAITING"
+                }
+                if ((state?.parseFailures ?: 0) > 0 || (state?.overLimitSegments ?: 0) > 0) {
+                    lines += "$label: parseFailures=${state?.parseFailures ?: 0}; overLimit=${state?.overLimitSegments ?: 0}"
+                }
+            }
+        }
+
+        val firstTrack = states.firstOrNull()?.let { (label, state) -> selectedTrack(label, state) }
+        val secondTrack = states.getOrNull(1)?.let { (label, state) -> selectedTrack(label, state) }
+        val firstFragments = fragmentsFor(states.firstOrNull()?.second, firstTrack)
+        val secondFragments = fragmentsFor(states.getOrNull(1)?.second, secondTrack)
+        val firstFragment = firstFragments.lastOrNull()
+        val secondFragment = secondFragments.lastOrNull()
+        if (firstTrack != null && secondTrack != null) {
+            val firstTiming = firstFragment?.sampleTimings?.mapNotNull { it.durationTicks }?.distinct()?.singleOrNull()
+            val secondTiming = secondFragment?.sampleTimings?.mapNotNull { it.durationTicks }?.distinct()?.singleOrNull()
+            val trackGate = HevcFeedCompatibility.compare(
+                HevcFeedCompatibility.Profile(
+                    firstTrack.originalFormat ?: firstTrack.sampleEntry,
+                    firstTrack.width, firstTrack.height, firstTrack.timescale, firstTiming,
+                    firstTrack.protectionScheme
+                ),
+                HevcFeedCompatibility.Profile(
+                    secondTrack.originalFormat ?: secondTrack.sampleEntry,
+                    secondTrack.width, secondTrack.height, secondTrack.timescale, secondTiming,
+                    secondTrack.protectionScheme
+                )
+            )
+            lines += "CMAF_TRACK_PROFILE_GATE=${if (trackGate.compatible) "MATCH" else "NOT_COMPATIBLE"}; reasons=${trackGate.reasons.ifEmpty { listOf("none") }.joinToString("|")}"
+
+            val firstConfig = firstTrack.hevcConfiguration
+            val secondConfig = secondTrack.hevcConfiguration
+            val tileGate = HevcParameterSetCompatibility.compare(
+                firstConfig?.vps?.singleOrNull(), firstConfig?.sps?.singleOrNull(), firstConfig?.pps?.singleOrNull(),
+                secondConfig?.vps?.singleOrNull(), secondConfig?.sps?.singleOrNull(), secondConfig?.pps?.singleOrNull()
+            )
+            lines += "CMAF_HEVC_TILE_CONFIG_GATE=${if (tileGate.compatible) "MATCH" else "NOT_COMPATIBLE"}; reasons=${tileGate.reasons.ifEmpty { listOf("none") }.joinToString("|")}"
+            val sourceTileReasons = buildList {
+                listOf(
+                    Triple("first", firstConfig?.pps, firstConfig?.sps),
+                    Triple("second", secondConfig?.pps, secondConfig?.sps)
+                ).forEach { (name, ppsSets, spsSets) ->
+                    if (ppsSets.isNullOrEmpty() || spsSets.isNullOrEmpty()) {
+                        add("$name feed source tile layout is unavailable")
+                    } else {
+                        ppsSets.forEach { pps ->
+                            val count = pps.numTileColumns.toLong() * pps.numTileRows.toLong()
+                            val sps = spsSets.singleOrNull { it.spsId == pps.spsId }
+                            val tizenSingleCell = sps?.width == 960 && sps.height == 544
+                            if ((!pps.tilesEnabled || count < 2L) && !tizenSingleCell) {
+                                add("$name feed PPS ${pps.ppsId}: no multi-tile grid and full-frame source is not the supported 960x544 single-cell profile")
+                            }
+                        }
+                    }
+                }
+            }
+            lines += "CMAF_SOURCE_TILE_LAYOUT_GATE=${if (sourceTileReasons.isEmpty()) "PASS" else "NOT_COMPATIBLE"}; reasons=${sourceTileReasons.ifEmpty { listOf("none") }.joinToString("|")}"
+        } else {
+            lines += "CMAF_TRACK_COMPARISON=WAITING_FOR_BOTH_VIDEO_INIT_SEGMENTS"
+        }
+
+        if (firstTrack != null && secondTrack != null) {
+            val alignment = HevcFragmentTimelineAlignment.compare(
+                firstTrack, firstFragments, secondTrack, secondFragments
+            )
+            val offset = alignment.offsetMillis?.let { "${it}ms" } ?: "unknown"
+            val offsetRange = if (alignment.minimumOffsetMillis != null && alignment.maximumOffsetMillis != null) {
+                "${alignment.minimumOffsetMillis}..${alignment.maximumOffsetMillis}ms"
+            } else {
+                "unknown"
+            }
+            lines += "CMAF_ORDERED_TIMELINE_ALIGNMENT=${alignment.classification}; secondMinusFirst=$offset; range=$offsetRange; comparedFragments=${alignment.comparedFragments}; comparedSamples=${alignment.comparedSamples}; pairing=ordered-window-index; pictureIdentity=NOT_CHECKED; timestampsModified=false; reasons=${alignment.reasons.ifEmpty { listOf("none") }.joinToString("|")}"
+        } else {
+            lines += "CMAF_ORDERED_TIMELINE_ALIGNMENT=WAITING_FOR_BOTH_SELECTED_VIDEO_REPRESENTATIONS"
+        }
+
+        if (firstTrack != null && secondTrack != null && firstFragment != null && secondFragment != null) {
+            val fragmentGate = HevcFragmentCompatibility.compare(firstTrack, firstFragment, secondTrack, secondFragment)
+            lines += "CMAF_FRAGMENT_TIMING_ENCRYPTION_GATE=${if (fragmentGate.compatible) "MATCH" else "NOT_COMPATIBLE"}; reasons=${fragmentGate.reasons.ifEmpty { listOf("none") }.joinToString("|")}"
+        } else {
+            lines += "CMAF_FRAGMENT_COMPARISON=WAITING_FOR_BOTH_VIDEO_MEDIA_FRAGMENTS"
+        }
+        lines += "HEVC_SLICE_HEADER_ANALYSIS=NOT_READ; protected media sample bytes are not inspected"
+        lines += "CMAF_ENCRYPTION_METADATA=STRUCTURE_ONLY; keyIdsAndIvBytes=NOT_RETAINED_OR_DISPLAYED"
+        lines += "DRM_SAFETY=KID values and IV values are never displayed; no decryption is attempted"
+        return lines.joinToString("\n")
+    }
+
+}

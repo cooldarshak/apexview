@@ -38,6 +38,7 @@ object CrashReports {
         val file = File(context.filesDir, FILE)
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            DiagnosticLogs.append(context, "FATAL EXCEPTION thread=${thread.name}\n${error.stackTraceToString()}")
             runCatching { file.writeText("${about()}\n${java.time.Instant.now()}\n\n${scrub(error.stackTraceToString())}") }
             previous?.uncaughtException(thread, error)
         }

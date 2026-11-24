@@ -207,6 +207,42 @@ class RemoteFocusTest {
         assertFocus("calendar")
     } 
     @Test
+    fun theTvHeaderRemainsReachableAfterScrollingTheHeroAway() {
+        val calendar = FocusRequester()
+        val row = FocusRequester()
+        rule.setContent {
+            val input = LocalInputModeManager.current
+            LaunchedEffect(Unit) { input.requestInputMode(InputMode.Keyboard) }
+            ArtPage(
+                image = null,
+                artKey = null,
+                title = "Apexview",
+                listState = rememberLazyListState(initialFirstVisibleItemIndex = 1),
+                backdrop = {},
+                tvHeaderFocus = calendar,
+                trailing = { backdrop ->
+                    Row {
+                        GlyphButton(Icons.Rounded.Settings, "Calendar", Modifier.testTag("calendar").focusRequester(calendar), backdrop) {}
+                        GlyphButton(Icons.Rounded.Settings, "Settings", Modifier.testTag("settings"), backdrop) {}
+                    }
+                },
+            ) {
+                item {
+                    SecondaryButton("Row", Modifier.testTag("row").focusRequester(row).padding(20.dp)) {}
+                }
+                item { Box(Modifier.fillMaxWidth().height(600.dp)) }
+            }
+        }
+        rule.waitForIdle()
+        rule.runOnIdle { row.requestFocus() }
+        assertFocus("row")
+        press(Key.DirectionUp)
+        assertFocus("calendar")
+        press(Key.DirectionRight)
+        assertFocus("settings")
+    }
+
+    @Test
     fun appleSliderCanBeAdjustedAndCommittedWithTheRemote() {
         val focus = FocusRequester()
         var value by mutableFloatStateOf(0.5f)
@@ -233,7 +269,12 @@ class RemoteFocusTest {
         rule.runOnIdle { assertEquals(0.51f, value, 0.001f) }
         press(Key.DirectionLeft)
         rule.runOnIdle { assertEquals(0.5f, value, 0.001f) }
-        rule.runOnIdle { assertTrue(finished >= 2) }
+        repeat(4) { press(Key.DirectionRight) }
+        rule.runOnIdle { assertEquals(0.54f, value, 0.001f) }
+        assertFocus("apple-slider")
+        repeat(4) { press(Key.DirectionLeft) }
+        rule.runOnIdle { assertEquals(0.5f, value, 0.001f) }
+        rule.runOnIdle { assertTrue(finished >= 10) }
     }
 
     @Test

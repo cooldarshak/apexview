@@ -1,6 +1,8 @@
 package app.apexview
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MapRetryTest {
@@ -22,6 +24,13 @@ class MapRetryTest {
         assertEquals(1_000L, archiveLookupTime(watchedUtc = 1_000L, sessionStartUtcMs = 2_000L))
         assertEquals(2_000L, archiveLookupTime(watchedUtc = null, sessionStartUtcMs = 2_000L))
         assertEquals(null, archiveLookupTime(watchedUtc = null, sessionStartUtcMs = null))
+    }
+
+    @Test
+    fun tvDecoderCapabilityQueryTargetsHevcRatherThanAvc() {
+        assertTrue(supportsF1VideoMimeType(arrayOf("video/hevc")))
+        assertTrue(supportsF1VideoMimeType(arrayOf("VIDEO/HEVC")))
+        assertFalse(supportsF1VideoMimeType(arrayOf("video/avc")))
     }
 
     @Test

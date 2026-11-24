@@ -10,6 +10,8 @@ build/
 dist/
 keystore.properties
 .kotlin/
+__pycache__/
+*.pyc
 # Signing keys and their passwords never go in the repository.
 *.jks
 *.keystore

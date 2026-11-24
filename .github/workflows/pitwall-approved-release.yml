@@ -1,0 +1,42 @@
+name: Pitwall hardware-approved release
+
+# Retain this older entry point for users who know its name, but route it
+# through the SAME accepted-source, 16-gate, signer-verified official release.
+# Do not publish obsolete debug APK version numbers or skip the release gate.
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: 'Successful Android debug APK workflow run ID at this branch head'
+        required: true
+        type: string
+      physical_acceptance_confirmed:
+        description: 'Confirm the full S22/TCL, decoder, DRM, captions and Cast matrix'
+        required: true
+        type: boolean
+        default: false
+      hardware_acceptance_issue:
+        description: 'Closed repo issue labelled pitwall-hardware-accepted documenting all 16 gates'
+        required: true
+        type: string
+      publish:
+        description: 'Publish production APK only after all verification (false builds candidate)'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: read
+  issues: read
+
+jobs:
+  verified-release:
+    if: github.ref_name == 'feature/pitwall-performance-audit-plan' && inputs.physical_acceptance_confirmed == true
+    uses: ./.github/workflows/official-release.yml
+    with:
+      accepted_debug_run_id: ${{ inputs.source_run_id }}
+      accepted_commit_sha: ${{ github.sha }}
+      hardware_acceptance_issue: ${{ inputs.hardware_acceptance_issue }}
+      publish: ${{ inputs.publish }}
+    secrets: inherit

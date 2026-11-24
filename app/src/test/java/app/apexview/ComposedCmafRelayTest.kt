@@ -1,0 +1,75 @@
+package app.apexview
+
+import app.apexview.cast.ComposedCmafRelay
+import app.apexview.cast.CastDashPublication
+import app.apexview.cast.local.ReceiverLicenseRequest
+import app.apexview.tiled.ProtectedHevcComposedDashPackageBuilder
+import java.net.InetAddress
+import java.net.Socket
+import java.net.URI
+import org.json.JSONObject
+import org.junit.Assert.*
+import org.junit.Test
+
+class ComposedCmafRelayTest {
+    @Test fun onlyTheCapabilityPathServesCmafAndRangeBytesRemainIdentical() {
+        val relay = ComposedCmafRelay("127.0.0.1", InetAddress.getByName("127.0.0.1"))
+        val uri = URI(relay.url)
+        fun get(path: String, range: String? = null): Pair<String, ByteArray> = Socket("127.0.0.1", uri.port).use { socket ->
+            socket.soTimeout = 3000
+            socket.getOutputStream().write(("GET $path HTTP/1.1\r\nHost: 127.0.0.1\r\n" + (range?.let { "Range: $it\r\n" } ?: "") + "\r\n").toByteArray())
+            val result = socket.getInputStream().readBytes()
+            val split = result.asList().windowed(4).indexOfFirst { it == listOf(13.toByte(), 10.toByte(), 13.toByte(), 10.toByte()) }
+            require(split > 0)
+            result.copyOfRange(0, split).toString(Charsets.US_ASCII) to result.copyOfRange(split + 4, result.size)
+        }
+        try {
+            val bytes = ByteArray(100) { (it * 3).toByte() }
+            val resources = mapOf("manifest.mpd" to "<MPD/>".toByteArray(), "segment-1.m4s" to bytes.copyOf())
+            CastDashPublication(ProtectedHevcComposedDashPackageBuilder.Package("<MPD/>", resources,
+                2560, 1472, 10, 1, 1, 0, 1)).publish(relay)
+            assertTrue(get("/manifest.mpd").first.startsWith("HTTP/1.1 404"))
+            val path = uri.path.substringBeforeLast('/') + "/segment-1.m4s"
+            assertArrayEquals(bytes, get(path).second)
+            val ranged = get(path, "bytes=15-29")
+            assertTrue(ranged.first.startsWith("HTTP/1.1 206"))
+            assertArrayEquals(bytes.copyOfRange(15, 30), ranged.second)
+            assertTrue(get(path, "bytes=900-999").first.startsWith("HTTP/1.1 416"))
+            assertTrue(get(path, "bytes=999999999999999999999-").first.startsWith("HTTP/1.1 416"))
+            assertTrue(get(path, "bytes=0-999999999999999999999").first.startsWith("HTTP/1.1 416"))
+            assertTrue(get(uri.path.substringBeforeLast('/') + "/../segment-1.m4s").first.startsWith("HTTP/1.1 404"))
+        } finally { relay.close() }
+    }
+    @Test fun directPlayCannotInjectAPhoneUrlAndSlidingWindowsKeepOneControllerClock() {
+        val request = ReceiverLicenseRequest(12, listOf(1033), 1033)
+        val body = JSONObject().put("metadata", JSONObject().put("custom", JSONObject()
+            .put("pitwallDirect", true).put("pitwallLicense", request.encode())))
+        assertEquals(request, ReceiverLicenseRequest.direct(body, true))
+        assertThrows(IllegalArgumentException::class.java) { ReceiverLicenseRequest.direct(body, false) }
+        assertThrows(IllegalArgumentException::class.java) {
+            ReceiverLicenseRequest.direct(body.put("url", "https://untrusted.invalid/video.mpd"), true)
+        }
+        assertEquals(app.apexview.cast.local.ReceiverTimeline.position(93_000, 6_000, 8_000),
+            app.apexview.cast.local.ReceiverTimeline.position(93_000, 12_000, 2_000))
+        assertEquals(60_000L, app.apexview.cast.local.ReceiverTimeline.restorePosition(93_000L, 50_000, 83_000))
+        assertEquals(50_000L, app.apexview.cast.local.ReceiverTimeline.restorePosition(null, 50_000, 83_000))
+        assertEquals(100L, app.apexview.cast.local.ReceiverTimeline.seek(500, 100))
+        assertEquals(500L, app.apexview.cast.local.ReceiverTimeline.seek(500, -1))
+        assertEquals(1_500L, app.apexview.cast.local.ReceiverTimeline.windowSeek(9_000, 7_000, 500, 2_000))
+        assertEquals(0L, app.apexview.cast.local.ReceiverTimeline.windowSeek(6_000, 7_000, 500, 2_000))
+        assertEquals(2_000L, app.apexview.cast.local.ReceiverTimeline.windowSeek(15_000, 7_000, 500, 2_000))
+    }
+    @Test fun receiverLicensingAcceptsContentIdentifiersAndRejectsCredentialInjection() {
+        val request = ReceiverLicenseRequest(1234, listOf(1033, 1034, 1035), 1033)
+        assertEquals(request, ReceiverLicenseRequest.decode(request.encode()))
+        assertThrows(IllegalArgumentException::class.java) {
+            ReceiverLicenseRequest.decode(request.encode().put("licenseUrl", "https://untrusted.invalid/"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ReceiverLicenseRequest.decode(request.encode().put("ascendontoken", "not-a-real-token"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ReceiverLicenseRequest.decode(JSONObject().put("contentId", 0).put("channels", org.json.JSONArray(listOf(1))).put("audioChannel", 1))
+        }
+    }
+}

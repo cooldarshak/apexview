@@ -1,5 +1,6 @@
 package app.apexview
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -28,17 +29,26 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -47,7 +57,7 @@ import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.delay
 
 private val ROW_HEIGHT = 34.dp
-private val TYRE_COLORS = mapOf(
+internal val TYRE_COLORS = mapOf(
     "SOFT" to Color(0xFFFF3B30),
     "MEDIUM" to Color(0xFFFFD60A),
     "HARD" to Color(0xFFF2F2F2),
@@ -98,27 +108,38 @@ fun LaptopPanel(app: AppState, timing: SessionTiming?, modifier: Modifier) {
 @Composable
 fun SessionCountdown(app: AppState, timing: SessionTiming, style: TextStyle, modifier: Modifier = Modifier) {
     if (timing.isRace) return
-    var now by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(Unit) {
+    // The picture clock has sub-second precision, but the visible countdown changes only
+    // once per second (or when a flag pauses it). Do the cheap clock lookup frequently
+    // without invalidating Compose and its accessibility tree four times per second.
+    var display by remember(app, timing) { mutableStateOf<CountdownDisplay?>(null) }
+    LaunchedEffect(app, timing) {
         while (true) {
-            now = app.mapTimeMs() ?: 0L
+            display = countdownDisplay(timing, app.mapTimeMs())
             delay(250)
         }
     }
-    if (now == 0L) return
-    val reading = timing.clock.at(now) ?: return
+    val shown = display ?: return
+    Text(
+        shown.text,
+        style = style.copy(color = if (shown.running) Ink.primary else Ink.secondary, fontFeatureSettings = "tnum"),
+        maxLines = 1,
+        modifier = modifier,
+    )
+}
+
+/** Immutable display state: identical quarter-second samples do not trigger recomposition. */
+internal data class CountdownDisplay(val text: String, val running: Boolean)
+
+internal fun countdownDisplay(timing: SessionTiming, now: Long?): CountdownDisplay? {
+    if (timing.isRace || now == null || now == 0L) return null
+    val reading = timing.clock.at(now) ?: return null
     val flag = timing.finishedUtc
-    if (reading.remainingMs == 0L && flag != null && now >= flag) return
+    if (reading.remainingMs == 0L && flag != null && now >= flag) return null
     val seconds = (reading.remainingMs + 999) / 1000
     val time = if (seconds >= 3600) "%d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60)
     else "%d:%02d".format(seconds / 60, seconds % 60)
     val part = reading.part?.takeIf { timing.showsPushLaps }?.let { (if (timing.name.contains("Sprint", ignoreCase = true)) "SQ" else "Q") + it + " " }.orEmpty()
-    Text(
-        part + time,
-        style = style.copy(color = if (reading.running) Ink.primary else Ink.secondary, fontFeatureSettings = "tnum"),
-        maxLines = 1,
-        modifier = modifier,
-    )
+    return CountdownDisplay(part + time, reading.running)
 }
 
 /**
@@ -129,25 +150,24 @@ fun SessionCountdown(app: AppState, timing: SessionTiming, style: TextStyle, mod
 fun TowerPanel(app: AppState, timing: SessionTiming, width: Float, height: Float, feedScale: Float) {
     val density = LocalDensity.current
     val plan = app.combinedOverlayPlan
-    val docked = plan?.floating == false
-    val bounds = plan?.let { if (it.floating) it.workspace else it.tower }
-    val maxTowerWidth = bounds?.let { with(density) { it.w.toDp() } } ?: TOWER_WIDTH
+    val bounds = plan?.workspace
+    val widthRange = app.towerWidthRange(width)
+    val maxTowerWidth = with(density) { (if (app.tvLandscapeLayout) bounds?.w ?: width else widthRange.endInclusive).toDp() }
+    val minTowerWidth = with(density) { widthRange.start.toDp().coerceAtMost(maxTowerWidth) }
     val maxTowerHeight = bounds?.let { with(density) { it.h.toDp() } } ?: with(density) {
-        minOf(TOWER_HEIGHT, (height.toDp() - 40.dp).coerceAtLeast(AppState.TOWER_MIN_HEIGHT_DP.dp))
+        minOf(TOWER_HEIGHT, height.toDp())
     }
     TowerTextScale(app) {
         FloatingPanel(
-            app, app.towerSpot, "Timing", "Hide timing", app::toggleTower, width, height, feedScale,
+            app, app.towerSpot, "", "Hide timing tower", app::toggleTower, width, height, feedScale,
             maxWidth = maxTowerWidth, maxHeight = maxTowerHeight,
-            minWidth = minOf(AppState.TOWER_MIN_WIDTH_DP.dp, maxTowerWidth),
-            minHeight = minOf(AppState.TOWER_MIN_HEIGHT_DP.dp, maxTowerHeight),
+            minWidth = minTowerWidth,
+            minHeight = minOf(AppState.TOWER_MIN_HEIGHT_DP.dp, maxTowerHeight,
+                plan?.takeUnless { it.floating }?.let { with(density) { it.tower.h.toDp() } } ?: maxTowerHeight),
             bounds = bounds,
-            compactHeader = true,
-            compactHeaderHeight = if (app.layoutMode == LayoutMode.TV) {
-                with(density) { height.toDp() * 0.09375f }
-            } else null,
+            tower = true,
             opacity = app.towerOpacity,
-            locked = app.towerLocked || docked,
+            locked = app.towerLocked,
             onResizeFinished = app::finishTowerResize,
         ) {
             TimingTower(app, timing)
@@ -164,33 +184,76 @@ private fun TowerTextScale(app: AppState, content: @Composable () -> Unit) {
     )
 }
 
+internal data class TowerSample(
+    val rows: List<Pair<String, CardState>>,
+    val header: TowerSessionHeaderData,
+    val tyres: Map<String, Tyre?>,
+    val speeds: Map<String, Pair<Int?, Int?>>,
+) {
+    /** A new polling epoch should not invalidate every visible row if the pixels are unchanged. */
+    fun visuallyEquals(other: TowerSample): Boolean = rows == other.rows &&
+        header == other.header && speeds == other.speeds &&
+        tyres.size == other.tyres.size && tyres.all { (number, tyre) ->
+            val candidate = other.tyres[number]
+            other.tyres.containsKey(number) && tyre?.compound == candidate?.compound &&
+                tyre?.laps == candidate?.laps
+        }
+}
+
 /** Live running order. The screen follows the same delayed picture clock as the map. */
 @Composable
 private fun TimingTower(app: AppState, timing: SessionTiming) {
-    // Replays load their car telemetry lazily; live sessions already carry it on SessionTiming.
     LaunchedEffect(timing) { app.loadSpeeds(timing) }
-    var now by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(Unit) {
+    // Session-scoped worker owns the immutable display snapshots. Keep heavy
+    // sampling off main, and do not publish unchanged frames to Compose.
+    var sample by remember(timing) { mutableStateOf<TowerSample?>(null) }
+    LaunchedEffect(app, timing) {
+        val sampler = OverlayTowerSampler(timing, OverlayPerformanceProbe("phone-tv-tower-sample"))
         while (true) {
-            now = app.mapTimeMs() ?: 0L
-            delay(500)
+            val now = app.mapTimeMs() ?: 0L
+            // Capture mutable Compose state on main before entering the worker.
+            // Newly loaded speed data must still appear at a paused playhead.
+            val speeds = timing.speeds
+            val next = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                android.os.Trace.beginSection("PitwallTowerSampleBuild")
+                try { sampler.sample(now, speeds) }
+                finally { android.os.Trace.endSection() }
+            }
+            if (sample !== next) sample = next
+            delay(if (app.isTv) 250L else 500L)
         }
     }
-    val rows = timing.laps.mapNotNull { (number, laps) -> laps.at(now)?.let { number to it } }
-        .sortedBy { it.second.position ?: 99 }
+    val visible = sample ?: return
     val onTop = app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString()
+    TimingTowerContents(timing, visible.rows, visible.header, visible.tyres, visible.speeds,
+        onTop, app.settings.speedUnit, app.layoutMode == LayoutMode.TV, app::showOnboard)
+}
 
+/** The phone and TV receiver use this same table; receiver data is already sampled on the phone. */
+@Composable
+internal fun TimingTowerContents(
+    timing: SessionTiming, rows: List<Pair<String, CardState>>, header: TowerSessionHeaderData,
+    tyres: Map<String, Tyre?>, speeds: Map<String, Pair<Int?, Int?>>, onTop: String?,
+    speedUnit: String, tvLayout: Boolean, onDriver: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val television = remember(context) { isTvDevice(context) }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         // The table is 361dp wide, plus its 18dp side padding. Scale its layout with the panel
         // so S1/S2/S3 and the tyre column remain inside the visible window when it is narrowed.
         // Let the 1/3 landscape sidebar shrink the complete table rather than clip its last columns.
         // The text-size setting remains available when the sidebar is especially narrow.
         val baseDensity = LocalDensity.current
-        val contentScale = ((maxWidth.value - 18f) / 361f).coerceIn(0.60f, 1f)
+        val contentScale = (maxWidth.value / 379f).coerceIn(0.25f, if (television) 1.75f else 1.25f)
         CompositionLocalProvider(
             LocalDensity provides Density(baseDensity.density * contentScale, baseDensity.fontScale)
         ) {
             val listState = rememberLazyListState()
+            // One bounded histogram for the entire visible tower, not one log per row.
+            // Same renderer and probe contract on phone and Pitwall Cast receiver.
+            val rowDrawProbe = remember(television) {
+                OverlayPerformanceProbe(if (television) "tv-tower-row-draw" else "phone-tower-row-draw")
+            }
             val scrollHint by remember(listState, rows.size) {
                 derivedStateOf {
                     val visible = listState.layoutInfo.visibleItemsInfo
@@ -206,31 +269,26 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
                     }
                 }
             }
-            val minimumRowHeight = if (app.layoutMode == LayoutMode.TV) 16f else 20f
+            val minimumRowHeight = if (tvLayout) 16f else 20f
             val rowHeight = if (rows.isEmpty()) ROW_HEIGHT else {
                 // The TV preset uses a compact broadcast tower so more of the field is visible.
                 // On other layouts preserve the existing minimum for touch readability.
-                ((maxHeight.value / contentScale - 73f) / rows.size)
-                    .coerceIn(minimumRowHeight / contentScale, ROW_HEIGHT.value).dp
+                ((maxHeight.value / contentScale - 67f) / rows.size)
+                    .coerceIn((minimumRowHeight / contentScale).coerceAtMost(ROW_HEIGHT.value), ROW_HEIGHT.value).dp
             }
-            Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp, top = 6.dp)) {
-                TowerSessionHeader(timing, now)
+            Column(Modifier.fillMaxSize().padding(start = 12.dp, end = 6.dp)) {
+                TowerSessionHeader(header)
                 TowerHeader()
                 LazyColumn(Modifier.weight(1f), state = listState) {
                     items(rows, key = { it.first }) { (number, state) ->
-                        val kmh = timing.speeds[number]?.kmhAt(now)
-                        val gear = timing.speeds[number]?.gearAt(now)
-                        TowerRow(
-                            timing = timing,
-                            number = number,
-                            state = state,
-                            tyre = timing.tyres[number]?.at(now),
-                            kmh = kmh,
-                            gear = gear,
-                            speedUnit = app.settings.speedUnit,
-                            highlight = number == onTop,
-                            rowHeight = rowHeight,
-                        ) { app.showOnboard(number) }
+                        val kmh = speeds[number]?.first
+                        val gear = speeds[number]?.second
+                        // Use the same single-Canvas row on phone and TV. The previous phone
+                        // branch built hundreds of nested Text/Row/Canvas layout nodes on each
+                        // timing sample. The native row preserves the broadcast columns,
+                        // clickable driver, tyre and sectors, and one TalkBack semantics node.
+                        TvTowerRow(timing.drivers[number], number, state, tyres[number], kmh, gear,
+                            speedUnit, number == onTop, rowHeight, rowDrawProbe) { onDriver(number) }
                     }
                 }
                 if (rows.isNotEmpty()) {
@@ -248,8 +306,7 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
 }
 
 /** Compact session/track strip, like the header on the F1 timing screen. */
-@Composable
-private fun TowerSessionHeader(timing: SessionTiming, now: Long) {
+internal fun towerSessionHeader(timing: SessionTiming, now: Long): TowerSessionHeaderData {
     val flag = timing.flags.at(now)
     val trackLabel = flag.caption(now) ?: "Track clear"
     val trackColor = when {
@@ -285,25 +342,34 @@ private fun TowerSessionHeader(timing: SessionTiming, now: Long) {
         false -> "DRY"
         null -> "RAIN –"
     }
+    return TowerSessionHeaderData(timing.name.uppercase(), trackLabel.uppercase(), trackColor,
+        counter, listOf(wind, trackTemp, airTemp, humidity, pressure, rain))
+}
+
+internal data class TowerSessionHeaderData(val name: String, val track: String,
+    val color: Color, val counter: String, val weather: List<String>)
+
+@Composable
+internal fun TowerSessionHeader(header: TowerSessionHeaderData) {
     Column(Modifier.fillMaxWidth().height(36.dp)) {
         Row(
             Modifier.fillMaxWidth().height(18.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                timing.name.uppercase(),
+                header.name,
                 style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Ink.secondary),
                 maxLines = 1,
                 modifier = Modifier.weight(1f),
             )
             Text(
-                trackLabel.uppercase(),
-                style = cell.copy(fontSize = 8.sp, fontWeight = FontWeight.Bold, color = trackColor),
+                header.track,
+                style = cell.copy(fontSize = 8.sp, fontWeight = FontWeight.Bold, color = header.color),
                 maxLines = 1,
                 modifier = Modifier.padding(horizontal = 5.dp),
             )
             Text(
-                counter,
+                header.counter,
                 style = cell.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
                 textAlign = TextAlign.End,
                 maxLines = 1,
@@ -314,7 +380,7 @@ private fun TowerSessionHeader(timing: SessionTiming, now: Long) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            listOf(wind, trackTemp, airTemp, humidity, pressure, rain).forEach { value ->
+            header.weather.forEach { value ->
                 Text(
                     value,
                     style = cell.copy(fontSize = 7.sp, color = Ink.secondary),
@@ -361,6 +427,13 @@ fun TowerRow(
     val teamColor = driver?.color?.let { Color(it) } ?: Color.White
     val last = state.lastLap
     val best = state.bestLap
+    // Hundreds of fast-changing Text semantics nodes previously forced a full
+    // accessibility-tree diff on nearly every timing sample. Keep one actionable
+    // row summary; do not recompute it for speed, gear or micro-sector changes.
+    val summary = remember(driver?.tla, number, state.position, state.inPit, state.retired,
+        last?.time, best?.time, state.ahead, state.toLeader, tyre?.compound, tyre?.laps) {
+        TowerAccessibilitySummary.prepare(driver?.tla ?: number, state, tyre)
+    }
     Row(
         Modifier
             .height(rowHeight)
@@ -373,7 +446,12 @@ fun TowerRow(
                     else -> Color.Transparent
                 }
             )
-            .pressable(scaleTo = 0.99f, onClick = onClick),
+            .pressable(scaleTo = 0.99f, onClick = onClick)
+            .clearAndSetSemantics {
+                contentDescription = summary
+                role = Role.Button
+                onClick(label = "Open driver details") { onClick(); true }
+            },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(Modifier.width(64.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -463,7 +541,7 @@ fun TowerRow(
             }
         }
         repeat(3) { index ->
-            val sector = state.sectors.getOrNull(index) ?: state.lapSectors.getOrNull(index)
+            val sector = state.towerSector(index)
             TowerSector(sector)
         }
         Column(
@@ -489,26 +567,20 @@ private fun TowerSector(sector: SectorCell?) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Row(
-            Modifier.fillMaxWidth().height(8.dp),
-            horizontalArrangement = Arrangement.spacedBy(1.dp),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            val segments = sector?.segments.orEmpty()
-            if (segments.isEmpty()) {
-                repeat(5) {
-                    Box(
-                        Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(1.dp))
-                            .background(Color.White.copy(alpha = 0.10f))
-                    )
-                }
-            } else {
-                segments.forEach { status ->
-                    Box(
-                        Modifier.weight(1f).height(8.dp).clip(RoundedCornerShape(1.dp))
-                            .background(segmentColor(status))
-                    )
-                }
+        val segments = sector?.segments.orEmpty()
+        Canvas(Modifier.fillMaxWidth().height(8.dp)) {
+            val count = segments.size.takeIf { it > 0 } ?: 5
+            val gap = minOf(1.dp.toPx(), size.width / (2 * count))
+            val width = (size.width - (count - 1) * gap) / count
+            val height = if (segments.isEmpty()) 6.dp.toPx() else size.height
+            val radius = CornerRadius(minOf(1.dp.toPx(), width / 2))
+            repeat(count) { index ->
+                drawRoundRect(
+                    color = segmentColor(segments.getOrNull(index) ?: 0),
+                    topLeft = Offset(index * (width + gap), size.height - height),
+                    size = Size(width, height),
+                    cornerRadius = radius,
+                )
             }
         }
         Text(
@@ -519,11 +591,11 @@ private fun TowerSector(sector: SectorCell?) {
     }
 }
 
-private fun segmentColor(status: Int) = when (status) {
-    2048 -> Color(0xFFFFD60A) // Yellow
+internal fun segmentColor(status: Int) = when (status) {
+    2048, 2052 -> Color(0xFFFFD60A) // Yellow
     2049 -> Color(0xFF30D158) // Personal best
     2051 -> Color(0xFFBF5AF2) // Session best
-    2064 -> Color(0xFFFF453A) // Stopped
+    2064 -> Color(0xFF28A8F8) // Pit lane
     else -> Color.White.copy(alpha = 0.10f)
 }
 
@@ -544,7 +616,7 @@ private fun Header(text: String, width: Dp, align: TextAlign = TextAlign.End) {
     Text(text, style = Type.caption.copy(fontSize = 7.sp), textAlign = align, maxLines = 1, modifier = Modifier.width(width))
 }
 
-private fun lapColor(pace: Pace?) = when (pace) {
+internal fun lapColor(pace: Pace?) = when (pace) {
     Pace.PURPLE -> Color(0xFFBF5AF2)
     Pace.GREEN -> Color(0xFF30D158)
     else -> Color.White
@@ -585,5 +657,4 @@ private fun broadcastName(channel: Channel) = channel.title.split(" ").joinToStr
 }
 
 /** The floating tower's size until it's resized: every column, and about ten drivers. */
-private val TOWER_WIDTH = 380.dp
 private val TOWER_HEIGHT = 720.dp
