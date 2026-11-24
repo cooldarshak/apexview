@@ -37,7 +37,6 @@ import app.apexview.tiled.ProtectedHevcLiveComposition
 import app.apexview.tiled.F1DashFeedCapture
 import app.apexview.tiled.ArchiveCompositionStartup
 import app.apexview.tiled.F1ArchiveFeedCapture
-import app.apexview.tiled.CmafCaptureLifecycle
 import app.apexview.tiled.ArchiveBufferPolicy
 
 private fun Channel.key() = channelId ?: -1
@@ -69,10 +68,8 @@ class AppState(
         private set
 
     private var api = F1TvApi(userAgent, chromeMajor)
-    private var f1DashCaptureJob: Job? = null
-    private val pendingControlSeek = ControlSeekBatch()
-    private var controlSeekJob: Job? = null
-    private var seekCastRestartJob: Job? = null
+    private val playbackWork = PlaybackWorkCoordinator()
+    private val timingWork = TimingWorkCoordinator()
     var singleDecoderDiagnostic by mutableStateOf<String?>(null)
         private set
     /** Attempt-scoped diagnostics must not outlive the decoder/session that produced them. */
@@ -82,7 +79,6 @@ class AppState(
         singleDecoderDiagnostic = null
     }
     val observedActiveVideoDecoders get() = tiles.sumOf { it.feed.activeVideoDecoderCount }
-    private var f1DashCapture: CmafCaptureLifecycle? = null
     // Compose must observe a host transition independently of the rolling atlas.
     // With a plain field the scene could be published while host was null and
     // PlaybackVideoCanvas would keep the old tile's PlayerView attached to the
@@ -169,7 +165,6 @@ class AppState(
             tiles.size > 1 && nativeArchiveTiles.isEmpty() && protectedRollingScene == null
     var singleDecoderFailure by mutableStateOf<String?>(null)
         private set
-    private var singleDecoderRetryJob: Job? = null
     val singleDecoderSceneActive: Boolean get() = nativeArchiveTiles.isNotEmpty()
     val singleDecoderScenePlayer: FeedPlayer? get() = if (singleDecoderSceneActive) protectedCompositionHost?.feed else null
     var castBusy by mutableStateOf(false)
@@ -610,7 +605,7 @@ class AppState(
         castPlaybackHandedOff = true
         sendCaptionPreferenceToReceiver()
         tiles.forEach { it.feed.suspendForRemotePlayback(true) }
-        if ((nativeComposedCast != null || directCast != null) && (protectedCompositionHost != null || f1DashCaptureJob != null)) {
+        if ((nativeComposedCast != null || directCast != null) && (protectedCompositionHost != null || playbackWork.captureJob != null)) {
             stopProtectedCompositionPresentation(keepSourceVideoDisabled = true)
             tiles.forEach { it.feed.suspendForRemotePlayback(true) }
         }
@@ -1112,7 +1107,7 @@ class AppState(
         stopCasting(true)
     }
     private fun stopCasting(resumeLocal: Boolean) {
-        seekCastRestartJob?.cancel(); seekCastRestartJob = null
+        playbackWork.cancelCastRestart()
         castVideoOnlyOffer = false
         googleVideoOnlyConsent = false
         castCoordinator.beginConnection()
@@ -1464,7 +1459,7 @@ class AppState(
         }
         settings.updateDecoderMode(mode)
         if (mode == DecoderMode.MULTIPLE) {
-            singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
+            playbackWork.cancelRetry()
             singleDecoderFailure = null
             singleDecoderFallbackTileId = null
         } else if (tiles.size > 1 && !singleDecoderSceneActive) {
@@ -1478,7 +1473,7 @@ class AppState(
     fun retrySingleDecoder() {
         if (settings.decoderMode != DecoderMode.SINGLE || archiveCompositionStarting) return
         val leader = leaderTile() ?: return
-        singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
+        playbackWork.cancelRetry()
         android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_RETRY requested=USER")
         startArchiveSingleDecoderComposition(leader.contentId)
     }
@@ -1544,14 +1539,15 @@ class AppState(
     }
 
     fun close() {
-        singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
+        timingWork.close()
+        playbackWork.cancelControlSeek()
+        playbackWork.cancelRetry()
         stopCasting(false)
         stopLocalDiscovery()
         googleCastRemoteClient?.unregisterCallback(googleRemoteCallback)
         stopProtectedCompositionPresentation(restorePlayer = false)
-        f1DashCaptureJob?.cancel()
-        f1DashCaptureJob = null
-        f1DashCapture = null
+        playbackWork.cancelCapture()
+        playbackWork.capture = null
         power?.removeThermalStatusListener(thermalListener)
         updater.close()
     }
@@ -1983,7 +1979,7 @@ class AppState(
     /** True when the stream has no clock and the map's time is a guess the user lines up. */
     var mapClockEstimated by mutableStateOf(false)
         private set
-    private var timingContentId: Long? = null
+    private val timingContentId get() = timingWork.contentId
 
     /** Play sessions by content ID. Every tile of a content shares one. */
     private val playOfferMutex = Mutex()
@@ -2738,7 +2734,7 @@ class AppState(
     /** Replay composition is a finite on-demand source, not a moving live capture window. */
     private fun startArchiveSingleDecoderComposition(contentId: Long, attempt: Int = 0) {
         if (castPlaybackHandedOff) { applyVideoBudget(); return }
-        singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
+        playbackWork.cancelRetry()
         if (protectedCompositionHost != null && !singleDecoderSceneActive) stopProtectedCompositionPresentation()
         val selected = tiles.filter { it.contentId == contentId }
         if (selected.size !in 2..MAX_SINGLE_DECODER_FEEDS || selected.size != tiles.size ||
@@ -2772,8 +2768,8 @@ class AppState(
         val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
         val diagnosticGeneration = compositionDiagnosticOwner.begin()
         singleDecoderDiagnostic = null
-        f1DashCaptureJob?.cancel()
-        f1DashCapture = capture
+        playbackWork.cancelCapture()
+        playbackWork.capture = capture
         val startup = ArchiveCompositionStartup()
         var transferred = false
         var released = 0
@@ -2791,7 +2787,7 @@ class AppState(
                 "activeSourceVideos=1 reason=COMPOSITION_NOT_READY")
         }
         fun diagnostic() {
-            if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || f1DashCapture !== capture) return
+            if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || playbackWork.capture !== capture) return
             singleDecoderDiagnostic = buildString {
                 append("Source: F1 Archive · Composition feeds: ${selected.size}\n")
                 append("Requested platform: ${selected.map { it.feed.sourceStream.requestedPlatform }.distinct().joinToString()}\n")
@@ -2817,7 +2813,7 @@ class AppState(
             }
         }
         fun restore() {
-            if (f1DashCapture !== capture) return
+            if (playbackWork.capture !== capture) return
             if (nativeArchiveTiles.isNotEmpty()) stopProtectedCompositionPresentation()
             else {
                 selected.forEach { it.feed.clearProtectedCompositionVideoRole() }
@@ -2835,7 +2831,7 @@ class AppState(
         archiveCompositionStarting = true
         message = SINGLE_DECODER_ACTIVATING
         diagnostic()
-        f1DashCaptureJob = scope.launch {
+        playbackWork.captureJob = scope.launch {
             try {
                 startup.start(
                     preflight = {
@@ -2944,7 +2940,7 @@ class AppState(
                 diagnostic()
                 throw cancelled
             } catch (error: Exception) {
-                if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || f1DashCapture !== capture) {
+                if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || playbackWork.capture !== capture) {
                     android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_IGNORED_OBSOLETE_ERROR path=CLEAR class=${error.javaClass.simpleName}")
                     return@launch
                 }
@@ -2975,11 +2971,11 @@ class AppState(
                 android.util.Log.w("ApexviewSingleDecoder", "ARCHIVE_VOD_FAILED stage=$failedAt " +
                     "retryable=$retryableFailure fallback=${singleDecoderFallbackTileId != null} reason=$failure")
             } finally {
-                if (f1DashCapture === capture) {
+                if (playbackWork.capture === capture) {
                     archiveCompositionStarting = false
                     if (!transferred && !useExistingBackend && settings.decoderMode == DecoderMode.MULTIPLE)
                         selected.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
-                    capture.reset(); f1DashCapture = null; f1DashCaptureJob = null
+                    capture.reset(); playbackWork.capture = null; playbackWork.captureJob = null
                 }
             }
             if (useExistingBackend && compositionDiagnosticOwner.isOwner(diagnosticGeneration))
@@ -2988,11 +2984,11 @@ class AppState(
                 attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
                 val originalIds = selected.map { it.id }
                 android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_RETRY requested=AUTO attempt=${attempt + 1} delayMs=${500L * (attempt + 1)}")
-                singleDecoderRetryJob = scope.launch {
+                playbackWork.retryJob = scope.launch {
                     kotlinx.coroutines.delay(500L * (attempt + 1))
                     if (compositionDiagnosticOwner.isOwner(diagnosticGeneration) &&
                         settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && !singleDecoderSceneActive) {
-                        singleDecoderRetryJob = null
+                        playbackWork.retryJob = null
                         startArchiveSingleDecoderComposition(contentId, attempt + 1)
                     }
                 }
@@ -3038,7 +3034,7 @@ class AppState(
         val group = "archive-content-$contentId-${java.util.UUID.randomUUID()}"
         val diagnosticGeneration = compositionDiagnosticOwner.begin()
         singleDecoderDiagnostic = null
-        f1DashCaptureJob?.cancel()
+        playbackWork.cancelCapture()
         val maxHeight = if (mixedRequested) selectedQualities.maxOf { it.targetHeight }
             .takeIf { it > 0 } ?: 1080
         else if (selectedTiles.size > 6 && composedQuality == VideoQuality.AUTO) {
@@ -3057,7 +3053,7 @@ class AppState(
         val evidence = "content=$contentId attempt=${attempt + 1} feeds=${feeds.size}"
         android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_START $evidence path=rolling maxSourceHeight=$maxHeight tclG09=${isTclG09()} " +
             "speed=$playbackSpeed requestedStartupLeadUs=${ArchiveBufferPolicy.protectedLeadUs(playbackSpeed)}")
-        f1DashCapture = capture
+        playbackWork.capture = capture
         ProtectedHevcLiveComposition.selectFeeds(group, labels, fullPictures = mixedRequested)
         val startup = ArchiveCompositionStartup()
         var lastSnapshot: F1DashFeedCapture.Snapshot? = null
@@ -3072,7 +3068,7 @@ class AppState(
         var composedCodec: String? = null
 
         fun diagnostics() {
-            if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || f1DashCapture !== capture) return
+            if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || playbackWork.capture !== capture) return
             val snapshot = lastSnapshot
             singleDecoderDiagnostic = buildString {
                 append("Source: F1 Archive · Composition feeds: ${selectedTiles.size}\n")
@@ -3098,7 +3094,7 @@ class AppState(
         }
         fun restore(replacedHost: Boolean) {
             // A newer layout/test may already own these players after cancelling this job.
-            if (restored || f1DashCapture !== capture) return
+            if (restored || playbackWork.capture !== capture) return
             restored = true
             if (protectedCompositionHost != null) {
                 stopProtectedCompositionPresentation()
@@ -3120,7 +3116,7 @@ class AppState(
         archiveCompositionStarting = true
         diagnostics()
         message = SINGLE_DECODER_ACTIVATING
-        f1DashCaptureJob = scope.launch {
+        playbackWork.captureJob = scope.launch {
             try {
                 startup.start(
                     preflight = {
@@ -3351,7 +3347,7 @@ class AppState(
                 diagnostics()
                 throw cancelled
             } catch (error: Exception) {
-                if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || f1DashCapture !== capture) {
+                if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || playbackWork.capture !== capture) {
                     android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_IGNORED_OBSOLETE_ERROR path=PROTECTED class=${error.javaClass.simpleName}")
                     return@launch
                 }
@@ -3371,13 +3367,13 @@ class AppState(
                 android.util.Log.w("ApexviewSingleDecoder", "F1_COMPOSITION_FAILED $evidence activeVideoDecoders=$observedActiveVideoDecoders reason=${DiagnosticRedaction.redact(terminalReason.orEmpty())}")
                 message = "Single decoder failed: $terminalReason. Use Retry or select Multiple decoders in Settings."
             } finally {
-                if (f1DashCapture === capture) {
+                if (playbackWork.capture === capture) {
                     archiveCompositionStarting = false
                     if (!startup.sourceDecodersTouched && settings.decoderMode == DecoderMode.MULTIPLE)
                         selectedTiles.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
                     capture.reset()
-                    f1DashCapture = null
-                    f1DashCaptureJob = null
+                    playbackWork.capture = null
+                    playbackWork.captureJob = null
                     ProtectedHevcLiveComposition.clearSelection(group)
                 }
             }
@@ -3385,11 +3381,11 @@ class AppState(
                 attempt < SINGLE_DECODER_AUTO_RETRIES && settings.decoderMode == DecoderMode.SINGLE) {
                 val originalIds = selectedTiles.map { it.id }
                 android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_RETRY requested=AUTO attempt=${attempt + 1} delayMs=${500L * (attempt + 1)} backend=PROTECTED")
-                singleDecoderRetryJob = scope.launch {
+                playbackWork.retryJob = scope.launch {
                     kotlinx.coroutines.delay(500L * (attempt + 1))
                     if (compositionDiagnosticOwner.isOwner(diagnosticGeneration) &&
                         settings.decoderMode == DecoderMode.SINGLE && tiles.map { it.id } == originalIds && protectedCompositionHost == null) {
-                        singleDecoderRetryJob = null
+                        playbackWork.retryJob = null
                         startArchiveSingleDecoderComposition(contentId, attempt + 1)
                     }
                 }
@@ -3442,21 +3438,21 @@ class AppState(
             return
         }
         invalidateCompositionDiagnostic()
-        f1DashCaptureJob?.cancel()
-        f1DashCapture?.reset()
+        playbackWork.cancelCapture()
+        playbackWork.capture?.reset()
         val capture = F1DashFeedCapture(
             userAgent = userAgent,
             ascendon = api.ascendon.orEmpty(),
             entitlement = api.entitlement.orEmpty(),
         )
-        f1DashCapture = capture
+        playbackWork.capture = capture
         val group = "content-$contentId"
         val selectedTiles = labels.mapNotNull { byLabel[it] }
         val host = selectedTiles.firstOrNull { !it.audible } ?: selectedTiles.first()
         val audioTile = selectedTiles.firstOrNull { it !== host && it.audible }
         if (audioTile != null && host.audible) setAudio(audioTile)
 
-        f1DashCaptureJob = scope.launch {
+        playbackWork.captureJob = scope.launch {
             var lastMessage: String? = null
             var composedPlaybackStarted = false
             var expandedVerifiedGeometry: Triple<Int, Int, Double>? = null
@@ -3611,10 +3607,9 @@ class AppState(
         if (message == SINGLE_DECODER_ACTIVATING) message = null
         val wasStarting = archiveCompositionStarting
         archiveCompositionStarting = false
-        f1DashCaptureJob?.cancel()
-        f1DashCaptureJob = null
-        f1DashCapture?.reset()
-        f1DashCapture = null
+        playbackWork.cancelCapture()
+        playbackWork.capture?.reset()
+        playbackWork.capture = null
         val native = nativeArchiveTiles
         protectedRollingScene = null
         val resumePositionMs = if (native.isNotEmpty()) protectedCompositionHost?.feed?.player?.currentPosition
@@ -3676,7 +3671,7 @@ class AppState(
             // immediately instead of waiting for every CONTENT/PLAY request and video prepare.
             // For entries without a catalog classification, the timing job waits for the real
             // Media3 timeline while feed creation proceeds in parallel.
-            if (timingContentId != contentId || (timing == null && liveFeed?.isActive != true)) {
+            if (timingContentId != contentId || (timing == null && timingWork.timingJob?.isActive != true)) {
                 loadTiming(contentId)
             }
             val offerStartedMs = android.os.SystemClock.elapsedRealtime()
@@ -3783,7 +3778,7 @@ class AppState(
             leaderTile()?.let { leader ->
                 // A prior timing job can finish while retaining the same content ID. Restart it
                 // instead of leaving the TV's map sheet permanently at its initial Loading text.
-                if (timingContentId != leader.contentId || (timing == null && liveFeed?.isActive != true)) {
+                if (timingContentId != leader.contentId || (timing == null && timingWork.timingJob?.isActive != true)) {
                     loadTiming(leader.contentId)
                 }
                 applyVideoBudget()
@@ -3881,20 +3876,16 @@ class AppState(
      * viewer moves on.
      */
     private fun loadTiming(contentId: Long) {
-        timingContentId = contentId
+        val timingOwner = timingWork.begin(contentId)
         replayClockKey = null
         replayClockBaseMs = null
         recordTimingDiagnostic("Starting timing load for content=$contentId", reset = true)
         pitDriver = null
         timing = null
-        speedsJob?.cancel()
-        speedsFor = null
-        archiveSpeeds = emptyMap()
         mapStatus = "Resolving F1 session…"
-        liveFeed?.cancel()
-        liveFeed = scope.launch {
+        timingWork.timingJob = scope.launch {
             var attempt = 0
-            while (timingContentId == contentId) {
+            while (timingWork.owns(timingOwner)) {
                 val ref = sessionRefs[contentId]
                 val token = api.ascendon
                 val problem = when {
@@ -3914,7 +3905,8 @@ class AppState(
                         knownLive = contentId in knownLiveContentIds,
                         knownArchive = contentId in knownArchiveContentIds,
                         completedLive = contentId in completedLiveTimingContentIds,
-                    ) ?: isLiveStream(contentId)
+                    ) ?: isLiveStream(contentId, timingOwner)
+                    if (!timingWork.owns(timingOwner)) return@launch
                     if (live == null) {
                         mapStatus = "Waiting for the video stream to identify live timing or replay…"
                         android.util.Log.i("ApexviewTiming", "content=$contentId: player timeline not ready; keeping timing source undecided")
@@ -3932,8 +3924,8 @@ class AppState(
                         )
                         // Runs until the viewer moves on, reconnecting itself; back here only
                         // if it failed outright or F1 ends this live timing session.
-                        followLive(contentId, ref, token!!)
-                        if (timingContentId != contentId) return@launch
+                        followLive(contentId, ref, token!!, timingOwner)
+                        if (!timingWork.owns(timingOwner)) return@launch
                         kotlinx.coroutines.delay(mapRetryDelayMs(attempt++))
                         continue
                     }
@@ -3956,6 +3948,7 @@ class AppState(
                         var oneSecondReported = false
                         var videoClockObserved = false
                         fun inspectPlayback() {
+                            if (!timingWork.owns(timingOwner)) return
                             val sample = replayPlayhead(contentId, savedPosition)
                             playhead.set(sample)
                             val base = sample.videoUtcMs?.minus(sample.positionMs)
@@ -4025,13 +4018,13 @@ class AppState(
                                 playhead = playhead::get,
                                 traceId = trace,
                                 onProgress = { status ->
-                                    if (timingContentId == contentId) {
+                                    if (timingWork.owns(timingOwner)) {
                                         if (timing?.outline?.size?.let { it >= 8 } != true) mapStatus = status
                                         recordTimingDiagnostic(status)
                                     }
                                 },
                                 onPartial = { partial ->
-                                    if (timingContentId == contentId) {
+                                    if (timingWork.owns(timingOwner)) {
                                         showTiming(partial)
                                         inspectPlayback()
                                         // Cache the actual replay window once the independently
@@ -4054,7 +4047,7 @@ class AppState(
                                     }
                                 },
                             )
-                            if (timingContentId != contentId) return@launch
+                            if (!timingWork.owns(timingOwner)) return@launch
                             showTiming(loaded)
                             saveReplayPreview(contentId, castFramePositionMs)
                             archiveComplete = true
@@ -4082,7 +4075,7 @@ class AppState(
                         android.util.Log.i("ApexviewTiming", "Replay cancelled content=$contentId trace=$trace")
                         throw e
                     } catch (e: Exception) {
-                        if (timingContentId != contentId) return@launch
+                        if (!timingWork.owns(timingOwner)) return@launch
                         recordTimingDiagnostic("ARCHIVE ERROR: ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
                         mapStatus = "Archive failed: ${e.javaClass.simpleName}: ${e.message}. Retrying…"
                     }
@@ -4094,45 +4087,40 @@ class AppState(
         }
     }
 
-    private var speedsJob: kotlinx.coroutines.Job? = null
-    private var speedsFor: String? = null
-    private var archiveSpeeds: Map<String, SpeedLog> = emptyMap()
 
     /** A replay's car speeds, fetched the first time an onboard wants them. Without them, no speed shows. */
     fun loadSpeeds(session: SessionTiming) {
-        if (session.live || session.radioBase.isBlank() || session.archivePartial || speedsFor == session.radioBase) return
+        if (session.live || session.radioBase.isBlank() || session.archivePartial || timing !== session) return
         val token = api.ascendon ?: return
-        speedsFor = session.radioBase
-        speedsJob?.cancel()
-        speedsJob = scope.launch {
+        val request = timingWork.beginSpeed(session.radioBase) ?: return
+        timingWork.speedJob = scope.launch {
             try {
                 val loaded = LiveTimingArchive(token, userAgent).loadSpeeds(session.radioBase)
-                if (speedsFor == session.radioBase) {
-                    archiveSpeeds = loaded
+                if (timingWork.completeSpeed(request, loaded)) {
                     timing?.takeIf { !it.live && it.radioBase == session.radioBase }?.speeds = loaded
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
+                timingWork.failSpeed(request)
                 throw e
             } catch (e: Exception) {
-                android.util.Log.w("ApexviewLive", "car data: ${e.message}")
+                timingWork.failSpeed(request)
+                android.util.Log.w("ApexviewLive", "car data: ${e.javaClass.simpleName}")
             }
         }
     }
 
-    /** The map's job for the session on screen: an archive load, or a live feed that runs on. */
-    private var liveFeed: kotlinx.coroutines.Job? = null
 
     /**
      * Whether the stream on screen is live. Known once the player has read the stream's playlist,
      * well before it's ready to play; a slow start used to be taken for a replay after 15 s, and
      * a live session then looked for its map in the archive, where it isn't yet.
      */
-    private suspend fun isLiveStream(contentId: Long): Boolean? {
+    private suspend fun isLiveStream(contentId: Long, timingOwner: TimingWorkCoordinator.Session): Boolean? {
         // FeedPlayer creates its ExoPlayer immediately; the asynchronous part is receiving a usable
         // timeline. A placeholder window is not evidence of a replay and must never trigger an
         // archive lookup for a live session.
         repeat(LIVE_CHECK_TRIES) { attempt ->
-            if (timingContentId != contentId) return null
+            if (!timingWork.owns(timingOwner)) return null
             val player = leaderTile()
                 ?.takeIf { it.contentId == contentId }
                 ?.feed
@@ -4159,18 +4147,19 @@ class AppState(
                     }
                 }
             }
-            if (attempt == 20 && timingContentId == contentId) {
+            if (attempt == 20 && timingWork.owns(timingOwner)) {
                 mapStatus = "Waiting for the TV stream's video timeline…"
                 recordTimingDiagnostic("No usable player timeline after 5s; checking again")
             }
             kotlinx.coroutines.delay(250)
         }
-        recordTimingDiagnostic("No usable video timeline after 10s; source remains undecided")
+        if (timingWork.owns(timingOwner))
+            recordTimingDiagnostic("No usable video timeline after 10s; source remains undecided")
         return null
     }
 
     /** Follows a live session through F1's live timing until the viewer closes or moves on. */
-    private suspend fun followLive(contentId: Long, ref: SessionRef, token: String) {
+    private suspend fun followLive(contentId: Long, ref: SessionRef, token: String, timingOwner: TimingWorkCoordinator.Session) {
         val key = ref.circuitKey
         val known = key?.let { readOutline(it) }
         val feed = LiveTimingFeed(context, token, userAgent, ref, known)
@@ -4178,7 +4167,7 @@ class AppState(
         try {
             feed.run(
                 onTiming = { live ->
-                    if (timingContentId == contentId) {
+                    if (timingWork.owns(timingOwner)) {
                         rememberStartLine(live)
                         showTiming(live)
                         offerVote(contentId, live)
@@ -4187,7 +4176,7 @@ class AppState(
                     }
                 },
                 onStatus = { status ->
-                    if (timingContentId == contentId) {
+                    if (timingWork.owns(timingOwner)) {
                         mapStatus = status
                         recordTimingDiagnostic("LIVE: $status")
                     }
@@ -4196,7 +4185,7 @@ class AppState(
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (timingContentId == contentId) {
+            if (timingWork.owns(timingOwner)) {
                 recordTimingDiagnostic("LIVE TIMING ERROR: ${e.javaClass.simpleName}: ${e.message ?: "no message"}")
                 if (e.message?.contains("live timing moved on to another session") == true) {
                     knownLiveContentIds -= contentId
@@ -4214,7 +4203,7 @@ class AppState(
     /** Puts a session's timing on screen; the first time, the map gets its place. */
     private fun showTiming(loaded: SessionTiming) {
         val first = timing == null
-        if (!loaded.live && speedsFor == loaded.radioBase) loaded.speeds = archiveSpeeds
+        if (!loaded.live && timingWork.speedsFor == loaded.radioBase) loaded.speeds = timingWork.archiveSpeeds
         timing = loaded
         if (!first) return
         // A tower reservation is a direct layout constraint, even if the user previously
@@ -4420,7 +4409,7 @@ class AppState(
     fun switchFeed(tile: Tile, channel: Channel) {
         tileMenu = null
         if (channel == tile.channel) return
-        val restartComposition = settings.decoderMode == DecoderMode.SINGLE || isTv && f1DashCaptureJob != null
+        val restartComposition = settings.decoderMode == DecoderMode.SINGLE || isTv && playbackWork.captureJob != null
         // The feed up top in laptop mode switched from its own menu: offer the way back too.
         if (laptopActive && tile.id == bigTileId) rememberBroadcast()
         task("Switching to ${channel.title}") {
@@ -4461,7 +4450,7 @@ class AppState(
         activeNamedLayoutId = null
         if (mode != layoutMode && !singleDecoderSceneActive && !protectedRollingSceneActive &&
             !archiveCompositionStarting &&
-            (protectedCompositionHost != null || f1DashCaptureJob != null)) {
+            (protectedCompositionHost != null || playbackWork.captureJob != null)) {
             stopProtectedCompositionPresentation()
         }
         if (mode == LayoutMode.SINGLE_DECODER_TEST) { chooseDecoderMode(DecoderMode.SINGLE); return }
@@ -4502,9 +4491,8 @@ class AppState(
         }
         if (!singleDecoderSceneActive && !protectedRollingSceneActive) {
             invalidateCompositionDiagnostic()
-            f1DashCaptureJob?.cancel()
-            f1DashCaptureJob = null
-            f1DashCapture = null
+            playbackWork.cancelCapture()
+            playbackWork.capture = null
             HevcFeedProfileCapture.clearTileTestSelection()
             clearLocalHevcComposition()
         }
@@ -6251,10 +6239,10 @@ class AppState(
         // Even a failed/finished preflight with no active job can have a terminal
         // diagnostic. Removing a feed changes ownership unconditionally.
         invalidateCompositionDiagnostic()
-        singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
+        playbackWork.cancelRetry()
         // A preflight also owns the selected set, before a composed host exists. Cancel it
         // when a feed is removed so it cannot hand off a released player afterwards.
-        if (protectedCompositionHost != null || archiveCompositionStarting || f1DashCaptureJob != null)
+        if (protectedCompositionHost != null || archiveCompositionStarting || playbackWork.captureJob != null)
             stopProtectedCompositionPresentation(keepSourceVideoDisabled = settings.decoderMode == DecoderMode.SINGLE)
         if (audioHint === tile) audioHint = null
         if (targetTile === tile) targetTile = null
@@ -6307,7 +6295,7 @@ class AppState(
         cancelControlSeek()
         stopExternalDisplay()
         clearExternalDisplayRequest()
-        singleDecoderRetryJob?.cancel(); singleDecoderRetryJob = null
+        playbackWork.cancelRetry()
         singleDecoderFailure = null
         // Save the receiver clock before the casting/local-host ownership is cleared.
         saveWatch()
@@ -6316,9 +6304,8 @@ class AppState(
         votePromptOpen = false
         nextLive = null
         liveAtStart = null
-        f1DashCaptureJob?.cancel()
-        f1DashCaptureJob = null
-        f1DashCapture = null
+        playbackWork.cancelCapture()
+        playbackWork.capture = null
         ProtectedHevcLiveComposition.clearAll()
         HevcFeedProfileCapture.clearTileTestSelection()
         tiles.forEach { it.feed.release() }
@@ -6337,14 +6324,10 @@ class AppState(
         mutedAll = false
         playing = true
         timing = null
-        timingContentId = null
-        speedsJob?.cancel()
-        speedsFor = null
+        timingWork.close()
         radioPlayer?.release()
         radioPlayer = null
         radioPlaying = null
-        liveFeed?.cancel()
-        liveFeed = null
         mapStatus = null
     }
 
@@ -6596,14 +6579,12 @@ class AppState(
     }
 
     private fun cancelControlSeek() {
-        controlSeekJob?.cancel(); controlSeekJob = null
-        pendingControlSeek.clear()
-        seekCastRestartJob?.cancel(); seekCastRestartJob = null
+        playbackWork.cancelControlSeek()
     }
 
     fun skip(deltaMs: Long) {
         val leader = leaderTile() ?: return
-        val base = pendingControlSeek.targetMs ?: (if (castPlaybackHandedOff) castFramePositionMs else leader.feed.player.currentPosition)
+        val base = playbackWork.pendingSeek.targetMs ?: (if (castPlaybackHandedOff) castFramePositionMs else leader.feed.player.currentPosition)
         seekTo(base + deltaMs)
     }
 
@@ -6612,10 +6593,10 @@ class AppState(
         // playback keeps the immediate exact Media3 seek path. The fixed
         // window is not extended by later requests, so scrubbing cannot starve.
         val expensive = nativeComposedCast != null || bakedCastSession != null ||
-            seekCastRestartJob?.isActive == true || composedArchiveOriginMs != null ||
+            playbackWork.castRestartJob?.isActive == true || composedArchiveOriginMs != null ||
             singleDecoderScenePlayer?.isArchiveVodPlayback == true ||
-            (archiveCompositionStarting && f1DashCaptureJob?.isActive == true)
-        if (!expensive && pendingControlSeek.targetMs == null) {
+            (archiveCompositionStarting && playbackWork.captureJob?.isActive == true)
+        if (!expensive && playbackWork.pendingSeek.targetMs == null) {
             seekToNow(targetMs)
             return
         }
@@ -6624,11 +6605,11 @@ class AppState(
         // scrub target, not after the 80ms coalescing delay. Media3 still seeks
         // only once to the exact final position.
         if (singleDecoderSceneActive) singleDecoderScenePlayer?.prioritizeArchiveSeek(targetMs)
-        if (pendingControlSeek.offer(targetMs)) {
-            controlSeekJob = scope.launch {
+        if (playbackWork.pendingSeek.offer(targetMs)) {
+            playbackWork.seekJob = scope.launch {
                 kotlinx.coroutines.delay(ControlSeekBatch.WINDOW_MS)
-                val latest = pendingControlSeek.take()
-                controlSeekJob = null
+                val latest = playbackWork.pendingSeek.take()
+                playbackWork.seekJob = null
                 if (latest != null && leaderTile()?.contentId == ownerContent) seekToNow(latest)
             }
         }
@@ -6636,8 +6617,8 @@ class AppState(
     }
 
     private fun seekToNow(targetMs: Long) {
-        val pendingBakedRestart = seekCastRestartJob?.isActive == true
-        seekCastRestartJob?.cancel(); seekCastRestartJob = null
+        val pendingBakedRestart = playbackWork.castRestartJob?.isActive == true
+        playbackWork.cancelCastRestart()
         nativeComposedCast?.let { session ->
             val target = if (session.durationMs > 0) targetMs.coerceIn(0, session.durationMs) else targetMs.coerceAtLeast(0)
             prepareNativeComposedCast(tiles.toList(), target)
@@ -6659,7 +6640,7 @@ class AppState(
         // before decoder handoff, for both clear and protected HEVC.
         val restartPreflightComposition = ArchiveBufferPolicy.restartPreflightOnSeek(
             starting = archiveCompositionStarting,
-            captureActive = f1DashCaptureJob?.isActive == true,
+            captureActive = playbackWork.captureJob?.isActive == true,
             hasComposedHost = protectedCompositionHost != null || nativeArchiveTiles.isNotEmpty(),
             isSingleDecoder = decoderMode == DecoderMode.SINGLE)
         if (composedArchiveOriginMs != null || restartPreflightComposition) {
@@ -6686,10 +6667,10 @@ class AppState(
             startArchiveSingleDecoderComposition(leader.contentId)
         if (restartBaked) {
             val ownerContent = leader.contentId
-            seekCastRestartJob = scope.launch {
+            playbackWork.castRestartJob = scope.launch {
                 kotlinx.coroutines.delay(1_000)
                 if (leaderTile()?.contentId == ownerContent && !castingActive) prepareFullSceneCast(false)
-                seekCastRestartJob = null
+                playbackWork.castRestartJob = null
             }
         }
         showChrome()

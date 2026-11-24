@@ -105,10 +105,10 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("key(host, app.protectedRollingSceneActive, secureRolling, independentClearSurface)", viewer)
         self.assertGreaterEqual(viewer.count("kotlinx.coroutines.withTimeoutOrNull(5_000L)"), 2)
         state = contents(prefix + "AppState.kt")
-        self.assertIn("pendingControlSeek.offer(targetMs)", state)
+        self.assertIn("playbackWork.pendingSeek.offer(targetMs)", state)
         self.assertIn("seekToNow(latest)", state)
         self.assertIn("fun stopAll() {\n        cancelControlSeek()", state)
-        self.assertIn("seekCastRestartJob?.cancel()", state)
+        self.assertIn("playbackWork.cancelCastRestart()", state)
         self.assertIn("if (protectedRollingScene != null) return protectedActualRenditions[label]", state)
         player = contents(prefix + "FeedPlayer.kt")
         self.assertIn("bufferEpisodes.onState", player)
@@ -575,6 +575,24 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("!f.sampleEncryptionBoxPresent", text)
         self.assertIn("group.isTrackSelected(index)", receiver)
         self.assertIn("NativeAudioControl.acknowledgment(playbackId(), requested, selected)", receiver)
+
+    def test_post835_timing_capture_and_tls_regressions(self):
+        base = "app/src/main/java/app/apexview/"
+        state = contents(base + "AppState.kt")
+        worker = contents(base + "scene/BakedCastCaptureWorker.kt")
+        timing = contents(base + "TimingWorkCoordinator.kt")
+        audio = contents(base + "cast/CmafCastAudio.kt")
+        self.assertIn("timingWork.begin(contentId)", state)
+        self.assertIn("timingWork.owns(timingOwner)", state)
+        self.assertIn("timingWork.completeSpeed(request, loaded)", state)
+        self.assertIn("playbackWork.cancelControlSeek()", state)
+        self.assertIn("current === owner", timing)
+        self.assertIn("!captureLifetime.stop()", worker)
+        self.assertIn("captureLifetime.complete()", worker)
+        self.assertIn("init = bytes; report = inspected", audio)
+        self.assertNotIn("FLAG_SECURE", contents(base + "MainActivity.kt"))
+        self.assertIn("if (protectedOutput) setSecure(true)", contents(base + "scene/ProtectedDecoderSceneView.kt"))
+        self.assertIn('jvmArgs("--add-opens=java.base/java.net=ALL-UNNAMED")', contents("app/build.gradle.kts"))
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,7 @@ internal class BakedCastCaptureWorker(
     private val gl = Handler(thread.looper)
     @Volatile private var stopped = false
     private var cleaned = false
+    private val captureLifetime = CaptureRequestLifetime()
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var contextGl: EGLContext = EGL14.EGL_NO_CONTEXT
     private var pbuffer: EGLSurface = EGL14.EGL_NO_SURFACE
@@ -112,8 +113,11 @@ internal class BakedCastCaptureWorker(
             }
             val encoder = checkNotNull(encoder)
             val requestedAtNs = System.nanoTime()
+            check(captureLifetime.begin()) { "Capture request already active or stopping" }
+            try {
             PixelCopy.request(window, Rect(bounds), encoder.pixels, { status ->
-                if (stopped) return@request
+                captureLifetime.complete()
+                if (stopped) { cleanup(); return@request }
                 if (status != PixelCopy.SUCCESS) {
                     copyFailures++
                     fail(IllegalStateException("Clear viewer PixelCopy $status"))
@@ -141,13 +145,17 @@ internal class BakedCastCaptureWorker(
                     fail(error)
                 }
             }, gl)
+            } catch (error: Exception) {
+                captureLifetime.complete()
+                throw error
+            }
         } catch (error: Exception) {
             fail(error)
         }
     }
 
     private fun fail(error: Exception) {
-        if (stopped) return
+        if (stopped) { cleanup(); return }
         stopped = true
         val reason = (error.message ?: error.javaClass.simpleName).take(200)
         Log.w("PitwallCast", "BAKED_CAST_WORKER_FAILURE $reason")
@@ -156,7 +164,7 @@ internal class BakedCastCaptureWorker(
     }
 
     private fun cleanup() {
-        if (cleaned) return
+        if (cleaned || !captureLifetime.stop()) return
         cleaned = true
         try {
             if (display != EGL14.EGL_NO_DISPLAY && contextGl != EGL14.EGL_NO_CONTEXT &&
@@ -167,6 +175,7 @@ internal class BakedCastCaptureWorker(
         } catch (error: Exception) {
             Log.w("PitwallCast", "BAKED_CAST_WORKER_CLEANUP ${error.javaClass.simpleName}")
         } finally {
+            encoder?.pixels?.recycle()
             encoder = null
             if (display != EGL14.EGL_NO_DISPLAY) {
                 EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,

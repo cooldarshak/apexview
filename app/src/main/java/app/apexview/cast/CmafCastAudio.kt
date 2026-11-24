@@ -30,6 +30,9 @@ internal class CmafCastAudio(private val reader: CmafHttpReader, private val lan
             a.originalFormat == b.originalFormat && a.protectionScheme == b.protectionScheme &&
             a.trackEncryption == b.trackEncryption &&
             format?.codecs == primary.format?.codecs &&
+            format?.sampleMimeType == primary.format?.sampleMimeType &&
+            format?.channelCount == primary.format?.channelCount &&
+            format?.sampleRate == primary.format?.sampleRate &&
             ((manifestPssh == null && primary.manifestPssh == null) ||
                 (manifestPssh != null && primary.manifestPssh != null &&
                     requireNotNull(manifestPssh).contentEquals(requireNotNull(primary.manifestPssh)))) &&
@@ -138,14 +141,17 @@ internal class CmafCastAudio(private val reader: CmafHttpReader, private val lan
         if (key == initKey) return
         require(initKey.isEmpty()) { "Audio initialization changed; reconnect casting" }
         val bytes = reader.read(uri, 2 * 1024 * 1024, start, length).bytes
+        var transferred = false
         try {
             val inspected = CmafBoxInspector.inspect(bytes)
             require(inspected.errors.isEmpty() && inspected.tracks.size == 1 && inspected.tracks.single().handler == "soun") { "Cast audio initialization must contain one audio track" }
             val track = inspected.tracks.single()
             require(!track.encrypted || track.protectionScheme in setOf("cenc", "cbcs")) { "Cast audio protection is unsupported" }
-            init = bytes.copyOf(); report = inspected; initKey = key; encrypted = track.encrypted
-            timescale = requireNotNull(track.timescale).also { require(it > 0) }
-        } finally { bytes.fill(0) }
+            val verifiedTimescale = requireNotNull(track.timescale).also { require(it > 0) }
+            init = bytes; report = inspected; initKey = key; encrypted = track.encrypted
+            timescale = verifiedTimescale
+            transferred = true
+        } finally { if (!transferred) bytes.fill(0) }
     }
     private fun append(bytes: ByteArray, sourceUs: Long) {
         var transferred = false
@@ -157,8 +163,11 @@ internal class CmafCastAudio(private val reader: CmafHttpReader, private val lan
             val dts = requireNotNull(f.baseDecodeTimeTicks); val duration = requireNotNull(f.totalDurationTicks)
             require(duration > 0)
             if (encrypted) require(f.sampleEncryptionBoxPresent && f.sampleEncryptionStructureComplete) { "Cast audio lost its encryption metadata" }
+            else require(!f.sampleEncryptionBoxPresent && !f.sampleAuxiliarySizesPresent &&
+                !f.sampleAuxiliaryOffsetsPresent && !f.sampleGroupEncryptionPresent) { "Clear Cast audio contains encryption metadata" }
+            require(dts >= 0 && dts <= Long.MAX_VALUE - duration)
+            segments.lastOrNull()?.let { require(Math.addExact(it.dts, it.duration) == dts) { "Cast audio has a timeline gap" } }
             if (firstSourceUs == null) { firstSourceUs = sourceUs; firstDts = dts }
-            segments.lastOrNull()?.let { require(it.dts + it.duration == dts) { "Cast audio has a timeline gap" } }
             segments += Segment("$namespace-${++serial}.m4s", bytes, dts, duration)
             transferred = true
             while (segments.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) segments.removeAt(0).bytes.fill(0)

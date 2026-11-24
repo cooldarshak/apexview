@@ -9,6 +9,14 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Post-835 failure correction and lifecycle continuation
+
+Build 835 compiled but failed in the JVM tests: 841/842 passed. Conscrypt on JDK 21 reflectively accesses java.net.InetAddress.holder() during the real mutual-TLS loopback. APK assembly and emulator tests were skipped. Open java.net only in the forked unit-test JVM; Android TLS, pairing, pinning and Widevine remain unchanged. Real mutual TLS and wrong-peer rejection remain mandatory. Failed accepted TLS sockets are closed.
+
+Extract playback composition/retry/seek and timing producer ownership into production coordinators. Unique session identity fences stale callbacks even when the same content reopens. Failed speed requests can retry, old requests cannot publish over newer sessions. Clear baked Cast waits for outstanding PixelCopy before encoder/bitmap teardown. Audio initialization ownership transfers after validation; validate alternate audio shape, clear fragment encryption metadata and overflow-safe timelines.
+
+Screenshot acceptance: preserve supported clear screenshots/replay capture, do not add window-wide screenshot bans, and retain license-required protected surfaces. Direct EGL capture with full Compose overlay parity, rolling HLS captions/alternate programme captions, broader remaining coordinator extraction and publication-copy optimisation are not complete. Exact-source CI and physical acceptance remain open; no inflated completion percentages.
+
 ## Post-834 consolidated source batch: protected streaming, paired Cast and lifecycle
 
 One branch update from exact green Build 834; no intermediate builds. Hard rule: implement all known coding work before declaring 100%; separate source, exact-source CI and physical acceptance.

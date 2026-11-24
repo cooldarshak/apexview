@@ -128,7 +128,8 @@ internal object PitwallTls {
     }
 
     fun accept(identity: Identity, socket: Socket): Provisional =
-        handshake(identity, socket as SSLSocket, false)
+        try { handshake(identity, socket as SSLSocket, false) }
+        catch (failure: Throwable) { runCatching { socket.close() }; throw failure }
 
     private fun handshake(identity: Identity, socket: SSLSocket, phone: Boolean): Provisional {
         socket.useClientMode = phone

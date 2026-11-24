@@ -39,6 +39,10 @@ class PitwallTlsTest {
             val phone = identity(dir, "phone")
             val tv = identity(dir, "tv")
             val stranger = identity(dir, "stranger")
+            assertThrows(java.security.cert.CertificateException::class.java) {
+                PitwallTls.PeerTrust(tv.certificate).checkServerTrusted(arrayOf(stranger.certificate), "EC")
+            }
+            PitwallTls.PeerTrust(tv.certificate).checkServerTrusted(arrayOf(tv.certificate), "EC")
             val loopback = InetAddress.getLoopbackAddress()
             val pair = PitwallTls.controlServer(tv, 0).use { server ->
                 val accepted = executor.submit<PitwallTls.Provisional> {

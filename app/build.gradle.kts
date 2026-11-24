@@ -15,6 +15,9 @@ plugins {
 
 
 tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    // Conscrypt on JDK 21 reads InetAddress.holder during the real loopback
+    // certificate handshake. Open java.net only in the forked test JVM.
+    jvmArgs("--add-opens=java.base/java.net=ALL-UNNAMED")
     testLogging {
         events("failed")
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
