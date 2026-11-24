@@ -86,7 +86,7 @@ class SceneCodecTimestampCorrelationTest {
         val timing = SceneCodecTimestampCorrelation().apply { active = true }
         timing.onTextureLatched(400_000_000L, 401_000_000L)
         assertEquals(1, timing.snapshotAndReset().outstandingLatches)
-        timing.onCodecFrame(500_000L, 400_000_000L, 401_000_000L)
+        timing.onCodecFrame(500_000L, 410_000_000L, 401_000_000L)
         var report = timing.snapshotAndReset()
         assertEquals(0L, report.lateMatchedLatches)
         assertEquals(1, report.outstandingLatches)
@@ -142,4 +142,85 @@ class SceneCodecTimestampCorrelationTest {
         assertEquals(0L, metrics.callbackToLatch.count)
     }
 
+
+    @Test fun matchesExactReleaseTimeWithoutAssumingMediaPts() {
+        val timing = SceneCodecTimestampCorrelation().apply { active = true }
+        timing.onCodecFrame(1_000_000, 50_000_000_000, 49_998_000_000)
+        timing.onTextureLatched(50_000_000_000, 50_002_000_000)
+        val report = timing.snapshotAndReset()
+        assertEquals(1L, report.releaseOnlyMatches)
+        assertEquals(0L, report.ptsOnlyMatches)
+        assertEquals(1L, report.matchedLatches)
+        assertEquals(2.0, report.releaseToLatch.maxMs, 0.001)
+    }
+
+    @Test fun distinctFramesMatchingDifferentDomainsAreNotAttributed() {
+        val timing = SceneCodecTimestampCorrelation().apply { active = true }
+        timing.onCodecFrame(1_000_000, 1_010_000_000, 1_000_000_000)
+        timing.onCodecFrame(2_000_000, 1_000_000_000, 1_000_000_000)
+        timing.onTextureLatched(1_000_000_000, 1_020_000_000)
+        val report = timing.snapshotAndReset()
+        assertEquals(0L, report.matchedLatches)
+        assertEquals(1L, report.ambiguousMatches)
+        assertEquals(0, report.outstandingLatches)
+    }
+
+    @Test fun lateExactReleaseTimestampIsAttributedOnce() {
+        val timing = SceneCodecTimestampCorrelation().apply { active = true }
+        timing.onTextureLatched(20_000_000_000, 20_001_000_000)
+        timing.onCodecFrame(800_000, 20_000_000_000, 20_002_000_000)
+        val report = timing.snapshotAndReset()
+        assertEquals(1L, report.releaseOnlyMatches)
+        assertEquals(1L, report.lateMatchedLatches)
+        assertEquals(0L, report.callbackToLatch.count)
+    }
+
+    @Test fun retiredSurfaceCannotConsumeDisableOrResetNewSurfaceDiagnostics() {
+        val timing = SceneCodecTimestampCorrelation()
+        val old = Any()
+        val current = Any()
+        timing.attach(old)
+        timing.onCodecFrame(100, 10_000_000, 9_000_000)
+        timing.attach(current)
+        timing.onCodecFrame(200, 20_000_000, 19_000_000)
+        timing.reset(old)
+        timing.detach(old)
+        timing.onTextureLatched(old, 20_000_000, 21_000_000)
+        assertNull(timing.snapshotAndReset(old))
+        timing.onTextureLatched(current, 20_000_000, 22_000_000)
+        timing.onSwapSubmitted(old, 23_000_000)
+        timing.onSwapSubmitted(current, 24_000_000)
+        val report = requireNotNull(timing.snapshotAndReset(current))
+        assertEquals(1L, report.codecFrames)
+        assertEquals(1L, report.releaseOnlyMatches)
+        assertEquals(1L, report.swapsAfterLatch)
+        timing.detach(current)
+        assertNull(timing.snapshotAndReset(current))
+        assertFalse(timing.active)
+    }
+
+    @Test fun repeatedMatchedTextureDoesNotClaimSecondCodecFrame() {
+        val timing = SceneCodecTimestampCorrelation().apply { active = true }
+        timing.onCodecFrame(1_000_000, 10_000_000_000, 9_999_000_000)
+        timing.onTextureLatched(10_000_000_000, 10_001_000_000)
+        timing.onCodecFrame(2_000_000, 10_000_000_000, 10_002_000_000)
+        timing.onTextureLatched(10_000_000_000, 10_003_000_000)
+        val report = timing.snapshotAndReset()
+        assertEquals(1L, report.matchedLatches)
+        assertEquals(1L, report.duplicateLatches)
+    }
+
+    @Test fun repeatedTextureAfterLateMetadataDoesNotCreateSecondMatchOrSwapSample() {
+        val timing = SceneCodecTimestampCorrelation().apply { active = true }
+        timing.onTextureLatched(20_000_000_000, 20_001_000_000)
+        timing.onSwapSubmitted(20_002_000_000)
+        timing.onCodecFrame(800_000, 20_000_000_000, 20_003_000_000)
+        timing.onCodecFrame(900_000, 20_000_000_000, 20_004_000_000)
+        timing.onTextureLatched(20_000_000_000, 20_005_000_000)
+        timing.onSwapSubmitted(20_006_000_000)
+        val report = timing.snapshotAndReset()
+        assertEquals(1L, report.matchedLatches)
+        assertEquals(1L, report.duplicateLatches)
+        assertEquals(1L, report.swapsAfterLatch)
+    }
 }

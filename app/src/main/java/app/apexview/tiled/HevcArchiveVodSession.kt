@@ -420,6 +420,7 @@ internal class HevcArchiveVodSession(
                     "processGcDuringSegment=${gcDuringProduction ?: -1L} " +
                     "outputBytes=${composed.mediaFragments.last().size} " +
                     "sourceAnnexBBytesAvoided=${composed.sourceAnnexBBytesAvoided} " +
+                    "sourceNalCopyBytesAvoided=${composed.sourceNalCopyBytesAvoided} " +
                     "durationMs=${groups[number].durationUs / 1000L} " +
                     "worker=$worker clock=PLAYER_REQUEST cache=$cacheEntries cachedBytes=$cachedByteCount")
             } finally {

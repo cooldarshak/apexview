@@ -55,6 +55,8 @@ internal object HevcClearCmafGridComposer {
         val nalInspectorMs: Long = 0,
         /** Deterministic removed staging bytes, NOT process-wide ART allocation data. */
         val sourceAnnexBBytesAvoided: Long = 0,
+        /** Bytes no longer materialized as temporary NAL arrays during clear passthrough. */
+        val sourceNalCopyBytesAvoided: Long = 0,
     )
 
     private data class SourceSample(
@@ -78,6 +80,8 @@ internal object HevcClearCmafGridComposer {
         val fragments: List<SourceFragment>,
         val inspectorFragments: List<CmafBoxInspector.FragmentMetadata>,
         val nalUnits: List<HevcBitstream.NalUnit>,
+        val firstVclType: Int?,
+        val validatedNalBytes: Long,
         val annexBEquivalentBytes: Int,
         val cmafInspectorNanos: Long,
         val nalInspectorNanos: Long,
@@ -85,15 +89,16 @@ internal object HevcClearCmafGridComposer {
 
     /** A single clear source needs no stitching. Keep its bytes, after the same protection/syntax checks. */
     fun passThrough(feed: Feed): Output {
-        val parsed = parseFeed(feed, 0)
+        val parsed = parseFeed(feed, 0, materializeNals = false)
         try {
             val sps = parsed.config.sps.single()
-            require(parsed.nalUnits.first { it.type in 0..31 }.type in 16..21) {
+            require(parsed.firstVclType?.let { it in 16..21 } == true) {
                 "A standalone replay segment must begin with an IRAP picture"
             }
             return Output(feed.initializationSegment.copyOf(), feed.mediaFragments.map { it.copyOf() },
                 sps.width, sps.height, sps.displayWidth, sps.displayHeight,
-                parsed.fragments.sumOf { it.samples.size }, parsed.fragments.size, emptyList())
+                parsed.fragments.sumOf { it.samples.size }, parsed.fragments.size, emptyList(),
+                sourceNalCopyBytesAvoided = parsed.validatedNalBytes)
         } finally {
             clearNalUnits(parsed)
         }
@@ -250,7 +255,7 @@ internal object HevcClearCmafGridComposer {
         pictures = pictures
     )
 
-    private fun parseFeed(feed: Feed, feedIndex: Int): ParsedFeed {
+    private fun parseFeed(feed: Feed, feedIndex: Int, materializeNals: Boolean = true): ParsedFeed {
         val initialInspectStarted = System.nanoTime()
         val initReport = feed.validatedInitialization ?: CmafBoxInspector.inspect(feed.initializationSegment)
         var cmafInspectorNanos = System.nanoTime() - initialInspectStarted
@@ -320,6 +325,9 @@ internal object HevcClearCmafGridComposer {
         val nalInspectStarted = System.nanoTime()
         val annexBEquivalentBytes = exactAnnexBSize(rawParameterSets, fragments, config.nalLengthSize)
         val nalUnits = ArrayList<HevcBitstream.NalUnit>()
+        var firstVclType: Int? = null
+        var validatedNalBytes = 0L
+        var validatedAnnexBBytes = 0L
         try {
             fun addNal(bytes: ByteArray, offset: Int, length: Int) {
                 require(offset >= 0 && length >= 2 && offset <= bytes.size &&
@@ -328,15 +336,25 @@ internal object HevcClearCmafGridComposer {
                 var end = offset + length
                 while (end > offset && bytes[end - 1] == 0.toByte()) end--
                 require(end - offset >= 2) { "Truncated HEVC NAL" }
-                val owned = bytes.copyOfRange(offset, end)
-                val header = try {
-                    HevcBitstream.readNalHeader(owned)
-                } catch (error: Throwable) {
-                    owned.fill(0)
-                    throw error
+                // Inspect directly in the immutable input fragment. A single-feed
+                // passthrough never consumes rewritten NAL bytes; allocating them
+                // merely to test the first IRAP picture needlessly duplicates every
+                // slice. Multifeed composition still receives owned arrays.
+                val nalLength = end - offset
+                val header = HevcBitstream.readNalHeader(bytes, offset, nalLength)
+                if (firstVclType == null && header.type in 0..31) firstVclType = header.type
+                validatedNalBytes = Math.addExact(validatedNalBytes, nalLength.toLong())
+                validatedAnnexBBytes = Math.addExact(validatedAnnexBBytes, nalLength.toLong() + 4L)
+                if (materializeNals) {
+                    val owned = bytes.copyOfRange(offset, end)
+                    try {
+                        nalUnits += HevcBitstream.NalUnit(owned, header.type,
+                            header.layerId, header.temporalIdPlus1)
+                    } catch (failure: Throwable) {
+                        owned.fill(0)
+                        throw failure
+                    }
                 }
-                nalUnits += HevcBitstream.NalUnit(owned, header.type,
-                    header.layerId, header.temporalIdPlus1)
             }
             rawParameterSets.forEach { addNal(it, 0, it.size) }
             fragments.forEachIndexed { fragmentIndex, parsed ->
@@ -357,7 +375,7 @@ internal object HevcClearCmafGridComposer {
                     accessUnit.nalUnitRanges.forEach { nal -> addNal(sample.bytes, nal.offset, nal.length) }
                 }
             }
-            require(nalUnits.sumOf { it.bytes.size.toLong() + 4L } <= annexBEquivalentBytes.toLong()) {
+            require(validatedAnnexBBytes <= annexBEquivalentBytes.toLong()) {
                 "HEVC NAL payload exceeds the bounded Annex-B equivalent"
             }
             val extractedSampleCount = fragments.sumOf { it.samples.size }
@@ -365,7 +383,7 @@ internal object HevcClearCmafGridComposer {
                 "Feed ${feed.label} CMAF fragment sample counts are inconsistent"
             }
             return ParsedFeed(track, config, rawParameterSets, fragments, metadata,
-                nalUnits, annexBEquivalentBytes,
+                nalUnits, firstVclType, validatedNalBytes, annexBEquivalentBytes,
                 cmafInspectorNanos = cmafInspectorNanos.coerceAtLeast(0L),
                 nalInspectorNanos = (System.nanoTime() - nalInspectStarted).coerceAtLeast(0L))
         } catch (error: Throwable) {

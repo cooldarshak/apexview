@@ -138,7 +138,14 @@ class LiveOverlayWiringTest(unittest.TestCase):
             scene = source(renderer)
             self.assertIn("codecCorrelation?.onTextureLatched(", scene)
             self.assertIn("codecCorrelation?.onSwapSubmitted(", scene)
-            self.assertIn("codecCorrelation?.snapshotAndReset()", scene)
+            self.assertIn("codecCorrelation?.snapshotAndReset(input)", scene)
+            self.assertIn("codecCorrelation?.attach(surface)", scene)
+            self.assertIn("codecCorrelation?.detach(old)", scene)
+            self.assertIn("codecCorrelation?.onTextureLatched(input,", scene)
+            self.assertIn("codecCorrelation?.onSwapSubmitted(input,", scene)
+            self.assertIn("codecExactReleaseOnly=", scene)
+            self.assertIn("codecMatchSemantics=EXACT_PTS_OR_RELEASE", scene)
+            self.assertNotIn("codecCorrelation?.active = false", scene)
 
     def test_clear_live_and_archive_all_register_host_before_atlas_publication(self):
         app = source("AppState.kt")

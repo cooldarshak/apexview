@@ -575,8 +575,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         receiverCaptionTracks = emptyList(); receiverCaptionTrackCount = 0
         sceneView?.release(); sceneView = null
         protectedSceneView?.release(); protectedSceneView = null
-        sceneCodecCorrelation?.active = false
-        sceneCodecCorrelation?.reset()
+        sceneCodecCorrelation?.shutdown()
         sceneCodecCorrelation = null
         standardView?.player = null; standardView = null
         val previous = player; player = null

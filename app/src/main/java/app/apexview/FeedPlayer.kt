@@ -1262,8 +1262,7 @@ class FeedPlayer(
         outputCadence.composedSingle = false
         outputDisplayOwner = null
         outputCadence.activeDisplayId = -1
-        sceneCodecCorrelation.active = false
-        sceneCodecCorrelation.reset()
+        sceneCodecCorrelation.shutdown()
         val archive = archiveVodSession
         archiveVodSession = null
         val protectedSource = protectedLiveDashSource

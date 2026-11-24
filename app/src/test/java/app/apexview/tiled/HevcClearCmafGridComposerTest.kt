@@ -78,6 +78,25 @@ class HevcClearCmafGridComposerTest {
             HevcClearCmafGridComposer.Feed(init, fragments, "synthetic-feed-$index")
         }
 
+        // Exercise the real independently encoded source, not a fake parser.
+        // No temporary source NAL arrays are needed when the picture is unchanged.
+        val original = feeds.first()
+        val originalInit = original.initializationSegment.copyOf()
+        val originalMedia = original.mediaFragments.map { it.copyOf() }
+        val passthrough = HevcClearCmafGridComposer.passThrough(original)
+        assertEquals(50, passthrough.sampleCount)
+        assertTrue(passthrough.sourceNalCopyBytesAvoided > 0L)
+        assertTrue(passthrough.initializationSegment !== original.initializationSegment)
+        assertTrue(passthrough.initializationSegment.contentEquals(originalInit))
+        passthrough.mediaFragments.zip(originalMedia).forEachIndexed { index, (actual, expected) ->
+            assertTrue(actual !== original.mediaFragments[index])
+            assertTrue(actual.contentEquals(expected))
+            actual.fill(0)
+            assertTrue(original.mediaFragments[index].contentEquals(expected))
+        }
+        passthrough.initializationSegment.fill(0)
+        assertTrue(original.initializationSegment.contentEquals(originalInit))
+
         val output = HevcClearCmafGridComposer.compose(
             HevcClearCmafGridComposer.Request(
                 feeds = feeds,

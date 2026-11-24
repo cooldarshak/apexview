@@ -124,6 +124,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val owner = attachedCodecPlayer ?: return
         attachedCodecSurface = null
         attachedCodecPlayer = null
+        codecCorrelation?.detach(old)
         owner.clearVideoSurface(old)
         Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_DETACH " +
             "renderer=SurfaceView protected=$protectedOutput reason=$reason surfaceId=${System.identityHashCode(old)} " +
@@ -140,6 +141,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         owner.setVideoSurface(surface)
         attachedCodecPlayer = owner
         attachedCodecSurface = surface
+        codecCorrelation?.attach(surface)
         Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_ATTACH " +
             "renderer=SurfaceView protected=$protectedOutput surfaceId=${System.identityHashCode(surface)} " +
             "inputEpoch=$epoch owner=Media3")
@@ -251,10 +253,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     fun bind(nextPlayer: ExoPlayer, nextScene: VideoScene,
              speed: Float = 1f, correlation: SceneCodecTimestampCorrelation? = null) {
         if (codecCorrelation !== correlation) {
-            codecCorrelation?.active = false
+            attachedCodecSurface?.let { codecCorrelation?.detach(it) }
             codecCorrelation = correlation
-            correlation?.reset()
-            correlation?.active = true
+            attachedCodecSurface?.let { correlation?.attach(it) }
         }
         val changed = scene != nextScene
         val firstBinding = scene == null
@@ -262,7 +263,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val playerChanged = player != null && player !== nextPlayer
         val bindingChanged = atlasChanged || playerChanged
         val invalidatedEpoch = if (bindingChanged) {
-            codecCorrelation?.reset()
+            codecCorrelation?.reset(attachedCodecSurface)
             // Layout-only window changes can reuse the already latched atlas;
             // only a different coded picture must await a fresh decoder frame.
             val epoch = outputReadiness.invalidate()
@@ -319,7 +320,6 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         surfaceLifetime.advance()
         outputReadiness.invalidate()
         onOutputLost()
-        codecCorrelation?.reset()
         detachOutput()
     }
     private fun detachOutput() {
@@ -339,10 +339,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         surfaceLifetime.advance()
         outputReadiness.invalidate()
         holder.removeCallback(this)
-        codecCorrelation?.active = false
-        codecCorrelation?.reset()
+        detachOutput()
         codecCorrelation = null
-        detachOutput(); player = null; gl.removeCallbacks(glQueueProbe); thread.quitSafely()
+        player = null; gl.removeCallbacks(glQueueProbe); thread.quitSafely()
     }
 
     private fun initialize(output: Surface, readinessEpoch: Long) {
@@ -444,7 +443,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                     val timestamp = frames.timestamp
                     pacing.onTextureLatched(latchedAtNs, latchedAtNs - latchStartNs,
                         timestamp, eglBindNs = bindNs, callbackArrivalNs = callbackStartedNs)
-                    codecCorrelation?.onTextureLatched(timestamp, latchedAtNs)
+                    codecCorrelation?.onTextureLatched(input, timestamp, latchedAtNs)
                     if (lastSourceTimestampNs > 0L && timestamp > 0L &&
                         timestamp < lastSourceTimestampNs) {
                         intervalSourceTimestampRegressions++
@@ -520,7 +519,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         try { check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" } }
         finally { Trace.endSection() }
         val swapEndedNs = System.nanoTime()
-        if (hasFrame) codecCorrelation?.onSwapSubmitted(swapEndedNs)
+        if (hasFrame) codecCorrelation?.onSwapSubmitted(input, swapEndedNs)
         if (hasFrame) {
             val swapMs = (swapEndedNs - swapStartedNs) / 1_000_000L
             intervalLongestSwapMs = maxOf(intervalLongestSwapMs, swapMs)
@@ -547,7 +546,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
             val metrics = pacing.snapshotAndReset()
-            val correlation = codecCorrelation?.snapshotAndReset()
+            val correlation = codecCorrelation?.snapshotAndReset(input)
             // Five-second trace samples of GL stages, not video scanout.
             Trace.setCounter("PitwallSurfaceSceneLatched5s",
                 metrics.latched.coerceAtLeast(0L))
@@ -585,11 +584,17 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "eglSwapP95UpperMs=${metrics.eglSwapDurations.percentileUpperMs(95)} " +
                 "choreographerDelayP95UpperMs=${metrics.callbackDelays.percentileUpperMs(95)} " +
                 "glQueueP95UpperMs=${metrics.glQueueDelays.percentileUpperMs(95)} " +
+                "codecCorrelationOwned=${correlation != null} codecMatchSemantics=EXACT_PTS_OR_RELEASE " +
                 "codecFrameCallbacks=${correlation?.codecFrames ?: 0} " +
                 "codecPtsMatched=${correlation?.matchedLatches ?: 0} " +
                 "codecPtsMissingAtLatch=${correlation?.unmatchedLatches ?: 0} " +
                 "codecPtsLateMatched=${correlation?.lateMatchedLatches ?: 0} " +
                 "codecPtsOutstanding=${correlation?.outstandingLatches ?: 0} " +
+                "codecExactPtsOnly=${correlation?.ptsOnlyMatches ?: 0} " +
+                "codecExactReleaseOnly=${correlation?.releaseOnlyMatches ?: 0} " +
+                "codecExactBothDomains=${correlation?.bothDomainMatches ?: 0} " +
+                "codecAmbiguous=${correlation?.ambiguousMatches ?: 0} " +
+                "codecDuplicateLatch=${correlation?.duplicateLatches ?: 0} " +
                 "plannedCodecReleaseToLatchP95UpperMs=${correlation?.releaseToLatch?.percentileUpperMs(95) ?: 0} " +
                 "codecCallbackToLatchP95UpperMs=${correlation?.callbackToLatch?.percentileUpperMs(95) ?: 0} " +
                 "latchToSwapP95UpperMs=${correlation?.latchToSwap?.percentileUpperMs(95) ?: 0} " +
@@ -620,7 +625,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     }
 
     private fun destroy() {
-        codecCorrelation?.reset()
+        input?.let { codecCorrelation?.detach(it) }
         displayClock?.removeFrameCallback(displayFrame)
         displayClock = null
         frameDemand.reset()
