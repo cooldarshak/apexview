@@ -78,6 +78,30 @@ class ArchitectureG0PackagingContract(unittest.TestCase):
         self.assertIn("pitwall-cargo-ndk-v1-",wf)
         self.assertIn("cargo install cargo-ndk --version 4.1.2 --locked",wf)
 
+    def test_workflow_has_unique_job_and_native_gate_definitions(self):
+        import re
+        import subprocess
+        wf=(ROOT/".github/workflows/android-debug-apk.yml").read_text()
+        jobs=wf.split("\njobs:\n",1)[1]
+        self.assertEqual(re.findall(r"^  ([a-z0-9_]+):$", jobs, re.M),
+                         ["build","g0_emulator","g0_publish"])
+        self.assertEqual(wf.count("name: Architecture G.0 host kernel and Android ABI feasibility"),1)
+        self.assertEqual(wf.count("cargo clippy --locked --all-targets -- -D warnings"),1)
+        self.assertEqual(wf.count("target/release/slice_bench "),1)
+        lines=wf.splitlines()
+        for i,line in enumerate(lines):
+            if line.strip() != "run: |":
+                continue
+            indent=len(line)-len(line.lstrip())+2
+            block=[]
+            for child in lines[i+1:]:
+                if child.strip() and len(child)-len(child.lstrip())<indent:
+                    break
+                block.append(child[indent:])
+            p=subprocess.run(["bash","-n"],input="\n".join(block)+"\n",
+                             text=True,capture_output=True)
+            self.assertEqual(p.returncode,0,f"workflow line {i+1}: {p.stderr}")
+
     def test_only_jni_module_can_use_unsafe(self):
         lib=(ROOT/"native/architecture-g/src/lib.rs").read_text()
         self.assertIn("#![deny(unsafe_code)]",lib)

@@ -26,6 +26,8 @@ Build 848 stopped on the existing publication contract regression before APK ass
 
 Build 849 GREEN in 15m15s, all five jobs successful. Sixth G.0 batch adds clear slice rewrite with JVM-validated descriptors, matched C++ CMAF control and pinned cargo-ndk tool cache. Physical baseline now requested on green 849. No production change. See G ledger.
 
+Malformed workflow in d5eed03 independently confirmed; restored 849 structure and reapplied intended changes with strict YAML/shell and targeted regression preflight passing. Full CI pending. No test or feature removal.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |

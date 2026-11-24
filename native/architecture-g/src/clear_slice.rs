@@ -87,7 +87,7 @@ pub fn rewrite(source:&[u8], s:Syntax, output:&mut [u8])->Option<usize> {
     if s.tiles {w.ue(0)?;}
     w.copy(&rbsp,s.entry_end,s.alignment)?;
     w.bit(1)?;
-    while w.pos%8!=0 {w.bit(0)?;}
+    while !w.pos.is_multiple_of(8) {w.bit(0)?;}
     let n=w.pos/8;
     if n+2>HEADER {return None;}
     header[n..n+2].copy_from_slice(&rbsp[s.header_bytes..s.header_bytes+2]);
