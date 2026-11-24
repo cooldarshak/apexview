@@ -20,11 +20,71 @@ internal object ProtectedHevcSampleComposer {
         val encryptedByteCount: Long
     )
 
+    internal class Plan internal constructor(
+        val size: Int,
+        val nalLengthSize: Int,
+        val nalCount: Int,
+        val subsampleRanges: List<CmafBoxInspector.SubsampleEncryptionRange>,
+        val encryptedByteCount: Long,
+        private val slices: List<Slice>
+    ) : AutoCloseable {
+        private var closed = false
+        fun copyInto(output: ByteArray, offset: Int) {
+            check(!closed)
+            require(offset >= 0 && offset <= output.size - size)
+            var cursor = offset
+            for (slice in slices) {
+                for (shift in nalLengthSize - 1 downTo 0)
+                    output[cursor++] = ((slice.size ushr (shift * 8)) and 0xff).toByte()
+                slice.copyInto(output, cursor)
+                cursor = Math.addExact(cursor, slice.size)
+            }
+            check(cursor == offset + size)
+        }
+        fun materialize(): Result {
+            val output = ByteArray(size)
+            try {
+                copyInto(output, 0)
+                return Result(output, nalLengthSize, nalCount, subsampleRanges, encryptedByteCount)
+            } catch (failure: Throwable) { output.fill(0); throw failure }
+        }
+        override fun close() {
+            if (closed) return
+            closed = true
+            slices.forEach { it.close() }
+        }
+    }
+
+    internal class Slice(
+        val size: Int,
+        val protectionRanges: List<ProtectedHevcSampleLayout.ProtectionRange>,
+        val encryptedByteCount: Long,
+        val header: () -> HevcBitstream.NalHeader,
+        val copyInto: (ByteArray, Int) -> Unit,
+        val close: () -> Unit
+    )
+
     fun compose(
         slices: List<ProtectedHevcSliceHeaderRewriter.Result>,
         nalLengthSize: Int,
         context: String = "Protected HEVC sample composition"
-    ): Result {
+    ): Result = plan(slices.map { slice ->
+        Slice(slice.nal.size, slice.protectionRanges, slice.encryptedByteCount,
+            { HevcBitstream.readNalHeader(slice.nal) },
+            { output, offset -> slice.nal.copyInto(output, offset) }, {})
+    }, nalLengthSize, context).use { it.materialize() }
+
+    /** Ownership of the rewritten clear prefixes transfers only on success. */
+    fun planBorrowed(
+        slices: List<ProtectedHevcSliceHeaderRewriter.Borrowed>,
+        nalLengthSize: Int,
+        context: String
+    ): Plan = plan(slices.map { slice ->
+        Slice(slice.size, slice.protectionRanges, slice.encryptedByteCount,
+            { slice.parts.header() }, slice::copyInto, slice::close)
+    }, nalLengthSize, context)
+
+    private fun plan(slices: List<Slice>, nalLengthSize: Int, context: String): Plan {
         require(slices.isNotEmpty()) { "$context: no protected slice NALs were supplied" }
         require(slices.size <= MAX_NAL_UNITS) { "$context: too many slice NALs" }
         require(nalLengthSize in 1..4) { "$context: unsupported NAL length size" }
@@ -36,25 +96,20 @@ internal object ProtectedHevcSampleComposer {
         }
         var totalSampleBytes = 0L
         slices.forEachIndexed { index, slice ->
-            val nal = slice.nal
-            require(nal.size >= 2 && nal.size.toLong() <= maximumNalLength) {
+            require(slice.size >= 2 && slice.size.toLong() <= maximumNalLength) {
                 "$context: NAL $index does not fit the selected length-prefix width"
             }
-            require(nal.size <= MAX_SAMPLE_BYTES) {
+            require(slice.size <= MAX_SAMPLE_BYTES) {
                 "$context: NAL $index exceeds the sample inspection limit"
             }
             validateNalProtectionMap(slice, index, context)
-            totalSampleBytes = Math.addExact(totalSampleBytes, nalLengthSize.toLong() + nal.size)
+            totalSampleBytes = Math.addExact(totalSampleBytes, nalLengthSize.toLong() + slice.size)
             require(totalSampleBytes <= MAX_SAMPLE_BYTES.toLong()) {
                 "$context: composed sample exceeds the inspection limit"
             }
         }
 
-        // The size was checked above. Write each length prefix and encrypted NAL
-        // directly into the single owned output; ByteArrayOutputStream.toByteArray()
-        // previously allocated and copied every sample a second time.
-        val output = ByteArray(totalSampleBytes.toInt())
-        var sampleOffset = 0
+        // Compute exact CENC metadata before materializing any ciphertext.
         val subsampleRanges = ArrayList<CmafBoxInspector.SubsampleEncryptionRange>()
         var pendingClearBytes = 0L
         var encryptedTotal = 0L
@@ -90,11 +145,7 @@ internal object ProtectedHevcSampleComposer {
             encryptedTotal = Math.addExact(encryptedTotal, encryptedBytes)
         }
 
-        slices.forEachIndexed { index, slice ->
-            val nal = slice.nal
-            for (byteIndex in nalLengthSize - 1 downTo 0) {
-                output[sampleOffset++] = ((nal.size ushr (byteIndex * 8)) and 0xff).toByte()
-            }
+        slices.forEach { slice ->
             // The length prefix is part of the clear run preceding this NAL's first encrypted
             // span, and is therefore recorded in the output CENC subsample map.
             pendingClearBytes = Math.addExact(pendingClearBytes, nalLengthSize.toLong())
@@ -105,8 +156,6 @@ internal object ProtectedHevcSampleComposer {
                     flushEncryptedRange(range.lengthBytes.toLong())
                 }
             }
-            nal.copyInto(output, destinationOffset = sampleOffset)
-            sampleOffset = Math.addExact(sampleOffset, nal.size)
         }
 
         while (pendingClearBytes > MAX_CLEAR_BYTES) {
@@ -115,17 +164,13 @@ internal object ProtectedHevcSampleComposer {
         }
         if (pendingClearBytes > 0L) appendSubsample(pendingClearBytes, 0L)
 
-        val sampleBytes = output
-        require(sampleOffset == sampleBytes.size && sampleBytes.size.toLong() == totalSampleBytes) {
-            "$context: output sample byte count differs from its calculated size"
-        }
         require(subsampleRanges.isNotEmpty()) {
             "$context: output sample has no CENC subsample map"
         }
         val mappedSampleBytes = subsampleRanges.sumOf {
             Math.addExact(it.clearBytes.toLong(), it.encryptedBytes)
         }
-        require(mappedSampleBytes == sampleBytes.size.toLong()) {
+        require(mappedSampleBytes == totalSampleBytes) {
             "$context: generated CENC subsample map does not cover the output sample"
         }
         val mappedEncryptedBytes = subsampleRanges.sumOf { it.encryptedBytes }
@@ -133,21 +178,15 @@ internal object ProtectedHevcSampleComposer {
             "$context: generated CENC subsample map changed the encrypted byte count"
         }
 
-        return Result(
-            sampleBytes = sampleBytes,
-            nalLengthSize = nalLengthSize,
-            nalCount = slices.size,
-            subsampleRanges = subsampleRanges,
-            encryptedByteCount = encryptedTotal
-        )
+        return Plan(totalSampleBytes.toInt(), nalLengthSize, slices.size,
+            subsampleRanges, encryptedTotal, slices.toList())
     }
 
     private fun validateNalProtectionMap(
-        slice: ProtectedHevcSliceHeaderRewriter.Result,
+        slice: Slice,
         nalIndex: Int,
         context: String
     ) {
-        val nal = slice.nal
         val ranges = slice.protectionRanges
         require(ranges.isNotEmpty()) {
             "$context: NAL $nalIndex has no clear/encrypted protection map"
@@ -158,7 +197,7 @@ internal object ProtectedHevcSampleComposer {
             require(range.offset == coveredUntil && range.lengthBytes > 0) {
                 "$context: NAL $nalIndex protection range $rangeIndex has a gap, overlap or empty span"
             }
-            require(range.endExclusive <= nal.size) {
+            require(range.endExclusive <= slice.size) {
                 "$context: NAL $nalIndex protection range $rangeIndex exceeds its byte bounds"
             }
             coveredUntil = range.endExclusive
@@ -166,7 +205,7 @@ internal object ProtectedHevcSampleComposer {
                 encryptedBytes = Math.addExact(encryptedBytes, range.lengthBytes.toLong())
             }
         }
-        require(coveredUntil == nal.size) {
+        require(coveredUntil == slice.size) {
             "$context: NAL $nalIndex protection map does not cover the complete NAL"
         }
         require(ranges.first().offset == 0 && ranges.first().isClear &&
@@ -176,7 +215,7 @@ internal object ProtectedHevcSampleComposer {
         require(encryptedBytes == slice.encryptedByteCount) {
             "$context: NAL $nalIndex encrypted-byte count differs from its protection map"
         }
-        val parsedHeader = HevcBitstream.parseNalHeader(nal.copyOfRange(0, 2))
+        val parsedHeader = slice.header()
         require(parsedHeader.type in 0..31) {
             "$context: NAL $nalIndex is not a VCL slice NAL"
         }

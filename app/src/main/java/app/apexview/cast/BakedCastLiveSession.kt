@@ -16,9 +16,10 @@ import kotlinx.coroutines.launch
 internal class BakedCastLiveSession(
     address: String, peer: InetAddress?, reader: CmafHttpReader, audioUri: Uri,
     val feeds: Int, scope: CoroutineScope,
+    tls: app.apexview.cast.local.PitwallTls.Session? = null,
     private val onFailure: (String) -> Unit,
 ) : AutoCloseable {
-    private val hls = BakedCastHlsSession(address, peer)
+    private val hls = BakedCastHlsSession(address, peer, tls)
     private val audioReader = reader
     private val audioSource = audioUri
     private var audio: BakedCastArchiveAudio? = null

@@ -33,7 +33,7 @@ internal class PitwallDiscovery(context: Context, private val changed: (List<Pit
         } }
     }
     fun start() {
-        try { nsd.discoverServices(FcastProtocol.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener) }
+        try { nsd.discoverServices(PitwallTls.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener) }
         catch (error: RuntimeException) { failure("TV discovery is unavailable on this device.") }
     }
     private fun resolveNext() {
@@ -46,7 +46,8 @@ internal class PitwallDiscovery(context: Context, private val changed: (List<Pit
             override fun onResolveFailed(service: NsdServiceInfo, code: Int) { main.post { resolving = false; resolveNext() } }
             override fun onServiceResolved(service: NsdServiceInfo) { main.post {
                 resolving = false
-                if (!closed && service.serviceName in found && service.attributes["pitwallScene"]?.toString(Charsets.UTF_8) == "1") {
+                if (!closed && service.serviceName in found && service.attributes["pitwallScene"]?.toString(Charsets.UTF_8) == "1" &&
+                    service.attributes["pitwallTls"]?.toString(Charsets.UTF_8) == "1") {
                     @Suppress("DEPRECATION") val address = if (android.os.Build.VERSION.SDK_INT >= 34)
                         service.hostAddresses.firstOrNull { it is java.net.Inet4Address } else service.host
                     if (address is java.net.Inet4Address && (address.isSiteLocalAddress || address.isLinkLocalAddress) && service.port in 1..65535) {
@@ -82,8 +83,8 @@ internal class PitwallAdvertisement(context: Context, port: Int, name: String,
     }
     init {
         try { nsd.registerService(NsdServiceInfo().apply {
-            serviceName = name.take(60); serviceType = FcastProtocol.SERVICE_TYPE; setPort(port)
-            setAttribute("version", "3"); setAttribute("pitwallScene", "1")
+            serviceName = name.take(60); serviceType = PitwallTls.SERVICE_TYPE; setPort(port)
+            setAttribute("version", "3"); setAttribute("pitwallScene", "1"); setAttribute("pitwallTls", "1")
         }, NsdManager.PROTOCOL_DNS_SD, listener) }
         catch (_: RuntimeException) { result("Local discovery is unavailable. Reopen the receiver to retry.", false) }
     }

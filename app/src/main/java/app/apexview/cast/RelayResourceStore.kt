@@ -7,8 +7,8 @@ import java.util.IdentityHashMap
  * No socket I/O under the publisher lock. Retired ciphertext/clear bytes are
  * erased only after the final read lease ends. No sample transformation. */
 internal class RelayResourceStore(
-    private val maxBytes: Long = 128L * 1024 * 1024,
-    private val maxResources: Int = 24,
+    private val maxBytes: Long = app.apexview.tiled.ProtectedOutputHistoryPolicy.MAX_RETAINED_BYTES + 32L * 1024 * 1024,
+    private val maxResources: Int = 64,
     private val maxReaders: Int = 3,
 ) : AutoCloseable {
     init { require(maxBytes > 0 && maxResources > 0 && maxReaders > 0) }

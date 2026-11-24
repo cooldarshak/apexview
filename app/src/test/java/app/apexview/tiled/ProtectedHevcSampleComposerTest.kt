@@ -120,4 +120,30 @@ class ProtectedHevcSampleComposerTest {
             ProtectedHevcSampleComposer.compose(listOf(rewritten), 4)
         }
     }
+    @Test fun borrowedSampleWritesExactCiphertextToFinalOffsetAndDoesNotOwnInput() {
+        val backing = byteArrayOf(99, 0x02, 0x01, 0x4a, 0x55, 0x66, 99)
+        val original = backing.copyOf()
+        val parts = HevcSliceHeaderRewriter.Parts(byteArrayOf(0x02, 0x01, 0x7e), backing,
+            4, 2, 0, 1, 1, 3, 0)
+        val ranges = listOf(
+            ProtectedHevcSampleLayout.ProtectionRange(0, 3, true),
+            ProtectedHevcSampleLayout.ProtectionRange(3, 1, false),
+            ProtectedHevcSampleLayout.ProtectionRange(4, 1, false)
+        )
+        val borrowed = ProtectedHevcSliceHeaderRewriter.Borrowed(parts, ranges, 0, 3, 3, 2, 2)
+        val legacy = ProtectedHevcSliceHeaderRewriter.Result(byteArrayOf(0x02, 0x01, 0x7e, 0x55, 0x66),
+            ranges, 0, 3, 3, 2, 2)
+        val expected = ProtectedHevcSampleComposer.compose(listOf(legacy), 4)
+        val plan = ProtectedHevcSampleComposer.planBorrowed(listOf(borrowed), 4, "test")
+        val actual = ByteArray(plan.size + 6) { 42 }
+        plan.copyInto(actual, 3)
+        assertArrayEquals(expected.sampleBytes, actual.copyOfRange(3, 3 + plan.size))
+        assertEquals(expected.subsampleRanges, plan.subsampleRanges)
+        assertEquals(expected.encryptedByteCount, plan.encryptedByteCount)
+        assertEquals(42.toByte(), actual[2])
+        assertEquals(42.toByte(), actual[3 + plan.size])
+        plan.close(); plan.close()
+        assertArrayEquals(original, backing)
+        assertThrows(IllegalStateException::class.java) { plan.copyInto(actual, 3) }
+    }
 }

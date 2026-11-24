@@ -3,8 +3,8 @@ package app.apexview.tiled
 /**
  * Applies the existing HEVC slice-header rewrite to a subsample-encrypted NAL.
  *
- * The complete NAL is supplied to the byte-preserving rewriter so that its opaque tail can be
- * copied unchanged. Syntax parsing is limited to the verified clear prefix. The returned map
+ * A validated bounded source range is supplied to the byte-preserving rewriter so its opaque
+ * tail can be copied unchanged. Syntax parsing is limited to the verified clear prefix. The returned map
  * describes the rewritten NAL's exact clear/encrypted byte layout; the NAL length prefix is not
  * included and must be written as clear by the enclosing CMAF sample builder.
  *
@@ -21,6 +21,23 @@ internal object ProtectedHevcSliceHeaderRewriter {
         val encryptedByteCount: Long
     )
 
+    internal class Borrowed internal constructor(
+        val parts: HevcSliceHeaderRewriter.Parts,
+        val protectionRanges: List<ProtectedHevcSampleLayout.ProtectionRange>,
+        val destinationAddress: Int,
+        val sourceTailOffset: Int,
+        val outputTailOffset: Int,
+        val copiedTailBytes: Int,
+        val encryptedByteCount: Long
+    ) : AutoCloseable {
+        val size get() = parts.size
+        fun copyInto(output: ByteArray, offset: Int) {
+            parts.copyInto(output, offset)
+            parts.verifyCopiedTail(output, offset)
+        }
+        override fun close() = parts.close()
+    }
+
     fun rewrite(
         sample: ByteArray,
         layout: ProtectedHevcSampleLayout.Report,
@@ -34,6 +51,34 @@ internal object ProtectedHevcSliceHeaderRewriter {
         loopFilterAcrossSlicesOverride: Boolean? = null,
         context: String = "Protected HEVC slice rewrite"
     ): Result {
+        return rewriteBorrowed(sample, layout, accessUnit, nalIndex, sourceSps, sourcePps, outputSps, outputPps,
+            destinationAddress, loopFilterAcrossSlicesOverride, context).use { rewritten ->
+            val nal = ByteArray(rewritten.size)
+            try {
+                rewritten.copyInto(nal, 0)
+                Result(nal, rewritten.protectionRanges, rewritten.destinationAddress,
+                    rewritten.sourceTailOffset, rewritten.outputTailOffset,
+                    rewritten.copiedTailBytes, rewritten.encryptedByteCount)
+            } catch (failure: Throwable) {
+                nal.fill(0)
+                throw failure
+            }
+        }
+    }
+
+    fun rewriteBorrowed(
+        sample: ByteArray,
+        layout: ProtectedHevcSampleLayout.Report,
+        accessUnit: ProtectedHevcAccessUnitInspector.Report,
+        nalIndex: Int,
+        sourceSps: HevcParameterSets.SpsMetadata,
+        sourcePps: HevcParameterSets.PpsMetadata,
+        outputSps: HevcParameterSets.SpsMetadata,
+        outputPps: HevcParameterSets.PpsMetadata,
+        destinationAddress: Int,
+        loopFilterAcrossSlicesOverride: Boolean? = null,
+        context: String = "Protected HEVC slice rewrite"
+    ): Borrowed {
         require(sample.isNotEmpty() && sample.size == layout.sampleSizeBytes &&
             sample.size == accessUnit.sampleSizeBytes) {
             "$context: sample size does not match its inspected metadata"
@@ -64,19 +109,10 @@ internal object ProtectedHevcSliceHeaderRewriter {
         require(mapped.nalOffset >= 0 && sourceNalEnd <= sample.size) {
             "$context: NAL $nalIndex is outside the CMAF sample"
         }
-        val sourceNal = sample.copyOfRange(mapped.nalOffset, sourceNalEnd)
-        val rewritten = HevcSliceHeaderRewriter.rewrite(
-            nal = sourceNal,
-            sourceSps = sourceSps,
-            sourcePps = sourcePps,
-            outputSps = outputSps,
-            outputPps = outputPps,
-            destinationAddress = destinationAddress,
-            clearNalBytes = mapped.clearNalPrefixBytes,
-            loopFilterAcrossSlicesOverride = loopFilterAcrossSlicesOverride,
-            preserveOpaqueCabacTail = opaqueCabacTail
-        )
-
+        val rewritten = HevcSliceHeaderRewriter.rewriteInspectedProtectedParts(
+            sample, mapped, sourceSps, sourcePps, outputSps, outputPps,
+            destinationAddress, loopFilterAcrossSlicesOverride, opaqueCabacTail)
+        try {
         val expectedTailOffset = if (opaqueCabacTail) slice.firstOpaqueCabacByteOffset
             else slice.thirdClearCabacByteOffset
         require(rewritten.sourceTailOffset == expectedTailOffset) {
@@ -84,7 +120,7 @@ internal object ProtectedHevcSliceHeaderRewriter {
         }
         val sourceMapResume = rewritten.sourceTailOffset + if (opaqueCabacTail) 0 else 1
         require(rewritten.sourceTailOffset >= 2 &&
-            rewritten.sourceTailOffset < sourceNal.size &&
+            rewritten.sourceTailOffset < mapped.nalLength &&
             sourceMapResume <= mapped.clearNalPrefixBytes) {
             "$context: copied CABAC tail does not begin at a verified header boundary"
         }
@@ -92,23 +128,16 @@ internal object ProtectedHevcSliceHeaderRewriter {
             "$context: rewritten clear header crosses into encrypted bytes"
         }
 
-        val outputTailOffset = rewritten.nal.size - rewritten.copiedTailBytes
+        val outputTailOffset = rewritten.size - rewritten.copiedTailBytes
         require(outputTailOffset >= 2 && rewritten.copiedTailBytes > 0 &&
-            outputTailOffset + rewritten.copiedTailBytes == rewritten.nal.size) {
+            outputTailOffset + rewritten.copiedTailBytes == rewritten.size) {
             "$context: rewritten NAL tail bounds are inconsistent"
         }
-        require(rewritten.copiedTailBytes == sourceNal.size - rewritten.sourceTailOffset) {
+        require(rewritten.copiedTailBytes == mapped.nalLength - rewritten.sourceTailOffset) {
             "$context: rewriter did not preserve the complete source NAL tail"
         }
-        for (index in 0 until rewritten.copiedTailBytes) {
-            require(
-                rewritten.nal[outputTailOffset + index] ==
-                    sourceNal[rewritten.sourceTailOffset + index]
-            ) {
-                "$context: copied clear/encrypted NAL tail changed at byte $index"
-            }
-        }
-
+        // Borrowed.copyInto verifies the byte-exact opaque tail in its final
+        // destination; no intermediate full NAL allocation is needed.
         val rebuiltRanges = ArrayList<ProtectedHevcSampleLayout.ProtectionRange>()
         var outputCoveredUntil = 0
 
@@ -142,7 +171,7 @@ internal object ProtectedHevcSliceHeaderRewriter {
         appendRange(0, outputMapResume, isClear = true)
         mapped.protectionRanges.forEach { range ->
             val intersectionStart = maxOf(sourceMapResume, range.offset)
-            val intersectionEnd = minOf(sourceNal.size, range.endExclusive)
+            val intersectionEnd = minOf(mapped.nalLength, range.endExclusive)
             if (intersectionStart < intersectionEnd) {
                 val outputOffset = outputMapResume +
                     (intersectionStart - sourceMapResume)
@@ -153,19 +182,19 @@ internal object ProtectedHevcSliceHeaderRewriter {
                 )
             }
         }
-        require(outputCoveredUntil == rewritten.nal.size) {
+        require(outputCoveredUntil == rewritten.size) {
             "$context: rewritten protection map does not cover the complete NAL"
         }
         require(rebuiltRanges.firstOrNull()?.offset == 0 &&
-            rebuiltRanges.lastOrNull()?.endExclusive == rewritten.nal.size) {
+            rebuiltRanges.lastOrNull()?.endExclusive == rewritten.size) {
             "$context: rewritten protection map has invalid outer bounds"
         }
 
         val encryptedBytes = rebuiltRanges.asSequence()
             .filterNot { it.isClear }
             .sumOf { it.lengthBytes.toLong() }
-        return Result(
-            nal = rewritten.nal,
+        return Borrowed(
+            parts = rewritten,
             protectionRanges = rebuiltRanges,
             destinationAddress = rewritten.destinationAddress,
             sourceTailOffset = rewritten.sourceTailOffset,
@@ -173,6 +202,10 @@ internal object ProtectedHevcSliceHeaderRewriter {
             copiedTailBytes = rewritten.copiedTailBytes,
             encryptedByteCount = encryptedBytes
         )
+        } catch (failure: Throwable) {
+            rewritten.close()
+            throw failure
+        }
     }
 
     private fun isFullyClear(

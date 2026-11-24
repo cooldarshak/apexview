@@ -53,6 +53,29 @@ internal object ProtectedHevcPictureComposer {
         val contributions: List<Contribution>
     )
 
+    internal data class PlannedPicture(
+        val payload: ProtectedHevcSampleComposer.Plan,
+        val nalLengthSize: Int,
+        val subsampleRanges: List<CmafBoxInspector.SubsampleEncryptionRange>,
+        val encryptedByteCount: Long,
+        val decodeTimeTicks: Long,
+        val presentationTimeTicks: Long,
+        val durationTicks: Long,
+        val compositionOffsetTicks: Long,
+        val timescale: Long,
+        val sampleFlags: Long,
+        val fullPictureOrderCount: Long,
+        val contributions: List<Contribution>
+    ) : AutoCloseable {
+        override fun close() = payload.close()
+        fun materialize(): Result {
+            val sample = payload.materialize()
+            return Result(sample.sampleBytes, nalLengthSize, subsampleRanges, encryptedByteCount,
+                decodeTimeTicks, presentationTimeTicks, durationTicks, compositionOffsetTicks,
+                timescale, sampleFlags, fullPictureOrderCount, contributions)
+        }
+    }
+
     private data class PreparedFeed(
         val input: FeedSample,
         val sps: HevcParameterSets.SpsMetadata,
@@ -81,6 +104,22 @@ internal object ProtectedHevcPictureComposer {
         /** Mixed full-frame layout verified against the same source-cell model as clear VOD. */
         mixedCells: List<HevcTizenGridComposer.CellSelection>? = null,
     ): Result {
+        return plan(feeds, outputSps, outputPps, outputNalLengthSize, context,
+            alignmentProof, fullPictureColumns, mixedCells).use { it.materialize() }
+    }
+
+    fun plan(
+        feeds: List<FeedSample>,
+        outputSps: HevcParameterSets.SpsMetadata,
+        outputPps: HevcParameterSets.PpsMetadata,
+        outputNalLengthSize: Int = 4,
+        context: String = "Protected HEVC picture composition",
+        alignmentProof: HevcPictureSequenceAligner.Result? = null,
+        /** Null retains the tile-selection POC. A value preserves every tile of each feed. */
+        fullPictureColumns: Int? = null,
+        /** Mixed full-frame layout verified against the same source-cell model as clear VOD. */
+        mixedCells: List<HevcTizenGridComposer.CellSelection>? = null,
+    ): PlannedPicture {
         require(feeds.size in MIN_FEEDS..MAX_FEEDS) {
             "$context: between $MIN_FEEDS and $MAX_FEEDS protected feeds are supported"
         }
@@ -222,8 +261,11 @@ internal object ProtectedHevcPictureComposer {
         }
         require(placements.map { it.address }.toSet() == expectedTileStarts &&
             placements.size == expectedTileStarts.size) { "$context: every output tile must be covered once" }
-        val rewritten = placements.map { (feed, slice, address) ->
-            ProtectedHevcSliceHeaderRewriter.rewrite(
+        val rewritten = mutableListOf<ProtectedHevcSliceHeaderRewriter.Borrowed>()
+        var composed: ProtectedHevcSampleComposer.Plan? = null
+        try {
+        placements.forEach { (feed, slice, address) ->
+            rewritten += ProtectedHevcSliceHeaderRewriter.rewriteBorrowed(
                 sample = feed.input.sampleBytes,
                 layout = feed.layout,
                 accessUnit = feed.accessUnit,
@@ -236,21 +278,22 @@ internal object ProtectedHevcPictureComposer {
                 context = context + " (" + feed.input.feedId + ")"
             )
         }
-        val composed = ProtectedHevcSampleComposer.compose(
+        val payload = ProtectedHevcSampleComposer.planBorrowed(
             slices = rewritten,
             nalLengthSize = outputNalLengthSize,
             context = context
         )
+        composed = payload
         // Only commit POC state after every validation, rewrite and sample-map build succeeded.
         prepared.forEach { feed ->
             feed.input.pocTracker.commitFrom(feed.pocTrackerAfter)
         }
         val timing = first.timing
-        return Result(
-            sampleBytes = composed.sampleBytes,
-            nalLengthSize = composed.nalLengthSize,
-            subsampleRanges = composed.subsampleRanges,
-            encryptedByteCount = composed.encryptedByteCount,
+        return PlannedPicture(
+            payload = payload,
+            nalLengthSize = payload.nalLengthSize,
+            subsampleRanges = payload.subsampleRanges,
+            encryptedByteCount = payload.encryptedByteCount,
             decodeTimeTicks = requireNotNull(timing.decodeTimeTicks),
             presentationTimeTicks = requireNotNull(timing.presentationTimeTicks),
             durationTicks = requireNotNull(timing.durationTicks),
@@ -267,6 +310,10 @@ internal object ProtectedHevcPictureComposer {
                 )
             }
         )
+        } catch (failure: Throwable) {
+            if (composed != null) composed.close() else rewritten.forEach { it.close() }
+            throw failure
+        }
     }
 
     private fun prepareFeed(

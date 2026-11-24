@@ -4,8 +4,8 @@ package app.apexview.tiled
  * Per-sample HEVC access-unit inspection for subsample-encrypted CMAF.
  *
  * The caller must first validate the init/fragment encryption metadata and supply the exact
- * subsample map for this sample. Only the contiguous clear prefix of each NAL is copied into the
- * HEVC parser. Encrypted bytes are never interpreted as syntax and this class never decrypts,
+ * subsample map for this sample. Only the contiguous clear prefix of each NAL is accessible to the
+ * bounded HEVC parser. Encrypted bytes are never interpreted as syntax and this class never decrypts,
  * transforms, or retains ciphertext.
  *
  * This is an inspection gate, not a protected sample rewriter. A slice may be structurally
@@ -107,11 +107,11 @@ internal object ProtectedHevcAccessUnitInspector {
             ensure(lengthFromSample == mapped.nalLength, context,
                 "Subsample layout NAL length differs from the sample length prefix")
             val prefixEnd = Math.addExact(mapped.nalOffset, mapped.clearNalPrefixBytes)
-            // Copy only bytes proven clear by ProtectedHevcSampleLayout. Do not pass the original
-            // sample or any byte beyond this prefix to a HEVC syntax parser.
-            val clearPrefix = sample.copyOfRange(mapped.nalOffset, prefixEnd)
+            // Bound the parser itself to bytes proven clear. Only small in-band
+            // parameter sets require an owned standalone array.
+            fun parameterBytes() = sample.copyOfRange(mapped.nalOffset, prefixEnd)
             val nalHeader = try {
-                HevcBitstream.parseNalHeader(clearPrefix)
+                HevcBitstream.readNalHeader(sample, mapped.nalOffset, mapped.clearNalPrefixBytes)
             } catch (error: Exception) {
                 fail(context, "NAL " + mapped.index + " has an invalid clear HEVC header: " +
                     (error.message ?: error.javaClass.simpleName))
@@ -140,25 +140,25 @@ internal object ProtectedHevcAccessUnitInspector {
                     ensure(mapped.clearNalPrefixBytes == mapped.nalLength, context,
                         "In-band VPS is not fully clear and cannot be validated")
                     ensure(vps != null, context, "In-band VPS has no matching hvcC VPS")
-                    ensure(HevcParameterSets.parseVps(clearPrefix) == vps, context,
+                    ensure(HevcParameterSets.parseVps(parameterBytes()) == vps, context,
                         "In-band VPS differs from hvcC")
                 }
                 33 -> {
                     ensure(mapped.clearNalPrefixBytes == mapped.nalLength, context,
                         "In-band SPS is not fully clear and cannot be validated")
-                    ensure(HevcParameterSets.parseSps(clearPrefix) == sps, context,
+                    ensure(HevcParameterSets.parseSps(parameterBytes()) == sps, context,
                         "In-band SPS differs from hvcC")
                 }
                 34 -> {
                     ensure(mapped.clearNalPrefixBytes == mapped.nalLength, context,
                         "In-band PPS is not fully clear and cannot be validated")
-                    ensure(HevcParameterSets.parsePps(clearPrefix, sps) == pps, context,
+                    ensure(HevcParameterSets.parsePps(parameterBytes(), sps) == pps, context,
                         "In-band PPS differs from hvcC")
                 }
                 in 0..31 -> {
                     val slice = try {
-                        HevcSliceHeaderParser.parse(
-                            clearPrefix, sps, pps, clearNalBytes = clearPrefix.size
+                        HevcSliceHeaderParser.parseRange(
+                            sample, mapped.nalOffset, mapped.clearNalPrefixBytes, sps, pps
                         )
                     } catch (error: Exception) {
                         fail(context, "NAL " + mapped.index + " clear slice header is incomplete or unsupported: " +
@@ -211,14 +211,15 @@ internal object ProtectedHevcAccessUnitInspector {
                     val headerRbspBytes = slice.bitsConsumed / 8
                     ensure(slice.bitsConsumed % 8 == 0, context,
                         "Parsed slice header is not byte aligned")
-                    val rbspOffsets = clearRbspByteOffsets(clearPrefix, context, mapped.index)
-                    val cabacBytes = (rbspOffsets.size - headerRbspBytes).coerceAtLeast(0)
-                    val opaqueCabacStart = rbspOffsets.getOrNull(headerRbspBytes - 1)
+                    val rbsp = clearRbspBoundaries(sample, mapped.nalOffset, mapped.clearNalPrefixBytes,
+                        headerRbspBytes, context, mapped.index)
+                    val cabacBytes = (rbsp.count - headerRbspBytes).coerceAtLeast(0)
+                    val opaqueCabacStart = rbsp.headerEnd
                         ?.let { lastHeaderEbspOffset ->
                             (lastHeaderEbspOffset + 1).takeIf { tailStart ->
                                 tailStart > 2 && tailStart < mapped.nalLength &&
                                     tailStart <= mapped.clearNalPrefixBytes &&
-                                    clearPrefix[tailStart - 1] != 0.toByte()
+                                    sample[mapped.nalOffset + tailStart - 1] != 0.toByte()
                             }
                         }
                     slices += SliceRegion(
@@ -226,9 +227,7 @@ internal object ProtectedHevcAccessUnitInspector {
                         header = slice,
                         tile = tile,
                         clearCabacBytes = cabacBytes,
-                        thirdClearCabacByteOffset = rbspOffsets.getOrNull(
-                            headerRbspBytes + REQUIRED_CLEAR_CABAC_BYTES - 1
-                        ),
+                        thirdClearCabacByteOffset = rbsp.thirdCabac,
                         firstOpaqueCabacByteOffset = opaqueCabacStart
                     )
                 }
@@ -319,36 +318,42 @@ internal object ProtectedHevcAccessUnitInspector {
         )
     }
 
-    /**
-     * Maps clear RBSP byte indices to NAL-relative EBSP offsets. The resulting indices are derived
-     * only from the contiguous clear prefix. A dangling emulation-prevention byte at the clear
-     * boundary is rejected instead of consulting a potentially encrypted next byte.
-     */
-    private fun clearRbspByteOffsets(
-        clearNalPrefix: ByteArray,
+    private data class RbspBoundaries(val count: Int, val headerEnd: Int?, val thirdCabac: Int?)
+
+    /** Scan the entire verified clear prefix as before, but retain only the
+     * two required offsets instead of allocating and boxing every clear byte. */
+    private fun clearRbspBoundaries(
+        sample: ByteArray,
+        start: Int,
+        length: Int,
+        headerBytes: Int,
         context: String,
         nalIndex: Int
-    ): IntArray {
-        val offsets = ArrayList<Int>(clearNalPrefix.size - 2)
+    ): RbspBoundaries {
+        var count = 0
+        var headerEnd: Int? = null
+        var thirdCabac: Int? = null
         var zeroCount = 0
         var index = 2
-        while (index < clearNalPrefix.size) {
-            val value = clearNalPrefix[index].toInt() and 0xff
+        while (index < length) {
+            val value = sample[start + index].toInt() and 0xff
             if (zeroCount >= 2 && value == 3) {
-                ensure(index + 1 < clearNalPrefix.size, context,
+                ensure(index + 1 < length, context,
                     "NAL " + nalIndex + " clear prefix ends inside an emulation-prevention sequence")
-                val next = clearNalPrefix[index + 1].toInt() and 0xff
+                val next = sample[start + index + 1].toInt() and 0xff
                 ensure(next <= 3, context,
                     "NAL " + nalIndex + " contains an invalid clear emulation-prevention sequence")
                 zeroCount = 0
                 index++
                 continue
             }
-            offsets += index
+            if (count == headerBytes - 1) headerEnd = index
+            if (count == headerBytes + REQUIRED_CLEAR_CABAC_BYTES - 1) thirdCabac = index
+            count++
             zeroCount = if (value == 0) zeroCount + 1 else 0
             index++
         }
-        return offsets.toIntArray()
+        return RbspBoundaries(count, headerEnd, thirdCabac)
     }
 
     private fun readNalLength(

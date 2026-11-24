@@ -421,13 +421,20 @@ internal object ProtectedHevcComposedDashPackageBuilder {
  * of an obsolete multi-megabyte window. No decrypted data or licence is used.
  */
 @OptIn(UnstableApi::class)
-internal class ProtectedDashResourceStore {
+internal class ProtectedDashResourceStore(
+    private val maxBytes: Long = ProtectedOutputHistoryPolicy.MAX_RETAINED_BYTES + 4L * 1024 * 1024,
+    private val maxReaders: Int = 8
+) {
+    init { require(maxBytes > 0 && maxReaders > 0) }
     private class Resource(val bytes: ByteArray) {
         var users = 0
         var retired = false
     }
     private var current = emptyMap<String, Resource>()
     private val retired = mutableSetOf<Resource>()
+    private val pinned = mutableSetOf<Resource>()
+    private var pinnedBytes = 0L
+    private var readerCount = 0
 
     class Lease internal constructor(
         val bytes: ByteArray,
@@ -452,6 +459,7 @@ internal class ProtectedDashResourceStore {
         // The publisher transfers detached, uniquely owned arrays. Reject aliasing
         // before changing the active map; otherwise retiring one name could erase
         // the bytes a different name or in-flight reader still owns.
+        require(next.resources.values.sumOf { it.size.toLong() } <= maxBytes) { "Protected DASH window exceeds its memory budget" }
         val seen = java.util.IdentityHashMap<ByteArray, Boolean>()
         current.values.forEach { seen[it.bytes] = true }
         retired.forEach { seen[it.bytes] = true }
@@ -468,14 +476,19 @@ internal class ProtectedDashResourceStore {
     @Synchronized fun acquire(name: String): Lease? {
         val resource = current[name] ?: return null
         check(!resource.retired) { "Cannot acquire a retired protected DASH resource" }
-        resource.users++
+        if (readerCount >= maxReaders || (resource.users == 0 && resource.bytes.size.toLong() > maxBytes - pinnedBytes)) return null
+        if (resource.users++ == 0) { pinned.add(resource); pinnedBytes += resource.bytes.size }
+        readerCount++
         return Lease(resource.bytes) {
             synchronized(this) {
                 check(resource.users > 0) { "Protected DASH lease was released twice" }
-                resource.users--
-                if (resource.retired && resource.users == 0) {
-                    retired.remove(resource)
-                    resource.bytes.fill(0)
+                readerCount--
+                if (--resource.users == 0) {
+                    pinned.remove(resource); pinnedBytes -= resource.bytes.size
+                    if (resource.retired) {
+                        retired.remove(resource)
+                        resource.bytes.fill(0)
+                    }
                 }
             }
         }

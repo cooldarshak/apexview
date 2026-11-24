@@ -19,8 +19,22 @@ internal object ProtectedHevcCmafFragmentWriter {
         val perSampleIvIdentity: ProtectedValueFingerprint?,
         val durationTicks: Long,
         val sampleFlags: Long,
-        val compositionOffsetTicks: Long
-    )
+        val compositionOffsetTicks: Long,
+        /** Live composition borrows immutable input ranges until this synchronous write returns. */
+        val plannedPayload: ProtectedHevcSampleComposer.Plan? = null
+    ) {
+        init {
+            require(plannedPayload == null || sampleBytes.isEmpty()) {
+                "Exactly one protected sample payload is required"
+            }
+            require(plannedPayload == null || plannedPayload.subsampleRanges == subsampleRanges)
+        }
+        val size: Int get() = plannedPayload?.size ?: sampleBytes.size
+        fun copyInto(target: ByteArray, offset: Int) {
+            val plan = plannedPayload
+            if (plan == null) sampleBytes.copyInto(target, offset) else plan.copyInto(target, offset)
+        }
+    }
 
     data class Request(
         val trackId: Long,
@@ -87,7 +101,7 @@ internal object ProtectedHevcCmafFragmentWriter {
         var mdatBytes = 0L
         val auxiliarySizes = ArrayList<Int>(request.samples.size)
         request.samples.forEachIndexed { index, sample ->
-            require(sample.sampleBytes.isNotEmpty() && sample.sampleBytes.size <= MAX_SAMPLE_BYTES) {
+            require(sample.size > 0 && sample.size <= MAX_SAMPLE_BYTES) {
                 "$context: output sample " + index + " is empty or too large"
             }
             require(sample.subsampleRanges.isNotEmpty() &&
@@ -122,7 +136,7 @@ internal object ProtectedHevcCmafFragmentWriter {
                 sample.compositionOffsetTicks in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) {
                 "$context: output sample " + index + " timing or flags exceed ISO-BMFF field limits"
             }
-            mdatBytes = Math.addExact(mdatBytes, sample.sampleBytes.size.toLong())
+            mdatBytes = Math.addExact(mdatBytes, sample.size.toLong())
         }
         require(mdatBytes in 1..MAX_MDAT_BYTES) {
             "$context: output mdat exceeds the bounded media size"
@@ -149,7 +163,7 @@ internal object ProtectedHevcCmafFragmentWriter {
             body.write(uint32(dataOffset))
             request.samples.forEach { sample ->
                 body.write(uint32(sample.durationTicks))
-                body.write(uint32(sample.sampleBytes.size.toLong()))
+                body.write(uint32(sample.size.toLong()))
                 body.write(uint32(sample.sampleFlags))
                 body.write(uint32(sample.compositionOffsetTicks.toLong() and UINT32_MAX))
             }
@@ -187,6 +201,7 @@ internal object ProtectedHevcCmafFragmentWriter {
             "$context: generated fragment exceeds the output size bound"
         }
         val result = ByteArray(totalFragmentBytes.toInt())
+        try {
         var cursor = 0
         styp.copyInto(result, destinationOffset = cursor)
         cursor = Math.addExact(cursor, styp.size)
@@ -202,8 +217,8 @@ internal object ProtectedHevcCmafFragmentWriter {
         }
         cursor = Math.addExact(cursor, 8)
         request.samples.forEach { sample ->
-            sample.sampleBytes.copyInto(result, destinationOffset = cursor)
-            cursor = Math.addExact(cursor, sample.sampleBytes.size)
+            sample.copyInto(result, cursor)
+            cursor = Math.addExact(cursor, sample.size)
         }
         check(cursor == result.size) { "$context: validated mdat samples did not fill the output fragment" }
 
@@ -234,7 +249,7 @@ internal object ProtectedHevcCmafFragmentWriter {
             require(timing.durationTicks == sample.durationTicks &&
                 timing.compositionOffsetTicks == sample.compositionOffsetTicks &&
                 timing.sampleFlags == sample.sampleFlags &&
-                timing.sampleSizeBytes == sample.sampleBytes.size.toLong()) {
+                timing.sampleSizeBytes == sample.size.toLong()) {
                 "$context: generated sample " + index + " timing differs from the main-feed source"
             }
             val encryption = fragment.sampleEncryptionMetadata[index]
@@ -248,6 +263,10 @@ internal object ProtectedHevcCmafFragmentWriter {
             }
         }
         return result
+        } catch (failure: Throwable) {
+            result.fill(0)
+            throw failure
+        }
     }
 
     private fun validateSubsamples(sample: Sample, index: Int, context: String) {
@@ -264,7 +283,7 @@ internal object ProtectedHevcCmafFragmentWriter {
             )
             encrypted = Math.addExact(encrypted, range.encryptedBytes)
         }
-        require(covered == sample.sampleBytes.size.toLong() && encrypted > 0L) {
+        require(covered == sample.size.toLong() && encrypted > 0L) {
             "$context: sample " + index + " CENC map does not exactly cover protected sample bytes"
         }
     }

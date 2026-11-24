@@ -171,7 +171,7 @@ internal object ProtectedHevcSampleLayout {
                 "$context: invalid NAL length at byte $offset"
             }
             requireClear(nalOffset, 2, "HEVC NAL header at byte $nalOffset")
-            val header = HevcBitstream.parseNalHeader(sample.copyOfRange(nalOffset, nalOffset + 2))
+            val header = HevcBitstream.readNalHeader(sample, nalOffset, 2)
             val nalLengthInt = nalLength.toInt()
             nals += NalUnit(
                 index = nals.size,

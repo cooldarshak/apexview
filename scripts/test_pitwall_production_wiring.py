@@ -525,6 +525,56 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("ClearCaptionPlaylist.rewrite(", archive)
         self.assertIn("ClearCaptionPlaylist.isWebVtt(bytes)", archive)
 
+    def test_post834_protected_payload_written_directly_to_final_fragment(self):
+        base = "app/src/main/java/app/apexview/tiled/"
+        live = contents(base + "ProtectedHevcLiveComposition.kt")
+        picture = contents(base + "ProtectedHevcPictureComposer.kt")
+        rewriter = contents(base + "ProtectedHevcSliceHeaderRewriter.kt")
+        writer = contents(base + "ProtectedHevcCmafFragmentWriter.kt")
+        self.assertIn("ProtectedHevcPictureComposer.plan(", live)
+        self.assertIn("plannedPayload = composed.payload", live)
+        self.assertIn("plannedPictures.forEach { it.close() }", live)
+        self.assertIn("ProtectedHevcSampleComposer.planBorrowed(", picture)
+        self.assertIn("rewriteInspectedProtectedParts(", rewriter)
+        self.assertIn("parts.verifyCopiedTail(output, offset)", rewriter)
+        self.assertIn("sample.copyInto(result, cursor)", writer)
+        self.assertIn("encryption.subsampleRanges == sample.subsampleRanges", writer)
+        self.assertNotIn("sample.copyOfRange(mapped.nalOffset, sourceNalEnd)", rewriter)
+
+    def test_post834_pitwall_control_and_media_use_paired_tls(self):
+        base = "app/src/main/java/app/apexview/"
+        sender = contents(base + "AppState.kt")
+        receiver = contents(base + "cast/local/PitwallReceiverActivity.kt")
+        tls = contents(base + "cast/local/PitwallTls.kt")
+        relay = contents(base + "cast/ComposedCmafRelay.kt")
+        archive = contents(base + "cast/SceneCastRelay.kt")
+        self.assertIn("PitwallTls.connect(", sender)
+        self.assertIn("decision.await()", sender)
+        self.assertIn("PitwallTls.controlServer(", receiver)
+        self.assertIn("PitwallTls.accept(identity, socket)", receiver)
+        self.assertIn("sslSocketFactory(tls.socketFactory, tls.trustManager)", receiver)
+        self.assertIn('origin.scheme == "https"', receiver)
+        self.assertIn("needClientAuth = true", tls)
+        self.assertIn("MessageDigest.isEqual(pinned.encoded, cert.encoded)", tls)
+        self.assertIn("tls?.mediaServer(", relay)
+        self.assertIn("tls?.mediaServer(", archive)
+        self.assertIn("castResources.releaseMedia()", sender)
+        self.assertIn("castResources.retainedCompositionGroups()", sender)
+
+    def test_post834_native_audio_and_declared_text_use_actual_receiver_tracks(self):
+        base = "app/src/main/java/app/apexview/"
+        native = contents(base + "cast/NativeComposedCastSession.kt")
+        audio = contents(base + "cast/CmafCastAudio.kt")
+        text = contents(base + "cast/CmafCastText.kt")
+        receiver = contents(base + "cast/local/PitwallReceiverActivity.kt")
+        self.assertIn("alternate.compatibleWith(audio)", native)
+        self.assertIn("track.appendTo(merged", native)
+        self.assertIn("textTracks.appendTo(merged)", native)
+        self.assertIn("acceptPssh(", audio)
+        self.assertIn("it.type == C.TRACK_TYPE_TEXT", text)
+        self.assertIn("!f.sampleEncryptionBoxPresent", text)
+        self.assertIn("group.isTrackSelected(index)", receiver)
+        self.assertIn("NativeAudioControl.acknowledgment(playbackId(), requested, selected)", receiver)
 
 if __name__ == "__main__":
     unittest.main()

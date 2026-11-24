@@ -20,8 +20,8 @@ internal object HevcSliceHeaderRewriter {
 
     /**
      * The new header is owned; the unchanged CABAC tail is borrowed from an
-     * already validated input NAL. Only the clear CMAF writer may retain this
-     * view, synchronously until its final fragment has been written.
+     * already validated input NAL. Clear and inspected protected writers may
+     * retain this view only synchronously until their final fragment is written.
      */
     internal class Parts internal constructor(
         private val prefix: ByteArray,
@@ -52,6 +52,29 @@ internal object HevcSliceHeaderRewriter {
             if (limit > prefixCount)
                 backing.copyInto(bytes, prefixCount, tailStart, tailStart + limit - prefixCount)
             return bytes
+        }
+
+        fun header(): HevcBitstream.NalHeader {
+            check(!closed)
+            return HevcBitstream.readNalHeader(prefix)
+        }
+
+        fun copyInto(output: ByteArray, offset: Int) {
+            check(!closed)
+            require(offset >= 0 && offset <= output.size - size)
+            prefix.copyInto(output, offset)
+            backing.copyInto(output, offset + prefix.size, tailStart, tailStart + copiedTailBytes)
+        }
+
+        /** Compare only the unchanged byte range, never interpret ciphertext. */
+        fun verifyCopiedTail(output: ByteArray, offset: Int) {
+            check(!closed)
+            require(offset >= 0 && offset <= output.size - size)
+            for (i in 0 until copiedTailBytes) {
+                require(output[offset + prefix.size + i] == backing[tailStart + i]) {
+                    "Rewritten HEVC tail changed at byte $i"
+                }
+            }
         }
 
         fun writeTo(output: java.nio.ByteBuffer) {
@@ -127,6 +150,41 @@ internal object HevcSliceHeaderRewriter {
         false, nal.offset, nal.length)
 
 
+    /**
+     * Only the protected rewriter calls this with a complete, independently
+     * checked per-NAL subsample map. Syntax reads remain inside the clear
+     * prefix, and the source tail is carried unchanged into final output.
+     * The general range API below still rejects partially clear borrowed NALs.
+     */
+    fun rewriteInspectedProtectedParts(
+        sample: ByteArray,
+        mapped: ProtectedHevcSampleLayout.NalUnit,
+        sourceSps: HevcParameterSets.SpsMetadata,
+        sourcePps: HevcParameterSets.PpsMetadata,
+        outputSps: HevcParameterSets.SpsMetadata,
+        outputPps: HevcParameterSets.PpsMetadata,
+        destinationAddress: Int,
+        loopFilterAcrossSlicesOverride: Boolean?,
+        preserveOpaqueCabacTail: Boolean
+    ): Parts {
+        require(mapped.nalOffset >= 0 && mapped.nalLength >= 3 &&
+            mapped.nalOffset <= sample.size - mapped.nalLength)
+        var covered = 0
+        var clearPrefix = 0
+        var encounteredProtected = false
+        for (range in mapped.protectionRanges) {
+            require(range.offset == covered && range.lengthBytes > 0 &&
+                range.lengthBytes <= mapped.nalLength - covered)
+            covered = Math.addExact(covered, range.lengthBytes)
+            if (!range.isClear) encounteredProtected = true
+            else if (!encounteredProtected) clearPrefix = covered
+        }
+        require(covered == mapped.nalLength && clearPrefix == mapped.clearNalPrefixBytes)
+        return rewriteToParts(sample, sourceSps, sourcePps, outputSps, outputPps,
+            destinationAddress, clearPrefix, loopFilterAcrossSlicesOverride, null,
+            preserveOpaqueCabacTail, mapped.nalOffset, mapped.nalLength, inspectedProtectedRange = true)
+    }
+
     private fun rewriteToParts(
         nal: ByteArray,
         sourceSps: HevcParameterSets.SpsMetadata,
@@ -140,12 +198,13 @@ internal object HevcSliceHeaderRewriter {
         /** Preserve opaque CBCS CABAC bytes when only the byte-aligned slice header is clear. */
         preserveOpaqueCabacTail: Boolean = false,
         sourceOffset: Int = 0,
-        sourceLength: Int = nal.size
+        sourceLength: Int = nal.size,
+        inspectedProtectedRange: Boolean = false
     ): Parts {
         val nalHeader = HevcBitstream.readNalHeader(nal, sourceOffset, sourceLength)
-        // Range borrowing is for the independently validated clear CMAF path.
-        // Protected callers retain the original complete-NAL / clear-prefix contract.
-        require((sourceOffset == 0 && sourceLength == nal.size) ||
+        // Only the dedicated subsample-validated path can borrow a partially
+        // clear range. Public/general range callers retain the original gate.
+        require(inspectedProtectedRange || (sourceOffset == 0 && sourceLength == nal.size) ||
             (!preserveOpaqueCabacTail && clearNalBytes == sourceLength)) {
             "Borrowed slice range requires a fully clear NAL"
         }

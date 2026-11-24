@@ -17,6 +17,7 @@ internal class FcastConnection(
     val socket: Socket,
     private val onPacket: suspend (FcastProtocol.Packet) -> Unit,
     private val onClosed: (String) -> Unit,
+    val secureSession: PitwallTls.Session? = null,
 ) : AutoCloseable {
     private val closed = AtomicBoolean(false)
     private val outgoing = Channel<FcastProtocol.Packet>(32)
@@ -27,10 +28,11 @@ internal class FcastConnection(
     private var reader: Job? = null
     private var writer: Job? = null
 
-    fun start() {
+    fun start(handshakeTimeoutMs: Int = 20_000) {
         check(reader == null)
         socket.tcpNoDelay = true
-        socket.soTimeout = 20_000
+        require(handshakeTimeoutMs in 20_000..100_000)
+        socket.soTimeout = handshakeTimeoutMs
         writer = scope.launch(Dispatchers.IO) {
             try {
                 BufferedOutputStream(socket.getOutputStream(), ioBufferBytes).use { output ->
@@ -54,6 +56,8 @@ internal class FcastConnection(
             } catch (error: Exception) { finish(error.javaClass.simpleName) }
         }
     }
+
+    fun handshakeComplete() { if (!closed.get()) socket.soTimeout = 20_000 }
 
     fun send(opcode: Int, body: JSONObject? = null) {
         if (!closed.get() && outgoing.trySend(FcastProtocol.Packet(opcode, body)).isFailure) {

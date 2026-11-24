@@ -3,6 +3,8 @@ package app.apexview.cast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
@@ -28,7 +30,7 @@ internal fun PitwallCastSheet(app: AppState) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("Cast to TV", style = Type.title2)
             Text("Pitwall TV · same video layout", style = Type.headline)
-            Text("On the TV, open TV casting → Receive from phone. Use the same Wi-Fi or Ethernet network.", style = Type.footnote)
+            Text("On the TV, open TV casting → Receive from phone. Both devices need this Pitwall version and the same Wi-Fi or Ethernet network.", style = Type.footnote)
             Text(app.localCastDiscoveryStatus, style = Type.subhead)
             app.localCastDevices.forEach { device -> PrimaryButton(device.name, enabled = !app.castBusy) { app.connectLocalCast(device) } }
             SecondaryButton("Search again") { app.startLocalDiscovery() }
@@ -54,4 +56,20 @@ internal fun PitwallCastSheet(app: AppState) {
             Spacer(Modifier.navigationBarsPadding().height(8.dp))
         }
     }
+}
+
+/** No media is sent to an unconfirmed TLS identity. */
+@Composable
+internal fun PitwallPairingDialog(code: String, onDecision: (Boolean) -> Unit, receiver: Boolean = false) {
+    AlertDialog(onDismissRequest = { onDecision(false) },
+        title = { Text(if (receiver) "Confirm the phone connection" else "Confirm the TV connection") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Compare every group with the code on your ${if (receiver) "phone" else "TV"}. Only confirm if they match exactly.")
+                Text(code, style = Type.headline)
+                Text("Also choose Match on your ${if (receiver) "phone" else "TV"}. If the codes differ, cancel on both devices.", style = Type.footnote)
+            }
+        },
+        confirmButton = { TextButton(onClick = { onDecision(true) }) { Text("Match") } },
+        dismissButton = { TextButton(onClick = { onDecision(false) }) { Text("Cancel") } })
 }

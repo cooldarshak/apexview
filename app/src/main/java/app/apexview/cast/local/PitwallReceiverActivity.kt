@@ -80,6 +80,8 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var captionOwnerControl = false
     private var receiverControlsFocused by mutableStateOf(false)
     private var captionLanguageMenu by mutableStateOf(false)
+    private var pendingNativeAudio: Int? = null
+    private var submittedNativeAudio: Int? = null
 
     private fun isBakedPlayback() = playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optBoolean("pitwallBaked") == true
 
@@ -142,6 +144,8 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var server: ServerSocket? = null
     private var advertisement: PitwallAdvertisement? = null
     private var connection: FcastConnection? = null
+    private var pairingCode by mutableStateOf<String?>(null)
+    private var pairingTimeout: kotlinx.coroutines.Job? = null
     private val timingState = CastTimingReceiver()
     private var timingPeer = false
     private var timingReported = false
@@ -225,7 +229,9 @@ class PitwallReceiverActivity : ComponentActivity() {
         listeningJob = lifecycleScope.launch(Dispatchers.IO) {
             var ownedSocket: ServerSocket? = null
             try {
-                val listening = try { ServerSocket(FcastProtocol.PORT, 2) } catch (_: java.io.IOException) { ServerSocket(0, 2) }
+                val identity = PitwallTls.identity()
+                val listening = try { PitwallTls.controlServer(identity, FcastProtocol.PORT) }
+                    catch (_: java.io.IOException) { PitwallTls.controlServer(identity, 0) }
                 ownedSocket = listening
                 withContext(Dispatchers.Main) {
                     if (destroyed) { listening.close(); return@withContext }
@@ -238,8 +244,15 @@ class PitwallReceiverActivity : ComponentActivity() {
                 while (!listening.isClosed) {
                     val socket = listening.accept()
                     var delivered = false
-                    try { withContext(Dispatchers.Main) { accept(socket); delivered = true } }
-                    finally { if (!delivered) runCatching { socket.close() } }
+                    try {
+                        if (socket.inetAddress.isSiteLocalAddress || socket.inetAddress.isLinkLocalAddress) {
+                            val secured = PitwallTls.accept(identity, socket)
+                            withContext(Dispatchers.Main) { accept(secured); delivered = true }
+                        }
+                    } catch (failure: Exception) {
+                        if (failure is kotlinx.coroutines.CancellationException) throw failure
+                        Log.w("PitwallReceiver", "TLS_HANDSHAKE_REJECTED type=${failure.javaClass.simpleName}")
+                    } finally { if (!delivered) runCatching { socket.close() } }
                 }
             } catch (error: Exception) {
                 withContext(Dispatchers.Main) { if (!destroyed && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) status = "Receiver stopped: ${error.javaClass.simpleName}. Reopen to retry." }
@@ -247,7 +260,8 @@ class PitwallReceiverActivity : ComponentActivity() {
         }
     }
 
-    private fun accept(socket: Socket) {
+    private fun accept(secured: PitwallTls.Provisional) {
+        val socket = secured.socket
         if (destroyed || connection != null || !(socket.inetAddress.isSiteLocalAddress || socket.inetAddress.isLinkLocalAddress)) {
             socket.close(); return
         }
@@ -258,14 +272,34 @@ class PitwallReceiverActivity : ComponentActivity() {
         }, { reason ->
             if (connection === next) {
                 connection = null; pending = null; approved = false; versionReceived = false
+                pairingCode = null; pairingTimeout?.cancel(); pairingTimeout = null
                 stopPlayback()
                 status = "Phone disconnected. Ready for another connection."
                 Log.i("PitwallReceiver", "CONNECTION_CLOSED reason=$reason")
             }
-        })
-        connection = next; next.start()
+        }, secureSession = secured.session)
+        connection = next
+        pairingCode = secured.session.code
+        status = "Compare the pairing code on your phone."
+        pairingTimeout?.cancel()
+        pairingTimeout = lifecycleScope.launch {
+            delay(90_000)
+            if (connection === next && pairingCode != null) {
+                pairingCode = null
+                next.close()
+            }
+        }
+    }
+
+    private fun confirmPairing(matches: Boolean) {
+        val next = connection ?: return
+        if (pairingCode == null) return
+        pairingCode = null
+        pairingTimeout?.cancel(); pairingTimeout = null
+        if (!matches) { next.close(); return }
+        next.start(handshakeTimeoutMs = 100_000)
         next.send(FcastProtocol.VERSION, JSONObject().put("version", 3))
-        status = "Phone connected. Waiting for playback request…"
+        status = "Paired securely. Waiting for playback request…"
     }
 
     private suspend fun handle(packet: FcastProtocol.Packet) {
@@ -285,14 +319,15 @@ class PitwallReceiverActivity : ComponentActivity() {
                 FcastProtocol.PING -> connection?.send(FcastProtocol.PONG)
                 FcastProtocol.PONG -> Unit
                 FcastProtocol.INITIAL -> {
-                    require(versionReceived)
+                    require(versionReceived && !pitwallPeer && body?.optInt("pitwallScene") == 1)
+                    connection?.handshakeComplete()
                     senderName = body?.optString("displayName")?.take(80)?.ifBlank { "Phone" } ?: "Phone"
                     pitwallPeer = body?.optInt("pitwallScene") == 1
                     timingPeer = body?.optInt("pitwallOverlays") == 1
                     captionOwnerControl = body?.optInt("pitwallCaptionOwnerControl") == 1
                 }
                 FcastProtocol.PLAY -> {
-                    require(versionReceived && body != null)
+                    require(versionReceived && pitwallPeer && body != null)
                     validatePlay(body)
                     if (approved) play(body) else { pending = body; status = "Allow $senderName to play on this TV?" }
                 }
@@ -309,10 +344,19 @@ class PitwallReceiverActivity : ComponentActivity() {
                         }
                         FcastProtocol.SET_SPEED -> { desiredSpeed = number(body, "speed", 0.25, 4.0).toFloat(); player?.setPlaybackSpeed(desiredSpeed) }
                         FcastProtocol.SET_VOLUME -> { desiredVolume = number(body, "volume", 0.0, 1.0).toFloat(); player?.volume = desiredVolume }
-                        FcastProtocol.UI_CONTROL -> if (body?.optString("action") == "captions") {
-                            if (!CaptionControlProtocol.matchesLoad(requireNotNull(body), playbackId(), captionOwnerControl)) return
-                            val requested = CaptionControlProtocol.decode(body)
-                            setReceiverCaptions(requested.enabled, requested.language)
+                        FcastProtocol.UI_CONTROL -> when (body?.optString("action")) {
+                            "captions" -> {
+                                if (!CaptionControlProtocol.matchesLoad(requireNotNull(body), playbackId(), captionOwnerControl)) return
+                                val requested = CaptionControlProtocol.decode(body)
+                                setReceiverCaptions(requested.enabled, requested.language)
+                            }
+                            "nativeAudio" -> {
+                                val index = NativeAudioControl.decode(requireNotNull(body), playbackId()) ?: return
+                                if (playData?.optJSONObject("metadata")?.optJSONObject("custom")?.has("pitwallAudio") != true) return
+                                pendingNativeAudio = index
+                                submittedNativeAudio = null
+                                player?.let { selectNativeAudio(it, it.currentTracks) }
+                            }
                         }
                         FcastProtocol.TIMING -> if (timingPeer && body != null) {
                             try { timingState.acceptAsync(body, playbackId()) }
@@ -359,6 +403,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         val peer = requireNotNull(connection).socket.inetAddress
         if (ReceiverLicenseRequest.direct(body, pitwallPeer) == null) {
             val origin = ReceiverMediaPolicy.validate(body.getString("url"), peer)
+            require(origin.scheme == "https" && connection?.secureSession != null) { "Pitwall media requires paired TLS" }
             ReceiverMediaPolicy.validateResource(body.getString("url"), peer, origin, pitwallPeer)
         }
         require((body.optJSONObject("headers")?.length() ?: 0) == 0) { "Authorization headers must stay on the phone" }
@@ -400,12 +445,46 @@ class PitwallReceiverActivity : ComponentActivity() {
         }
     }
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    private fun selectNativeAudio(current: ExoPlayer, tracks: androidx.media3.common.Tracks) {
+        val requested = pendingNativeAudio ?: return
+        if (tracks.groups.isEmpty()) return
+        val id = NativeAudioControl.representationId(requested)
+        val choice = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }.flatMap { group ->
+            (0 until group.length).filter { group.isTrackSupported(it) && group.getTrackFormat(it).id == id }
+                .map { group to it }
+        }.singleOrNull()
+        if (choice != null) {
+            val (group, index) = choice
+            if (!group.isTrackSelected(index) && submittedNativeAudio != requested) {
+                submittedNativeAudio = requested
+                current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
+                    .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                    .setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, listOf(index)))
+                    .build()
+                return // Acknowledge only an observed Media3 selection.
+            }
+        }
+        val selected = choice?.let { (group, index) -> group.isTrackSelected(index) } == true
+        pendingNativeAudio = null; submittedNativeAudio = null
+        connection?.send(FcastProtocol.UI_CONTROL, NativeAudioControl.acknowledgment(playbackId(), requested, selected))
+        Log.i("PitwallReceiver", "NATIVE_AUDIO_TRACK_SELECTION index=$requested selected=$selected")
+    }
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun startPlayer(body: JSONObject) {
-        val direct = body.optJSONObject("metadata")?.optJSONObject("custom")?.optBoolean("pitwallDirect") == true
+        val custom = body.optJSONObject("metadata")?.optJSONObject("custom")
+        val direct = custom?.optBoolean("pitwallDirect") == true
+        submittedNativeAudio = null
+        pendingNativeAudio = custom?.optInt("pitwallAudio", -1)?.takeIf { it in 0..5 }
         val data: DataSource.Factory = if (direct) requireNotNull(widevine).mediaHttp else {
         val peer = requireNotNull(connection).socket.inetAddress
         val origin = ReceiverMediaPolicy.validate(body.getString("url"), peer)
-        val upstream = OkHttpDataSource.Factory(receiverHttp)
+        val tls = requireNotNull(connection?.secureSession)
+        val pinnedHttp = receiverHttp.newBuilder()
+            .sslSocketFactory(tls.socketFactory, tls.trustManager)
+            .hostnameVerifier { host, _ -> host.equals(peer.hostAddress?.substringBefore('%'), true) }
+            .build()
+        val upstream = OkHttpDataSource.Factory(pinnedHttp)
         val scopedPitwallPeer = pitwallPeer
         val data = DataSource.Factory {
             val source = upstream.createDataSource()
@@ -483,6 +562,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         next.addListener(object : Player.Listener {
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
                 if (player !== next) return
+                selectNativeAudio(next, tracks)
                 val supported = buildList<Pair<String?, String?>> {
                     tracks.groups.forEach { group ->
                         if (group.type == C.TRACK_TYPE_TEXT) {
@@ -622,6 +702,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         active = false
         timingState.clear(); timingReported = false; lastTimingHealthAtMs = -1L
         receiverCaptionTracks = emptyList(); receiverCaptionTrackCount = 0
+        pendingNativeAudio = null; submittedNativeAudio = null
         sceneView?.release(); sceneView = null
         protectedSceneView?.release(); protectedSceneView = null
         sceneCodecCorrelation?.shutdown()
@@ -791,6 +872,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             },
             confirmButton = { TextButton(onClick = { captionLanguageMenu = false; showReceiverControls() }) { Text("Close") } }
         )
+        pairingCode?.let { code -> app.apexview.cast.PitwallPairingDialog(code, ::confirmPairing, receiver = true) }
         pending?.let { request -> AlertDialog(onDismissRequest = { deny() }, title = { Text("Play from $senderName?") },
             text = { Text("This phone can control playback until it disconnects. Protected feeds use the F1 TV subscription signed in on this TV.") },
             confirmButton = { TextButton(onClick = { approved = true; pending = null; try { play(request) } catch (e: Exception) { fail(e.message ?: "Unable to play") } }) { Text("Allow") } },
@@ -825,6 +907,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         listeningJob?.cancel(); listeningJob = null
         val previous = connection; connection = null; previous?.close()
         pending = null; approved = false; versionReceived = false
+        pairingCode = null; pairingTimeout?.cancel(); pairingTimeout = null
         stopPlayback()
         super.onStop()
     }

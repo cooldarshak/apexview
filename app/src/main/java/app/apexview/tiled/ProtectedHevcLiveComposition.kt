@@ -955,6 +955,7 @@ internal object ProtectedHevcLiveComposition {
 
         val composedSamples = mutableListOf<ProtectedHevcCmafFragmentWriter.Sample>()
         val outputBytesToClear = mutableListOf<ByteArray>()
+        val plannedPictures = mutableListOf<ProtectedHevcPictureComposer.PlannedPicture>()
         try {
             val pictureComposeStartedNs = System.nanoTime()
             var previousDecodeTime: Long? = null
@@ -988,7 +989,7 @@ internal object ProtectedHevcLiveComposition {
                             buffered.picture.fragmentBaseDecodeTimeTicks
                     )
                 }
-                val composed = ProtectedHevcPictureComposer.compose(
+                val composed = ProtectedHevcPictureComposer.plan(
                     feeds = feedSamples,
                     outputSps = outputSps,
                     outputPps = outputPps,
@@ -998,7 +999,7 @@ internal object ProtectedHevcLiveComposition {
                     fullPictureColumns = if (session.fullPictures && mixedPlan == null) gridColumns else null,
                     mixedCells = mixedPlan?.cells,
                 )
-                outputBytesToClear += composed.sampleBytes
+                plannedPictures += composed
                 val masterBuffered = session.feeds.getValue(masterFeedId).picturesByOrdinal[
                     match.sampleEvidenceByFeed.getValue(masterFeedId).sequenceSampleOrdinal
                 ] ?: throw IllegalArgumentException("main-feed protected sample bytes are unavailable")
@@ -1014,13 +1015,14 @@ internal object ProtectedHevcLiveComposition {
                 val ivBytes = masterBuffered.perSampleIvBytes?.copyOf()
                 ivBytes?.let(outputBytesToClear::add)
                 composedSamples += ProtectedHevcCmafFragmentWriter.Sample(
-                    sampleBytes = composed.sampleBytes,
+                    sampleBytes = ByteArray(0),
                     subsampleRanges = composed.subsampleRanges,
                     perSampleIvBytes = ivBytes,
                     perSampleIvIdentity = masterBuffered.perSampleIvIdentity,
                     durationTicks = composed.durationTicks,
                     sampleFlags = composed.sampleFlags,
-                    compositionOffsetTicks = composed.compositionOffsetTicks
+                    compositionOffsetTicks = composed.compositionOffsetTicks,
+                    plannedPayload = composed.payload
                 )
             }
 
@@ -1104,8 +1106,10 @@ internal object ProtectedHevcLiveComposition {
                 "outputBytes=${newOutput.mediaFragment.size} retainedSegments=${session.outputHistory.size} " +
                 "retainedBytes=${session.outputHistory.sumOf { it.mediaFragment.size.toLong() }} " +
                 "processAllocBytesDuringSegment=${allocated ?: -1L} processGcDuringSegment=${collections ?: -1L} " +
+                "protectedSampleStagingBytesAvoided=${plannedPictures.sumOf { it.payload.size.toLong() }} " +
                 "protectedPayloadUnmodified=true")
         } finally {
+            plannedPictures.forEach { it.close() }
             outputBytesToClear.forEach { it.fill(0) }
         }
         } finally {

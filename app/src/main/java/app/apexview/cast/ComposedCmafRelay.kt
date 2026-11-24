@@ -15,10 +15,12 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Bounded peer-only HTTP publication of unchanged CBCS CMAF and its public DRM metadata. */
-internal class ComposedCmafRelay(address: String, private val peer: InetAddress?, private val liveHls: Boolean = false) : AutoCloseable {
+internal class ComposedCmafRelay(address: String, private val peer: InetAddress?, private val liveHls: Boolean = false,
+                                 tls: app.apexview.cast.local.PitwallTls.Session? = null) : AutoCloseable {
     private val token = ByteArray(24).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
-    private val server = ServerSocket(0, 16, CastRelayBinding.address(address))
-    val url = "http://$address:${server.localPort}/p/$token/" + if (liveHls) "live.m3u8" else "manifest.mpd"
+    private val server = tls?.mediaServer(CastRelayBinding.address(address))
+        ?: ServerSocket(0, 16, CastRelayBinding.address(address))
+    val url = "${if (tls == null) "http" else "https"}://$address:${server.localPort}/p/$token/" + if (liveHls) "live.m3u8" else "manifest.mpd"
     private val accepting = Executors.newSingleThreadExecutor()
     private val workers = ThreadPoolExecutor(3, 3, 0, TimeUnit.SECONDS, ArrayBlockingQueue(6))
     private val sockets = ConcurrentHashMap.newKeySet<Socket>()

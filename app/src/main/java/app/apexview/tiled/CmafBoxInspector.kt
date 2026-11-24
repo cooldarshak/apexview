@@ -296,8 +296,20 @@ internal object CmafBoxInspector {
                 val boxEnd = stsdBox.start.toLong() + stsdBox.size
                 if (entrySize >= 8 && entryEndLong <= boxEnd && entryEndLong <= data.size.toLong()) {
                     val entryEnd = entryEndLong.toInt()
-                    val childStart = entryStart + 8 + if (handler == "vide" ||
-                        sampleEntry in setOf("avc1", "avc3", "hvc1", "hev1", "encv", "dvhe", "dvh1")) 78 else 28
+                    val childStart = when {
+                        sampleEntry == "wvtt" -> entryStart + 16
+                        sampleEntry == "stpp" -> {
+                            var cursor = entryStart + 16
+                            repeat(3) {
+                                while (cursor < entryEnd && data[cursor] != 0.toByte()) cursor++
+                                require(cursor < entryEnd) { "Truncated TTML sample entry" }
+                                cursor++
+                            }
+                            cursor
+                        }
+                        handler == "vide" || sampleEntry in setOf("avc1", "avc3", "hvc1", "hev1", "encv", "dvhe", "dvh1") -> entryStart + 86
+                        else -> entryStart + 36
+                    }
                     if (childStart <= entryEnd) {
                         val entryChildren = parseBoxes(data, childStart, entryEnd, 1, intArrayOf(0), errors)
                         all += entryChildren.flatMap { flatten(it) }
