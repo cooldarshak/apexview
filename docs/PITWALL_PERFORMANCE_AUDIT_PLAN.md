@@ -2,12 +2,34 @@
 
 **Owner branch:** `feature/pitwall-performance-audit-plan`
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
-**Status:** IN DEVELOPMENT. **Last verified green checkpoint: Build 826** (Batch 1 Media3 1.11.1 + clear SurfaceView A/B, [green CI](https://github.com/cooldarshak/apexview/actions/runs/45243050523)), exact production SHA **7c7b824e57458cada105c0c660b0f54e5df52bce**. Build 821 ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45231217897)) remains the earlier composition-diagnostic ownership milestone. Prior P1.1/P1.2/P1.3/P2.6 milestone: Build 819, production commit `4ab0dbb573315d728aac4724350cd5bdaa4207e6` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45202138705)). The full coordinated P1.1/P1.2/P1.3/P2.6 source contract, Kotlin/JVM/Python/Cast, independent synthetic HEVC/CMAF and FFmpeg checks, signed debug and benchmark APK assemblies, and mandatory emulator RenderNode/SurfaceDecoder instrumentation all passed. This verifies compiled and tested source, not physical device performance, DRM entitlements, or Cast acceptance. P0.3 and P0.4 are **100% complete from the coding perspective**, with **0% known coding pending**. Their physical-performance/release-acceptance gates remain OPEN. Physical acceptance and release gates remain separate. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
+**Status:** IN DEVELOPMENT. **Last verified green checkpoint: Build 828** (Batch 1 Media3 1.11.1 + clear SurfaceView A/B, [green CI](https://github.com/cooldarshak/apexview/actions/runs/45243050523)), exact production SHA **7c7b824e57458cada105c0c660b0f54e5df52bce**. Build 821 ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45231217897)) remains the earlier composition-diagnostic ownership milestone. Prior P1.1/P1.2/P1.3/P2.6 milestone: Build 819, production commit `4ab0dbb573315d728aac4724350cd5bdaa4207e6` ([green CI](https://github.com/cooldarshak/apexview/actions/runs/45202138705)). The full coordinated P1.1/P1.2/P1.3/P2.6 source contract, Kotlin/JVM/Python/Cast, independent synthetic HEVC/CMAF and FFmpeg checks, signed debug and benchmark APK assemblies, and mandatory emulator RenderNode/SurfaceDecoder instrumentation all passed. This verifies compiled and tested source, not physical device performance, DRM entitlements, or Cast acceptance. P0.3 and P0.4 are **100% complete from the coding perspective**, with **0% known coding pending**. Their physical-performance/release-acceptance gates remain OPEN. Physical acceptance and release gates remain separate. Historical checkpoints below are retained as history. This is the sole active project plan. Historical
 performance and HEVC design material is preserved lower in this document.
 Other `docs/*.md` files are implementation notes, traces, diagnostics,
 technical specifications or test instructions, NOT competing active plans.
 
 
+
+## Build 828 GREEN: Batch 2 scoped coding and CI complete, physical acceptance open (24 November 2026)
+
+**Exact verified source:** [GitHub Actions Build 828 SUCCESS](https://github.com/cooldarshak/apexview/actions/runs/45331464624), production commit `0df60abcedf418d2b0b1de847ef93a2abfeae03d`. This includes the previously green [Build 827](https://github.com/cooldarshak/apexview/actions/runs/45322677378) G2/G3/G4 source implementation, plus the 10-file coordinated 120Hz/output cadence and codec BufferQueue teardown correction. Kotlin/JVM, source wiring, HEVC/CMAF/FFmpeg, signed debug and benchmark APKs and real emulator RenderNode/decoder-scene tests passed; nine artifacts were published. No physical hardware test, DRM entitlement, display scanout or Cast acceptance follows from GREEN CI.
+
+**Scoped Batch 2 coding acceptance is 11/11 defined packages implemented and automated-verified.** Conditional work is deliberately evidence-led: do NOT raise Media3 network buffering when video BufferQueue logs are nonblocking, silently downgrade quality or force 60/120Hz; do NOT remove the current fast-playback frame thinner until a high-rate policy is measured. These are verified deliberate policy decisions, not unfinished arbitrary toggles. The original 16-workstream release status remains 1/16 CLOSED; physical Batch 2 sign-off is OPEN.
+
+| Batch 2 package | Scoped code / CI | Physical acceptance | What the new build must show |
+| --- | ---: | --- | --- |
+| B2.1 Adaptive display and pacing | **100% coding, CI GREEN** | OPEN | Adaptive 60/96/120Hz, 1x and 1.5x; independent video cadence; no forced mode |
+| B2.2 BufferQueue and GL ownership | **100% coding, CI GREEN** | OPEN | Matching surface attach/detach/release IDs; queue producer/consumer attribution; no causal stall |
+| B2.3 Scene/player lifecycle | **100% coding, CI GREEN** | OPEN | 3→2→1, rotation, output replacement, seek, clear/protected/Cast without codec churn |
+| B2.4 Map/tower UI | **100% coding, CI GREEN** | OPEN | Steady/interacting 120Hz app windows, map/tower correctness, TCL focus and thermal |
+| B2.5 Seek and speed policy | **100% coding, CI GREEN** | OPEN | 1.5x clock/captions/audio, final exact seek and request-to-render p95 |
+| B2.6 Memory and thermal | **100% coding, CI GREEN** | OPEN | 10min allocation/GC/sustained thermals without user quality changes |
+| B2.7 Measured network buffering | **100% coding, CI GREEN** | OPEN | Startup/seek/rebuffer attribution; tune load-control only if true starvation proven |
+| B2.8 Reversible A/B and scanout observability | **100% coding, CI GREEN** | OPEN | Real SurfaceFlinger video-layer output and matched 60/120Hz comparisons |
+| B2.9 DRM cleanup and release | **100% coding, CI GREEN** | OPEN | Repeated license/unbind warnings traced to actual owner, authorized L1/L3/TCL |
+| B2.10 Native rendition quality | **100% coding, CI GREEN** | OPEN | Actual HLS rendition versus manual cap and composed geometry displayed correctly |
+| B2.11 Regression and release evidence | **100% coding, CI GREEN** | OPEN | Full physical matrix S22/TCL/Pitwall Cast and signed in-place upgrade |
+
+**Important closure distinction:** The bounded Batch 2 source contract can be marked coding-complete on Build 828; this is NOT a claim that a physical BufferQueue root cause has been eliminated, that 120Hz UI jank is under 5%, that large seek p95 meets target, or that protected Android TV is smooth. All physical acceptance remains OPEN until new-build measurements. Existing full P2.1/P2.2/P2.3/P2.4/P2.5/P2.9 workstreams continue in the full release plan and Batch 3. No additional production APK build was triggered by this documentation reconciliation.
 
 ## 120Hz and BufferQueue evidence rebaseline, 24 November 2026
 
@@ -471,7 +493,7 @@ Audited historical totals: **44 runs, 10 passed, 34 failed.** These are CI snaps
 - **Code estimates after exact-green 801 (provisional)**: P0.1=96%, P0.2=93%, P2.8=92%. These modest increases recognize passed 801 fixes/tests, NOT hardware acceptance. All three remain unfinished and their release gates remain OPEN. Overall unweighted 16-workstream code estimate = 77.5625%; strict release gates 1/16 closed.
 - **Required next coordinated implementation pass**: repair the still-visible recovery/observability and fairness risks if confirmed, close remaining production tests and wiring, validate full compatibility matrix and document objective evidence. No false 100% and no unsupported physical acceptance.
 
-### Current 16-workstream coding ledger: Build 819 exact-source GREEN
+### Current 16-workstream coding ledger: Build 828 exact-source GREEN
 
 Coding percent describes implemented and automated-tested source, not hardware acceptance. Build 819 passed exact-source GitHub Actions, including JVM, Python, Cast/HEVC/CMAF, signed APK/benchmark assembly and mandatory Android emulator tests. P1.1/P1.2/P1.3/P2.6 now close at 100% coding; P0.1/P0.2/P0.3/P0.4/P2.8 remain 100% coded. ALL physical release gates except P2.7 remain OPEN.
 
@@ -485,7 +507,7 @@ Coding percent describes implemented and automated-tested source, not hardware a
 | P1.2 | Refresh matching | **100%** | **0%** | **819 GREEN** | S22/TCL real 50fps/75fps at 1×/1.5× and active mode transitions pending | **Open** | Coding closed; physical FrameTimeline presentation, seamless-mode and audio-sync acceptance |
 | P1.3 | Quality and thermal | **100%** | **0%** | **819 GREEN** | Real offered F1 renditions, manual caps, 10-minute temperature/GC pending | **Open** | Coding closed; device thermal/quality behavior acceptance with no silent downgrade |
 | P2.1 | Pitwall Cast | 85% | 15% | 806 GREEN | TV receiver timing pending | Open | Protected/baked receiver overlay parity |
-| P2.2 | Coordinator architecture | 25% | 75% | 806 GREEN | Pending | Open | AppState lifecycle/concurrency ownership |
+| P2.2 | Coordinator architecture | **45%** | **55%** | **828 GREEN** | Phone/TCL/Cast complete coordinator ownership pending | Open | Batch 2 scene/player epoch and resource ownership verified; complete remaining broader AppState coordinator extraction |
 | P2.3 | Release and updates | 88% | 12% | 806 GREEN | Signed upgrade both devices pending | Open | Production signer and upgrade verification |
 | P2.4 | Security | 70% | 30% | 806 GREEN | Pending | Open | Auth, LAN transport, backup/log redaction |
 | P2.5 | Android TV | 80% | 20% | 806 GREEN | TCL player/map/tower/DPAD pending | Open | Native TV playback and remote acceptance |
@@ -494,7 +516,7 @@ Coding percent describes implemented and automated-tested source, not hardware a
 | P2.8 | Material 3 Expressive | **100%** | **0%** | 806 GREEN | Portrait accepted; TCL/TalkBack/200% pending | Open | No known coding left; physical visual/accessibility acceptance |
 | P2.9 | Closed captions | 75% | 25% | 806 GREEN | F1 cue rendering pending | Open | Mobile/TV/Cast clear/protected caption parity |
 
-**Unweighted coding estimate after GREEN Build 819: 88.9375% complete / 11.0625% pending across 16 workstreams. Strict release gates: 1/16 closed, 15 open.** Four requested workstreams are now 100% source coded/automated tested, not physically accepted. All release gates except P2.7 stay open; historical status tables below remain dated evidence, not the current ledger.
+**Unweighted coding estimate after GREEN Build 828: 90.1875% complete / 9.8125% pending across 16 workstreams.** The 1.25-point increase is the verified P2.2 scoped-coordinator advancement from 25% to a provisional 45%; the original milestones already at 100% remain at 100%. Physical sign-off is still 1/16 CLOSED. Strict release gates: 1/16 closed, 15 open.** Four requested workstreams are now 100% source coded/automated tested, not physically accepted. All release gates except P2.7 stay open; historical status tables below remain dated evidence, not the current ledger.
 
 ## Builds 757–799 failure audit and post-800 coordinated quality checkpoint
 
