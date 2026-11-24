@@ -22,7 +22,7 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("private val compositionDiagnosticOwner = CompositionDiagnosticOwner()", app)
         self.assertEqual(
             2,
-            app.count("if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || f1DashCapture !== capture) return")
+            app.count("if (!compositionDiagnosticOwner.isOwner(diagnosticGeneration) || playbackWork.capture !== capture) return")
         )
         self.assertIn("compositionDiagnosticOwner.invalidate()", app)
         remove = app.split("    fun remove(tile: Tile) {", 1)[1].split("\n    fun stopAll()", 1)[0]

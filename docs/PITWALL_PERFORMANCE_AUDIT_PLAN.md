@@ -9,6 +9,10 @@ technical specifications or test instructions, NOT competing active plans.
 
 
 
+## Build 836 CI correction
+
+Build 836 stopped at the Python production-wiring suite (80 of 81 tests passed). The active composition diagnostic test counted two occurrences of the old f1DashCapture variable, renamed to playbackWork.capture in the preceding coordinator extraction. Both production identity fences are present. Update the exact two-occurrence assertion to the new owner field; do not skip or weaken the test. Kotlin compilation, TLS loopback and APK assembly did not run in 836. Exact-source CI remains pending; all earlier physical and engineering gates remain unchanged.
+
 ## Post-835 failure correction and lifecycle continuation
 
 Build 835 compiled but failed in the JVM tests: 841/842 passed. Conscrypt on JDK 21 reflectively accesses java.net.InetAddress.holder() during the real mutual-TLS loopback. APK assembly and emulator tests were skipped. Open java.net only in the forked unit-test JVM; Android TLS, pairing, pinning and Widevine remain unchanged. Real mutual TLS and wrong-peer rejection remain mandatory. Failed accepted TLS sockets are closed.
