@@ -109,6 +109,8 @@ jobs:
             lib="$report/abi/$abi/libpitwall_g0.so"
             test -s "$lib"
             readelf -h -l -n "$lib" > "$report/$abi-elf.txt"
+            # Reject missing build IDs before expensive Gradle work.
+            python3 ../../scripts/architecture_g0_build_id.py "$report/$abi-elf.txt" | tee "$report/$abi-prepackage-build-id.txt"
             if [[ "$abi" == arm64-v8a || "$abi" == x86_64 ]]; then
               python3 -c 'import sys; lines=open(sys.argv[1]).read().splitlines(); rows=[lines[i+1].split()[-1] for i,l in enumerate(lines) if l.strip().startswith("LOAD")]; assert rows and all(int(v,16)>=16384 for v in rows), rows' "$report/$abi-elf.txt"
             fi

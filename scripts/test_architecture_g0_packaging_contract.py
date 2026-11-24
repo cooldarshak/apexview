@@ -1,6 +1,7 @@
 """Ensure the G.0 debug-only probe and existing regression gates stay wired."""
 import pathlib
 import unittest
+from architecture_g0_build_id import build_id, verify
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 class ArchitectureG0PackagingContract(unittest.TestCase):
@@ -19,6 +20,36 @@ class ArchitectureG0PackagingContract(unittest.TestCase):
         self.assertIn("ArchitectureG0AndroidTest",script)
         self.assertIn('OK (3 tests)',script)
         self.assertIn("G0 signed upgrade/data retention PASS",script)
+
+    def test_build_id_linker_and_early_gate(self):
+        build = (ROOT/"native/architecture-g/build.rs").read_text()
+        wf = (ROOT/".github/workflows/android-debug-apk.yml").read_text()
+        verifier = (ROOT/"scripts/verify_architecture_g0_apk.sh").read_text()
+        self.assertIn("cargo:rustc-link-arg-cdylib=-Wl,--build-id=sha1", build)
+        self.assertIn('Ok("android")', build)
+        self.assertLess(wf.index("architecture_g0_build_id.py"), wf.index("name: Set up Gradle"))
+        self.assertIn("architecture_g0_build_id.py", verifier)
+        self.assertIn("llvm-addr2line", verifier)
+
+    def test_missing_build_id_reproduces_build_844_failure(self):
+        # Build 844 unstripped and packaged notes contained only Android ident.
+        notes = "Displaying notes found in: .note.android.ident\n  Android  0x00000084  NT_ANDROID_TYPE_IDENT\n"
+        with self.assertRaisesRegex(ValueError, "found 0"):
+            verify(notes, notes)
+
+    def test_valid_id_and_package_mismatch(self):
+        identity = "ab" * 20
+        notes = "Displaying notes found in: .note.gnu.build-id\n    Build ID: " + identity + "\n"
+        self.assertEqual(identity, verify(notes, notes.upper().replace("BUILD ID:", "Build ID:")))
+        with self.assertRaisesRegex(ValueError, "differs"):
+            verify(notes, notes.replace(identity, "cd" * 20))
+        with self.assertRaisesRegex(ValueError, "found 0"):
+            verify(notes, "Android ident only")
+        for value in ("0" * 40, "bad", "ab" * 19):
+            with self.assertRaises(ValueError):
+                build_id("Build ID: " + value)
+        with self.assertRaisesRegex(ValueError, "found 2"):
+            build_id(notes + notes)
 
     def test_only_jni_module_can_use_unsafe(self):
         lib=(ROOT/"native/architecture-g/src/lib.rs").read_text()

@@ -48,12 +48,25 @@ for abi in armeabi-v7a arm64-v8a x86 x86_64; do
     packed="$report/packaged/$abi/libpitwall_g0.so"
     "$ndk/llvm-readelf" -n "$full" > "$report/$abi-unstripped-build-id.txt"
     "$ndk/llvm-readelf" -n "$packed" > "$report/$abi-packaged-build-id.txt"
-    grep 'Build ID:' "$report/$abi-unstripped-build-id.txt" > "$report/$abi-build-id.txt"
-    grep 'Build ID:' "$report/$abi-packaged-build-id.txt" | diff - "$report/$abi-build-id.txt"
+    echo "G0 checking native build ID and symbolication: $abi"
+    python3 scripts/architecture_g0_build_id.py \
+        "$report/$abi-unstripped-build-id.txt" "$report/$abi-packaged-build-id.txt" \
+        | tee "$report/$abi-build-id.txt"
     "$ndk/llvm-nm" --defined-only --dynamic "$full" > "$report/$abi-symbols.txt"
     address="$(awk '$3=="Java_app_apexview_tiled_ArchitectureG0Probe_nativeConvert"{print $1}' "$report/$abi-symbols.txt")"
-    test -n "$address"
+    if [[ ! "$address" =~ ^[0-9a-fA-F]+$ ]]; then
+        echo "G0 $abi: missing or ambiguous nativeConvert symbol" >&2
+        exit 1
+    fi
+    # ARM32 function symbols may carry the Thumb-state bit in st_value.
+    if [[ "$abi" == armeabi-v7a ]]; then
+        address="$(printf '%x' "$((16#$address & ~1))")"
+    fi
     "$ndk/llvm-addr2line" -f -C -e "$full" "0x$address" > "$report/$abi-symbolication.txt"
-    grep -F 'jni_bridge.rs:' "$report/$abi-symbolication.txt"
+    if ! grep -F 'jni_bridge.rs:' "$report/$abi-symbolication.txt"; then
+        cat "$report/$abi-symbolication.txt" >&2
+        echo "G0 $abi: nativeConvert did not resolve to its Rust source" >&2
+        exit 1
+    fi
 done
 echo "G0 packaging, signature, alignment and symbolication PASS"

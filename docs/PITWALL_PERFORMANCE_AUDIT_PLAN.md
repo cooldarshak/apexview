@@ -14,6 +14,8 @@ On `feature/architecture-g-rust-stitching` only, G.0 initial feasibility work be
 
 G.0 second batch on the dedicated branch: diagnostic JNI-RS/DirectByteBuffer, real clear fixture differential test, debug native packaging, signed upgrade/ABI/alignment and symbolication gates added; exact CI/physical evidence pending. Build 843 remains verified green; no player/DRM/feature changes or release acceptance claims. See the G ledger for detail.
 
+Build 844 failed at the new native crash-symbol gate: all four Rust/NDK libraries lacked GNU build IDs. Exact artifact inspected; signed APK identity, version, native library packaging and ZIP alignment passed. Android-only linker flag, early build-ID checks and regression tests added in the dedicated branch. Build 843 remains the verified green baseline; no release acceptance or player change. See G ledger.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |
