@@ -130,6 +130,13 @@ class HevcClearCmafGridComposerTest {
         assertTrue(output.packageCpuMs >= 0)
         assertTrue(output.cmafInspectorMs >= 0)
         assertTrue(output.nalInspectorMs >= 0)
+        if (!System.getenv("PITWALL_G0_SLICE_DIR").isNullOrBlank()) {
+            println("G0 JVM real two-feed grid sampleCount=${output.sampleCount} " +
+                "parseCpuMs=${output.parseCpuMs} rewriteCpuMs=${output.rewriteCpuMs} " +
+                "packageCpuMs=${output.packageCpuMs} cmafInspectorMs=${output.cmafInspectorMs} " +
+                "nalInspectorMs=${output.nalInspectorMs} sourceCopyAvoided=${output.sourceNalCopyBytesAvoided} " +
+                "rewrittenTailStagingAvoided=${output.rewrittenTailStagingBytesAvoided}")
+        }
 
         // A session validates each exact rendition's init once. Reusing that immutable
         // metadata must not change a single output byte or weaken fragment checks.

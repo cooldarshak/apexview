@@ -72,6 +72,11 @@ class ArchitectureG0PackagingContract(unittest.TestCase):
         self.assertIn("g0-encrypted-stage-",wf)
         self.assertIn("architecture_g0_stage.py unpack",wf)
         self.assertIn("cmaf_bench",wf)
+        self.assertIn("cmaf_control.cpp",wf)
+        self.assertIn("slice_bench",wf)
+        self.assertIn("PITWALL_G0_SLICE_DIR",wf)
+        self.assertIn("pitwall-cargo-ndk-v1-",wf)
+        self.assertIn("cargo install cargo-ndk --version 4.1.2 --locked",wf)
 
     def test_only_jni_module_can_use_unsafe(self):
         lib=(ROOT/"native/architecture-g/src/lib.rs").read_text()

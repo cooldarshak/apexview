@@ -24,6 +24,8 @@ Build 847 GREEN but 22m24s, slower than 846. Dedicated G branch candidate freeze
 
 Build 848 stopped on the existing publication contract regression before APK assembly. Updated the regression to enforce both legacy and parallel workflows, including all four artifact gates. Exact targeted preflight passed; full CI pending. No test suppression.
 
+Build 849 GREEN in 15m15s, all five jobs successful. Sixth G.0 batch adds clear slice rewrite with JVM-validated descriptors, matched C++ CMAF control and pinned cargo-ndk tool cache. Physical baseline now requested on green 849. No production change. See G ledger.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |

@@ -227,6 +227,47 @@ class HevcSliceHeaderRewriterTest {
         }
     }
 
+    @Test
+    fun exportsClearSliceFeasibilityFixtures() {
+        val root = System.getenv("PITWALL_G0_SLICE_DIR")?.let { java.io.File(it) } ?: return
+        val sourceSps = HevcParameterSets.parseSps(nal(33, spsBits(1920, 1080)))
+        val outputSps = HevcParameterSets.parseSps(nal(33, spsBits(3840, 1080)))
+        val sourcePps = HevcParameterSets.parsePps(nal(34, ppsBits(0, tiles = false)), sourceSps)
+        val outputPps = HevcParameterSets.parsePps(nal(34, ppsBits(1, tiles = true)), outputSps)
+        val ctbs = outputSps.picWidthInCtbs * outputSps.picHeightInCtbs
+        val addressBits = 32 - Integer.numberOfLeadingZeros(ctbs - 1)
+        for (size in listOf(16, 4096, 128 * 1024)) {
+            val payload = ByteArray(size) { i -> if (i % 193 in 10..12) 0 else (i % 251).toByte() }
+            val source = nal(1, pSliceBits() + byteArrayOf(0x12, 0x34, 0x56) + payload)
+            val parsed = HevcSliceHeaderParser.parse(source, sourceSps, sourcePps)
+            for (address in listOf(0,30)) {
+                val dir = java.io.File(root, "bytes-$size-address-$address")
+                check(dir.mkdirs() || dir.isDirectory)
+                val span = HevcBitstream.NalSpan(source,0,source.size)
+                fun rewrite() = HevcSliceHeaderRewriter.rewriteClearParts(span,sourceSps,sourcePps,
+                    outputSps,outputPps,address,null,parsed)
+                val expected = rewrite().use { it.materialize() }
+                val out = ByteArray(expected.size)
+                java.io.File(dir,"source.bin").writeBytes(source)
+                java.io.File(dir,"expected.bin").writeBytes(expected)
+                java.io.File(dir,"syntax.txt").writeText(listOf(parsed.sourceAddressEndBit,
+                    parsed.entryPointFieldStartBit,parsed.entryPointFieldEndBit,parsed.alignmentStartBit,
+                    parsed.bitsConsumed/8,address,addressBits,outputPps.ppsId,
+                    if(outputPps.dependentSliceSegmentsEnabled) 1 else 0,
+                    if(outputPps.tilesEnabled) 1 else 0,
+                    if(parsed.noOutputOfPriorPictures == true) 1 else 0).joinToString(" ")+"\n")
+                repeat(32) { rewrite().use { it.copyInto(out,0) } }
+                val times=LongArray(101) {
+                    val start=System.nanoTime()
+                    repeat(16) { rewrite().use { it.copyInto(out,0) } }
+                    (System.nanoTime()-start)/16
+                }.sorted()
+                assertArrayEquals(expected,out)
+                println("G0 clear slice jvm case=${dir.name} bytes=${source.size} p50Ns=${times[50]} p95Ns=${times[95]} p99Ns=${times[99]} maxNs=${times[100]} prevalidatedSyntax=true")
+            }
+        }
+    }
+
     private fun assertRejected(expectedText: String, action: () -> Unit) {
         try {
             action()
