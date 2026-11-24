@@ -363,20 +363,52 @@ class ProductionWiringTests(unittest.TestCase):
 
     def test_ci_never_assembles_or_publishes_an_apk_after_failure(self):
         workflow = contents(".github/workflows/android-debug-apk.yml")
-        assemble = re.search(
-            r"- name: Assemble debug APK\s+id: assemble_apks\s+if: success\(\)",
-            workflow,
-        )
-        self.assertIsNotNone(assemble)
+        build, rest = workflow.split("\n  g0_emulator:\n", 1)
+        matrix, publish = rest.split("\n  g0_publish:\n", 1)
+        self.assertRegex(build,
+            r"- name: Assemble debug APK\s+id: assemble_apks\s+if: success\(\)")
         self.assertNotIn("if: always() && !cancelled()", workflow)
         self.assertIn("cancel-in-progress: true", workflow)
-        self.assertIn("if: success() && steps.assemble_apks.outcome == 'success' && env.APK_SIGNING_READY == 'true'", workflow)
-        self.assertIn("Execute native RenderNode recording and replay instrumentation", workflow)
-        self.assertLess(workflow.index("- name: Execute native RenderNode recording and replay instrumentation"),
-                        workflow.index("- name: Upload debug APK"))
+        legacy = "github.ref != 'refs/heads/feature/architecture-g-rust-stitching'"
+        self.assertIn("if: " + legacy + " && success() && steps.assemble_apks.outcome == 'success' && env.APK_SIGNING_READY == 'true'", build)
+        self.assertLess(build.index("- name: Execute native RenderNode recording and replay instrumentation"),
+                        build.index("- name: Upload debug APK"))
+        self.assertIn("needs: build", matrix)
+        self.assertIn("needs.build.result == 'success'", matrix)
+        self.assertIn("fail-fast: false", matrix)
+        self.assertIn("max-parallel: 3", matrix)
+        for api in (29, 31, 36):
+            self.assertIn(f"- api: {api}", matrix)
+        self.assertIn("scripts/run_rendernode_instrumentation.sh", matrix)
+        self.assertIn("needs: [build, g0_emulator]", publish)
+        self.assertIn("needs.build.result == 'success'", publish)
+        self.assertIn('test "$MATRIX_RESULT" = success', publish)
+        gate = "success() && needs.g0_emulator.result == 'success'"
+        restore = publish.split("- name: Restore verified APKs only after all gates", 1)[1].split("- name:", 1)[0]
+        self.assertIn(gate, restore)
+        self.assertIn("architecture_g0_stage.py unpack", restore)
+        names = ("apexview-custom-debug-apk", "pitwall-benchmark-target-apk",
+                 "pitwall-macrobenchmark-instrumentation", "apexview-hevc-single-decoder-instrumentation")
+        def uploads(job, artifact):
+            return [step for step in job.split("      - name: ")
+                    if "uses: actions/upload-artifact@" in step
+                    and "name: " + artifact + "\n" in step]
+        for name in names:
+            legacy_steps = uploads(build, name)
+            self.assertEqual(len(legacy_steps), 1)
+            self.assertIn(legacy + " && success()", legacy_steps[0])
+            steps = uploads(publish, name)
+            self.assertEqual(len(steps), 1)
+            self.assertIn(gate, steps[0])
+            self.assertFalse(uploads(matrix, name))
+        stage = build.split("- name: Upload encrypted internal test bundle", 1)[1].split("- name:", 1)[0]
+        self.assertIn("g0-stage.gpg", stage)
+        self.assertNotIn(".apk", stage)
         instrumentation = contents("scripts/run_rendernode_instrumentation.sh")
         self.assertIn("app.apexview.tiled.ArchiveSegmentDeliveryAndroidTest", instrumentation)
         self.assertIn("'OK (2 tests)'", instrumentation)
+        self.assertIn("ArchitectureG0AndroidTest", instrumentation)
+        self.assertIn("'OK (4 tests)'", instrumentation)
 
 
     def test_batch2_decoder_producer_detaches_before_texture_consumer_replacement(self):

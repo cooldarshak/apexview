@@ -22,6 +22,8 @@ Build 846 GREEN; fourth G.0 candidate adds shared bitreader/box/synthetic metada
 
 Build 847 GREEN but 22m24s, slower than 846. Dedicated G branch candidate freezes Gradle inputs, reverts unproven parallel Gradle mode, runs existing Android API29/31/36 tests as independent jobs with encrypted exact-APK staging and all-gates publication, and adds Rust clear CMAF byte equivalence. No feature/test removal. Actual CI and physical acceptance pending. See G ledger.
 
+Build 848 stopped on the existing publication contract regression before APK assembly. Updated the regression to enforce both legacy and parallel workflows, including all four artifact gates. Exact targeted preflight passed; full CI pending. No test suppression.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |
