@@ -4089,7 +4089,9 @@ class AppState(
 
     /** A replay's car speeds, fetched the first time an onboard wants them. */
     fun loadSpeeds(session: SessionTiming) {
-        if (session.live || session.radioBase.isBlank() || session.archivePartial || timing !== session) return
+        // Partial archive previews already contain the same resolved session path.
+        // CarData is independent of map/circuit/radio completion; start it immediately.
+        if (timing !== session || !TimingWorkCoordinator.canRequestArchiveSpeeds(session.live, session.radioBase)) return
         val token = api.ascendon ?: return
         timingWork.loadSpeeds(
             scope, session.radioBase,

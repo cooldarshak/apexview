@@ -67,9 +67,29 @@ run_required_instrumentation() {
   return 1
 }
 
+run_tls_gate() {
+  local sdk tls_report
+  sdk="$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
+  [[ "$sdk" =~ ^[0-9]+$ ]]
+  tls_report="${RUNNER_TEMP:?}/pitwall-tls-api-$sdk-instrumentation.txt"
+  if ! run_required_instrumentation \
+    app.apexview.cast.local.PitwallTlsAndroidTest \
+    'OK (2 tests)' "$tls_report"; then
+    adb logcat -d -s PitwallTls:I '*:S' >> "$tls_report" || true
+    cat "$tls_report" >> "$report"
+    return 1
+  fi
+  cat "$tls_report" >> "$report"
+}
+
 wait_for_android_services
 adb install -r "$apk"
 adb install -r "$tests"
+
+if [[ "${1:-}" == "tls-only" ]]; then
+  run_tls_gate
+  exit 0
+fi
 
 run_required_instrumentation \
   app.apexview.OverlayRetainedRenderNodeAndroidTest \
@@ -104,9 +124,4 @@ run_required_instrumentation \
   'OK (2 tests)' "$delivery_report"
 cat "$delivery_report" >> "$report"
 
-# Use real AndroidKeyStore identities, not desktop software keys, for Cast TLS.
-tls_report="${RUNNER_TEMP:?}/pitwall-tls-instrumentation.txt"
-run_required_instrumentation \
-  app.apexview.cast.local.PitwallTlsAndroidTest \
-  'OK (1 test)' "$tls_report"
-cat "$tls_report" >> "$report"
+run_tls_gate

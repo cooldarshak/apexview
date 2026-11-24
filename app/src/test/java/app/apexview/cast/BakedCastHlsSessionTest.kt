@@ -10,6 +10,13 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 class BakedCastHlsSessionTest {
+    @Test fun startupRequiresThreeAdvertisedTargetDurations() {
+        assertFalse(BakedCastStartupPolicy.ready(3, 3_000_000L))
+        assertFalse(BakedCastStartupPolicy.ready(11, 11_999_999L))
+        assertFalse(BakedCastStartupPolicy.ready(2, 12_000_000L))
+        assertTrue(BakedCastStartupPolicy.ready(12, 12_000_000L))
+    }
+
     @Test
     fun playlistRollsAndPublishesMuxedVideoAndCommentary() {
         // These payloads exercise transport framing and sequence retention.

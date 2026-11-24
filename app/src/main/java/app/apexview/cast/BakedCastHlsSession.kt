@@ -15,13 +15,13 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
     private val window = ArrayDeque<Segment>()
     private var nextSequence = 0L
     private var ended = false
-    private val targetDuration = 4L
+    private val targetDuration = BakedCastStartupPolicy.TARGET_DURATION_SECONDS
     private var retainedUs = 0L
-    private var activeUs = 0L
+    @Volatile private var activeUs = 0L
     val advertisedDurationUs get() = activeUs
     val url get() = relay.url
 
-    fun append(samples: List<BakedCastTransportStream.Sample>, durationUs: Long) {
+    @Synchronized fun append(samples: List<BakedCastTransportStream.Sample>, durationUs: Long) {
         check(!ended)
         require(durationUs in 800_000L..4_000_000L) { "Keep baked Cast segments at or below four seconds" }
         val packed = muxer.segment(samples)
@@ -35,7 +35,7 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
         publish()
     }
 
-    fun end() {
+    @Synchronized fun end() {
         if (!ended && window.isNotEmpty()) {
             ended = true
             publish()
@@ -45,7 +45,7 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
     private fun publish() {
         var duration = 0L
         val active = window.asReversed().takeWhile {
-            if (duration >= 12_000_000L) false else {
+            if (duration >= BakedCastStartupPolicy.STARTUP_MEDIA_US) false else {
                 duration += it.durationUs
                 true
             }
@@ -68,9 +68,16 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
             ("live.m3u8" to playlist.toByteArray()))
     }
 
-    override fun close() {
+    @Synchronized override fun close() {
         ended = true
         relay.close()
         window.clear()
     }
+}
+
+/** Match the HLS holdback to the advertised target duration. */
+internal object BakedCastStartupPolicy {
+    const val TARGET_DURATION_SECONDS = 4L
+    const val STARTUP_MEDIA_US = 3 * TARGET_DURATION_SECONDS * 1_000_000L
+    fun ready(segments: Long, mediaUs: Long): Boolean = segments >= 3 && mediaUs >= STARTUP_MEDIA_US
 }

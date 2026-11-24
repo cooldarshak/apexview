@@ -11,6 +11,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.ensureActive
 
 /** One continuously captured, baked phone picture + original authorized AAC commentary. */
 internal class BakedCastLiveSession(
@@ -25,18 +27,16 @@ internal class BakedCastLiveSession(
     private var audio: BakedCastArchiveAudio? = null
     private var sourceStartMs = -1L
     private val firstSegment = CompletableDeferred<Unit>()
-    private val video = ArrayDeque<BakedCastTransportStream.Sample>()
-    private val commentary = ArrayDeque<BakedCastTransportStream.Sample>()
+    private val pending = BakedCastSegmentQueue()
+    // A notification is only a wakeup; the bounded queue owns every sample.
+    private val publishRequests = Channel<Unit>(Channel.CONFLATED)
     private var stopped = false
     private var published = 0L
     private var publishedDurationUs = 0L
     private var lastPublicationNs = 0L
     @Volatile var receiverRendering = false
     @Volatile var previewSuppressionRequested = false
-    @Synchronized fun health(): String = "segments=$published mediaUs=$publishedDurationUs windowUs=${hls.advertisedDurationUs} videoUs=$latestVideoUs audioUs=$latestAudioUs queuedVideo=${video.size} queuedAudio=${commentary.size}"
-    private var latestVideoUs = 0L
-    private var latestAudioUs = 0L
-    private var lastVideoUs = -1L
+    @Synchronized fun health(): String = "segments=$published mediaUs=$publishedDurationUs windowUs=${hls.advertisedDurationUs} videoUs=${pending.latestVideoUs} audioUs=${pending.latestAudioUs} queuedVideo=${pending.videoCount} queuedAudio=${pending.audioCount} queuedBytes=${pending.pendingBytes}"
     var width = 0
         private set
     var height = 0
@@ -44,31 +44,71 @@ internal class BakedCastLiveSession(
     val url get() = hls.url
     val playable get() = firstSegment.isCompleted && !firstSegment.isCancelled
 
+    private val publisherJob: Job = scope.launch(Dispatchers.Default) {
+        try {
+            for (ignored in publishRequests) {
+                while (true) {
+                    ensureActive()
+                    val ready = synchronized(this@BakedCastLiveSession) {
+                        if (stopped) null else pending.takeReady()
+                    } ?: break
+                    val started = System.nanoTime()
+                    // Single owner of mux continuity counters and segment ordering.
+                    // Never hold the session lock across packing or relay publication.
+                    hls.append(ready.video + ready.audio, ready.durationUs)
+                    val muxMs = (System.nanoTime() - started) / 1_000_000L
+                    synchronized(this@BakedCastLiveSession) {
+                        if (stopped) return@launch
+                        published++
+                        publishedDurationUs += ready.durationUs
+                        val now = System.nanoTime()
+                        val intervalMs = if (lastPublicationNs == 0L) 0L else (now - lastPublicationNs) / 1_000_000L
+                        lastPublicationNs = now
+                        if (!firstSegment.isCompleted && BakedCastStartupPolicy.ready(published, publishedDurationUs))
+                            firstSegment.complete(Unit)
+                        if (published <= 3L || published % 5L == 0L) Log.i("PitwallCast",
+                            "BAKED_CAST_SEGMENT count=$published durationUs=${ready.durationUs} intervalMs=$intervalMs muxPublishMs=$muxMs ${health()} " +
+                            "picture=${width}x$height feeds=$feeds audioFrames=${ready.audio.size} videoFrames=${ready.video.size} transport=HLS_AVC_AAC")
+                    }
+                }
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Exception) { fail("Baked Cast publication: ${error.javaClass.simpleName}") }
+    }
+
     private val audioJob: Job = scope.launch(Dispatchers.IO) {
         try {
             while (true) {
                 val request = synchronized(this@BakedCastLiveSession) {
                     if (stopped) return@launch
-                    audio?.let { it to (sourceStartMs * 1000 + latestVideoUs + 5_000_000) }
+                    audio?.let { it to (sourceStartMs * 1000 + pending.latestVideoUs.coerceAtLeast(0) + 5_000_000) }
                 }
                 if (request == null) { delay(50); continue }
                 // Fetch a short distance ahead of the captured picture, not the entire replay.
                 val samples = request.first.readUntil(request.second)
                 synchronized(this@BakedCastLiveSession) {
                     if (stopped) return@launch
-                    samples.forEach(commentary::addLast)
-                    samples.lastOrNull()?.let { latestAudioUs = it.ptsUs }
-                    publishReadySegments()
+                    pending.offerAudio(samples)
+                    publishRequests.trySend(Unit)
                 }
                 delay(800)
             }
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Exception) { fail("Clear archive commentary: ${error.message ?: error.javaClass.simpleName}") }
+        catch (error: Exception) { fail("Clear archive commentary: ${app.apexview.DiagnosticRedaction.redact(error.message ?: error.javaClass.simpleName)}") }
+    }
+
+    init {
+        // readUntil is blocking IO. Cancel first; close its state only after that
+        // worker really exits, never zero its initialization during a read.
+        audioJob.invokeOnCompletion {
+            val retired = synchronized(this) { audio.also { audio = null } }
+            runCatching { retired?.close() }
+        }
     }
 
     @Synchronized fun setOutputSize(w: Int, h: Int, playbackPositionMs: Long) {
         require(w > 0 && h > 0 && playbackPositionMs >= 0)
-        check(!stopped && audio == null) { "Clear Cast output already anchored or closed" }
+        check(!stopped && audioJob.isActive && publisherJob.isActive && audio == null) { "Clear Cast output already anchored or closed" }
         val sourceStartUs = Math.multiplyExact(playbackPositionMs, 1_000L)
         width = w; height = h
         sourceStartMs = playbackPositionMs
@@ -76,45 +116,15 @@ internal class BakedCastLiveSession(
         Log.i("PitwallCast", "BAKED_CAST_SOURCE_CLOCK startMs=$sourceStartMs encoderPicture=${width}x$height")
     }
 
-    /** Called on the GL encoder thread. Nothing here may block on network I/O. */
-    @Synchronized fun videoSample(sample: BakedCastTransportStream.Sample) {
-        if (stopped) return
+    /** GL encoder callback: validate/transfer and signal only, never mux or publish. */
+    fun videoSample(sample: BakedCastTransportStream.Sample) {
         try {
-            require(sample.video && (lastVideoUs < 0 || sample.ptsUs > lastVideoUs)) {
-                "The scene encoder did not produce monotonically increasing timestamps"
+            synchronized(this) {
+                if (stopped) return
+                pending.offerVideo(sample)
+                publishRequests.trySend(Unit)
             }
-            if (sample.keyFrame || video.isNotEmpty()) video.addLast(sample)
-            lastVideoUs = sample.ptsUs
-            latestVideoUs = sample.ptsUs
-            require(video.size < 350) { "Live commentary cannot keep up with the video encoder" }
-            publishReadySegments()
         } catch (error: Exception) { fail("Scene Cast encoder: ${error.message ?: error.javaClass.simpleName}") }
-    }
-
-    @Synchronized private fun publishReadySegments() {
-        while (!stopped && video.isNotEmpty() && commentary.isNotEmpty()) {
-        val first = video.first()
-        if (!first.keyFrame) return
-        // End each segment immediately before the next IDR. Never advertise a mid-GOP segment.
-        val boundary = video.firstOrNull { it.keyFrame && it.ptsUs - first.ptsUs >= 800_000 } ?: return
-        if (latestAudioUs < boundary.ptsUs - 50_000) return
-        val videoSamples = mutableListOf<BakedCastTransportStream.Sample>()
-        while (video.isNotEmpty() && video.first().ptsUs < boundary.ptsUs) videoSamples += video.removeFirst()
-        while (commentary.isNotEmpty() && commentary.first().ptsUs < first.ptsUs) commentary.removeFirst()
-        val audioSamples = mutableListOf<BakedCastTransportStream.Sample>()
-        while (commentary.isNotEmpty() && commentary.first().ptsUs < boundary.ptsUs) audioSamples += commentary.removeFirst()
-        require(audioSamples.isNotEmpty()) { "The Cast segment has no commentary" }
-        val duration = boundary.ptsUs - first.ptsUs
-        hls.append(videoSamples + audioSamples, duration)
-        published++
-        publishedDurationUs += duration
-        val now = System.nanoTime()
-        val intervalMs = if (lastPublicationNs == 0L) 0L else (now - lastPublicationNs) / 1_000_000
-        lastPublicationNs = now
-        if (!firstSegment.isCompleted && published >= 3 && publishedDurationUs >= 3_000_000L) firstSegment.complete(Unit)
-        if (published <= 3L || published % 5L == 0L) Log.i("PitwallCast", "BAKED_CAST_SEGMENT count=$published durationUs=$duration intervalMs=$intervalMs ${health()} " +
-            "picture=${width}x$height feeds=$feeds audioFrames=${audioSamples.size} videoFrames=${videoSamples.size} transport=HLS_AVC_AAC")
-        }
     }
 
     suspend fun awaitPlayable() = firstSegment.await()
@@ -125,6 +135,7 @@ internal class BakedCastLiveSession(
         synchronized(this) {
             if (stopped) return
             stopped = true
+            publishRequests.close()
             if (!firstSegment.isCompleted) firstSegment.completeExceptionally(IllegalStateException(reason))
         }
         Log.w("PitwallCast", "BAKED_CAST_FAILURE ${reason.take(160)}")
@@ -133,15 +144,19 @@ internal class BakedCastLiveSession(
 
     private var closed = false
 
-    @Synchronized override fun close() {
-        if (closed) return
-        closed = true
-        stopped = true
-        if (!firstSegment.isCompleted) firstSegment.cancel()
+    override fun close() {
+        synchronized(this) {
+            if (closed) return
+            closed = true
+            stopped = true
+            if (!firstSegment.isCompleted) firstSegment.cancel()
+            pending.clear()
+            publishRequests.close()
+        }
         audioJob.cancel()
+        publisherJob.cancel()
+        // The HLS object's lock serializes at most the one already-running mux.
+        // No session/GL lock is held while waiting for its retirement.
         runCatching { hls.end() }; runCatching { hls.close() }
-        runCatching { audio?.close() }
-        audio = null
-        video.clear(); commentary.clear()
     }
 }

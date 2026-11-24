@@ -12,6 +12,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PlaybackTimingWorkCoordinatorTest {
+    @Test fun partialReplayWithResolvedPathCanLoadCarDataIndependently() {
+        assertTrue(TimingWorkCoordinator.canRequestArchiveSpeeds(false, "https://example.invalid/archive/"))
+        assertFalse(TimingWorkCoordinator.canRequestArchiveSpeeds(true, "https://example.invalid/archive/"))
+        assertFalse(TimingWorkCoordinator.canRequestArchiveSpeeds(false, ""))
+    }
+
     @Test fun reopeningSameContentInvalidatesTimingAndSpeedOwners() {
         val work = TimingWorkCoordinator()
         val first = work.begin(42)

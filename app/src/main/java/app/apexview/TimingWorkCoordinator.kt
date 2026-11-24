@@ -163,6 +163,8 @@ internal class TimingWorkCoordinator {
     }
 
     companion object {
+        fun canRequestArchiveSpeeds(live: Boolean, radioBase: String): Boolean = !live && radioBase.isNotBlank()
+
         private val retryDelaysMs = longArrayOf(3_000L, 10_000L, 30_000L, 60_000L)
         fun retryDelayMs(attempt: Int) = retryDelaysMs.getOrElse(attempt) { retryDelaysMs.last() }
     }

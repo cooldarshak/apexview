@@ -62,6 +62,17 @@ class SpeedTest {
     }
 
     @Test
+    fun malformedEntryDoesNotDiscardValidGearOnlyTelemetry() {
+        val cars = mutableMapOf<String, SpeedBuilder>()
+        LiveTimingArchive("", "").addCarData(JSONObject("""{"Entries":[null,1,
+            {"Utc":"bad","Cars":{}},
+            {"Utc":"2026-11-01T20:00:00Z","Cars":{"1":{"Channels":{"3":5}}}}]}"""), cars)
+        val log = cars.getValue("1").build()
+        assertEquals(5, log.gearAt(ms("2026-11-01T20:00:00Z")))
+        assertNull(log.kmhAt(ms("2026-11-01T20:00:00Z")))
+    }
+
+    @Test
     fun milesPerHourAndKilometres() {
         assertEquals(186, speedIn(300, Settings.MPH))
         assertEquals(300, speedIn(300, Settings.KMH))

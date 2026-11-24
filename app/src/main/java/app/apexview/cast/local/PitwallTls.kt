@@ -2,16 +2,19 @@ package app.apexview.cast.local
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.security.keystore.KeyInfo
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.Principal
 import java.security.PrivateKey
 import java.security.SecureRandom
+import java.security.Signature
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
@@ -65,13 +68,26 @@ internal object PitwallTls {
         require(alias == ALIAS || alias.startsWith("pitwall_tls_test_"))
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         val existing = store.getCertificate(alias) as? X509Certificate
-        if (existing == null || runCatching { validateIdentityCertificate(existing) }.isFailure) {
+        val existingKey = store.getKey(alias, null) as? PrivateKey
+        // Key authorizations are immutable. Build 841 and earlier omitted DIGEST_NONE,
+        // so existing keys cannot perform Conscrypt's prehashed ECDSA signing.
+        // Replace an incompatible identity once, before either endpoint pairs.
+        val compatible = existing != null && existingKey != null &&
+            runCatching { validateIdentityCertificate(existing) }.isSuccess &&
+            supportsTlsSigning(existingKey)
+        if (!compatible) {
+            if (existingKey != null) runCatching {
+                android.util.Log.i("PitwallTls", "TLS_INSTALLATION_IDENTITY_RENEWED reason=INCOMPATIBLE_KEY_AUTHORIZATION_OR_CERTIFICATE")
+            }
             if (store.containsAlias(alias)) store.deleteEntry(alias)
             val now = System.currentTimeMillis()
             val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore")
             generator.initialize(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
                 .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-                .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA384, KeyProperties.DIGEST_SHA512)
+                // Conscrypt passes a precomputed digest to opaque AndroidKeyStore EC keys.
+                // NONE is raw ECDSA signing, NOT a weaker TLS protocol or disabled verification.
+                .setDigests(KeyProperties.DIGEST_NONE, KeyProperties.DIGEST_SHA256,
+                    KeyProperties.DIGEST_SHA384, KeyProperties.DIGEST_SHA512)
                 .setCertificateSubject(X500Principal("CN=Pitwall LAN"))
                 .setCertificateSerialNumber(java.math.BigInteger(128, SecureRandom()).add(java.math.BigInteger.ONE))
                 .setCertificateNotBefore(Date(now - 86_400_000L))
@@ -82,7 +98,24 @@ internal object PitwallTls {
         val cert = requireNotNull(store.getCertificate(alias) as? X509Certificate)
         val key = requireNotNull(store.getKey(alias, null) as? PrivateKey)
         validateIdentityCertificate(cert)
+        require(supportsTlsSigning(key)) { "Installation key cannot sign TLS digests" }
+        // Fail early, with a local cause, if the OEM provider cannot actually perform
+        // the operation even though its declared authorization allows it.
+        val digest = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        val signed = Signature.getInstance("NONEwithECDSA").run {
+            initSign(key); update(digest); sign()
+        }
+        require(Signature.getInstance("NONEwithECDSA").run {
+            initVerify(cert.publicKey); update(digest); verify(signed)
+        }) { "Installation key TLS signing self-test failed" }
         return Identity(key, cert)
+    }
+
+    internal fun supportsTlsSigning(key: PrivateKey): Boolean {
+        val info = KeyFactory.getInstance(key.algorithm, "AndroidKeyStore")
+            .getKeySpec(key, KeyInfo::class.java)
+        return info.purposes and KeyProperties.PURPOSE_SIGN != 0 &&
+            KeyProperties.DIGEST_NONE in info.digests
     }
 
     private fun validateIdentityCertificate(cert: X509Certificate) {
@@ -135,6 +168,7 @@ internal object PitwallTls {
         fun attempt(protocols: Array<String>?): Provisional {
             val socket = identity.context(PeerTrust()).socketFactory.createSocket() as SSLSocket
             try {
+                socket.useClientMode = true
                 socket.enabledProtocols = PitwallTls.protocols(socket.supportedProtocols, protocols)
                 socket.connect(InetSocketAddress(address, port), 6_000)
                 return handshake(identity, socket, true)
@@ -161,7 +195,7 @@ internal object PitwallTls {
             .take(6).joinToString(">") { it.javaClass.simpleName }
 
     private fun handshake(identity: Identity, socket: SSLSocket, phone: Boolean): Provisional {
-        socket.useClientMode = phone
+        check(socket.useClientMode == phone) { "Unexpected TLS socket role" }
         socket.enabledProtocols = protocols(socket.enabledProtocols)
         if (!phone) socket.needClientAuth = true
         socket.soTimeout = HANDSHAKE_TIMEOUT_MS

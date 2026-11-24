@@ -1823,8 +1823,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
     internal fun addCarData(json: JSONObject, cars: MutableMap<String, SpeedBuilder>) {
         val entries = json.optJSONArray("Entries") ?: return
         for (i in 0 until entries.length()) {
-            val entry = entries.getJSONObject(i)
-            val time = runCatching { Instant.parse(entry.getString("Utc")).toEpochMilli() }.getOrNull() ?: continue
+            val entry = entries.optJSONObject(i) ?: continue
+            val time = runCatching { Instant.parse(entry.optString("Utc")).toEpochMilli() }.getOrNull() ?: continue
             val list = entry.optJSONObject("Cars") ?: continue
             list.keys().forEach { number ->
                 val channels = list.optJSONObject(number)?.optJSONObject("Channels")
