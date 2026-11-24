@@ -60,10 +60,18 @@ class ArchitectureG0PackagingContract(unittest.TestCase):
                          "generate_hevc_fixtures.py", "verify_architecture_g0_apk.sh",
                          "cargo test --locked", "cargo clippy --locked", "feasibility_bench"):
             self.assertIn(required,wf)
-        self.assertEqual(wf.count("--daemon --parallel --no-build-cache"),2)
+        self.assertEqual(wf.count("--daemon --no-build-cache"),2)
         self.assertIn("pitwall-kvazaar-v1-",wf)
         self.assertIn("c997f08c805bd7ec82233654e417e06fe7c83cba",wf)
-        self.assertIn("if: success() && steps.assemble_apks.outcome == 'success' && env.APK_SIGNING_READY == 'true'",wf)
+        self.assertIn("success() && steps.assemble_apks.outcome == 'success' && env.APK_SIGNING_READY == 'true'",wf)
+        self.assertIn("PITWALL_BUILT_AT",wf)
+        self.assertIn("max-parallel: 3",wf)
+        self.assertIn("fail-fast: false",wf)
+        self.assertIn("needs: [build, g0_emulator]",wf)
+        self.assertIn("success() && needs.g0_emulator.result == 'success'",wf)
+        self.assertIn("g0-encrypted-stage-",wf)
+        self.assertIn("architecture_g0_stage.py unpack",wf)
+        self.assertIn("cmaf_bench",wf)
 
     def test_only_jni_module_can_use_unsafe(self):
         lib=(ROOT/"native/architecture-g/src/lib.rs").read_text()

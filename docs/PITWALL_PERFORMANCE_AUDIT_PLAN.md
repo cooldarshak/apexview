@@ -20,6 +20,8 @@ Build 845 GREEN (717cc4c): native diagnostic JNI, signed emulator upgrade, all A
 
 Build 846 GREEN; fourth G.0 candidate adds shared bitreader/box/synthetic metadata vectors and conservative CI tool-cache/Gradle daemon reuse. No test suppression, no playback/DRM changes. Exact CI and physical acceptance pending. See G ledger.
 
+Build 847 GREEN but 22m24s, slower than 846. Dedicated G branch candidate freezes Gradle inputs, reverts unproven parallel Gradle mode, runs existing Android API29/31/36 tests as independent jobs with encrypted exact-APK staging and all-gates publication, and adds Rust clear CMAF byte equivalence. No feature/test removal. Actual CI and physical acceptance pending. See G ledger.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |

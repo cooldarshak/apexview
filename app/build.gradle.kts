@@ -59,7 +59,8 @@ android {
         versionCode = 100_000 + versionSerial
         versionName = "1.0.$versionSerial"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        val builtAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("MMM d, HH:mm"))
+        val builtAt = System.getenv("PITWALL_BUILT_AT")?.takeIf { it.matches(Regex("[A-Za-z]{3} [0-9]{1,2}, [0-9]{2}:[0-9]{2}")) }
+            ?: LocalDateTime.now().format(DateTimeFormatter.ofPattern("MMM d, HH:mm"))
         val castReceiverId = System.getenv("PITWALL_CAST_RECEIVER_ID").orEmpty().trim().uppercase()
         require(castReceiverId.isEmpty() || castReceiverId.matches(Regex("[0-9A-F]{8}"))) {
             "PITWALL_CAST_RECEIVER_ID must be the eight-character app ID from the Google Cast Console"
