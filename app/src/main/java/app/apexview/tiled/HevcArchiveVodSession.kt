@@ -9,8 +9,8 @@ import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.TransferListener
 import androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist
 import java.io.IOException
-import java.util.LinkedHashMap
-import java.util.concurrent.Executors
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
@@ -99,19 +99,24 @@ internal class HevcArchiveVodSession(
             } }
         }
     }
-    // Never queue foreground network requests behind speculative prefetch I/O. Each lane is
-    // bounded to four per-feed requests and seek cancellation interrupts the warm lane.
-    private val fetchers = Executors.newFixedThreadPool(inputs.size.coerceIn(1, 4)) { r -> Thread(r, "ApexviewVodFetch").apply { isDaemon = true } }
-    private val prefetchFetchers = Executors.newFixedThreadPool(inputs.size.coerceIn(1, 4)) { r ->
-        Thread(r, "ApexviewVodPrefetchNet").apply { isDaemon = true }
+    // Separate bounded execution lanes. The group permit limits admission before
+    // submitting per-feed jobs; a canceled Future is purged rather than occupying
+    // a queue slot until a slow HTTP operation finishes.
+    private val foregroundAdmission = ArchiveWorkAdmission(maxWaiters = 4)
+    private val prefetchAdmission = ArchiveWorkAdmission(maxWaiters = 1)
+    private fun boundedFetchPool(name: String): ThreadPoolExecutor {
+        val workers = inputs.size.coerceIn(1, 4)
+        return ThreadPoolExecutor(workers, workers, 0L, TimeUnit.MILLISECONDS,
+            ArrayBlockingQueue<Runnable>(inputs.size.coerceAtLeast(1)),
+            java.util.concurrent.ThreadFactory { r -> Thread(r, name).apply { isDaemon = true } })
     }
-    // The speculative HEVC rewrite can consume hundreds of milliseconds of CPU and trigger
-    // young GC while the player, SurfaceTexture and UI need their regular frame deadlines.
-    // Foreground misses still compose on the requesting thread; only warm-ahead yields CPU.
-    private val warmer = Executors.newSingleThreadExecutor { r -> Thread({
-        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
-        r.run()
-    }, "ApexviewVodWarm").apply { isDaemon = true } }
+    private val fetchers = boundedFetchPool("ApexviewVodFetch")
+    private val prefetchFetchers = boundedFetchPool("ApexviewVodPrefetchNet")
+    private val warmer = ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue<Runnable>(1), java.util.concurrent.ThreadFactory { r -> Thread({
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            r.run()
+        }, "ApexviewVodWarm").apply { isDaemon = true } })
     private val warmLock = Any()
     private var warmActiveNumber: Int? = null
     @Volatile private var warmTask: Future<*>? = null
@@ -202,12 +207,20 @@ internal class HevcArchiveVodSession(
         preemptUnrelatedWarmup(target, seek = true)
     }
 
-    fun segment(number: Int): ByteArray {
+    // Cast/HTTP callers keep their existing independent mutable payload contract.
+    fun segment(number: Int): ByteArray =
+        requestSegment(number, { delivery.obtain(number, copyForCaller = true)!! }, { it.fill(0) })
+
+    private fun segmentLease(number: Int): ArchiveFragmentLease =
+        requestSegment(number, { delivery.obtainLease(number) }, { it.close() })
+
+    private fun <T> requestSegment(number: Int, acquire: () -> T, discard: (T) -> Unit): T {
         require(number in groups.indices) { "Archive segment is outside the finite timeline" }
         preemptUnrelatedWarmup(number)
         val started = System.nanoTime()
         val wasCached = synchronized(cacheLock) { cache.contains(number) }
-        val bytes = composeOrRead(number)
+        val resource = acquire()
+        try {
         val waitMs = (System.nanoTime() - started) / 1_000_000L
         // Record every foreground request. Only logging misses/slow hits biases the
         // sample and makes a real p95 impossible to calculate from exported logs.
@@ -216,6 +229,7 @@ internal class HevcArchiveVodSession(
         synchronized(warmLock) {
             if (!closed && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
                 val next = ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex)
+                warmer.purge()
                 warmTask = warmer.submit {
                     for (candidate in next) {
                         if (closed || Thread.currentThread().isInterrupted) break
@@ -245,7 +259,11 @@ internal class HevcArchiveVodSession(
                 }
             }
         }
-        return bytes
+            return resource
+        } catch (failure: Throwable) {
+            discard(resource)
+            throw failure
+        }
     }
 
     private fun preemptUnrelatedWarmup(number: Int, seek: Boolean = false) {
@@ -254,21 +272,33 @@ internal class HevcArchiveVodSession(
             if (warmTask?.isDone == false && ArchiveBufferPolicy.preemptWarmup(
                     number, cached, warmActiveNumber, seek)) {
                 warmTask?.cancel(true)
+                warmer.purge()
             }
         }
     }
 
-    /**
-     * Foreground readers need an independently owned ByteArray because their DataSource
-     * clears it on close. Speculative production needs only cache publication: do not
-     * allocate and immediately wipe an extra full CMAF segment for every prefetch.
-     */
-    private fun composeOrRead(number: Int): ByteArray =
-        requireNotNull(delivery.obtain(number, copyForCaller = true))
-
     private fun composeAndPublish(number: Int) {
         checkOpen()
         require(number in groups.indices) { "Archive segment is outside the finite timeline" }
+        val warm = Thread.currentThread().name == "ApexviewVodWarm"
+        val admission = if (warm) prefetchAdmission else foregroundAdmission
+        val requestedAt = System.nanoTime()
+        try {
+            admission.run(ArchiveFetchDeadline.remainingNs(requestedAt, System.nanoTime())) {
+                checkOpen()
+                android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_WORK_ADMISSION segment=$number " +
+                    "worker=${if (warm) "PREFETCH" else "PLAYBACK"} " +
+                    "waitMs=${(System.nanoTime() - requestedAt) / 1_000_000L} queuedGroups=${admission.queued()}")
+                composeAndPublishAdmitted(number, requestedAt)
+            }
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw ArchiveWarmupCancelledException()
+        }
+    }
+
+    private fun composeAndPublishAdmitted(number: Int, requestedAt: Long) {
+        checkOpen()
         val started = System.nanoTime()
         val cpuAtStart = android.os.Debug.threadCpuTimeNanos()
         // ART process-wide counters include concurrent player/UI allocation; this is a
@@ -278,7 +308,7 @@ internal class HevcArchiveVodSession(
         val batches = mutableListOf<List<ByteArray>>()
         try {
             val anchor = number
-            batches += fetch(number)
+            batches += fetch(number, requestedAt)
             // A finite DASH index may seek directly to any advertised chunk. A continuation
             // fragment cannot be advertised as an independent seek point merely because an
             // earlier GOP was inspected. Never feed a decoder a missing-reference picture.
@@ -438,20 +468,27 @@ internal class HevcArchiveVodSession(
                 throw ArchiveWarmupCancelledException()
             }
             if (error is ProtectedArchiveBackendRequired) throw error
-            val message = if (root is IllegalArgumentException || root is IllegalStateException) root.message.orEmpty()
-                .replace(Regex("https?://\\S+"), "[URL]").take(220) else CaptureFailure.from(root).reason
+            val message = if (root is IllegalArgumentException || root is IllegalStateException)
+                app.apexview.DiagnosticRedaction.redact(root.message.orEmpty()).take(220)
+                else CaptureFailure.from(root).reason
             val retryable = root !is IllegalArgumentException && root !is IllegalStateException && CaptureFailure.from(root).retryable
             throw ArchiveVodMediaException("Archive segment $number: $message", retryable)
         } finally { batches.flatten().forEach { it.fill(0) } }
     }
 
-    private fun fetch(number: Int): List<ByteArray> {
+    private fun fetch(number: Int, fetchStartedNs: Long): List<ByteArray> {
         val lane = if (Thread.currentThread().name == "ApexviewVodWarm") prefetchFetchers else fetchers
         val retained = mutableListOf<ByteArray>()
         val aborted = java.util.concurrent.atomic.AtomicBoolean(false)
         val futures = mutableListOf<Future<ByteArray>>()
-        val fetchStartedNs = System.nanoTime()
         try {
+        checkOpen()
+        if (ArchiveFetchDeadline.remainingNs(fetchStartedNs, System.nanoTime()) == 0L)
+            throw java.util.concurrent.TimeoutException("Archive fetch deadline expired during admission")
+        lane.purge()
+        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_FETCH_ADMISSION segment=$number " +
+            "worker=${if (lane === prefetchFetchers) "PREFETCH" else "PLAYBACK"} " +
+            "waitMs=${(System.nanoTime() - fetchStartedNs) / 1_000_000L} queued=${lane.queue.size} active=${lane.activeCount}")
         val discontinuities = inputs.mapIndexed { i, input ->
             val segment = input.playlist.segments[groups[number].indexes[i]]
             input.playlist.discontinuitySequence + segment.relativeDiscontinuitySequence
@@ -521,6 +558,7 @@ internal class HevcArchiveVodSession(
             if (error is InterruptedException) Thread.currentThread().interrupt()
             aborted.set(true)
             futures.forEach { it.cancel(true) }
+            lane.purge()
             synchronized(retained) { retained.forEach { it.fill(0) } }
             throw error
         }
@@ -590,6 +628,7 @@ internal class HevcArchiveVodSession(
         // A waiter must never spend a stale 25s fetch timeout on an owned,
         // explicitly closed session.
         production.close()
+        foregroundAdmission.close(); prefetchAdmission.close()
         synchronized(warmLock) { warmTask?.cancel(true); warmer.shutdownNow() }
         fetchers.shutdownNow()
         prefetchFetchers.shutdownNow()
@@ -604,7 +643,7 @@ internal class HevcArchiveVodSession(
 
     private class ResourceDataSource(private val session: HevcArchiveVodSession) : DataSource {
         private var uri: Uri? = null
-        private var bytes: ByteArray? = null
+        private var resource: ArchiveFragmentLease? = null
         private var cursor = 0
         private var end = 0
         override fun addTransferListener(listener: TransferListener) {}
@@ -612,20 +651,20 @@ internal class HevcArchiveVodSession(
         override fun open(spec: DataSpec): Long {
             close(); uri = spec.uri
             val body = when (val name = spec.uri.lastPathSegment) {
-                "manifest.mpd" -> session.manifest()
-                "init.mp4" -> session.initialization()
+                "manifest.mpd" -> ArchiveFragmentLease.owned(session.manifest())
+                "init.mp4" -> ArchiveFragmentLease.owned(session.initialization())
                 else -> {
                     val number = name?.let { Regex("s-(\\d+)\\.m4s").matchEntire(it)?.groupValues?.get(1)?.toIntOrNull() }
                         ?: throw IOException("Unknown archive resource")
-                    session.segment(number)
+                    session.segmentLease(number)
                 }
             }
-            if (spec.position !in 0..body.size.toLong()) { body.fill(0); throw IOException("Archive range is out of bounds") }
+            if (spec.position !in 0..body.size.toLong()) { body.close(); throw IOException("Archive range is out of bounds") }
             if (spec.length < 0L && spec.length != C.LENGTH_UNSET.toLong()) {
-                body.fill(0)
+                body.close()
                 throw IOException("Invalid archive resource range length")
             }
-            bytes = body
+            resource = body
             cursor = spec.position.toInt()
             // Avoid position+length overflow on a malformed DataSpec. Do not
             // over-read or silently publish a negative length to Media3.
@@ -639,14 +678,14 @@ internal class HevcArchiveVodSession(
                 throw IndexOutOfBoundsException("Invalid archive data source read bounds")
             }
             if (length == 0) return 0
-            val body = bytes ?: throw IOException("Archive resource is closed")
+            val body = resource ?: throw IOException("Archive resource is closed")
             if (cursor >= end) return C.RESULT_END_OF_INPUT
             val count = minOf(length, end - cursor)
-            body.copyInto(buffer, offset, cursor, cursor + count)
+            body.readInto(buffer, offset, cursor, count)
             cursor += count
             return count
         }
-        override fun close() { bytes?.fill(0); bytes = null; uri = null; cursor = 0; end = 0 }
+        override fun close() { resource?.close(); resource = null; uri = null; cursor = 0; end = 0 }
     }
 
     companion object {

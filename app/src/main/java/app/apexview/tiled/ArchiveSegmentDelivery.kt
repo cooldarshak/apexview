@@ -25,43 +25,49 @@ internal class ArchiveSegmentDelivery(
         cache.readCopy(number)
     }
 
+    private fun readLease(number: Int): ArchiveFragmentLease? = synchronized(cacheLock) {
+        checkOpen()
+        cache.readLease(number)
+    }
+
     private fun contains(number: Int): Boolean = synchronized(cacheLock) {
         checkOpen()
         cache.contains(number)
     }
 
-    fun obtain(number: Int, copyForCaller: Boolean): ByteArray? {
+    fun obtain(number: Int, copyForCaller: Boolean): ByteArray? =
+        if (copyForCaller) obtainInternal(number, true, ::readCopy)
+        else {
+            obtainInternal(number, false) { if (contains(it)) Unit else null }
+            null
+        }
+
+    fun obtainLease(number: Int): ArchiveFragmentLease =
+        obtainInternal(number, true, ::readLease)
+
+    private fun <T : Any> obtainInternal(number: Int, foreground: Boolean, acquire: (Int) -> T?): T {
         var evictionRetries = 0
         var cancelledRecoveries = 0
         while (true) {
-            if (copyForCaller) {
-                readCopy(number)?.let { return it }
-            } else if (contains(number)) {
-                return null // Prefetch never makes a second full-sized read copy.
-            }
-
+            acquire(number)?.let { return it }
             try {
                 production.run(number) {
                     if (!contains(number)) composeAndPublish(number)
                 }
             } catch (cancelled: ArchiveWarmupCancelledException) {
-                if (!copyForCaller || Thread.currentThread().isInterrupted ||
+                if (!foreground || Thread.currentThread().isInterrupted ||
                     ++cancelledRecoveries > MAX_CANCELLED_PREFETCH_RECOVERIES) throw cancelled
                 onCancelledWarmupRecovery(number)
                 continue
             }
 
-            // Copy under lock immediately after shared production. Another group may have
-            // evicted this segment, but a borrowed array must never contain wiped ciphertext.
-            if (copyForCaller) {
-                readCopy(number)?.let { return it }
-            } else if (contains(number)) {
-                return null
-            }
+            // Atomically acquire ownership after publication. An eviction may
+            // race with production, but can never zero a successfully leased read.
+            acquire(number)?.let { return it }
             if (evictionRetries >= MAX_EVICTION_RETRIES) {
                 throw ArchiveVodMediaException(
                     "Archive segment $number repeatedly evicted during delivery",
-                    retryable = copyForCaller
+                    retryable = foreground
                 )
             }
             evictionRetries++

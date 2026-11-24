@@ -123,48 +123,173 @@ internal class OwnedArchiveInitializations private constructor(val copies: List<
 internal class ArchiveWarmupCancelledException : IOException("Archive prefetch cancelled")
 
 /**
- * Owns each CMAF fragment exactly once. Callers keep their returned copies; evicted and
- * replaced cached ciphertext is zeroed. The session's cacheLock serializes operations.
- * Retaining three *items* alone is not enough when an 8-feed atlas grows to many MiB.
+ * A read-only, single-owner handle. The backing array is never exposed to callers.
+ * A cache eviction cannot erase a fragment until the last reader has closed.
+ */
+internal class ArchiveFragmentLease(
+    private val bytes: ByteArray,
+    private val release: () -> Unit,
+) : AutoCloseable {
+    private var closed = false
+    val size: Int = bytes.size
+
+    @Synchronized fun readInto(target: ByteArray, targetOffset: Int, sourceOffset: Int, length: Int) {
+        check(!closed) { "Archive fragment lease is closed" }
+        require(length >= 0 && targetOffset >= 0 && sourceOffset >= 0 &&
+            targetOffset <= target.size - length && sourceOffset <= size - length)
+        bytes.copyInto(target, targetOffset, sourceOffset, sourceOffset + length)
+    }
+
+    @Synchronized override fun close() {
+        if (closed) return
+        closed = true
+        release()
+    }
+
+    companion object {
+        /** Small standalone resources (manifest/init) retain their existing zero-on-close contract. */
+        fun owned(bytes: ByteArray) = ArchiveFragmentLease(bytes) { bytes.fill(0) }
+    }
+}
+
+/**
+ * Byte-bounded LRU with read leases for the clear Media3 archive loader.
+ * Cache and pinned-reader budgets are independently bounded by maxBytes; at
+ * most 2*maxBytes of unique backing data can be retained, including evictions.
+ * The legacy copy API remains for callers that transfer mutable byte ownership.
  */
 internal class BoundedArchiveFragmentCache(
     private val maxEntries: Int = ArchiveBufferPolicy.RETAINED_SEGMENTS,
     private val maxBytes: Long = ArchiveBufferPolicy.MAX_RETAINED_MEDIA_BYTES,
+    private val maxReaders: Int = 8,
 ) {
-    init { require(maxEntries > 0 && maxBytes > 0) }
-    private val entries = LinkedHashMap<Int, ByteArray>(maxEntries + 1, 0.75f, true)
-    var bytesRetained: Long = 0L
+    init { require(maxEntries > 0 && maxBytes > 0 && maxReaders > 0) }
+    private class Entry(val bytes: ByteArray) {
+        var cached = true
+        var readers = 0
+    }
+    private val entries = LinkedHashMap<Int, Entry>(maxEntries + 1, 0.75f, true)
+    private val pinned = mutableSetOf<Entry>()
+    private var readers = 0
+    @get:Synchronized var bytesRetained: Long = 0L
         private set
-    val size: Int get() = entries.size
-    fun contains(number: Int): Boolean = entries.containsKey(number)
-    fun readCopy(number: Int): ByteArray? = entries[number]?.copyOf()
+    @get:Synchronized var leasedBytes: Long = 0L
+        private set
+    val size: Int @Synchronized get() = entries.size
+    @Synchronized fun contains(number: Int): Boolean = entries.containsKey(number)
+    @Synchronized fun readCopy(number: Int): ByteArray? = entries[number]?.bytes?.copyOf()
 
-    /** Takes ownership only on success; no request can observe a mutable cache-owned array. */
-    fun put(number: Int, owned: ByteArray) {
-        require(owned.isNotEmpty() && owned.size.toLong() <= maxBytes) {
-            "Archive CMAF fragment exceeds the bounded cache budget"
+    @Synchronized fun readLease(number: Int): ArchiveFragmentLease? {
+        val entry = entries[number] ?: return null
+        if (readers >= maxReaders || (entry.readers == 0 &&
+                entry.bytes.size.toLong() > maxBytes - leasedBytes)) {
+            throw ArchiveVodMediaException("Archive read lease budget exhausted", retryable = true)
         }
-        // Protect against one ByteArray being inserted under two separate keys.
-        require(entries.values.none { it === owned }) { "Archive fragment ownership already transferred" }
-        entries.put(number, owned)?.let { previous ->
-            bytesRetained -= previous.size
-            if (previous !== owned) previous.fill(0)
+        if (entry.readers == 0) {
+            pinned.add(entry)
+            leasedBytes += entry.bytes.size
         }
-        bytesRetained += owned.size
-        while (entries.size > maxEntries || bytesRetained > maxBytes) {
-            val eldest = entries.entries.iterator()
-            if (!eldest.hasNext()) break
-            val victim = eldest.next()
-            eldest.remove()
-            bytesRetained -= victim.value.size
-            victim.value.fill(0)
+        entry.readers++
+        readers++
+        return ArchiveFragmentLease(entry.bytes) { release(entry) }
+    }
+
+    @Synchronized private fun release(entry: Entry) {
+        check(entry.readers > 0)
+        entry.readers--
+        readers--
+        if (entry.readers == 0) {
+            pinned.remove(entry)
+            leasedBytes -= entry.bytes.size
+            if (!entry.cached) entry.bytes.fill(0)
         }
     }
 
-    fun clear() {
-        entries.values.forEach { it.fill(0) }
+    private fun retire(entry: Entry) {
+        entry.cached = false
+        bytesRetained -= entry.bytes.size
+        if (entry.readers == 0) entry.bytes.fill(0)
+    }
+
+    /** Transfers ownership only on success. Readers see stable bytes even after eviction. */
+    @Synchronized fun put(number: Int, owned: ByteArray) {
+        require(owned.isNotEmpty() && owned.size.toLong() <= maxBytes) {
+            "Archive CMAF fragment exceeds the bounded cache budget"
+        }
+        require(entries.values.none { it.bytes === owned } && pinned.none { it.bytes === owned }) {
+            "Archive fragment ownership already transferred"
+        }
+        entries.put(number, Entry(owned))?.let(::retire)
+        bytesRetained += owned.size
+        while (entries.size > maxEntries || bytesRetained > maxBytes) {
+            val eldest = entries.entries.iterator()
+            val victim = eldest.next()
+            eldest.remove()
+            retire(victim.value)
+        }
+    }
+
+    @Synchronized fun clear() {
+        entries.values.forEach(::retire)
         entries.clear()
-        bytesRetained = 0L
+        check(bytesRetained == 0L)
+    }
+}
+
+/**
+ * Close-aware, bounded admission for an entire fetch + compose + publication group.
+ * Separate instances own foreground and speculative work. A retired session wakes
+ * queued producers immediately; active producers retain their normal cancellation
+ * and ownership checks. No network or composition work executes under this lock.
+ */
+internal class ArchiveWorkAdmission(private val maxWaiters: Int) : AutoCloseable {
+    init { require(maxWaiters >= 0) }
+    private val lock = java.util.concurrent.locks.ReentrantLock(true)
+    private val changed = lock.newCondition()
+    private var busy = false
+    private var waiting = 0
+    private var closed = false
+
+    fun queued(): Int {
+        lock.lock()
+        try { return waiting } finally { lock.unlock() }
+    }
+
+    fun <T> run(timeoutNs: Long, work: () -> T): T {
+        require(timeoutNs >= 0)
+        lock.lockInterruptibly()
+        try {
+            if (closed) throw IOException("Archive work admission closed")
+            if (busy || waiting > 0) {
+                if (waiting >= maxWaiters) throw ArchiveVodMediaException(
+                    "Archive work admission queue full", retryable = true)
+                waiting++
+                try {
+                    var remaining = timeoutNs
+                    while (busy && !closed) {
+                        if (remaining <= 0L) throw ArchiveVodMediaException(
+                            "Archive work admission timed out", retryable = true)
+                        remaining = changed.awaitNanos(remaining)
+                    }
+                    if (closed) throw IOException("Archive work admission closed")
+                } finally {
+                    waiting--
+                    // If this waiter was canceled or timed out, let its successor run.
+                    changed.signalAll()
+                }
+            }
+            if (closed) throw IOException("Archive work admission closed")
+            busy = true
+        } finally { lock.unlock() }
+        try { return work() } finally {
+            lock.lock()
+            try { busy = false; changed.signalAll() } finally { lock.unlock() }
+        }
+    }
+
+    override fun close() {
+        lock.lock()
+        try { closed = true; changed.signalAll() } finally { lock.unlock() }
     }
 }
 

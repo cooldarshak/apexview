@@ -177,6 +177,7 @@ class FeedPlayer(
     private lateinit var drmManager: DefaultDrmSessionManager
     private var protectedLiveDashSource: ProtectedHevcLiveDashSource? = null
     private var archiveVodSession: HevcArchiveVodSession? = null
+    private var archiveSelectedAudioUri: Uri? = null
     private lateinit var archiveAudioSources: DefaultMediaSourceFactory
     internal val isArchiveVodPlayback: Boolean get() = archiveVodSession != null
     internal val archiveSceneLabels: List<String> get() = archiveVodSession?.sourceLabels.orEmpty()
@@ -969,6 +970,7 @@ class FeedPlayer(
             .setMimeType(MimeTypes.APPLICATION_M3U8).build()), setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_TEXT))
         firstFrameRendered = false; error = null; problem = null
         val previousArchive = archiveVodSession
+        val previousAudio = archiveSelectedAudioUri
         archiveVodSession = session
         outputCadence.composedSingle = true
         videoSuppressedByProtectedComposition = false
@@ -979,8 +981,12 @@ class FeedPlayer(
             player.setMediaSource(MergingMediaSource(true, true, video, audio), positionMs.coerceAtLeast(0))
             player.playWhenReady = playWhenReady && !remotePlaybackSuspended
             player.prepare()
+            archiveSelectedAudioUri = audioUri
         } catch (failure: Throwable) {
-            if (archiveVodSession === session) archiveVodSession = previousArchive
+            if (archiveVodSession === session) {
+                archiveVodSession = previousArchive
+                archiveSelectedAudioUri = previousAudio
+            }
             outputCadence.composedSingle =
                 archiveVodSession != null || protectedLiveDashSource != null
             throw failure
@@ -992,12 +998,16 @@ class FeedPlayer(
     internal fun selectArchiveAudio(label: String): Boolean {
         val session = archiveVodSession ?: return false
         val audio = session.audioUris[label] ?: return false
+        // Cast handback and repeated selection must not rebuild the same video
+        // source, reset its decoder, lose the current CC choice or restart audio.
+        if (archiveSelectedAudioUri == audio && player.playerError == null) return true
         startArchiveVodPlayback(session, player.currentPosition, player.playWhenReady, audio)
         return true
     }
 
     internal fun releaseArchiveOwnership() {
         archiveVodSession?.close(); archiveVodSession = null
+        archiveSelectedAudioUri = null
         outputCadence.composedSingle = protectedLiveDashSource != null
     }
 
@@ -1122,6 +1132,7 @@ class FeedPlayer(
         val priorArchive = archiveVodSession
         protectedLiveDashSource = null
         archiveVodSession = null
+        archiveSelectedAudioUri = null
         firstFrameRendered = false; error = null; problem = null
         videoSuppressedByProtectedComposition = false
         val restorePositionMs = positionMs?.coerceAtLeast(0L)
@@ -1265,6 +1276,7 @@ class FeedPlayer(
         sceneCodecCorrelation.shutdown()
         val archive = archiveVodSession
         archiveVodSession = null
+        archiveSelectedAudioUri = null
         val protectedSource = protectedLiveDashSource
         protectedLiveDashSource = null
         // Media3 owns the codec producer and DRM session. Close it before

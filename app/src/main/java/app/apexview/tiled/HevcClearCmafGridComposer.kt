@@ -55,7 +55,7 @@ internal object HevcClearCmafGridComposer {
         val nalInspectorMs: Long = 0,
         /** Deterministic removed staging bytes, NOT process-wide ART allocation data. */
         val sourceAnnexBBytesAvoided: Long = 0,
-        /** Bytes no longer materialized as temporary NAL arrays during clear passthrough. */
+        /** Source NAL staging bytes avoided (all passthrough NALs, VCL only for stitching). */
         val sourceNalCopyBytesAvoided: Long = 0,
     )
 
@@ -79,9 +79,10 @@ internal object HevcClearCmafGridComposer {
         val parameterSets: List<ByteArray>,
         val fragments: List<SourceFragment>,
         val inspectorFragments: List<CmafBoxInspector.FragmentMetadata>,
-        val nalUnits: List<HevcBitstream.NalUnit>,
+        val nalUnits: MutableList<HevcBitstream.NalSpan>,
         val firstVclType: Int?,
         val validatedNalBytes: Long,
+        val borrowedVclBytes: Long,
         val annexBEquivalentBytes: Int,
         val cmafInspectorNanos: Long,
         val nalInspectorNanos: Long,
@@ -89,7 +90,7 @@ internal object HevcClearCmafGridComposer {
 
     /** A single clear source needs no stitching. Keep its bytes, after the same protection/syntax checks. */
     fun passThrough(feed: Feed): Output {
-        val parsed = parseFeed(feed, 0, materializeNals = false)
+        val parsed = parseFeed(feed, 0, retainSpans = false)
         try {
             val sps = parsed.config.sps.single()
             require(parsed.firstVclType?.let { it in 16..21 } == true) {
@@ -100,7 +101,7 @@ internal object HevcClearCmafGridComposer {
                 parsed.fragments.sumOf { it.samples.size }, parsed.fragments.size, emptyList(),
                 sourceNalCopyBytesAvoided = parsed.validatedNalBytes)
         } finally {
-            clearNalUnits(parsed)
+            releaseNalSpans(parsed)
         }
     }
 
@@ -120,14 +121,14 @@ internal object HevcClearCmafGridComposer {
         try {
             request.feeds.forEachIndexed { index, feed -> parsedFeeds += parseFeed(feed, index) }
         } catch (error: Throwable) {
-            parsedFeeds.forEach(::clearNalUnits)
+            parsedFeeds.forEach(::releaseNalSpans)
             throw error
         }
         val parsedAt = System.nanoTime()
         val parsedCpuAt = android.os.Debug.threadCpuTimeNanos()
         val first = parsedFeeds.first()
         val composed = try {
-            HevcTizenGridComposer.composeNalUnits(
+            HevcTizenGridComposer.composeNalSpans(
                 feedNals = parsedFeeds.map { it.nalUnits },
                 grid = request.outputGrid,
                 cells = request.cells,
@@ -138,9 +139,10 @@ internal object HevcClearCmafGridComposer {
                 emitSampleData = false
             )
         } finally {
-            // The grid composer creates owned rewritten samples and picture identities.
-            // Source Annex-B streams must not survive the synchronous composition call.
-            parsedFeeds.forEach(::clearNalUnits)
+            // The grid composer creates independently owned rewritten samples.
+            // Drop borrowed views; the calling session owns and zeroes the original
+            // source fragments after all packaging/validation is complete.
+            parsedFeeds.forEach(::releaseNalSpans)
         }
         val rewrittenAt = System.nanoTime()
         val rewrittenCpuAt = android.os.Debug.threadCpuTimeNanos()
@@ -222,6 +224,7 @@ internal object HevcClearCmafGridComposer {
                 cmafInspectorMs = parsedFeeds.sumOf { it.cmafInspectorNanos } / 1_000_000L,
                 nalInspectorMs = parsedFeeds.sumOf { it.nalInspectorNanos } / 1_000_000L,
                 sourceAnnexBBytesAvoided = parsedFeeds.sumOf { it.annexBEquivalentBytes.toLong() },
+                sourceNalCopyBytesAvoided = parsedFeeds.sumOf { it.borrowedVclBytes },
             )
             committed = true
             return output
@@ -240,8 +243,8 @@ internal object HevcClearCmafGridComposer {
         }
     }
 
-    private fun clearNalUnits(feed: ParsedFeed) {
-        feed.nalUnits.forEach { it.bytes.fill(0) }
+    private fun releaseNalSpans(feed: ParsedFeed) {
+        feed.nalUnits.clear() // Borrowed source bytes must never be zeroed here.
     }
 
     private fun sequence(
@@ -255,7 +258,7 @@ internal object HevcClearCmafGridComposer {
         pictures = pictures
     )
 
-    private fun parseFeed(feed: Feed, feedIndex: Int, materializeNals: Boolean = true): ParsedFeed {
+    private fun parseFeed(feed: Feed, feedIndex: Int, retainSpans: Boolean = true): ParsedFeed {
         val initialInspectStarted = System.nanoTime()
         val initReport = feed.validatedInitialization ?: CmafBoxInspector.inspect(feed.initializationSegment)
         var cmafInspectorNanos = System.nanoTime() - initialInspectStarted
@@ -324,9 +327,10 @@ internal object HevcClearCmafGridComposer {
         // Keep the existing overflow limit, without allocating the whole intermediate stream.
         val nalInspectStarted = System.nanoTime()
         val annexBEquivalentBytes = exactAnnexBSize(rawParameterSets, fragments, config.nalLengthSize)
-        val nalUnits = ArrayList<HevcBitstream.NalUnit>()
+        val nalUnits = ArrayList<HevcBitstream.NalSpan>()
         var firstVclType: Int? = null
         var validatedNalBytes = 0L
+        var borrowedVclBytes = 0L
         var validatedAnnexBBytes = 0L
         try {
             fun addNal(bytes: ByteArray, offset: Int, length: Int) {
@@ -336,24 +340,17 @@ internal object HevcClearCmafGridComposer {
                 var end = offset + length
                 while (end > offset && bytes[end - 1] == 0.toByte()) end--
                 require(end - offset >= 2) { "Truncated HEVC NAL" }
-                // Inspect directly in the immutable input fragment. A single-feed
-                // passthrough never consumes rewritten NAL bytes; allocating them
-                // merely to test the first IRAP picture needlessly duplicates every
-                // slice. Multifeed composition still receives owned arrays.
+                // Both passthrough and grid composition inspect immutable input
+                // ranges. Only rewritten output NALs are materialized as owned arrays.
                 val nalLength = end - offset
                 val header = HevcBitstream.readNalHeader(bytes, offset, nalLength)
                 if (firstVclType == null && header.type in 0..31) firstVclType = header.type
                 validatedNalBytes = Math.addExact(validatedNalBytes, nalLength.toLong())
                 validatedAnnexBBytes = Math.addExact(validatedAnnexBBytes, nalLength.toLong() + 4L)
-                if (materializeNals) {
-                    val owned = bytes.copyOfRange(offset, end)
-                    try {
-                        nalUnits += HevcBitstream.NalUnit(owned, header.type,
-                            header.layerId, header.temporalIdPlus1)
-                    } catch (failure: Throwable) {
-                        owned.fill(0)
-                        throw failure
-                    }
+                if (retainSpans) {
+                    nalUnits += HevcBitstream.NalSpan(bytes, offset, nalLength)
+                    if (header.type in 0..31)
+                        borrowedVclBytes = Math.addExact(borrowedVclBytes, nalLength.toLong())
                 }
             }
             rawParameterSets.forEach { addNal(it, 0, it.size) }
@@ -383,11 +380,11 @@ internal object HevcClearCmafGridComposer {
                 "Feed ${feed.label} CMAF fragment sample counts are inconsistent"
             }
             return ParsedFeed(track, config, rawParameterSets, fragments, metadata,
-                nalUnits, firstVclType, validatedNalBytes, annexBEquivalentBytes,
+                nalUnits, firstVclType, validatedNalBytes, borrowedVclBytes, annexBEquivalentBytes,
                 cmafInspectorNanos = cmafInspectorNanos.coerceAtLeast(0L),
                 nalInspectorNanos = (System.nanoTime() - nalInspectStarted).coerceAtLeast(0L))
         } catch (error: Throwable) {
-            nalUnits.forEach { it.bytes.fill(0) }
+            nalUnits.clear()
             throw error
         }
     }

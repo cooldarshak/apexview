@@ -230,10 +230,42 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("onEvictionRace = { number, attempt ->", session)
         self.assertNotIn("composeOrRead(candidate).fill(0)", session)
         self.assertIn("cache.readCopy(number)", delivery)
+        composer = contents("app/src/main/java/app/apexview/tiled/HevcClearCmafGridComposer.kt")
+        grid = contents("app/src/main/java/app/apexview/tiled/HevcTizenGridComposer.kt")
+        rewriter = contents("app/src/main/java/app/apexview/tiled/HevcSliceHeaderRewriter.kt")
+        self.assertIn("HevcTizenGridComposer.composeNalSpans(", composer)
+        self.assertIn("HevcBitstream.NalSpan(bytes, offset, nalLength)", composer)
+        self.assertIn("sourceOffset = located.nal.offset", grid)
+        self.assertIn("sourceLength = located.nal.length", grid)
+        self.assertIn("sourceOffset + sourceTailOffset, sourceOffset + sourceLength", rewriter)
+        self.assertIn("(!preserveOpaqueCabacTail && clearNalBytes == sourceLength)", rewriter)
+        self.assertIn("cache.readLease(number)", delivery)
+        self.assertIn("session.segmentLease(number)", session)
+        self.assertIn("body.readInto(buffer, offset, cursor, count)", session)
+        self.assertIn("resource?.close()", session)
+        self.assertIn("ArrayBlockingQueue<Runnable>", session)
+        self.assertIn("admission.run(ArchiveFetchDeadline.remainingNs(", session)
+        self.assertIn("composeAndPublishAdmitted(number, requestedAt)", session)
+        self.assertIn("foregroundAdmission.close(); prefetchAdmission.close()", session)
+        self.assertIn("lane.purge()", session)
+        self.assertIn("busy = false; changed.signalAll()", policy)
         self.assertIn("cache.contains(number)", delivery)
         self.assertIn("cache.put(number, output)", session)
         self.assertIn("MAX_RETAINED_MEDIA_BYTES", policy)
         self.assertIn("pending.forEach { it.finished.completeExceptionally", policy)
+
+    def test_protected_resource_retirement_and_idempotent_archive_audio_are_wired(self):
+        source = contents("app/src/main/java/app/apexview/tiled/ProtectedHevcLiveDashSource.kt")
+        self.assertIn("previous.values.forEach(::retire)", source)
+        self.assertIn("retired.remove(resource)", source)
+        self.assertIn("PROTECTED_DASH_RESOURCE_BYTES", source)
+        self.assertIn("resources.replace(next)", source)
+        host = contents("app/src/main/java/app/apexview/FeedPlayer.kt")
+        audio = host.split("internal fun selectArchiveAudio(", 1)[1].split("internal fun releaseArchiveOwnership", 1)[0]
+        self.assertLess(audio.index("archiveSelectedAudioUri == audio"), audio.index("startArchiveVodPlayback("))
+        self.assertIn("archiveSelectedAudioUri = previousAudio", host)
+        self.assertIn("archiveSelectedAudioUri = audioUri", host)
+        self.assertIn("archiveSelectedAudioUri = null", host)
 
     def test_clear_and_protected_writers_remain_real_player_sources(self):
         session = contents("app/src/main/java/app/apexview/tiled/HevcArchiveVodSession.kt")
@@ -384,7 +416,8 @@ class ProductionWiringTests(unittest.TestCase):
         clear = player.split("    internal fun startArchiveVodPlayback(", 1)[1].split(
             "    internal fun selectArchiveAudio", 1)[0]
         self.assertIn("val previousArchive = archiveVodSession", clear)
-        self.assertIn("if (archiveVodSession === session) archiveVodSession = previousArchive", clear)
+        self.assertIn("if (archiveVodSession === session) {", clear)
+        self.assertIn("archiveVodSession = previousArchive", clear)
         self.assertLess(clear.index("player.prepare()"), clear.index("previousArchive?.close()"))
         restore = player.split("    fun stopProtectedComposedPlayback(", 1)[1].split(
             "    /** Clears only the source-tile video lock", 1)[0]

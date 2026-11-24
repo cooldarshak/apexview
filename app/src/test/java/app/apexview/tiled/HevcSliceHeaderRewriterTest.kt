@@ -70,6 +70,25 @@ class HevcSliceHeaderRewriterTest {
         assertTrue(rewritten.copiedTailBytes > 128 * 1024)
         assertArrayEquals(sourceNal.copyOfRange(rewritten.sourceTailOffset, sourceNal.size),
             rewritten.nal.copyOfRange(rewritten.nal.size - rewritten.copiedTailBytes, rewritten.nal.size))
+
+        // A CMAF input range can begin/end anywhere in its backing fragment.
+        // Adjacent NAL bytes must not be read, copied or modified.
+        val padded = byteArrayOf(99, 98, 97) + sourceNal + byteArrayOf(96, 95)
+        val expectedInput = padded.copyOf()
+        val ranged = HevcSliceHeaderRewriter.rewrite(
+            padded, sourceSps, sourcePps, outputSps, outputPps, destinationAddress = 30,
+            clearNalBytes = sourceNal.size, sourceOffset = 3, sourceLength = sourceNal.size
+        )
+        assertArrayEquals(rewritten.nal, ranged.nal)
+        assertEquals(rewritten.sourceTailOffset, ranged.sourceTailOffset)
+        assertEquals(rewritten.copiedTailBytes, ranged.copiedTailBytes)
+        assertArrayEquals(expectedInput, padded)
+        assertRejected("fully clear") {
+            HevcSliceHeaderRewriter.rewrite(
+                padded, sourceSps, sourcePps, outputSps, outputPps, 30,
+                clearNalBytes = sourceNal.size - 1, sourceOffset = 3, sourceLength = sourceNal.size
+            )
+        }
     }
 
     @Test

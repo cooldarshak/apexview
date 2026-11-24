@@ -79,7 +79,7 @@ internal object HevcTizenGridComposer {
     )
 
     private data class LocatedSlice(
-        val nal: ByteArray,
+        val nal: HevcBitstream.NalSpan,
         val header: HevcSliceHeaderParser.SliceHeader,
         val tileIndex: Int,
         val expectedStartAddress: Int
@@ -112,6 +112,22 @@ internal object HevcTizenGridComposer {
      */
     internal fun composeNalUnits(
         feedNals: List<List<HevcBitstream.NalUnit>>,
+        grid: HevcOutputGridDimensions,
+        cells: List<CellSelection>,
+        frameRateNumerator: Int = 50,
+        frameRateDenominator: Int = 1,
+        outputNalLengthSize: Int = 4,
+        includeAnnexBOutput: Boolean = true,
+        emitSampleData: Boolean = true
+    ): Result = composeNalSpans(
+        feedNals.map { units -> units.map { HevcBitstream.NalSpan(it.bytes, 0, it.bytes.size) } },
+        grid, cells, frameRateNumerator, frameRateDenominator, outputNalLengthSize,
+        includeAnnexBOutput, emitSampleData
+    )
+
+    /** Borrow clear input ranges only until all rewritten output NALs are independently owned. */
+    internal fun composeNalSpans(
+        feedNals: List<List<HevcBitstream.NalSpan>>,
         grid: HevcOutputGridDimensions,
         cells: List<CellSelection>,
         frameRateNumerator: Int = 50,
@@ -279,7 +295,7 @@ internal object HevcTizenGridComposer {
                             located.header.loopFilterAcrossSlices == true && ownEdges
                         } else null
                         val rewritten = HevcSliceHeaderRewriter.rewrite(
-                            nal = located.nal,
+                            nal = located.nal.backing,
                             sourceSps = feed.sps,
                             sourcePps = feed.pps,
                             outputSps = outputSps,
@@ -287,7 +303,9 @@ internal object HevcTizenGridComposer {
                             destinationAddress = outputAddress,
                             clearNalBytes = located.nal.size,
                             loopFilterAcrossSlicesOverride = filterOverride,
-                            parsedSourceHeader = located.header
+                            parsedSourceHeader = located.header,
+                            sourceOffset = located.nal.offset,
+                            sourceLength = located.nal.length
                         )
                         // If verification throws, the new NAL still belongs to this scope.
                         try {
@@ -367,7 +385,7 @@ internal object HevcTizenGridComposer {
         }
     }
 
-    private fun parseFeed(index: Int, nals: List<HevcBitstream.NalUnit>): ParsedFeed {
+    private fun parseFeed(index: Int, nals: List<HevcBitstream.NalSpan>): ParsedFeed {
         require(nals.all { it.layerId == 0 }) {
             "Source feed $index contains a non-zero HEVC layer ID"
         }
@@ -377,16 +395,16 @@ internal object HevcTizenGridComposer {
         require(vpsUnits.isNotEmpty() && spsUnits.isNotEmpty() && ppsUnits.isNotEmpty()) {
             "Source feed $index must contain VPS, SPS and PPS NAL units"
         }
-        val vps = HevcParameterSets.parseVps(vpsUnits.first().bytes)
-        val sps = HevcParameterSets.parseSps(spsUnits.first().bytes)
-        val pps = HevcParameterSets.parsePps(ppsUnits.first().bytes, sps)
-        require(vpsUnits.all { HevcParameterSets.parseVps(it.bytes) == vps }) {
+        val vps = HevcParameterSets.parseVps(vpsUnits.first().parameterBytes())
+        val sps = HevcParameterSets.parseSps(spsUnits.first().parameterBytes())
+        val pps = HevcParameterSets.parsePps(ppsUnits.first().parameterBytes(), sps)
+        require(vpsUnits.all { HevcParameterSets.parseVps(it.parameterBytes()) == vps }) {
             "Source feed $index changes its VPS during the supplied stream"
         }
-        require(spsUnits.all { HevcParameterSets.parseSps(it.bytes) == sps }) {
+        require(spsUnits.all { HevcParameterSets.parseSps(it.parameterBytes()) == sps }) {
             "Source feed $index changes its SPS during the supplied stream"
         }
-        require(ppsUnits.all { HevcParameterSets.parsePps(it.bytes, sps) == pps }) {
+        require(ppsUnits.all { HevcParameterSets.parsePps(it.parameterBytes(), sps) == pps }) {
             "Source feed $index changes its PPS during the supplied stream"
         }
         require(sps.vpsId == vps.vpsId && pps.spsId == sps.spsId) {
@@ -402,14 +420,14 @@ internal object HevcTizenGridComposer {
 
         // The analyzer and tile locator inspect the same immutable NAL payloads. Re-splitting
         // Annex-B here cloned every large VCL NAL (and doubled peak young-generation pressure).
-        val validatedHeaders = java.util.IdentityHashMap<ByteArray, HevcSliceHeaderParser.SliceHeader>()
+        val validatedHeaders = java.util.IdentityHashMap<HevcBitstream.NalSpan, HevcSliceHeaderParser.SliceHeader>()
         val pictures = mutableListOf<MutableList<LocatedSlice>>()
         var current: MutableList<LocatedSlice>? = null
         nals.filter { it.type in 0..31 }.forEach { nal ->
             // Parse and validate every source tile just once. Keep the trusted header
             // beside its original immutable NAL bytes for all later composition stages.
-            val header = HevcSliceHeaderParser.parse(nal.bytes, sps, pps)
-            validatedHeaders[nal.bytes] = header
+            val header = HevcSliceHeaderParser.parseRange(nal.backing, nal.offset, nal.length, sps, pps)
+            validatedHeaders[nal] = header
             if (header.firstSliceSegmentInPicture) {
                 current?.let { pictures += it }
                 current = mutableListOf()
@@ -430,13 +448,13 @@ internal object HevcTizenGridComposer {
             require(picture.none { it.tileIndex == tile.index }) {
                 "Source picture contains multiple independent slices in tile ${tile.index}"
             }
-            picture += LocatedSlice(nal.bytes, header, tile.index, tile.startAddress)
+            picture += LocatedSlice(nal, header, tile.index, tile.startAddress)
         }
         current?.let { pictures += it }
         // The alignment pass still verifies all POC, reference and picture identity
         // relationships, but consumes those exact validated headers rather than
         // re-parsing hundreds of multi-kilobyte slice prefixes per segment.
-        val signatures = HevcStreamAlignmentAnalyzer.analyzeNalUnits(nals, validatedHeaders)
+        val signatures = HevcStreamAlignmentAnalyzer.analyzeNalSpans(nals, validatedHeaders)
         require(pictures.size == signatures.size && signatures.isNotEmpty()) {
             "Source feed $index picture grouping disagrees with the POC analyzer"
         }
@@ -450,7 +468,7 @@ internal object HevcTizenGridComposer {
             )
         }
         return ParsedFeed(
-            vpsUnits.first().bytes, spsUnits.first().bytes, ppsUnits.first().bytes,
+            vpsUnits.first().parameterBytes(), spsUnits.first().parameterBytes(), ppsUnits.first().parameterBytes(),
             vps, sps, pps, pictures, identities
         )
     }
@@ -516,7 +534,7 @@ internal object HevcTizenGridComposer {
             require(seen.add(tile.index)) {
                 "Source picture contains multiple independent slices in tile ${tile.index}"
             }
-            allTiles += LocatedSlice(nal, header, tile.index, tile.startAddress)
+            allTiles += LocatedSlice(HevcBitstream.NalSpan(nal, 0, nal.size), header, tile.index, tile.startAddress)
         }
         return allTiles
     }

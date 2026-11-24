@@ -416,29 +416,18 @@ internal object ProtectedHevcComposedDashPackageBuilder {
 }
 
 /**
- * Mutable resource endpoint for Media3's dynamic DASH manifest loader and segment requests.
- * A publication swaps a complete validated package atomically. Individual DataSources receive
- * defensive copies, so retiring the old rolling window cannot zero bytes being read by Media3.
+ * Atomically publishes validated DASH resources. Each immutable resource owns
+ * its own lease count: a slow manifest or fragment reader cannot pin the rest
+ * of an obsolete multi-megabyte window. No decrypted data or licence is used.
  */
 @OptIn(UnstableApi::class)
-
-/**
- * Bounded immutable resource generations. A Media3 DataSource borrows an
- * already validated package buffer rather than cloning an entire encrypted
- * CMAF fragment on every read. Old generations are zeroed only after the last
- * reader closes, so live manifest rotation cannot corrupt an in-flight read.
- *
- * The owner never exposes mutable buffers outside the private DataSource.
- * No copy is decrypted, no licence is touched, and all retired media bytes
- * are erased when their readers finish.
- */
 internal class ProtectedDashResourceStore {
-    private class Generation(
-        val value: ProtectedHevcComposedDashPackageBuilder.Package,
-        var users: Int = 0,
-        var retired: Boolean = false
-    )
-    private var current: Generation? = null
+    private class Resource(val bytes: ByteArray) {
+        var users = 0
+        var retired = false
+    }
+    private var current = emptyMap<String, Resource>()
+    private val retired = mutableSetOf<Resource>()
 
     class Lease internal constructor(
         val bytes: ByteArray,
@@ -454,35 +443,55 @@ internal class ProtectedDashResourceStore {
         }
     }
 
+    data class Snapshot(val currentBytes: Long, val retiredReadBytes: Long, val retiredResources: Int)
+    @Synchronized fun snapshot(): Snapshot = Snapshot(
+        current.values.sumOf { it.bytes.size.toLong() },
+        retired.sumOf { it.bytes.size.toLong() }, retired.size)
+
     @Synchronized fun replace(next: ProtectedHevcComposedDashPackageBuilder.Package) {
-        val prior = current
-        current = Generation(next)
-        if (prior != null) retire(prior)
+        // The publisher transfers detached, uniquely owned arrays. Reject aliasing
+        // before changing the active map; otherwise retiring one name could erase
+        // the bytes a different name or in-flight reader still owns.
+        val seen = java.util.IdentityHashMap<ByteArray, Boolean>()
+        current.values.forEach { seen[it.bytes] = true }
+        retired.forEach { seen[it.bytes] = true }
+        val nextResources = LinkedHashMap<String, Resource>(next.resources.size)
+        next.resources.forEach { (name, bytes) ->
+            require(seen.put(bytes, true) == null) { "Protected DASH resource ownership already transferred" }
+            nextResources[name] = Resource(bytes)
+        }
+        val previous = current
+        current = nextResources
+        previous.values.forEach(::retire)
     }
 
     @Synchronized fun acquire(name: String): Lease? {
-        val generation = current ?: return null
-        val bytes = generation.value.resources[name] ?: return null
-        check(!generation.retired) { "Cannot acquire a retired protected DASH generation" }
-        generation.users++
-        return Lease(bytes) {
+        val resource = current[name] ?: return null
+        check(!resource.retired) { "Cannot acquire a retired protected DASH resource" }
+        resource.users++
+        return Lease(resource.bytes) {
             synchronized(this) {
-                check(generation.users > 0) { "Protected DASH lease was released twice" }
-                generation.users--
-                if (generation.retired && generation.users == 0) generation.value.zero()
+                check(resource.users > 0) { "Protected DASH lease was released twice" }
+                resource.users--
+                if (resource.retired && resource.users == 0) {
+                    retired.remove(resource)
+                    resource.bytes.fill(0)
+                }
             }
         }
     }
 
     @Synchronized fun close() {
-        current?.let(::retire)
-        current = null
+        val previous = current
+        current = emptyMap()
+        previous.values.forEach(::retire)
     }
 
-    private fun retire(generation: Generation) {
-        if (generation.retired) return
-        generation.retired = true
-        if (generation.users == 0) generation.value.zero()
+    private fun retire(resource: Resource) {
+        check(!resource.retired) { "Protected DASH resource retired twice" }
+        resource.retired = true
+        if (resource.users == 0) resource.bytes.fill(0)
+        else retired.add(resource)
     }
 }
 
@@ -535,6 +544,10 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
             // zeroes the buffers only when the last reader releases a lease.
             resources.replace(next)
             transferred = true
+            val retained = resources.snapshot()
+            android.util.Log.i("ApexviewSingleDecoder", "PROTECTED_DASH_RESOURCE_BYTES " +
+                "currentBytes=${retained.currentBytes} retiredReadBytes=${retained.retiredReadBytes} " +
+                "retiredResources=${retained.retiredResources}")
         } finally {
             if (!transferred) window.zero()
         }

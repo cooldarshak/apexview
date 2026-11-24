@@ -68,6 +68,17 @@ internal object HevcStreamAlignmentAnalyzer {
         nals: List<HevcBitstream.NalUnit>,
         prevalidatedSliceHeaders: Map<ByteArray, HevcSliceHeaderParser.SliceHeader> = emptyMap(),
     ): List<HevcFrameSignature> {
+        val spans = nals.map { HevcBitstream.NalSpan(it.bytes, 0, it.bytes.size) }
+        val headers = spans.mapNotNull { span ->
+            prevalidatedSliceHeaders[span.backing]?.let { span to it }
+        }.toMap()
+        return analyzeNalSpans(spans, headers)
+    }
+
+    internal fun analyzeNalSpans(
+        nals: List<HevcBitstream.NalSpan>,
+        prevalidatedSliceHeaders: Map<HevcBitstream.NalSpan, HevcSliceHeaderParser.SliceHeader> = emptyMap(),
+    ): List<HevcFrameSignature> {
         val spsById = mutableMapOf<Int, HevcParameterSets.SpsMetadata>()
         val ppsById = mutableMapOf<Int, HevcParameterSets.PpsMetadata>()
         val pocTracker = HevcPocTracker()
@@ -79,24 +90,24 @@ internal object HevcStreamAlignmentAnalyzer {
             when (nal.type) {
                 36 -> afterEndOfSequence = true // EOS_NUT
                 33 -> {
-                    val sps = HevcParameterSets.parseSps(nal.bytes)
+                    val sps = HevcParameterSets.parseSps(nal.parameterBytes())
                     spsById[sps.spsId] = sps
                 }
                 34 -> {
-                    val pps = HevcParameterSets.parsePps(nal.bytes)
+                    val pps = HevcParameterSets.parsePps(nal.parameterBytes())
                     ppsById[pps.ppsId] = pps
                 }
                 in 0..31 -> {
                     // A compositor can provide the same already-validated header for the
                     // exact owned NAL object. Independent inspector callers keep the
                     // original PPS lookup and bounded parse below.
-                    val prevalidated = prevalidatedSliceHeaders[nal.bytes]
-                    val ppsId = prevalidated?.ppsId ?: readSlicePpsId(nal.bytes, nal.type)
+                    val prevalidated = prevalidatedSliceHeaders[nal]
+                    val ppsId = prevalidated?.ppsId ?: readSlicePpsId(nal, nal.type)
                     val pps = ppsById[ppsId]
                         ?: error("Slice references unknown PPS $ppsId")
                     val sps = spsById[pps.spsId]
                         ?: error("PPS ${pps.ppsId} references unknown SPS ${pps.spsId}")
-                    val slice = prevalidated ?: HevcSliceHeaderParser.parse(nal.bytes, sps, pps)
+                    val slice = prevalidated ?: HevcSliceHeaderParser.parseRange(nal.backing, nal.offset, nal.length, sps, pps)
                     require(slice.ppsId == pps.ppsId && slice.nalUnitType == nal.type) {
                         "Cached slice header does not match its active parameter set or NAL"
                     }
@@ -217,9 +228,8 @@ internal object HevcStreamAlignmentAnalyzer {
         )
     }
 
-    private fun readSlicePpsId(nal: ByteArray, nalType: Int): Int {
-        val header = HevcBitstream.readNalHeader(nal)
-        require(header.type == nalType)
+    private fun readSlicePpsId(nal: HevcBitstream.NalSpan, nalType: Int): Int {
+        require(nal.type == nalType)
         // Picture PPS id is in the first few bytes. Do not copy the encoded VCL payload.
         // The 128-byte inspection window may end exactly on 00 00 03 (an HEVC
         // emulation-prevention byte), while the following byte still exists in
@@ -231,7 +241,7 @@ internal object HevcStreamAlignmentAnalyzer {
             nal[end - 3] == 0.toByte() && nal[end - 2] == 0.toByte() && nal[end - 1] == 3.toByte()) {
             prefixBytes++
         }
-        val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal, 2, prefixBytes))
+        val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal.backing, nal.offset + 2, prefixBytes))
         bits.readBit() // first_slice_segment_in_pic_flag
         if (nalType in 16..23) bits.readBit() // no_output_of_prior_pics_flag
         val ppsId = bits.readUnsignedExpGolomb()

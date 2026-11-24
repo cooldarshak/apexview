@@ -16,6 +16,31 @@ internal object HevcBitstream {
         val temporalIdPlus1: Int,
     )
 
+    /**
+     * Borrowed, bounded view of a clear input NAL. Valid only during synchronous
+     * composition; its owner must keep backing bytes unchanged until return.
+     * The backing array is never exposed as an owned output.
+     */
+    internal class NalSpan(val backing: ByteArray, val offset: Int, val length: Int) {
+        private val header = readNalHeader(backing, offset, length)
+        val type: Int get() = header.type
+        val layerId: Int get() = header.layerId
+        val temporalIdPlus1: Int get() = header.temporalIdPlus1
+        val size: Int get() = length
+        operator fun get(index: Int): Byte {
+            require(index in 0 until length) { "NAL span index out of bounds" }
+            return backing[offset + index]
+        }
+        // Only small parameter sets use the standalone legacy parsers.
+        fun parameterBytes(): ByteArray {
+            require(type in 32..34) { "Only parameter sets can be materialized from a borrowed span" }
+            return if (offset == 0 && length == backing.size) backing
+                else backing.copyOfRange(offset, offset + length)
+        }
+    }
+
+    internal fun NalUnit.asSpan(): NalSpan = NalSpan(bytes, 0, bytes.size)
+
     /** Header fields only: inspecting a multi-megabyte VCL NAL must not clone its payload. */
     data class NalHeader(val type: Int, val layerId: Int, val temporalIdPlus1: Int)
 

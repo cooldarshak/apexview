@@ -61,4 +61,44 @@ class ProtectedDashResourceStoreTest {
         store.close()
         assertArrayEquals(byteArrayOf(0, 0, 0), bytes)
     }
+
+    @Test fun oneRetiredReaderCannotPinUnrelatedProtectedWindowResources() {
+        val held = ByteArray(8) { 11 }
+        val unrelated = ByteArray(16) { 12 }
+        val manifest = ByteArray(3) { 13 }
+        val store = ProtectedDashResourceStore()
+        store.replace(pkg("a" to held, "b" to unrelated, "manifest" to manifest))
+        val reader = requireNotNull(store.acquire("a"))
+        store.replace(pkg("new" to ByteArray(10) { 14 }))
+        assertArrayEquals(ByteArray(16), unrelated)
+        assertArrayEquals(ByteArray(3), manifest)
+        assertArrayEquals(ByteArray(8) { 11 }, reader.bytes)
+        assertEquals(10L, store.snapshot().currentBytes)
+        assertEquals(8L, store.snapshot().retiredReadBytes)
+        assertEquals(1, store.snapshot().retiredResources)
+        reader.close()
+        assertArrayEquals(ByteArray(8), held)
+        assertEquals(0L, store.snapshot().retiredReadBytes)
+        store.close()
+    }
+
+    @Test fun aliasedPublicationCannotZeroOrReplaceCurrentOrLeasedBytes() {
+        val bytes = ByteArray(6) { 7 }
+        val store = ProtectedDashResourceStore()
+        store.replace(pkg("old" to bytes))
+        val old = requireNotNull(store.acquire("old"))
+        assertThrows(IllegalArgumentException::class.java) {
+            store.replace(pkg("alias" to bytes))
+        }
+        val stillCurrent = requireNotNull(store.acquire("old"))
+        stillCurrent.close()
+        store.replace(pkg("new" to byteArrayOf(4, 5)))
+        assertThrows(IllegalArgumentException::class.java) {
+            store.replace(pkg("retiredAlias" to bytes))
+        }
+        assertArrayEquals(ByteArray(6) { 7 }, old.bytes)
+        old.close()
+        assertArrayEquals(ByteArray(6), bytes)
+        store.close()
+    }
 }

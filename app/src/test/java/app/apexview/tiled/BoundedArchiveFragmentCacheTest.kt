@@ -56,4 +56,44 @@ class BoundedArchiveFragmentCacheTest {
         assertEquals(8L, cache.bytesRetained)
         assertEquals(1, cache.size)
     }
+
+    @Test fun leasedDataSurvivesEvictionAndClearUntilLastReaderCloses() {
+        val cache = BoundedArchiveFragmentCache(maxEntries = 1, maxBytes = 12)
+        val old = ByteArray(6) { 3 }
+        cache.put(1, old)
+        val first = requireNotNull(cache.readLease(1))
+        val second = requireNotNull(cache.readLease(1))
+        cache.put(2, ByteArray(8) { 4 })
+        assertNull(cache.readCopy(1))
+        assertEquals(6L, cache.leasedBytes)
+        val read = ByteArray(4)
+        first.readInto(read, 0, 1, 4)
+        assertArrayEquals(ByteArray(4) { 3 }, read)
+        first.close(); first.close()
+        cache.clear()
+        second.readInto(read, 0, 0, 4)
+        assertArrayEquals(ByteArray(4) { 3 }, read)
+        assertThrows(IllegalStateException::class.java) { first.readInto(read, 0, 0, 1) }
+        assertThrows(IllegalArgumentException::class.java) { second.readInto(read, 0, 5, 2) }
+        second.close()
+        assertArrayEquals(ByteArray(6), old)
+        assertEquals(0L, cache.leasedBytes)
+    }
+
+    @Test fun readerBudgetIsBoundedAndRecoversAfterClose() {
+        val cache = BoundedArchiveFragmentCache(maxEntries = 2, maxBytes = 10, maxReaders = 2)
+        val old = ByteArray(7) { 1 }
+        cache.put(1, old)
+        val lease = requireNotNull(cache.readLease(1))
+        val duplicate = requireNotNull(cache.readLease(1))
+        assertThrows(ArchiveVodMediaException::class.java) { cache.readLease(1) }
+        duplicate.close()
+        cache.put(2, ByteArray(7) { 2 })
+        assertThrows(ArchiveVodMediaException::class.java) { cache.readLease(2) }
+        assertThrows(IllegalArgumentException::class.java) { cache.put(3, old) }
+        lease.close()
+        assertArrayEquals(ByteArray(7), old)
+        requireNotNull(cache.readLease(2)).close()
+        cache.clear()
+    }
 }

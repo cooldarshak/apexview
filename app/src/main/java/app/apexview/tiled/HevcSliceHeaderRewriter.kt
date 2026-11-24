@@ -34,9 +34,17 @@ internal object HevcSliceHeaderRewriter {
         loopFilterAcrossSlicesOverride: Boolean? = null,
         parsedSourceHeader: HevcSliceHeaderParser.SliceHeader? = null,
         /** Preserve opaque CBCS CABAC bytes when only the byte-aligned slice header is clear. */
-        preserveOpaqueCabacTail: Boolean = false
+        preserveOpaqueCabacTail: Boolean = false,
+        sourceOffset: Int = 0,
+        sourceLength: Int = nal.size
     ): Result {
-        val nalHeader = HevcBitstream.readNalHeader(nal)
+        val nalHeader = HevcBitstream.readNalHeader(nal, sourceOffset, sourceLength)
+        // Range borrowing is for the independently validated clear CMAF path.
+        // Protected callers retain the original complete-NAL / clear-prefix contract.
+        require((sourceOffset == 0 && sourceLength == nal.size) ||
+            (!preserveOpaqueCabacTail && clearNalBytes == sourceLength)) {
+            "Borrowed slice range requires a fully clear NAL"
+        }
         require(nalHeader.type in 0..21) { "Unsupported VCL NAL type" }
         require(nalHeader.layerId == 0) { "Non-zero HEVC layers are not supported" }
         require(sourcePps.spsId == sourceSps.spsId) { "Source PPS/SPS identity mismatch" }
@@ -47,7 +55,7 @@ internal object HevcSliceHeaderRewriter {
         require(!sourcePps.extensionPresent && !outputPps.extensionPresent) {
             "PPS extensions are not supported by the slice rewriter"
         }
-        require(clearNalBytes in 3..nal.size) { "Invalid clear NAL prefix length" }
+        require(clearNalBytes in 3..sourceLength) { "Invalid clear NAL prefix length" }
         requireCompatibleSps(sourceSps, outputSps)
         requireCompatiblePps(sourcePps, outputPps)
         require(!sourceSps.scalingListDataPresent && !outputSps.scalingListDataPresent) {
@@ -70,7 +78,7 @@ internal object HevcSliceHeaderRewriter {
         // The grid composer already validated this same immutable NAL in its single
         // per-feed parse. Other callers still parse here and retain the full gate.
         val parsed = parsedSourceHeader
-            ?: HevcSliceHeaderParser.parse(nal, sourceSps, sourcePps, clearNalBytes)
+            ?: HevcSliceHeaderParser.parseRange(nal, sourceOffset, sourceLength, sourceSps, sourcePps, clearNalBytes)
         require(!parsed.dependentSliceSegment) { "Dependent slice segments are not supported" }
         require(parsed.entryPointOffsets.isEmpty()) {
             "Non-zero tile/WPP entry-point offsets are not supported"
@@ -94,7 +102,7 @@ internal object HevcSliceHeaderRewriter {
         // terminal byte is nonzero on both sides, so the opaque EBSP tail cannot have an
         // emulation-prevention sequence straddling the splice boundary.
         val requiredClearRbspBytes = sourceHeaderBytes + if (preserveOpaqueCabacTail) 0 else 3
-        val clearRbsp = decodeClearPrefix(nal, clearNalBytes, requiredClearRbspBytes)
+        val clearRbsp = decodeClearPrefix(nal, sourceOffset, clearNalBytes, requiredClearRbspBytes)
         val rbsp = clearRbsp.bytes
         require(parsed.sourceAddressEndBit <= parsed.entryPointFieldStartBit &&
             parsed.entryPointFieldStartBit <= parsed.entryPointFieldEndBit &&
@@ -163,9 +171,9 @@ internal object HevcSliceHeaderRewriter {
             // byte of an aligned HEVC slice header contains alignment_bit_equal_to_one.
             // Consequently it cannot be 0x00, before or after the header rewrite.
             sourceTailOffset = Math.addExact(clearRbsp.sourceTailOffset, 1)
-            require(sourceTailOffset in 3 until nal.size &&
+            require(sourceTailOffset in 3 until sourceLength &&
                 sourceTailOffset <= clearNalBytes &&
-                nal[sourceTailOffset - 1] != 0.toByte() &&
+                nal[sourceOffset + sourceTailOffset - 1] != 0.toByte() &&
                 outputHeaderRbsp.isNotEmpty() && outputHeaderRbsp.last() != 0.toByte()) {
                 "Opaque CABAC splice requires complete clear byte-aligned slice headers"
             }
@@ -185,11 +193,12 @@ internal object HevcSliceHeaderRewriter {
             sourceTailOffset = clearRbsp.sourceTailOffset
             reencodedCabacBytes = 2
         }
-        require(sourceTailOffset in 2 until nal.size) { "CABAC tail is outside the source NAL" }
-        val outputNal = ByteArray(2 + escapedHeaderAndPayloadPrefix.size + nal.size - sourceTailOffset)
-        nal.copyInto(outputNal, 0, 0, 2)
+        require(sourceTailOffset in 2 until sourceLength) { "CABAC tail is outside the source NAL" }
+        val outputNal = ByteArray(Math.addExact(2 + escapedHeaderAndPayloadPrefix.size, sourceLength - sourceTailOffset))
+        nal.copyInto(outputNal, 0, sourceOffset, sourceOffset + 2)
         escapedHeaderAndPayloadPrefix.copyInto(outputNal, 2)
-        nal.copyInto(outputNal, 2 + escapedHeaderAndPayloadPrefix.size, sourceTailOffset)
+        nal.copyInto(outputNal, 2 + escapedHeaderAndPayloadPrefix.size,
+            sourceOffset + sourceTailOffset, sourceOffset + sourceLength)
 
         return Result(
             nal = outputNal,
@@ -197,7 +206,7 @@ internal object HevcSliceHeaderRewriter {
             sourceHeaderBytes = sourceHeaderBytes,
             outputHeaderBytes = outputHeaderRbsp.size,
             sourceTailOffset = sourceTailOffset,
-            copiedTailBytes = nal.size - sourceTailOffset,
+            copiedTailBytes = sourceLength - sourceTailOffset,
             reencodedClearPayloadBytes = reencodedCabacBytes
         )
     }
@@ -271,7 +280,7 @@ internal object HevcSliceHeaderRewriter {
         ) { "Output PPS changes source slice-header semantics" }
     }
 
-    private fun decodeClearPrefix(nal: ByteArray, clearNalBytes: Int, requiredBytes: Int): ClearRbsp {
+    private fun decodeClearPrefix(nal: ByteArray, offset: Int, clearNalBytes: Int, requiredBytes: Int): ClearRbsp {
         require(requiredBytes in 1..clearNalBytes - 2) {
             "At least three clear CABAC bytes are required after the slice header"
         }
@@ -281,19 +290,19 @@ internal object HevcSliceHeaderRewriter {
         var zeroCount = 0
         var index = 2
         while (index < clearNalBytes) {
-            val value = nal[index].toInt() and 0xff
+            val value = nal[offset + index].toInt() and 0xff
             if (zeroCount >= 2 && value == 3) {
                 require(index + 1 < clearNalBytes) {
                     "Emulation-prevention byte is truncated at the clear/encrypted boundary"
                 }
-                val next = nal[index + 1].toInt() and 0xff
+                val next = nal[offset + index + 1].toInt() and 0xff
                 require(next <= 3) { "Invalid emulation-prevention sequence in clear slice header" }
                 zeroCount = 0
                 index++
                 continue
             }
             if (decodedCount < requiredBytes) {
-                decoded[decodedCount] = nal[index]
+                decoded[decodedCount] = nal[offset + index]
                 if (decodedCount == requiredBytes - 1) tailOffset = index
             }
             decodedCount++

@@ -180,4 +180,63 @@ class ArchiveSegmentDeliveryTest {
         assertEquals(ArchiveWarmupStopReason.CANCELLED,
             ArchiveWarmupFailurePolicy.classify(IOException("closed"), true, false))
     }
+
+    @Test fun mediaLoaderLeaseUsesSharedPublicationAndSurvivesReplacement() {
+        val cache = BoundedArchiveFragmentCache(maxEntries = 1, maxBytes = 64)
+        val owned = ByteArray(12) { 7 }
+        val calls = AtomicInteger()
+        val delivery = ArchiveSegmentDelivery(cache, Any(), ArchiveSegmentSingleFlight(), {},
+            { key -> calls.incrementAndGet(); cache.put(key, owned) })
+        delivery.obtain(1, copyForCaller = false)
+        val lease = delivery.obtainLease(1)
+        cache.put(2, ByteArray(12) { 8 })
+        val read = ByteArray(5)
+        lease.readInto(read, 0, 4, 5)
+        assertArrayEquals(ByteArray(5) { 7 }, read)
+        assertEquals(1, calls.get())
+        lease.close()
+        assertArrayEquals(ByteArray(12), owned)
+        cache.clear()
+    }
+
+    @Test fun fullWorkAdmissionBoundsWaitersAndCloseWakesQueuedProducer() {
+        val admission = ArchiveWorkAdmission(maxWaiters = 1)
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val waiting = CountDownLatch(1)
+        val workers = Executors.newFixedThreadPool(2)
+        try {
+            val active = workers.submit<Int> {
+                admission.run(TimeUnit.SECONDS.toNanos(5)) {
+                    started.countDown()
+                    check(release.await(5, TimeUnit.SECONDS))
+                    7
+                }
+            }
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            val queued = workers.submit {
+                waiting.countDown()
+                assertThrows(IOException::class.java) {
+                    admission.run(TimeUnit.SECONDS.toNanos(5)) { error("Closed admission ran queued work") }
+                }
+            }
+            assertTrue(waiting.await(2, TimeUnit.SECONDS))
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (admission.queued() == 0 && System.nanoTime() < deadline) Thread.yield()
+            assertEquals(1, admission.queued())
+            val failure = assertThrows(ArchiveVodMediaException::class.java) {
+                admission.run(0L) { error("Over-budget admission ran work") }
+            }
+            assertTrue(failure.retryable)
+            admission.close()
+            queued.get(2, TimeUnit.SECONDS)
+            release.countDown()
+            assertEquals(7, active.get(2, TimeUnit.SECONDS).toInt())
+            assertThrows(IOException::class.java) { admission.run(0L) { Unit } }
+        } finally {
+            release.countDown()
+            admission.close()
+            workers.shutdownNow()
+        }
+    }
 }
