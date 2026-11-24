@@ -4,6 +4,10 @@
 **Baseline:** Build 699, commit `ea2cfbb345f02779f610a9d8f467426157f29ecc`, green CI.
 **Status:** The consolidated source update is implemented. Physical and release acceptance is open. **Verified starting checkpoint: Build 837**, commit `6d20bccdcfba121f7b0998fdcb8d9dcc492ff539`. Its mandatory source, JVM, Cast, independent HEVC/CMAF, APK and Android instrumentation checks passed. This document is the active project plan. [Build 837](https://github.com/cooldarshak/apexview/actions/runs/45374278181)
 
+## Build 838 Android rendering correction
+
+[Build 838](https://github.com/cooldarshak/apexview/actions/runs/45388176878) passed the JVM, Cast protocol, independent HEVC/CMAF and signed package stages. Its mandatory Android pixel test verified the video layer but found the expected translucent overlay missing at the sampled position. The correction records the live viewer overlay once into an Android RenderNode, uses that display list in the viewer, and explicitly draws and posts it on the encoder's transparent hardware Canvas. Each capture still waits for both input frames. The first frame has a separate bounded acquisition timeout. The Android test retains its placement, opacity and movement assertions and reports the observed bounds if a pixel differs. The exact-source Android results belong to the next branch workflow.
+
 ## Consolidated update after Build 837
 
 - **Playback and timing.** The playback coordinator owns feed-offer cancellation, composition replacement, delayed retry and the latest exact seek/Cast restart. Detached capture workers finish before their backend is reset. Each timing open and speed lookup has its own identity. Stale operations cannot publish over a newer request, including when the same race is reopened. Backgrounding during a local feed offer cancels the offer before it can start a player out of view.

@@ -197,7 +197,8 @@ internal class BakedCastCaptureWorker(
     private fun useWindowCapture(error: Exception) {
         directCapture?.close()
         directCapture = null
-        Log.w("PitwallCast", "BAKED_CAST_CAPTURE_PATH source=WINDOW_PIXEL_COPY cause=${error.javaClass.simpleName}")
+        val detail = app.apexview.DiagnosticRedaction.redact(error.message.orEmpty()).take(160)
+        Log.w("PitwallCast", "BAKED_CAST_CAPTURE_PATH source=WINDOW_PIXEL_COPY cause=${error.javaClass.simpleName} detail=$detail")
     }
 
     private fun fail(error: Exception) {

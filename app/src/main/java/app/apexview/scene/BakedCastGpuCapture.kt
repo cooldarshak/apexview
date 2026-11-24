@@ -30,7 +30,6 @@ internal class BakedCastGpuCapture(
     private var video: Input? = null
     private var ui: Input? = null
     private var videoTarget: VideoTarget? = null
-    private var overlayTarget: BakedCastOverlayTarget? = null // Main only.
     @Volatile private var closed = false
 
     private class Request(val complete: (BakedCastVideoPlacement) -> Unit, val fail: (Exception) -> Unit) {
@@ -40,6 +39,7 @@ internal class BakedCastGpuCapture(
         lateinit var timeout: Runnable
     }
     private var pending: Request? = null
+    private var deliveredFrame = false
 
     init {
         try {
@@ -60,16 +60,14 @@ internal class BakedCastGpuCapture(
         val request = Request(complete, failed)
         request.timeout = Runnable { fail(request, IllegalStateException("Timed out drawing clear Cast layers")) }
         pending = request
-        gl.postDelayed(request.timeout, 750)
+        gl.postDelayed(request.timeout, if (deliveredFrame) 750L else 2_000L)
         drawVideo(checkNotNull(videoTarget))
         val targetSurface = checkNotNull(ui).surface
         main.post {
             if (closed) return@post
             try {
-                val layer = checkNotNull(overlay.layer) { "Viewer overlays are not attached" }
                 val placement = overlay.placement()
-                val target = overlayTarget ?: BakedCastOverlayTarget(targetSurface, width, height).also { overlayTarget = it }
-                if (!target.submit(layer)) {
+                if (!overlay.submit(targetSurface, width, height)) {
                     gl.post { fail(request, IllegalStateException("Viewer overlay frame could not be drawn")) }
                 } else gl.post { request.placement = placement; complete(request) }
             } catch (error: Exception) {
@@ -83,6 +81,7 @@ internal class BakedCastGpuCapture(
         if (pending !== request || !request.videoReady || !request.uiReady) return
         pending = null
         gl.removeCallbacks(request.timeout)
+        deliveredFrame = true
         request.complete(placement)
     }
 
@@ -108,9 +107,13 @@ internal class BakedCastGpuCapture(
         pending?.let { gl.removeCallbacks(it.timeout) }
         pending = null
         videoTarget?.let { it.close(); detachVideo(it) }
-        main.post { overlayTarget?.close(); overlayTarget = null }
+        ui?.let { input ->
+            // The producer Surface belongs to the Main draw callback. Release it after
+            // any outstanding Canvas lock ends, even if its GL queue is abandoned first.
+            main.post { input.surface.release() }
+            input.releaseTexture()
+        }
         video?.close()
-        ui?.close()
         shader.close()
     }
 
@@ -135,11 +138,15 @@ internal class BakedCastGpuCapture(
 
         fun latch() { frames.updateTexImage(); frames.getTransformMatrix(matrix) }
 
-        override fun close() {
+        fun releaseTexture() {
             frames.setOnFrameAvailableListener(null)
-            surface.release()
             frames.release()
             GLES20.glDeleteTextures(1, intArrayOf(id), 0)
+        }
+
+        override fun close() {
+            surface.release()
+            releaseTexture()
         }
     }
 }

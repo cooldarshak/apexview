@@ -91,8 +91,16 @@ class BakedCastCaptureAndroidTest {
         fun assertPixel(pixels: ByteBuffer, x: Int, y: Int, vararg expected: Int) {
             val start = ((63 - y) * 64 + x) * 4
             val actual = expected.indices.map { pixels.get(start + it).toInt() and 255 }
-            assertTrue("At ($x,$y) expected ${expected.toList()}, got $actual",
-                expected.indices.all { kotlin.math.abs(expected[it] - actual[it]) <= 4 })
+            if (expected.indices.any { kotlin.math.abs(expected[it] - actual[it]) > 4 }) {
+                // Field diagnostics keep the pixel requirement exact and reveal a displaced layer.
+                val points = (0 until 64 * 64).filter { (pixels.get(it * 4 + 1).toInt() and 255) > 40 }
+                val bounds = if (points.isEmpty()) "absent" else {
+                    val xs = points.minOf { it % 64 }..points.maxOf { it % 64 }
+                    val ys = points.minOf { 63 - it / 64 }..points.maxOf { 63 - it / 64 }
+                    "x=$xs y=$ys"
+                }
+                throw AssertionError("At ($x,$y) expected ${expected.toList()}, got $actual. Overlay $bounds")
+            }
         }
 
         try {

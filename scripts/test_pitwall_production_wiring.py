@@ -637,6 +637,13 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("mediaClock.timestampNs(position)", worker)
         self.assertIn("WINDOW_PIXEL_COPY", worker)
         self.assertIn("check(!closed && pending == null)", gpu)
+        overlay = contents(base + "scene/BakedCastOverlay.kt")
+        self.assertIn("scope.drawContent()", overlay)
+        self.assertIn("display.nativeCanvas.drawRenderNode(content)", overlay)
+        self.assertIn("surface.lockHardwareCanvas()", overlay)
+        self.assertIn("canvas.drawRenderNode(content)", overlay)
+        self.assertIn("surface.unlockCanvasAndPost(canvas)", overlay)
+        self.assertIn("overlay.submit(targetSurface, width, height)", gpu)
         self.assertNotIn("BakedCastGpuCapture", contents(base + "scene/ProtectedDecoderSceneView.kt"))
         self.assertIn("BakedCastCaptureAndroidTest", contents("scripts/run_rendernode_instrumentation.sh"))
 
