@@ -1,5 +1,12 @@
 //! G.0 feasibility only. No production playback or protected payload processing.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+
+mod annex_b;
+pub use annex_b::convert_length_prefixed;
+
+#[cfg(target_os = "android")]
+#[allow(unsafe_code)]
+mod jni_bridge;
 
 /// Mirrors the current JVM clear sizing kernel. Four-byte prefixes have a
 /// sizing-only fast path; this function is NOT a NAL validator.

@@ -150,6 +150,13 @@ android {
         sourceSets.getByName("androidTest").assets.srcDir(hevcTileFixtureDirectory)
     }
 
+    // G.0 diagnostic libraries are only packaged in the debug APK by the
+    // dedicated branch's existing CI. No release/benchmark/player activation.
+    val g0JniDir = System.getenv("PITWALL_G0_JNI_LIB_DIR")
+    if (!g0JniDir.isNullOrBlank()) {
+        sourceSets.getByName("debug").jniLibs.srcDir(g0JniDir)
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true

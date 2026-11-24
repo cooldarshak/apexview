@@ -82,9 +82,36 @@ run_tls_gate() {
   cat "$tls_report" >> "$report"
 }
 
+run_g0_gate() {
+  local sdk g0_report
+  sdk="$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
+  [[ "$sdk" =~ ^[0-9]+$ ]]
+  g0_report="${RUNNER_TEMP:?}/pitwall-g0-api-$sdk-instrumentation.txt"
+  if ! run_required_instrumentation \
+    app.apexview.tiled.ArchitectureG0AndroidTest \
+    'OK (3 tests)' "$g0_report"; then
+    adb logcat -d -s PitwallG0:I '*:S' >> "$g0_report" || true
+    cat "$g0_report"
+    return 1
+  fi
+  adb logcat -d -s PitwallG0:I '*:S' >> "$g0_report"
+  cat "$g0_report"
+}
+
 wait_for_android_services
+if [[ -n "${PITWALL_G0_BASELINE_APK:-}" ]]; then
+  # Fresh hosted emulator only; verify actual signed upgrade and data retention.
+  adb install -r "$PITWALL_G0_BASELINE_APK"
+  adb shell "run-as app.apexview_custom sh -c 'mkdir -p files && printf g0-baseline > files/g0-upgrade-marker'"
+fi
 adb install -r "$apk"
 adb install -r "$tests"
+if [[ -n "${PITWALL_G0_BASELINE_APK:-}" ]]; then
+  [[ "$(adb shell run-as app.apexview_custom cat files/g0-upgrade-marker | tr -d '\r')" == "g0-baseline" ]]
+  adb shell run-as app.apexview_custom rm files/g0-upgrade-marker
+  echo "G0 signed upgrade/data retention PASS"
+  run_g0_gate
+fi
 
 if [[ "${1:-}" == "tls-only" ]]; then
   run_tls_gate

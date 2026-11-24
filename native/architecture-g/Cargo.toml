@@ -8,5 +8,8 @@ rust-version = "1.91"
 [lib]
 crate-type = ["rlib", "cdylib"]
 
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "=0.21.1", default-features = false }
+
 [profile.release]
 debug = 1

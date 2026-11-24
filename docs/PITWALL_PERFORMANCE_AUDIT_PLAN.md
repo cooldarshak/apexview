@@ -12,6 +12,8 @@ Build 840 completed successfully at [a70fed21](https://github.com/cooldarshak/ap
 
 On `feature/architecture-g-rust-stitching` only, G.0 initial feasibility work begins. See [the consolidated G ledger](handovers/PITWALL_TV_ARCHITECTURE_G_RUST_HANDOVER.md) for exact prototype and open CI/physical gates. The 16-workstream acceptance remains unchanged. No production engine/default changes; parent and main untouched.
 
+G.0 second batch on the dedicated branch: diagnostic JNI-RS/DirectByteBuffer, real clear fixture differential test, debug native packaging, signed upgrade/ABI/alignment and symbolication gates added; exact CI/physical evidence pending. Build 843 remains verified green; no player/DRM/feature changes or release acceptance claims. See the G ledger for detail.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |

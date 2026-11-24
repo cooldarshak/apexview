@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # Read exact Build 843 baseline artifact for G.0 upgrade gate.
 
 # One branch HEAD, one useful CI run. Pushing an updated HEAD cancels only the
 # superseded run on that branch; a failed compiler/test never publishes an APK.
@@ -102,6 +103,8 @@ jobs:
           done < "$report/fixtures/manifest.txt"
           cargo install cargo-ndk --version 4.1.2 --locked
           cargo ndk --platform 29 -t armeabi-v7a -t arm64-v8a -t x86 -t x86_64 -o "$report/abi" build --locked --release --lib
+          echo "PITWALL_G0_JNI_LIB_DIR=$report/abi" >> "$GITHUB_ENV"
+          cp Cargo.lock "$report/Cargo.lock"
           for abi in armeabi-v7a arm64-v8a x86 x86_64; do
             lib="$report/abi/$abi/libpitwall_g0.so"
             test -s "$lib"
@@ -317,6 +320,34 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleBenchmark :macrobenchmark:assembleBenchmark
 
+      - name: Download exact Build 843 signed baseline for G.0 upgrade
+        if: github.ref == 'refs/heads/feature/architecture-g-rust-stitching'
+        uses: actions/download-artifact@v4
+        with:
+          name: apexview-custom-debug-apk
+          run-id: 45441485463
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/pitwall-g0-baseline
+
+      - name: Verify G.0 signed native APK and build-ID-matched symbols
+        if: github.ref == 'refs/heads/feature/architecture-g-rust-stitching'
+        run: |
+          set -euo pipefail
+          test "${APK_SIGNING_READY:-false}" = true
+          mapfile -t baseline_apks < <(find "$RUNNER_TEMP/pitwall-g0-baseline" -type f -name '*.apk')
+          test "${#baseline_apks[@]}" -eq 1
+          baseline="${baseline_apks[0]}"
+          bash scripts/verify_architecture_g0_apk.sh app/build/outputs/apk/debug/app-debug.apk "$baseline" "$RUNNER_TEMP/pitwall-g0"
+          echo "PITWALL_G0_BASELINE_APK=$baseline" >> "$GITHUB_ENV"
+
+      - name: Retain G.0 APK and native symbol evidence
+        if: always() && github.ref == 'refs/heads/feature/architecture-g-rust-stitching'
+        uses: actions/upload-artifact@v4
+        with:
+          name: architecture-g0-apk-symbols
+          path: ${{ runner.temp }}/pitwall-g0
+          if-no-files-found: error
+
       # This runner may not expose /dev/kvm (nested virtualization is not guaranteed).
       # Do not fail an otherwise successful APK build before the tests even start.
       # Emulator Runner's 'auto' uses KVM when accessible and TCG otherwise.
@@ -399,6 +430,7 @@ jobs:
           path: |
             ${{ runner.temp }}/pitwall-rendernode-instrumentation.txt
             ${{ runner.temp }}/pitwall-tls-api-*-instrumentation.txt
+            ${{ runner.temp }}/pitwall-g0-api-*-instrumentation.txt
           if-no-files-found: warn
           retention-days: 14
 
