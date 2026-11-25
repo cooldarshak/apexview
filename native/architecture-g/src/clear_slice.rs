@@ -97,7 +97,38 @@ pub fn rewrite_scalar(source:&[u8], s:Syntax, output:&mut [u8])->Option<usize> {
     rewrite_impl::<false>(source,s,output)
 }
 
-fn rewrite_impl<const FAST: bool>(source:&[u8], s:Syntax, output:&mut [u8])->Option<usize> {
+fn rewrite_impl<const FAST: bool>(source: &[u8], s: Syntax, output: &mut [u8]) -> Option<usize> {
+    with_rewritten_parts::<FAST, _>(source, s, |prefix, tail| {
+        let total = prefix.len() + tail.len();
+        let out = output.get_mut(..total)?;
+        let (header, payload) = out.split_at_mut(prefix.len());
+        header.copy_from_slice(prefix);
+        payload.copy_from_slice(tail);
+        Some(total)
+    })?
+}
+
+pub struct Parts<'a> {
+    pub(crate) header: Vec<u8>,
+    pub(crate) tail: &'a [u8],
+}
+
+/// Owns the escaped header only. The VCL payload remains in the caller's clear
+/// input until final fragment assembly. Syntax still comes from the JVM reference.
+pub fn rewrite_parts(source: &[u8], syntax: Syntax) -> Option<Parts<'_>> {
+    with_rewritten_parts::<true, _>(source, syntax, |prefix, tail| {
+        let mut header = Vec::new();
+        header.try_reserve_exact(prefix.len()).ok()?;
+        header.extend_from_slice(prefix);
+        Some(Parts { header, tail })
+    })?
+}
+
+fn with_rewritten_parts<'a, const FAST: bool, T>(
+    source: &'a [u8],
+    s: Syntax,
+    consume: impl FnOnce(&[u8], &'a [u8]) -> T,
+) -> Option<T> {
     if !(5..=MAX).contains(&source.len()) || source[0]&0x81 != 0 ||
         source[1]>>3 != 0 || source[1]&7==0 || (source[0]>>1)>21 ||
         s.header_bytes==0 || s.header_bytes>HEADER-3 ||
@@ -138,10 +169,8 @@ fn rewrite_impl<const FAST: bool>(source:&[u8], s:Syntax, output:&mut [u8])->Opt
     }
     if zeros>=2 && rbsp[s.header_bytes+2]<=3 {prefix[pos]=3;pos+=1;}
     let total=pos.checked_add(source.len()-tail)?;
-    if total>MAX || total>output.len() {return None;}
-    output[..pos].copy_from_slice(&prefix[..pos]);
-    output[pos..total].copy_from_slice(&source[tail..]);
-    Some(total)
+    if total > MAX { return None; }
+    Some(consume(&prefix[..pos], &source[tail..]))
 }
 
 #[cfg(test)]

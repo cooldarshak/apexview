@@ -367,17 +367,28 @@ Record p50/p95/p99/max latency, throughput and deadline slack, CPU time, JVM/nat
 
 Rust is selected. Go forward if equal or better than C++, or within the proposed approximately 10% trade-off and sufficient actual playback headroom. 10% is not an industry standard; device deadlines and memory ceilings win. If materially slower, profile and correct actual bottlenecks before drawing conclusions. If repeated representative results show an important playback deficit or mandatory compatibility/deployment failure, present evidence and a contingency recommendation to the user. Do not silently change the selected language. G.0 is a real gate; do not assert feasibility merely from a cross-compile or popularity.
 
+### G-B first implementation batch
+
+The branch was verified at `670b610c00cd62870a79c3ccd4307648d52a1e8f` before implementation. The only changes after tested Build 857 were documentation. Work starts with clear CMAF and uses the live JVM composer as the reference.
+
+- `bmff.rs` and `cmaf_input.rs` borrow bounded box, initialization and media sample ranges. They check the single-track profile, the sample description and `tfhd`/`tfdt`/`trun`/`trex` defaults, full sample coverage, signed or unsigned CTS offsets and checked DTS/PTS. Recognized encryption and sample-group signalling are rejected by the clear route.
+- `hevc_nal.rs`, `hevc_prefix.rs` and `hevc_poc.rs` validate NAL extents, early VPS/SPS/PPS references, coded and cropped geometry, CTB addresses, slice prefixes, POC wrap and random-access epochs. Full parameter/slice semantics, tile/RPS/loop-filter compatibility, output VPS/SPS/PPS generation and generation-bound config caching remain open.
+- `cmaf_init.rs` writes byte-exact clear initialization from the JVM-validated output configuration. The clear fragment writer writes rewritten headers and borrowed source NAL tails directly into the final CMAF destination buffer. Arena job dispatch, leased playback publication and controlled engine restart still require integration. JVM playback and licensed Widevine remain the effective routes.
+- The new host gate reconstructs the 50-frame 1920×540, two-feed clear stream from independently encoded source CMAF using the existing JVM-validated rewrite descriptors and output configuration. It requires exact initialization and fragment bytes, matching packet PTS/DTS/duration/flags and independent FFmpeg pixel hashes. Targeted host preflight also covers malformed extents, oversized inputs, signed timestamp overflow, encryption markers and deterministic parser mutations. Full CI, native tiled 2×2, mixed geometry, protected metadata parity, and Android seek/rotation evidence remain open.
+
+The relevant external references for this batch are Mozilla MP4Parse `e9ee67b` (bounded container extents, MPL-2.0), ChromeOS cros-codecs `a050c6c` (HEVC syntax, BSD-3-Clause), gst-plugins-rs `a0c371f` (fragmented MP4 structure, Apache-2.0) and the already pinned Kvazaar `c997f08` plus FFmpeg for independent pixels and packet probes. The implementation follows the in-repository Kotlin contracts and adds no dependency or third-party source.
+
 ## 10. Architecture G master engineering plan — G.1–G.20
 
-Build 857 is the verified G-A foundation baseline. G.0 is signed off by the user. G-A foundation coding and automated gates are complete; G-B–G-D are not started as integrated phases. Existing diagnostic kernels do not establish production stitching. Update coding, automated, physical and measured-result columns with exact evidence. P0 gates protect correctness, safety and compatibility; P1 work is grouped into coherent follow-up batches. Architecture G extends the original plan; no independent competing roadmap.
+Build 857 is the verified G-A foundation baseline. G.0 is signed off by the user. G-A foundation coding and automated gates are complete; G-B clear media implementation has started. G-C and G-D remain pending. Existing diagnostic kernels do not establish production stitching. Update coding, automated, physical and measured-result columns with exact evidence. P0 gates protect correctness, safety and compatibility; P1 work is grouped into coherent follow-up batches. Architecture G extends the original plan; no independent competing roadmap.
 
 | ID | Workstream / required deliverable | Priority | Coding | Automated | Physical / measurement |
 | --- | --- | --- | --- | --- | --- |
 | G.1 | Audit/profile existing JVM stitcher, establish repeatable baseline | P0 | Foundation audit + boundary counters complete; physical profile G-C/D | Build 857 GREEN; foundation gates passed | Deferred |
 | G.2 | Fixed-capacity native input/output memory arenas | P0 | Bounded native arena foundation complete | Build 857 GREEN; foundation gates passed | Deferred |
-| G.3 | Port native HEVC parsing and stitching with exact invariants | P0 | Not started | Pending | Pending |
-| G.4 | Native CMAF moof/mdat assembly, exact sizes/offsets/timestamps | P0 | Not started | Pending | Pending |
-| G.5 | Preserve existing DRM compatibility validations and authorized pipeline | P0 | Not started | Pending | Pending |
+| G.3 | Port native HEVC parsing and stitching with exact invariants | P0 | Partial. Early NAL/RBSP, VPS/SPS/PPS references, geometry, slice prefixes and POC | Host regressions. Full syntax/output parameter generation pending | Pending |
+| G.4 | Native CMAF moof/mdat assembly, exact sizes/offsets/timestamps | P0 | Partial. Clear init/media reader, exact clear writers, borrowed tails. Worker/lease and playback integration pending | Two-feed fixture byte-exact locally. Full CI pending | Pending |
+| G.5 | Preserve existing DRM compatibility validations and authorized pipeline | P0 | Existing authorized route retained. Clear path rejects protection signalling. Native protected compatibility pending | Clear rejection tests. Native protected corpus pending | Pending |
 | G.6 | Explicit buffer ownership, leases and lifecycle | P0 | Deterministic native slots/bridge ownership and joined close complete | Build 857 GREEN; foundation gates passed | Deferred |
 | G.7 | Bounded queues, backpressure and deadline-aware producer/consumer coordination | P0 | Bounded deadline scheduler and expiry tests complete | Build 857 GREEN; foundation gates passed | Deferred |
 | G.8 | Reusable Direct ByteBuffer integration, checked JNI ownership | P0 | Checked native-owned direct bridge, batch JNI and copy accounting complete | Build 857 GREEN; foundation gates passed | Deferred |
@@ -388,7 +399,7 @@ Build 857 is the verified G-A foundation baseline. G.0 is signed off by the user
 | G.13 | Cancellation, seek-generation invalidation, stale publication prevention | P1 | Generation cancellation and globally unique stale leases complete | Build 857 GREEN; foundation gates passed | Deferred |
 | G.14 | Compatible feed switching and bounded priority prefetch | P1 | Not started | Pending | Pending |
 | G.15 | Leak detection, fuzzing, sanitizer and safety tests | P0 | Foundation stress, ASan/LSan and Android lifecycle gates added | Build 857 GREEN; foundation gates passed | Deferred |
-| G.16 | Byte-for-byte JVM/native differential regression plus independent decode | P0 | Not started | Pending | Pending |
+| G.16 | Byte-for-byte JVM/native differential regression plus independent decode | P0 | Partial. Two-feed encoded clear stream, packet metadata and malformed/mutation coverage | Two-feed FFmpeg/Kvazaar pixel and packet preflight passed. Full CI, 2×2, mixed and protected corpus pending | Pending |
 | G.17 | Adaptive memory budgets for low-RAM devices | P0 | Observed device-headroom planning and admission provider complete; G-B dispatch pending | Build 857 GREEN; foundation gates passed | Deferred |
 | G.18 | Sustained CPU/memory/power/thermal and playback profiling | P0 | Not started | Pending | Pending |
 | G.19 | Preserve every existing playback feature and mode | P0 | Not started | Pending | Pending |
@@ -633,7 +644,7 @@ The user explicitly authorized a new dedicated branch for Architecture G and a c
 | Last exact tested baseline | Build 857 GREEN; 9dcbef0abc3fb92c35eb6c57d0db665cdb254fb1 |
 | G.0 | Signed off by user; physical deferrals carried forward |
 | G-A | Foundation coding and automated verification complete; physical acceptance open |
-| G-B | Next, when user authorizes: G.3/G.4/G.5/G.16 exact native port |
+| G-B | Started with the clear media path and differential fixture. See workstream status and remaining integration above. |
 | G-C | Pending: G.9/G.10/G.11/G.12/G.14 |
 | G-D | Pending: G.18/G.19 and carried physical gates |
 | User settings toggle | Implemented and persisted, OFF by default; actual JVM until integrated eligibility |

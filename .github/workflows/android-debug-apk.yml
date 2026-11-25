@@ -302,7 +302,9 @@ jobs:
           if [ -n "${PITWALL_G0_FIXTURE_DIR:-}" ]; then
             export PITWALL_G0_CMAF_DIR="$RUNNER_TEMP/pitwall-g0/cmaf"
             export PITWALL_G0_SLICE_DIR="$RUNNER_TEMP/pitwall-g0/slices"
-            mkdir -p "$PITWALL_G0_CMAF_DIR" "$PITWALL_G0_SLICE_DIR"
+            export PITWALL_GB_CMAF_INPUT_DIR="$RUNNER_TEMP/pitwall-g0/gb-input"
+            mkdir -p "$PITWALL_G0_CMAF_DIR" "$PITWALL_G0_SLICE_DIR" "$PITWALL_GB_CMAF_INPUT_DIR"
+            echo "PITWALL_GB_CMAF_INPUT_DIR=$PITWALL_GB_CMAF_INPUT_DIR" >> "$GITHUB_ENV"
           fi
           echo "APEXVIEW_HEVC_OUTPUT_PARAMETER_DIR=$OUTPUT_PARAMETER_DIR" >> "$GITHUB_ENV"
           chmod +x ./gradlew
@@ -364,6 +366,17 @@ jobs:
         run: |
           python3 tools/validate_hevc_cmaf_grid.py \
             --tile-dir "$RUNNER_TEMP/apexview-hevc-tile-fixtures" \
+            --fixture-dir "$RUNNER_TEMP/apexview-hevc-fixtures" \
+            --output-dir "$RUNNER_TEMP/apexview-hevc-output-parameters"
+
+      - name: Verify exact Rust 2-feed clear CMAF and independently decode its output
+        if: github.ref == 'refs/heads/feature/architecture-g-rust-stitching'
+        run: |
+          set -euo pipefail
+          native/architecture-g/target/release/gb_clear_grid \
+            "$PITWALL_GB_CMAF_INPUT_DIR" "$RUNNER_TEMP/pitwall-g0/slices" \
+            "$RUNNER_TEMP/apexview-hevc-output-parameters"
+          python3 tools/validate_hevc_rust_gb_grid.py \
             --fixture-dir "$RUNNER_TEMP/apexview-hevc-fixtures" \
             --output-dir "$RUNNER_TEMP/apexview-hevc-output-parameters"
 

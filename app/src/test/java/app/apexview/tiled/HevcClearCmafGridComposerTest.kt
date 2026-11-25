@@ -164,6 +164,21 @@ class HevcClearCmafGridComposerTest {
             assertTrue(actual.contentEquals(cached))
         }
 
+        System.getenv("PITWALL_GB_CMAF_INPUT_DIR")?.let { path ->
+            val target = File(path)
+            check(target.mkdirs() || target.isDirectory)
+            feeds.forEachIndexed { feed, source ->
+                File(target, "feed-$feed-init.mp4").writeBytes(source.initializationSegment)
+                source.mediaFragments.forEachIndexed { fragment, bytes ->
+                    File(target, "feed-$feed-fragment-$fragment.m4s").writeBytes(bytes)
+                }
+            }
+            File(target, "grid-init.mp4").writeBytes(output.initializationSegment)
+            output.mediaFragments.forEachIndexed { fragment, bytes ->
+                File(target, "grid-fragment-$fragment.m4s").writeBytes(bytes)
+            }
+        }
+
         val composedBytes = output.mediaFragments.fold(output.initializationSegment) { acc, fragment ->
             acc + fragment
         }

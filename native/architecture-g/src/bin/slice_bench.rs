@@ -1,4 +1,6 @@
-use pitwall_g0::clear_slice::{rewrite,rewrite_scalar,Syntax};
+mod support;
+
+use pitwall_g0::clear_slice::{rewrite,rewrite_scalar};
 use std::{env,fs,hint::black_box,path::PathBuf,time::Instant};
 fn main() {
     let root=PathBuf::from(env::args_os().nth(1).expect("fixture directory"));
@@ -8,11 +10,7 @@ fn main() {
     let mut encoded_verified=0usize;
     let mut synthetic_verified=0usize;
     for d in dirs {
-        let descriptor=fs::read_to_string(d.join("syntax.txt")).unwrap();
-        let f:Vec<usize>=descriptor.split_whitespace().map(|x|x.parse().unwrap()).collect();
-        assert_eq!(f.len(),11);
-        let s=Syntax{address_end:f[0],entry_start:f[1],entry_end:f[2],alignment:f[3],header_bytes:f[4],
-            destination:f[5] as u32,address_bits:f[6],pps:f[7] as u32,dependent_flag_present:f[8]!=0,tiles:f[9]!=0,no_output:f[10]!=0};
+        let s = support::slice_syntax(&d.join("syntax.txt"));
         let source=fs::read(d.join("source.bin")).unwrap();
         let expected=fs::read(d.join("expected.bin")).unwrap();
         let mut output=vec![0;expected.len()];
