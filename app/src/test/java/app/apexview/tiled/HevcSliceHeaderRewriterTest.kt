@@ -277,9 +277,17 @@ class HevcSliceHeaderRewriterTest {
             streams,HevcOutputGridDimensions(columns=2,rows=1),
             listOf(HevcTizenGridComposer.CellSelection(0,0,0,0),
                 HevcTizenGridComposer.CellSelection(1,0,1,0)),
-            frameRateNumerator=25,includeAnnexBOutput=false)
+            frameRateNumerator=25,includeAnnexBOutput=false,emitSampleData=false)
         assertFalse(composed.outputLoopFilterAcrossTilesEnabled)
         assertEquals(50,composed.pictures.size)
+        // Fixture export needs owned rewritten NALs, not length-prefixed samples.
+        // The composer deliberately discards vclNals when only sampleData is requested.
+        composed.pictures.forEach { picture ->
+            assertEquals("owned NALs for frame ${picture.frameIndex}",2,picture.vclNals.size)
+            assertTrue(picture.sampleData.isEmpty())
+            assertTrue(picture.nalParts.isEmpty())
+            assertEquals(2,picture.evidence.size)
+        }
         val outputSps=HevcParameterSets.parseSps(composed.outputParameters.sps)
         val outputPps=HevcParameterSets.parsePps(composed.outputParameters.pps,outputSps)
         val addressBits=32-Integer.numberOfLeadingZeros(outputSps.picWidthInCtbs*outputSps.picHeightInCtbs-1)

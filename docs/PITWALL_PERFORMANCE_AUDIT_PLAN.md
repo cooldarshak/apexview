@@ -30,6 +30,8 @@ Malformed workflow in d5eed03 independently confirmed; restored 849 structure an
 
 Build 851 GREEN; first physical ARM diagnostic passed all 290 byte comparisons. TV validation deferred by user, not waived. Seventh G.0 batch extends real encoded slice differential and optimizes clear EBSP tail validation without removing scalar checks. Production unchanged; CI pending.
 
+Build 852: Rust host checks passed; JVM fixture exporter selected sample-only instead of owned-NAL-only output. Corrected test configuration and explicit ownership assertions; full CI pending. All differential coverage retained.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |
