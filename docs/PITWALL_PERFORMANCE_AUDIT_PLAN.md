@@ -52,6 +52,8 @@ Build 859 passed all five jobs at `938c29342c0e20726cd4711f1583aced0263306a`, wi
 
 The clear atlas worker batch writes the real CMAF result into an admitted Rust output slot. It reuses the bounded G-A queue and leases, checks exact init/layout/generation identity for cached configurations, and adds mandatory Android JNI tests for byte parity, seek invalidation and malformed rejection. Synthetic CBCS checks also cover compatible track/sample-group identities and reject changed KIDs. The archive playback route, controlled switch and protected parity remain open.
 
+Build 860 passed all five jobs at `70479b02601d7c5d4e40361704069144ef581b83`. The clear fixture gate verified exact initialization and media bytes, decoded pixels, packet timing and 150 frames across single-tile, 2×2 and mixed-width cases. Mandatory API29/31/36 instrumentation verified Rust worker output and generation-fenced leases. Production playback selection, native protected parity and physical acceptance remain open. [Exact CI](https://github.com/cooldarshak/apexview/actions/runs/45549129456).
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |
