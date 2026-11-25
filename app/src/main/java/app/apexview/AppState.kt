@@ -2943,8 +2943,9 @@ class AppState(
                         // Capture the selected position once. Slow preparation must not chase an
                         // independently advancing source clock or interrupt working playback.
                         val quality = composedQuality ?: VideoQuality.AUTO
+                        val autoBaseline = if (selected.size > 4) 270 else if (selected.size > 2) 540 else 720
                         val preferredHeight = quality.targetHeight.takeIf { it > 0 }
-                            ?: if (selected.size > 4) 270 else if (selected.size > 2) 540 else 720
+                            ?: autoCompositionHeight("FINITE_CLEAR", selected, autoBaseline) ?: autoBaseline
                         val minimumHeight = if (composedQuality == VideoQuality.P1080) 1080 else 0
                         val session = capture.prepareVod(sourcePlan.feeds, probePositionMs, host.feed.sourceStream.profileLabel,
                             preferredHeight, settings.commentary, minimumHeight, desired)
@@ -3154,9 +3155,11 @@ class AppState(
             minOf(composedQuality.targetHeight.takeIf { it > 0 } ?: 720,
                 if (selectedTiles.size > 4) 540 else 720)
         } else composedQuality.targetHeight.takeIf { it > 0 } ?: 2160
+        val autoPreferredHeight = autoCompositionHeight("ROLLING_LOCAL", selectedTiles, maxHeight)
         val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty(),
             maximumHeight = maxHeight, fullPictures = mixedRequested,
-            nativeContext = context, nativeRequested = { settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff })
+            nativeContext = context, nativeRequested = { settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff },
+            autoPreferredHeight = autoPreferredHeight)
         android.util.Log.i("ApexviewSingleDecoder", "F1_PROTECTED_MIXED_PREFLIGHT requested=" +
             PerFeedQualityPolicy.description(labels, selectedQualities) +
             " maxSourceHeight=$maxHeight fullPictures=true cbcsGate=REQUIRED")
@@ -3588,6 +3591,7 @@ class AppState(
             userAgent = userAgent,
             ascendon = api.ascendon.orEmpty(),
             entitlement = api.entitlement.orEmpty(),
+            autoPreferredHeight = autoCompositionHeight("LIVE_LOCAL", labels.mapNotNull { byLabel[it] }, 2160),
         )
         val group = "live-content-$contentId-${java.util.UUID.randomUUID()}"
         playbackWork.prepareCapture(capture) {
@@ -6623,6 +6627,31 @@ class AppState(
     }
 
     private fun qualityFor(tile: Tile): VideoQuality = settings.videoQualityForFeed(tile.feed.sourceStream.profileLabel)
+
+    private data class AutoCompositionChoice(val contentId: Long, val labels: List<String>, val height: Int)
+    private val autoCompositionChoices = mutableMapOf<String, AutoCompositionChoice>()
+
+    /** Only local composition preparation has a known local viewport. Cast
+     * retains its existing receiver rendition preference; sender pixels are not TV pixels. */
+    private fun autoCompositionHeight(route: String, selected: List<Tile>, baseline: Int): Int? {
+        val first = selected.firstOrNull() ?: return null
+        val labels = selected.map { it.feed.sourceStream.profileLabel }.sorted()
+        val previous = autoCompositionChoices[route]?.takeIf {
+            it.contentId == first.contentId && it.labels == labels
+        }?.height
+        val headroom = runCatching { app.apexview.tiled.NativeStitchingDeviceBudget.sample(context) }.getOrNull()
+        val constrained = thermal >= android.os.PowerManager.THERMAL_STATUS_SEVERE ||
+            headroom?.lowMemory == true
+        val height = ComposedAutoQualityPolicy.preferredHeight(selected.map(::qualityFor),
+            selected.map { tile -> minOf(tile.h, tile.w * 9f / 16f) }, baseline, previous, constrained)
+        if (height == null) autoCompositionChoices.remove(route)
+        else {
+            autoCompositionChoices[route] = AutoCompositionChoice(first.contentId, labels, height)
+            android.util.Log.i("ApexviewSingleDecoder",
+                "GC_AUTO_COMPOSITION route=$route feeds=${selected.size} preferredHeight=$height baseline=$baseline pressure=$constrained preparationOnly=true")
+        }
+        return height
+    }
 
     /** A choice belongs to the F1 feed, not its current on-screen size or tile position. */
     fun chooseFeedVideoQuality(tileId: Int, choice: VideoQuality?) {

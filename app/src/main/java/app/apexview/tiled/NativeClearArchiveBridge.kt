@@ -253,6 +253,7 @@ internal class NativeClearArchiveBridge(
                 NativeClearArchiveJob.executeWindow(active, encoded, count, foreground, remaining) { checkCurrent(selected.epoch) }
             }
             nativeOutput = out
+            val validationStarted = System.nanoTime()
             reason = "NATIVE_CLEAR_PARITY_MISMATCH"
             require(out.initialization.contentEquals(expectedInit))
             baseline?.let {
@@ -286,7 +287,9 @@ internal class NativeClearArchiveBridge(
                 "referenceCompared=${baseline != null} sequence=${request.firstOutputSequenceNumber} deadlineMs=$timeoutMs wallMs=${(System.nanoTime() - started) / 1_000_000L} " +
                 "inputBytes=${encoded.size} outputBytes=${out.media.sumOf { it.size.toLong() }} fragments=$count javaInputBytes=${stats.javaInputBytes} " +
                 "nativeInputBytes=${stats.nativeInputBytes} nativeOutputBytes=${stats.nativeOutputBytes} " +
-                "javaOutputBytes=${stats.javaOutputBytes} rejectedSubmits=${stats.rejectedSubmits} compactAtlas=${active.budget.compactAtlas}")
+                "javaOutputBytes=${stats.javaOutputBytes} rejectedSubmits=${stats.rejectedSubmits} compactAtlas=${active.budget.compactAtlas} " +
+                "submitUs=${out.submitNs / 1000L} waitUs=${out.waitNs / 1000L} readUs=${out.readNs / 1000L} " +
+                "validateUs=${(System.nanoTime() - validationStarted) / 1000L}")
             if (needReference) {
                 clearProof()
                 verifiedInits = inits.map { it.copyOf() }

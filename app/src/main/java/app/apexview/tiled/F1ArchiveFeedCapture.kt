@@ -13,13 +13,15 @@ internal class F1ArchiveFeedCapture(
     private val minimumHeight: Int = 0, private val maximumHeight: Int = 2160, fullPictures: Boolean = minimumHeight > 0,
     nativeContext: android.content.Context? = null,
     nativeRequested: () -> Boolean = { false },
+    autoPreferredHeight: Int? = null,
 ) : CmafCaptureLifecycle {
     private val factory = dataSourceFactory ?: DefaultHttpDataSource.Factory().setUserAgent(userAgent)
         .setAllowCrossProtocolRedirects(false)
         .setDefaultRequestProperties(mapOf("ascendontoken" to ascendon, "entitlementtoken" to entitlement))
-    private val dash = F1DashFeedCapture(userAgent, ascendon, entitlement, dataSourceFactory = factory, maximumVideoHeight = maximumHeight, minimumVideoHeight = minimumHeight)
+    private val dash = F1DashFeedCapture(userAgent, ascendon, entitlement, dataSourceFactory = factory, maximumVideoHeight = maximumHeight, minimumVideoHeight = minimumHeight, autoPreferredHeight = autoPreferredHeight)
     private val hls = F1HlsFeedCapture(factory, maximumHeight, minimumCaptureHeight = minimumHeight,
-        fullPictures = fullPictures, nativeContext = nativeContext, nativeRequested = nativeRequested)
+        fullPictures = fullPictures, nativeContext = nativeContext, nativeRequested = nativeRequested,
+        autoPreferredHeight = autoPreferredHeight)
     private var usingHls = false
     val clearOutput get() = usingHls && hls.clearOutput == true
     val protection get() = if (usingHls) when (hls.clearOutput) { true -> "CLEAR"; false -> "CBCS"; null -> "UNVERIFIED" } else "CBCS"

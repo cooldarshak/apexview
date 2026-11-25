@@ -281,22 +281,31 @@ impl Atlas {
         if pictures.saturating_mul(source_tiles + self.placements.len()) > MAX_SEGMENT_SLICES {
             return Err(Error::Limit);
         }
-        let mut picture_parts = Vec::new();
-        picture_parts
-            .try_reserve_exact(pictures)
-            .map_err(|_| Error::Limit)?;
+        // The aggregate descriptor count was bounded above before reserving.
+        // All payload tails still borrow the validated input; no full picture
+        // or concatenated payload is materialized.
+        let parts_count = pictures.checked_mul(self.placements.len()).ok_or(Error::Limit)?;
+        let mut picture_parts = Vec::<Parts<'_>>::new();
+        picture_parts.try_reserve_exact(parts_count).map_err(|_| Error::Limit)?;
+        let mut feed_slices: Vec<Vec<(usize, Slice<'_>)>> = Vec::new();
+        feed_slices.try_reserve_exact(self.sources.len()).map_err(|_| Error::Limit)?;
+        for source in &self.sources {
+            let mut slices = Vec::new();
+            slices.try_reserve_exact(source.tiles.len()).map_err(|_| Error::Limit)?;
+            feed_slices.push(slices);
+        }
         let mut output_bytes = 0usize;
         let mut can_gate_filter = self.own_seams;
         for (index, source_sample) in reference.samples.iter().enumerate() {
-            let mut feed_slices = Vec::new();
-            feed_slices
-                .try_reserve_exact(self.sources.len())
-                .map_err(|_| Error::Limit)?;
             let mut order: Option<Identity> = None;
             for (feed, (source, fragment)) in self.sources.iter().zip(&fragments).enumerate() {
                 let incoming = &fragment.samples[index];
                 match_timing(source_sample, self.sources[0].timescale, incoming, source.timescale)?;
-                let (slices, leading_eos, trailing_eos) = source.slices(incoming)?;
+                // Split before the mutable borrow: only earlier feeds contain
+                // this picture, and the first feed is the comparison reference.
+                let (earlier, current) = feed_slices.split_at_mut(feed);
+                let slices = &mut current[0];
+                let (leading_eos, trailing_eos) = source.slices_into(incoming, slices)?;
                 let first_slice = slices.first().ok_or(Error::Metadata)?;
                 let picture = first_slice.1.prefix.picture.ok_or(Error::Metadata)?;
                 if previous_end.is_none() && index == 0
@@ -309,7 +318,7 @@ impl Atlas {
                         || slice.references != first_slice.1.references
                         || slice.prediction != first_slice.1.prediction
                         || slice.prefix.no_output_of_prior != first_slice.1.prefix.no_output_of_prior
-                }) || feed_slices.first().is_some_and(|first: &Vec<(usize, Slice<'_>)>| {
+                }) || earlier.first().is_some_and(|first| {
                     first[0].1.prefix.picture != Some(picture)
                         || first[0].1.references != first_slice.1.references
                         || first[0].1.prediction != first_slice.1.prediction
@@ -328,11 +337,7 @@ impl Atlas {
                     return Err(Error::Timing);
                 }
                 order = Some(position);
-                feed_slices.push(slices);
             }
-            let mut nals = Vec::<Parts<'_>>::new();
-            nals.try_reserve_exact(self.placements.len())
-                .map_err(|_| Error::Limit)?;
             for placement in &self.placements {
                 let Cell { feed, tile } = placement.cell;
                 let slices = &feed_slices[feed];
@@ -353,9 +358,8 @@ impl Atlas {
                     .ok_or(Error::Limit)?;
                 if output_bytes > MAX_ATLAS_BYTES { return Err(Error::Limit); }
                 if output_bytes > output.len() { return Err(Error::Capacity); }
-                nals.push(nal);
+                picture_parts.push(nal);
             }
-            picture_parts.push(nals);
         }
         if (standalone || self.output.pps.loop_across_tiles)
             && self.output.pps.loop_across_tiles != can_gate_filter {
@@ -365,7 +369,13 @@ impl Atlas {
         samples
             .try_reserve_exact(pictures)
             .map_err(|_| Error::Limit)?;
-        for (sample, nals) in reference.samples.iter().zip(&picture_parts) {
+        // Every placement contributes exactly one NAL to each picture.
+        // Keep the old ordering and metadata, now borrowing a flat slab.
+        if picture_parts.len() != parts_count || self.placements.is_empty() {
+            return Err(Error::Metadata);
+        }
+        for (sample, nals) in reference.samples.iter()
+            .zip(picture_parts.chunks_exact(self.placements.len())) {
             samples.push(NalSample {
                 nals,
                 duration: sample.duration,
@@ -390,16 +400,13 @@ impl Atlas {
     }
 }
 
-type SampleSlices<'a> = (Vec<(usize, Slice<'a>)>, bool, bool);
-
 impl Source {
-    fn slices<'b>(&self, sample: &Sample<'b>) -> Result<SampleSlices<'b>, Error> {
-        let mut slices = Vec::new();
+    fn slices_into<'b>(&self, sample: &Sample<'b>, slices: &mut Vec<(usize, Slice<'b>)>)
+        -> Result<(bool, bool), Error> {
+        // Borrowed slice state is never reused across pictures. Capacity is.
+        slices.clear();
         let mut leading_eos = false;
         let mut trailing_eos = false;
-        slices
-            .try_reserve_exact(self.tiles.len())
-            .map_err(|_| Error::Limit)?;
         for unit in NalUnits::new(sample.bytes, self.nal_prefix)? {
             let (nal, header) = unit?;
             if header.layer_id != 0 ||
@@ -445,7 +452,7 @@ impl Source {
         if slices.is_empty() {
             return Err(Error::Metadata);
         }
-        Ok((slices, leading_eos, trailing_eos))
+        Ok((leading_eos, trailing_eos))
     }
 }
 

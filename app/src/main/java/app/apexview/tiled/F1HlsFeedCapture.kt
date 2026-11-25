@@ -40,7 +40,8 @@ private suspend fun <T, R> mapArchiveFeedsBounded(
 internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximumHeight: Int = 2160,
                                 private val maximumOutputWidth: Int = 4096, private val minimumCaptureHeight: Int = 0, fullPictures: Boolean = minimumCaptureHeight > 0,
                                 nativeContext: android.content.Context? = null,
-                                nativeRequested: () -> Boolean = { false }) {
+                                nativeRequested: () -> Boolean = { false },
+                                private val autoPreferredHeight: Int? = null) {
     private data class Offer(val feed: F1DashFeedCapture.Feed, val uri: Uri, val format: Format?, val master: HlsMultivariantPlaylist?, val audioGroupId: String? = null, val subtitleGroupId: String? = null)
     private class Init(val uri: Uri, val offset: Long, val length: Long, val bytes: ByteArray, val report: CmafBoxInspector.Report)
     private val reader = CmafHttpReader(factory)
@@ -290,7 +291,8 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             }
             val individual = heights.values.distinct().size > 1
             val selected = if (individual) chooseIndividual(perFeed, heights, maximumHeight, minimumCaptureHeight)
-                else chooseCommon(perFeed, preferredHeight = maximumHeight.takeIf { it <= 1080 },
+                else chooseCommon(perFeed, preferredHeight = autoPreferredHeight?.coerceIn(1, maximumHeight)
+                    ?: maximumHeight.takeIf { it <= 1080 },
                     minimumHeight = minimumCaptureHeight)
             format = selected.first().format
             val renditionReport = "REAL_HLS_RENDITIONS policy=${if (individual) "PER_FEED" else "COMMON"} " +

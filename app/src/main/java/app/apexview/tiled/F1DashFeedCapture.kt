@@ -52,6 +52,7 @@ internal class F1DashFeedCapture(
     private val segmentTimeToleranceUs: Long = 250_000L,
     dataSourceFactory: DataSource.Factory? = null,
     private val minimumVideoHeight: Int = 0,
+    private val autoPreferredHeight: Int? = null,
 ) : CmafCaptureLifecycle {
     data class Feed(
         val label: String,
@@ -598,8 +599,11 @@ internal class F1DashFeedCapture(
                 .filter { (width, height) -> width > 0 && height in maxOf(1, minimumVideoHeight)..maximumVideoHeight }
                 .toSet()
         }.reduce { left, right -> left intersect right }
-        return if (maximumVideoHeight <= 1080 || minimumVideoHeight > 0)
-            HevcArchiveRenditionPlan.choose(common, maximumVideoHeight, minimumVideoHeight, feeds.size, 4096)
+        // Existing hard capture bounds and compatibility remain authoritative.
+        // A soft Auto preference only applies to the common route.
+        val preferred = autoPreferredHeight?.coerceIn(1, maximumVideoHeight)
+        return if (maximumVideoHeight <= 1080 || minimumVideoHeight > 0 || preferred != null)
+            HevcArchiveRenditionPlan.choose(common, preferred ?: maximumVideoHeight, minimumVideoHeight, feeds.size, 4096)
         else common.maxWithOrNull(compareBy<Pair<Int, Int>> { it.second }.thenBy { it.first })
     }
 

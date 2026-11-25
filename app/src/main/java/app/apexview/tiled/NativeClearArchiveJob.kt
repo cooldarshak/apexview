@@ -23,7 +23,8 @@ internal object NativeClearArchiveJob {
         fun wipe() { initialization.fill(0); media.fill(0) }
     }
 
-    data class WindowOutput(val initialization: ByteArray, val media: List<ByteArray>) {
+    data class WindowOutput(val initialization: ByteArray, val media: List<ByteArray>,
+                            val submitNs: Long = 0, val waitNs: Long = 0, val readNs: Long = 0) {
         fun wipe() { initialization.fill(0); media.forEach { it.fill(0) } }
     }
 
@@ -135,6 +136,7 @@ internal object NativeClearArchiveJob {
         require(count in 1..MAX_WINDOW)
         require(timeoutMs in 1..60_000)
         checkCurrent()
+        val submittedAt = System.nanoTime()
         val token = submit()
         check(token > 0) { "Native clear admission: $token" }
         val started = System.nanoTime()
@@ -154,6 +156,7 @@ internal object NativeClearArchiveJob {
             }
             if (length == NativeStitchingEngine.OUTPUT_CAPACITY) throw OutputCapacityException()
             check(length in 10L..engine.budget.outputBytes.toLong()) { "Native clear result: $length" }
+            val readyAt = System.nanoTime()
             val header = ByteArray(8)
             check(engine.read(token, 0, header, 0, 8) == 8L)
             val b = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN)
@@ -183,7 +186,9 @@ internal object NativeClearArchiveJob {
             check(engine.release(token) == 1L)
             terminal = false
             transferred = true
-            return WindowOutput(initBytes, media)
+            return WindowOutput(initBytes, media,
+                (started - submittedAt).coerceAtLeast(0L), (readyAt - started).coerceAtLeast(0L),
+                (System.nanoTime() - readyAt).coerceAtLeast(0L))
         } finally {
             if (!transferred) {
                 init?.fill(0); media.forEach { it.fill(0) }

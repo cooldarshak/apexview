@@ -646,6 +646,33 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("nativeJobTimeoutMs", session)
         self.assertIn("memoryWarmLimit", session)
 
+    def test_gc_reuse_and_auto_preparation_are_wired(self):
+        base = "app/src/main/java/app/apexview/"
+        tiled = base + "tiled/"
+        app = contents(base + "AppState.kt")
+        quality = contents(base + "PerFeedQualityPolicy.kt")
+        archive = contents(tiled + "F1ArchiveFeedCapture.kt")
+        dash = contents(tiled + "F1DashFeedCapture.kt")
+        hls = contents(tiled + "F1HlsFeedCapture.kt")
+        atlas = contents("native/architecture-g/src/clear_atlas.rs")
+        self.assertIn("qualities.any { it != VideoQuality.AUTO }", quality)
+        self.assertIn('autoCompositionHeight("FINITE_CLEAR", selected, autoBaseline)', app)
+        self.assertIn('autoCompositionHeight("ROLLING_LOCAL", selectedTiles, maxHeight)', app)
+        self.assertIn('autoCompositionHeight("LIVE_LOCAL",', app)
+        self.assertIn("autoPreferredHeight = autoPreferredHeight", archive)
+        self.assertIn("preferred ?: maximumVideoHeight", dash)
+        self.assertIn("autoPreferredHeight?.coerceIn(1, maximumHeight)", hls)
+        self.assertIn("source.slices_into(incoming, slices)", atlas)
+        self.assertIn("slices.clear();", atlas)
+        self.assertIn("picture_parts.chunks_exact(self.placements.len())", atlas)
+        self.assertIn("pictures.checked_mul(self.placements.len())", atlas)
+        self.assertNotIn("picture_parts.push(nals)", atlas)
+        bridge = contents(tiled + "NativeClearArchiveBridge.kt")
+        job = contents(tiled + "NativeClearArchiveJob.kt")
+        for metric in ("submitUs=", "waitUs=", "readUs=", "validateUs="):
+            self.assertIn(metric, bridge)
+        self.assertIn("readyAt - started", job)
+
     def test_gb_native_profile_and_protected_chunk_admission_remain_wired(self):
         base = "app/src/main/java/app/apexview/tiled/"
         bridge = contents(base + "NativeClearArchiveBridge.kt")

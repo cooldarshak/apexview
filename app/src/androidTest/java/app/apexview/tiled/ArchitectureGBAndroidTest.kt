@@ -90,6 +90,19 @@ class ArchitectureGBAndroidTest {
             assertEquals(generation + 1, engine.seek())
             assertEquals(NativeStitchingEngine.STALE, engine.read(token, 0, actual, 1, expected.size))
             assertEquals(1L, engine.release(token))
+            // Same real multi-picture fixture, after a generation change and slot reuse.
+            val output = NativeClearArchiveJob.executeWindow(engine,
+                NativeClearArchiveJob.Parts(parts, input.size), 1, true, 5000) {}
+            try {
+                val expectedSizes = java.nio.ByteBuffer.wrap(expected)
+                val initSize = expectedSizes.int
+                val mediaSize = expectedSizes.int
+                assertEquals(initSize, output.initialization.size)
+                assertEquals(mediaSize, output.media.single().size)
+                assertArrayEquals(expected.copyOfRange(8, 8 + initSize), output.initialization)
+                assertArrayEquals(expected.copyOfRange(8 + initSize, expected.size), output.media.single())
+                assertTrue(output.submitNs >= 0 && output.waitNs >= 0 && output.readNs >= 0)
+            } finally { output.wipe() }
         }
         Log.i("PitwallGC", "Compact direct slot transfer, exact parity and stale lease rejection PASS")
     }
