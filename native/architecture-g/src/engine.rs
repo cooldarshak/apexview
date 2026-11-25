@@ -287,12 +287,10 @@ impl Engine {
         let mut s=self.shared.0.lock().expect("engine mutex");
         if s.closed{return CLOSED;}
         let Some(i)=s.index(token) else {return STALE;};
-        let generation=s.generation;
         let slot=&mut s.slots[i];
         if !matches!(slot.stage,Stage::Reading|Stage::Ready|Stage::Failed) {return INVALID;}
-        let stale=slot.work.is_some_and(|w|w.generation!=generation);
         slot.recycle();
-        if stale {Self::trim_free_spares(&mut s);}
+        Self::trim_free_spares(&mut s);
         1
     }
     /// Invalidate pending/ready old results; running work can finish only

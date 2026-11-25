@@ -6,6 +6,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import app.apexview.tiled.NativeStitchingDeviceBudget
 import app.apexview.tiled.NativeStitchingEngine
+import app.apexview.tiled.SpeculativeMemoryAdmission
 
 /** Opt-in diagnostic only. Platform PSS categories can overlap other metrics. */
 internal object ProcessMemoryDiagnostic {
@@ -29,7 +30,17 @@ internal object ProcessMemoryDiagnostic {
             "platformGraphicsKiB=${memory.getMemoryStat("summary.graphics") ?: "unavailable"} externalCodecGpu=NOT_MEASURED " +
             "osAvailableBytes=${headroom?.available ?: -1} osThresholdBytes=${headroom?.threshold ?: -1} " +
             "lowRam=${headroom?.lowRam} lowMemory=${headroom?.lowMemory} thermal=${thermal ?: -1} " +
-            fragmentFields(fragments)
+            fragmentFields(fragments) + " " + engineFields(NativeStitchingEngine.engineMemorySnapshot()) +
+            SpeculativeMemoryAdmission.process.snapshot().let { (reserved, peak) ->
+                " speculativeForecastBytes=$reserved speculativePeakForecastBytes=$peak"
+            }
+    }
+
+    fun engineFields(values: LongArray?): String {
+        if (values == null || values.size != 4 || values.any { it < 0L } ||
+            values[2] > values[1] || values[3] > values[1] - values[2]) return "nativeEngineArena=UNAVAILABLE"
+        return "nativeEngineId=${values[0]} nativeEngineReservedBytes=${values[1]} " +
+            "nativeEnginePayloadBytes=${values[2]} nativeEngineBridgeBytes=${values[3]}"
     }
 
     // A null snapshot means the library was not loaded or the query failed;

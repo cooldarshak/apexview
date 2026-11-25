@@ -15,6 +15,21 @@ def contents(path):
 
 
 class ProductionWiringTests(unittest.TestCase):
+    def test_gc_shared_forecast_and_unique_owner_accounting(self):
+        archive = contents("app/src/main/java/app/apexview/tiled/HevcArchiveVodSession.kt")
+        relay = contents("app/src/main/java/app/apexview/cast/RelayResourceStore.kt")
+        diagnostic = contents("app/src/main/java/app/apexview/ProcessMemoryDiagnostic.kt")
+        fixture = contents("native/architecture-g/src/bin/gb_clear_grid.rs")
+        self.assertEqual(archive.count("SpeculativeMemoryAdmission.process.tryReserve("), 1)
+        self.assertIn("reservation?.close()", archive)
+        self.assertIn("cache.trimBehind(number)", archive)
+        self.assertIn("pinned.filterNot { it.current }", relay)
+        self.assertIn("nativeEngineReservedBytes", diagnostic)
+        self.assertIn("speculativePeakForecastBytes", diagnostic)
+        self.assertIn("verify_native_lease_mode(packet, expected, false)", fixture)
+        self.assertIn("verify_native_lease_mode(packet, expected, true)", fixture)
+        self.assertIn("engine.allocated_payload_bytes(), pair", fixture)
+
     def test_gc_memory_ownership_diagnostics_and_speculative_gate(self):
         diagnostics = contents("app/src/main/java/app/apexview/DiagnosticLogs.kt")
         memory = contents("app/src/main/java/app/apexview/ProcessMemoryDiagnostic.kt")

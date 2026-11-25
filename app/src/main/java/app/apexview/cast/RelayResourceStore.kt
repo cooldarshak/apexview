@@ -42,8 +42,20 @@ internal class RelayResourceStore(
             release()
         }
     }
-    data class Snapshot(val currentBytes: Long, val pinnedBytes: Long, val readers: Int)
-    @Synchronized fun snapshot() = Snapshot(current.values.sumOf { it.size.toLong() }, pinnedBytes, readers)
+    data class Snapshot(val currentBytes: Long, val pinnedBytes: Long, val readers: Int,
+                        val retiredPinnedBytes: Long, val exclusiveHeapBytes: Long,
+                        val sharedHeapBytes: Long, val nativeLogicalBytes: Long) {
+        val uniqueBytes get() = currentBytes + retiredPinnedBytes
+    }
+    @Synchronized fun snapshot(): Snapshot {
+        val retired = pinned.filterNot { it.current }
+        val unique = current.values + retired
+        return Snapshot(current.values.sumOf { it.size.toLong() }, pinnedBytes, readers,
+            retired.sumOf { it.size.toLong() },
+            unique.filter { it.heap != null && it.identity === it.heap }.sumOf { it.size.toLong() },
+            unique.filter { it.heap != null && it.identity !== it.heap }.sumOf { it.size.toLong() },
+            unique.filter { it.native != null }.sumOf { it.size.toLong() })
+    }
 
     @Synchronized fun publish(
         next: Map<String, ByteArray>,

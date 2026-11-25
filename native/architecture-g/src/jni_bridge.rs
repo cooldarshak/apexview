@@ -413,6 +413,21 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragm
     guarded(|| if crate::fragment_storage::release(id) { 1 } else { STALE })
 }
 #[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeEngineMemorySnapshot(
+    env: JNIEnv<'_>, _class: JClass<'_>,
+) -> jni::sys::jlongArray {
+    catch_unwind(AssertUnwindSafe(|| {
+        let r = registry().lock().expect("engine registry");
+        let values = r.active.as_ref().map_or([0; 4], |s| [s.id,
+            s.engine.reserved() as i64, s.engine.allocated_payload_bytes() as i64,
+            (s.input.as_ref().map_or(0, BridgeBuffer::capacity) +
+                s.output.as_ref().map_or(0, BridgeBuffer::capacity)) as i64]);
+        let Ok(array) = env.new_long_array(values.len() as jint) else { return std::ptr::null_mut(); };
+        if env.set_long_array_region(&array, 0, &values).is_err() { return std::ptr::null_mut(); }
+        array.into_raw()
+    })).unwrap_or(std::ptr::null_mut())
+}
+#[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragmentMemorySnapshot(
     env: JNIEnv<'_>, _class: JClass<'_>,
 ) -> jni::sys::jlongArray {

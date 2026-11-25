@@ -479,10 +479,20 @@ internal class ProtectedDashResourceStore(
         }
     }
 
-    data class Snapshot(val currentBytes: Long, val retiredReadBytes: Long, val retiredResources: Int)
-    @Synchronized fun snapshot(): Snapshot = Snapshot(
-        current.values.sumOf { it.size.toLong() },
-        retired.sumOf { it.size.toLong() }, retired.size)
+    data class Snapshot(val currentBytes: Long, val retiredReadBytes: Long, val retiredResources: Int,
+                        val uniqueHeapBytes: Long, val uniqueNativeLogicalBytes: Long)
+    @Synchronized fun snapshot(): Snapshot {
+        val seen = java.util.IdentityHashMap<Any, Boolean>()
+        var heap = 0L
+        var native = 0L
+        for (resource in current.values + retired) {
+            val identity = resource.heap ?: requireNotNull(resource.native).storageIdentity
+            if (seen.put(identity, true) != null) continue
+            if (resource.heap != null) heap += resource.size else native += resource.size
+        }
+        return Snapshot(current.values.sumOf { it.size.toLong() }, retired.sumOf { it.size.toLong() },
+            retired.size, heap, native)
+    }
 
     @Synchronized fun replace(next: ProtectedHevcComposedDashPackageBuilder.Package) {
         // The publisher transfers detached, uniquely owned arrays. Reject aliasing
@@ -601,7 +611,8 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
             val retained = resources.snapshot()
             android.util.Log.i("ApexviewSingleDecoder", "PROTECTED_DASH_RESOURCE_BYTES " +
                 "currentBytes=${retained.currentBytes} retiredReadBytes=${retained.retiredReadBytes} " +
-                "retiredResources=${retained.retiredResources} media3DeliveredBytesTotal=${media3DeliveredBytes.get()}")
+                "retiredResources=${retained.retiredResources} uniqueHeapBytes=${retained.uniqueHeapBytes} " +
+                "uniqueNativeLogicalBytes=${retained.uniqueNativeLogicalBytes} media3DeliveredBytesTotal=${media3DeliveredBytes.get()}")
         } finally {
             if (!transferred) {
                 pending?.nativeResources?.values?.forEach { it.close() }

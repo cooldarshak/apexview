@@ -9,6 +9,24 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class ArchiveBufferPolicyTest {
+    @Test fun pressureTrimOnlyRetiresUnpinnedBehindTheRequestedSegment() {
+        val cache = BoundedArchiveFragmentCache(5, 100)
+        val past = byteArrayOf(1, 2)
+        val pinned = byteArrayOf(3, 4)
+        val active = byteArrayOf(5, 6)
+        val future = byteArrayOf(7, 8)
+        cache.put(0, past); cache.put(1, pinned); cache.put(2, active); cache.put(3, future)
+        val lease = requireNotNull(cache.readLease(1))
+        assertEquals(2L, cache.trimBehind(2))
+        assertTrue(past.all { it == 0.toByte() })
+        assertTrue(pinned.contentEquals(byteArrayOf(3, 4)))
+        assertTrue(active.contentEquals(byteArrayOf(5, 6)))
+        assertTrue(future.contentEquals(byteArrayOf(7, 8)))
+        lease.close()
+        assertEquals(2L, cache.trimBehind(2))
+        cache.clear()
+    }
+
     @Test fun retiredPinnedBytesCountOnceAndOnlyGateSpeculativeWork() {
         val cache = BoundedArchiveFragmentCache(maxEntries = 1, maxBytes = 10L)
         cache.put(1, ByteArray(6) { 7 })

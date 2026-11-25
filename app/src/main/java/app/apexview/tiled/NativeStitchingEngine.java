@@ -103,6 +103,11 @@ public final class NativeStitchingEngine implements AutoCloseable {
     private static native long nativeFragmentRelease(long id);
     private static native void nativeFragmentTrim();
     private static native long[] nativeFragmentMemorySnapshot();
+    private static native long[] nativeEngineMemorySnapshot();
+    public static long[] engineMemorySnapshot() {
+        try { return nativeEngineMemorySnapshot(); }
+        catch (LinkageError unavailable) { return null; }
+    }
     /** Never load the Rust library merely to sample Kotlin playback. */
     public static long[] fragmentMemorySnapshot() {
         try { return nativeFragmentMemorySnapshot(); }

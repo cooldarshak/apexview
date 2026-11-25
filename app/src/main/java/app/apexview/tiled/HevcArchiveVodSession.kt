@@ -279,6 +279,11 @@ internal class HevcArchiveVodSession(
         val headroom = nativeBudgetContext?.let { context ->
             runCatching { NativeStitchingDeviceBudget.sample(context) }.getOrNull()
         }
+        if (headroom?.lowMemory == true) {
+            val freed = cache.trimBehind(number)
+            if (freed > 0L) android.util.Log.i("ApexviewSingleDecoder",
+                "GC_ARCHIVE_PRESSURE_TRIM behindBytes=$freed foregroundUnchanged=true")
+        }
         val observed = nativeBudgetObservation.sizes()
         val memoryWarmLimit = ArchiveBufferPolicy.memoryWarmLimit(warmLimit, headroom, observed.input, observed.output)
         synchronized(warmLock) {
@@ -295,11 +300,16 @@ internal class HevcArchiveVodSession(
                         if (candidate - number > ArchiveBufferPolicy.memoryWarmLimit(warmLimit, currentMemory,
                             currentSizes.input, currentSizes.output)) break
                         if (!cache.canSpeculate(candidate, currentSizes.output)) break
-                        synchronized(warmLock) {
-                            warmActiveNumber = candidate
-                            warmActiveTid = android.os.Process.myTid()
-                        }
+                        val estimate = SpeculativeMemoryAdmission.charge(currentSizes.input, currentSizes.output)
+                        val reservation = if (currentMemory != null && estimate != null) {
+                            SpeculativeMemoryAdmission.process.tryReserve(estimate,
+                                SpeculativeMemoryAdmission.limit(currentMemory)) ?: break
+                        } else null
                         try {
+                            synchronized(warmLock) {
+                                warmActiveNumber = candidate
+                                warmActiveTid = android.os.Process.myTid()
+                            }
                             // Prefetch populates the bounded cache, not a DataSource reader.
                             // Do NOT allocate a second multi-MB ByteArray just to zero it.
                             try {
@@ -318,6 +328,7 @@ internal class HevcArchiveVodSession(
                                 break
                             }
                         } finally {
+                            reservation?.close()
                             synchronized(warmLock) {
                                 warmActiveNumber = null
                                 warmActiveTid = null
@@ -605,7 +616,7 @@ internal class HevcArchiveVodSession(
                 else CaptureFailure.from(root).reason
             val retryable = root !is IllegalArgumentException && root !is IllegalStateException && CaptureFailure.from(root).retryable
             throw ArchiveVodMediaException("Archive segment $number: $message", retryable)
-        } finally { batches.flatten().forEach { it.fill(0) } }
+        } finally { batches.forEach { batch -> batch.forEach { it.fill(0) } } }
     }
 
     private fun fetch(number: Int, fetchStartedNs: Long): List<ByteArray> {

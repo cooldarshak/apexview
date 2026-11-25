@@ -32,6 +32,11 @@ internal class ComposedCmafRelay(address: String, private val peer: InetAddress?
     ) {
         check(!closed.get())
         resources.publish(next, shared, native)
+        val s = resources.snapshot()
+        android.util.Log.i("PitwallCast", "GC_RELAY_MEMORY currentBytes=${s.currentBytes} " +
+            "pinnedBytes=${s.pinnedBytes} retiredPinnedBytes=${s.retiredPinnedBytes} uniqueLogicalBytes=${s.uniqueBytes} " +
+            "exclusiveHeapBytes=${s.exclusiveHeapBytes} sharedHeapBytes=${s.sharedHeapBytes} " +
+            "nativeLogicalBytes=${s.nativeLogicalBytes} readers=${s.readers}")
     }
     init { accepting.execute {
         while (!closed.get()) {

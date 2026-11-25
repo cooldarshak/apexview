@@ -196,6 +196,18 @@ internal class BoundedArchiveFragmentCache(
         return snapshot.retiredPinned == 0L || (outputEstimate > 0 &&
             outputEstimate <= maxBytes - snapshot.unique)
     }
+    @Synchronized fun trimBehind(number: Int): Long {
+        var freed = 0L
+        val iterator = entries.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.key >= number || entry.value.readers != 0) continue
+            freed += entry.value.bytes.size
+            iterator.remove()
+            retire(entry.value)
+        }
+        return freed
+    }
     @Synchronized fun contains(number: Int): Boolean = entries.containsKey(number)
     @Synchronized fun readCopy(number: Int): ByteArray? = entries[number]?.bytes?.copyOf()
 
@@ -404,8 +416,8 @@ internal object ArchiveBufferPolicy {
         if (headroom.lowMemory || headroom.available <= headroom.threshold) return 0
         if (input <= 0 || output <= 0 || input > Int.MAX_VALUE || output > Int.MAX_VALUE)
             return minOf(thermalLimit, 1)
-        val charge = input + 2L * output + 8L * 1024 * 1024
-        val spare = minOf((headroom.available - headroom.threshold) / 8, headroom.jvmHeadroom / 2)
+        val charge = requireNotNull(SpeculativeMemoryAdmission.charge(input, output))
+        val spare = SpeculativeMemoryAdmission.limit(headroom)
         return minOf(thermalLimit, (spare / charge).coerceIn(0L, 2L).toInt())
     }
 

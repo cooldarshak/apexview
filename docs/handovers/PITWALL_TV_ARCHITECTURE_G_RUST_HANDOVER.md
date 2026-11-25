@@ -1,5 +1,29 @@
 # PITWALL TV / APEXVIEW: ARCHITECTURE G — CONSOLIDATED RUST ENGINEERING PLAN
 
+
+### Build 882 green baseline / consolidated memory ownership and pressure batch (25 November 2026)
+
+Verified all five jobs successful for exact source 2b05c4c320307ec43ac445f97892bf3b29420fda, [run 45657408075](https://github.com/cooldarshak/apexview/actions/runs/45657408075). Preserve all existing gates. No change to codec, Widevine, source quality, feed count, frame rate, buffer durations or Cast protocol.
+
+| Workstream | Implemented / remaining boundary |
+|---|---|
+| M1 | Process PSS/RSS, heap/graphics category, fragment capacity/live bytes, engine reservation/materialized slots/bridge, speculative current/peak forecast, local and relay unique backing attribution. Existing symbol artifact and benchmark-only profileable manifest retained. Matched heapprofd and external codec/parser attribution pending. |
+| M2 | Shared process speculative archive forecast prevents simultaneous warmers independently spending headroom; common estimate and live OS/JVM headroom; release on every exit. Full common admission across mandatory foreground, native, Media3 and Cast remains open. |
+| M3 | Existing direct JNI transfers, exact known-length CMAF acquisition, shared native/sidecar ownership and no full-copy prefetch retained. Remove temporary flattened list of source references at cleanup. Further full-copy reduction open. |
+| M4 | Compact spare payload slots lazy; retire extra free pairs at all terminal releases rather than only seek; keep one warm free pair. Other owner allocation audit open. |
+| M5 | Pressure trim behind requested segment only for unpinned entries under OS lowMemory. Retain requested/forward window and active readers. Native free spare retirement at release/seek; fragment capacity bounded. Adaptive resizing/hysteresis outside these owners open. |
+| M6 | Native immutable lease, capacity charging, bounded nearby-size reuse, zeroing/final retirement retained; new DASH/Cast diagnostics distinguish shared native logical bytes from arena capacity. Physical native retention verification pending. |
+| M7 | Existing generation-fenced atlas validation cache/header slab and fixed descriptor arrays retained. Warm regression reuses workspace. Further parser optimization requires measured site evidence; open. |
+| M8 | Speculative group reservations include observed input/output and existing allowance; peak forecast visible. Foreground queue unchanged; general source/compose/relay pending-byte coordination open. |
+| M9 | Explicit existing-default Media3 allocator and diagnostics retained in player and receiver. No buffer-duration or quality changes; cross-player allocator coordination needs attribution. |
+| M10 | Pressure-aware eviction of only unpinned older archive cache entries. Cache/relay/DASH ownership and retired-reader accounting. No eviction of live advertised media or pinned readers. Protected/relay adaptive policy remains open. |
+| M11 | Existing generic fixture retained; additional compact fixture with 12 repeated real atlas jobs, byte parity and single materialized payload pair, unchanged stale/invalid/seek checks. Added JVM forecast, trim and accounting regressions and wiring checks. Full CI and physical paired PSS/peak/quality gates pending. |
+| M12 | Conditional allocator experiment NOT triggered: no controlled heapprofd proof of fragmentation. Keep system allocator. |
+| M13 | Existing platform graphics category and player diagnostics retained; no codec or surface ownership removed without proof. External codec/GPU allocations explicitly not measured; physical attribution open. |
+
+Diagnostic owner-level projections and logical references are not additive process PSS. Count native capacity once at the arena, shared audio/text once at its budget, and reserved/forecast bytes separately from materialized allocations. Relay and DASH logical references can overlap with source history. Pressure trim may require re-fetch on backward seek under lowMemory only; measure before accepting. No physical RAM savings asserted. Six targeted production-wiring checks passed in remote checkout; full Rust/Android toolchain unavailable there, so exact-source CI mandatory. M1–M13 not represented as 100% coding complete; all physical acceptance gates remain.
+
+
 ### Build 881 first-failure correction (25 November 2026)
 
 Build 881 ([run 45656595936](https://github.com/cooldarshak/apexview/actions/runs/45656595936), exact source `1e486403be8f132126e3a2d9c69f0a9249998fa7`) failed in mandatory host Rust test compilation, error E0063: missing `compact_atlas` in the existing deadline-priority test State initializer. Initialize that generic test state explicitly to false; production state already uses the supplied mode. Audited both State constructors. Keep all deadline/priority assertions, spare retirement tests, strict lint, sanitizers, Android ABI and device gates unchanged. No memory policy or playback behavior change in this correction. Exact-source CI pending; Build 880 remains last verified green. M1–M13 status and physical acceptance gates above/below remain open as recorded.

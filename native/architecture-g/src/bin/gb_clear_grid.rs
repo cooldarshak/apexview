@@ -714,13 +714,18 @@ fn verify_dependent_window(
 }
 
 fn verify_native_lease(packet: &[u8], expected: &[u8]) {
-    let mut engine = Engine::new(Budget {
+    verify_native_lease_mode(packet, expected, false);
+    verify_native_lease_mode(packet, expected, true);
+}
+
+fn verify_native_lease_mode(packet: &[u8], expected: &[u8], compact: bool) {
+    let budget = Budget {
         slots: 2,
         input: packet.len(),
         output: expected.len(),
         ceiling: 12 * 1024 * 1024,
-    })
-    .unwrap();
+    };
+    let mut engine = if compact { Engine::new_atlas(budget) } else { Engine::new(budget) }.unwrap();
     let generation = engine.generation();
     let token = engine.submit_clear_atlas(generation, packet, true, 5000);
     assert!(token > 0);
@@ -748,6 +753,19 @@ fn verify_native_lease(packet: &[u8], expected: &[u8]) {
     assert_eq!(engine.copy(rebuilt, 0, &mut lease), expected.len() as i64);
     assert_eq!(lease, expected);
     assert_eq!(engine.release(rebuilt), 1);
+    let pair = packet.len() + expected.len();
+    for _ in 0..(if compact { 12 } else { 0 }) {
+        let token = engine.submit_clear_atlas(generation, packet, true, 5000);
+        assert!(token > 0);
+        assert_eq!(await_result(&engine, token), expected.len() as i64);
+        assert_eq!(engine.copy(token, 0, &mut lease), expected.len() as i64);
+        assert_eq!(lease, expected);
+        assert_eq!(engine.release(token), 1);
+        assert_eq!(engine.allocated_payload_bytes(), pair);
+    }
+    if compact {
+        println!("GC_WARM_ATLAS repetitions=12 payloadBytes={pair} reservedBytes={} byteParity=true", engine.reserved());
+    }
     let invalid =
         engine.submit_clear_atlas(engine.generation(), &packet[..packet.len() - 1], true, 5000);
     assert!(invalid > 0);
