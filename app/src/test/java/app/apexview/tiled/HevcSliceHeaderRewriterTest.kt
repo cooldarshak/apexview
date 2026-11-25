@@ -268,6 +268,66 @@ class HevcSliceHeaderRewriterTest {
         }
     }
 
+    @Test
+    fun exportsAllEncodedTwoFeedSliceFixtures() {
+        val root = System.getenv("PITWALL_G0_SLICE_DIR")?.let { java.io.File(it) } ?: return
+        val fixture = java.io.File(requireNotNull(System.getenv("APEXVIEW_HEVC_FIXTURE_DIR")))
+        val streams = listOf("feed_a.hevc","feed_b.hevc").map { java.io.File(fixture,it).readBytes() }
+        val composed = HevcTizenGridComposer.composeAnnexBStreams(
+            streams,HevcOutputGridDimensions(columns=2,rows=1),
+            listOf(HevcTizenGridComposer.CellSelection(0,0,0,0),
+                HevcTizenGridComposer.CellSelection(1,0,1,0)),
+            frameRateNumerator=25,includeAnnexBOutput=false)
+        assertFalse(composed.outputLoopFilterAcrossTilesEnabled)
+        assertEquals(50,composed.pictures.size)
+        val outputSps=HevcParameterSets.parseSps(composed.outputParameters.sps)
+        val outputPps=HevcParameterSets.parsePps(composed.outputParameters.pps,outputSps)
+        val addressBits=32-Integer.numberOfLeadingZeros(outputSps.picWidthInCtbs*outputSps.picHeightInCtbs-1)
+        var verified=0
+        streams.forEachIndexed { feed, stream ->
+            val nals=HevcBitstream.splitAnnexB(stream)
+            val sps=HevcParameterSets.parseSps(nals.first { it.type==33 }.bytes)
+            val pps=HevcParameterSets.parsePps(nals.first { it.type==34 }.bytes,sps)
+            val vcl=nals.filter { it.type in 0..21 }
+            assertEquals(50,vcl.size)
+            vcl.forEachIndexed { frame, unit ->
+                val source=unit.bytes
+                val parsed=HevcSliceHeaderParser.parse(source,sps,pps)
+                val picture=composed.pictures[frame]
+                val evidence=picture.evidence[feed]
+                assertEquals(feed,evidence.feedIndex)
+                val address=evidence.destinationCtbAddress
+                val expected=picture.vclNals[feed]
+                val span=HevcBitstream.NalSpan(source,0,source.size)
+                fun rewrite()=HevcSliceHeaderRewriter.rewriteClearParts(span,sps,pps,outputSps,outputPps,address,null,parsed)
+                assertArrayEquals(expected,rewrite().use { it.materialize() })
+                val dir=java.io.File(root,"encoded-$feed-frame-$frame")
+                check(dir.mkdirs() || dir.isDirectory)
+                java.io.File(dir,"source.bin").writeBytes(source)
+                java.io.File(dir,"expected.bin").writeBytes(expected)
+                java.io.File(dir,"syntax.txt").writeText(listOf(parsed.sourceAddressEndBit,
+                    parsed.entryPointFieldStartBit,parsed.entryPointFieldEndBit,parsed.alignmentStartBit,
+                    parsed.bitsConsumed/8,address,addressBits,outputPps.ppsId,
+                    if(outputPps.dependentSliceSegmentsEnabled) 1 else 0,
+                    if(outputPps.tilesEnabled) 1 else 0,
+                    if(parsed.noOutputOfPriorPictures==true) 1 else 0).joinToString(" ")+"\n")
+                verified++
+                if(frame<=1) {
+                    val out=ByteArray(expected.size)
+                    repeat(32) { rewrite().use { it.copyInto(out,0) } }
+                    val times=LongArray(101) {
+                        val start=System.nanoTime()
+                        repeat(16) { rewrite().use { it.copyInto(out,0) } }
+                        (System.nanoTime()-start)/16
+                    }.sorted()
+                    assertArrayEquals(expected,out)
+                    println("G0 clear slice jvm case=${dir.name} bytes=${source.size} p50Ns=${times[50]} p95Ns=${times[95]} p99Ns=${times[99]} maxNs=${times[100]} prevalidatedSyntax=true")
+                }
+            }
+        }
+        assertEquals(100,verified)
+    }
+
     private fun assertRejected(expectedText: String, action: () -> Unit) {
         try {
             action()

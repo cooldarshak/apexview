@@ -36,7 +36,9 @@ class ArchitectureG0AndroidTest {
             assertEquals(ArchitectureG0Probe.INVALID, s.copyOutput(g, out))
         }
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
-        Log.i(TAG, "G0 runtime sdk=${Build.VERSION.SDK_INT} abis=${Build.SUPPORTED_ABIS.joinToString()} pageBytes=${Os.sysconf(OsConstants._SC_PAGESIZE)} package=${ctx.packageName}")
+        @Suppress("DEPRECATION")
+        val version = ctx.packageManager.getPackageInfo(ctx.packageName,0).versionName
+        Log.i(TAG, "G0 runtime sdk=${Build.VERSION.SDK_INT} abis=${Build.SUPPORTED_ABIS.joinToString()} process64Bit=${android.os.Process.is64Bit()} pageBytes=${Os.sysconf(OsConstants._SC_PAGESIZE)} package=${ctx.packageName} version=$version")
     }
 
     @Test

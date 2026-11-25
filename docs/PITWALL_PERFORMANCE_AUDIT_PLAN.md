@@ -28,6 +28,8 @@ Build 849 GREEN in 15m15s, all five jobs successful. Sixth G.0 batch adds clear 
 
 Malformed workflow in d5eed03 independently confirmed; restored 849 structure and reapplied intended changes with strict YAML/shell and targeted regression preflight passing. Full CI pending. No test or feature removal.
 
+Build 851 GREEN; first physical ARM diagnostic passed all 290 byte comparisons. TV validation deferred by user, not waived. Seventh G.0 batch extends real encoded slice differential and optimizes clear EBSP tail validation without removing scalar checks. Production unchanged; CI pending.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |
