@@ -37,6 +37,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.upstream.DefaultAllocator
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -557,9 +558,10 @@ class PitwallReceiverActivity : ComponentActivity() {
                     setForceHighestSupportedBitrate(true)
                 }
             }.build()
+        val receiverAllocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
         val next = ExoPlayer.Builder(this, renderers).setTrackSelector(selector)
             .setMediaSourceFactory(DefaultMediaSourceFactory(data).apply { widevine?.sessions?.let { key -> setDrmSessionManagerProvider { key } } })
-            .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(5_000, 15_000, 1_000, 2_000).build())
+            .setLoadControl(DefaultLoadControl.Builder().setAllocator(receiverAllocator).setBufferDurationsMs(5_000, 15_000, 1_000, 2_000).build())
             .build()
         receiverCadence = cadence
         receiverDisplayOwner = null
@@ -637,6 +639,8 @@ class PitwallReceiverActivity : ComponentActivity() {
             }
             override fun onPlaybackStateChanged(state: Int) {
                 if (player !== next) return
+                Log.i("PitwallReceiver", "GC_RECEIVER_ALLOCATOR generation=$generation state=$state " +
+                    "media3InUseBytes=${receiverAllocator.totalBytesAllocated}")
                 sendPlayback()
                 if (state == Player.STATE_ENDED) stopPlayback()
             }

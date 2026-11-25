@@ -113,6 +113,7 @@ struct State {
     slots:Vec<Slot>,
     generation:i64,
     closed:bool,
+    compact_atlas:bool,
 }
 impl State {
     fn index(&self, token:i64)->Option<usize> {
@@ -156,7 +157,7 @@ impl Engine {
             let buffers=if !compact_atlas || index==0 {Some(Buffers::new(budget)?)} else {None};
             slots.push(Slot{buffers,stage:Stage::Free,work:None,result:0});
         }
-        let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false}),Condvar::new()));
+        let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false,compact_atlas}),Condvar::new()));
         let cloned=Arc::clone(&shared);
         let worker=thread::Builder::new().name("pitwall-native-stitch".into())
             .stack_size(WORKER_STACK).spawn(move || run_worker(cloned)).ok()?;
@@ -167,6 +168,23 @@ impl Engine {
         if state.closed {CLOSED} else {state.generation}
     }
     pub fn reserved(&self)->usize {self.reserved_bytes}
+    /// Actual materialized payload pairs, including worker-owned Running slots.
+    /// Does not include parser scratch, allocator overhead or resident pages.
+    pub fn allocated_payload_bytes(&self)->usize {
+        let s=self.shared.0.lock().expect("engine mutex");
+        s.slots.iter().filter(|slot|slot.buffers.is_some() || slot.stage==Stage::Running).count()
+            * (self.budget.input + self.budget.output)
+    }
+    /// Keep one warm free pair; never touch a queued, running or leased slot.
+    fn trim_free_spares(state:&mut State) {
+        if !state.compact_atlas {return;}
+        let mut warm=false;
+        for slot in &mut state.slots {
+            if slot.stage==Stage::Free && slot.buffers.is_some() {
+                if warm {slot.buffers=None;} else {warm=true;}
+            }
+        }
+    }
     /// Caller derives deadline from media buffer slack. Speculative work
     /// cannot consume the final free slot; foreground wins among queued work.
     pub fn submit(&self,generation:i64,source:&[u8],prefix:usize,count:usize,
@@ -269,9 +287,12 @@ impl Engine {
         let mut s=self.shared.0.lock().expect("engine mutex");
         if s.closed{return CLOSED;}
         let Some(i)=s.index(token) else {return STALE;};
+        let generation=s.generation;
         let slot=&mut s.slots[i];
         if !matches!(slot.stage,Stage::Reading|Stage::Ready|Stage::Failed) {return INVALID;}
+        let stale=slot.work.is_some_and(|w|w.generation!=generation);
         slot.recycle();
+        if stale {Self::trim_free_spares(&mut s);}
         1
     }
     /// Invalidate pending/ready old results; running work can finish only
@@ -285,6 +306,7 @@ impl Engine {
         for slot in &mut s.slots {
             if matches!(slot.stage,Stage::Queued|Stage::Ready|Stage::Failed) {slot.recycle();}
         }
+        Self::trim_free_spares(&mut s);
         self.shared.1.notify_all();
         generation
     }
@@ -336,7 +358,7 @@ fn run_worker(shared:Shared) {
         let obsolete=s.closed || work.generation!=s.generation;
         let slot=&mut s.slots[index];
         slot.buffers=Some(buffers);
-        if obsolete {slot.recycle();continue;}
+        if obsolete {slot.recycle();Engine::trim_free_spares(&mut s);continue;}
         slot.result=if Instant::now()>=work.deadline {DEADLINE} else {
             match result {Ok(Ok(n))=>n as i64,Ok(Err(code))=>code,Err(_)=>PANIC}
         };
@@ -406,6 +428,30 @@ mod tests {
         assert_eq!(engine.release(first),1);
         assert_eq!(engine.release(foreground),1);
         assert_eq!(engine.seek(),g+1);
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn compact_seek_trims_free_spares_but_not_active_slots() {
+        let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
+        let mut engine=Engine::new_atlas(b).unwrap();
+        let pair=b.input+b.output;
+        assert_eq!(engine.allocated_payload_bytes(),pair);
+        let g=engine.generation();
+        let one=engine.submit(g,&[2,2,1],1,1,true,5000);
+        assert!(one>0);
+        assert_eq!(wait(&engine,one),6);
+        let two=engine.submit(g,&[2,2,1],1,1,true,5000);
+        assert!(two>0);
+        assert_eq!(wait(&engine,two),6);
+        assert_eq!(engine.allocated_payload_bytes(),2*pair);
+        assert_eq!(engine.release(two),1);
+        assert!(engine.seek()>g);
+        assert_eq!(engine.allocated_payload_bytes(),2*pair);
+        assert_eq!(engine.read_with(one,0,1,|_|panic!("stale read")),STALE);
+        assert_eq!(engine.release(one),1);
+        assert_eq!(engine.allocated_payload_bytes(),pair);
+        assert_eq!(engine.reserved(),b.reserved_atlas().unwrap());
         assert!(engine.close());
     }
 

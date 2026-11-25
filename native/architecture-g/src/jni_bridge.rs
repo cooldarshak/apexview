@@ -302,6 +302,11 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeRelea
     guarded(||engine_call(handle,|e|e.release(token)))
 }
 #[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeAllocatedPayloadBytes(
+    _env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong)->jlong {
+    guarded(||engine_call(handle,|e|e.allocated_payload_bytes() as i64))
+}
+#[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeSeek(
     _env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong)->jlong {
     guarded(||engine_call(handle,Engine::seek))
@@ -406,6 +411,18 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragm
     _env: JNIEnv<'_>, _class: JClass<'_>, id: jlong,
 ) -> jlong {
     guarded(|| if crate::fragment_storage::release(id) { 1 } else { STALE })
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragmentMemorySnapshot(
+    env: JNIEnv<'_>, _class: JClass<'_>,
+) -> jni::sys::jlongArray {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(snapshot) = crate::fragment_storage::snapshot() else { return std::ptr::null_mut(); };
+        let values = snapshot.map(|v| i64::try_from(v).unwrap_or(i64::MAX));
+        let Ok(array) = env.new_long_array(values.len() as jint) else { return std::ptr::null_mut(); };
+        if env.set_long_array_region(&array, 0, &values).is_err() { return std::ptr::null_mut(); }
+        array.into_raw()
+    })).unwrap_or(std::ptr::null_mut())
 }
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragmentTrim(

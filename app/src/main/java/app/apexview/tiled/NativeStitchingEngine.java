@@ -102,6 +102,12 @@ public final class NativeStitchingEngine implements AutoCloseable {
     private static native ByteBuffer nativeFragmentView(long id);
     private static native long nativeFragmentRelease(long id);
     private static native void nativeFragmentTrim();
+    private static native long[] nativeFragmentMemorySnapshot();
+    /** Never load the Rust library merely to sample Kotlin playback. */
+    public static long[] fragmentMemorySnapshot() {
+        try { return nativeFragmentMemorySnapshot(); }
+        catch (LinkageError unavailable) { return null; }
+    }
     static long allocateFragment(int size) {
         System.loadLibrary("pitwall_g0");
         return nativeAbi() == 2 ? nativeFragmentAllocate(size) : INVALID;
@@ -146,6 +152,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
     private static native long nativeAcquire(long handle,long token);
     private static native long nativeCopy(long handle,long token,int offset,ByteBuffer output,int length);
     private static native long nativeRelease(long handle,long token);
+    private static native long nativeAllocatedPayloadBytes(long handle);
     private static native long nativeSeek(long handle);
     private static native long nativeClose(long handle);
 
@@ -189,6 +196,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
         try{return new NativeStitchingEngine(id,budget);}
         catch(RuntimeException|Error failure){nativeClose(id);throw failure;}
     }
+    public synchronized long allocatedPayloadBytes(){return handle==0?CLOSED:nativeAllocatedPayloadBytes(handle);}
     public synchronized long generation(){return handle==0?CLOSED:generation;}
     public synchronized long submit(long expected,byte[] bytes,int prefix,int count,boolean foreground,long slack) {
         return submitJob(expected, bytes, prefix, count, foreground, slack, false);

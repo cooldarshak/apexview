@@ -182,6 +182,20 @@ internal class BoundedArchiveFragmentCache(
     @get:Synchronized var leasedBytes: Long = 0L
         private set
     val size: Int @Synchronized get() = entries.size
+    data class MemorySnapshot(val cached: Long, val pinned: Long, val retiredPinned: Long) {
+        val unique: Long get() = Math.addExact(cached, retiredPinned)
+    }
+    @Synchronized fun memorySnapshot() = MemorySnapshot(bytesRetained, leasedBytes,
+        pinned.filterNot { it.cached }.sumOf { it.bytes.size.toLong() })
+    /** Foreground keeps its original admission and retry contract. Do not
+     * start speculative production while retired readers consume the cache
+     * allowance; current-window data may still be evicted normally. */
+    @Synchronized fun canSpeculate(number: Int, outputEstimate: Long): Boolean {
+        if (entries.containsKey(number)) return true
+        val snapshot = memorySnapshot()
+        return snapshot.retiredPinned == 0L || (outputEstimate > 0 &&
+            outputEstimate <= maxBytes - snapshot.unique)
+    }
     @Synchronized fun contains(number: Int): Boolean = entries.containsKey(number)
     @Synchronized fun readCopy(number: Int): ByteArray? = entries[number]?.bytes?.copyOf()
 

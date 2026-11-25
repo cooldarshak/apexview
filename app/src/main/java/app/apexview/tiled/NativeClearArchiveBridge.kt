@@ -288,6 +288,7 @@ internal class NativeClearArchiveBridge(
                 "inputBytes=${encoded.size} outputBytes=${out.media.sumOf { it.size.toLong() }} fragments=$count javaInputBytes=${stats.javaInputBytes} " +
                 "nativeInputBytes=${stats.nativeInputBytes} nativeOutputBytes=${stats.nativeOutputBytes} " +
                 "javaOutputBytes=${stats.javaOutputBytes} rejectedSubmits=${stats.rejectedSubmits} compactAtlas=${active.budget.compactAtlas} " +
+                "arenaReservedBytes=${active.budget.reservedBytes} arenaPayloadBytes=${active.allocatedPayloadBytes()} " +
                 "submitUs=${out.submitNs / 1000L} waitUs=${out.waitNs / 1000L} readUs=${out.readNs / 1000L} " +
                 "validateUs=${(System.nanoTime() - validationStarted) / 1000L}")
             if (needReference) {

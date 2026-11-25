@@ -9,6 +9,26 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class ArchiveBufferPolicyTest {
+    @Test fun retiredPinnedBytesCountOnceAndOnlyGateSpeculativeWork() {
+        val cache = BoundedArchiveFragmentCache(maxEntries = 1, maxBytes = 10L)
+        cache.put(1, ByteArray(6) { 7 })
+        val lease = requireNotNull(cache.readLease(1))
+        assertEquals(6L, cache.memorySnapshot().unique)
+        cache.put(2, ByteArray(4) { 9 })
+        assertEquals(10L, cache.memorySnapshot().unique)
+        assertEquals(6L, cache.memorySnapshot().retiredPinned)
+        assertFalse(cache.canSpeculate(3, 1L))
+        assertTrue(cache.canSpeculate(2, 1L))
+        val copy = ByteArray(6)
+        lease.readInto(copy, 0, 0, copy.size)
+        assertArrayEquals(ByteArray(6) { 7 }, copy)
+        lease.close()
+        assertEquals(4L, cache.memorySnapshot().unique)
+        assertTrue(cache.canSpeculate(3, 6L))
+        cache.clear()
+        assertEquals(0L, cache.memorySnapshot().unique)
+    }
+
     @Test fun nativeDemandUsesFreshPlaybackClockAndMemoryLimitsOnlySpeculation() {
         val demand = ArchiveBufferPolicy.NativeDemand(1000L, 9000L, 1.5f, true, 100L)
         assertEquals(2000L, ArchiveBufferPolicy.nativeJobTimeoutMs(1000L, 3000L, demand, 100L))

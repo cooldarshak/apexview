@@ -15,6 +15,28 @@ def contents(path):
 
 
 class ProductionWiringTests(unittest.TestCase):
+    def test_gc_memory_ownership_diagnostics_and_speculative_gate(self):
+        diagnostics = contents("app/src/main/java/app/apexview/DiagnosticLogs.kt")
+        memory = contents("app/src/main/java/app/apexview/ProcessMemoryDiagnostic.kt")
+        feed = contents("app/src/main/java/app/apexview/FeedPlayer.kt")
+        receiver = contents("app/src/main/java/app/apexview/cast/local/PitwallReceiverActivity.kt")
+        archive = contents("app/src/main/java/app/apexview/tiled/HevcArchiveVodSession.kt")
+        arena = contents("native/architecture-g/src/fragment_storage.rs")
+        engine = contents("native/architecture-g/src/engine.rs")
+        self.assertIn("ProcessMemoryDiagnostic.sample(context)", diagnostics)
+        self.assertIn("if (token == generation) runCatching", diagnostics)
+        self.assertIn("memory.totalPss", memory)
+        self.assertIn("nativeFragmentArena=UNAVAILABLE", memory)
+        self.assertIn(".setAllocator(playbackAllocator)", feed)
+        self.assertIn("DefaultLoadControl.DEFAULT_MIN_BUFFER_MS, DefaultLoadControl.DEFAULT_MAX_BUFFER_MS, 1_000, 2_000", feed)
+        self.assertIn(".setAllocator(receiverAllocator).setBufferDurationsMs(5_000, 15_000, 1_000, 2_000)", receiver)
+        self.assertEqual(archive.count("cache.canSpeculate("), 1)
+        self.assertIn("if (!cache.canSpeculate(candidate, currentSizes.output)) break", archive)
+        self.assertIn("cacheRetiredPinnedBytes", archive)
+        self.assertIn("size..=max_capacity", arena)
+        self.assertIn("slot.stage==Stage::Free && slot.buffers.is_some()", engine)
+        self.assertIn("slot.stage==Stage::Running", engine)
+
     def test_active_composition_generation_owns_diagnostics_and_remove_revokes_old_state(self):
         app = contents("app/src/main/java/app/apexview/AppState.kt")
         viewer = contents("app/src/main/java/app/apexview/Viewer.kt")

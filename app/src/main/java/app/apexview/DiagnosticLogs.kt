@@ -97,6 +97,16 @@ object DiagnosticLogs {
                     }
                 }
             }, 1_000, 1_000)
+            // PSS is an Android process estimate, not an addition to RSS or
+            // allocator counters. Sample off the UI thread only while recording.
+            timer.schedule(timerTask {
+                if (token != generation) return@timerTask
+                val line = runCatching { ProcessMemoryDiagnostic.sample(context) }
+                    .getOrElse { "GC_PROCESS_MEMORY unavailable=${it.javaClass.simpleName}" }
+                synchronized(lock) {
+                    if (token == generation) runCatching { writeLocked(context, "$line\n") }
+                }
+            }, 0L, 10_000L)
             publishStatus("Recording to Download/Pitwall", token)
             if (Build.VERSION.SDK_INT >= 30) {
                 runCatching {

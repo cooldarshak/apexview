@@ -294,6 +294,7 @@ internal class HevcArchiveVodSession(
                         val currentSizes = nativeBudgetObservation.sizes()
                         if (candidate - number > ArchiveBufferPolicy.memoryWarmLimit(warmLimit, currentMemory,
                             currentSizes.input, currentSizes.output)) break
+                        if (!cache.canSpeculate(candidate, currentSizes.output)) break
                         synchronized(warmLock) {
                             warmActiveNumber = candidate
                             warmActiveTid = android.os.Process.myTid()
@@ -562,6 +563,7 @@ internal class HevcArchiveVodSession(
                 }
                 val producerMs = (System.nanoTime() - started) / 1_000_000L
                 val mediaMs = groups[number].durationUs / 1000L
+                val memory = cache.memorySnapshot()
                 android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs " +
                     "composeMs=$compositionMs verifyMs=$verificationMs totalMs=${(System.nanoTime() - started) / 1_000_000L} " +
                     "parseMs=${composed.parseMs} rewriteMs=${composed.rewriteMs} packageMs=${composed.packageMs} " +
@@ -581,7 +583,8 @@ internal class HevcArchiveVodSession(
                     "producerSlackAt1_5xMs=${mediaMs * 2 / 3 - producerMs} " +
                     "worker=$worker actualStitcher=${if (produced.nativeEpoch != null) "RUST" else "JVM"} " +
                     "requestedRust=${nativeClear.requested} stitcherReason=${nativeClear.decision.reason} " +
-                    "clock=PLAYER_REQUEST cache=$cacheEntries cachedBytes=$cachedByteCount")
+                    "clock=PLAYER_REQUEST cache=$cacheEntries cachedBytes=$cachedByteCount " +
+                    "cacheUniqueBytes=${memory.unique} cachePinnedBytes=${memory.pinned} cacheRetiredPinnedBytes=${memory.retiredPinned}")
             } finally {
                 composed.initializationSegment.fill(0)
                 composed.mediaFragments.forEach { if (it !== publishedFragment) it.fill(0) }

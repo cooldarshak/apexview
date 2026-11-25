@@ -25,6 +25,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.upstream.DefaultAllocator
 import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
@@ -270,6 +271,7 @@ class FeedPlayer(
     val hasLoadedDrmKeys: Boolean get() = licensed
     private var firstFrameRendered = false
     private val diagnosticId = System.identityHashCode(this)
+    private val playbackAllocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
     private var loggedClock = false
     private var firstFrameLogged = false
     private var seekSequence = 0
@@ -302,7 +304,7 @@ class FeedPlayer(
             "sampleIntervalMs=$sampleIntervalMs mediaPositionDeltaMs=$positionDeltaMs " +
             "mediaClockProgressionDifferenceMs=$clockDifferenceMs playbackSpeed=${player.playbackParameters.speed} " +
             "audioFormat=${player.audioFormat?.sampleMimeType ?: "none"} " +
-            "audioHardwareClock=NOT_MEASURED")
+            "media3InUseBytes=${playbackAllocator.totalBytesAllocated} audioHardwareClock=NOT_MEASURED")
     }
     var activeVideoDecoderCount by mutableStateOf(0)
         private set
@@ -476,6 +478,7 @@ class FeedPlayer(
         // a stall): F1's chunks are almost 6 s each, so a feed starting mid-chunk otherwise waits
         // for the next one too.
         val loadControl = DefaultLoadControl.Builder()
+            .setAllocator(playbackAllocator)
             .setBufferDurationsMs(DefaultLoadControl.DEFAULT_MIN_BUFFER_MS, DefaultLoadControl.DEFAULT_MAX_BUFFER_MS, 1_000, 2_000)
             .build()
         player = ExoPlayer.Builder(context, ThinningRenderersFactory(context, outputCadence))

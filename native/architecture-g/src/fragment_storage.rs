@@ -17,6 +17,7 @@ struct Arena {
     live: BTreeMap<i64, Vec<u8>>,
     free: Vec<Vec<u8>>,
     charged: usize,
+    allocations: u64,
 }
 impl Arena {
     fn allocate(&mut self, size: usize) -> Option<i64> { self.allocate_bounded(size, MAX_BYTES) }
@@ -28,8 +29,17 @@ impl Arena {
         let serial = self.serial.checked_add(1)?;
         if self.charged>limit { self.trim(); }
         if self.charged>limit {return None;}
-        let bytes = if let Some(i) = self.free.iter().position(|b| b.len() == size) {
-            self.free.swap_remove(i)
+        // Fragment sizes vary slightly even at fixed video quality. Reuse the
+        // smallest suitable free backing, with strictly bounded slack.
+        // Expose only the requested length; charge the entire capacity.
+        let max_capacity = size + (size / 8).min(64 * 1024);
+        let reusable = self.free.iter().enumerate()
+            .filter(|(_, b)| (size..=max_capacity).contains(&b.capacity()))
+            .min_by_key(|(_, b)| b.capacity()).map(|(i, _)| i);
+        let bytes = if let Some(i) = reusable {
+            let mut bytes = self.free.swap_remove(i);
+            bytes.resize(size, 0);
+            bytes
         } else {
             while size > limit.saturating_sub(self.charged) {
                 let old = self.free.pop()?;
@@ -41,6 +51,7 @@ impl Arena {
             if charged > limit { return None; }
             bytes.resize(size, 0);
             self.charged = charged;
+            self.allocations = self.allocations.saturating_add(1);
             bytes
         };
         self.serial = serial;
@@ -65,6 +76,13 @@ impl Arena {
         }
         true
     }
+    // Unique capacity and logical live payload are deliberately separate.
+    fn snapshot(&self) -> [u64; 5] {
+        [self.charged as u64,
+         self.live.values().map(Vec::capacity).sum::<usize>() as u64,
+         self.live.values().map(Vec::len).sum::<usize>() as u64,
+         self.live.len() as u64, self.allocations]
+    }
     fn trim(&mut self) {
         for bytes in self.free.drain(..) { self.charged -= bytes.capacity(); }
     }
@@ -82,6 +100,8 @@ pub fn allocate_bounded(size: usize, limit: usize) -> Option<i64> { arena().lock
 pub fn release(id: i64) -> bool { arena().lock().is_ok_and(|mut a| a.release(id)) }
 #[cfg(target_os = "android")]
 pub fn trim() { if let Ok(mut a) = arena().lock() { a.trim(); } }
+#[cfg(target_os = "android")]
+pub fn snapshot() -> Option<[u64; 5]> { Some(arena().lock().ok()?.snapshot()) }
 
 /// Used only for the private JNI view. Its caller must keep the allocation
 /// alive until all Java views have been retired; no raw pointer is retained
@@ -110,6 +130,25 @@ mod tests {
         assert_eq!(a.charged,48);
         assert!(a.release(keep)); assert!(a.release(next));
         assert_eq!(a.charged,0);
+    }
+
+    #[test]
+    fn nearby_sizes_reuse_only_bounded_slack_and_charge_capacity() {
+        let mut a=Arena::default();
+        let keep=a.allocate(1).unwrap();
+        let old=a.allocate(1024).unwrap();
+        a.live.get_mut(&old).unwrap().fill(0x61);
+        assert!(a.release(old));
+        let near=a.allocate(960).unwrap();
+        assert_eq!(a.live.get(&near).unwrap().as_slice(), &[0;960]);
+        assert_eq!(a.snapshot(),[1025,1025,961,2,2]);
+        assert!(a.release(near));
+        let small=a.allocate(64).unwrap();
+        assert_eq!(a.snapshot()[4],3);
+        assert_eq!(a.live.get(&small).unwrap().len(),64);
+        assert!(a.release(small));
+        assert!(a.release(keep));
+        assert_eq!(a.snapshot(),[0,0,0,0,3]);
     }
 
     #[test]
