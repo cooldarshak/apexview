@@ -121,6 +121,7 @@ class ArchitectureGBAndroidTest {
         verifyProtectedSequence(inits, media, expectedInit)
         verifyClearVariant(request, geometry, inits, media, expectedInit, expectedMedia)
         verifyLargerClearFeedCounts(request, inits, media)
+        verifySelectedClearTiles(request, inits, media)
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         var references = 0
         fun reference(): HevcClearCmafGridComposer.Output {
@@ -396,6 +397,56 @@ class ArchitectureGBAndroidTest {
             windows.flatten().forEach { it.fill(0) }
         }
         Log.i("PitwallGB", "GB dependent clear HLS 2/4-fragment windows preserve POC, timing and exact JVM output PASS")
+    }
+
+    /** Existing JVM supports selecting only a subset of the available source
+     * tiles. Compare actual Rust worker output, including its filter policy. */
+    private fun verifySelectedClearTiles(
+        template: HevcClearCmafGridComposer.Request, inits: List<ByteArray>, media: List<ByteArray>
+    ) {
+        val reports = inits.map { CmafBoxInspector.inspect(it) }
+        val config = requireNotNull(reports[0].tracks.single().hevcConfiguration)
+        val columns = config.pps.single().numTileColumns
+        val rows = config.pps.single().numTileRows
+        require(columns >= 2 && rows >= 2)
+        val cells = List(columns) { column ->
+            HevcTizenGridComposer.CellSelection(0, column, column, 0)
+        }
+        val feeds = inits.indices.map { i ->
+            HevcClearCmafGridComposer.Feed(inits[i], listOf(media[i]), "selected-$i",
+                reports[i], listOf(HevcClearCmafGridComposer.InspectedMedia.inspect(media[i], reports[i])))
+        }
+        val request = template.copy(feeds = feeds,
+            outputGrid = HevcOutputGridDimensions(columns, 1), cells = cells)
+        val expected = HevcClearCmafGridComposer.compose(request)
+        try {
+            val cfg = requireNotNull(CmafBoxInspector.inspect(expected.initializationSegment)
+                .tracks.single().hevcConfiguration)
+            val sps = cfg.sps.single()
+            val pps = cfg.pps.single()
+            val geometry = NativeClearArchiveJob.Geometry(sps.width, sps.height,
+                requireNotNull(pps.tileColumnWidthsInCtbs), requireNotNull(pps.tileRowHeightsInCtbs),
+                cells, loopAcrossTiles = pps.loopFilterAcrossTiles == true)
+            val packet = NativeClearArchiveJob.encode(request.outputTrackId,
+                request.firstOutputSequenceNumber, request.frameRateNumerator, request.frameRateDenominator,
+                geometry, inits, media).bytes
+            try {
+                val budget = requireNotNull(NativeStitchingEngine.planClearAtlas(true,
+                    256L*1024*1024, 32L*1024*1024, 32L*1024*1024, packet.size,
+                    8 + expected.initializationSegment.size + expected.mediaFragments.single().size))
+                NativeStitchingEngine.open(budget).use { engine ->
+                    val result = NativeClearArchiveJob.execute(engine, packet, true, 5_000) {}
+                    try {
+                        assertArrayEquals(expected.initializationSegment, result.initialization)
+                        assertArrayEquals(expected.mediaFragments.single(), result.media)
+                    } finally { result.wipe() }
+                }
+            } finally { packet.fill(0) }
+        } finally {
+            expected.initializationSegment.fill(0)
+            expected.mediaFragments.forEach { it.fill(0) }
+        }
+        Log.i("PitwallGB", "GB selected source-tile subset exact native/JVM profile PASS")
     }
 
     /** Same actual JVM composer and native worker, but the second source has
@@ -1044,7 +1095,11 @@ class ArchitectureGBAndroidTest {
         val expectedSamples = mutableListOf<ProtectedHevcCmafFragmentWriter.Sample>()
         val actualSamples = mutableListOf<ProtectedHevcCmafFragmentWriter.Sample>()
         val nativePlans = mutableListOf<ProtectedHevcPictureComposer.PlannedPicture>()
-        val planner = NativeProtectedPlan(outSets, { true }, { error("Direct sequence rejected") }, direct = true)
+        // Exercise multi-command admission on genuine protected-labelled
+        // clear-header fixtures. The normal one-command picture test above
+        // remains mandatory; this full sequence forces the bounded split.
+        val planner = NativeProtectedPlan(outSets, { true }, { error("Direct sequence rejected") },
+            direct = true, maxBatchSlices = 3)
         var firstDts = 0L
         for (frame in 0 until frameCount) {
             val reference = ProtectedHevcPictureComposer.plan(sources.mapIndexed { i, s ->

@@ -261,6 +261,7 @@ fn compose(
             };
             verify_extended_profile(&request, sequence, &source_init, &fragments, &expected_init, &expected);
             verify_mixed_clock(&request, sequence, &source_init, &fragments, &expected_init, &expected);
+            verify_metadata_profile(&request, sequence, &source_init, &fragments, &expected_init, &expected);
             let packet = atlas_packet(&request, 9, sequence, &source_init, &fragments);
             let mut expected_result = Vec::new();
             expected_result.extend_from_slice(&(initialized.len() as u32).to_be_bytes());
@@ -268,6 +269,18 @@ fn compose(
             expected_result.extend_from_slice(&initialized);
             expected_result.extend_from_slice(&expected);
             verify_native_lease(&packet, &expected_result);
+            let mut unsafe_filter = packet.clone();
+            unsafe_filter[3] = b'3';
+            unsafe_filter[34..36].copy_from_slice(&1u16.to_be_bytes());
+            let mut engine = Engine::new(Budget {
+                slots: 2, input: unsafe_filter.len(), output: expected_result.len(),
+                ceiling: 12 * 1024 * 1024,
+            }).unwrap();
+            let invalid = engine.submit_clear_atlas(engine.generation(), &unsafe_filter, true, 5000);
+            assert!(invalid > 0);
+            assert_eq!(await_result(&engine, invalid), INVALID);
+            assert_eq!(engine.release(invalid), 1);
+            assert!(engine.close());
             verify_dependent_window(&request, sequence, &source_init, &fragments,
                 &expected_init, &expected, assets);
             fs::write(assets.join("gb_clear_job.bin"), packet).unwrap();
@@ -508,6 +521,59 @@ fn atlas_packet(
 // No new encoding, fabricated reference data or modification of HEVC payloads.
 // Match the JVM's exact cross-timescale comparison with a second source
 // using twice the clock rate but the same physical sample timings.
+// Rebuild only the source init's general level signalling. Preserve all
+// encoded pictures and coding syntax; output uses the first cell's template.
+fn verify_metadata_profile(
+    grid: &Grid<'_>, sequence: u32, inits: &[Vec<u8>; 2],
+    fragments: &[Vec<u8>; 2], expected_init: &[u8], expected: &[u8],
+) {
+    let original = Initialization::parse(&inits[1]).unwrap();
+    let record = original.configuration.record();
+    // Rebuild the three hvcC arrays using canonical escaping of the same RBSP.
+    // Level 186 is valid and deliberately differs from the fixture level.
+    let mut changed = record[..23].to_vec();
+    changed[12] = 186;
+    changed[22] = 3;
+    for (index, nal) in original.configuration.parameter_sets().iter().enumerate() {
+        let mut bytes = Vec::new();
+        let mut zeros = 0;
+        for &byte in &nal[2..] {
+            if zeros == 2 && byte == 3 { zeros = 0; continue; }
+            bytes.push(byte);
+            zeros = if byte == 0 { (zeros+1).min(2) } else { 0 };
+        }
+        if index == 0 { bytes[15] = 186; }
+        if index == 1 { bytes[12] = 186; }
+        let mut escaped = nal[..2].to_vec();
+        let mut zeros = 0;
+        for byte in bytes {
+            if zeros == 2 && byte <= 3 { escaped.push(3); zeros = 0; }
+            escaped.push(byte);
+            zeros = if byte == 0 { (zeros+1).min(2) } else { 0 };
+        }
+        changed.extend_from_slice(&[0xa0 | index as u8, 0, 1]);
+        changed.extend_from_slice(&(escaped.len() as u16).to_be_bytes());
+        changed.extend_from_slice(&escaped);
+    }
+    let request = cmaf_init::Request {
+        track_id: original.track_id, timescale: original.timescale,
+        width: original.display_width, height: original.display_height,
+        handler_name: "ApexView source HEVC",
+        configuration: HevcConfiguration::parse(&changed).unwrap(),
+    };
+    let mut variant = vec![0; request.size().unwrap()];
+    request.write(&mut variant).unwrap();
+    let atlas = Atlas::new(&[&inits[0], &variant], Grid {
+        width: grid.width, height: grid.height, columns: grid.columns,
+        rows: grid.rows, cells: grid.cells, frame_rate: grid.frame_rate,
+    }, 9).unwrap();
+    assert_eq!(atlas.initialization(), expected_init);
+    let mut output = vec![0; expected.len()];
+    assert_eq!(atlas.write_fragment(&[&fragments[0], &fragments[1]], sequence, &mut output).unwrap(), expected.len());
+    assert_eq!(output, expected);
+    println!("G-B source general-level variation preserves exact template and encoded media PASS");
+}
+
 fn verify_mixed_clock(
     grid: &Grid<'_>, sequence: u32, inits: &[Vec<u8>; 2],
     fragments: &[Vec<u8>; 2], expected_init: &[u8], expected: &[u8],

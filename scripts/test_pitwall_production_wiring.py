@@ -607,6 +607,28 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("nativeRequested = nativeRequested", archive)
         self.assertIn("nativeContext = context, nativeRequested = { settings.nativeRustStitching", app)
 
+    def test_gb_native_profile_and_protected_chunk_admission_remain_wired(self):
+        base = "app/src/main/java/app/apexview/tiled/"
+        bridge = contents(base + "NativeClearArchiveBridge.kt")
+        job = contents(base + "NativeClearArchiveJob.kt")
+        native = contents("native/architecture-g/src/clear_atlas.rs")
+        worker = contents("native/architecture-g/src/atlas_job.rs")
+        parser = contents("native/architecture-g/src/cmaf_input.rs")
+        protected = contents(base + "NativeProtectedPlan.kt")
+        self.assertIn("loopAcrossTiles = pps.loopFilterAcrossTiles == true", bridge)
+        self.assertIn("if (geometry.loopAcrossTiles) 0x33", job)
+        self.assertIn('b"GBC3"', worker)
+        self.assertIn("filter != can_gate_filter", worker)
+        self.assertIn("loop_across_tiles && !own_seams", native)
+        self.assertIn("coding_key()? != key", native)
+        self.assertIn("slice.prediction != first_slice.1.prediction", native)
+        self.assertIn("mdat.payload.get(start..).ok_or(Error::Extent)?", parser)
+        self.assertIn("payload.finish()?", parser)
+        self.assertIn("batchChunks(sources, outputSets, inputs, maxBatchSlices)", protected)
+        self.assertIn("candidate(3, { encodeBatch(sources, outputSets, chunk) }", protected)
+        self.assertIn("require(prepared.size == inputs.size)", protected)
+        self.assertIn("if (!transferred) prepared.forEach { it.prefix.fill(0) }", protected)
+
     def test_gb_frame_rate_reduction_is_api29_compatible_and_checked(self):
         base = "app/src/main/java/app/apexview/tiled/"
         rolling = contents(base + "ClearCmafArchiveComposition.kt")

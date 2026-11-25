@@ -13,6 +13,7 @@ internal class NativeProtectedPlan(
     private val enabled: () -> Boolean,
     private val reject: () -> Unit,
     val direct: Boolean = false,
+    private val maxBatchSlices: Int = 440,
     private val generate: (ByteArray, Int) -> ByteArray? = NativeStitchingEngine::protectedPlan
 ) {
     var matchedSlices = 0
@@ -41,32 +42,54 @@ internal class NativeProtectedPlan(
         reject()
     }
 
-    /** One bounded JNI call per picture, shared parsed parameter triplets. */
+    /** One native command for normal pictures; split only when bounded
+     * input or worst-case output would exceed a command's capacity.
+     * Never retain a partially accepted picture. No opaque media enters JNI. */
     fun prepareBatch(sources: List<List<ByteArray>>, inputs: List<BatchInput>) {
         clearBatch()
-        if (!direct) return
-        val result = candidate(3, { encodeBatch(sources, outputSets, inputs) }, { output ->
-            val b = ByteBuffer.wrap(output).order(ByteOrder.BIG_ENDIAN)
-            require(b.remaining() >= 4 && b.int == inputs.size)
-            val prepared = ArrayDeque<BatchResult>()
-            try {
-                inputs.forEach { input ->
-                    require(b.remaining() >= 4)
-                    val len = b.int
-                    require(len in 6..b.remaining() && len <= 32*1024)
-                    require(b.int == input.tail)
-                    val prefix = ByteArray(len-4).also { b.get(it) }
-                    prepared.addLast(BatchResult(input, prefix))
-                }
-                require(!b.hasRemaining())
-                prepared
-            } catch (failure: Throwable) {
-                prepared.forEach { it.prefix.fill(0) }
-                throw failure
+        if (!direct || failed || !enabled()) return
+        val prepared = ArrayDeque<BatchResult>()
+        var transferred = false
+        try {
+            val chunks = try { batchChunks(sources, outputSets, inputs, maxBatchSlices) }
+                catch (_: RuntimeException) { fail(); return }
+            for (chunk in chunks) {
+                val result = candidate(3, { encodeBatch(sources, outputSets, chunk) }, { output ->
+                    val b = ByteBuffer.wrap(output).order(ByteOrder.BIG_ENDIAN)
+                    require(b.remaining() >= 4 && b.int == chunk.size)
+                    val parsed = ArrayDeque<BatchResult>()
+                    try {
+                        chunk.forEach { input ->
+                            require(b.remaining() >= 4)
+                            val len = b.int
+                            require(len in 6..b.remaining() && len <= 32*1024)
+                            require(b.int == input.tail)
+                            val prefix = ByteArray(len-4).also { b.get(it) }
+                            parsed.addLast(BatchResult(input, prefix))
+                        }
+                        require(!b.hasRemaining())
+                        parsed
+                    } catch (failure: Throwable) {
+                        parsed.forEach { it.prefix.fill(0) }
+                        throw failure
+                    }
+                }) ?: return
+                try {
+                    while (result.isNotEmpty()) {
+                        val entry = result.first()
+                        prepared.addLast(entry)
+                        result.removeFirst()
+                    }
+                } finally { result.forEach { it.prefix.fill(0) } }
             }
-        })
-        batch = result
-        if (result != null) matchedBatches++
+            if (!enabled()) return
+            require(prepared.size == inputs.size)
+            batch = prepared
+            matchedBatches++
+            transferred = true
+        } finally {
+            if (!transferred) prepared.forEach { it.prefix.fill(0) }
+        }
     }
 
     private fun <T> candidate(kind: Int, encode: () -> ByteArray, accept: (ByteArray) -> T?): T? {
@@ -239,6 +262,45 @@ internal class NativeProtectedPlan(
     }
 
     companion object {
+        private const val MAX_BATCH_PACKET = 2*1024*1024L
+        // Rust's fixed header arena can emit at most 16 KiB of escaped prefix.
+        // Use the larger existing verified JVM response cap conservatively.
+        private const val MAX_RESULT_PER_SLICE = 4L + 32*1024L
+
+        internal fun batchChunks(sources: List<List<ByteArray>>, output: List<ByteArray>,
+                                 inputs: List<BatchInput>, maxSlices: Int = 440): List<List<BatchInput>> {
+            require(sources.size in 1..8 && sources.all { it.size == 3 } && output.size == 3)
+            require(inputs.size in 1..440 && maxSlices in 1..440)
+            val sets = sources.flatten() + output
+            require(sets.all { it.size in 3..16*1024 })
+            val overhead = 12L + sets.sumOf { 4L+it.size }
+            var previous = -1
+            var start = 0
+            var bytes = overhead
+            val chunks = ArrayList<List<BatchInput>>()
+            inputs.forEachIndexed { index, input ->
+                val mapped = input.mapped
+                val end = Math.addExact(input.tail, if (input.opaque) 0 else 1)
+                require(input.feedIndex in sources.indices && input.destination > previous &&
+                    input.tail in 2 until mapped.nalLength && end in 3..mapped.clearNalPrefixBytes &&
+                    end <= 16*1024 && mapped.nalOffset >= 0 && mapped.nalOffset <= input.sample.size-end)
+                previous = input.destination
+                val cost = 20L + end
+                require(overhead + cost <= MAX_BATCH_PACKET)
+                val count = index - start + 1
+                if (count > maxSlices || bytes + cost > MAX_BATCH_PACKET ||
+                    4L + count * MAX_RESULT_PER_SLICE > MAX_BATCH_PACKET) {
+                    require(index > start)
+                    chunks += inputs.subList(start, index)
+                    start = index
+                    bytes = overhead
+                }
+                bytes += cost
+            }
+            chunks += inputs.subList(start, inputs.size)
+            return chunks
+        }
+
         fun encodeBatch(sources: List<List<ByteArray>>, output: List<ByteArray>,
                         inputs: List<BatchInput>): ByteArray {
             require(sources.size in 1..8 && sources.all { it.size == 3 } && output.size == 3)

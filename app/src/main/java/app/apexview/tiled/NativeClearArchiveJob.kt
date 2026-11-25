@@ -14,7 +14,8 @@ internal object NativeClearArchiveJob {
     const val MAX_WINDOW = 4
 
     data class Geometry(val width: Int, val height: Int, val columns: List<Int>,
-                        val rows: List<Int>, val cells: List<HevcTizenGridComposer.CellSelection>)
+                        val rows: List<Int>, val cells: List<HevcTizenGridComposer.CellSelection>,
+                        val loopAcrossTiles: Boolean = false)
     data class Encoded(val bytes: ByteArray)
     data class Output(val initialization: ByteArray, val media: ByteArray) {
         fun wipe() { initialization.fill(0); media.fill(0) }
@@ -62,11 +63,12 @@ internal object NativeClearArchiveJob {
             require(cell.feedIndex in inits.indices && cell.sourceTileIndex in 0..65535)
         }
         val packet = ByteBuffer.allocate(length).order(ByteOrder.BIG_ENDIAN)
-        packet.put(byteArrayOf(0x47, 0x42, 0x43, (if (count == 1) 0x31 else 0x32).toByte()))
+        packet.put(byteArrayOf(0x47, 0x42, 0x43,
+            (if (geometry.loopAcrossTiles) 0x33 else if (count == 1) 0x31 else 0x32).toByte()))
         packet.putInt(track.toInt()).putInt(sequence.toInt()).putInt(geometry.width).putInt(geometry.height)
         packet.putInt(rateNumerator).putInt(rateDenominator)
         packet.putShort(inits.size.toShort()).putShort(geometry.columns.size.toShort())
-            .putShort(geometry.rows.size.toShort()).putShort((if (count == 1) 0 else count).toShort())
+            .putShort(geometry.rows.size.toShort()).putShort((if (count == 1 && !geometry.loopAcrossTiles) 0 else count).toShort())
         geometry.columns.forEach { packet.putInt(it) }
         geometry.rows.forEach { packet.putInt(it) }
         ordered.forEach { packet.putShort(it.feedIndex.toShort()).putShort(it.sourceTileIndex.toShort()) }

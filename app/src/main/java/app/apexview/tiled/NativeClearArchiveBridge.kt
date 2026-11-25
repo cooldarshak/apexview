@@ -181,7 +181,8 @@ internal class NativeClearArchiveBridge(
             val sps = cfg.sps.single()
             val pps = cfg.pps.single()
             val geometry = NativeClearArchiveJob.Geometry(sps.width, sps.height,
-                requireNotNull(pps.tileColumnWidthsInCtbs), requireNotNull(pps.tileRowHeightsInCtbs), request.cells)
+                requireNotNull(pps.tileColumnWidthsInCtbs), requireNotNull(pps.tileRowHeightsInCtbs), request.cells,
+                loopAcrossTiles = pps.loopFilterAcrossTiles == true)
             require(geometry.columns.size == request.outputGrid.columns && geometry.rows.size == request.outputGrid.rows)
             val inits = request.feeds.map { it.initializationSegment }
             val media = sources.map { it.first }

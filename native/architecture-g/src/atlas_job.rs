@@ -1,6 +1,8 @@
 //! Clear worker packet. All fields are big-endian and borrow bounded input.
 //! GBC1 output is [initialization size, media size, initialization, media].
 //! GBC2 retains the header, then length-prefixes each of 2..=4 media fragments.
+//! GBC3 uses the same single/window layouts with an explicit filter-enabled
+//! request; Rust verifies every output seam and every selected slice.
 //! Each source block carries a bounded window beginning at random access.
 use crate::bmff::{Error, Reader, MAX_BYTES};
 use crate::clear_atlas::{Atlas, Cell, Grid, MAX_FEEDS};
@@ -8,6 +10,7 @@ use crate::hevc_poc::Tracker;
 
 const MAGIC: &[u8; 4] = b"GBC1";
 const WINDOW_MAGIC: &[u8; 4] = b"GBC2";
+const FILTER_MAGIC: &[u8; 4] = b"GBC3";
 const MAX_WINDOW: usize = 4;
 const OUTPUT_HEADER: usize = 8;
 
@@ -28,6 +31,7 @@ pub(crate) struct Dispatcher {
 struct Cached {
     generation: i64,
     track: u32,
+    filter: bool,
     geometry: Vec<u8>,
     inits: Vec<Vec<u8>>,
     atlas: Atlas,
@@ -54,11 +58,11 @@ impl Dispatcher {
             return Err(Error::Limit);
         }
         let mut reader = Reader::new(input);
-        let window = match reader.take(4)? {
-            magic if magic == MAGIC => false,
-            magic if magic == WINDOW_MAGIC => true,
-            _ => return Err(Error::Unsupported),
-        };
+        let magic = reader.take(4)?;
+        let filter = magic == FILTER_MAGIC;
+        if magic != MAGIC && magic != WINDOW_MAGIC && !filter {
+            return Err(Error::Unsupported);
+        }
         let track = reader.u32()?;
         let sequence = reader.u32()?;
         if track == 0 || sequence == 0 {
@@ -71,12 +75,13 @@ impl Dispatcher {
         let column_count = usize::from(reader.u16()?);
         let row_count = usize::from(reader.u16()?);
         let field = usize::from(reader.u16()?);
+        let window = magic == WINDOW_MAGIC || filter && field > 1;
         let count = if window { field } else { 1 };
         if !(2..=MAX_FEEDS).contains(&feeds)
             || !(1..=20).contains(&column_count)
             || !(1..=22).contains(&row_count)
             || (window && !(2..=MAX_WINDOW).contains(&count))
-            || (!window && field != 0)
+            || (!window && field != if filter { 1 } else { 0 })
         {
             return Err(Error::Limit);
         }
@@ -118,7 +123,7 @@ impl Dispatcher {
         reader.finish()?;
         self.invalidate(generation);
         let reusable = self.cached.as_ref().is_some_and(|cache| {
-            cache.track == track
+            cache.track == track && cache.filter == filter
                 && cache.geometry == geometry
                 && cache
                     .inits
@@ -128,7 +133,7 @@ impl Dispatcher {
         });
         if !reusable {
             self.cached = None;
-            let atlas = Atlas::new(
+            let atlas = Atlas::new_with_filter(
                 &inits[..feeds],
                 Grid {
                     width,
@@ -139,6 +144,7 @@ impl Dispatcher {
                     frame_rate: rate,
                 },
                 track,
+                filter,
             )?;
             let mut copies = Vec::new();
             copies.try_reserve_exact(feeds).map_err(|_| Error::Limit)?;
@@ -148,6 +154,7 @@ impl Dispatcher {
             self.cached = Some(Cached {
                 generation,
                 track,
+                filter,
                 geometry: copy_bytes(geometry)?,
                 inits: copies,
                 atlas,
@@ -159,19 +166,22 @@ impl Dispatcher {
         let mut cursor = media_offset;
         let mut trackers = [Tracker::default(); MAX_FEEDS];
         let mut previous_end = None;
+        let mut can_gate_filter = true;
         for (index, row) in media[..count].iter().enumerate() {
             let number = sequence.checked_add(index as u32).ok_or(Error::Limit)?;
             let start = cursor.checked_add(if window { 4 } else { 0 }).ok_or(Error::Limit)?;
             let destination = output.get_mut(start..).ok_or(Error::Limit)?;
-            let (size, end) = atlas.write_window_fragment(
-                &row[..feeds], number, destination, &mut trackers, previous_end,
+            let (size, end, gate) = atlas.write_window_fragment(
+                &row[..feeds], number, destination, &mut trackers, previous_end, count == 1,
             )?;
+            can_gate_filter &= gate;
             if window {
                 output[cursor..start].copy_from_slice(&(size as u32).to_be_bytes());
             }
             cursor = start.checked_add(size).ok_or(Error::Limit)?;
             previous_end = Some(end);
         }
+        if filter != can_gate_filter { return Err(Error::Metadata); }
         let size = cursor - media_offset;
         output[..4].copy_from_slice(&(init.len() as u32).to_be_bytes());
         output[4..OUTPUT_HEADER].copy_from_slice(&(size as u32).to_be_bytes());

@@ -203,6 +203,29 @@ impl Request<'_> {
 }
 
 impl Output {
+    /// Compare the fully validated normalized bitstreams, ignoring only
+    /// presentation VUI and level fields which the reference permits to differ.
+    /// The actual emitted template is never modified by this comparison.
+    pub(crate) fn coding_key(&self) -> Result<[Vec<u8>; 3], Error> {
+        let [vps, sps, pps] = self.nals.each_ref().map(Vec::as_slice);
+        let vps_rbsp = Bits::read_rbsp(vps, 32)?;
+        let sps_rbsp = Bits::read_rbsp(sps, 33)?;
+        let vui = self.parameters.sps.vui_start..self.parameters.sps.vui_end;
+        let vps_levels = sublayer_level_ranges(vps, 32, 32, self.parameters.prefix.vps_sub_layers_minus_one)?;
+        let sps_levels = sublayer_level_ranges(sps, 33, 8, self.parameters.prefix.max_sub_layers - 1)?;
+        let vps_key = splice(vps, &vps_rbsp, |w| {
+            w.replace(VPS_LEVEL..VPS_LEVEL + 8, |out| out.bits(0, 8))?;
+            for range in vps_levels { w.replace(range, |out| out.bits(0, 8))?; }
+            Some(())
+        })?;
+        let sps_key = splice(sps, &sps_rbsp, |w| {
+            w.replace(SPS_LEVEL..SPS_LEVEL + 8, |out| out.bits(0, 8))?;
+            for range in sps_levels { w.replace(range, |out| out.bits(0, 8))?; }
+            w.replace(vui, |out| out.bit(0))
+        })?;
+        Ok([vps_key, sps_key, pps.to_vec()])
+    }
+
     pub fn hvcc(&self) -> Result<Vec<u8>, Error> {
         let sps = Bits::read_rbsp(&self.nals[1], 33)?;
         let vps = Bits::read_rbsp(&self.nals[0], 32)?;
@@ -240,6 +263,28 @@ impl Output {
         }
         Ok(record)
     }
+}
+
+fn sublayer_level_ranges(nal: &[u8], kind: u8, prefix: u32, layers: u32)
+    -> Result<Vec<Range<usize>>, Error>
+{
+    let mut bits = Bits::new(nal, kind)?;
+    bits.read(prefix)?;
+    for _ in 0..3 { bits.read(32)?; }
+    let flags = bits.read(2 * layers)?;
+    if layers != 0 { bits.read(2 * (8 - layers))?; }
+    let mut ranges = Vec::new();
+    for i in (0..layers).rev() {
+        if flags & (2 << (2 * i)) != 0 {
+            bits.read(32)?; bits.read(32)?; bits.read(24)?;
+        }
+        if flags & (1 << (2 * i)) != 0 {
+            let start = bits.consumed;
+            bits.read(8)?;
+            ranges.push(start..bits.consumed);
+        }
+    }
+    Ok(ranges)
 }
 
 fn valid_partition(values: &[u32], total: u32) -> bool {
@@ -320,4 +365,39 @@ fn splice(
         zeros = if byte == 0 { (zeros + 1).min(2) } else { 0 };
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(text: &str) -> Vec<u8> {
+        text.as_bytes().chunks_exact(2).map(|pair|
+            u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()
+        ).collect()
+    }
+
+    #[test]
+    fn presentation_vui_does_not_change_coding_key_but_coding_syntax_does() {
+        // Independently encoded 128x128 gray frames (libx265, no WPP/TMVP),
+        // differing only in colour primaries BT.709 vs BT.2020.
+        let vps = hex("40010c01ffff01600000030090000003000003001e959809");
+        let pps = hex("4401c172b42240");
+        let sps_a = hex("42010101600000030090000003000003001ea0102020596566924ca7016a02020208000003000800000300c840");
+        let sps_b = hex("42010101600000030090000003000003001ea0102020596566924ca7016a12020208000003000800000300c840");
+        let source = Parameters::parse([&vps, &sps_a, &pps]).unwrap();
+        let columns = [source.prefix.width_in_ctbs];
+        let rows = [source.prefix.height_in_ctbs];
+        let mut request = Request {
+            ids: [0;3], width: 128, height: 128, columns: &columns, rows: &rows,
+            frame_rate: (25,1), loop_across_tiles: false, uncropped: false,
+        };
+        let first = request.generate([&vps, &sps_a, &pps]).unwrap();
+        let second = request.generate([&vps, &sps_b, &pps]).unwrap();
+        assert_ne!(first.nals[1], second.nals[1]);
+        assert_eq!(first.coding_key().unwrap(), second.coding_key().unwrap());
+        request.loop_across_tiles = true;
+        let changed = request.generate([&vps, &sps_a, &pps]).unwrap();
+        assert_ne!(first.coding_key().unwrap(), changed.coding_key().unwrap());
+    }
 }

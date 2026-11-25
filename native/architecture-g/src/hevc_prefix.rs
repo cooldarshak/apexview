@@ -146,6 +146,7 @@ pub struct StreamPrefix {
     pub coded_height: u32,
     pub display_width: u32,
     pub display_height: u32,
+    pub(crate) crop: [u32; 4],
     pub width_in_ctbs: u32,
     pub height_in_ctbs: u32,
     pub max_sub_layers: u32,
@@ -198,9 +199,11 @@ impl StreamPrefix {
         let width = bits.ue(32768)?;
         let height = bits.ue(32768)?;
         let (mut display_width, mut display_height) = (width, height);
+        let mut crop = [0; 4];
         if bits.flag()? {
-            let crop_width = bits.ue(32768)? + bits.ue(32768)?;
-            let crop_height = bits.ue(32768)? + bits.ue(32768)?;
+            for value in &mut crop { *value = bits.ue(32768)?; }
+            let crop_width = crop[0] + crop[1];
+            let crop_height = crop[2] + crop[3];
             let x = if matches!(chroma, 1 | 2) { 2 } else { 1 };
             let y = if chroma == 1 { 2 } else { 1 };
             display_width = width.checked_sub(crop_width * x).ok_or(Error::Metadata)?;
@@ -235,6 +238,7 @@ impl StreamPrefix {
             coded_height: height,
             display_width,
             display_height,
+            crop,
             width_in_ctbs: width.div_ceil(ctb),
             height_in_ctbs: height.div_ceil(ctb),
             max_sub_layers: sub_layers + 1,

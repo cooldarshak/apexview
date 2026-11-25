@@ -33,6 +33,8 @@ pub(crate) struct Sps {
     pub temporal_mvp: bool,
     pub short: Vec<ShortTerm>,
     pub long: Option<Vec<LongTerm>>,
+    pub vui_start: usize,
+    pub vui_end: usize,
 }
 
 impl Sps {
@@ -68,9 +70,11 @@ impl Sps {
         };
         let temporal_mvp = bits.flag()?;
         bits.flag()?; // strong_intra_smoothing_enabled_flag
+        let vui_start = bits.consumed;
         if bits.flag()? {
             validate_vui(bits, prefix.max_sub_layers - 1)?;
         }
+        let vui_end = bits.consumed;
         if bits.flag()? {
             return Err(Error::Unsupported);
         }
@@ -79,6 +83,8 @@ impl Sps {
             temporal_mvp,
             short,
             long,
+            vui_start,
+            vui_end,
         })
     }
 }

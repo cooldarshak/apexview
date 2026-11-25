@@ -5,10 +5,22 @@ use crate::hevc_parameters::Parameters;
 use crate::hevc_prefix::{Bits, SlicePrefix};
 use crate::hevc_references::{address_bits, References};
 
+/// Prediction fields which must match across independent cells, even if
+/// the expanded RPS and container clocks happen to match.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PredictionIdentity {
+    l0: u32,
+    l1: u32,
+    mvd_l1_zero: Option<bool>,
+    cabac_init: Option<bool>,
+    merge_candidates_minus: u32,
+}
+
 pub struct Slice<'a> {
     nal: &'a [u8],
     pub prefix: SlicePrefix,
     pub references: References,
+    pub prediction: Option<PredictionIdentity>,
     pub loop_filter_bit: Option<usize>,
     pub loop_filter_across_slices: Option<bool>,
     pub entry_points: u32,
@@ -22,6 +34,7 @@ impl Parameters {
     pub fn read_slice<'a>(&self, nal: &'a [u8]) -> Result<Slice<'a>, Error> {
         let (prefix, mut bits) = self.prefix.slice_reader(nal)?;
         let mut references = References::default();
+        let mut prediction = None;
         let mut loop_filter_bit = None;
         let mut loop_filter_across_slices = None;
         let mut entry_points = 0;
@@ -42,12 +55,12 @@ impl Parameters {
             let chroma = self.prefix.chroma_array_type != 0;
             let sao_chroma = self.sps.sao && chroma && bits.flag()?;
             if picture.slice_type != 2 {
-                self.inter_prediction(
+                prediction = Some(self.inter_prediction(
                     &mut bits,
                     picture.slice_type == 0,
                     tmvp,
                     references.used_count(),
-                )?;
+                )?);
             }
             let initial_qp = self.pps.initial_qp;
             bits.se(
@@ -95,6 +108,7 @@ impl Parameters {
             nal,
             prefix,
             references,
+            prediction,
             loop_filter_bit,
             loop_filter_across_slices,
             entry_points,
@@ -111,7 +125,7 @@ impl Parameters {
         b_picture: bool,
         tmvp: bool,
         references: u32,
-    ) -> Result<(), Error> {
+    ) -> Result<PredictionIdentity, Error> {
         let override_active = bits.flag()?;
         let l0 = if override_active {
             1 + bits.ue(14)?
@@ -137,12 +151,8 @@ impl Parameters {
                 }
             }
         }
-        if b_picture {
-            bits.flag()?; // mvd_l1_zero_flag
-        }
-        if self.pps.cabac_init {
-            bits.flag()?;
-        }
+        let mvd_l1_zero = if b_picture { Some(bits.flag()?) } else { None };
+        let cabac_init = if self.pps.cabac_init { Some(bits.flag()?) } else { None };
         if tmvp {
             let from_l0 = !b_picture || bits.flag()?;
             let count = if from_l0 { l0 } else { l1 };
@@ -153,8 +163,8 @@ impl Parameters {
         if (b_picture && self.pps.weighted_b) || (!b_picture && self.pps.weighted_p) {
             prediction_weights(bits, l0, l1, self.prefix.chroma_array_type != 0)?;
         }
-        bits.ue(4)?; // five_minus_max_num_merge_cand
-        Ok(())
+        let merge_candidates_minus = bits.ue(4)?;
+        Ok(PredictionIdentity { l0, l1, mvd_l1_zero, cabac_init, merge_candidates_minus })
     }
 
     pub fn rewrite_tile<'a>(

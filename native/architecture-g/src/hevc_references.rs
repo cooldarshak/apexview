@@ -92,6 +92,8 @@ impl LongTerm {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct References {
     short: ShortTerm,
+    short_from_sps: Option<bool>,
+    short_sps_index: Option<u32>,
     long: Vec<(LongTerm, Option<u32>)>,
 }
 
@@ -102,19 +104,23 @@ impl References {
         long: Option<&[LongTerm]>,
         lsb_bits: u32,
     ) -> Result<Self, Error> {
-        let short = if bits.flag()? {
+        let from_sps = bits.flag()?;
+        let mut short_sps_index = None;
+        let short = if from_sps {
             let len = u32::try_from(short.len()).map_err(|_| Error::Limit)?;
             if len == 0 {
                 return Err(Error::Metadata);
             }
-            *short
-                .get(bits.read(address_bits(len))? as usize)
-                .ok_or(Error::Metadata)?
+            let index = bits.read(address_bits(len))?;
+            short_sps_index = Some(index);
+            *short.get(index as usize).ok_or(Error::Metadata)?
         } else {
             ShortTerm::read(bits, short, true)?
         };
         let mut output = Self {
             short,
+            short_from_sps: Some(from_sps),
+            short_sps_index,
             long: Vec::new(),
         };
         if let Some(long) = long {

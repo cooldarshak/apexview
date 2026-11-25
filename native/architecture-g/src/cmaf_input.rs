@@ -247,7 +247,7 @@ fn parse_tfhd(view: BoxView<'_>, init: TrackContext) -> Result<Defaults, Error> 
     const FLAGS: u32 = 0x020000 | 0x000002 | 0x000008 | 0x000010 | 0x000020;
     let mut reader = Reader::new(view.payload);
     let (version, flags) = reader.full()?;
-    if version != 0 || flags & !FLAGS != 0 || flags & 0x020000 == 0 {
+    if version != 0 || flags & !FLAGS != 0 {
         return Err(Error::Unsupported);
     }
     if reader.u32()? != init.track_id {
@@ -314,12 +314,10 @@ fn parse_trun<'a>(
     let start = offset
         .checked_sub(mdat.payload_offset)
         .ok_or(Error::Extent)?;
-    // The clear profile owns the entire payload. A gap before the first sample
-    // is just as ambiguous as leftover bytes after the final sample.
-    if start != 0 {
-        return Err(Error::Extent);
-    }
-    let mut payload = Reader::new(mdat.payload);
+    // One traf, one trun, no explicit base-data-offset: the source
+    // run resolves against its moof. A leading unreferenced mdat range is
+    // allowed by the reference; trailing bytes and out-of-range samples are not.
+    let mut payload = Reader::new(mdat.payload.get(start..).ok_or(Error::Extent)?);
     let first_flags = if flags & FIRST_FLAGS != 0 {
         Some(run.u32()?)
     } else {
@@ -490,6 +488,38 @@ mod tests {
             parsed.samples[0].bytes.as_ptr(),
             data[data.len() - 9..].as_ptr()
         );
+    }
+
+    #[test]
+    fn single_traf_implicit_base_and_leading_mdat_padding_are_borrowed_safely() {
+        let init_bytes = initialization();
+        let init = Initialization::parse(&init_bytes).unwrap();
+        let original = fragment(90_000);
+        let reference = Fragment::parse(&original, &init).unwrap();
+        let mut variant = original.clone();
+        let tfhd = variant.windows(4).position(|x| x == b"tfhd").unwrap() + 4;
+        let flags = u32::from_be_bytes(variant[tfhd..tfhd+4].try_into().unwrap()) & !0x020000;
+        variant[tfhd..tfhd+4].copy_from_slice(&flags.to_be_bytes());
+        let trun = variant.windows(4).position(|x| x == b"trun").unwrap() + 12;
+        let offset = i32::from_be_bytes(variant[trun..trun+4].try_into().unwrap());
+        variant[trun..trun+4].copy_from_slice(&(offset + 3).to_be_bytes());
+        let mdat = variant.windows(4).position(|x| x == b"mdat").unwrap();
+        let size = u32::from_be_bytes(variant[mdat-4..mdat].try_into().unwrap());
+        variant[mdat-4..mdat].copy_from_slice(&(size+3).to_be_bytes());
+        drop(variant.splice(mdat+4..mdat+4, [0xaa,0xbb,0xcc]));
+        assert_eq!(Fragment::parse(&variant, &init).unwrap().samples, reference.samples);
+        // A size-zero final mdat extends to the containing extent.
+        variant[mdat-4..mdat].copy_from_slice(&0u32.to_be_bytes());
+        assert_eq!(Fragment::parse(&variant, &init).unwrap().samples, reference.samples);
+        // Trailing unreferenced data, and offsets into the header or outside
+        // the enclosing extent, must still fail.
+        variant.push(0xaa);
+        assert!(Fragment::parse(&variant, &init).is_err());
+        variant.pop();
+        for bad in [offset - 1, i32::MAX, -1] {
+            variant[trun..trun+4].copy_from_slice(&bad.to_be_bytes());
+            assert!(Fragment::parse(&variant, &init).is_err());
+        }
     }
 
     #[test]

@@ -59,6 +59,7 @@ pub struct Atlas {
     output: Parameters,
     placements: Vec<Placement>,
     track: u32,
+    own_seams: bool,
     output_nal_prefix: usize,
     initialization: Vec<u8>,
 }
@@ -67,6 +68,11 @@ impl Atlas {
     /// Use conservative normalized parameter-set equality so different coding
     /// profiles never enter the compositor on the strength of geometry alone.
     pub fn new(inputs: &[&[u8]], grid: Grid<'_>, track: u32) -> Result<Self, Error> {
+        Self::new_with_filter(inputs, grid, track, false)
+    }
+
+    pub fn new_with_filter(inputs: &[&[u8]], grid: Grid<'_>, track: u32,
+                           loop_across_tiles: bool) -> Result<Self, Error> {
         if !(2..=MAX_FEEDS).contains(&inputs.len())
             || !(1..=MAX_COLUMNS).contains(&grid.columns.len())
             || !(1..=MAX_ROWS).contains(&grid.rows.len())
@@ -123,6 +129,7 @@ impl Atlas {
                 || candidate.coded_height != prefix.coded_height
                 || candidate.display_width != prefix.display_width
                 || candidate.display_height != prefix.display_height
+                || candidate.crop != prefix.crop
         });
         let request = hevc_output::Request {
             ids: [0; 3],
@@ -131,13 +138,19 @@ impl Atlas {
             columns: grid.columns,
             rows: grid.rows,
             frame_rate: grid.frame_rate,
-            loop_across_tiles: false,
+            loop_across_tiles,
             uncropped,
         };
         let generated = request.generate(template_init.configuration.parameter_sets())?;
-        for (index, (init, _)) in sources.iter().enumerate() {
+        let key = generated.coding_key()?;
+        for (index, (init, source)) in sources.iter().enumerate() {
+            if source.parameters.prefix.dependent_slices || source.parameters.pps.weighted_p
+                || source.parameters.pps.weighted_b || source.parameters.pps.lists_modification
+            {
+                return Err(Error::Unsupported);
+            }
             if index != template_index
-                && request.generate(init.configuration.parameter_sets())?.nals != generated.nals
+                && request.generate(init.configuration.parameter_sets())?.coding_key()? != key
             {
                 return Err(Error::Unsupported);
             }
@@ -147,8 +160,8 @@ impl Atlas {
         placements
             .try_reserve_exact(grid.cells.len())
             .map_err(|_| Error::Limit)?;
-        let mut represented = [false; MAX_FEEDS];
-        for (&cell, tile) in grid.cells.iter().zip(output_tiles) {
+        let mut own_seams = true;
+        for (index, (&cell, tile)) in grid.cells.iter().zip(output_tiles).enumerate() {
             let source_tile = sources
                 .get(cell.feed)
                 .and_then(|(_, source)| source.tiles.get(cell.tile))
@@ -156,13 +169,26 @@ impl Atlas {
             if source_tile.width != tile.width || source_tile.height != tile.height {
                 return Err(Error::Unsupported);
             }
-            represented[cell.feed] = true;
+            let source = &sources[cell.feed].1;
+            let source_columns = source.parameters.tile_columns.len();
+            let column = index % grid.columns.len();
+            let row = index / grid.columns.len();
+            if column != 0 {
+                let left = grid.cells[index - 1];
+                own_seams &= !cell.tile.is_multiple_of(source_columns) &&
+                    left.feed == cell.feed && left.tile.checked_add(1) == Some(cell.tile);
+            }
+            if row != 0 {
+                let top = grid.cells[index - grid.columns.len()];
+                own_seams &= cell.tile >= source_columns &&
+                    top.feed == cell.feed && top.tile.checked_add(source_columns) == Some(cell.tile);
+            }
             placements.push(Placement {
                 cell,
                 address: tile.address,
             });
         }
-        if represented[..sources.len()].contains(&false) {
+        if loop_across_tiles && !own_seams {
             return Err(Error::Metadata);
         }
         let mut hvcc = generated.hvcc()?;
@@ -189,6 +215,7 @@ impl Atlas {
             output: generated.parameters,
             placements,
             track,
+            own_seams,
             output_nal_prefix,
             initialization,
         })
@@ -205,8 +232,8 @@ impl Atlas {
         output: &mut [u8],
     ) -> Result<usize, Error> {
         let mut trackers = [Tracker::default(); MAX_FEEDS];
-        self.write_window_fragment(input, sequence, output, &mut trackers, None)
-            .map(|(size, _)| size)
+        self.write_window_fragment(input, sequence, output, &mut trackers, None, true)
+            .map(|(size, _, _)| size)
     }
 
     /// The caller owns a bounded window and fresh trackers; no reference state
@@ -218,7 +245,8 @@ impl Atlas {
         output: &mut [u8],
         trackers: &mut [Tracker; MAX_FEEDS],
         previous_end: Option<i64>,
-    ) -> Result<(usize, i64), Error> {
+        standalone: bool,
+    ) -> Result<(usize, i64, bool), Error> {
         if input.len() != self.sources.len() {
             return Err(Error::Metadata);
         }
@@ -254,6 +282,7 @@ impl Atlas {
             .try_reserve_exact(pictures)
             .map_err(|_| Error::Limit)?;
         let mut output_bytes = 0usize;
+        let mut can_gate_filter = self.own_seams;
         for (index, source_sample) in reference.samples.iter().enumerate() {
             let mut feed_slices = Vec::new();
             feed_slices
@@ -264,20 +293,23 @@ impl Atlas {
                 let incoming = &fragment.samples[index];
                 match_timing(source_sample, self.sources[0].timescale, incoming, source.timescale)?;
                 let slices = source.slices(incoming)?;
-                let picture = slices[0].prefix.picture.ok_or(Error::Metadata)?;
+                let first_slice = slices.first().ok_or(Error::Metadata)?;
+                let picture = first_slice.1.prefix.picture.ok_or(Error::Metadata)?;
                 if previous_end.is_none() && index == 0
                     && (!(16..=21).contains(&picture.nal_type) || incoming.flags & 0x1_0000 != 0)
                 {
                     return Err(Error::Unsupported);
                 }
-                if slices.iter().any(|slice| {
+                if slices.iter().any(|(_, slice)| {
                     slice.prefix.picture != Some(picture)
-                        || slice.references != slices[0].references
-                        || slice.prefix.no_output_of_prior != slices[0].prefix.no_output_of_prior
-                }) || feed_slices.first().is_some_and(|first: &Vec<Slice<'_>>| {
-                    first[0].prefix.picture != Some(picture)
-                        || first[0].references != slices[0].references
-                        || first[0].prefix.no_output_of_prior != slices[0].prefix.no_output_of_prior
+                        || slice.references != first_slice.1.references
+                        || slice.prediction != first_slice.1.prediction
+                        || slice.prefix.no_output_of_prior != first_slice.1.prefix.no_output_of_prior
+                }) || feed_slices.first().is_some_and(|first: &Vec<(usize, Slice<'_>)>| {
+                    first[0].1.prefix.picture != Some(picture)
+                        || first[0].1.references != first_slice.1.references
+                        || first[0].1.prediction != first_slice.1.prediction
+                        || first[0].1.prefix.no_output_of_prior != first_slice.1.prefix.no_output_of_prior
                 }) {
                     return Err(Error::Metadata);
                 }
@@ -297,9 +329,19 @@ impl Atlas {
                 .map_err(|_| Error::Limit)?;
             for placement in &self.placements {
                 let Cell { feed, tile } = placement.cell;
-                let nal =
-                    self.output
-                        .rewrite_tile(&feed_slices[feed][tile], placement.address, None)?;
+                let slices = &feed_slices[feed];
+                let index = slices.binary_search_by_key(&tile, |(index, _)| *index)
+                    .map_err(|_| Error::Metadata)?;
+                let slice = &slices[index].1;
+                let pps = &self.sources[feed].parameters.pps;
+                let gate = pps.tiles && pps.loop_across_tiles && pps.loop_across_slices &&
+                    slice.loop_filter_bit.is_some();
+                can_gate_filter &= gate;
+                let filter = if self.output.pps.loop_across_tiles {
+                    if !gate { return Err(Error::Metadata); }
+                    Some(slice.loop_filter_across_slices == Some(true))
+                } else { None };
+                let nal = self.output.rewrite_tile(slice, placement.address, filter)?;
                 output_bytes = output_bytes
                     .checked_add(nal.header.len() + nal.tail.len() + self.output_nal_prefix)
                     .ok_or(Error::Limit)?;
@@ -309,6 +351,10 @@ impl Atlas {
                 nals.push(nal);
             }
             picture_parts.push(nals);
+        }
+        if (standalone || self.output.pps.loop_across_tiles)
+            && self.output.pps.loop_across_tiles != can_gate_filter {
+            return Err(Error::Metadata);
         }
         let mut samples = Vec::new();
         samples
@@ -333,12 +379,12 @@ impl Atlas {
             output,
         )
         .ok_or(Error::Limit)?;
-        Ok((size, end))
+        Ok((size, end, can_gate_filter))
     }
 }
 
 impl Source {
-    fn slices<'b>(&self, sample: &Sample<'b>) -> Result<Vec<Slice<'b>>, Error> {
+    fn slices<'b>(&self, sample: &Sample<'b>) -> Result<Vec<(usize, Slice<'b>)>, Error> {
         let mut slices = Vec::new();
         slices
             .try_reserve_exact(self.tiles.len())
@@ -353,31 +399,33 @@ impl Source {
             let nal = trim_terminal_zeros(nal)?;
             match header.unit_type {
                 32..=34 => {
-                    // Require exact in-band parameter identity. Even a
-                    // semantically equivalent but differently encoded set
-                    // takes the existing conservative JVM fallback.
-                    if nal != self.parameter_sets[usize::from(header.unit_type - 32)].as_slice() {
+                    let expected = &self.parameter_sets[usize::from(header.unit_type - 32)];
+                    // Header and escaping may vary; require the complete
+                    // decoded syntax, including its trailing bits, to match.
+                    if nal != expected.as_slice() &&
+                        crate::hevc_prefix::Bits::read_rbsp(nal, header.unit_type)? !=
+                        crate::hevc_prefix::Bits::read_rbsp(expected, header.unit_type)?
+                    {
                         return Err(Error::Metadata);
                     }
                 }
                 35..=40 => {} // reference discards AUD/EOS/EOB/filler/SEI
                 0..=31 => {
-                    let index = slices.len();
-                    let tile = self.tiles.get(index).ok_or(Error::Metadata)?;
                     let slice = self.parameters.read_slice(nal)?;
-                    if slice.prefix.first != (index == 0)
-                        || slice.prefix.address != tile.address
-                        || slice.prefix.picture.is_none()
-                        || slice.entry_points != 0
+                    let index = self.tiles.binary_search_by_key(&slice.prefix.address, |tile| tile.address)
+                        .map_err(|_| Error::Metadata)?;
+                    if slice.prefix.first != slices.is_empty() || slice.prefix.first != (index == 0)
+                        || slices.last().is_some_and(|(previous, _)| *previous >= index)
+                        || slice.prefix.picture.is_none() || slice.entry_points != 0
                     {
                         return Err(Error::Unsupported);
                     }
-                    slices.push(slice);
+                    slices.push((index, slice));
                 }
                 _ => return Err(Error::Unsupported),
             }
         }
-        if slices.len() != self.tiles.len() {
+        if slices.is_empty() {
             return Err(Error::Metadata);
         }
         Ok(slices)
