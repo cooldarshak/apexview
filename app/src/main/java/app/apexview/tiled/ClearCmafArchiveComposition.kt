@@ -30,7 +30,10 @@ internal class ClearCmafArchiveComposition(
     var status: String = "WAITING_FOR_CLEAR_CMAF"
         private set
 
-    fun compose(feeds: List<HevcClearCmafGridComposer.Feed>) {
+    /** transferSource is only used by the HLS capture owner, which relinquishes
+     * each exact source array before its cancellation/finally cleanup. */
+    fun compose(feeds: List<HevcClearCmafGridComposer.Feed>, transferSource: ((Int) -> Unit)? = null) {
+        require(transferSource == null || feeds.all { it.mediaFragments.size == 1 })
         val source = CmafBoxInspector.inspect(feeds.first().initializationSegment)
         val track = source.tracks.single { it.handler == "vide" }
         require(!track.encrypted) { "Clear runtime rejects encrypted source tracks" }
@@ -109,6 +112,7 @@ internal class ClearCmafArchiveComposition(
         }
         val output = produced.output
         var published = false
+        val newOwned = mutableListOf<HeapFragmentLease>()
         try {
         val initReport = CmafBoxInspector.inspect(output.initializationSegment)
         require(initReport.errors.isEmpty())
@@ -118,9 +122,11 @@ internal class ClearCmafArchiveComposition(
             val inspected = CmafBoxInspector.inspect(bytes, initReport)
             require(inspected.errors.isEmpty())
             val metadata = inspected.fragments.single()
-            ProtectedHevcLiveComposition.OutputFragment(sequence + index, bytes, timescale,
+            val retained = HeapFragmentLease.take(bytes).also { newOwned += it }
+            ProtectedHevcLiveComposition.OutputFragment(sequence + index, ByteArray(0), timescale,
                 requireNotNull(metadata.baseDecodeTimeTicks), requireNotNull(metadata.totalDurationTicks), metadata.sampleCount,
-                requireNotNull(outputTrack.width), requireNotNull(outputTrack.height), feeds.associate { it.label to 0L })
+                requireNotNull(outputTrack.width), requireNotNull(outputTrack.height), feeds.associate { it.label to 0L },
+                sharedHeapMedia = retained)
         }
             history.lastOrNull()?.let { previous ->
                 require(previous.baseDecodeTimeTicks + previous.durationTicks == newFragments.first().baseDecodeTimeTicks) {
@@ -128,16 +134,24 @@ internal class ClearCmafArchiveComposition(
                 }
                 require(initialization!!.contentEquals(output.initializationSegment)) { "Clear archive initialization changed" }
             }
+            val evictions = ProtectedOutputHistoryPolicy.evictions(history.map { it.size } + newFragments.map { it.size })
             nativeClear.publish(produced.nativeEpoch) {
                 if (initialization == null) initialization = output.initializationSegment.copyOf()
                 history += newFragments
-                feeds.forEach { feed ->
+                feeds.forEachIndexed { index, feed ->
                     val stored = sourceHistory.getOrPut(feed.label) { mutableListOf() }
                     if (independentlyDecodable) { stored.forEach { it.fill(0) }; stored.clear() }
-                    stored += feed.mediaFragments.map { it.copyOf() }
+                    if (transferSource == null) stored += feed.mediaFragments.map { it.copyOf() }
+                    else {
+                        stored.add(feed.mediaFragments.single())
+                        transferSource(index)
+                    }
                 }
+                app.apexview.MediaMemoryAccounting.process.record(this,
+                    app.apexview.MediaMemoryAccounting.Kind.CLEAR_SOURCE,
+                    sourceHistory.values.sumOf { fragments -> fragments.sumOf { it.size.toLong() } })
                 sequence += newFragments.size
-                while (history.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) history.removeAt(0).zero()
+                repeat(evictions) { history.removeAt(0).zero() }
                 status = "CLEAR_HEVC_CMAF_COMPOSED_NOT_YET_PLAYED; layout=${columns}x${rows}"
             }
             published = true
@@ -146,7 +160,7 @@ internal class ClearCmafArchiveComposition(
                     if (produced.nativeEpoch != null) "VALIDATED_CLEAR_ROLLING" else nativeClear.decision.reason)
         } finally {
             output.initializationSegment.fill(0)
-            if (!published) output.mediaFragments.forEach { it.fill(0) }
+            if (!published) { newOwned.forEach { it.close() }; output.mediaFragments.forEach { it.fill(0) } }
         }
     }
 
@@ -154,14 +168,23 @@ internal class ClearCmafArchiveComposition(
 
     fun hasOutput(): Boolean = initialization != null && history.isNotEmpty()
 
-    fun outputWindow(): ProtectedHevcLiveComposition.OutputWindow? = initialization?.let {
-        ProtectedHevcLiveComposition.OutputWindow(it.copyOf(), history.map { fragment -> fragment.detached() }, geometry)
+    fun outputWindow(shareNative: Boolean = false): ProtectedHevcLiveComposition.OutputWindow? = initialization?.let {
+        val init = it.copyOf()
+        val retained = ArrayList<ProtectedHevcLiveComposition.OutputFragment>(history.size)
+        try {
+            history.forEach { fragment -> retained += if (shareNative) fragment.detached() else fragment.legacyDetached() }
+            ProtectedHevcLiveComposition.OutputWindow(init, retained, geometry)
+        } catch (failure: Throwable) {
+            init.fill(0); retained.forEach { fragment -> fragment.zero() }; throw failure
+        }
     }
 
     fun reset() {
         nativeClear.close()
         initialization?.fill(0); initialization = null; geometry = null
         history.forEach { it.zero() }; history.clear()
-        sourceHistory.values.flatten().forEach { it.fill(0) }; sourceHistory.clear(); sequence = 1L; status = "WAITING_FOR_CLEAR_CMAF"
+        sourceHistory.values.forEach { fragments -> fragments.forEach { it.fill(0) } }; sourceHistory.clear()
+        app.apexview.MediaMemoryAccounting.process.record(this, app.apexview.MediaMemoryAccounting.Kind.CLEAR_SOURCE, 0)
+        sequence = 1L; status = "WAITING_FOR_CLEAR_CMAF"
     }
 }

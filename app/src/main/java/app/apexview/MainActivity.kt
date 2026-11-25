@@ -1,5 +1,6 @@
 package app.apexview
 
+import app.apexview.tiled.NativeFragmentLease
 import app.apexview.cast.PitwallCastSheet
 import app.apexview.cast.PitwallPairingDialog
 import app.apexview.cast.local.ExternalDisplayController
@@ -166,6 +167,10 @@ class MainActivity : FragmentActivity() {
     override fun onStop() {
         super.onStop()
         app.pauseForBackground()
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            Media3MemoryOwners.trimUnused()
+            NativeFragmentLease.trim()
+        }
     }
 
     /** Back in front: anything that lay over the app (the vote sheet) has gone. */

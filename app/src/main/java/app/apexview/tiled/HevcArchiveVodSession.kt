@@ -87,7 +87,8 @@ internal class HevcArchiveVodSession(
 
     fun disableNativeClear(reason: String, requested: Boolean) {
         synchronized(cacheLock) { nativeClear.disable(reason, requested) }
-        if (!requested) nativeBudgetContext = null
+        // Memory pressure policy applies to Kotlin as well as Rust. Keep the
+        // application context until the archive owner retires.
     }
 
     private val cache = BoundedArchiveFragmentCache()
@@ -279,13 +280,14 @@ internal class HevcArchiveVodSession(
         val headroom = nativeBudgetContext?.let { context ->
             runCatching { NativeStitchingDeviceBudget.sample(context) }.getOrNull()
         }
+        val constrained = NativeStitchingDeviceBudget.observePressure(headroom)
         if (headroom?.lowMemory == true) {
             val freed = cache.trimBehind(number)
             if (freed > 0L) android.util.Log.i("ApexviewSingleDecoder",
                 "GC_ARCHIVE_PRESSURE_TRIM behindBytes=$freed foregroundUnchanged=true")
         }
         val observed = nativeBudgetObservation.sizes()
-        val memoryWarmLimit = ArchiveBufferPolicy.memoryWarmLimit(warmLimit, headroom, observed.input, observed.output)
+        val memoryWarmLimit = if (constrained) 0 else ArchiveBufferPolicy.memoryWarmLimit(warmLimit, headroom, observed.input, observed.output)
         synchronized(warmLock) {
             if (!closed && memoryWarmLimit > 0 && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
                 val next = ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, memoryWarmLimit)
@@ -296,6 +298,7 @@ internal class HevcArchiveVodSession(
                         val currentMemory = nativeBudgetContext?.let { context ->
                             runCatching { NativeStitchingDeviceBudget.sample(context) }.getOrNull()
                         }
+                        if (NativeStitchingDeviceBudget.observePressure(currentMemory)) break
                         val currentSizes = nativeBudgetObservation.sizes()
                         if (candidate - number > ArchiveBufferPolicy.memoryWarmLimit(warmLimit, currentMemory,
                             currentSizes.input, currentSizes.output)) break
@@ -382,7 +385,12 @@ internal class HevcArchiveVodSession(
                 android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_WORK_ADMISSION segment=$number " +
                     "worker=${if (warm) "PREFETCH" else "PLAYBACK"} " +
                     "waitMs=${(System.nanoTime() - requestedAt) / 1_000_000L} queuedGroups=${admission.queued()}")
-                composeAndPublishAdmitted(number, requestedAt)
+                val observed = nativeBudgetObservation.sizes()
+                val foreground = if (warm) null else SpeculativeMemoryAdmission.process.beginForeground(
+                    SpeculativeMemoryAdmission.charge(observed.input, observed.output)
+                        ?: SpeculativeMemoryAdmission.sourceForecast(inputs.size, 8 * 1024 * 1024))
+                try { composeAndPublishAdmitted(number, requestedAt) }
+                finally { foreground?.close() }
             }
         } catch (interrupted: InterruptedException) {
             Thread.currentThread().interrupt()
@@ -783,6 +791,7 @@ internal class HevcArchiveVodSession(
             inputs.forEach { it.initialization.fill(0) }
         }
         compatibleMaps.clear()
+        nativeBudgetContext = null
     }
 
     private fun checkOpen() { if (closed || Thread.currentThread().isInterrupted) throw IOException("Archive VOD session closed") }

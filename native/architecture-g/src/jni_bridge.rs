@@ -145,6 +145,9 @@ fn open_session(slots:jint,input:jint,output:jint,ceiling:jlong,compact:bool)->j
         if reserved.is_none(){return i64::from(INVALID);}
         let mut r=registry().lock().expect("engine registry");
         if r.active.is_some(){return BACKPRESSURE;}
+        // Do not retain idle fragment backing while admitting a new atlas.
+        // Live immutable leases remain untouched.
+        crate::fragment_storage::trim();
         let Some(id)=r.serial.checked_add(1) else {return i64::from(INVALID);};
         let (input,output)=if compact {(None,None)} else {
             let Some(input)=BridgeBuffer::new(input) else {return BACKPRESSURE;};
@@ -393,6 +396,20 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragm
     })
 }
 #[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragmentAllocateHeadroom(
+    _env: JNIEnv<'_>, _class: JClass<'_>, size:jint, incremental:jlong,
+)->jlong {
+    guarded(|| {
+        let (Ok(size),Ok(incremental))=(usize::try_from(size),usize::try_from(incremental)) else {return i64::from(INVALID);};
+        let r=registry().lock().expect("engine registry");
+        let committed=r.active.as_ref().map_or(0,|s| {
+            let bridge=s.input.as_ref().map_or(0,BridgeBuffer::capacity)+s.output.as_ref().map_or(0,BridgeBuffer::capacity);
+            s.engine.future_commitment(bridge)
+        });
+        crate::fragment_storage::allocate_headroom(size,incremental.saturating_sub(committed)).unwrap_or(BACKPRESSURE)
+    })
+}
+#[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragmentView(
     mut env: JNIEnv<'_>, _class: JClass<'_>, id: jlong,
 ) -> jobject {
@@ -418,10 +435,12 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeEngin
 ) -> jni::sys::jlongArray {
     catch_unwind(AssertUnwindSafe(|| {
         let r = registry().lock().expect("engine registry");
-        let values = r.active.as_ref().map_or([0; 4], |s| [s.id,
-            s.engine.reserved() as i64, s.engine.allocated_payload_bytes() as i64,
-            (s.input.as_ref().map_or(0, BridgeBuffer::capacity) +
-                s.output.as_ref().map_or(0, BridgeBuffer::capacity)) as i64]);
+        let values = r.active.as_ref().map_or([0; 9], |s| {
+            let bridge=s.input.as_ref().map_or(0,BridgeBuffer::capacity)+s.output.as_ref().map_or(0,BridgeBuffer::capacity);
+            let stats=s.engine.payload_stats().map(|v|i64::try_from(v).unwrap_or(i64::MAX));
+            [s.id,s.engine.reserved() as i64,s.engine.allocated_payload_bytes() as i64,bridge as i64,
+                stats[0],stats[1],stats[2],stats[3],s.engine.future_commitment(bridge) as i64]
+        });
         let Ok(array) = env.new_long_array(values.len() as jint) else { return std::ptr::null_mut(); };
         if env.set_long_array_region(&array, 0, &values).is_err() { return std::ptr::null_mut(); }
         array.into_raw()
@@ -444,6 +463,9 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragm
     _env: JNIEnv<'_>, _class: JClass<'_>,
 ) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
+        if let Ok(r) = registry().lock() {
+            if let Some(s) = r.active.as_ref() { s.engine.trim_idle_payload(); }
+        }
         crate::fragment_storage::trim();
         crate::protected_plan::clear_configuration_cache();
     }));

@@ -425,6 +425,8 @@ internal class F1DashFeedCapture(
         require(feeds.size == aligned.size)
         val owned = arrayOfNulls<ByteArray>(feeds.size)
         val started = android.os.SystemClock.elapsedRealtime()
+        val forecast = SpeculativeMemoryAdmission.process.beginForeground(
+            SpeculativeMemoryAdmission.sourceForecast(feeds.size, MAX_MEDIA_FRAGMENT_BYTES))
         try {
             // Network requests run concurrently without blocking the global
             // encrypted-composition critical section or video display thread.
@@ -472,6 +474,7 @@ internal class F1DashFeedCapture(
             return labels
         } finally {
             owned.forEach { it?.fill(0) }
+            forecast.close()
         }
     }
 

@@ -487,6 +487,7 @@ class FeedPlayer(
             .setTrackSelector(sourceTrackSelector)
             .setBandwidthMeter(androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(context))
             .build()
+        Media3MemoryOwners.register(playbackAllocator)
         val codecReleaseTiming = CodecReleaseTiming()
         var lastCodecReleaseLogNs = 0L
         player.setVideoFrameMetadataListener(object : VideoFrameMetadataListener {
@@ -1432,7 +1433,12 @@ class FeedPlayer(
         try {
             player.release()
         } finally {
-            try { archive?.close() } finally { protectedSource?.release() }
+            try {
+                Media3MemoryOwners.unregister(playbackAllocator)
+                playbackAllocator.trim()
+            } finally {
+                try { archive?.close() } finally { protectedSource?.release() }
+            }
         }
     }
 

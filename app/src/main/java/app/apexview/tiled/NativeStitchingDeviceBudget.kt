@@ -6,6 +6,8 @@ import android.util.Log
 
 /** Samples actual OS/JVM headroom at admission. No device-model exceptions. */
 internal object NativeStitchingDeviceBudget {
+    private val admissionLock = Any()
+    fun <T> admit(action: () -> T): T = synchronized(admissionLock) { action() }
     data class Headroom(val lowRam: Boolean, val lowMemory: Boolean, val available: Long,
                         val threshold: Long, val jvmHeadroom: Long)
     fun plan(headroom: Headroom, input: Long, output: Long): NativeStitchingEngine.Budget? {
@@ -23,12 +25,23 @@ internal object NativeStitchingDeviceBudget {
         return Headroom(manager.isLowRamDevice,info.lowMemory,info.availMem,info.threshold,
             (runtime.maxMemory()-used).coerceAtLeast(0))
     }
+    /** Only called from existing media workers or an explicitly dispatched
+     * lifecycle callback; never block the UI on allocator/native locks. */
+    fun observePressure(h: Headroom?): Boolean {
+        if (h == null) return false
+        val decision = MediaPressurePolicy.process.observe(h, android.os.SystemClock.elapsedRealtime())
+        if (decision.trimUnused) {
+            app.apexview.Media3MemoryOwners.trimUnused()
+            NativeFragmentLease.trim()
+        }
+        return decision.constrained
+    }
     /** G-B calls this on its owner worker before creating the native pipeline.
      * Re-sample at each new admission; never allocate a second session to grow. */
-    fun open(context: Context,input: Long,output: Long): NativeStitchingEngine {
+    fun open(context: Context,input: Long,output: Long): NativeStitchingEngine = admit {
         val headroom=sample(context) ?: throw IllegalStateException("Device memory unavailable")
         val budget=plan(headroom,input,output) ?: throw IllegalStateException("Native memory budget unavailable")
-        return NativeStitchingEngine.open(budget)
+        NativeStitchingEngine.open(budget)
     }
 }
 

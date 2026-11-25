@@ -27,8 +27,12 @@ class BakedCastSegmentQueueTest {
         assertEquals(1, queue.audioCount)
         assertEquals(5L, queue.pendingBytes)
         assertNull(queue.takeReady())
+        assertEquals(first.bytes + second.bytes,queue.publishingBytes)
         queue.clear()
         assertEquals(0L, queue.pendingBytes)
+        assertEquals(first.bytes + second.bytes,queue.bytesInFlight)
+        queue.finish(first); queue.finish(second); queue.finish(first)
+        assertEquals(0L,queue.bytesInFlight)
     }
 
     @Test fun stalledPublisherCannotAccumulateUnboundedEncodedMedia() {
@@ -40,4 +44,19 @@ class BakedCastSegmentQueueTest {
         assertTrue(runCatching { queue.offerAudio(listOf(sound(100_000))) }.isFailure)
         assertEquals(8L, queue.pendingBytes)
     }
+
+    @Test fun dequeuedPublisherStillCountsAgainstByteLimit() {
+        val queue = BakedCastSegmentQueue(maxBytes = 10)
+        queue.offerVideo(picture(0,true))
+        queue.offerVideo(picture(1_000_000,true))
+        queue.offerAudio(listOf(sound(0),sound(1_000_000)))
+        val ready = requireNotNull(queue.takeReady())
+        assertEquals(10L,queue.bytesInFlight)
+        assertTrue(runCatching { queue.offerAudio(listOf(sound(1_100_000))) }.isFailure)
+        queue.finish(ready)
+        queue.offerAudio(listOf(sound(1_100_000)))
+        assertEquals(7L,queue.bytesInFlight)
+        queue.clear()
+    }
+
 }

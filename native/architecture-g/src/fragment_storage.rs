@@ -58,6 +58,12 @@ impl Arena {
         self.live.insert(serial, bytes);
         Some(serial)
     }
+    fn allocate_headroom(&mut self, size:usize, incremental:usize)->Option<i64> {
+        // Resident backing is already reflected in the OS headroom sample.
+        // Charge new capacity, while retaining the original hard arena cap.
+        let ceiling=self.charged.saturating_add(incremental).min(MAX_BYTES);
+        self.allocate_bounded(size,ceiling)
+    }
     fn release(&mut self, id: i64) -> bool {
         let Some(mut bytes) = self.live.remove(&id) else { return false; };
         // Final Java owner has retired every view before calling release.
@@ -97,6 +103,10 @@ pub fn allocate(size: usize) -> Option<i64> { arena().lock().ok()?.allocate(size
 #[cfg(target_os = "android")]
 pub fn allocate_bounded(size: usize, limit: usize) -> Option<i64> { arena().lock().ok()?.allocate_bounded(size,limit) }
 #[cfg(target_os = "android")]
+pub fn allocate_headroom(size:usize, incremental:usize)->Option<i64> {
+    arena().lock().ok()?.allocate_headroom(size,incremental)
+}
+#[cfg(target_os = "android")]
 pub fn release(id: i64) -> bool { arena().lock().is_ok_and(|mut a| a.release(id)) }
 #[cfg(target_os = "android")]
 pub fn trim() { if let Ok(mut a) = arena().lock() { a.trim(); } }
@@ -116,6 +126,20 @@ pub fn view(id: i64) -> Option<(*mut u8, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incremental_headroom_charges_existing_backing_once() {
+        let mut a=Arena::default();
+        let keep=a.allocate_headroom(16,16).unwrap();
+        let free=a.allocate_headroom(32,32).unwrap();
+        assert!(a.allocate_headroom(1,0).is_none());
+        assert!(a.release(free));
+        let reused=a.allocate_headroom(32,0).unwrap();
+        assert_eq!(a.snapshot()[0],48);
+        assert_eq!(a.snapshot()[4],2);
+        assert!(a.release(reused));
+        assert!(a.release(keep));
+        assert_eq!(a.snapshot()[0],0);
+    }
     #[test]
     fn shrinking_headroom_never_evicts_live_readers() {
         let mut a=Arena::default();

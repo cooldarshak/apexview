@@ -29,9 +29,10 @@ internal class ComposedCmafRelay(address: String, private val peer: InetAddress?
         next: Map<String, ByteArray>,
         shared: Map<String, SharedRelayResource> = emptyMap(),
         native: Map<String, app.apexview.tiled.NativeFragmentLease> = emptyMap(),
+        sharedHeap: Map<String, app.apexview.tiled.HeapFragmentLease> = emptyMap(),
     ) {
         check(!closed.get())
-        resources.publish(next, shared, native)
+        resources.publish(next, shared, native, sharedHeap)
         val s = resources.snapshot()
         android.util.Log.i("PitwallCast", "GC_RELAY_MEMORY currentBytes=${s.currentBytes} " +
             "pinnedBytes=${s.pinnedBytes} retiredPinnedBytes=${s.retiredPinnedBytes} uniqueLogicalBytes=${s.uniqueBytes} " +

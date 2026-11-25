@@ -99,6 +99,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
     private static native int nativeAbi();
     private static native long nativeFragmentAllocate(int size);
     private static native long nativeFragmentAllocateBounded(int size,long limit);
+    private static native long nativeFragmentAllocateHeadroom(int size,long incremental);
     private static native ByteBuffer nativeFragmentView(long id);
     private static native long nativeFragmentRelease(long id);
     private static native void nativeFragmentTrim();
@@ -120,6 +121,10 @@ public final class NativeStitchingEngine implements AutoCloseable {
     static long allocateFragmentBounded(int size,long limit) {
         System.loadLibrary("pitwall_g0");
         return nativeAbi() == 2 ? nativeFragmentAllocateBounded(size,limit) : INVALID;
+    }
+    static long allocateFragmentHeadroom(int size,long incremental) {
+        System.loadLibrary("pitwall_g0");
+        return nativeAbi() == 2 ? nativeFragmentAllocateHeadroom(size,incremental) : INVALID;
     }
     static ByteBuffer fragmentView(long id) { return nativeFragmentView(id); }
     static long releaseFragment(long id) { return nativeFragmentRelease(id); }

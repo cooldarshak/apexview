@@ -27,6 +27,7 @@ pub(crate) fn workspace_reserve(input_capacity: usize, output_capacity: usize) -
 pub(crate) struct Dispatcher {
     cached: Option<Cached>,
     header_slab: Vec<u8>,
+    small_header_jobs: u8,
 }
 
 struct Cached {
@@ -47,6 +48,7 @@ impl Dispatcher {
         {
             self.cached = None;
             self.header_slab = Vec::new();
+            self.small_header_jobs = 0;
         }
     }
 
@@ -168,6 +170,7 @@ impl Dispatcher {
         let media_offset = OUTPUT_HEADER + init.len();
         if media_offset > output.len() { return Err(Error::Capacity); }
         let mut cursor = media_offset;
+        let mut max_headers = 0;
         let mut trackers = [Tracker::default(); MAX_FEEDS];
         let mut previous_end = None;
         let mut can_gate_filter = true;
@@ -179,6 +182,7 @@ impl Dispatcher {
                 &row[..feeds], number, destination, &mut trackers,
                 FragmentBoundary { previous_end, standalone: count == 1 }, &mut self.header_slab,
             )?;
+            max_headers = max_headers.max(self.header_slab.len());
             can_gate_filter &= gate;
             if window {
                 output[cursor..start].copy_from_slice(&(size as u32).to_be_bytes());
@@ -191,6 +195,15 @@ impl Dispatcher {
         output[..4].copy_from_slice(&(init.len() as u32).to_be_bytes());
         output[4..OUTPUT_HEADER].copy_from_slice(&(size as u32).to_be_bytes());
         output[OUTPUT_HEADER..media_offset].copy_from_slice(init);
+        // No header descriptor survives the validated job boundary.
+        self.header_slab.clear();
+        if self.header_slab.capacity() > 64 * 1024 && max_headers <= self.header_slab.capacity() / 4 {
+            self.small_header_jobs = self.small_header_jobs.saturating_add(1);
+            if self.small_header_jobs >= 8 {
+                self.header_slab.shrink_to(max_headers.saturating_mul(2));
+                self.small_header_jobs = 0;
+            }
+        } else { self.small_header_jobs = 0; }
         Ok(cursor)
     }
 }

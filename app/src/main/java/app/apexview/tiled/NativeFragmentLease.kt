@@ -10,13 +10,14 @@ import java.nio.ByteOrder
  * lease. The final release drops the private view before returning memory to
  * Rust; neither callers nor Media3 receive a raw native pointer or view.
  */
-internal class NativeFragmentLease private constructor(private val shared: Shared) : AutoCloseable {
+internal class NativeFragmentLease private constructor(private val shared: Shared) : FragmentReadLease {
     private class Shared(val id: Long, var buffer: ByteBuffer?, val size: Int) {
         var owners = 1
     }
     private var closed = false
-    val size: Int get() = shared.size
-    internal val storageIdentity: Any get() = shared
+    override val size: Int get() = shared.size
+    override val storageIdentity: Any get() = shared
+    override val nativeBacked get() = true
 
     @Synchronized fun retain(): NativeFragmentLease {
         check(!closed)
@@ -27,7 +28,7 @@ internal class NativeFragmentLease private constructor(private val shared: Share
         return NativeFragmentLease(shared)
     }
 
-    @Synchronized fun readTo(target: ByteArray, offset: Int, start: Int, count: Int) {
+    @Synchronized override fun readTo(target: ByteArray, offset: Int, start: Int, count: Int) {
         check(!closed)
         require(start >= 0 && count >= 0 && start <= size-count &&
             offset >= 0 && offset <= target.size-count)
@@ -48,7 +49,7 @@ internal class NativeFragmentLease private constructor(private val shared: Share
 
     /** Only a bounded transfer scratch buffer is needed for HTTP/TLS.
      * Each socket reader holds its independent lease until the write ends. */
-    @Synchronized fun writeTo(output: java.io.OutputStream, start: Int, count: Int) {
+    @Synchronized override fun writeTo(output: java.io.OutputStream, start: Int, count: Int) {
         check(!closed)
         require(start >= 0 && count >= 0 && start <= size - count)
         if (count == 0) return
@@ -86,15 +87,17 @@ internal class NativeFragmentLease private constructor(private val shared: Share
 
         fun build(size: Int, context: android.content.Context?, writer: (ByteBuffer) -> Unit): NativeFragmentLease? {
             if (size <= 0) return null
-            val limit = if (context == null) 64L * 1024 * 1024 else {
-                val h = NativeStitchingDeviceBudget.sample(context) ?: return null
-                if (h.lowMemory || h.available <= h.threshold) { trim(); return null }
-                minOf(64L * 1024 * 1024, (h.available - h.threshold) / 8)
-            }
-            if (size.toLong() > limit) { trim(); return null }
+            if (size > 64 * 1024 * 1024) return null
             val id = try {
-                if (context == null) NativeStitchingEngine.allocateFragment(size)
-                else NativeStitchingEngine.allocateFragmentBounded(size, limit)
+                NativeStitchingDeviceBudget.admit {
+                    if (context == null) NativeStitchingEngine.allocateFragment(size)
+                    else {
+                        val h = NativeStitchingDeviceBudget.sample(context)
+                        if (h == null || h.lowMemory || h.available <= h.threshold) NativeStitchingEngine.BACKPRESSURE
+                        else NativeStitchingEngine.allocateFragmentHeadroom(size,
+                            minOf(64L * 1024 * 1024, (h.available - h.threshold) / 8))
+                    }
+                }
             }
                 catch (_: RuntimeException) { return null }
                 catch (_: LinkageError) { return null }
@@ -117,7 +120,14 @@ internal class NativeFragmentLease private constructor(private val shared: Share
         }
 
         fun trim() {
-            try { NativeStitchingEngine.trimFragments() } catch (_: LinkageError) { }
+            try {
+                val before = NativeStitchingEngine.engineMemorySnapshot()?.getOrNull(2) ?: -1L
+                val fragments = NativeStitchingEngine.fragmentMemorySnapshot()?.getOrNull(0) ?: -1L
+                NativeStitchingEngine.trimFragments()
+                val after = NativeStitchingEngine.engineMemorySnapshot()?.getOrNull(2) ?: -1L
+                val retained = NativeStitchingEngine.fragmentMemorySnapshot()?.getOrNull(0) ?: -1L
+                android.util.Log.d("ApexviewSingleDecoder", "GC_NATIVE_TRIM payloadBefore=$before payloadAfter=$after fragmentCapacityBefore=$fragments fragmentCapacityAfter=$retained")
+            } catch (_: LinkageError) { }
         }
     }
 }

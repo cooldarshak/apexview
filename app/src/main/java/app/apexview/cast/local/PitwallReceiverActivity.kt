@@ -167,6 +167,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         }
     }
     private var widevine: ReceiverWidevine? = null
+    private var activeReceiverAllocator: DefaultAllocator? = null
     private var secureOutput by mutableStateOf(false)
     private var loadingJob: kotlinx.coroutines.Job? = null
     private var loadEpoch = 0L
@@ -563,6 +564,8 @@ class PitwallReceiverActivity : ComponentActivity() {
             .setMediaSourceFactory(DefaultMediaSourceFactory(data).apply { widevine?.sessions?.let { key -> setDrmSessionManagerProvider { key } } })
             .setLoadControl(DefaultLoadControl.Builder().setAllocator(receiverAllocator).setBufferDurationsMs(5_000, 15_000, 1_000, 2_000).build())
             .build()
+        activeReceiverAllocator = receiverAllocator
+        app.apexview.Media3MemoryOwners.register(receiverAllocator)
         receiverCadence = cadence
         receiverDisplayOwner = null
         sceneCodecCorrelation = correlation
@@ -752,11 +755,13 @@ class PitwallReceiverActivity : ComponentActivity() {
         standardView?.player = null; standardView = null
         val previous = player; player = null
         val previousAuthorization = widevine; widevine = null
+        val previousAllocator = activeReceiverAllocator; activeReceiverAllocator = null
         try {
             previous?.release()
         } catch (error: Exception) {
             Log.e("PitwallReceiver", "PLAYER_RELEASE_FAILED type=${error.javaClass.simpleName}")
         } finally {
+            previousAllocator?.let { app.apexview.Media3MemoryOwners.unregister(it); it.trim() }
             try { previousAuthorization?.close() }
             catch (error: Exception) {
                 Log.e("PitwallReceiver", "DRM_RELEASE_FAILED type=${error.javaClass.simpleName}")

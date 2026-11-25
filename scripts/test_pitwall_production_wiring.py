@@ -336,7 +336,9 @@ class ProductionWiringTests(unittest.TestCase):
         # and before each speculative fetch.
         self.assertIn("warmLimit = next", session)
         self.assertIn("ArchiveBufferPolicy.speculativeWarmLimit(status)", session)
-        self.assertIn("val memoryWarmLimit = ArchiveBufferPolicy.memoryWarmLimit(warmLimit, headroom, observed.input, observed.output)", session)
+        self.assertIn("val memoryWarmLimit = if (constrained) 0 else ArchiveBufferPolicy.memoryWarmLimit(warmLimit, headroom, observed.input, observed.output)", session)
+        self.assertIn("NativeStitchingDeviceBudget.observePressure(headroom)", session)
+        self.assertIn("if (NativeStitchingDeviceBudget.observePressure(currentMemory)) break", session)
         self.assertIn("!closed && memoryWarmLimit > 0", session)
         self.assertIn("ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, memoryWarmLimit)", session)
         self.assertIn("candidate - number > warmLimit", session)
@@ -970,6 +972,20 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("overlay.submit(targetSurface, width, height)", gpu)
         self.assertNotIn("BakedCastGpuCapture", contents(base + "scene/ProtectedDecoderSceneView.kt"))
         self.assertIn("BakedCastCaptureAndroidTest", contents("scripts/run_rendernode_instrumentation.sh"))
+
+    def test_consolidated_memory_ownership_and_regression_paths(self):
+        base = "app/src/main/java/app/apexview/"
+        self.assertIn("MediaMemoryAccounting", contents(base + "ProcessMemoryDiagnostic.kt"))
+        self.assertIn("Media3MemoryOwners", contents(base + "ProcessMemoryDiagnostic.kt"))
+        self.assertIn("Media3MemoryOwners.register", contents(base + "FeedPlayer.kt"))
+        self.assertIn("HeapFragmentLease", contents(base + "tiled/ProtectedHevcLiveComposition.kt"))
+        self.assertIn("shareNative = true", contents(base + "cast/NativeComposedCastSession.kt"))
+        self.assertIn("beginForeground", contents(base + "tiled/F1HlsFeedCapture.kt"))
+        self.assertIn("beginForeground", contents(base + "tiled/F1DashFeedCapture.kt"))
+        self.assertIn("trim_idle_payload", contents("native/architecture-g/src/engine.rs"))
+        self.assertIn("allocate_headroom", contents("native/architecture-g/src/fragment_storage.rs"))
+        self.assertIn("GC_HOST_ALLOCATOR", contents("native/architecture-g/src/bin/gb_clear_grid.rs"))
+        self.assertIn("gc-memory-host.txt", contents(".github/workflows/android-debug-apk.yml"))
 
 if __name__ == "__main__":
     unittest.main()

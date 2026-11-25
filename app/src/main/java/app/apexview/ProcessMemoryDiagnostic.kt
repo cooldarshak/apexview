@@ -23,24 +23,33 @@ internal object ProcessMemoryDiagnostic {
             }
         }.getOrNull()
         val thermal = context.getSystemService(PowerManager::class.java)?.currentThermalStatus
+        val refresh = runCatching { context.getSystemService(android.hardware.display.DisplayManager::class.java)?.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.refreshRate }.getOrNull()
         return "GC_PROCESS_MEMORY uptimeMs=${SystemClock.elapsedRealtime()} pid=${android.os.Process.myPid()} " +
             "pssKiB=${memory.totalPss} rssKiB=${rss ?: -1} " +
             "jvmUsedBytes=${runtime.totalMemory() - runtime.freeMemory()} jvmCommittedBytes=${runtime.totalMemory()} " +
             "nativeHeapAllocatedBytes=${Debug.getNativeHeapAllocatedSize()} nativeHeapSizeBytes=${Debug.getNativeHeapSize()} " +
-            "platformGraphicsKiB=${memory.getMemoryStat("summary.graphics") ?: "unavailable"} externalCodecGpu=NOT_MEASURED " +
+            "platformGraphicsKiB=${memory.getMemoryStat("summary.graphics") ?: "unavailable"} externalCodecGpu=NOT_MEASURED defaultDisplayHz=${refresh ?: -1f} " +
             "osAvailableBytes=${headroom?.available ?: -1} osThresholdBytes=${headroom?.threshold ?: -1} " +
             "lowRam=${headroom?.lowRam} lowMemory=${headroom?.lowMemory} thermal=${thermal ?: -1} " +
             fragmentFields(fragments) + " " + engineFields(NativeStitchingEngine.engineMemorySnapshot()) +
             SpeculativeMemoryAdmission.process.snapshot().let { (reserved, peak) ->
                 " speculativeForecastBytes=$reserved speculativePeakForecastBytes=$peak"
+            } + SpeculativeMemoryAdmission.process.foregroundSnapshot().let { (current, peak) ->
+                " foregroundForecastBytes=$current foregroundPeakForecastBytes=$peak"
+            } + Media3MemoryOwners.snapshot().let { (owners, bytes) ->
+                " media3AllocatorOwners=$owners media3InUseBytes=$bytes"
+            } + MediaMemoryAccounting.process.snapshot().entries.joinToString("") { (kind, usage) ->
+                " ${kind.name}OwnedBytes=${usage.owned} ${kind.name}PinnedBytes=${usage.pinned}"
             }
     }
 
     fun engineFields(values: LongArray?): String {
-        if (values == null || values.size != 4 || values.any { it < 0L } ||
-            values[2] > values[1] || values[3] > values[1] - values[2]) return "nativeEngineArena=UNAVAILABLE"
+        if (values == null || values.size != 9 || values.any { it < 0L } ||
+            values[2] > values[1] || values[3] > values[1] - values[2] || values[5] < values[2] || values[5] > values[1]) return "nativeEngineArena=UNAVAILABLE"
         return "nativeEngineId=${values[0]} nativeEngineReservedBytes=${values[1]} " +
-            "nativeEnginePayloadBytes=${values[2]} nativeEngineBridgeBytes=${values[3]}"
+            "nativeEnginePayloadBytes=${values[2]} nativeEngineBridgeBytes=${values[3]} " +
+            "nativeEnginePayloadAllocations=${values[4]} nativeEnginePeakPayloadBytes=${values[5]} " +
+            "nativeEngineInputCopyBytes=${values[6]} nativeEngineOutputCopyBytes=${values[7]} nativeEngineFutureCommitmentBytes=${values[8]}"
     }
 
     // A null snapshot means the library was not loaded or the query failed;

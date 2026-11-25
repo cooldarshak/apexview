@@ -36,7 +36,7 @@ internal class BakedCastLiveSession(
     private var lastPublicationNs = 0L
     @Volatile var receiverRendering = false
     @Volatile var previewSuppressionRequested = false
-    @Synchronized fun health(): String = "segments=$published mediaUs=$publishedDurationUs windowUs=${hls.advertisedDurationUs} videoUs=${pending.latestVideoUs} audioUs=${pending.latestAudioUs} queuedVideo=${pending.videoCount} queuedAudio=${pending.audioCount} queuedBytes=${pending.pendingBytes}"
+    @Synchronized fun health(): String = "segments=$published mediaUs=$publishedDurationUs windowUs=${hls.advertisedDurationUs} videoUs=${pending.latestVideoUs} audioUs=${pending.latestAudioUs} queuedVideo=${pending.videoCount} queuedAudio=${pending.audioCount} queuedBytes=${pending.pendingBytes} publishingBytes=${pending.publishingBytes} bytesInFlight=${pending.bytesInFlight}"
     var width = 0
         private set
     var height = 0
@@ -55,7 +55,12 @@ internal class BakedCastLiveSession(
                     val started = System.nanoTime()
                     // Single owner of mux continuity counters and segment ordering.
                     // Never hold the session lock across packing or relay publication.
-                    hls.append(ready.video + ready.audio, ready.durationUs)
+                    val forecast = app.apexview.tiled.SpeculativeMemoryAdmission.process.beginForeground(ready.bytes)
+                    try { hls.append(ready.video + ready.audio, ready.durationUs) }
+                    finally {
+                        forecast.close()
+                        synchronized(this@BakedCastLiveSession) { pending.finish(ready) }
+                    }
                     val muxMs = (System.nanoTime() - started) / 1_000_000L
                     synchronized(this@BakedCastLiveSession) {
                         if (stopped) return@launch

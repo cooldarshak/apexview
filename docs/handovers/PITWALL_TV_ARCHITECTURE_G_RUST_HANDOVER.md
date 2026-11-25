@@ -1,5 +1,63 @@
 # PITWALL TV / APEXVIEW: ARCHITECTURE G — CONSOLIDATED RUST ENGINEERING PLAN
 
+## Mandatory user-directed scope completion gate (25 November 2026)
+
+When the user instructs completion of an agreed scope (including M1–M13), implement every unconditional coding requirement in that scope before creating a functional commit or triggering CI. Do not subdivide the agreed scope without explicit user authorization. Work in a staged checkout and perform available static checks, source review and local tests before one consolidated commit. No interim commits, builds, documentation-only progress commits, or diagnostic-only substitutions for implementation. A build failure may require a corrective commit; this does not authorize unrelated incomplete scope. Separate coding completion, exact-source CI verification, and physical acceptance. Conditional work (M12 allocator and M13 evidence-dependent ownership changes) must be reported as conditional, never falsely marked implemented; if evidence is essential for a coding decision, explicitly identify the evidence blocker rather than silently changing scope or triggering an intermediate build. Preserve video quality, functionality, Widevine, phone/TV, single/multiple decoder and all Cast paths. Apply this gate across future Pitwall TV work. User instructions take precedence over discretionary batching. Do not claim 100% unless the entire agreed unconditional coding checklist has been audited against actual source and tests.
+
+
+
+### Build 883 green baseline / M1–M13 consolidated completion
+
+Baseline: c06a6cc17eee4dccc857fff5553aa148e5390ad8, [run 45662092202](https://github.com/cooldarshak/apexview/actions/runs/45662092202), five successful jobs. This consolidated change supersedes the earlier partial memory-workstream ledger below. Implementation and pre-commit verification are separate from exact-source CI and measured device acceptance.
+
+| Item | Completed coding scope |
+|---|---|
+| M1 | Process memory and unique-owner accounting, current/peak foreground and speculation forecasts, native engine reservation/materialized slots/copy/allocation counters, native fragment charged/live capacity, Media3 actual allocation, graphics attribution and explicit unknown external codec/GPU memory. |
+| M2 | Shared foreground/speculative group admission, checked byte forecasts, serialized native headroom admission, incremental fragment charging including outstanding native commitments, existing per-owner hard limits retained. Mandatory foreground work never rejected by the optional-work forecast. |
+| M3 | Transfer clear HLS source ownership at successful publication, retain immutable heap/native rolling output into local DASH and Cast, reuse backing identities across windows, release on final owner; legacy copy API stays compatible. |
+| M4 | Lazy compact native slot allocation and retirement, exact allocation counters, free-only trim with on-demand rematerialization and read-lease regression coverage. |
+| M5 | Shared pressure hysteresis, trim only idle/free or unpinned behind-playhead entries, pause/background hooks, eight-job slab/right-size hysteresis and existing generation-safe engine replacement. |
+| M6 | Compact, bounded immutable backing reuse and checked ranges, no duplicate full-fragment rolling copies, final-owner zeroing, unique-byte accounting. |
+| M7 | Warm native atlas workspace/header slab reuse, generation-fenced validated init cache, fixed protected descriptor array, bounded slab shrink and warm parity/allocation checks. |
+| M8 | Forecast reservation across overlapping capture/composition work and publishing; baked Cast pending plus publishing bytes share the queue cap; finally release charges, preserve frame order and existing hard bounds. |
+| M9 | Weak Media3 allocator registry for feed, radio and receiver, actual in-use byte totals and excess-free-block trimming with existing LoadControl duration/byte targets preserved. |
+| M10 | Cache pressure trims, shared backing retirement, active reader protection, generation/close cleanup, tests for final release and slow consumers. |
+| M11 | Host allocator wrapper limited to the regression fixture (System allocator unchanged), live/peak/churn/copy measurements, repeated clear/protected parity checks, CI artifact with exact SHA/host architecture, Kotlin/Rust tests and production wiring. |
+| M12 | Conditional: no allocator substitution without matched physical evidence of allocator fragmentation/retention; production System allocator remains. |
+| M13 | Instrumentation/attribution retained and connected; decoder/graphics ownership redesign conditional on physical evidence. Do not remove surfaces, change protection or lower quality on an assumption. |
+
+No source-quality, frame-rate, decoder-count, DRM, Cast-protocol or minimum playback-buffer target change. The forecast is not PSS; live OS/JVM headroom already reflects resident allocations, so do not subtract all owner totals a second time. Unique shared heap backing counted at its owner; individual store pinned/retired snapshots describe reader lifetimes and are not additional process allocations. External GPU/codec allocations are not inferred from app heap. Host allocator peak tracks requested allocation bytes rather than allocator internals or Android RSS.
+
+Engineering choices: recover optional prefetch only after 10 seconds above max(16 MiB, threshold/4) additional headroom, throttle pressure trim to 30 seconds, shrink atlas workspace after eight consecutive small jobs. Reclamation may require reallocation/backward refetch; physical latency verification is required. Existing native hard ceilings, Media3 target buffering and manual rendition selection are not weakened.
+
+**Pre-commit gate:** all 41 production-wiring tests passed on staged source. New Kotlin and Rust regression tests are included in the unchanged mandatory CI pipeline; full Android/Rust toolchain is unavailable in the editing workbench. CI success and physical acceptance are not claimed here.
+
+#### M1/M12/M13 physical measurement instructions (debug/profileable builds only)
+
+1. Install the APK from the exact successful CI run. Record commit SHA, APK variant, device model, Android build/API, ABI (adb shell getprop ro.product.cpu.abi), refresh and power/thermal state. Keep its architecture-g0-apk-symbols artifact and match the ABI and native library build ID before symbolizing any stack. Never use release customer profiling or change DRM settings merely to acquire a trace.
+2. Run the same race/session, segment range, 1080p + three 480p feeds at 50 fps, same layout, selected audio, speed and device conditions on Kotlin and Rust. Alternate order; repeat cold/warm runs, 1x and 1.5x, seek, pause/resume, stop and Cast. Repeat on Android TV and protected/clear paths when available. Record baseline idle, startup peak, steady-state median/peak, after-stop recovery, and a full-race sustained test. Capture at approximately 10-second intervals; report exact sampling interval.
+3. Identify the actual installed debug application package via adb shell pm list packages and PID via adb shell pidof PACKAGE. Sample adb shell dumpsys meminfo PACKAGE; retain PSS/RSS and graphics categories where reported. If permitted, sample /proc/PID/status and smaps_rollup; access denials are unknown, not zero. Save application logs containing GC_PROCESS_MEMORY, GC_NATIVE_TRIM and existing codec/surface/refresh/queue/playback markers. CI gc-memory-host.txt contains GC_HOST_ALLOCATOR, GC_WARM_ATLAS and protected warm-path evidence. Do not add overlapping categories as if they were unique physical memory.
+4. If the device supports heapprofd and the exact build is debuggable/profileable, capture a matched 60-second native allocation trace with Perfetto (example below). Save config, trace and matched symbols. In Perfetto UI inspect allocation sites, retained bytes and lifetime; compare the same time window. If permissions/device support prevent tracing, report this limitation, use dumpsys and existing owner counters, and leave allocator redesign conditional.
+5. Correlate external codec/graphics costs using available dumpsys media.codec / SurfaceFlinger data and existing Perfetto frame/BufferQueue traces; keep protected content secure, never capture raw protected frames. M12 allocator work requires demonstrated allocator retention not explained by live/reserved backing. M13 redesign requires demonstrated avoidable duplicate decoder/surface/graphics ownership. Neither is a prerequisite to running this implementation through CI.
+
+Example Perfetto text config (replace PACKAGE with the actual package; run using adb shell perfetto --txt -c - -o /data/misc/perfetto-traces/pitwall-memory.perfetto-trace, piping this config to stdin, then pull the trace if permitted):
+
+```text
+buffers { size_kb: 32768 fill_policy: RING_BUFFER }
+data_sources {
+  config {
+    name: "android.heapprofd"
+    heapprofd_config {
+      process_cmdline: "PACKAGE"
+      sampling_interval_bytes: 4096
+      continuous_dump_config { dump_interval_ms: 10000 }
+    }
+  }
+}
+duration_ms: 60000
+```
+
+Acceptance remains: Rust steady-state PSS at most 80% of matched Kotlin, lower peak, no sustained memory growth, no regression in frame deadlines/drops, buffering, seek latency or output quality; all single/multiple decoder, phone/TV, clear/protected, local/Cast paths preserved. The numerical target is not yet measured or claimed. M12/M13 remain evidence-gated, not falsely closed as production redesigns.
 
 ### Build 882 green baseline / consolidated memory ownership and pressure batch (25 November 2026)
 

@@ -375,7 +375,8 @@ jobs:
           set -euo pipefail
           native/architecture-g/target/release/gb_clear_grid \
             "$PITWALL_GB_CMAF_INPUT_DIR" "$RUNNER_TEMP/pitwall-g0/slices" \
-            "$RUNNER_TEMP/apexview-hevc-output-parameters"
+            "$RUNNER_TEMP/apexview-hevc-output-parameters" | tee "$RUNNER_TEMP/apexview-hevc-output-parameters/gc-memory-host.txt"
+          printf "source_sha=%s host_arch=%s\n" "$GITHUB_SHA" "$(uname -m)" >> "$RUNNER_TEMP/apexview-hevc-output-parameters/gc-memory-host.txt"
           python3 tools/validate_hevc_rust_gb_grid.py \
             --fixture-dir "$RUNNER_TEMP/apexview-hevc-fixtures" \
             --tile-dir "$RUNNER_TEMP/apexview-hevc-tile-fixtures" \

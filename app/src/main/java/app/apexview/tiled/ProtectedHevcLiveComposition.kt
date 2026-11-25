@@ -43,24 +43,29 @@ internal object ProtectedHevcLiveComposition {
         // Only local opt-in publication can hold this backing. Legacy and
         // cast callers request a heap-detached window instead.
         internal val nativeMedia: NativeFragmentLease? = null,
+        internal val sharedHeapMedia: HeapFragmentLease? = null,
     ) {
-        init { require(nativeMedia == null || mediaFragment.isEmpty()) }
-        val size: Int get() = nativeMedia?.size ?: mediaFragment.size
-        fun copyMediaBytes(): ByteArray = nativeMedia?.copyBytes() ?: mediaFragment.copyOf()
+        init {
+            require(nativeMedia == null || sharedHeapMedia == null)
+            require((nativeMedia == null && sharedHeapMedia == null) || mediaFragment.isEmpty())
+        }
+        val size: Int get() = nativeMedia?.size ?: sharedHeapMedia?.size ?: mediaFragment.size
+        fun copyMediaBytes(): ByteArray = nativeMedia?.copyBytes() ?: sharedHeapMedia?.copyBytes() ?: mediaFragment.copyOf()
         fun inspect(init: CmafBoxInspector.Report): CmafBoxInspector.Report =
-            nativeMedia?.inspect(init) ?: CmafBoxInspector.inspect(mediaFragment, init)
-        fun zero() { mediaFragment.fill(0); nativeMedia?.close() }
+            nativeMedia?.inspect(init) ?: sharedHeapMedia?.inspect(init) ?: CmafBoxInspector.inspect(mediaFragment, init)
+        fun closeRetained() { nativeMedia?.close(); sharedHeapMedia?.close() }
+        fun zero() { mediaFragment.fill(0); closeRetained() }
 
         fun detached() = copy(
-            mediaFragment = if (nativeMedia == null) mediaFragment.copyOf() else ByteArray(0),
+            mediaFragment = if (nativeMedia == null && sharedHeapMedia == null) mediaFragment.copyOf() else ByteArray(0),
             alignmentOffsetsMillis = alignmentOffsetsMillis.toMap(),
-            nativeMedia = nativeMedia?.retain()
+            nativeMedia = nativeMedia?.retain(), sharedHeapMedia = sharedHeapMedia?.retain()
         )
 
         fun legacyDetached() = copy(
             mediaFragment = copyMediaBytes(),
             alignmentOffsetsMillis = alignmentOffsetsMillis.toMap(),
-            nativeMedia = null
+            nativeMedia = null, sharedHeapMedia = null
         )
     }
 
@@ -122,10 +127,16 @@ internal object ProtectedHevcLiveComposition {
         var window: List<HevcPictureSequenceAligner.PictureSample> = emptyList()
         val picturesByOrdinal = linkedMapOf<Long, BufferedPicture>()
 
+        fun recordMemory() = app.apexview.MediaMemoryAccounting.process.record(this,
+            app.apexview.MediaMemoryAccounting.Kind.PROTECTED_SOURCE,
+            (initializationSegment?.size?.toLong() ?: 0L) + picturesByOrdinal.values.sumOf {
+                it.sampleBytes.size.toLong() + (it.perSampleIvBytes?.size ?: 0)
+            })
         fun clearWindow() {
             picturesByOrdinal.values.forEach(BufferedPicture::zero)
             picturesByOrdinal.clear()
             window = emptyList()
+            recordMemory()
         }
 
         fun clearAll() {
@@ -139,6 +150,7 @@ internal object ProtectedHevcLiveComposition {
             nextSequenceOrdinal = 0L
             sawCodedPicture = false
             afterEndOfSequence = false
+            recordMemory()
         }
     }
 
@@ -409,7 +421,7 @@ internal object ProtectedHevcLiveComposition {
         val retained = ArrayList<OutputFragment>(session.outputHistory.size)
         try {
             session.outputHistory.forEach { fragment ->
-                retained += if (shareNative && (session.localNativeHeader || session.castNativeHeader)) fragment.detached()
+                retained += if (shareNative) fragment.detached()
                     else fragment.legacyDetached()
             }
             return OutputWindow(initialization, retained, session.sourceGeometry)
@@ -535,6 +547,7 @@ internal object ProtectedHevcLiveComposition {
         }
         state.initializationSegment?.fill(0)
         state.initializationSegment = bytes.copyOf()
+        state.recordMemory()
         state.initializationReport = report
         state.track = track
         state.representationSignature = signature
@@ -726,6 +739,7 @@ internal object ProtectedHevcLiveComposition {
             state.clearWindow()
             state.picturesByOrdinal.putAll(currentBuffers)
             state.window = currentPictures.toList()
+            state.recordMemory()
             state.pocTracker.commitFrom(workingTracker)
             state.nextSequenceOrdinal = nextOrdinal
             state.sawCodedPicture = sawCodedPicture
@@ -1211,7 +1225,7 @@ internal object ProtectedHevcLiveComposition {
             }
             val newOutput = OutputFragment(
                 sequenceNumber = session.outputSequenceNumber,
-                mediaFragment = ownedFragment.heap ?: ByteArray(0),
+                mediaFragment = ByteArray(0),
                 timescale = requireNotNull(firstTrack.timescale),
                 baseDecodeTimeTicks = firstComposedDts,
                 durationTicks = durationTicks,
@@ -1219,7 +1233,8 @@ internal object ProtectedHevcLiveComposition {
                 width = outputSps.displayWidth,
                 height = outputSps.displayHeight,
                 alignmentOffsetsMillis = proof.offsetsByFeed.mapValues { it.value.offsetMillis },
-                nativeMedia = ownedFragment.native
+                nativeMedia = ownedFragment.native,
+                sharedHeapMedia = ownedFragment.heap?.let(HeapFragmentLease::take)
             )
             // Validate the new **unpublished** protected fragment together with the
             // previously retained outputs. If an 8-feed bitrate cannot hold the

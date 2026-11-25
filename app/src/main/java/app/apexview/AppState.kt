@@ -846,12 +846,14 @@ class AppState(
                             autoBandwidthBps = compositionBandwidthBudget(castTiles.map(::qualityFor)),
                         ).also {
                             ownedSession = it
+                            it.configureNativeBudget(context)
                             if(settings.nativeRustStitching) it.configureNativeClear(context)
                         }
                     } finally { capture.reset() }
                 }
                 // The receiver consumes the same validated CMAF bytes. Reuse
                 // the active owner rather than create a competing native arena.
+                session.configureNativeBudget(context)
                 if (settings.nativeRustStitching) {
                     val previous = singleDecoderScenePlayer?.archiveSceneSession
                     if (previous !== session) previous?.disableNativeClear("CAST_OWNER_TRANSFER", true)
@@ -2978,6 +2980,7 @@ class AppState(
                         val session = capture.prepareVod(sourcePlan.feeds, probePositionMs, host.feed.sourceStream.profileLabel,
                             preferredHeight, settings.commentary, minimumHeight, desired,
                             autoBandwidthBps = compositionBandwidthBudget(selected.map(::qualityFor)))
+                        session.configureNativeBudget(context)
                         if (settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff)
                             session.configureNativeClear(context)
                         android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_QUALITY content=$contentId " +
@@ -5721,6 +5724,7 @@ class AppState(
     /** Feed rectangles, for finding open space. */
     fun tileSlots() = tiles.map { Slot(it.x, it.y, it.w) }
     private var radioPlayer: androidx.media3.exoplayer.ExoPlayer? = null
+    private var radioAllocator: androidx.media3.exoplayer.upstream.DefaultAllocator? = null
 
     fun toggleRadio() {
         radioOpen = !radioOpen
@@ -5739,7 +5743,12 @@ class AppState(
             return
         }
         val base = timing?.radioBase ?: return
-        val player = radioPlayer ?: androidx.media3.exoplayer.ExoPlayer.Builder(context).build().also { p ->
+        val player = radioPlayer ?: run {
+            val allocator = androidx.media3.exoplayer.upstream.DefaultAllocator(true, androidx.media3.common.C.DEFAULT_BUFFER_SEGMENT_SIZE)
+            androidx.media3.exoplayer.ExoPlayer.Builder(context)
+                .setLoadControl(androidx.media3.exoplayer.DefaultLoadControl.Builder().setAllocator(allocator).build())
+                .build().also { radioAllocator = allocator; Media3MemoryOwners.register(allocator) }
+        }.also { p ->
             radioPlayer = p
             p.setPlaybackSpeed(playbackSpeed)
             p.addListener(object : Player.Listener {
@@ -6483,8 +6492,11 @@ class AppState(
         playing = true
         timing = null
         timingWork.close()
-        radioPlayer?.release()
-        radioPlayer = null
+        try { radioPlayer?.release() } finally {
+            radioAllocator?.let { Media3MemoryOwners.unregister(it); it.trim() }
+            radioAllocator = null
+            radioPlayer = null
+        }
         radioPlaying = null
         mapStatus = null
     }
@@ -6572,6 +6584,10 @@ class AppState(
     fun togglePlay() {
         val bakedWasPlaying = bakedCastSession != null
         playing = !playing
+        if (!playing) scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            Media3MemoryOwners.trimUnused()
+            app.apexview.tiled.NativeFragmentLease.trim()
+        }
         if (castingActive) {
             remoteCastClock.update(castFramePositionMs, playing, playbackSpeed, durationMs)
             if (localChosen) localConnection?.send(if (playing) app.apexview.cast.local.FcastProtocol.RESUME else app.apexview.cast.local.FcastProtocol.PAUSE)

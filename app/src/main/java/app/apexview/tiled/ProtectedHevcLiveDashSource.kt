@@ -37,11 +37,13 @@ internal object ProtectedHevcComposedDashPackageBuilder {
         val startNumber: Long,
         val presentationTimeOffsetTicks: Long,
         val availabilityStartTimeMs: Long,
-        val nativeResources: Map<String, NativeFragmentLease> = emptyMap()
+        val nativeResources: Map<String, NativeFragmentLease> = emptyMap(),
+        val sharedHeapResources: Map<String, HeapFragmentLease> = emptyMap()
     ) {
         fun zero() {
             resources.values.forEach { it.fill(0) }
             nativeResources.values.forEach { it.close() }
+            sharedHeapResources.values.forEach { it.close() }
         }
     }
 
@@ -113,6 +115,7 @@ internal object ProtectedHevcComposedDashPackageBuilder {
         val urls = StringBuilder()
         val resources = linkedMapOf<String, ByteArray>()
         val pendingNative = linkedMapOf<String, NativeFragmentLease>()
+        val pendingHeap = linkedMapOf<String, HeapFragmentLease>()
         if (!validationOnly) resources["init.mp4"] = if (takeOwnership) init else init.copyOf()
 
         window.fragments.forEachIndexed { index, fragment ->
@@ -170,7 +173,9 @@ internal object ProtectedHevcComposedDashPackageBuilder {
             urls.append("""<SegmentURL media="$name"/>""")
             if (!validationOnly) {
                 val native = fragment.nativeMedia
+                val heap = fragment.sharedHeapMedia
                 if (takeOwnership && native != null) pendingNative[name] = native
+                else if (takeOwnership && heap != null) pendingHeap[name] = heap
                 else resources[name] = if (takeOwnership) fragment.mediaFragment else fragment.copyMediaBytes()
             }
         }
@@ -227,10 +232,13 @@ internal object ProtectedHevcComposedDashPackageBuilder {
         // Only retain after all validation succeeds. The store gets its own
         // lease, independent of the caller's cancellation/zero lifecycle.
         val nativeResources = linkedMapOf<String, NativeFragmentLease>()
+        val sharedHeapResources = linkedMapOf<String, HeapFragmentLease>()
         try {
             pendingNative.forEach { (name, native) -> nativeResources[name] = native.retain() }
+            pendingHeap.forEach { (name, heap) -> sharedHeapResources[name] = heap.retain() }
         } catch (failure: Throwable) {
             nativeResources.values.forEach { it.close() }
+            sharedHeapResources.values.forEach { it.close() }
             throw failure
         }
         return Package(
@@ -243,7 +251,7 @@ internal object ProtectedHevcComposedDashPackageBuilder {
             startNumber = first.sequenceNumber,
             presentationTimeOffsetTicks = presentationTimeOffsetTicks,
             availabilityStartTimeMs = availabilityStartTimeMs,
-            nativeResources = nativeResources
+            nativeResources = nativeResources, sharedHeapResources = sharedHeapResources
         )
     }
 
@@ -438,10 +446,11 @@ internal class ProtectedDashResourceStore(
     private val maxReaders: Int = 8
 ) {
     init { require(maxBytes > 0 && maxReaders > 0) }
-    private class Resource(val heap: ByteArray?, val native: NativeFragmentLease?) {
+    private class Resource(val heap: ByteArray?, val native: FragmentReadLease?) {
         init { require((heap == null) != (native == null)) }
         val size get() = heap?.size ?: requireNotNull(native).size
         val identity: Any get() = heap ?: requireNotNull(native)
+        val backing: Any get() = heap ?: requireNotNull(native).storageIdentity
         fun dispose() { heap?.fill(0); native?.close() }
         var users = 0
         var retired = false
@@ -454,7 +463,7 @@ internal class ProtectedDashResourceStore(
 
     class Lease internal constructor(
         private val heap: ByteArray?,
-        private val native: NativeFragmentLease?,
+        private val native: FragmentReadLease?,
         private val onClose: () -> Unit
     ) : AutoCloseable {
         // Existing heap-only callers and tests retain this contract. Native
@@ -488,36 +497,59 @@ internal class ProtectedDashResourceStore(
         for (resource in current.values + retired) {
             val identity = resource.heap ?: requireNotNull(resource.native).storageIdentity
             if (seen.put(identity, true) != null) continue
-            if (resource.heap != null) heap += resource.size else native += resource.size
+            if (resource.native?.nativeBacked == true) native += resource.size else heap += resource.size
         }
         return Snapshot(current.values.sumOf { it.size.toLong() }, retired.sumOf { it.size.toLong() },
             retired.size, heap, native)
     }
 
+    private fun recordMemory() {
+        val exclusive = (current.values + retired).filter { it.heap != null }
+        app.apexview.MediaMemoryAccounting.process.record(this,
+            app.apexview.MediaMemoryAccounting.Kind.DASH_EXCLUSIVE,
+            exclusive.sumOf { it.size.toLong() }, exclusive.filter { it.users > 0 }.sumOf { it.size.toLong() })
+    }
     @Synchronized fun replace(next: ProtectedHevcComposedDashPackageBuilder.Package) {
         // The publisher transfers detached, uniquely owned arrays. Reject aliasing
         // before changing the active map; otherwise retiring one name could erase
         // the bytes a different name or in-flight reader still owns.
-        require(next.resources.keys.intersect(next.nativeResources.keys).isEmpty())
+        val retained: Map<String, FragmentReadLease> = next.nativeResources + next.sharedHeapResources
+        require(retained.size == next.nativeResources.size + next.sharedHeapResources.size &&
+            next.resources.keys.intersect(retained.keys).isEmpty())
         require(next.resources.values.sumOf { it.size.toLong() } +
-            next.nativeResources.values.sumOf { it.size.toLong() } <= maxBytes) {
+            retained.values.sumOf { it.size.toLong() } <= maxBytes) {
             "Protected DASH window exceeds its memory budget"
         }
         val seen = java.util.IdentityHashMap<Any, Boolean>()
-        current.values.forEach { seen[it.identity] = true }
-        retired.forEach { seen[it.identity] = true }
-        val nextResources = LinkedHashMap<String, Resource>(next.resources.size+next.nativeResources.size)
+        val existing = java.util.IdentityHashMap<Any, Resource>()
+        (current.values + retired).forEach { seen[it.identity] = true; existing[it.backing] = it }
+        val nextResources = LinkedHashMap<String, Resource>(next.resources.size+retained.size)
+        val nextBackings = java.util.IdentityHashMap<Any, Boolean>()
+        val redundant = mutableListOf<FragmentReadLease>()
         next.resources.forEach { (name, bytes) ->
-            require(seen.put(bytes, true) == null) { "Protected DASH resource ownership already transferred" }
+            require(seen.put(bytes, true) == null && nextBackings.put(bytes, true) == null) {
+                "Protected DASH resource ownership already transferred"
+            }
             nextResources[name] = Resource(bytes, null)
         }
-        next.nativeResources.forEach { (name, native) ->
-            require(seen.put(native, true) == null) { "Protected DASH native lease ownership already transferred" }
-            nextResources[name] = Resource(null, native)
+        retained.forEach { (name, native) ->
+            require(seen.put(native, true) == null && nextBackings.put(native.storageIdentity, true) == null) {
+                "Protected DASH native lease ownership already transferred"
+            }
+            val previous = existing[native.storageIdentity]
+            if (previous != null) {
+                require(previous.native != null && previous.native !== native && previous.size == native.size)
+                nextResources[name] = previous
+                redundant += native
+            } else nextResources[name] = Resource(null, native)
         }
         val previous = current
+        val nextSet = nextResources.values.toSet()
+        nextSet.forEach { if (it.retired) { retired.remove(it); it.retired = false } }
         current = nextResources
-        previous.values.forEach(::retire)
+        previous.values.filterNot { it in nextSet }.forEach(::retire)
+        redundant.forEach { it.close() }
+        recordMemory()
     }
 
     @Synchronized fun acquire(name: String): Lease? {
@@ -526,6 +558,7 @@ internal class ProtectedDashResourceStore(
         if (readerCount >= maxReaders || (resource.users == 0 && resource.size.toLong() > maxBytes - pinnedBytes)) return null
         if (resource.users++ == 0) { pinned.add(resource); pinnedBytes += resource.size }
         readerCount++
+        recordMemory()
         return Lease(resource.heap, resource.native) {
             synchronized(this) {
                 check(resource.users > 0) { "Protected DASH lease was released twice" }
@@ -537,6 +570,7 @@ internal class ProtectedDashResourceStore(
                         resource.dispose()
                     }
                 }
+                recordMemory()
             }
         }
     }
@@ -545,6 +579,7 @@ internal class ProtectedDashResourceStore(
         val previous = current
         current = emptyMap()
         previous.values.forEach(::retire)
+        recordMemory()
     }
 
     private fun retire(resource: Resource) {
@@ -616,11 +651,12 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
         } finally {
             if (!transferred) {
                 pending?.nativeResources?.values?.forEach { it.close() }
+                pending?.sharedHeapResources?.values?.forEach { it.close() }
                 window.zero()
             } else {
                 // Heap ownership transferred exactly as before. Native
                 // ownership is independent; release the caller's tokens.
-                window.fragments.forEach { it.nativeMedia?.close() }
+                window.fragments.forEach { it.closeRetained() }
             }
         }
     }

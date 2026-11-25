@@ -186,12 +186,11 @@ pub fn slice_batch(packet: &[u8]) -> Result<Vec<u8>, Error> {
     if !(1..=8).contains(&feeds) || !(1..=440).contains(&count) {
         return Err(Error::Limit);
     }
-    let mut sets = Vec::new();
-    sets.try_reserve_exact(feeds+1).map_err(|_| Error::Limit)?;
-    for _ in 0..=feeds {
-        sets.push([read_nal(&mut r)?, read_nal(&mut r)?, read_nal(&mut r)?]);
+    let mut sets = [[&[][..]; 3]; 9];
+    for set in &mut sets[..=feeds] {
+        *set = [read_nal(&mut r)?, read_nal(&mut r)?, read_nal(&mut r)?];
     }
-    let configuration = configuration_cache().lock().map_err(|_| Error::Metadata)?.get(&sets)?;
+    let configuration = configuration_cache().lock().map_err(|_| Error::Metadata)?.get(&sets[..=feeds])?;
     let sources = &configuration.parsed[..feeds];
     let output = &configuration.parsed[feeds];
     let mut out = Vec::new();

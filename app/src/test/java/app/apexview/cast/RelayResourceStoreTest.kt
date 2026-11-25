@@ -102,4 +102,23 @@ class RelayResourceStoreTest {
         assertEquals(0L, budget.bytesInUse())
         store.close()
     }
+
+    @Test fun sharedFragmentRollsWithoutCopyOrPrematureZeroing() {
+        val bytes = byteArrayOf(3,4,5)
+        val history = app.apexview.tiled.HeapFragmentLease.take(bytes)
+        val store = RelayResourceStore(16)
+        store.publish(emptyMap(),sharedHeap=mapOf("a" to history.retain()))
+        val reader = requireNotNull(store.acquire("a"))
+        store.publish(emptyMap(),sharedHeap=mapOf("a" to history.retain()))
+        assertEquals(3L,store.snapshot().sharedHeapBytes)
+        assertEquals(0L,store.snapshot().retiredPinnedBytes)
+        history.close()
+        store.close()
+        val output = ByteArrayOutputStream()
+        reader.writeTo(output,0,3)
+        assertArrayEquals(byteArrayOf(3,4,5),output.toByteArray())
+        reader.close()
+        assertArrayEquals(ByteArray(3),bytes)
+    }
+
 }

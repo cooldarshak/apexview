@@ -21,6 +21,68 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Host fixture only: counts requested allocator bytes, not Android RSS/PSS.
+// Production APKs continue to use the unmodified system allocator.
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
+struct FixtureAllocator;
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
+static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+fn charge(bytes: usize) {
+    let now = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
+    PEAK.fetch_max(now, Ordering::Relaxed);
+    ALLOCS.fetch_add(1, Ordering::Relaxed);
+}
+// SAFETY: forward the exact pointer/layout contract to System. Counters do
+// not allocate, access the returned memory, change alignment, or unwind.
+unsafe impl GlobalAlloc for FixtureAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller supplies a valid GlobalAlloc layout.
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() { charge(layout.size()); }
+        ptr
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller supplies a valid GlobalAlloc layout.
+        let ptr = unsafe { System.alloc_zeroed(layout) };
+        if !ptr.is_null() { charge(layout.size()); }
+        ptr
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        // SAFETY: the caller owns this System allocation and original layout.
+        unsafe { System.dealloc(ptr, layout) };
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: the caller owns this System allocation and valid new size.
+        let next = unsafe { System.realloc(ptr, layout, new_size) };
+        if !next.is_null() {
+            if new_size >= layout.size() {
+                charge(new_size - layout.size());
+            } else {
+                LIVE.fetch_sub(layout.size() - new_size, Ordering::Relaxed);
+                ALLOCS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        next
+    }
+}
+#[global_allocator]
+static FIXTURE_ALLOCATOR: FixtureAllocator = FixtureAllocator;
+
+fn allocation_window() -> (usize, usize) {
+    let live = LIVE.load(Ordering::Relaxed);
+    PEAK.store(live, Ordering::Relaxed);
+    (live, ALLOCS.load(Ordering::Relaxed))
+}
+fn allocation_result(start: (usize, usize)) -> (usize, usize, usize) {
+    let (live, allocations) = start;
+    (ALLOCS.load(Ordering::Relaxed) - allocations,
+     PEAK.load(Ordering::Relaxed).saturating_sub(live),
+     LIVE.load(Ordering::Relaxed).saturating_sub(live))
+}
+
 fn main() {
     let mut args = env::args_os().skip(1).map(PathBuf::from);
     let input = args.next().expect("fixture CMAF input directory");
@@ -360,6 +422,13 @@ fn verify_configuration_cache(
         protected_plan::clear_configuration_cache();
         assert_eq!(protected_plan::slice_batch(&batch).unwrap(),first);
         assert_eq!(protected_plan::configuration_cache_counts(),(before.0+2,before.1+2));
+        let host_window=allocation_window();
+        for _ in 0..12 { assert_eq!(protected_plan::slice_batch(&batch).unwrap(),first); }
+        let (allocations,peak_extra,retained_extra)=allocation_result(host_window);
+        assert_eq!(protected_plan::configuration_cache_counts(),(before.0+14,before.1+2));
+        assert_eq!(retained_extra,0,"protected metadata retained extra host bytes");
+        assert!(peak_extra <= 8 * 1024 * 1024,"protected metadata workspace grew");
+        println!("GC_WARM_PROTECTED repetitions=12 configurationReparses=0 allocations={allocations} peakExtraBytes={peak_extra} retainedExtraBytes={retained_extra} exactMatch=true");
     }
 }
 
@@ -754,7 +823,10 @@ fn verify_native_lease_mode(packet: &[u8], expected: &[u8], compact: bool) {
     assert_eq!(lease, expected);
     assert_eq!(engine.release(rebuilt), 1);
     let pair = packet.len() + expected.len();
-    for _ in 0..(if compact { 12 } else { 0 }) {
+    let before = engine.payload_stats();
+    let host_window = allocation_window();
+    let mut halfway = 0;
+    for i in 0..(if compact { 12 } else { 0 }) {
         let token = engine.submit_clear_atlas(generation, packet, true, 5000);
         assert!(token > 0);
         assert_eq!(await_result(&engine, token), expected.len() as i64);
@@ -762,9 +834,20 @@ fn verify_native_lease_mode(packet: &[u8], expected: &[u8], compact: bool) {
         assert_eq!(lease, expected);
         assert_eq!(engine.release(token), 1);
         assert_eq!(engine.allocated_payload_bytes(), pair);
+        if i==5 { halfway=ALLOCS.load(Ordering::Relaxed)-host_window.1; }
     }
     if compact {
-        println!("GC_WARM_ATLAS repetitions=12 payloadBytes={pair} reservedBytes={} byteParity=true", engine.reserved());
+        let (allocations, peak_extra, retained_extra)=allocation_result(host_window);
+        assert!(allocations-halfway <= halfway, "steady allocation count grew");
+        assert!(peak_extra <= budget.ceiling, "fixture exceeded native workspace ceiling");
+        assert_eq!(retained_extra,0,"warm fixture retained extra host bytes");
+        println!("GC_HOST_ALLOCATOR repetitions=12 allocations={allocations} peakExtraBytes={peak_extra} retainedExtraBytes={retained_extra}");
+        let after = engine.payload_stats();
+        assert_eq!(after[0], before[0]);
+        assert_eq!(after[1], pair as u64);
+        assert_eq!(after[2]-before[2], 12*packet.len() as u64);
+        assert_eq!(after[3]-before[3], 12*expected.len() as u64);
+        println!("GC_WARM_ATLAS repetitions=12 payloadBytes={pair} reservedBytes={} payloadAllocations={} peakPayloadBytes={} inputCopyBytes={} outputCopyBytes={} byteParity=true", engine.reserved(),after[0],after[1],after[2]-before[2],after[3]-before[3]);
     }
     let invalid =
         engine.submit_clear_atlas(engine.generation(), &packet[..packet.len() - 1], true, 5000);

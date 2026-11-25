@@ -114,6 +114,10 @@ struct State {
     generation:i64,
     closed:bool,
     compact_atlas:bool,
+    payload_allocations:u64,
+    peak_pairs:usize,
+    copied_input:u64,
+    copied_output:u64,
 }
 impl State {
     fn index(&self, token:i64)->Option<usize> {
@@ -157,7 +161,9 @@ impl Engine {
             let buffers=if !compact_atlas || index==0 {Some(Buffers::new(budget)?)} else {None};
             slots.push(Slot{buffers,stage:Stage::Free,work:None,result:0});
         }
-        let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false,compact_atlas}),Condvar::new()));
+        let initial_pairs=if compact_atlas {1} else {budget.slots};
+        let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false,compact_atlas,
+            payload_allocations:initial_pairs as u64,peak_pairs:initial_pairs,copied_input:0,copied_output:0}),Condvar::new()));
         let cloned=Arc::clone(&shared);
         let worker=thread::Builder::new().name("pitwall-native-stitch".into())
             .stack_size(WORKER_STACK).spawn(move || run_worker(cloned)).ok()?;
@@ -174,6 +180,30 @@ impl Engine {
         let s=self.shared.0.lock().expect("engine mutex");
         s.slots.iter().filter(|slot|slot.buffers.is_some() || slot.stage==Stage::Running).count()
             * (self.budget.input + self.budget.output)
+    }
+    /// Outstanding ceiling not already materialized in slots or bridge. The
+    /// OS headroom sample already reflects resident allocations; reserve only
+    /// future commitments when another native owner requests new capacity.
+    pub fn future_commitment(&self, bridge_bytes:usize)->usize {
+        self.budget.ceiling.saturating_sub(self.allocated_payload_bytes().saturating_add(bridge_bytes))
+    }
+    /// Counts payload-pair allocations and exact bytes passed across the slot
+    /// boundary, not allocator-global or resident-page estimates.
+    pub fn payload_stats(&self)->[u64;4] {
+        let s=self.shared.0.lock().expect("engine mutex");
+        [s.payload_allocations,(s.peak_pairs*(self.budget.input+self.budget.output)) as u64,
+            s.copied_input,s.copied_output]
+    }
+    /// Pressure or pause may retire every idle compact pair. In-flight slots
+    /// remain untouched; the next admitted request allocates lazily.
+    pub fn trim_idle_payload(&self)->usize {
+        let mut s=self.shared.0.lock().expect("engine mutex");
+        if !s.compact_atlas { return 0; }
+        let mut count=0;
+        for slot in &mut s.slots {
+            if slot.stage==Stage::Free && slot.buffers.take().is_some() { count+=1; }
+        }
+        count*(self.budget.input+self.budget.output)
     }
     /// Keep one warm free pair; never touch a queued, running or leased slot.
     fn trim_free_spares(state:&mut State) {
@@ -236,6 +266,9 @@ impl Engine {
         if s.slots[index].buffers.is_none() {
             let Some(buffers)=Buffers::new(self.budget) else {return BACKPRESSURE;};
             s.slots[index].buffers=Some(buffers);
+            s.payload_allocations=s.payload_allocations.saturating_add(1);
+            let pairs=s.slots.iter().filter(|slot|slot.buffers.is_some() || slot.stage==Stage::Running).count();
+            s.peak_pairs=s.peak_pairs.max(pairs);
         }
         if Instant::now()>=deadline {return DEADLINE;}
         // Tokens never repeat across engines, including on 32-bit targets.
@@ -248,6 +281,7 @@ impl Engine {
         if Instant::now()>=deadline { destination.fill(0); return DEADLINE; }
         slot.work=Some(Work{token,generation,len,command,foreground,deadline});
         slot.stage=Stage::Queued;
+        s.copied_input=s.copied_input.saturating_add(len as u64);
         self.shared.1.notify_one();
         token
     }
@@ -271,7 +305,7 @@ impl Engine {
         self.read_with(token,offset,destination.len(),|src|{destination.copy_from_slice(src);true})
     }
     pub fn read_with(&self,token:i64,offset:usize,count:usize,read:impl FnOnce(&[u8])->bool)->i64 {
-        let s=self.shared.0.lock().expect("engine mutex");
+        let mut s=self.shared.0.lock().expect("engine mutex");
         if s.closed{return CLOSED;}
         let Some(i)=s.index(token) else {return STALE;};
         let slot=&s.slots[i];
@@ -280,6 +314,7 @@ impl Engine {
         let len=slot.result as usize;
         if offset>len || count>len-offset{return INVALID;}
         if read(&slot.buffers.as_ref().expect("read buffers").output[offset..offset+count]) {
+            s.copied_output=s.copied_output.saturating_add(count as u64);
             count as i64
         } else { INVALID }
     }
@@ -394,6 +429,24 @@ mod tests {
         assert!(engine.close());
     }
 
+    #[test]
+    fn idle_trim_preserves_a_read_lease_and_rematerializes_on_demand() {
+        let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
+        let engine=Engine::new_atlas(b).unwrap();
+        let pair=b.input+b.output;
+        assert_eq!(engine.trim_idle_payload(),pair);
+        assert_eq!(engine.allocated_payload_bytes(),0);
+        let token=engine.submit(engine.generation(),&[2,2,1],1,1,true,5000);
+        assert_eq!(wait(&engine,token),6);
+        assert_eq!(engine.trim_idle_payload(),0);
+        let mut bytes=[0;6];
+        assert_eq!(engine.copy(token,0,&mut bytes),6);
+        assert_eq!(bytes,[0,0,0,1,2,1]);
+        assert_eq!(engine.release(token),1);
+        assert_eq!(engine.trim_idle_payload(),pair);
+        assert_eq!(engine.allocated_payload_bytes(),0);
+        assert_eq!(engine.payload_stats()[0],2);
+    }
     #[test]
     fn compact_spare_slot_is_lazy_and_preserves_foreground_admission() {
         let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
@@ -532,7 +585,7 @@ mod tests {
         let mk=|token,foreground,ms|Slot{buffers:None,stage:Stage::Queued,
             work:Some(Work{token,generation:1,len:3,command:Command::Convert{prefix:1,count:1},foreground,
                 deadline:now+Duration::from_millis(ms)}),result:0};
-        let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false,compact_atlas:false};
+        let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false,compact_atlas:false,payload_allocations:0,peak_pairs:0,copied_input:0,copied_output:0};
         assert_eq!(s.next(),Some(2));s.slots[2].stage=Stage::Running;
         assert_eq!(s.next(),Some(3));s.slots[3].stage=Stage::Running;
         assert_eq!(s.next(),Some(1));s.slots[1].stage=Stage::Running;

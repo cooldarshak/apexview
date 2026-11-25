@@ -187,6 +187,11 @@ internal class BoundedArchiveFragmentCache(
     }
     @Synchronized fun memorySnapshot() = MemorySnapshot(bytesRetained, leasedBytes,
         pinned.filterNot { it.cached }.sumOf { it.bytes.size.toLong() })
+    private fun recordMemory() {
+        val s = memorySnapshot()
+        app.apexview.MediaMemoryAccounting.process.record(this,
+            app.apexview.MediaMemoryAccounting.Kind.ARCHIVE_CACHE, s.unique, s.pinned)
+    }
     /** Foreground keeps its original admission and retry contract. Do not
      * start speculative production while retired readers consume the cache
      * allowance; current-window data may still be evicted normally. */
@@ -206,6 +211,7 @@ internal class BoundedArchiveFragmentCache(
             iterator.remove()
             retire(entry.value)
         }
+        recordMemory()
         return freed
     }
     @Synchronized fun contains(number: Int): Boolean = entries.containsKey(number)
@@ -223,6 +229,7 @@ internal class BoundedArchiveFragmentCache(
         }
         entry.readers++
         readers++
+        recordMemory()
         return ArchiveFragmentLease(entry.bytes) { release(entry) }
     }
 
@@ -235,6 +242,7 @@ internal class BoundedArchiveFragmentCache(
             leasedBytes -= entry.bytes.size
             if (!entry.cached) entry.bytes.fill(0)
         }
+        recordMemory()
     }
 
     private fun retire(entry: Entry) {
@@ -259,12 +267,14 @@ internal class BoundedArchiveFragmentCache(
             eldest.remove()
             retire(victim.value)
         }
+        recordMemory()
     }
 
     @Synchronized fun clear() {
         entries.values.forEach(::retire)
         entries.clear()
         check(bytesRetained == 0L)
+        recordMemory()
     }
 }
 

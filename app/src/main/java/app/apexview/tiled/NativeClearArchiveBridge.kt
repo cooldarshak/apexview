@@ -17,6 +17,7 @@ import java.util.concurrent.locks.ReentrantLock
  */
 internal class NativeClearArchiveBridge(
     private val openEngine: (Context, Int, Int) -> NativeStitchingEngine = { context, input, output ->
+      NativeStitchingDeviceBudget.admit {
         val h = requireNotNull(NativeStitchingDeviceBudget.sample(context))
         val b = if (h.lowMemory) null else
             NativeStitchingEngine.planClearAtlas(h.lowRam, h.available, h.threshold, h.jvmHeadroom, input, output)
@@ -27,6 +28,7 @@ internal class NativeClearArchiveBridge(
             "arenaBytes=${b?.reservedBytes ?: 0} workspaceBytes=${b?.let { NativeStitchingEngine.atlasWorkspaceBytes(it.inputBytes, it.outputBytes) } ?: 0} " +
             "ceilingBytes=${b?.ceilingBytes ?: 0}")
         NativeStitchingEngine.open(b ?: throw IllegalStateException("Clear atlas memory admission rejected"))
+      }
     },
 ) : AutoCloseable {
     private data class State(
@@ -41,6 +43,7 @@ internal class NativeClearArchiveBridge(
     // Accessed only under work, except immutable status in state.
     private var engine: NativeStitchingEngine? = null
     private var engineEpoch = -1L
+    private var smallerJobs = 0
     private var verifiedEpoch = -1L
     private var verifiedWindowCount = 0
     private var verifiedInits: List<ByteArray> = emptyList()
@@ -191,7 +194,8 @@ internal class NativeClearArchiveBridge(
             val inits = request.feeds.map { it.initializationSegment }
             val media = sources.map { it.first }
             val inputSize = NativeClearArchiveJob.windowSize(geometry, inits, media)
-            if (engine != null && engineEpoch != selected.epoch) {
+            val generationChanged = engine != null && engineEpoch != selected.epoch
+            if (generationChanged) {
                 check(requireNotNull(engine).seek() > 0)
                 engineEpoch = selected.epoch
                 clearProof()
@@ -227,7 +231,10 @@ internal class NativeClearArchiveBridge(
                 // composer for the exact size or sampling new headroom.
                 if (engine != null && inputSize > requireNotNull(engine).budget.inputBytes) closeOwned()
                 val required = referenceSize()
-                if (engine == null || required > requireNotNull(engine).budget.outputBytes) openSized(required)
+                val existing = engine?.budget
+                val shrink = generationChanged && smallerJobs >= 8 && existing != null &&
+                    inputSize <= existing.inputBytes / 2 && required <= existing.outputBytes / 2
+                if (existing == null || required > existing.outputBytes || shrink) openSized(required)
             }
             reason = "NATIVE_CLEAR_WORKER_REJECTED"
             val encoded = NativeClearArchiveJob.encodeParts(request.outputTrackId, request.firstOutputSequenceNumber,
@@ -282,6 +289,9 @@ internal class NativeClearArchiveBridge(
                 sampleCount = Math.addExact(sampleCount, fragment.sampleCount)
             }
             checkCurrent(selected.epoch)
+            val actualOutput = 8L + out.initialization.size + out.media.sumOf { it.size.toLong() + if (count > 1) 4L else 0L }
+            smallerJobs = if (encoded.size <= active.budget.inputBytes / 2 && actualOutput <= active.budget.outputBytes / 2)
+                (smallerJobs + 1).coerceAtMost(8) else 0
             val stats = active.copyStats()
             Log.i("ApexviewSingleDecoder", "GB_CLEAR_NATIVE_FRAGMENT generation=${selected.epoch} " +
                 "referenceCompared=${baseline != null} sequence=${request.firstOutputSequenceNumber} deadlineMs=$timeoutMs wallMs=${(System.nanoTime() - started) / 1_000_000L} " +
@@ -350,6 +360,7 @@ internal class NativeClearArchiveBridge(
         val old = engine
         engine = null
         engineEpoch = -1
+        smallerJobs = 0
         clearProof()
         if (old != null) old.close() // worker only; native joins before re-admission
     }
@@ -365,6 +376,7 @@ internal class NativeClearArchiveBridge(
                 old = engine
                 engine = null
                 engineEpoch = -1
+                smallerJobs = 0
                 clearProof()
             }
         } finally { work.unlock() }

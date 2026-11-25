@@ -101,4 +101,24 @@ class ProtectedDashResourceStoreTest {
         assertArrayEquals(ByteArray(6), bytes)
         store.close()
     }
+
+    @Test fun retainedFragmentIsReusedAcrossWindowsAndPinnedUntilReadEnds() {
+        val bytes = byteArrayOf(3,4,5)
+        val history = HeapFragmentLease.take(bytes)
+        val store = ProtectedDashResourceStore()
+        store.replace(pkg().copy(sharedHeapResources = mapOf("a" to history.retain())))
+        val reader = requireNotNull(store.acquire("a"))
+        store.replace(pkg().copy(sharedHeapResources = mapOf("a" to history.retain())))
+        assertEquals(3L,store.snapshot().uniqueHeapBytes)
+        assertEquals(0L,store.snapshot().retiredReadBytes)
+        history.close()
+        store.replace(pkg("b" to byteArrayOf(9)))
+        val target = ByteArray(3)
+        reader.readTo(target,0,0,3)
+        assertArrayEquals(byteArrayOf(3,4,5),target)
+        reader.close()
+        assertArrayEquals(ByteArray(3),bytes)
+        store.close()
+    }
+
 }

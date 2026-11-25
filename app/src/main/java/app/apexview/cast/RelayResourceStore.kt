@@ -13,7 +13,7 @@ internal class RelayResourceStore(
 ) : AutoCloseable {
     init { require(maxBytes > 0 && maxResources > 0 && maxReaders > 0) }
     private class Entry(val heap: ByteArray?, val identity: Any, val release: () -> Unit,
-                        val native: app.apexview.tiled.NativeFragmentLease? = null) {
+                        val native: app.apexview.tiled.FragmentReadLease? = null) {
         init { require((heap == null) != (native == null)) }
         val size: Int get() = heap?.size ?: requireNotNull(native).size
         val backing: Any get() = heap ?: requireNotNull(native).storageIdentity
@@ -27,7 +27,7 @@ internal class RelayResourceStore(
     private var closed = false
 
     class Lease internal constructor(private val heap: ByteArray?, private val release: () -> Unit,
-                                     private val native: app.apexview.tiled.NativeFragmentLease? = null) : AutoCloseable {
+                                     private val native: app.apexview.tiled.FragmentReadLease? = null) : AutoCloseable {
         val size = heap?.size ?: requireNotNull(native).size
         private var closed = false
         @Synchronized fun writeTo(output: OutputStream, start: Int, count: Int) {
@@ -53,19 +53,29 @@ internal class RelayResourceStore(
         return Snapshot(current.values.sumOf { it.size.toLong() }, pinnedBytes, readers,
             retired.sumOf { it.size.toLong() },
             unique.filter { it.heap != null && it.identity === it.heap }.sumOf { it.size.toLong() },
-            unique.filter { it.heap != null && it.identity !== it.heap }.sumOf { it.size.toLong() },
-            unique.filter { it.native != null }.sumOf { it.size.toLong() })
+            unique.filter { (it.heap != null && it.identity !== it.heap) || it.native?.nativeBacked == false }.sumOf { it.size.toLong() },
+            unique.filter { it.native?.nativeBacked == true }.sumOf { it.size.toLong() })
     }
 
+    private fun recordMemory() {
+        val unique = current.values + pinned.filterNot { it.current }
+        val exclusive = unique.filter { it.heap != null && it.identity === it.heap }
+        app.apexview.MediaMemoryAccounting.process.record(this,
+            app.apexview.MediaMemoryAccounting.Kind.RELAY_EXCLUSIVE,
+            exclusive.sumOf { it.size.toLong() }, exclusive.filter { it.readers > 0 }.sumOf { it.size.toLong() })
+    }
     @Synchronized fun publish(
         next: Map<String, ByteArray>,
         shared: Map<String, SharedRelayResource> = emptyMap(),
         native: Map<String, app.apexview.tiled.NativeFragmentLease> = emptyMap(),
+        sharedHeap: Map<String, app.apexview.tiled.HeapFragmentLease> = emptyMap(),
     ) {
         check(!closed)
-        require(next.size.toLong() + shared.size + native.size <= maxResources &&
+        val retainedMedia: Map<String, app.apexview.tiled.FragmentReadLease> = native + sharedHeap
+        require(retainedMedia.size == native.size + sharedHeap.size &&
+            next.size.toLong() + shared.size + retainedMedia.size <= maxResources &&
             next.values.sumOf { it.size.toLong() } + shared.values.sumOf { it.size.toLong() } +
-                native.values.sumOf { it.size.toLong() } <= maxBytes) {
+                retainedMedia.values.sumOf { it.size.toLong() } <= maxBytes) {
             "Receiver media window exceeds its bounded memory budget"
         }
         val existing = IdentityHashMap<Any, Entry>()
@@ -76,9 +86,9 @@ internal class RelayResourceStore(
         current.values.forEach { backingOwners[it.backing] = it.identity }
         pinned.forEach { backingOwners[it.backing] = it.identity }
         val seen = IdentityHashMap<Any, Boolean>()
-        val replacement = LinkedHashMap<String, Entry>(next.size + shared.size + native.size)
+        val replacement = LinkedHashMap<String, Entry>(next.size + shared.size + retainedMedia.size)
         val acquired = mutableListOf<SharedRelayResource.Retained>()
-        val redundantNative = mutableListOf<app.apexview.tiled.NativeFragmentLease>()
+        val redundantNative = mutableListOf<app.apexview.tiled.FragmentReadLease>()
         fun validate(name: String, identity: Any, backing: Any) {
             val currentOwner = backingOwners[backing]
             require(name.matches(resourceName) && name != "." && name != ".." &&
@@ -101,7 +111,7 @@ internal class RelayResourceStore(
                     Entry(handle.bytes, resource, handle.release)
                 }
             }
-            native.forEach { (name, lease) ->
+            retainedMedia.forEach { (name, lease) ->
                 val identity = lease.storageIdentity
                 validate(name, identity, identity)
                 val previous = existing[identity] ?: retired[identity]
@@ -125,6 +135,7 @@ internal class RelayResourceStore(
         current = replacement
         previous.values.filterNot { it in retained }.forEach(::retire)
         redundantNative.forEach { it.close() }
+        recordMemory()
     }
 
     @Synchronized fun acquire(name: String): Lease? {
@@ -133,6 +144,7 @@ internal class RelayResourceStore(
             return null
         if (entry.readers++ == 0) { pinned.add(entry); pinnedBytes += entry.size }
         readers++
+        recordMemory()
         return Lease(entry.heap, {
             synchronized(this) {
                 check(entry.readers > 0 && readers > 0)
@@ -142,6 +154,7 @@ internal class RelayResourceStore(
                     pinnedBytes -= entry.size
                     if (!entry.current) entry.release()
                 }
+                recordMemory()
             }
         }, entry.native)
     }
@@ -159,5 +172,6 @@ internal class RelayResourceStore(
         val previous = current
         current = emptyMap()
         previous.values.forEach(::retire)
+        recordMemory()
     }
 }

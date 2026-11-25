@@ -9,11 +9,14 @@ internal class RelayMediaBudget(private val maxBytes: Long = 32L * 1024 * 1024) 
             "Cast audio and text exceed their retained-byte budget"
         }
         retainedBytes += bytes.size
+        recordMemory()
         return SharedRelayResource(bytes) {
-            synchronized(this) { retainedBytes -= bytes.size }
+            synchronized(this) { retainedBytes -= bytes.size; recordMemory() }
         }
     }
 
+    private fun recordMemory() = app.apexview.MediaMemoryAccounting.process.record(this,
+        app.apexview.MediaMemoryAccounting.Kind.SIDECAR, retainedBytes)
     @Synchronized fun bytesInUse() = retainedBytes
 }
 

@@ -13,11 +13,13 @@ class ProcessMemoryDiagnosticTest {
     }
     @Test fun nativeEngineReservationAndActualAreDistinct() {
         assertEquals("nativeEngineArena=UNAVAILABLE", ProcessMemoryDiagnostic.engineFields(null))
-        assertEquals("nativeEngineArena=UNAVAILABLE", ProcessMemoryDiagnostic.engineFields(longArrayOf(1, 10, 8, 3)))
-        val result = ProcessMemoryDiagnostic.engineFields(longArrayOf(1, 100, 40, 20))
+        assertEquals("nativeEngineArena=UNAVAILABLE", ProcessMemoryDiagnostic.engineFields(longArrayOf(1, 10, 8, 3, 1, 8, 0, 0, 0)))
+        val result = ProcessMemoryDiagnostic.engineFields(longArrayOf(1, 100, 40, 20, 2, 60, 15, 25, 40))
         assertTrue(result.contains("nativeEngineReservedBytes=100"))
         assertTrue(result.contains("nativeEnginePayloadBytes=40"))
         assertTrue(result.contains("nativeEngineBridgeBytes=20"))
+        assertTrue(result.contains("nativeEnginePeakPayloadBytes=60"))
+        assertTrue(result.contains("nativeEngineInputCopyBytes=15"))
     }
     @Test fun pinnedBackingAndLogicalPayloadAreNotAddedTwice() {
         val result = ProcessMemoryDiagnostic.fragmentFields(longArrayOf(100, 80, 70, 2, 4))

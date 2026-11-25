@@ -153,7 +153,7 @@ internal class NativeComposedCastSession(
             windowTransferred = true
             // Heap arrays transfer to the package. Its native entries retained
             // separate leases; the detached window's original tokens end here.
-            window.fragments.forEach { it.nativeMedia?.close() }
+            window.fragments.forEach { it.closeRetained() }
             val publication = CastDashPublication(video)
             for (track in audioTracks.values) track.appendTo(publication, requireNotNull(sourceStartUs))
             textTracks.values.forEach { it.appendTo(publication) }
@@ -164,7 +164,7 @@ internal class NativeComposedCastSession(
             protectedOutput = !capture.clearOutput || audioTracks.values.any { it.encrypted }
             captured = true
             android.util.Log.i("PitwallCast", "GC_CAST_STITCHING requested=${if (nativeRequested) "RUST" else "JVM"} " +
-                "route=${capture.stitchingRoute(group)} nativePublishedBytes=${video.nativeResources.values.sumOf { it.size.toLong() }}")
+                "route=${capture.stitchingRoute(group)} nativePublishedBytes=${video.nativeResources.values.sumOf { it.size.toLong() }} sharedHeapPublishedBytes=${video.sharedHeapResources.values.sumOf { it.size.toLong() }}")
             android.util.Log.i("PitwallCast", "PROTECTED_CMAF_RELAY sources=${feeds.size} source=${shape.displayWidth}x${shape.displayHeight} atlas=${width}x$height encrypted=$protectedOutput frames=${video.sampleCount} fullPictures=true sharedPublicationBytes=${publication.reusedBytes} sharedRetainedBytes=${sidecars.bytesInUse()}")
         } finally { packaged?.zero(); if (!windowTransferred) window.zero(); pssh?.fill(0) }
         snapshot
