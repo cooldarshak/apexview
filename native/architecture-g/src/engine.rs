@@ -28,8 +28,9 @@ pub const PANIC:i64=-3;
 pub const BACKPRESSURE:i64=-4;
 pub const DEADLINE:i64=-5;
 pub const CLOSED:i64=-6;
-const MAX_BUFFER:usize=8*1024*1024;
-const MAX_BUDGET:usize=32*1024*1024;
+pub const OUTPUT_CAPACITY:i64=-7;
+const MAX_BUFFER:usize=crate::bmff::MAX_ATLAS_BYTES;
+const MAX_BUDGET:usize=192*1024*1024;
 const WORKER_STACK:usize=512*1024;
 const OVERHEAD_RESERVE:usize=64*1024;
 
@@ -139,7 +140,7 @@ impl Engine {
     pub fn submit(&self,generation:i64,source:&[u8],prefix:usize,count:usize,
                   foreground:bool,slack_ms:u64)->i64 {
         if !(1..=4).contains(&prefix) || !(1..=64).contains(&count) ||
-            !source.len().is_multiple_of(count) {
+            source.len() > crate::annex_b::MAX_BYTES || !source.len().is_multiple_of(count) {
             return INVALID;
         }
         self.enqueue(generation, source, Command::Convert { prefix, count }, foreground, slack_ms)
@@ -265,8 +266,9 @@ fn run_worker(shared:Shared) {
             let input = &buffers.input[..work.len];
             match work.command {
                 Command::Convert { prefix, count } =>
-                    convert_fixed_batch(input, work.len / count, count, prefix, &mut buffers.output),
-                Command::ClearAtlas => atlas.run(work.generation, input, &mut buffers.output).ok(),
+                    convert_fixed_batch(input, work.len / count, count, prefix, &mut buffers.output).ok_or(INVALID),
+                Command::ClearAtlas => atlas.run(work.generation, input, &mut buffers.output)
+                    .map_err(|error| if error == crate::bmff::Error::Capacity { OUTPUT_CAPACITY } else { INVALID }),
             }
         }));
         let mut s=shared.0.lock().expect("engine mutex");
@@ -275,7 +277,7 @@ fn run_worker(shared:Shared) {
         slot.buffers=Some(buffers);
         if obsolete {slot.recycle();continue;}
         slot.result=if Instant::now()>=work.deadline {DEADLINE} else {
-            match result {Ok(Some(n))=>n as i64,Ok(None)=>INVALID,Err(_)=>PANIC}
+            match result {Ok(Ok(n))=>n as i64,Ok(Err(code))=>code,Err(_)=>PANIC}
         };
         slot.stage=if slot.result>0 {Stage::Ready} else {Stage::Failed};
     }
@@ -294,6 +296,21 @@ mod tests {
             thread::yield_now();
         }
     }
+    #[test]
+    fn real_four_feed_budget_is_admitted_without_weakening_workspace_checks() {
+        let input = 6_300_000;
+        let output = 7_800_000;
+        let b = Budget { slots: 2, input, output, ceiling: 96 * 1024 * 1024 };
+        let required = b.reserved().unwrap() + atlas_job::workspace_reserve(input, output).unwrap();
+        assert!(required > 32 * 1024 * 1024 && required <= b.ceiling);
+        let mut engine = Engine::new(b).unwrap();
+        let token = engine.submit_clear_atlas(1, b"bad", true, 5000);
+        assert!(token > 0);
+        assert!(engine.close());
+        assert!(Budget { ceiling: MAX_BUDGET + 1, ..b }.reserved().is_none());
+        assert!(Budget { input: MAX_BUFFER + 1, ..b }.reserved().is_none());
+    }
+
     #[test]
     fn clear_atlas_requires_workspace_headroom_beyond_fixed_slots() {
         let budget = Budget { slots: 2, input: 32, output: 32, ceiling: 1024 * 1024 };

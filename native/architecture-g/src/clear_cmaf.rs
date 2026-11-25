@@ -1,5 +1,5 @@
 //! Bounded clear fragment packaging, matching HevcClearCmafFragmentWriter.
-use crate::bmff::MAX_BYTES;
+use crate::bmff::MAX_ATLAS_BYTES;
 use crate::clear_slice::Parts;
 
 const MAX_SAMPLES: usize = 4096;
@@ -72,7 +72,7 @@ fn total_size(mut layout: impl ExactSizeIterator<Item = Option<Layout>>) -> Opti
         }
         total.checked_add(sample.size)
     })?;
-    (total <= MAX_BYTES).then_some(total)
+    (total <= MAX_ATLAS_BYTES).then_some(total)
 }
 
 pub fn size(samples: &[Sample<'_>]) -> Option<usize> {

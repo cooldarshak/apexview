@@ -64,8 +64,35 @@ class NativeStitchingFoundationTest {
         assertTrue(low!!.reservedBytes + 4L*low.inputBytes + low.outputBytes + 8*mib <= low.ceilingBytes)
         // The old arena-only plan accepted this combination. The actual
         // Rust worker needs additional parser workspace and must reject it.
-        assertNotNull(NativeStitchingEngine.plan(true,512*mib,128*mib,128*mib,1024*1024,1024*1024))
-        assertNull(NativeStitchingEngine.planClearAtlas(true,512*mib,128*mib,128*mib,1024*1024,1024*1024))
+        assertNotNull(NativeStitchingEngine.plan(true,256*mib,128*mib,128*mib,1024*1024,1024*1024))
+        assertNull(NativeStitchingEngine.planClearAtlas(true,256*mib,128*mib,128*mib,1024*1024,1024*1024))
+        // Identical low-RAM class, more measured headroom: now admissible.
+        assertNotNull(NativeStitchingEngine.planClearAtlas(true,512*mib,128*mib,128*mib,1024*1024,1024*1024))
+    }
+    @Test fun realFourFeedAndLargerWindowsUseActualHeadroom() {
+        val mib = 1024L*1024L
+        // Rounded maxima from the captured real four-feed F1 archive.
+        val input = 6_300_000
+        val output = 7_800_000
+        val phone = NativeStitchingEngine.planClearAtlas(false,4096*mib,128*mib,256*mib,input,output)!!
+        assertEquals(2, phone.slots)
+        assertTrue(phone.inputBytes >= input && phone.outputBytes >= output)
+        assertTrue(phone.ceilingBytes > 32*mib)
+        val required = phone.reservedBytes + NativeStitchingEngine.atlasWorkspaceBytes(phone.inputBytes,phone.outputBytes)
+        assertTrue(required <= phone.ceilingBytes)
+        assertTrue(phone.ceilingBytes + phone.inputBytes + 2L*phone.outputBytes + 8*mib <= (4096-128)*mib/8)
+        assertNull(NativeStitchingEngine.planClearAtlas(true,512*mib,128*mib,128*mib,input,output))
+        val roomyTv = NativeStitchingEngine.planClearAtlas(true,1152*mib,128*mib,128*mib,input,output)!!
+        assertEquals(input,roomyTv.inputBytes)
+        assertEquals(output,roomyTv.outputBytes)
+        assertNull(NativeStitchingEngine.planClearAtlas(false,4096*mib,128*mib,8*mib,input,output))
+        val bigger = NativeStitchingEngine.planClearAtlas(false,4096*mib,128*mib,256*mib,10*1024*1024,11*1024*1024)
+        assertNotNull(bigger)
+        val maxPacket = NativeStitchingEngine.MAX_ATLAS_PACKET
+        val maximum = NativeStitchingEngine.planClearAtlas(false,4096*mib,128*mib,256*mib,maxPacket,maxPacket)!!
+        assertTrue(maximum.reservedBytes + NativeStitchingEngine.atlasWorkspaceBytes(maxPacket,maxPacket) <= maximum.ceilingBytes)
+        assertTrue(maximum.ceilingBytes <= 192*mib)
+        assertNull(NativeStitchingEngine.planClearAtlas(false,4096*mib,128*mib,256*mib,maxPacket+1,output))
     }
     @Test fun observedDeviceHeadroomAndHighWaterControlAdmission() {
         val mib=1024L*1024L

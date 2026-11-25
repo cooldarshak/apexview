@@ -47,6 +47,16 @@ class ArchitectureGBAndroidTest {
             assertEquals(1L, engine.release(rejected))
             Log.i("PitwallGB", "GB clear tiled worker byte parity and lease fencing PASS")
         }
+        // Real encoded fixture with a deliberately undersized output slot.
+        // A capacity-specific failure must not be published as valid output.
+        val shortBudget = requireNotNull(NativeStitchingEngine.planClearAtlas(false,
+            1024L*1024*1024, 32L*1024*1024, 128L*1024*1024, input.size, expected.size / 2))
+        assertTrue(shortBudget.outputBytes < expected.size)
+        NativeStitchingEngine.open(shortBudget).use { engine ->
+            val failed = runCatching { NativeClearArchiveJob.execute(engine,input,true,5000) {} }.exceptionOrNull()
+            assertTrue("Actual worker must report insufficient output capacity: $failed",
+                failed is NativeClearArchiveJob.OutputCapacityException)
+        }
         verifyArchiveBridge(input, expected)
     }
 
@@ -162,6 +172,41 @@ class ArchitectureGBAndroidTest {
             assertArrayEquals(expectedMedia, out.output.mediaFragments.single())
             out.output.initializationSegment.fill(0)
             out.output.mediaFragments.single().fill(0)
+        }
+
+        // Exercise the production bridge's one-time resize/recompare path
+        // using a real encoded packet, not a mocked worker result.
+        var resizeOpens = 0
+        var resizeReferences = 0
+        NativeClearArchiveBridge { _, i, o ->
+            resizeOpens++
+            val requestedOutput = if (resizeOpens == 1) o / 2 else o
+            val budget = requireNotNull(NativeStitchingEngine.planClearAtlas(false,
+                1024L*1024*1024, 32L*1024*1024, 128L*1024*1024, i, requestedOutput))
+            NativeStitchingEngine.open(budget)
+        }.use { bridge ->
+            bridge.enable(context)
+            repeat(2) {
+                val result = bridge.compose(request, expectedInit, true, 10_000) {
+                    resizeReferences++
+                    HevcClearCmafGridComposer.compose(request)
+                }
+                assertTrue(result.nativeEpoch != null)
+                bridge.publish(result.nativeEpoch) { verify(result) }
+                assertEquals(NativeStitchingSelection.Route.RUST, bridge.decision.actual)
+            }
+            assertEquals("One bounded resize, no repeated admission", 2, resizeOpens)
+            assertEquals("Reuse exact reference, then native-only", 1, resizeReferences)
+            // Force the existing synchronous failure retirement path before
+            // starting the independent low-RAM bridge test. Normal UI close
+            // deliberately retires asynchronously and must not be raced here.
+            try {
+                bridge.compose(request.copy(firstOutputSequenceNumber = 0), expectedInit, true, 5_000) {
+                    HevcClearCmafGridComposer.compose(request.copy(firstOutputSequenceNumber = 0))
+                }
+                throw AssertionError("Invalid sequence was accepted after resize")
+            } catch (_: IllegalArgumentException) { }
+            assertFalse(bridge.candidate)
         }
 
         NativeClearArchiveBridge { _, i, o ->

@@ -10,7 +10,8 @@ import java.nio.ByteOrder
  * the packet. Only validated unencrypted windows beginning at random access enter this path.
  */
 internal object NativeClearArchiveJob {
-    const val MAX_PACKET = 8 * 1024 * 1024
+    const val MAX_PACKET = NativeStitchingEngine.MAX_ATLAS_PACKET
+    class OutputCapacityException : IllegalStateException("Native clear output capacity exceeded")
     const val MAX_WINDOW = 4
 
     data class Geometry(val width: Int, val height: Int, val columns: List<Int>,
@@ -114,6 +115,7 @@ internal object NativeClearArchiveJob {
                 check(System.nanoTime() - started < timeoutMs * 1_000_000L) { "Native clear deadline" }
                 Thread.sleep(2)
             }
+            if (length == NativeStitchingEngine.OUTPUT_CAPACITY) throw OutputCapacityException()
             check(length in 10L..engine.budget.outputBytes.toLong()) { "Native clear result: $length" }
             val header = ByteArray(8)
             check(engine.read(token, 0, header, 0, 8) == 8L)

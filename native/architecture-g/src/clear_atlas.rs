@@ -1,7 +1,7 @@
 //! The clear CMAF compositor for an explicit, checked tile placement.
 //! A session owns the validated configuration. Frame data borrows only
 //! the corresponding media fragment and is written into the caller's output.
-use crate::bmff::{Error, MAX_BYTES};
+use crate::bmff::{Error, MAX_ATLAS_BYTES};
 use crate::clear_cmaf::{self, NalSample};
 use crate::clear_slice::Parts;
 use crate::cmaf_init;
@@ -351,9 +351,8 @@ impl Atlas {
                 output_bytes = output_bytes
                     .checked_add(nal.header.len() + nal.tail.len() + self.output_nal_prefix)
                     .ok_or(Error::Limit)?;
-                if output_bytes > output.len().min(MAX_BYTES) {
-                    return Err(Error::Limit);
-                }
+                if output_bytes > MAX_ATLAS_BYTES { return Err(Error::Limit); }
+                if output_bytes > output.len() { return Err(Error::Capacity); }
                 nals.push(nal);
             }
             picture_parts.push(nals);
@@ -376,6 +375,8 @@ impl Atlas {
         }
         let last = reference.samples.last().ok_or(Error::Timing)?;
         let end = last.decode_time.checked_add(i64::from(last.duration)).ok_or(Error::Timing)?;
+        let required = clear_cmaf::nal_parts_size(&samples, self.output_nal_prefix).ok_or(Error::Limit)?;
+        if required > output.len() { return Err(Error::Capacity); }
         let size = clear_cmaf::write_nal_parts(
             self.track,
             sequence,
@@ -513,7 +514,7 @@ fn require_bounded_bytes(chunks: &[&[u8]]) -> Result<(), Error> {
         .iter()
         .try_fold(0usize, |total, bytes| total.checked_add(bytes.len()))
         .ok_or(Error::Limit)?;
-    if total > MAX_BYTES {
+    if total > MAX_ATLAS_BYTES {
         return Err(Error::Limit);
     }
     Ok(())

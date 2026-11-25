@@ -1,5 +1,8 @@
 //! Bounded, borrowed ISO BMFF extents used by the clear CMAF port.
 pub(crate) const MAX_BYTES: usize = 8 * 1024 * 1024;
+// Aggregate clear job / composed fragment cap. Individual source BMFF
+// and conversion inputs retain their existing 8 MiB validation limit.
+pub(crate) const MAX_ATLAS_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BOXES: usize = 20_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9,6 +12,7 @@ pub enum Error {
     Protected,
     Metadata,
     Limit,
+    Capacity,
     Timing,
     Nal,
 }

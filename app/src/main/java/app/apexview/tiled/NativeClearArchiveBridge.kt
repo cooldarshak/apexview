@@ -18,10 +18,15 @@ import java.util.concurrent.locks.ReentrantLock
 internal class NativeClearArchiveBridge(
     private val openEngine: (Context, Int, Int) -> NativeStitchingEngine = { context, input, output ->
         val h = requireNotNull(NativeStitchingDeviceBudget.sample(context))
-        require(!h.lowMemory)
-        val b = NativeStitchingEngine.planClearAtlas(h.lowRam, h.available, h.threshold, h.jvmHeadroom, input, output)
-            ?: throw IllegalStateException("Clear atlas memory admission rejected")
-        NativeStitchingEngine.open(b)
+        val b = if (h.lowMemory) null else
+            NativeStitchingEngine.planClearAtlas(h.lowRam, h.available, h.threshold, h.jvmHeadroom, input, output)
+        Log.i("ApexviewSingleDecoder", "GB_CLEAR_MEMORY_ADMISSION input=$input output=$output " +
+            "available=${h.available} threshold=${h.threshold} jvmHeadroom=${h.jvmHeadroom} " +
+            "lowRam=${h.lowRam} lowMemory=${h.lowMemory} admitted=${b != null} " +
+            "inputCapacity=${b?.inputBytes ?: 0} outputCapacity=${b?.outputBytes ?: 0} " +
+            "arenaBytes=${b?.reservedBytes ?: 0} workspaceBytes=${b?.let { NativeStitchingEngine.atlasWorkspaceBytes(it.inputBytes, it.outputBytes) } ?: 0} " +
+            "ceilingBytes=${b?.ceilingBytes ?: 0}")
+        NativeStitchingEngine.open(b ?: throw IllegalStateException("Clear atlas memory admission rejected"))
     },
 ) : AutoCloseable {
     private data class State(
@@ -197,33 +202,58 @@ internal class NativeClearArchiveBridge(
                 verifiedGeometry == geometry && verifiedRate == rate && verifiedTrack == request.outputTrackId &&
                 verifiedInits.size == inits.size &&
                 verifiedInits.zip(inits).all { (a, b) -> a.contentEquals(b) }
-            val needReference = engine == null || !proofMatches ||
+            var needReference = engine == null || !proofMatches ||
                 inputSize > requireNotNull(engine).budget.inputBytes
-            if (needReference) {
+            fun referenceSize(): Int {
                 val ref = referenceOutput()
                 checkCurrent(selected.epoch)
                 require(ref.initializationSegment.contentEquals(expectedInit))
                 require(ref.mediaFragments.size == count)
-                val required = 8L + expectedInit.size + ref.mediaFragments.sumOf { it.size.toLong() + if (count > 1) 4L else 0L }
-                require(required in 1..NativeClearArchiveJob.MAX_PACKET.toLong())
-                if (engine == null || inputSize > requireNotNull(engine).budget.inputBytes ||
-                    required > requireNotNull(engine).budget.outputBytes) {
-                    closeOwned()
-                    reason = "NATIVE_CLEAR_MEMORY_OR_ENGINE_ADMISSION"
-                    // Exact observed sizes, no silent quality reduction or
-                    // overlapping old/new native arenas.
-                    engine = openEngine(requireNotNull(selected.context), inputSize, required.toInt())
-                    engineEpoch = selected.epoch
-                    clearProof()
+                val required = 8L + expectedInit.size + ref.mediaFragments.sumOf {
+                    it.size.toLong() + if (count > 1) 4L else 0L
                 }
+                require(required in 1..NativeClearArchiveJob.MAX_PACKET.toLong())
+                return required.toInt()
+            }
+            fun openSized(required: Int) {
+                closeOwned()
+                checkCurrent(selected.epoch)
+                reason = "NATIVE_CLEAR_MEMORY_OR_ENGINE_ADMISSION"
+                engine = openEngine(requireNotNull(selected.context), inputSize, required)
+                engineEpoch = selected.epoch
+                clearProof()
+            }
+            if (needReference) {
+                // Retire undersized native storage before asking the reference
+                // composer for the exact size or sampling new headroom.
+                if (engine != null && inputSize > requireNotNull(engine).budget.inputBytes) closeOwned()
+                val required = referenceSize()
+                if (engine == null || required > requireNotNull(engine).budget.outputBytes) openSized(required)
             }
             reason = "NATIVE_CLEAR_WORKER_REJECTED"
-            val active = requireNotNull(engine)
             val encoded = NativeClearArchiveJob.encodeWindow(request.outputTrackId, request.firstOutputSequenceNumber,
                 request.frameRateNumerator, request.frameRateDenominator, geometry, inits, media).bytes
             packet = encoded
             val started = System.nanoTime()
-            val out = NativeClearArchiveJob.executeWindow(active, encoded, count, foreground, timeoutMs) { checkCurrent(selected.epoch) }
+            var active = requireNotNull(engine)
+            val out = try {
+                NativeClearArchiveJob.executeWindow(active, encoded, count, foreground, timeoutMs) { checkCurrent(selected.epoch) }
+            } catch (_: NativeClearArchiveJob.OutputCapacityException) {
+                // Only an explicitly undersized output lease can trigger a
+                // retry. Other invalid syntax/metadata stays a hard failure.
+                val priorCapacity = active.budget.outputBytes
+                closeOwned()
+                checkCurrent(selected.epoch)
+                needReference = true
+                val required = referenceSize()
+                require(required > priorCapacity) { "Native output capacity disagrees with reference" }
+                openSized(required)
+                active = requireNotNull(engine)
+                val remaining = timeoutMs - (System.nanoTime() - started) / 1_000_000L
+                reason = "NATIVE_CLEAR_WORKER_REJECTED"
+                check(remaining > 0) { "Native clear resize deadline" }
+                NativeClearArchiveJob.executeWindow(active, encoded, count, foreground, remaining) { checkCurrent(selected.epoch) }
+            }
             nativeOutput = out
             reason = "NATIVE_CLEAR_PARITY_MISMATCH"
             require(out.initialization.contentEquals(expectedInit))

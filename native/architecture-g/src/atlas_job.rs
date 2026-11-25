@@ -4,7 +4,7 @@
 //! GBC3 uses the same single/window layouts with an explicit filter-enabled
 //! request; Rust verifies every output seam and every selected slice.
 //! Each source block carries a bounded window beginning at random access.
-use crate::bmff::{Error, Reader, MAX_BYTES};
+use crate::bmff::{Error, Reader, MAX_ATLAS_BYTES};
 use crate::clear_atlas::{Atlas, Cell, Grid, MAX_FEEDS};
 use crate::hevc_poc::Tracker;
 
@@ -54,9 +54,10 @@ impl Dispatcher {
         input: &[u8],
         output: &mut [u8],
     ) -> Result<usize, Error> {
-        if input.len() > MAX_BYTES || output.len() <= OUTPUT_HEADER {
+        if input.len() > MAX_ATLAS_BYTES || output.len() > MAX_ATLAS_BYTES {
             return Err(Error::Limit);
         }
+        if output.len() <= OUTPUT_HEADER { return Err(Error::Capacity); }
         let mut reader = Reader::new(input);
         let magic = reader.take(4)?;
         let filter = magic == FILTER_MAGIC;
@@ -163,6 +164,7 @@ impl Dispatcher {
         let atlas = &self.cached.as_ref().ok_or(Error::Metadata)?.atlas;
         let init = atlas.initialization();
         let media_offset = OUTPUT_HEADER + init.len();
+        if media_offset > output.len() { return Err(Error::Capacity); }
         let mut cursor = media_offset;
         let mut trackers = [Tracker::default(); MAX_FEEDS];
         let mut previous_end = None;
@@ -170,7 +172,7 @@ impl Dispatcher {
         for (index, row) in media[..count].iter().enumerate() {
             let number = sequence.checked_add(index as u32).ok_or(Error::Limit)?;
             let start = cursor.checked_add(if window { 4 } else { 0 }).ok_or(Error::Limit)?;
-            let destination = output.get_mut(start..).ok_or(Error::Limit)?;
+            let destination = output.get_mut(start..).ok_or(Error::Capacity)?;
             let (size, end, gate) = atlas.write_window_fragment(
                 &row[..feeds], number, destination, &mut trackers, previous_end, count == 1,
             )?;

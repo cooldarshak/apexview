@@ -9,9 +9,11 @@ import java.nio.ByteBuffer;
  * Native-owned bridge views are private and invalidated before deterministic close.
  */
 public final class NativeStitchingEngine implements AutoCloseable {
-    public static final long INVALID=-1, STALE=-2, PANIC=-3, BACKPRESSURE=-4, DEADLINE=-5, CLOSED=-6;
+    public static final long INVALID=-1, STALE=-2, PANIC=-3, BACKPRESSURE=-4, DEADLINE=-5, CLOSED=-6, OUTPUT_CAPACITY=-7;
     private static final long MIB=1024L*1024L;
     private static final long RESERVE=576L*1024L;
+    public static final int MAX_ATLAS_PACKET=16*1024*1024;
+    private static final long MAX_ATLAS_BUDGET=192*MIB;
 
     public static final class Budget {
         public final int slots, inputBytes, outputBytes;
@@ -46,14 +48,37 @@ public final class NativeStitchingEngine implements AutoCloseable {
      */
     public static Budget planClearAtlas(boolean lowRam,long availableBytes,long osThresholdBytes,
                                         long jvmHeadroom,int observedInput,int observedOutput) {
-        Budget candidate=plan(lowRam,availableBytes,osThresholdBytes,jvmHeadroom,observedInput,observedOutput);
-        if(candidate==null)return null;
-        long workspace=4L*observedInput+observedOutput+8*MIB;
-        for(int slots=candidate.slots;slots>=2;slots--) {
-            Budget b=new Budget(slots,observedInput,observedOutput,candidate.ceilingBytes);
-            if(workspace<=b.ceilingBytes-b.reservedBytes)return b;
+        if (availableBytes<=0 || osThresholdBytes<0 || availableBytes<=osThresholdBytes ||
+            jvmHeadroom<=0 || observedInput<=0 || observedOutput<=0 ||
+            observedInput>MAX_ATLAS_PACKET || observedOutput>MAX_ATLAS_PACKET) return null;
+        // The arena lives outside the Java heap. Reserve Java packet/output
+        // copies separately, and retain seven eighths of the OS surplus for
+        // codecs, GL, audio, the JVM and other apps. Do not grant capacity
+        // just because a device has a particular model or RAM class.
+        long surplus=availableBytes-osThresholdBytes;
+        long ceiling=surplus/8;
+        // The archive bridge serializes jobs; two slots preserve the
+        // foreground reservation without preallocating unused 4-slot arenas.
+        // On low RAM use exact sizes, on other devices try bounded growth
+        // headroom first, then exact sizing if the larger arena won't fit.
+        int grownInput=(int)Math.min(MAX_ATLAS_PACKET,observedInput+(observedInput+3L)/4);
+        int grownOutput=(int)Math.min(MAX_ATLAS_PACKET,observedOutput+(observedOutput+3L)/4);
+        if (!lowRam) {
+            Budget grown=atlasBudget(ceiling,jvmHeadroom,grownInput,grownOutput);
+            if (grown!=null) return grown;
         }
-        return null;
+        return atlasBudget(ceiling,jvmHeadroom,observedInput,observedOutput);
+    }
+    public static long atlasWorkspaceBytes(int input,int output) {
+        return 4L*input+output+8*MIB;
+    }
+    private static Budget atlasBudget(long ceiling,long jvmHeadroom,int input,int output) {
+        long javaTransient=input+2L*output+8*MIB;
+        // Charge native arena + workspace + the Java transfer staging against
+        // the same OS surplus. Keep Java headroom independently checked.
+        if (javaTransient>jvmHeadroom || javaTransient>=ceiling) return null;
+        Budget b=new Budget(2,input,output,Math.min(MAX_ATLAS_BUDGET,ceiling-javaTransient));
+        return b.reservedBytes+atlasWorkspaceBytes(input,output)<=b.ceilingBytes?b:null;
     }
 
     /** Compute bounded wall-clock budget from media buffer slack and speed. */

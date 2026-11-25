@@ -129,11 +129,11 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeBridg
     })).unwrap_or(std::ptr::null_mut())
 }
 fn submit_from_bridge(
-    env: &JNIEnv<'_>, handle: jlong, input: &JByteBuffer<'_>, length: jint,
+    env: &JNIEnv<'_>, handle: jlong, input: &JByteBuffer<'_>, length: jint, limit: usize,
     submit: impl FnOnce(&Engine, &[u8]) -> jlong,
 ) -> jlong {
     let Ok(n) = usize::try_from(length) else { return i64::from(INVALID); };
-    if n == 0 || n > MAX_BYTES || env.get_direct_buffer_capacity(input).ok().is_none_or(|cap| n > cap) {
+    if n == 0 || n > limit || env.get_direct_buffer_capacity(input).ok().is_none_or(|cap| n > cap) {
         return i64::from(INVALID);
     }
     let Ok(ptr) = env.get_direct_buffer_address(input) else { return i64::from(INVALID); };
@@ -153,7 +153,7 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeSubmi
     guarded(||{
         let (Ok(p),Ok(c),Ok(ms)) = (usize::try_from(prefix),usize::try_from(count),
             u64::try_from(slack)) else { return i64::from(INVALID); };
-        submit_from_bridge(&env, handle, &input, length,
+        submit_from_bridge(&env, handle, &input, length, MAX_BYTES,
             |engine, bytes| engine.submit(generation, bytes, p, c, foreground != 0, ms))
     })
 }
@@ -163,7 +163,7 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeSubmi
     length:jint,foreground:jboolean,slack:jlong)->jlong {
     guarded(||{
         let Ok(ms) = u64::try_from(slack) else { return i64::from(INVALID); };
-        submit_from_bridge(&env, handle, &input, length,
+        submit_from_bridge(&env, handle, &input, length, crate::bmff::MAX_ATLAS_BYTES,
             |engine, bytes| engine.submit_clear_atlas(generation, bytes, foreground != 0, ms))
     })
 }
@@ -178,7 +178,7 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeCopy(
     output:JByteBuffer<'_>,length:jint)->jlong {
     guarded(||{
         let (Ok(offset),Ok(n))=(usize::try_from(offset),usize::try_from(length)) else {return i64::from(INVALID);};
-        if n==0 || n>MAX_BYTES || env.get_direct_buffer_capacity(&output).ok().is_none_or(|cap|n>cap){
+        if n==0 || n>crate::bmff::MAX_ATLAS_BYTES || env.get_direct_buffer_capacity(&output).ok().is_none_or(|cap|n>cap){
             return i64::from(INVALID);
         }
         if !matches!(env.call_method(&output,"isReadOnly","()Z",&[]).and_then(|v|v.z()),Ok(false)){

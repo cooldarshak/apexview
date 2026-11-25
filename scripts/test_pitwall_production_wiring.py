@@ -629,6 +629,30 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("require(prepared.size == inputs.size)", protected)
         self.assertIn("if (!transferred) prepared.forEach { it.prefix.fill(0) }", protected)
 
+    def test_gb_atlas_admission_uses_headroom_and_bounded_capacity_retry(self):
+        base = "app/src/main/java/app/apexview/tiled/"
+        rust = "native/architecture-g/src/"
+        java = contents(base + "NativeStitchingEngine.java")
+        bridge = contents(base + "NativeClearArchiveBridge.kt")
+        session = contents(base + "HevcArchiveVodSession.kt")
+        job = contents(base + "NativeClearArchiveJob.kt")
+        engine = contents(rust + "engine.rs")
+        jni = contents(rust + "jni_bridge.rs")
+        self.assertIn("long ceiling=surplus/8", java)
+        self.assertIn("Math.min(MAX_ATLAS_BUDGET,ceiling-javaTransient)", java)
+        self.assertIn("javaTransient>jvmHeadroom", java)
+        self.assertIn("b.reservedBytes+atlasWorkspaceBytes(input,output)<=b.ceilingBytes", java)
+        self.assertIn("if (h.lowMemory) null", bridge)
+        self.assertIn("GB_CLEAR_MEMORY_ADMISSION", bridge)
+        self.assertIn("catch (_: NativeClearArchiveJob.OutputCapacityException)", bridge)
+        self.assertIn("require(required > priorCapacity)", bridge)
+        self.assertIn("val remaining = timeoutMs -", bridge)
+        self.assertIn("actualStitcher=", session)
+        self.assertIn("stitcherReason=", session)
+        self.assertIn("NativeStitchingEngine.OUTPUT_CAPACITY", job)
+        self.assertIn("crate::bmff::Error::Capacity { OUTPUT_CAPACITY }", engine)
+        self.assertIn("length, crate::bmff::MAX_ATLAS_BYTES", jni)
+
     def test_gb_semantic_parameter_equivalence_and_protected_output_setup(self):
         base = "app/src/main/java/app/apexview/tiled/"
         rust = "native/architecture-g/src/"

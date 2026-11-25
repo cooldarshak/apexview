@@ -560,6 +560,7 @@ internal class HevcArchiveVodSession(
                     "durationMs=$mediaMs producerSlackMs=${mediaMs - producerMs} " +
                     "producerSlackAt1_5xMs=${mediaMs * 2 / 3 - producerMs} " +
                     "worker=$worker actualStitcher=${if (produced.nativeEpoch != null) "RUST" else "JVM"} " +
+                    "requestedRust=${nativeClear.requested} stitcherReason=${nativeClear.decision.reason} " +
                     "clock=PLAYER_REQUEST cache=$cacheEntries cachedBytes=$cachedByteCount")
             } finally {
                 composed.initializationSegment.fill(0)
