@@ -45,6 +45,28 @@ class NativeStitchingFoundationTest {
             assertTrue(on.diagnostic(path).contains("actual=JVM"))
         }
     }
+    @Test fun onlyActuallyPublishedClearCanReportRust() {
+        val s = NativeStitchingSelection
+        NativeStitchingSelection.Path.entries.forEach { path ->
+            val selected = s.resolve(true, path, clearPublished = true)
+            assertEquals(if (path == NativeStitchingSelection.Path.VERIFIED_CLEAR) NativeStitchingSelection.Route.RUST else NativeStitchingSelection.Route.JVM, selected.actual)
+            assertEquals(NativeStitchingSelection.Route.JVM, s.resolve(false, path, clearPublished = true).actual)
+        }
+        val rejected = s.resolve(true, NativeStitchingSelection.Path.VERIFIED_CLEAR, true, "TEST_FALLBACK")
+        assertEquals(NativeStitchingSelection.Route.JVM, rejected.actual)
+        assertTrue(rejected.requested)
+        assertEquals("TEST_FALLBACK", rejected.reason)
+    }
+    @Test fun clearAtlasAdmissionIncludesNativeWorkspaceReserve() {
+        val mib = 1024L * 1024L
+        val low = NativeStitchingEngine.planClearAtlas(true,512*mib,128*mib,128*mib,256*1024,256*1024)
+        assertNotNull(low)
+        assertTrue(low!!.reservedBytes + 4L*low.inputBytes + low.outputBytes + 8*mib <= low.ceilingBytes)
+        // The old arena-only plan accepted this combination. The actual
+        // Rust worker needs additional parser workspace and must reject it.
+        assertNotNull(NativeStitchingEngine.plan(true,512*mib,128*mib,128*mib,1024*1024,1024*1024))
+        assertNull(NativeStitchingEngine.planClearAtlas(true,512*mib,128*mib,128*mib,1024*1024,1024*1024))
+    }
     @Test fun observedDeviceHeadroomAndHighWaterControlAdmission() {
         val mib=1024L*1024L
         val sizes=app.apexview.tiled.NativeStitchingBudgetObservation()

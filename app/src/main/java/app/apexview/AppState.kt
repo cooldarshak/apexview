@@ -659,6 +659,8 @@ class AppState(
         }
         applyVideoBudget()
         if (singleDecoderSceneActive) {
+            if (settings.nativeRustStitching && !castingActive)
+                singleDecoderScenePlayer?.archiveSceneSession?.configureNativeClear(context)
             tiles.firstOrNull { it.audible }?.let { singleDecoderScenePlayer?.selectArchiveAudio(it.feed.sourceStream.profileLabel) }
             singleDecoderScenePlayer?.setAudible(!mutedAll)
         } else if (settings.decoderMode == DecoderMode.SINGLE && tiles.size >= 2) {
@@ -845,6 +847,9 @@ class AppState(
                         }
                     } finally { capture.reset() }
                 }
+                // Reused local clear sessions must not change the Cast source
+                // route before independent receiver parity is certified.
+                session.disableNativeClear("CAST_ROUTE", settings.nativeRustStitching)
                 android.util.Log.i("PitwallCast", "CAST_SOURCE_QUALITY actual=${session.sourceDisplayWidth}x${session.sourceDisplayHeight} feeds=${session.sourceLabels.size} atlas=${session.width}x${session.height} decoderMode=$decoderMode layoutReceiver=$usesLayoutCastReceiver")
                 val manager = context.getSystemService(android.net.ConnectivityManager::class.java)
                 val network = manager.allNetworks.firstOrNull { network -> manager.getNetworkCapabilities(network)?.let {
@@ -911,7 +916,12 @@ class AppState(
                 message = castStatus
             } finally {
                 ownedSession?.close()
-                if (generation == castPreparationGeneration) { castBusy = false; castPreparationJob = null }
+                if (generation == castPreparationGeneration) {
+                    castBusy = false; castPreparationJob = null
+                    if (!castingActive && !castPlaybackHandedOff && settings.nativeRustStitching &&
+                        (relay == null || castRelay !== relay))
+                        singleDecoderScenePlayer?.archiveSceneSession?.configureNativeClear(context)
+                }
                 if (relay != null && castRelay !== relay) relay?.close()
             }
         }
@@ -1145,6 +1155,8 @@ class AppState(
         if (localConnection == null) app.apexview.cast.local.CastConnectionService.stop(context)
         if (resumeLocal) {
             returnCastPlayback()
+            if (settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff)
+                singleDecoderScenePlayer?.archiveSceneSession?.configureNativeClear(context)
             if (singleDecoderSceneActive) singleDecoderScenePlayer?.setAudible(!mutedAll)
             else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll) }
         } else castPlaybackHandedOff = false
@@ -1506,13 +1518,24 @@ class AppState(
             session.frameRate)
     }
     fun setNativeStitchingPreference(value: Boolean) {
-        val path = NativeStitchingSelection.Path.NON_COMPOSED
-        val previous = NativeStitchingSelection.resolve(settings.nativeRustStitching, path)
+        if (settings.nativeRustStitching == value) return
+        val session = singleDecoderScenePlayer?.archiveSceneSession
+        val host = protectedCompositionHost
+        val restart = session != null && host != null && nativeArchiveTiles.isNotEmpty() &&
+            settings.decoderMode == DecoderMode.SINGLE && !castingActive && !castPlaybackHandedOff &&
+            !archiveCompositionStarting &&
+            (value || session.nativeStitchingCandidate ||
+                session.nativeStitchingDecision.actual == NativeStitchingSelection.Route.RUST)
         settings.updateNativeRustStitching(value)
-        val next = NativeStitchingSelection.resolve(value, path)
-        android.util.Log.i("ApexviewSingleDecoder", next.diagnostic(path) +
-            " restartRequired=${NativeStitchingSelection.requiresRestart(previous,next)}")
-        // Both effective engines remain JVM in G-A. No pointless player reset.
+        // Retire the old generation before the existing coordinator prepares
+        // a replacement. During Cast defer ON until local playback returns.
+        session?.disableNativeClear(if (restart) "PREFERENCE_RESTART" else
+            if (castingActive || castPlaybackHandedOff) "CAST_ROUTE" else "PREFERENCE_CHANGED", value)
+        val path = if (session != null) NativeStitchingSelection.Path.VERIFIED_CLEAR
+            else NativeStitchingSelection.Path.NON_COMPOSED
+        val next = session?.nativeStitchingDecision ?: NativeStitchingSelection.resolve(value, path)
+        android.util.Log.i("ApexviewSingleDecoder", next.diagnostic(path) + " restartRequired=$restart")
+        if (restart && host != null) startArchiveSingleDecoderComposition(host.contentId)
     }
 
     private fun logStitchingEngine(path: NativeStitchingSelection.Path) {
@@ -2865,6 +2888,8 @@ class AppState(
                     append("Source: ${session.selectedHeight ?: "verified in CMAF"}p · Full feeds: YES\n")
                     append("Composed picture: ${session.width}x${session.height} at ${session.frameRate}fps\n")
                     append("Archive timeline: finite VOD · native audio/video clock\n")
+                    append(session.nativeStitchingDecision.diagnostic(NativeStitchingSelection.Path.VERIFIED_CLEAR))
+                    append('\n')
                 }
                 append("Source decoders released (callbacks): $released\n")
                 append("Composed decoder: ${if (transferred) host.feed.activeVideoDecoderName ?: "NOT OBSERVED" else "NOT STARTED"}\n")
@@ -2910,7 +2935,8 @@ class AppState(
                         val minimumHeight = if (composedQuality == VideoQuality.P1080) 1080 else 0
                         val session = capture.prepareVod(sourcePlan.feeds, probePositionMs, host.feed.sourceStream.profileLabel,
                             preferredHeight, settings.commentary, minimumHeight, desired)
-                        if(settings.nativeRustStitching) session.configureNativeBudget(context)
+                        if (settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff)
+                            session.configureNativeClear(context)
                         android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_QUALITY content=$contentId " +
                             "feeds=${selected.size} requested=${PerFeedQualityPolicy.description(desired.keys.toList(), selected.map(::qualityFor))} " +
                             "source=${session.sourceDisplayWidth}x${session.sourceDisplayHeight} mixed=${session.mixedSourceRects.isNotEmpty()} " +
@@ -2950,6 +2976,9 @@ class AppState(
                         // One Media3 player now loads both the composed video and selected audio.
                         // Stopped originals perform no downloads and cannot move its clock.
                         selected.forEach { it.feed.suspendForArchiveComposition(); it.feed.setAudible(false) }
+                        if (settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff)
+                            session.configureNativeClear(context)
+                        else session.disableNativeClear("PREFERENCE_OR_CAST_ROUTE", settings.nativeRustStitching)
                         host.feed.startArchiveVodPlayback(session, handoffPositionMs, playing)
                         singleDecoderFallbackTileId = null
                         transferred = true

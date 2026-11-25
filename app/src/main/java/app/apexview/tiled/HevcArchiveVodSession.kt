@@ -53,6 +53,7 @@ internal class HevcArchiveVodSession(
             require(it.errors.isEmpty() && it.tracks.size == 1) { "Invalid archive source initialization" }
         }
     }
+    private val nativeClear = NativeClearArchiveBridge()
     private val nativeBudgetObservation = NativeStitchingBudgetObservation()
     @Volatile private var nativeBudgetContext: android.content.Context? = null
     private val httpCoalescedBytes = java.util.concurrent.atomic.AtomicLong()
@@ -62,6 +63,25 @@ internal class HevcArchiveVodSession(
     fun configureNativeBudget(context: android.content.Context) {
         nativeBudgetContext=context.applicationContext
         nativeBudgetObservation.log(context.applicationContext)
+    }
+
+    val nativeStitchingDecision: NativeStitchingSelection.Decision get() = nativeClear.decision
+    val nativeStitchingCandidate: Boolean get() = nativeClear.candidate
+
+    /** Only the verified local clear multi-feed archive owner enables dispatch.
+     * The initial JVM probe has already validated the representation. */
+    fun configureNativeClear(context: android.content.Context) {
+        if (inputs.size < 2) return
+        synchronized(cacheLock) {
+            if (closed || initialization == null) return
+            nativeClear.enable(context)
+        }
+        configureNativeBudget(context)
+    }
+
+    fun disableNativeClear(reason: String, requested: Boolean) {
+        synchronized(cacheLock) { nativeClear.disable(reason, requested) }
+        if (!requested) nativeBudgetContext = null
     }
 
     private val cache = BoundedArchiveFragmentCache()
@@ -226,6 +246,7 @@ internal class HevcArchiveVodSession(
     /** Stop stale warm-ahead work as soon as a user seeks to a different fragment. */
     fun prioritizeSeek(positionMs: Long) {
         val target = segmentAt(ArchiveTimelineSearch.msToUs(positionMs))
+        synchronized(cacheLock) { if (!closed) nativeClear.invalidateForSeek() }
         preemptUnrelatedWarmup(target, seek = true)
     }
 
@@ -406,19 +427,34 @@ internal class HevcArchiveVodSession(
                 OwnedArchiveInitializations.snapshot(inputs.map { it.initialization })
             }
             val compositionStarted = System.nanoTime()
-            val composed = try {
+            val produced = try {
                 // Every pre-composition exception, including feed setup and seek/close
                 // validation, must wipe owned initialization snapshots.
                 val composingFeeds = inputs.mapIndexed { i, input -> HevcClearCmafGridComposer.Feed(
                     ownedInits.copies[i], batches.map { it[i] }, input.label, validatedInitializations[i], listOf(inspectedMedia[i])) }
                 checkOpen()
-                if (inputs.size == 1) HevcClearCmafGridComposer.passThrough(composingFeeds.single())
-                else HevcClearCmafGridComposer.compose(HevcClearCmafGridComposer.Request(
-                    composingFeeds,
-                    mixedAtlas?.grid ?: HevcOutputGridDimensions(columns * requireNotNull(atlas).columns, rows * atlas.rows), cells,
-                    firstOutputSequenceNumber = anchor + 1L,
-                    frameRateNumerator = (trackScale / divisor).toInt(), frameRateDenominator = (step / divisor).toInt()))
+                if (inputs.size == 1) NativeClearArchiveBridge.Produced(
+                    HevcClearCmafGridComposer.passThrough(composingFeeds.single()))
+                else {
+                    val request = HevcClearCmafGridComposer.Request(
+                        composingFeeds,
+                        mixedAtlas?.grid ?: HevcOutputGridDimensions(columns * requireNotNull(atlas).columns, rows * atlas.rows), cells,
+                        firstOutputSequenceNumber = anchor + 1L,
+                        frameRateNumerator = (trackScale / divisor).toInt(), frameRateDenominator = (step / divisor).toInt())
+                    val expectedInit = if (nativeClear.candidate) synchronized(cacheLock) {
+                        checkOpen(); initialization?.copyOf()
+                    } else null
+                    if (expectedInit == null) NativeClearArchiveBridge.Produced(HevcClearCmafGridComposer.compose(request))
+                    else try {
+                        nativeClear.compose(request, expectedInit,
+                            foreground = Thread.currentThread().name != "ApexviewVodWarm",
+                            timeoutMs = (groups[number].durationUs / 1_000L).coerceIn(1L, 5_000L)) {
+                            HevcClearCmafGridComposer.compose(request)
+                        }
+                    } finally { expectedInit.fill(0) }
+                }
             } finally { ownedInits.close() }
+            val composed = produced.output
             var publishedFragment: ByteArray? = null
             try {
                 checkOpen()
@@ -444,6 +480,7 @@ internal class HevcArchiveVodSession(
                 // DataSource request behind a speculative producer's cacheLock.
                 val (cacheEntries, cachedByteCount) = synchronized(cacheLock) {
                     checkOpen()
+                    nativeClear.publish(produced.nativeEpoch) {
                     if (initialization == null) {
                         initialization = composed.initializationSegment.copyOf()
                         timescale = trackScale
@@ -483,7 +520,10 @@ internal class HevcArchiveVodSession(
                     cache.put(number, output)
                     publishedFragment = output
                     cache.size to cache.bytesRetained
+                    }
                 }
+                if (produced.nativeEpoch != null) android.util.Log.i("ApexviewSingleDecoder",
+                    nativeClear.decision.diagnostic(NativeStitchingSelection.Path.VERIFIED_CLEAR))
                 atlasDiagnostic?.let { android.util.Log.i("ApexviewSingleDecoder", it) }
                 val worker = if (Thread.currentThread().name == "ApexviewVodWarm") "PREFETCH" else "PLAYBACK"
                 val allocatedDuringProduction = allocatedAtStart?.let { first ->
@@ -519,7 +559,8 @@ internal class HevcArchiveVodSession(
                     "rewrittenTailStagingBytesAvoided=${composed.rewrittenTailStagingBytesAvoided} " +
                     "durationMs=$mediaMs producerSlackMs=${mediaMs - producerMs} " +
                     "producerSlackAt1_5xMs=${mediaMs * 2 / 3 - producerMs} " +
-                    "worker=$worker clock=PLAYER_REQUEST cache=$cacheEntries cachedBytes=$cachedByteCount")
+                    "worker=$worker actualStitcher=${if (produced.nativeEpoch != null) "RUST" else "JVM"} " +
+                    "clock=PLAYER_REQUEST cache=$cacheEntries cachedBytes=$cachedByteCount")
             } finally {
                 composed.initializationSegment.fill(0)
                 composed.mediaFragments.forEach { if (it !== publishedFragment) it.fill(0) }
@@ -693,6 +734,7 @@ internal class HevcArchiveVodSession(
 
     private fun shutdown() {
         closed = true
+        nativeClear.close()
         // Wake foreground waiters before shutting down speculative networking.
         // A waiter must never spend a stale 25s fetch timeout on an owned,
         // explicitly closed session.

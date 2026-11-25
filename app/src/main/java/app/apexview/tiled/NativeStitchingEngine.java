@@ -39,6 +39,23 @@ public final class NativeStitchingEngine implements AutoCloseable {
         }
         return null;
     }
+    /**
+     * Atlas dispatch reserves bounded parsing/rewrite workspace in addition to
+     * the G-A slot/bridge arena. Mirror atlas_job::workspace_reserve exactly;
+     * do not admit an engine that is guaranteed to reject every atlas job.
+     */
+    public static Budget planClearAtlas(boolean lowRam,long availableBytes,long osThresholdBytes,
+                                        long jvmHeadroom,int observedInput,int observedOutput) {
+        Budget candidate=plan(lowRam,availableBytes,osThresholdBytes,jvmHeadroom,observedInput,observedOutput);
+        if(candidate==null)return null;
+        long workspace=4L*observedInput+observedOutput+8*MIB;
+        for(int slots=candidate.slots;slots>=2;slots--) {
+            Budget b=new Budget(slots,observedInput,observedOutput,candidate.ceilingBytes);
+            if(workspace<=b.ceilingBytes-b.reservedBytes)return b;
+        }
+        return null;
+    }
+
     /** Compute bounded wall-clock budget from media buffer slack and speed. */
     public static long slackMs(long bufferedMs,long positionMs,double speed) {
         if(bufferedMs<0 || positionMs<0 || !Double.isFinite(speed) || speed<=0)return 0;

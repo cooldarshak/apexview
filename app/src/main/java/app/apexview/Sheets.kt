@@ -471,8 +471,8 @@ fun SettingsScreen(app: AppState) {
                     s.nativeRustStitching, app::setNativeStitchingPreference)
                 Text(
                     if (s.nativeRustStitching)
-                        "Requested: Rust. Active: current JVM engine. Native playback integration is not available in this build."
-                    else "OFF uses the current JVM engine. The experimental native engine is not yet available for playback.",
+                        "Requested: Rust. Eligible local clear multifeed archives verify the first native fragment against JVM. See playback diagnostics for actual engine and fallback reason. Protected and unsupported routes remain JVM."
+                    else "OFF uses the existing JVM stitching engine. Rust remains experimental.",
                     style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
                 Text("Stream type", style = Type.footnote, modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 2.dp))
