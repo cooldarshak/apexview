@@ -111,6 +111,18 @@ internal object ProtectedHevcSampleComposer {
             }
         }
 
+        // The native map is checked against every original validated range,
+        // including adjacent CBCS boundaries, without building a second list.
+        if (nativePlan?.direct == true) {
+            val nativeRanges = nativePlan.directMap(slices, nalLengthSize, totalSampleBytes.toInt())
+            if (nativeRanges != null) {
+                val encryptedTotal = slices.sumOf { it.encryptedByteCount }
+                require(nativeRanges.sumOf { it.encryptedBytes } == encryptedTotal &&
+                    nativeRanges.sumOf { it.clearBytes.toLong() + it.encryptedBytes } == totalSampleBytes)
+                return Plan(totalSampleBytes.toInt(), nalLengthSize, slices.size,
+                    nativeRanges, encryptedTotal, slices.toList())
+            }
+        }
         // Compute exact CENC metadata before materializing any ciphertext.
         val subsampleRanges = ArrayList<CmafBoxInspector.SubsampleEncryptionRange>()
         var pendingClearBytes = 0L
@@ -180,7 +192,7 @@ internal object ProtectedHevcSampleComposer {
             "$context: generated CENC subsample map changed the encrypted byte count"
         }
 
-        val verifiedRanges = nativePlan?.matchingMap(slices, nalLengthSize,
+        val verifiedRanges = nativePlan?.takeUnless { it.direct }?.matchingMap(slices, nalLengthSize,
             totalSampleBytes.toInt(), subsampleRanges) ?: subsampleRanges
         return Plan(totalSampleBytes.toInt(), nalLengthSize, slices.size,
             verifiedRanges, encryptedTotal, slices.toList())

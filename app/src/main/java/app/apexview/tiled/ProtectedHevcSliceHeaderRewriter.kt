@@ -77,7 +77,9 @@ internal object ProtectedHevcSliceHeaderRewriter {
         outputPps: HevcParameterSets.PpsMetadata,
         destinationAddress: Int,
         loopFilterAcrossSlicesOverride: Boolean? = null,
-        context: String = "Protected HEVC slice rewrite"
+        context: String = "Protected HEVC slice rewrite",
+        nativePlan: NativeProtectedPlan? = null,
+        sourceSets: List<ByteArray> = emptyList(),
     ): Borrowed {
         require(sample.isNotEmpty() && sample.size == layout.sampleSizeBytes &&
             sample.size == accessUnit.sampleSizeBytes) {
@@ -109,12 +111,13 @@ internal object ProtectedHevcSliceHeaderRewriter {
         require(mapped.nalOffset >= 0 && sourceNalEnd <= sample.size) {
             "$context: NAL $nalIndex is outside the CMAF sample"
         }
-        val rewritten = HevcSliceHeaderRewriter.rewriteInspectedProtectedParts(
-            sample, mapped, sourceSps, sourcePps, outputSps, outputPps,
-            destinationAddress, loopFilterAcrossSlicesOverride, opaqueCabacTail)
-        try {
         val expectedTailOffset = if (opaqueCabacTail) slice.firstOpaqueCabacByteOffset
             else slice.thirdClearCabacByteOffset
+        val rewritten = HevcSliceHeaderRewriter.rewriteInspectedProtectedParts(
+            sample, mapped, sourceSps, sourcePps, outputSps, outputPps,
+            destinationAddress, loopFilterAcrossSlicesOverride, opaqueCabacTail,
+            nativePlan, sourceSets, expectedTailOffset)
+        try {
         require(rewritten.sourceTailOffset == expectedTailOffset) {
             "$context: slice rewriter's CABAC splice differs from the protected access-unit inspection"
         }

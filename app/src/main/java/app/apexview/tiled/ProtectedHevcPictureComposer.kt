@@ -265,7 +265,25 @@ internal object ProtectedHevcPictureComposer {
         val rewritten = mutableListOf<ProtectedHevcSliceHeaderRewriter.Borrowed>()
         var composed: ProtectedHevcSampleComposer.Plan? = null
         try {
+        if (nativePlan?.direct == true) {
+            val sourceSets = prepared.map { feed ->
+                requireNotNull(feed.input.track.hevcConfiguration).let {
+                    it.rawVpsNals + it.rawSpsNals + it.rawPpsNals
+                }
+            }
+            val inputs = placements.map { (feed, slice, address) ->
+                val opaque = slice.clearCabacBytes < 3
+                val tail = if (opaque) slice.firstOpaqueCabacByteOffset else slice.thirdClearCabacByteOffset
+                NativeProtectedPlan.BatchInput(prepared.indexOf(feed), feed.input.sampleBytes,
+                    feed.layout.nals.single { it.index == slice.nalIndex }, requireNotNull(tail),
+                    address, opaque)
+            }
+            nativePlan.prepareBatch(sourceSets, inputs)
+        }
         placements.forEach { (feed, slice, address) ->
+            val sourceSets = if (nativePlan != null) requireNotNull(feed.input.track.hevcConfiguration).let {
+                it.rawVpsNals + it.rawSpsNals + it.rawPpsNals
+            } else emptyList()
             rewritten += ProtectedHevcSliceHeaderRewriter.rewriteBorrowed(
                 sample = feed.input.sampleBytes,
                 layout = feed.layout,
@@ -276,13 +294,13 @@ internal object ProtectedHevcPictureComposer {
                 outputSps = outputSps,
                 outputPps = outputPps,
                 destinationAddress = address,
-                context = context + " (" + feed.input.feedId + ")"
+                context = context + " (" + feed.input.feedId + ")",
+                nativePlan = nativePlan,
+                sourceSets = sourceSets,
             )
-            if (nativePlan != null) {
-                val config = requireNotNull(feed.input.track.hevcConfiguration)
+            if (nativePlan != null && !nativePlan.direct) {
                 val mapped = feed.layout.nals.single { it.index == slice.nalIndex }
-                nativePlan.verifySlice(config.rawVpsNals + config.rawSpsNals + config.rawPpsNals,
-                    feed.input.sampleBytes, mapped, rewritten.last())
+                nativePlan.verifySlice(sourceSets, feed.input.sampleBytes, mapped, rewritten.last())
             }
         }
         val payload = ProtectedHevcSampleComposer.planBorrowed(
@@ -321,6 +339,8 @@ internal object ProtectedHevcPictureComposer {
         } catch (failure: Throwable) {
             if (composed != null) composed.close() else rewritten.forEach { it.close() }
             throw failure
+        } finally {
+            nativePlan?.clearBatch()
         }
     }
 

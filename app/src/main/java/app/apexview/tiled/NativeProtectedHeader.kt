@@ -54,6 +54,64 @@ internal object NativeProtectedHeader {
         }
     }
 
+    /** Direct candidate after exact parity on the current representation.
+     * The caller still validates the generated complete fragment independently. */
+    fun directHeader(request: ProtectedHevcCmafFragmentWriter.Request, auxiliarySizes: List<Int>,
+                     generate: (ByteArray) -> ByteArray? = NativeStitchingEngine::protectedHeader): ByteArray? {
+        var packet: ByteArray? = null
+        var output: ByteArray? = null
+        var accepted = false
+        try {
+            packet = encode(request, auxiliarySizes)
+            output = generate(packet)
+            val candidate = output ?: return null
+            // Canonical box length and sequence are checked here; independent
+            // CMAF inspection subsequently verifies all timing/IV/ranges.
+            val n = request.samples.size
+            val tfdt = if (request.baseDecodeTimeTicks <= 0xffffffffL) 16 else 20
+            val expectedSize = 8 + 16 + 8 + 20 + tfdt + 20 + 16*n + 16 +
+                auxiliarySizes.sum() + 17 + n + 20
+            require(candidate.size == expectedSize)
+            val b = ByteBuffer.wrap(candidate).order(ByteOrder.BIG_ENDIAN)
+            require(b.int == expectedSize && b.int == 0x6d6f6f66 &&
+                b.int == 16 && b.int == 0x6d666864 && b.int == 0 &&
+                (b.int.toLong() and 0xffffffffL) == request.sequenceNumber)
+            // Check the canonical data/aux offsets, in addition to the
+            // independent inspector's full fragment and CBCS round trip.
+            val trun = 8 + 16 + 8 + 20 + tfdt
+            val senc = trun + 20 + 16*n
+            val saiz = senc + 16 + auxiliarySizes.sum()
+            val saio = saiz + 17 + n
+            val tfhd = 32
+            val tfdtStart = tfhd + 20
+            require(b.getInt(24) == expectedSize - 24 && b.getInt(28) == 0x74726166 &&
+                b.getInt(tfhd) == 20 && b.getInt(tfhd+4) == 0x74666864 &&
+                b.getInt(tfhd+8) == 0x00020002 &&
+                (b.getInt(tfhd+12).toLong() and 0xffffffffL) == request.trackId &&
+                b.getInt(tfhd+16) == 1 &&
+                b.getInt(tfdtStart) == tfdt && b.getInt(tfdtStart+4) == 0x74666474 &&
+                b.getInt(tfdtStart+8) == (if (tfdt == 16) 0 else 0x01000000) &&
+                b.getInt(trun) == 20+16*n && b.getInt(trun+4) == 0x7472756e &&
+                b.getInt(trun+8) == 0x01000f01 && b.getInt(trun+12) == n &&
+                b.getInt(trun + 16) == expectedSize + 8 &&
+                b.getInt(senc) == 16+auxiliarySizes.sum() && b.getInt(senc+4) == 0x73656e63 &&
+                b.getInt(senc+8) == 2 && b.getInt(senc+12) == n &&
+                b.getInt(saiz) == 17+n && b.getInt(saiz+4) == 0x7361697a &&
+                b.getInt(saiz+8) == 0 && b.get(saiz+12) == 0.toByte() &&
+                b.getInt(saiz+13) == n &&
+                b.getInt(saio) == 20 && b.getInt(saio+4) == 0x7361696f &&
+                b.getInt(saio+8) == 0 && b.getInt(saio+12) == 1 &&
+                b.getInt(saio + 16) == senc + 16)
+            auxiliarySizes.forEachIndexed { i, size ->
+                require((b.get(saiz+17+i).toInt() and 0xff) == size)
+            }
+            accepted = true
+            return candidate
+        } catch (_: RuntimeException) { return null }
+          catch (_: LinkageError) { return null }
+        finally { packet?.fill(0); if (!accepted) output?.fill(0) }
+    }
+
     /** Null means JVM fallback. Neither malformed native output nor an
      * unavailable library can change the authorized metadata or media bytes. */
     fun matchingHeader(reference: ByteArray, request: ProtectedHevcCmafFragmentWriter.Request,

@@ -58,6 +58,7 @@ internal object ProtectedHevcCmafFragmentWriter {
         context: String = "Protected HEVC CMAF fragment writer",
         preferNativeHeader: Boolean = false,
         onNativeHeaderResult: (Boolean) -> Unit = {},
+        directNativeHeader: Boolean = false,
     ): ByteArray {
         require(request.trackId in 1..UINT32_MAX &&
             request.baseDecodeTimeTicks >= 0L &&
@@ -144,6 +145,7 @@ internal object ProtectedHevcCmafFragmentWriter {
             "$context: output mdat exceeds the bounded media size"
         }
 
+        fun referenceMoof(): ByteArray {
         val tfhd = fullBox("tfhd", 0, 0x020002,
             uint32(request.trackId) + uint32(1))
         val tfdt = if (request.baseDecodeTimeTicks <= UINT32_MAX) {
@@ -190,33 +192,34 @@ internal object ProtectedHevcCmafFragmentWriter {
         require(moof.size == moofPlaceholder.size) {
             "$context: moof size changed while calculating media data offset"
         }
+        return moof
+        }
 
+        val direct = preferNativeHeader && directNativeHeader
+        val nativeMoof = if (direct) NativeProtectedHeader.directHeader(request, auxiliarySizes) else null
+        val reference = if (nativeMoof == null) referenceMoof() else null
+        val selectedMoof = nativeMoof ?: if (preferNativeHeader && !direct)
+            NativeProtectedHeader.matchingHeader(requireNotNull(reference), request, auxiliarySizes) ?: requireNotNull(reference)
+            else requireNotNull(reference)
+        val nativeAccepted = selectedMoof !== reference
         // Mirror the clear CMAF writer: the output is an exact-sized, owned
         // fragment buffer. Previously the 5-10 MB mdat payload was copied
         // into a temporary array, then copied again by box()/byte-array
         // concatenation. On 50fps four-feed CBCS this repeatedly pressured GC.
         val totalFragmentBytes = Math.addExact(
-            Math.addExact(styp.size.toLong(), moof.size.toLong()),
+            Math.addExact(styp.size.toLong(), selectedMoof.size.toLong()),
             Math.addExact(mdatBytes, 8L)
         )
         require(totalFragmentBytes <= MAX_FRAGMENT_BYTES) {
             "$context: generated fragment exceeds the output size bound"
         }
         val result = ByteArray(totalFragmentBytes.toInt())
-        var nativeMoof: ByteArray? = null
         try {
-        if (preferNativeHeader) {
-            nativeMoof = NativeProtectedHeader.matchingHeader(moof, request, auxiliarySizes)
-            onNativeHeaderResult(nativeMoof != null)
-            android.util.Log.i("ApexviewSingleDecoder",
-                "GB_PROTECTED_HEADER result=${if (nativeMoof != null) "RUST_EXACT_MATCH" else "JVM_FALLBACK"} " +
-                    "actualStitcher=JVM metadataOnly=true")
-        }
         var cursor = 0
         styp.copyInto(result, destinationOffset = cursor)
         cursor = Math.addExact(cursor, styp.size)
-        (nativeMoof ?: moof).copyInto(result, destinationOffset = cursor)
-        cursor = Math.addExact(cursor, moof.size)
+        selectedMoof.copyInto(result, destinationOffset = cursor)
+        cursor = Math.addExact(cursor, selectedMoof.size)
         ByteBuffer.wrap(result).order(ByteOrder.BIG_ENDIAN).apply {
             position(cursor)
             putInt(Math.addExact(mdatBytes, 8L).toInt())
@@ -247,7 +250,11 @@ internal object ProtectedHevcCmafFragmentWriter {
             fragment.sampleEncryptionStructureComplete &&
             fragment.sampleEncryptionCount == request.samples.size.toLong() &&
             fragment.subsampleEncryptionSignalled == true &&
-            fragment.sampleEncryptionRangesCoverSamples) {
+            fragment.sampleEncryptionRangesCoverSamples &&
+            fragment.sampleAuxiliaryInfoStructureComplete &&
+            fragment.sampleAuxiliaryPayloadStructureComplete &&
+            fragment.sampleAuxiliaryPayloadSampleCount == request.samples.size &&
+            fragment.sampleDescriptionIndex == 1L) {
             "$context: generated fragment lost protected sample timing or encryption metadata"
         }
         require(fragment.sampleTimings.size == request.samples.size &&
@@ -272,12 +279,21 @@ internal object ProtectedHevcCmafFragmentWriter {
                 "$context: generated sample " + index + " CBCS IV/subsample map failed round-trip validation"
             }
         }
+        if (preferNativeHeader) {
+            onNativeHeaderResult(nativeAccepted)
+            android.util.Log.i("ApexviewSingleDecoder",
+                "GB_PROTECTED_HEADER result=${if (!nativeAccepted) "JVM_FALLBACK" else if (direct) "RUST_VALIDATED" else "RUST_EXACT_MATCH"} metadataOnly=true")
+        }
         return result
         } catch (failure: Throwable) {
             result.fill(0)
+            if (direct && nativeAccepted && failure is RuntimeException) {
+                onNativeHeaderResult(false)
+                return write(outputInitializationSegment, request, context)
+            }
             throw failure
         } finally {
-            nativeMoof?.fill(0)
+            if (nativeAccepted) selectedMoof.fill(0)
         }
     }
 

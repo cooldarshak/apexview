@@ -94,6 +94,7 @@ class ArchitectureGBAndroidTest {
         verifyProtectedMetadata(expectedInit)
         verifyProtectedPlan(inits[0], media[0], expectedInit)
         verifyProtectedPictures(inits, media, expectedInit)
+        verifyProtectedSequence(inits, media, expectedInit)
         verifyClearVariant(request, geometry, inits, media, expectedInit, expectedMedia)
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         var references = 0
@@ -282,6 +283,12 @@ class ArchitectureGBAndroidTest {
                     preferNativeHeader = true, onNativeHeaderResult = { matched = it })
                 assertTrue("Native protected metadata must not silently fall back", matched)
                 assertArrayEquals(baseline, candidate)
+                matched = false
+                val direct = ProtectedHevcCmafFragmentWriter.write(init, request,
+                    preferNativeHeader = true, onNativeHeaderResult = { matched = it }, directNativeHeader = true)
+                assertTrue("Direct native protected metadata must not silently fall back", matched)
+                assertArrayEquals(baseline, direct)
+                direct.fill(0)
                 val moof = ByteBuffer.wrap(baseline).int
                 val header = baseline.copyOfRange(0, moof)
                 val auxiliarySizes = List(2) { ivWidth + 14 }
@@ -292,6 +299,13 @@ class ArchitectureGBAndroidTest {
                 assertNull(NativeStitchingEngine.protectedHeader(corrupted))
                 assertNull(NativeProtectedHeader.matchingHeader(header, request, auxiliarySizes) { ByteArray(header.size) })
                 assertNull(NativeProtectedHeader.matchingHeader(header, request, auxiliarySizes) { null })
+                assertNull(NativeProtectedHeader.directHeader(request, auxiliarySizes) { null })
+                assertNull(NativeProtectedHeader.directHeader(request, auxiliarySizes) { header.copyOf().apply {
+                    ByteBuffer.wrap(this).putInt(20, 99)
+                } })
+                assertNull(NativeProtectedHeader.directHeader(request, auxiliarySizes) { header.copyOf().apply {
+                    ByteBuffer.wrap(this).putInt(size-4, 0)
+                } })
                 // The dummy opaque payload remains byte-for-byte identical
                 // in the real JVM writer's final mdat, with no native access.
                 assertArrayEquals(samples[0].sampleBytes + samples[1].sampleBytes,
@@ -343,8 +357,21 @@ class ArchitectureGBAndroidTest {
             val layout = ProtectedHevcSampleLayout.inspect(sample, 4, ranges)
             val access = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(sample, layout, srcSps, srcPps,
                 source.vps.single())
-            fun borrow() = ProtectedHevcSliceHeaderRewriter.rewriteBorrowed(sample, layout, access, 0,
-                srcSps, srcPps, dstSps, dstPps, destination)
+            val batchInput = NativeProtectedPlan.BatchInput(0, sample, layout.nals.single(),
+                reference.sourceTailOffset, destination, opaque)
+            val batchPacket = NativeProtectedPlan.encodeBatch(listOf(srcSets), outSets, listOf(batchInput))
+            val batchResult = requireNotNull(NativeStitchingEngine.protectedPlan(batchPacket, 3))
+            val batchReader = ByteBuffer.wrap(batchResult)
+            assertEquals(1, batchReader.int)
+            assertEquals(actual.size, batchReader.int)
+            assertArrayEquals(actual, ByteArray(batchReader.remaining()).also { batchReader.get(it) })
+            assertNull(NativeStitchingEngine.protectedPlan(batchPacket.copyOf(batchPacket.size-1), 3))
+            assertNull(NativeStitchingEngine.protectedPlan(batchPacket.copyOf().apply {
+                ByteBuffer.wrap(this).putInt(8, 441)
+            }, 3))
+            batchPacket.fill(0); batchResult.fill(0)
+            fun borrow(native: NativeProtectedPlan? = null) = ProtectedHevcSliceHeaderRewriter.rewriteBorrowed(sample, layout, access, 0,
+                srcSps, srcPps, dstSps, dstPps, destination, nativePlan = native, sourceSets = srcSets)
             val baseline = ProtectedHevcSampleComposer.planBorrowed(listOf(borrow()), 4, "GB reference").use { it.materialize() }
             var rejected = false
             val planner = NativeProtectedPlan(outSets, { true }, { rejected = true })
@@ -358,6 +385,15 @@ class ArchitectureGBAndroidTest {
             assertEquals(baseline.subsampleRanges, result.subsampleRanges)
             assertEquals(baseline.encryptedByteCount, result.encryptedByteCount)
             assertArrayEquals(u32(reference.nal.size) + reference.nal, result.sampleBytes)
+            val direct = NativeProtectedPlan(outSets, { true }, { rejected = true }, direct = true)
+            val directResult = ProtectedHevcSampleComposer.planBorrowed(listOf(borrow(direct)), 4,
+                "GB direct", direct).use { it.materialize() }
+            assertEquals(1, direct.matchedSlices)
+            assertEquals(1, direct.matchedMaps)
+            assertFalse(rejected)
+            assertArrayEquals(baseline.sampleBytes, directResult.sampleBytes)
+            assertEquals(baseline.subsampleRanges, directResult.subsampleRanges)
+            directResult.sampleBytes.fill(0)
             // A bad candidate disables native planning for the whole attempt;
             // the validated reference remains byte-identical.
             var attempts = 0
@@ -373,6 +409,22 @@ class ArchitectureGBAndroidTest {
             assertEquals(1, attempts)
             assertArrayEquals(baseline.sampleBytes, fallbackResult.sampleBytes)
             assertEquals(baseline.subsampleRanges, fallbackResult.subsampleRanges)
+            var directAttempts = 0
+            val badDirect = NativeProtectedPlan(outSets, { true }, { rejected = true }, direct = true) { input, kind ->
+                directAttempts++
+                requireNotNull(NativeStitchingEngine.protectedPlan(input, kind)).apply {
+                    // Wrong splice offset; it cannot be adopted even in direct mode.
+                    ByteBuffer.wrap(this).putInt(0, Int.MAX_VALUE)
+                }
+            }
+            val directFallback = ProtectedHevcSampleComposer.planBorrowed(listOf(borrow(badDirect)), 4,
+                "GB direct fallback", badDirect).use { it.materialize() }
+            assertEquals(1, directAttempts)
+            assertEquals(0, badDirect.matchedSlices)
+            assertEquals(0, badDirect.matchedMaps)
+            assertArrayEquals(baseline.sampleBytes, directFallback.sampleBytes)
+            assertEquals(baseline.subsampleRanges, directFallback.subsampleRanges)
+            directFallback.sampleBytes.fill(0)
             listOf(packet, clear, actual, expectedPrefix, reference.nal, baseline.sampleBytes,
                 result.sampleBytes, fallbackResult.sampleBytes, sample).forEach { it.fill(0) }
         }
@@ -392,6 +444,18 @@ class ArchitectureGBAndroidTest {
         val planner = NativeProtectedPlan(outSets, { true }, { error("Valid range metadata rejected") })
         assertEquals(map, planner.matchingMap(listOf(slice), 4, 65595, map))
         assertEquals(1, planner.matchedMaps)
+        val directMap = NativeProtectedPlan(outSets, { true }, { error("Valid direct range metadata rejected") }, direct = true)
+        assertEquals(map, directMap.directMap(listOf(slice), 4, 65595))
+        assertEquals(1, directMap.matchedMaps)
+        var mapRejected = false
+        val badMap = NativeProtectedPlan(outSets, { true }, { mapRejected = true }, direct = true) { input, kind ->
+            requireNotNull(NativeStitchingEngine.protectedPlan(input, kind)).apply {
+                // Change one protected range boundary without changing total bytes.
+                ByteBuffer.wrap(this).putInt(16, 17)
+            }
+        }
+        assertNull(badMap.directMap(listOf(slice), 4, 65595))
+        assertTrue(mapRejected)
         val packet = NativeProtectedPlan.encodeMap(listOf(slice), 4)
         assertNull(NativeStitchingEngine.protectedPlan(packet.copyOf(packet.size - 1), 2))
         assertNull(NativeStitchingEngine.protectedPlan(packet.copyOf().apply {
@@ -461,20 +525,35 @@ class ArchitectureGBAndroidTest {
         assertArrayEquals(baseline.sampleBytes, candidate.sampleBytes)
         assertEquals(baseline.subsampleRanges, candidate.subsampleRanges)
         assertEquals(baseline.contributions, candidate.contributions)
+        val directPlanner = NativeProtectedPlan(outSets, { true }, { rejected = true }, direct = true)
+        val directPicture = ProtectedHevcPictureComposer.plan(fresh(), outSps, outPps,
+            fullPictureColumns = 2, nativePlan = directPlanner).use { it.materialize() }
+        assertFalse(rejected)
+        assertEquals(planner.matchedSlices, directPlanner.matchedSlices)
+        assertEquals(1, directPlanner.matchedMaps)
+        assertEquals(1, directPlanner.matchedBatches)
+        assertArrayEquals(baseline.sampleBytes, directPicture.sampleBytes)
+        assertEquals(baseline.subsampleRanges, directPicture.subsampleRanges)
+        assertEquals(baseline.contributions, directPicture.contributions)
         val protectedInit = syntheticProtectedInit(outputInit, 16)
         val trackId = requireNotNull(CmafBoxInspector.inspect(protectedInit).tracks.single().trackId)
-        fun packagePicture(picture: ProtectedHevcPictureComposer.Result, nativeHeader: Boolean): ByteArray {
+        fun packagePicture(picture: ProtectedHevcPictureComposer.Result, nativeHeader: Boolean,
+                           direct: Boolean = false): ByteArray {
             return ProtectedHevcCmafFragmentWriter.write(protectedInit,
                 ProtectedHevcCmafFragmentWriter.Request(trackId, picture.decodeTimeTicks, 1, 16,
                     listOf(ProtectedHevcCmafFragmentWriter.Sample(picture.sampleBytes, picture.subsampleRanges,
                         iv, ProtectedValueFingerprint.fromBytes("iv", iv), picture.durationTicks,
                         picture.sampleFlags, picture.compositionOffsetTicks))),
                 preferNativeHeader = nativeHeader,
-                onNativeHeaderResult = { assertTrue(it) })
+                onNativeHeaderResult = { assertTrue(it) }, directNativeHeader = direct)
         }
         val expected = packagePicture(baseline, false)
         val actual = packagePicture(candidate, true)
         assertArrayEquals(expected, actual)
+        val directFragment = packagePicture(directPicture, true, true)
+        assertArrayEquals(expected, directFragment)
+        directFragment.fill(0)
+        directPicture.sampleBytes.fill(0)
         // Crypto-identity rejection precedes any native planning call.
         var nativeCalls = 0
         val forbidden = NativeProtectedPlan(outSets, { true }, { error("Unauthorized native admission") }) { _, _ ->
@@ -495,6 +574,102 @@ class ArchitectureGBAndroidTest {
         listOf(expected, actual, baseline.sampleBytes, candidate.sampleBytes, protectedInit, iv).forEach { it.fill(0) }
         sources.forEach { it.sampleBytes.fill(0) }
         Log.i("PitwallGB", "GB complete two-source protected-labelled picture and CMAF differential, incompatible IV rejected before native admission PASS")
+    }
+
+    /** Every coded picture of the independent tiled fixture, with alternating
+     * header-only/three-clear-CABAC-byte synthetic labels. Track POC across
+     * the sequence and require exact native/JVM payload and metadata equality. */
+    private fun verifyProtectedSequence(inits: List<ByteArray>, media: List<ByteArray>, outputInit: ByteArray) {
+        val outConfig = requireNotNull(CmafBoxInspector.inspect(outputInit).tracks.single().hevcConfiguration)
+        val outSets = outConfig.rawVpsNals + outConfig.rawSpsNals + outConfig.rawPpsNals
+        val outSps = outConfig.sps.single()
+        val outPps = outConfig.pps.single()
+        val iv = ByteArray(16) { 47 }
+        val ivIdentity = ProtectedValueFingerprint.fromBytes("iv", iv)
+        val sources = inits.indices.map { feed ->
+            val protectedInit = syntheticProtectedInit(inits[feed], 16)
+            val protectedReport = CmafBoxInspector.inspect(protectedInit)
+            val track = protectedReport.tracks.single()
+            val cfg = requireNotNull(track.hevcConfiguration)
+            val sps = cfg.sps.single()
+            val pps = cfg.pps.single()
+            val clearReport = CmafBoxInspector.inspect(inits[feed])
+            val timing = CmafBoxInspector.inspect(media[feed], clearReport).fragments.single()
+            val data = ByteBuffer.wrap(media[feed])
+            data.position(data.int + 8)
+            val samples = timing.sampleTimings.mapIndexed { index, t ->
+                val sample = ByteArray(requireNotNull(t.sampleSizeBytes).toInt()).also { data.get(it) }
+                val nals = ByteBuffer.wrap(sample)
+                val ranges = mutableListOf<CmafBoxInspector.SubsampleEncryptionRange>()
+                while (nals.hasRemaining()) {
+                    val nal = ByteArray(nals.int).also { nals.get(it) }
+                    val parsed = HevcSliceHeaderParser.parse(nal, sps, pps)
+                    val opaque = index % 2 == 0
+                    val ref = HevcSliceHeaderRewriter.rewrite(nal, sps, pps, sps, pps,
+                        parsed.sliceSegmentAddress, preserveOpaqueCabacTail = opaque)
+                    val clearEnd = ref.sourceTailOffset + if (opaque) 0 else 1
+                    require(clearEnd < nal.size)
+                    ranges += CmafBoxInspector.SubsampleEncryptionRange(4 + clearEnd, (nal.size-clearEnd).toLong())
+                    ref.nal.fill(0); nal.fill(0)
+                }
+                ProtectedHevcCmafFragmentWriter.Sample(sample, ranges, iv, ivIdentity,
+                    requireNotNull(t.durationTicks), requireNotNull(t.sampleFlags),
+                    requireNotNull(t.compositionOffsetTicks))
+            }
+            assertEquals(media[feed].size, data.position())
+            val synthetic = ProtectedHevcCmafFragmentWriter.write(protectedInit,
+                ProtectedHevcCmafFragmentWriter.Request(requireNotNull(track.trackId),
+                    requireNotNull(timing.baseDecodeTimeTicks), 1, 16, samples))
+            val fragment = CmafBoxInspector.inspect(synthetic, protectedReport).fragments.single()
+            synthetic.fill(0); protectedInit.fill(0)
+            samples.mapIndexed { index, s ->
+                ProtectedHevcPictureComposer.FeedSample("sequence-$feed", s.sampleBytes, track,
+                    fragment, index, 0, feed*sps.picWidthInCtbs, HevcPocTracker())
+            }
+        }
+        val frameCount = sources.first().size
+        assertTrue(frameCount >= 25)
+        assertTrue(sources.all { it.size == frameCount })
+        val jvmPoc = sources.map { HevcPocTracker() }
+        val rustPoc = sources.map { HevcPocTracker() }
+        val expectedSamples = mutableListOf<ProtectedHevcCmafFragmentWriter.Sample>()
+        val actualSamples = mutableListOf<ProtectedHevcCmafFragmentWriter.Sample>()
+        val planner = NativeProtectedPlan(outSets, { true }, { error("Direct sequence rejected") }, direct = true)
+        var firstDts = 0L
+        for (frame in 0 until frameCount) {
+            val reference = ProtectedHevcPictureComposer.plan(sources.mapIndexed { i, s ->
+                s[frame].copy(pocTracker = jvmPoc[i])
+            }, outSps, outPps, fullPictureColumns = 2).use { it.materialize() }
+            val actual = ProtectedHevcPictureComposer.plan(sources.mapIndexed { i, s ->
+                s[frame].copy(pocTracker = rustPoc[i])
+            }, outSps, outPps, fullPictureColumns = 2, nativePlan = planner).use { it.materialize() }
+            assertArrayEquals("picture $frame", reference.sampleBytes, actual.sampleBytes)
+            assertEquals(reference.subsampleRanges, actual.subsampleRanges)
+            assertEquals(reference.fullPictureOrderCount, actual.fullPictureOrderCount)
+            assertEquals(reference.contributions, actual.contributions)
+            if (frame == 0) firstDts = reference.decodeTimeTicks
+            fun sample(p: ProtectedHevcPictureComposer.Result) = ProtectedHevcCmafFragmentWriter.Sample(
+                p.sampleBytes, p.subsampleRanges, iv, ivIdentity, p.durationTicks,
+                p.sampleFlags, p.compositionOffsetTicks)
+            expectedSamples += sample(reference)
+            actualSamples += sample(actual)
+        }
+        assertEquals(frameCount, planner.matchedMaps)
+        assertEquals(frameCount, planner.matchedBatches)
+        assertEquals(frameCount * requireNotNull(outPps.tileColumnWidthsInCtbs).size *
+            requireNotNull(outPps.tileRowHeightsInCtbs).size, planner.matchedSlices)
+        val protectedInit = syntheticProtectedInit(outputInit, 16)
+        val trackId = requireNotNull(CmafBoxInspector.inspect(protectedInit).tracks.single().trackId)
+        val reference = ProtectedHevcCmafFragmentWriter.write(protectedInit,
+            ProtectedHevcCmafFragmentWriter.Request(trackId, firstDts, 1, 16, expectedSamples))
+        val result = ProtectedHevcCmafFragmentWriter.write(protectedInit,
+            ProtectedHevcCmafFragmentWriter.Request(trackId, firstDts, 1, 16, actualSamples),
+            preferNativeHeader = true, onNativeHeaderResult = { assertTrue(it) }, directNativeHeader = true)
+        assertArrayEquals(reference, result)
+        listOf(reference, result, protectedInit, iv).forEach { it.fill(0) }
+        (expectedSamples + actualSamples).forEach { it.sampleBytes.fill(0) }
+        sources.flatten().forEach { it.sampleBytes.fill(0) }
+        Log.i("PitwallGB", "GB direct protected-labelled sequence: frames=$frameCount slices=${planner.matchedSlices} exact POC/sample/fragment parity PASS")
     }
 
     private fun syntheticProtectedInit(clear: ByteArray, ivWidth: Int): ByteArray {

@@ -175,7 +175,10 @@ internal object HevcSliceHeaderRewriter {
         outputPps: HevcParameterSets.PpsMetadata,
         destinationAddress: Int,
         loopFilterAcrossSlicesOverride: Boolean?,
-        preserveOpaqueCabacTail: Boolean
+        preserveOpaqueCabacTail: Boolean,
+        nativePlan: NativeProtectedPlan? = null,
+        sourceSets: List<ByteArray> = emptyList(),
+        inspectedTailOffset: Int? = null,
     ): Parts {
         require(mapped.nalOffset >= 0 && mapped.nalLength >= 3 &&
             mapped.nalOffset <= sample.size - mapped.nalLength)
@@ -192,7 +195,8 @@ internal object HevcSliceHeaderRewriter {
         require(covered == mapped.nalLength && clearPrefix == mapped.clearNalPrefixBytes)
         return rewriteToParts(sample, sourceSps, sourcePps, outputSps, outputPps,
             destinationAddress, clearPrefix, loopFilterAcrossSlicesOverride, null,
-            preserveOpaqueCabacTail, mapped.nalOffset, mapped.nalLength, inspectedProtectedRange = true)
+            preserveOpaqueCabacTail, mapped.nalOffset, mapped.nalLength, inspectedProtectedRange = true,
+            nativePlan = nativePlan, nativeSourceSets = sourceSets, inspectedTailOffset = inspectedTailOffset)
     }
 
     private fun rewriteToParts(
@@ -209,7 +213,10 @@ internal object HevcSliceHeaderRewriter {
         preserveOpaqueCabacTail: Boolean = false,
         sourceOffset: Int = 0,
         sourceLength: Int = nal.size,
-        inspectedProtectedRange: Boolean = false
+        inspectedProtectedRange: Boolean = false,
+        nativePlan: NativeProtectedPlan? = null,
+        nativeSourceSets: List<ByteArray> = emptyList(),
+        inspectedTailOffset: Int? = null
     ): Parts {
         val nalHeader = HevcBitstream.readNalHeader(nal, sourceOffset, sourceLength)
         // Only the dedicated subsample-validated path can borrow a partially
@@ -267,6 +274,59 @@ internal object HevcSliceHeaderRewriter {
 
         require(parsed.bitsConsumed % 8 == 0) { "Source slice header is not byte aligned" }
         val sourceHeaderBytes = parsed.bitsConsumed / 8
+        if (inspectedProtectedRange && nativePlan?.direct == true && inspectedTailOffset != null) {
+            val native = nativePlan.directSlice(nativeSourceSets, nal, sourceOffset, clearNalBytes,
+                sourceLength, inspectedTailOffset, destinationAddress, preserveOpaqueCabacTail,
+                loopFilterAcrossSlicesOverride) { prefix, tail ->
+                // Only the validated clear bytes are parsed. A third clear
+                // CABAC byte may be needed after a terminal prevention byte.
+                require(prefix.size >= 3 && prefix[0] == nal[sourceOffset] &&
+                    prefix[1] == nal[sourceOffset+1])
+                if (preserveOpaqueCabacTail) require(prefix.last() != 0.toByte() &&
+                    nal[sourceOffset+tail-1] != 0.toByte())
+                val probe = if (preserveOpaqueCabacTail) prefix.copyOf()
+                    else prefix + byteArrayOf(nal[sourceOffset+tail])
+                try {
+                    val output = HevcSliceHeaderParser.parse(probe, outputSps, outputPps)
+                    require(output.firstSliceSegmentInPicture == (destinationAddress == 0) &&
+                        output.sliceSegmentAddress == destinationAddress &&
+                        output.ppsId == outputPps.ppsId && !output.dependentSliceSegment &&
+                        output.entryPointOffsets.isEmpty() && output.bitsConsumed % 8 == 0)
+                    // Every parsed coding field must be identical except the
+                    // intentionally rewritten placement, PPS, filter and bit offsets.
+                    require(output.copy(firstSliceSegmentInPicture = parsed.firstSliceSegmentInPicture,
+                        ppsId = parsed.ppsId, sliceSegmentAddress = parsed.sliceSegmentAddress,
+                        loopFilterAcrossSlices = parsed.loopFilterAcrossSlices,
+                        loopFilterAcrossSlicesFieldBit = parsed.loopFilterAcrossSlicesFieldBit,
+                        bitsConsumed = parsed.bitsConsumed, sourceAddressEndBit = parsed.sourceAddressEndBit,
+                        entryPointFieldStartBit = parsed.entryPointFieldStartBit,
+                        entryPointFieldEndBit = parsed.entryPointFieldEndBit,
+                        alignmentStartBit = parsed.alignmentStartBit) == parsed)
+                    require(output.loopFilterAcrossSlices ==
+                        (loopFilterAcrossSlicesOverride ?: parsed.loopFilterAcrossSlices))
+                    // Verify the preserved clear CABAC bytes independently in
+                    // decoded RBSP form, without reading opaque source bytes.
+                    if (preserveOpaqueCabacTail) {
+                        val aligned = decodeClearPrefix(probe, 0, probe.size, output.bitsConsumed/8)
+                        try { require(aligned.sourceTailOffset + 1 == prefix.size) }
+                        finally { aligned.bytes.fill(0) }
+                    } else {
+                        val before = decodeClearPrefix(nal, sourceOffset, tail+1, sourceHeaderBytes+3)
+                        val after = decodeClearPrefix(probe, 0, probe.size, output.bitsConsumed/8+3)
+                        try {
+                            require(before.sourceTailOffset == tail &&
+                                after.sourceTailOffset == prefix.size)
+                            for (i in 0..2) require(before.bytes[sourceHeaderBytes+i] ==
+                                after.bytes[output.bitsConsumed/8+i])
+                        } finally { before.bytes.fill(0); after.bytes.fill(0) }
+                    }
+                    Parts(prefix, nal, sourceOffset+tail, sourceLength-tail, destinationAddress,
+                        sourceHeaderBytes, output.bitsConsumed/8, tail,
+                        if (preserveOpaqueCabacTail) 0 else 2)
+                } finally { probe.fill(0) }
+            }
+            if (native != null) return native
+        }
         // Only the slice header and three CABAC bytes are needed here. An all-clear
         // video NAL may be hundreds of kilobytes, so never allocate or box an RBSP
         // byte and source-offset entry for the entire compressed picture.

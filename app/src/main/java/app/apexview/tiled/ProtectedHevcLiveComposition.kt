@@ -131,6 +131,14 @@ internal object ProtectedHevcLiveComposition {
     ) {
         @Volatile var nativeHeaderRequested = nativeHeaderRequested
         @Volatile var nativeHeaderRejected = false
+        // Runtime parity belongs to one representation/preference generation.
+        // The UI can invalidate without taking the long composition monitor.
+        val nativeEpoch = java.util.concurrent.atomic.AtomicLong(0L)
+        @Volatile var nativeVerifiedEpoch = -1L
+        fun invalidateNativeProof() {
+            nativeEpoch.incrementAndGet()
+            nativeVerifiedEpoch = -1L
+        }
         var sourceGeometry: SourceGeometry? = null
         // Equivalent to the clear VOD session's cachedMixedAtlas. These keys
         // contain ONLY SHA-256 VPS/SPS/PPS fingerprints (never CBCS identities).
@@ -150,6 +158,7 @@ internal object ProtectedHevcLiveComposition {
         @Volatile var hasPublishedOutput: Boolean = false
 
         fun clear() {
+            invalidateNativeProof()
             feeds.values.forEach(FeedState::clearAll)
             outputInitializationSegment?.fill(0)
             outputInitializationSegment = null
@@ -226,8 +235,11 @@ internal object ProtectedHevcLiveComposition {
      * experiment. Do not take the long composition monitor from the UI. */
     fun updateLocalNativeHeaderPreference(enabled: Boolean) {
         sessionIndex.values.filter { it.localNativeHeader }.forEach { session ->
-            if (enabled && !session.nativeHeaderRequested) session.nativeHeaderRejected = false
-            session.nativeHeaderRequested = enabled
+            if (enabled != session.nativeHeaderRequested) {
+                session.nativeHeaderRequested = enabled
+                session.invalidateNativeProof()
+                if (enabled) session.nativeHeaderRejected = false
+            }
         }
     }
 
@@ -447,6 +459,7 @@ internal object ProtectedHevcLiveComposition {
             encryption.constantIvSize, encryption.constantIvIdentity
         ).joinToString("|")
         if (state.representationSignature != signature) {
+            session.invalidateNativeProof()
             state.clearWindow()
             state.pocTracker.reset()
             state.nextSequenceOrdinal = 0L
@@ -944,6 +957,7 @@ internal object ProtectedHevcLiveComposition {
         ).joinToString("|")
         if (session.outputRepresentationSignature != outputSignature ||
             session.outputInitializationSegment == null) {
+            session.invalidateNativeProof()
             session.outputInitializationSegment?.fill(0)
             session.outputInitializationSegment =
                 ProtectedHevcCmafInitSegmentWriter.rewrite(
@@ -972,11 +986,22 @@ internal object ProtectedHevcLiveComposition {
         val composedSamples = mutableListOf<ProtectedHevcCmafFragmentWriter.Sample>()
         val outputBytesToClear = mutableListOf<ByteArray>()
         val plannedPictures = mutableListOf<ProtectedHevcPictureComposer.PlannedPicture>()
-        val nativePlan = if (session.nativeHeaderRequested && !session.nativeHeaderRejected)
+        val nativeEpoch = session.nativeEpoch.get()
+        fun nativeEnabled() = session.nativeHeaderRequested && !session.nativeHeaderRejected &&
+            session.nativeEpoch.get() == nativeEpoch
+        val directNative = nativeEnabled() && session.nativeVerifiedEpoch == nativeEpoch
+        val nativePlan = if (nativeEnabled())
             NativeProtectedPlan(listOf(outputParameters.vps, outputParameters.sps, outputParameters.pps),
-                enabled = { session.nativeHeaderRequested && !session.nativeHeaderRejected },
-                reject = { session.nativeHeaderRejected = true })
+                enabled = ::nativeEnabled,
+                reject = {
+                    if (session.nativeEpoch.get() == nativeEpoch) {
+                        session.nativeHeaderRejected = true
+                        session.nativeVerifiedEpoch = -1L
+                    }
+                },
+                direct = directNative)
             else null
+        var nativeHeaderMatched = false
         try {
             val pictureComposeStartedNs = System.nanoTime()
             var previousDecodeTime: Long? = null
@@ -1073,16 +1098,25 @@ internal object ProtectedHevcLiveComposition {
                     samples = composedSamples
                 ),
                 context = "Live protected F1 composed fragment",
-                preferNativeHeader = session.nativeHeaderRequested && !session.nativeHeaderRejected,
+                preferNativeHeader = nativeEnabled(),
                 onNativeHeaderResult = { matched ->
-                    if (!matched) session.nativeHeaderRejected = true
-                }
+                    nativeHeaderMatched = matched
+                    if (!matched && session.nativeEpoch.get() == nativeEpoch) {
+                        session.nativeHeaderRejected = true
+                        session.nativeVerifiedEpoch = -1L
+                    }
+                },
+                directNativeHeader = directNative
             )
             val fragmentWriteElapsedMs = (System.nanoTime() - fragmentWriteStartedNs) / 1_000_000L
+            val nativeComplete = nativePlan != null && nativeEnabled() && nativeHeaderMatched &&
+                nativePlan.matchedSlices > 0 && nativePlan.matchedMaps == composedSamples.size &&
+                (!directNative || nativePlan.matchedBatches == composedSamples.size)
             if (nativePlan != null) android.util.Log.i("ApexviewSingleDecoder",
                 "GB_PROTECTED_PLANNING matchedSlices=${nativePlan.matchedSlices} " +
-                    "matchedMaps=${nativePlan.matchedMaps} " +
-                    "fallback=${session.nativeHeaderRejected} actualStitcher=JVM differential=true")
+                    "matchedMaps=${nativePlan.matchedMaps} batches=${nativePlan.matchedBatches} " +
+                    "fallback=${session.nativeHeaderRejected} direct=$directNative " +
+                    "nativeComputationComplete=$nativeComplete")
             val durationTicks = composedSamples.fold(0L) { total, sample ->
                 Math.addExact(total, sample.durationTicks)
             }
@@ -1117,6 +1151,14 @@ internal object ProtectedHevcLiveComposition {
             session.composedFragments = Math.addExact(session.composedFragments, 1L)
             // Publish this scalar only after the bounded history and valid init are complete.
             session.hasPublishedOutput = true
+            // Exact first-fragment differential or independent direct checks
+            // are only certified once the bounded history actually owns output.
+            if (nativeComplete && nativeEnabled()) session.nativeVerifiedEpoch = nativeEpoch
+            android.util.Log.i("ApexviewSingleDecoder",
+                "GB_PROTECTED_PUBLICATION requested=${if (session.nativeHeaderRequested) "RUST" else "JVM"} " +
+                    "actualComputation=${if (nativeComplete && nativeEnabled() && directNative) "RUST" else "JVM"} " +
+                    "proof=${if (nativeComplete && !directNative) "EXACT_REFERENCE" else if (nativeComplete) "INDEPENDENT_VALIDATION" else "JVM_FALLBACK"} " +
+                    "payloadCopy=JVM_AUTHORIZED_BORROWED generation=$nativeEpoch")
             session.status = "REAL_PROTECTED_F1_CMAF_COMPOSED_NOT_YET_PLAYED"
             session.lastFailure = null
             val allocated = allocatedAtStart?.let { before ->

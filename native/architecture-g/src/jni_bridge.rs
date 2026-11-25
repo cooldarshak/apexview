@@ -255,6 +255,7 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeProte
         let generated = match kind {
             1 => crate::protected_plan::slice_prefix(&input),
             2 => crate::protected_plan::sample_map(&input),
+            3 => crate::protected_plan::slice_batch(&input),
             _ => Err(crate::bmff::Error::Unsupported),
         };
         input.fill(0);

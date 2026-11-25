@@ -12,6 +12,7 @@ internal class NativeProtectedPlan(
     private val outputSets: List<ByteArray>,
     private val enabled: () -> Boolean,
     private val reject: () -> Unit,
+    val direct: Boolean = false,
     private val generate: (ByteArray, Int) -> ByteArray? = NativeStitchingEngine::protectedPlan
 ) {
     var matchedSlices = 0
@@ -19,6 +20,54 @@ internal class NativeProtectedPlan(
     var matchedMaps = 0
         private set
     private var failed = false
+    var matchedBatches = 0
+        private set
+
+    data class BatchInput(
+        val feedIndex: Int, val sample: ByteArray, val mapped: ProtectedHevcSampleLayout.NalUnit,
+        val tail: Int, val destination: Int, val opaque: Boolean, val filter: Boolean? = null
+    )
+    private data class BatchResult(val input: BatchInput, val prefix: ByteArray)
+    private var batch: ArrayDeque<BatchResult>? = null
+
+    fun clearBatch() {
+        batch?.forEach { it.prefix.fill(0) }
+        batch = null
+    }
+
+    private fun fail() {
+        clearBatch()
+        failed = true
+        reject()
+    }
+
+    /** One bounded JNI call per picture, shared parsed parameter triplets. */
+    fun prepareBatch(sources: List<List<ByteArray>>, inputs: List<BatchInput>) {
+        clearBatch()
+        if (!direct) return
+        val result = candidate(3, { encodeBatch(sources, outputSets, inputs) }, { output ->
+            val b = ByteBuffer.wrap(output).order(ByteOrder.BIG_ENDIAN)
+            require(b.remaining() >= 4 && b.int == inputs.size)
+            val prepared = ArrayDeque<BatchResult>()
+            try {
+                inputs.forEach { input ->
+                    require(b.remaining() >= 4)
+                    val len = b.int
+                    require(len in 6..b.remaining() && len <= 32*1024)
+                    require(b.int == input.tail)
+                    val prefix = ByteArray(len-4).also { b.get(it) }
+                    prepared.addLast(BatchResult(input, prefix))
+                }
+                require(!b.hasRemaining())
+                prepared
+            } catch (failure: Throwable) {
+                prepared.forEach { it.prefix.fill(0) }
+                throw failure
+            }
+        })
+        batch = result
+        if (result != null) matchedBatches++
+    }
 
     private fun <T> candidate(kind: Int, encode: () -> ByteArray, accept: (ByteArray) -> T?): T? {
         if (failed || !enabled()) return null
@@ -40,8 +89,7 @@ internal class NativeProtectedPlan(
             packet?.fill(0)
             output?.fill(0)
         }
-        failed = true
-        reject()
+        fail()
         return null
     }
 
@@ -71,6 +119,106 @@ internal class NativeProtectedPlan(
         if (matched == true) matchedSlices++
     }
 
+    /**
+     * After an exact published fragment has established the current
+     * representation's parity, use the native rewrite without constructing
+     * a duplicate JVM prefix. The independently inspected source boundary and
+     * caller's output parser still validate every candidate. Null is fallback.
+     */
+    fun directSlice(
+        sourceSets: List<ByteArray>, sample: ByteArray, sourceOffset: Int,
+        clearBytes: Int, sourceLength: Int, expectedTail: Int,
+        destination: Int, opaque: Boolean, filterOverride: Boolean?,
+        accept: (ByteArray, Int) -> HevcSliceHeaderRewriter.Parts?
+    ): HevcSliceHeaderRewriter.Parts? {
+        if (!direct || failed || !enabled()) return null
+        val queued = batch
+        if (queued != null) {
+            val entry = queued.removeFirstOrNull()
+            var transferred = false
+            try {
+                require(entry != null)
+                val i = entry.input
+                require(i.sample === sample && i.mapped.nalOffset == sourceOffset &&
+                    i.mapped.clearNalPrefixBytes == clearBytes && i.mapped.nalLength == sourceLength &&
+                    i.tail == expectedTail && i.destination == destination && i.opaque == opaque &&
+                    i.filter == filterOverride)
+                val parts = accept(entry.prefix, i.tail)
+                if (parts != null) {
+                    transferred = true
+                    matchedSlices++
+                    return parts
+                }
+            } catch (_: RuntimeException) {
+                // Same independently checked fallback as the single kernel.
+            } finally { if (!transferred) entry?.prefix?.fill(0) }
+            fail()
+            return null
+        }
+        val result = candidate(1, {
+            val end = Math.addExact(expectedTail, if (opaque) 0 else 1)
+            require(expectedTail in 2 until sourceLength && end in 3..clearBytes &&
+                end <= 16*1024 && sourceOffset >= 0 && sourceOffset <= sample.size-end)
+            val clear = sample.copyOfRange(sourceOffset, sourceOffset+end)
+            try { encodeSlice(sourceSets, outputSets, clear, destination, opaque, filterOverride) }
+            finally { clear.fill(0) }
+        }, { output ->
+            require(output.size >= 6)
+            val tail = ByteBuffer.wrap(output).order(ByteOrder.BIG_ENDIAN).int
+            require(tail == expectedTail)
+            val prefix = output.copyOfRange(4, output.size)
+            var transferred = false
+            try {
+                val parts = accept(prefix, tail)
+                transferred = parts != null
+                parts
+            } finally { if (!transferred) prefix.fill(0) }
+        })
+        if (result != null) matchedSlices++
+        return result
+    }
+
+    /** Verify native metadata against every original range in one pass.
+     * No duplicate JVM range list is created in direct mode. */
+    fun directMap(slices: List<ProtectedHevcSampleComposer.Slice>, width: Int, size: Int):
+        List<CmafBoxInspector.SubsampleEncryptionRange>? {
+        if (!direct) return null
+        val result = candidate(2, { encodeMap(slices, width) }, { output ->
+            val b = ByteBuffer.wrap(output).order(ByteOrder.BIG_ENDIAN)
+            require(b.remaining() >= 8 && b.int == size)
+            val count = b.int
+            require(count in 1..4096 && b.remaining() == 6*count)
+            val entries = List(count) {
+                CmafBoxInspector.SubsampleEncryptionRange(
+                    b.short.toInt() and 0xffff, b.int.toLong() and 0xffffffffL)
+            }
+            var cursor = 0
+            var pending = 0L
+            fun consume(clear: Long, encrypted: Long) {
+                require(cursor < entries.size)
+                val entry = entries[cursor++]
+                require(entry.clearBytes.toLong() == clear && entry.encryptedBytes == encrypted)
+            }
+            fun flush(encrypted: Long) {
+                while (pending > 0xffffL) { consume(0xffffL, 0); pending -= 0xffffL }
+                consume(pending, encrypted)
+                pending = 0
+            }
+            for (slice in slices) {
+                pending += width
+                for (range in slice.protectionRanges) {
+                    if (range.isClear) pending += range.lengthBytes
+                    else flush(range.lengthBytes.toLong())
+                }
+            }
+            if (pending > 0) flush(0)
+            require(cursor == entries.size)
+            entries
+        })
+        if (result != null) matchedMaps++
+        return result
+    }
+
     fun matchingMap(
         slices: List<ProtectedHevcSampleComposer.Slice>, width: Int, size: Int,
         reference: List<CmafBoxInspector.SubsampleEncryptionRange>
@@ -91,6 +239,38 @@ internal class NativeProtectedPlan(
     }
 
     companion object {
+        fun encodeBatch(sources: List<List<ByteArray>>, output: List<ByteArray>,
+                        inputs: List<BatchInput>): ByteArray {
+            require(sources.size in 1..8 && sources.all { it.size == 3 } && output.size == 3)
+            require(inputs.size in 1..440)
+            val sets = sources.flatten() + output
+            require(sets.all { it.size in 3..16*1024 })
+            var previous = -1
+            var size = 12L + sets.sumOf { 4L+it.size }
+            for (input in inputs) {
+                val mapped = input.mapped
+                val end = Math.addExact(input.tail, if (input.opaque) 0 else 1)
+                require(input.feedIndex in sources.indices && input.destination > previous &&
+                    input.tail in 2 until mapped.nalLength && end in 3..mapped.clearNalPrefixBytes &&
+                    end <= 16*1024 && mapped.nalOffset >= 0 && mapped.nalOffset <= input.sample.size-end)
+                previous = input.destination
+                size += 20L + end
+            }
+            require(size in 1..2*1024*1024L)
+            val b = ByteBuffer.allocate(size.toInt()).order(ByteOrder.BIG_ENDIAN)
+            b.put(byteArrayOf(0x47,0x42,0x53,0x32)).putInt(sources.size).putInt(inputs.size)
+            sets.forEach { b.putInt(it.size).put(it) }
+            inputs.forEach { input ->
+                val end = input.tail + if (input.opaque) 0 else 1
+                b.putInt(input.feedIndex).putInt(input.destination)
+                    .putInt(if (input.opaque) 1 else 0)
+                    .putInt(if (input.filter == null) 0 else if (input.filter) 2 else 1)
+                    .putInt(end).put(input.sample, input.mapped.nalOffset, end)
+            }
+            check(!b.hasRemaining())
+            return b.array()
+        }
+
         fun encodeSlice(source: List<ByteArray>, output: List<ByteArray>,
                         clear: ByteArray, destination: Int, opaque: Boolean,
                         filterOverride: Boolean? = null): ByteArray {

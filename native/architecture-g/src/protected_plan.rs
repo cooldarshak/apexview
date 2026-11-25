@@ -45,6 +45,13 @@ pub fn slice_prefix(packet: &[u8]) -> Result<Vec<u8>, Error> {
     let output = Parameters::parse([read_nal(&mut r)?, read_nal(&mut r)?, read_nal(&mut r)?])?;
     let clear = read_nal(&mut r)?;
     r.finish()?;
+    rewrite_one(&source, &output, destination, opaque, filter, clear)
+}
+
+fn rewrite_one(
+    source: &Parameters, output: &Parameters, destination: u32, opaque: bool,
+    filter: Option<bool>, clear: &[u8],
+) -> Result<Vec<u8>, Error> {
     let slice = source.read_slice(clear)?;
     let syntax = output.rewrite_syntax(&slice, destination)?;
     let filter = match filter {
@@ -61,6 +68,54 @@ pub fn slice_prefix(packet: &[u8]) -> Result<Vec<u8>, Error> {
     out.try_reserve_exact(4 + prefix.len()).map_err(|_| Error::Limit)?;
     out.extend_from_slice(&(tail_offset as u32).to_be_bytes());
     out.extend_from_slice(&prefix);
+    Ok(out)
+}
+
+/// GBS2: bounded whole-picture clear-header batch. Each feed's parameter
+/// triplet and the output triplet are parsed once, then borrowed for every
+/// checked placement. No opaque media is accepted. Output consists of the
+/// count followed by length-prefixed GBS1 results, in raster placement order.
+pub fn slice_batch(packet: &[u8]) -> Result<Vec<u8>, Error> {
+    if packet.len() > MAX_PACKET { return Err(Error::Limit); }
+    let mut r = Reader::new(packet);
+    if r.take(4)? != b"GBS2" { return Err(Error::Unsupported); }
+    let feeds = r.u32()? as usize;
+    let count = r.u32()? as usize;
+    if !(1..=8).contains(&feeds) || !(1..=440).contains(&count) {
+        return Err(Error::Limit);
+    }
+    let mut sources = Vec::new();
+    sources.try_reserve_exact(feeds).map_err(|_| Error::Limit)?;
+    for _ in 0..feeds {
+        sources.push(Parameters::parse([read_nal(&mut r)?, read_nal(&mut r)?, read_nal(&mut r)?])?);
+    }
+    let output = Parameters::parse([read_nal(&mut r)?, read_nal(&mut r)?, read_nal(&mut r)?])?;
+    let mut out = Vec::new();
+    out.extend_from_slice(&(count as u32).to_be_bytes());
+    let mut last = None;
+    for _ in 0..count {
+        let feed = r.u32()? as usize;
+        let destination = r.u32()?;
+        if last.is_some_and(|address| destination <= address) { return Err(Error::Metadata); }
+        last = Some(destination);
+        let opaque = match r.u32()? { 0 => false, 1 => true, _ => return Err(Error::Unsupported) };
+        let filter = match r.u32()? {
+            0 => None, 1 => Some(false), 2 => Some(true), _ => return Err(Error::Unsupported),
+        };
+        let clear = read_nal(&mut r)?;
+        let mut rewritten = rewrite_one(sources.get(feed).ok_or(Error::Metadata)?,
+            &output, destination, opaque, filter, clear)?;
+        let required = 4 + rewritten.len();
+        if required > MAX_PACKET - out.len() {
+            rewritten.fill(0);
+            return Err(Error::Limit);
+        }
+        out.try_reserve_exact(required).map_err(|_| Error::Limit)?;
+        out.extend_from_slice(&(rewritten.len() as u32).to_be_bytes());
+        out.extend_from_slice(&rewritten);
+        rewritten.fill(0);
+    }
+    r.finish()?;
     Ok(out)
 }
 
@@ -167,6 +222,19 @@ mod tests {
             bytes.extend_from_slice(&c.to_be_bytes());
         }
         bytes
+    }
+
+    #[test]
+    fn batch_rejects_bad_count_and_missing_parameter_sets() {
+        for (feeds,count) in [(0u32,1u32),(9,1),(1,0),(1,441),(1,1)] {
+            let mut packet=b"GBS2".to_vec();
+            packet.extend_from_slice(&feeds.to_be_bytes());
+            packet.extend_from_slice(&count.to_be_bytes());
+            assert!(slice_batch(&packet).is_err());
+            for end in 0..packet.len() {
+                assert!(slice_batch(&packet[..end]).is_err());
+            }
+        }
     }
 
     #[test]
