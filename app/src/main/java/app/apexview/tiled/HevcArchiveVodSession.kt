@@ -513,7 +513,7 @@ internal class HevcArchiveVodSession(
                     "processGcDuringSegment=${gcDuringProduction ?: -1L} " +
                     "sourceInputBytes=$sourceInputBytes httpCoalescedBytesTotal=${httpCoalescedBytes.get()} " +
                     "media3DeliveredBytesTotal=${media3DeliveredBytes.get()} " +
-                    "outputBytes=${composed.mediaFragments.last().size} " +
+                    "outputBytes=${outputBytes.size} " +
                     "sourceAnnexBBytesAvoided=${composed.sourceAnnexBBytesAvoided} " +
                     "sourceNalCopyBytesAvoided=${composed.sourceNalCopyBytesAvoided} " +
                     "rewrittenTailStagingBytesAvoided=${composed.rewrittenTailStagingBytesAvoided} " +

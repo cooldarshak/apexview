@@ -107,6 +107,19 @@ class ArchitectureG0PackagingContract(unittest.TestCase):
                              text=True,capture_output=True)
             self.assertEqual(p.returncode,0,f"workflow line {i+1}: {p.stderr}")
 
+    def test_archive_budget_reuses_verified_fragment_without_duplicate_local(self):
+        # Regression for Build 855: duplicate ByteArray/Long outputBytes locals.
+        import re
+        source=(ROOT/"app/src/main/java/app/apexview/tiled/HevcArchiveVodSession.kt").read_text()
+        producer=source.split("private fun composeAndPublishAdmitted(",1)[1]
+        producer=producer.split("private fun ",1)[0]
+        self.assertEqual(len(re.findall(r"\bval\s+outputBytes\b",producer)),1)
+        self.assertIn("val outputBytes = composed.mediaFragments.single()",producer)
+        self.assertIn("nativeBudgetObservation.observe(sourceInputBytes,outputBytes.size.toLong())",producer)
+        self.assertIn('"outputBytes=${outputBytes.size} "',producer)
+        self.assertLess(producer.index("cache.put(number, output)"),
+                        producer.index("nativeBudgetObservation.observe("))
+
     def test_only_jni_module_can_use_unsafe(self):
         lib=(ROOT/"native/architecture-g/src/lib.rs").read_text()
         self.assertIn("#![deny(unsafe_code)]",lib)

@@ -38,6 +38,8 @@ Build 854 GREEN (all five jobs, 20 Rust tests). G-A completion candidate adds de
 
 Build 855 stable and ASan/LSan Rust tests 22/22 passed each; Kotlin compile failed from duplicate local outputBytes declaration. Corrected by reusing existing verified fragment size; no safety or test reduction. Full CI pending.
 
+Build 856 stopped at coordinated-change contract (missing changed regression test in prior fix). Added targeted archive observer regression and reused exact verified output fragment for both size attribution and budget observation. No policy relaxation. Full CI pending.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |
