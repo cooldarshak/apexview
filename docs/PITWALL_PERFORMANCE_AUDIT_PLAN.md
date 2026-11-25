@@ -1,5 +1,10 @@
 # PITWALL TV: SINGLE CONSOLIDATED RELEASE AND ACCEPTANCE PLAN
 
+### Build 881 first-failure correction (25 November 2026)
+
+Build 881 ([run 45656595936](https://github.com/cooldarshak/apexview/actions/runs/45656595936), exact source `1e486403be8f132126e3a2d9c69f0a9249998fa7`) failed in mandatory host Rust test compilation, error E0063: missing `compact_atlas` in the existing deadline-priority test State initializer. Initialize that generic test state explicitly to false; production state already uses the supplied mode. Audited both State constructors. Keep all deadline/priority assertions, spare retirement tests, strict lint, sanitizers, Android ABI and device gates unchanged. No memory policy or playback behavior change in this correction. Exact-source CI pending; Build 880 remains last verified green. M1–M13 status and physical acceptance gates above/below remain open as recorded.
+
+
 ### Current approved G-C memory optimization execution (Build 880 baseline, 25 November 2026)
 
 Build 880 exact source `4b97ef8c77ee8df047e978f39181ed6795ea0572`, run [45651321774](https://github.com/cooldarshak/apexview/actions/runs/45651321774), independently confirmed all five mandatory jobs successful (139336286363, 139342738770, 139342738882, 139342738927, 139344730867). Head before this functional candidate `e740c832d3a38e5fa2d59fbf508637aea63ba5c9` adds the approved documentation only. G.0/G-A/G-B prior sign-offs unchanged. The user explicitly approved M1–M13 and all acceptance criteria in [Build 880 execution handover](https://github.com/cooldarshak/apexview/blob/feature/architecture-g-rust-stitching/docs/handovers/PITWALL_TV_BUILD_880_GC_MEMORY_OPTIMIZATION_HANDOVER_2026-11-25.md). The following is the active extension of the master plans, not a separate architecture. Previous checkpoints below are historical.

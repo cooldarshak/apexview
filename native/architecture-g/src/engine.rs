@@ -534,7 +534,7 @@ mod tests {
         let mk=|token,foreground,ms|Slot{buffers:None,stage:Stage::Queued,
             work:Some(Work{token,generation:1,len:3,command:Command::Convert{prefix:1,count:1},foreground,
                 deadline:now+Duration::from_millis(ms)}),result:0};
-        let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false};
+        let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false,compact_atlas:false};
         assert_eq!(s.next(),Some(2));s.slots[2].stage=Stage::Running;
         assert_eq!(s.next(),Some(3));s.slots[3].stage=Stage::Running;
         assert_eq!(s.next(),Some(1));s.slots[1].stage=Stage::Running;
