@@ -33,41 +33,19 @@ const MAX_BUFFER:usize=crate::bmff::MAX_ATLAS_BYTES;
 const MAX_BUDGET:usize=192*1024*1024;
 const WORKER_STACK:usize=512*1024;
 
-// Android NDK tracing is a no-op on host and when tracing is disabled.
-// The API is present on all supported Android API levels (29+).
+// Android platform FFI is confined to the existing audited bridge.
+// Host tests retain the same scope API without linking Android libraries.
 #[cfg(target_os = "android")]
-#[link(name = "android")]
-unsafe extern "C" {
-    fn ATrace_isEnabled() -> bool;
-    fn ATrace_beginSection(name: *const std::ffi::c_char);
-    fn ATrace_endSection();
-}
-pub(crate) struct NativeTrace {
-    #[cfg(target_os = "android")]
-    active: bool,
-}
+pub(crate) use crate::jni_bridge::NativeTrace;
+#[cfg(not(target_os = "android"))]
+pub(crate) struct NativeTrace;
+#[cfg(not(target_os = "android"))]
 impl NativeTrace {
-    pub(crate) fn begin(name: &'static std::ffi::CStr) -> Self {
-        #[cfg(target_os = "android")]
-        {
-            // SAFETY: NDK ATrace accepts a static NUL-terminated name and
-            // records only the current worker thread. Scope is ended on it.
-            let active = unsafe { ATrace_isEnabled() };
-            if active { unsafe { ATrace_beginSection(name.as_ptr()) }; }
-            Self { active }
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            let _ = name;
-            Self {}
-        }
-    }
+    pub(crate) fn begin(_name: &'static std::ffi::CStr) -> Self { Self }
 }
+#[cfg(not(target_os = "android"))]
 impl Drop for NativeTrace {
-    fn drop(&mut self) {
-        #[cfg(target_os = "android")]
-        if self.active { unsafe { ATrace_endSection() }; }
-    }
+    fn drop(&mut self) {}
 }
 const OVERHEAD_RESERVE:usize=64*1024;
 

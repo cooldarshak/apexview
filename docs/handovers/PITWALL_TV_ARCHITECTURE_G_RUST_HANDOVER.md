@@ -2,6 +2,12 @@
 
 **Current Architecture G checkpoint (25 November 2026):** [Build 876](https://github.com/cooldarshak/apexview/actions/runs/45633549000), exact source `b57d0c370fc5cd48e4c8bb5e305c6f58bbb8f8e5`, verified GREEN in all five mandatory jobs: build/host 139272862915, API36 139282184962, API29 139282184981, API31 139282185346, final signed publication 139284550470. User G-B sign-off retained. The next consolidated G-C candidate implements further copy/allocation reduction, measured-bandwidth Auto selection and native worker trace instrumentation. Exact-source candidate CI and physical profiling are still required.
 
+### Build 878 failure correction (G-C)
+
+- Build 878, run 45640329497, source `c87a6f0fd6f3195cf2185961addd42fe431d5e5e`: all 52 host Rust tests passed, mandatory Clippy passed and 52 address-sanitized tests passed. Android ABI compilation rejected the new ATrace FFI in the safe engine under the existing crate-wide deny(unsafe_code) policy. APK/instrumentation/publication not completed.
+- Move the trace guard and NDK FFI into the existing Android-only audited JNI/platform bridge, without expanding the crate's unsafe exemption. Safe engine and compositor use the same scope API; host guard stays no-op. The Android guard is thread-bound, does not retain any pointers/media/JNI references, and closes only an opened trace on drop. Native profiling stages and previous G-C optimizations retained.
+- All 38 production wiring tests passed on the candidate with exact Build 878 dependencies verified by Git blob SHA. Strengthened assertions require the unchanged crate-wide unsafe policy, single existing exemption and safe engine trace call sites. Exact-source Android ABI, full CI and physical validation remain pending. Last verified green baseline is Build 876.
+
 ### Build 877 failure correction (G-C)
 
 - Build 877, run 45638564822, source `409ccbd1f676054fdfe1a04fffe6020930153f3c`: all 52 Rust host unit tests passed, then mandatory Clippy rejected the eight-argument fragment writer. Android ABI/build/instrumentation and publication did not complete.

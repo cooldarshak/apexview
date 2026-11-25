@@ -4,6 +4,40 @@ use crate::{annex_b::MAX_BYTES, convert_fixed_batch};
 use jni::{objects::{JByteBuffer,JClass},sys::jint,JNIEnv};
 use std::{panic::{catch_unwind,AssertUnwindSafe},slice};
 
+// Android API 23+ (our minimum is 29). Keep platform FFI inside the
+// existing audited unsafe boundary, not the safe stitching engine.
+#[link(name = "android")]
+unsafe extern "C" {
+    fn ATrace_isEnabled() -> bool;
+    fn ATrace_beginSection(name: *const std::ffi::c_char);
+    fn ATrace_endSection();
+}
+
+/// Thread-bound RAII trace section. No JNI object, media data, or raw
+/// pointer is retained. The Rc marker prevents moving the guard to a
+/// different worker or sharing it across threads.
+pub(crate) struct NativeTrace {
+    active: bool,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+impl NativeTrace {
+    pub(crate) fn begin(name: &'static std::ffi::CStr) -> Self {
+        // SAFETY: these NDK functions are available on every supported
+        // Android API level. CStr provides a valid NUL-terminated name
+        // with static lifetime. Begin/end execute on the same thread.
+        let active = unsafe { ATrace_isEnabled() };
+        if active { unsafe { ATrace_beginSection(name.as_ptr()) }; }
+        Self { active, _thread_bound: std::marker::PhantomData }
+    }
+}
+impl Drop for NativeTrace {
+    fn drop(&mut self) {
+        // SAFETY: this guard cannot cross threads and only ends a section
+        // that was begun. Normal returns and unwinding both close the scope.
+        if self.active { unsafe { ATrace_endSection() }; }
+    }
+}
+
 const INVALID: jint = -1;
 const PANIC: jint = -3;
 
