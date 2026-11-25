@@ -37,7 +37,7 @@ internal class ClearCmafArchiveComposition(
         val fragment = CmafBoxInspector.inspect(feeds.first().mediaFragments.first(), source).fragments.single()
         val timescale = requireNotNull(track.timescale)
         val sampleDuration = fragment.sampleTimings.map { requireNotNull(it.durationTicks) }.distinct().single()
-        val divisor = java.math.BigInteger.valueOf(timescale).gcd(java.math.BigInteger.valueOf(sampleDuration)).longValueExact()
+        val (frameRateNumerator, frameRateDenominator) = reducePositiveHevcFrameRate(timescale, sampleDuration)
         val configuration = requireNotNull(track.hevcConfiguration)
         val sps = configuration.sps.single()
         val pps = configuration.pps.single()
@@ -70,7 +70,7 @@ internal class ClearCmafArchiveComposition(
                 } }
             } else feeds.indices.map { HevcTizenGridComposer.CellSelection(it, 0, it % columns, it / columns) },
             firstOutputSequenceNumber = sequence - previous,
-            frameRateNumerator = (timescale / divisor).toInt(), frameRateDenominator = (sampleDuration / divisor).toInt()
+            frameRateNumerator = frameRateNumerator, frameRateDenominator = frameRateDenominator
         )
         val requested = nativeRequested()
         if (requested != configured) {

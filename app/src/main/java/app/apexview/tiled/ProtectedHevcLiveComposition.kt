@@ -1,6 +1,5 @@
 package app.apexview.tiled
 
-import java.math.BigInteger
 import java.util.LinkedHashMap
 
 /**
@@ -1245,11 +1244,7 @@ internal object ProtectedHevcLiveComposition {
             ?: vui?.numUnitsInTick?.takeIf { it > 0L }
             ?: configuration.averageFrameRate.takeIf { it > 0 }?.let { 256L }
             ?: throw IllegalArgumentException("active HEVC configuration has no usable frame-rate denominator")
-        val a = BigInteger.valueOf(numerator)
-        val b = BigInteger.valueOf(denominator)
-        val divisor = a.gcd(b)
-        val reducedNumerator = a.divide(divisor).intValueExact()
-        val reducedDenominator = b.divide(divisor).intValueExact()
+        val (reducedNumerator, reducedDenominator) = reducePositiveHevcFrameRate(numerator, denominator)
         require(reducedNumerator in 1..240 && reducedDenominator in 1..1000) {
             "derived HEVC frame rate is outside supported bounds"
         }

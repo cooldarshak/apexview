@@ -597,6 +597,19 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("nativeRequested = nativeRequested", archive)
         self.assertIn("nativeContext = context, nativeRequested = { settings.nativeRustStitching", app)
 
+    def test_gb_frame_rate_reduction_is_api29_compatible_and_checked(self):
+        base = "app/src/main/java/app/apexview/tiled/"
+        rolling = contents(base + "ClearCmafArchiveComposition.kt")
+        protected = contents(base + "ProtectedHevcLiveComposition.kt")
+        helper = contents(base + "HevcFrameRate.kt")
+        self.assertIn("reducePositiveHevcFrameRate(timescale, sampleDuration)", rolling)
+        self.assertIn("reducePositiveHevcFrameRate(numerator, denominator)", protected)
+        self.assertNotIn(".longValueExact()", rolling)
+        self.assertNotIn(".intValueExact()", protected)
+        self.assertIn("Math.toIntExact(numerator / a)", helper)
+        self.assertIn("Math.toIntExact(denominator / a)", helper)
+        self.assertIn("require(numerator > 0L && denominator > 0L)", helper)
+
     def test_post834_pitwall_control_and_media_use_paired_tls(self):
         base = "app/src/main/java/app/apexview/"
         sender = contents(base + "AppState.kt")

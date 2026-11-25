@@ -20,6 +20,7 @@ import org.junit.runner.RunWith
 class ArchitectureGBAndroidTest {
     @Test
     fun stitchedTiledFragmentUsesNativeWorkerAndGenerationFencedLease() {
+        verifyFrameRateArithmetic()
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         val input = assets.open("gb_clear_job.bin").use { it.readBytes() }
         val expected = assets.open("gb_clear_expected.bin").use { it.readBytes() }
@@ -47,6 +48,23 @@ class ArchitectureGBAndroidTest {
             Log.i("PitwallGB", "GB clear tiled worker byte parity and lease fencing PASS")
         }
         verifyArchiveBridge(input, expected)
+    }
+
+    /** Run on every mandatory API, including Android 10. Exact reduction
+     * must not use BigInteger's newer Android exact-conversion methods. */
+    private fun verifyFrameRateArithmetic() {
+        assertEquals(50 to 1, reducePositiveHevcFrameRate(90_000L, 1_800L))
+        assertEquals(30_000 to 1_001, reducePositiveHevcFrameRate(60_000L, 2_002L))
+        assertEquals(1 to 1, reducePositiveHevcFrameRate(Long.MAX_VALUE, Long.MAX_VALUE))
+        assertEquals(Int.MAX_VALUE to 1, reducePositiveHevcFrameRate(Int.MAX_VALUE.toLong(), 1L))
+        assertEquals(1 to Int.MAX_VALUE, reducePositiveHevcFrameRate(1L, Int.MAX_VALUE.toLong()))
+        for ((n, d) in listOf(0L to 1L, 1L to 0L, -1L to 1L, 1L to -1L)) {
+            assertTrue(runCatching { reducePositiveHevcFrameRate(n, d) }.exceptionOrNull() is IllegalArgumentException)
+        }
+        for ((n, d) in listOf(Long.MAX_VALUE to 1L, 1L to Long.MAX_VALUE)) {
+            assertTrue(runCatching { reducePositiveHevcFrameRate(n, d) }.exceptionOrNull() is ArithmeticException)
+        }
+        Log.i("PitwallGB", "GB API-compatible exact frame-rate reduction and overflow rejection PASS")
     }
 
     /** Use the existing independently encoded, exact JVM/Rust fixture, not
