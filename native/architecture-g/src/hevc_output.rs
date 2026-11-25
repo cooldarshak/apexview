@@ -1,7 +1,8 @@
 //! Syntax-aware native VPS/SPS/PPS generation for an independently coded atlas.
 use crate::bmff::Error;
 use crate::clear_slice::Writer;
-use crate::hevc_parameters::Parameters;
+use crate::hevc_parameters::{Parameters, VuiIdentity};
+use crate::hevc_references::ShortTerm;
 use crate::hevc_prefix::Bits;
 use std::ops::Range;
 
@@ -203,27 +204,10 @@ impl Request<'_> {
 }
 
 impl Output {
-    /// Compare the fully validated normalized bitstreams, ignoring only
-    /// presentation VUI and level fields which the reference permits to differ.
-    /// The actual emitted template is never modified by this comparison.
-    pub(crate) fn coding_key(&self) -> Result<[Vec<u8>; 3], Error> {
-        let [vps, sps, pps] = self.nals.each_ref().map(Vec::as_slice);
-        let vps_rbsp = Bits::read_rbsp(vps, 32)?;
-        let sps_rbsp = Bits::read_rbsp(sps, 33)?;
-        let vui = self.parameters.sps.vui_start..self.parameters.sps.vui_end;
-        let vps_levels = sublayer_level_ranges(vps, 32, 32, self.parameters.prefix.vps_sub_layers_minus_one)?;
-        let sps_levels = sublayer_level_ranges(sps, 33, 8, self.parameters.prefix.max_sub_layers - 1)?;
-        let vps_key = splice(vps, &vps_rbsp, |w| {
-            w.replace(VPS_LEVEL..VPS_LEVEL + 8, |out| out.bits(0, 8))?;
-            for range in vps_levels { w.replace(range, |out| out.bits(0, 8))?; }
-            Some(())
-        })?;
-        let sps_key = splice(sps, &sps_rbsp, |w| {
-            w.replace(SPS_LEVEL..SPS_LEVEL + 8, |out| out.bits(0, 8))?;
-            for range in sps_levels { w.replace(range, |out| out.bits(0, 8))?; }
-            w.replace(vui, |out| out.bit(0))
-        })?;
-        Ok([vps_key, sps_key, pps.to_vec()])
+    /// Compare normalized coding syntax and decoded semantic fields without
+    /// rewriting the actual first-selected-source output template.
+    pub(crate) fn coding_key(&self) -> Result<ParameterIdentity, Error> {
+        parameter_identity(self.nals.each_ref().map(Vec::as_slice), &self.parameters, true)
     }
 
     pub fn hvcc(&self) -> Result<Vec<u8>, Error> {
@@ -263,6 +247,69 @@ impl Output {
         }
         Ok(record)
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ParameterIdentity {
+    syntax: [Vec<u8>; 3],
+    ordering: [[u32; 3]; 7],
+    short: Vec<ShortTerm>,
+    vui: Option<VuiIdentity>,
+}
+
+/// Identity used for source compatibility (different IDs/layouts/levels were
+/// already normalized by the output writer) and in-band replacement checks.
+/// Compare the complete other syntax, including coding-tool fields not in the
+/// JVM metadata. Only explicitly parsed equivalent representations are erased.
+pub(crate) fn parameter_identity(
+    [vps, sps, pps]: [&[u8]; 3], parameters: &Parameters, cross_source: bool,
+) -> Result<ParameterIdentity, Error> {
+    let vps_rbsp = Bits::read_rbsp(vps, 32)?;
+    let sps_rbsp = Bits::read_rbsp(sps, 33)?;
+    let pps_rbsp = Bits::read_rbsp(pps, 34)?;
+    let prefix = &parameters.prefix;
+    let metadata = &parameters.sps;
+    let mut vps_key = splice(vps, &vps_rbsp, |w| {
+        if cross_source {
+            w.replace(VPS_LEVEL..VPS_LEVEL + 8, |out| out.bits(0, 8))?;
+            for range in sublayer_level_ranges(vps, 32, 32, prefix.vps_sub_layers_minus_one).ok()? {
+                w.replace(range, |out| out.bits(0, 8))?;
+            }
+        }
+        // The reference compares VPS timing and common HRD metadata, not
+        // per-sublayer CPB schedules. These are presentation constraints;
+        // the output preserves the complete original selected template.
+        for range in &parameters.vps_hrd_schedules {
+            w.replace(range.clone(), |out| out.bit(0))?;
+        }
+        Some(())
+    })?;
+    let mut sps_key = splice(sps, &sps_rbsp, |w| {
+        if cross_source {
+            w.replace(SPS_LEVEL..SPS_LEVEL + 8, |out| out.bits(0, 8))?;
+            // The reference slice rewriter ignores only the general SPS
+            // level; retain the sublayer level signalling exactly.
+        }
+        // A signalled zero crop and an absent crop are equivalent.
+        if prefix.crop == [0; 4] {
+            w.replace(prefix.crop_start..prefix.crop_end, |out| out.bit(0))?;
+        }
+        w.replace(prefix.ordering_start..prefix.ordering_end, |out| out.bit(0))?;
+        w.replace(metadata.short_start..metadata.short_end, |out| out.bit(0))?;
+        w.replace(metadata.vui_start..metadata.vui_end, |out| out.bit(0))
+    })?;
+    let mut pps_key = splice(pps, &pps_rbsp, |_| Some(()))?;
+    // The parameter NAL layer and type have been validated; temporal header
+    // bits do not change the parsed parameter syntax.
+    vps_key[1] = 1;
+    sps_key[1] = 1;
+    pps_key[1] = 1;
+    Ok(ParameterIdentity {
+        syntax: [vps_key, sps_key, pps_key],
+        ordering: prefix.ordering,
+        short: metadata.short.clone(),
+        vui: if cross_source { None } else { metadata.vui },
+    })
 }
 
 fn sublayer_level_ranges(nal: &[u8], kind: u8, prefix: u32, layers: u32)
@@ -375,6 +422,63 @@ mod tests {
         text.as_bytes().chunks_exact(2).map(|pair|
             u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()
         ).collect()
+    }
+
+    #[test]
+    fn semantic_sps_identity_accepts_equivalent_dpb_crop_and_rps_encodings() {
+        let vps = hex("40010c01ffff01600000030090000003000003001e959809");
+        let pps = hex("4401c172b42240");
+        let sps = hex("42010101600000030090000003000003001ea0102020596566924ca7016a02020208000003000800000300c840");
+        let original = Parameters::parse([&vps, &sps, &pps]).unwrap();
+        assert_eq!(original.prefix.crop, [0;4]);
+        let rbsp = Bits::read_rbsp(&sps, 33).unwrap();
+        let build = |predicted: bool, equivalent: bool, alternate: bool| {
+            splice(&sps, &rbsp, |w| {
+                if alternate {
+                    w.replace(original.prefix.crop_start..original.prefix.crop_end, |out| {
+                        out.bit(1)?;
+                        for _ in 0..4 { out.ue(0)?; }
+                        Some(())
+                    })?;
+                    w.replace(original.prefix.ordering_start..original.prefix.ordering_end, |out| {
+                        out.bit(1)?;
+                        for layer in &original.prefix.ordering[..original.prefix.max_sub_layers as usize] {
+                            for &value in layer { out.ue(value)?; }
+                        }
+                        Some(())
+                    })?;
+                }
+                w.replace(original.sps.short_start..original.sps.short_end, |out| {
+                    out.ue(2)?; // two SPS RPS sets
+                    out.ue(1)?; out.ue(0)?; out.ue(0)?; out.bit(1)?; // {-1}
+                    out.bit(u32::from(predicted))?;
+                    if predicted {
+                        out.bit(1)?; out.ue(0)?; // shift by -1
+                        out.bit(1)?; // previous -1 becomes -2
+                        out.bit(u32::from(equivalent))?; // zero becomes -1
+                        if !equivalent { out.bit(1)?; } // keep but not used
+                    } else {
+                        out.ue(2)?; out.ue(0)?;
+                        out.ue(0)?; out.bit(1)?; // -1
+                        out.ue(0)?; out.bit(1)?; // -2
+                    }
+                    Some(())
+                })
+            }).unwrap()
+        };
+        let explicit = build(false, true, false);
+        let predicted = build(true, true, true);
+        let changed = build(true, false, true);
+        assert_ne!(explicit, predicted);
+        let identity = |nal: &[u8]| {
+            let sets = [&vps[..], nal, &pps[..]];
+            parameter_identity(sets, &Parameters::parse(sets).unwrap(), false).unwrap()
+        };
+        assert_eq!(identity(&explicit), identity(&predicted));
+        assert_ne!(identity(&explicit), identity(&changed));
+        let mut bad = explicit.clone();
+        bad.push(0x80);
+        assert!(Parameters::parse([&vps, &bad, &pps]).is_err());
     }
 
     #[test]

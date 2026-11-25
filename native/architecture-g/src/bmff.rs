@@ -124,7 +124,7 @@ impl<'a> Boxes<'a> {
         let size = reader.u32()?;
         let kind = reader.take(4)?.try_into().unwrap();
         let (size, header) = match size {
-            0 => (self.bytes.len(), 8),
+            0 => return Err(Error::Unsupported), // matches the JVM clear composition parser
             1 => (
                 usize::try_from(reader.u64()?).map_err(|_| Error::Extent)?,
                 16,

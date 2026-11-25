@@ -629,6 +629,33 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("require(prepared.size == inputs.size)", protected)
         self.assertIn("if (!transferred) prepared.forEach { it.prefix.fill(0) }", protected)
 
+    def test_gb_semantic_parameter_equivalence_and_protected_output_setup(self):
+        base = "app/src/main/java/app/apexview/tiled/"
+        rust = "native/architecture-g/src/"
+        atlas = contents(rust + "clear_atlas.rs")
+        keys = contents(rust + "hevc_output.rs")
+        params = contents(rust + "hevc_parameters.rs")
+        cmaf = contents(rust + "cmaf_input.rs")
+        poc = contents(rust + "hevc_poc.rs")
+        plan = contents(rust + "protected_plan.rs")
+        jni = contents(rust + "jni_bridge.rs")
+        adapter = contents(base + "NativeProtectedPlan.kt")
+        production = contents(base + "ProtectedHevcLiveComposition.kt")
+        self.assertIn("parameter_identity(sets, &candidate, false)? != self.parameter_identity", atlas)
+        self.assertIn("short: metadata.short.clone()", keys)
+        self.assertIn("ordering: prefix.ordering", keys)
+        self.assertIn("sps.finish_rbsp()?", params)
+        self.assertIn('optional(b"mfhd")?', cmaf)
+        self.assertIn("take_end_of_sequence", atlas)
+        self.assertIn("take_end_of_sequence", poc)
+        self.assertIn('b"GBO1"', plan)
+        self.assertIn("4 => crate::protected_plan::output_parameters(&input)", jni)
+        self.assertIn("response = generate(packet, 4)", adapter)
+        self.assertIn("require(nal.contentEquals(ref))", adapter)
+        self.assertIn("NativeProtectedPlan.matchingOutputParameters(", production)
+        self.assertIn("session.nativeParameterEpoch == nativeEpoch", production)
+        self.assertIn("listOf(nativeParameters.vps, nativeParameters.sps, nativeParameters.pps)", production)
+
     def test_gb_frame_rate_reduction_is_api29_compatible_and_checked(self):
         base = "app/src/main/java/app/apexview/tiled/"
         rolling = contents(base + "ClearCmafArchiveComposition.kt")

@@ -167,6 +167,8 @@ internal object ProtectedHevcLiveComposition {
         var mixedAtlas: HevcMixedArchiveAtlasPlan.Plan? = null
         var outputParametersKey: Pair<List<List<String>>, HevcOutputParameterSetWriter.Request>? = null
         var outputParameters: HevcOutputParameterSetWriter.Output? = null
+        var nativeOutputParameters: HevcOutputParameterSetWriter.Output? = null
+        var nativeParameterEpoch = -1L
         val feeds = labels.associateWith(::FeedState)
         @Volatile var status: String = "WAITING_FOR_ACTIVE_PROTECTED_INIT_SEGMENTS"
         var outputInitializationSegment: ByteArray? = null
@@ -188,6 +190,8 @@ internal object ProtectedHevcLiveComposition {
             mixedAtlas = null
             outputParametersKey = null
             outputParameters = null
+            nativeOutputParameters = null
+            nativeParameterEpoch = -1L
             outputHistory.forEach(OutputFragment::zero)
             outputHistory.clear()
             if (localNativeHeader) NativeFragmentLease.trim()
@@ -1019,9 +1023,33 @@ internal object ProtectedHevcLiveComposition {
         val nativeEpoch = session.nativeEpoch.get()
         fun nativeEnabled() = session.nativeHeaderRequested && !session.nativeHeaderRejected &&
             session.nativeEpoch.get() == nativeEpoch
+        // Prove and retain the native-generated clear output parameters for
+        // the current representation/preference epoch. The initialization
+        // remains byte-identical to the existing authorized JVM rewrite.
+        if (nativeEnabled()) {
+            val cached = session.nativeOutputParameters
+            val exact = session.nativeParameterEpoch == nativeEpoch && cached != null &&
+                cached.vps.contentEquals(outputParameters.vps) &&
+                cached.sps.contentEquals(outputParameters.sps) &&
+                cached.pps.contentEquals(outputParameters.pps)
+            if (!exact) {
+                val native = NativeProtectedPlan.matchingOutputParameters(
+                    listOf(sourceVps, sourceSps, sourcePps), outputRequest, outputParameters)
+                if (nativeEnabled()) {
+                    if (native == null) {
+                        session.nativeHeaderRejected = true
+                        session.nativeVerifiedEpoch = -1L
+                    } else {
+                        session.nativeOutputParameters = native
+                        session.nativeParameterEpoch = nativeEpoch
+                    }
+                }
+            }
+        }
         val directNative = nativeEnabled() && session.nativeVerifiedEpoch == nativeEpoch
-        val nativePlan = if (nativeEnabled())
-            NativeProtectedPlan(listOf(outputParameters.vps, outputParameters.sps, outputParameters.pps),
+        val nativePlan = if (nativeEnabled() && session.nativeParameterEpoch == nativeEpoch)
+            requireNotNull(session.nativeOutputParameters).let { nativeParameters ->
+            NativeProtectedPlan(listOf(nativeParameters.vps, nativeParameters.sps, nativeParameters.pps),
                 enabled = ::nativeEnabled,
                 reject = {
                     if (session.nativeEpoch.get() == nativeEpoch) {
@@ -1030,6 +1058,7 @@ internal object ProtectedHevcLiveComposition {
                     }
                 },
                 direct = directNative)
+            }
             else null
         var nativeHeaderMatched = false
         var unpublished: ProtectedHevcCmafFragmentWriter.Owned? = null

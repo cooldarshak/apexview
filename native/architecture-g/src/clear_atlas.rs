@@ -38,6 +38,7 @@ struct Source {
     timescale: u32,
     nal_prefix: usize,
     parameter_sets: [Vec<u8>; 3],
+    parameter_identity: hevc_output::ParameterIdentity,
     parameters: Parameters,
     tiles: Vec<Tile>,
 }
@@ -107,6 +108,9 @@ impl Atlas {
                     context: init.fragment_context(),
                     timescale: init.timescale,
                     nal_prefix: init.configuration.nal_length_size(),
+                    parameter_identity: hevc_output::parameter_identity(
+                        parameter_sets.each_ref().map(Vec::as_slice), &parameters, false,
+                    )?,
                     parameter_sets,
                     parameters,
                     tiles,
@@ -292,7 +296,7 @@ impl Atlas {
             for (feed, (source, fragment)) in self.sources.iter().zip(&fragments).enumerate() {
                 let incoming = &fragment.samples[index];
                 match_timing(source_sample, self.sources[0].timescale, incoming, source.timescale)?;
-                let slices = source.slices(incoming)?;
+                let (slices, leading_eos, trailing_eos) = source.slices(incoming)?;
                 let first_slice = slices.first().ok_or(Error::Metadata)?;
                 let picture = first_slice.1.prefix.picture.ok_or(Error::Metadata)?;
                 if previous_end.is_none() && index == 0
@@ -313,11 +317,13 @@ impl Atlas {
                 }) {
                     return Err(Error::Metadata);
                 }
+                let eos = trackers[feed].take_end_of_sequence();
                 let position = trackers[feed].advance(
                     picture,
                     source.parameters.prefix.poc_lsb_bits,
-                    previous_end.is_none() && index == 0,
+                    previous_end.is_none() && index == 0 || eos || leading_eos,
                 )?;
+                if trailing_eos { trackers[feed].end_of_sequence(); }
                 if order.is_some_and(|previous| previous != position) {
                     return Err(Error::Timing);
                 }
@@ -383,9 +389,13 @@ impl Atlas {
     }
 }
 
+type SampleSlices<'a> = (Vec<(usize, Slice<'a>)>, bool, bool);
+
 impl Source {
-    fn slices<'b>(&self, sample: &Sample<'b>) -> Result<Vec<(usize, Slice<'b>)>, Error> {
+    fn slices<'b>(&self, sample: &Sample<'b>) -> Result<SampleSlices<'b>, Error> {
         let mut slices = Vec::new();
+        let mut leading_eos = false;
+        let mut trailing_eos = false;
         slices
             .try_reserve_exact(self.tiles.len())
             .map_err(|_| Error::Limit)?;
@@ -400,16 +410,22 @@ impl Source {
             match header.unit_type {
                 32..=34 => {
                     let expected = &self.parameter_sets[usize::from(header.unit_type - 32)];
-                    // Header and escaping may vary; require the complete
-                    // decoded syntax, including its trailing bits, to match.
-                    if nal != expected.as_slice() &&
-                        crate::hevc_prefix::Bits::read_rbsp(nal, header.unit_type)? !=
-                        crate::hevc_prefix::Bits::read_rbsp(expected, header.unit_type)?
-                    {
-                        return Err(Error::Metadata);
+                    if nal != expected.as_slice() {
+                        let mut sets = self.parameter_sets.each_ref().map(Vec::as_slice);
+                        sets[usize::from(header.unit_type - 32)] = nal;
+                        let candidate = Parameters::parse(sets)?;
+                        if hevc_output::parameter_identity(sets, &candidate, false)? != self.parameter_identity {
+                            return Err(Error::Metadata);
+                        }
                     }
                 }
-                35..=40 => {} // reference discards AUD/EOS/EOB/filler/SEI
+                36 => {
+                    // EOS changes the next CRA POC epoch even though the
+                    // reference does not copy non-VCL NALs into the atlas.
+                    if slices.is_empty() { leading_eos = true; }
+                    else { trailing_eos = true; }
+                }
+                35 | 37..=40 => {} // reference discards AUD/EOB/filler/SEI
                 0..=31 => {
                     let slice = self.parameters.read_slice(nal)?;
                     let index = self.tiles.binary_search_by_key(&slice.prefix.address, |tile| tile.address)
@@ -428,7 +444,7 @@ impl Source {
         if slices.is_empty() {
             return Err(Error::Metadata);
         }
-        Ok(slices)
+        Ok((slices, leading_eos, trailing_eos))
     }
 }
 

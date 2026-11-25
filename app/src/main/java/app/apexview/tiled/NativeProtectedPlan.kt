@@ -263,6 +263,60 @@ internal class NativeProtectedPlan(
 
     companion object {
         private const val MAX_BATCH_PACKET = 2*1024*1024L
+
+        /** Native generation uses only clear parameter-set syntax. The
+         * existing JVM output/DRM validators remain authoritative; a
+         * mismatch cannot activate the native protected publication path. */
+        fun matchingOutputParameters(
+            source: List<ByteArray>, request: HevcOutputParameterSetWriter.Request,
+            reference: HevcOutputParameterSetWriter.Output,
+            generate: (ByteArray, Int) -> ByteArray? = NativeStitchingEngine::protectedPlan,
+        ): HevcOutputParameterSetWriter.Output? {
+            var packet: ByteArray? = null
+            var response: ByteArray? = null
+            val sets = ArrayList<ByteArray>(3)
+            var accepted = false
+            try {
+                require(source.size == 3 && source.all { it.size in 3..16*1024 })
+                val cols = request.tileColumnWidthsInCtbs
+                val rows = request.tileRowHeightsInCtbs
+                require(cols.size in 1..20 && rows.size in 1..22 &&
+                    cols.all { it > 0 } && rows.all { it > 0 })
+                val b = ByteBuffer.allocate(44 + 4*(cols.size+rows.size) +
+                    source.sumOf { 4+it.size }).order(ByteOrder.BIG_ENDIAN)
+                b.put(byteArrayOf(0x47,0x42,0x4f,0x31))
+                    .putInt(request.vpsId).putInt(request.spsId).putInt(request.ppsId)
+                    .putInt(request.codedWidth).putInt(request.codedHeight)
+                    .putInt(request.frameRateNumerator).putInt(request.frameRateDenominator)
+                    .putInt((if (request.loopFilterAcrossTilesEnabled) 1 else 0) or
+                        (if (request.uncroppedOutputPicture) 2 else 0))
+                    .putInt(cols.size).putInt(rows.size)
+                cols.forEach { b.putInt(it) }; rows.forEach { b.putInt(it) }
+                source.forEach { b.putInt(it.size).put(it) }
+                check(!b.hasRemaining())
+                packet = b.array()
+                response = generate(packet, 4) ?: return null
+                val result = ByteBuffer.wrap(response).order(ByteOrder.BIG_ENDIAN)
+                val expected = listOf(reference.vps, reference.sps, reference.pps)
+                expected.forEach { ref ->
+                    require(result.remaining() >= 4)
+                    val length = result.int
+                    require(length == ref.size && length <= result.remaining())
+                    val nal = ByteArray(length).also { result.get(it) }
+                    sets.add(nal)
+                    require(nal.contentEquals(ref))
+                }
+                require(!result.hasRemaining())
+                val output = reference.copy(vps = sets[0], sps = sets[1], pps = sets[2])
+                accepted = true
+                return output
+            } catch (_: RuntimeException) { return null }
+              catch (_: LinkageError) { return null }
+            finally {
+                packet?.fill(0); response?.fill(0)
+                if (!accepted) sets.forEach { it.fill(0) }
+            }
+        }
         // Rust's fixed header arena can emit at most 16 KiB of escaped prefix.
         // Use the larger existing verified JVM response cap conservatively.
         private const val MAX_RESULT_PER_SLICE = 4L + 32*1024L

@@ -2,11 +2,13 @@
 use crate::bmff::Error;
 use crate::hevc_prefix::{Bits, StreamPrefix};
 use crate::hevc_references::{LongTerm, ShortTerm};
+use std::ops::Range;
 
 pub struct Parameters {
     pub prefix: StreamPrefix,
     pub tile_columns: Vec<u32>,
     pub tile_rows: Vec<u32>,
+    pub(crate) vps_hrd_schedules: Vec<Range<usize>>,
     pub(crate) sps: Sps,
     pub(crate) pps: Pps,
 }
@@ -14,13 +16,17 @@ pub struct Parameters {
 impl Parameters {
     pub fn parse(nals: [&[u8]; 3]) -> Result<Self, Error> {
         let (prefix, mut vps, mut sps, mut pps) = StreamPrefix::prefixes(nals)?;
-        validate_vps(&mut vps, prefix.vps_sub_layers_minus_one)?;
-        let sps = Sps::read(&mut sps, &prefix)?;
-        let (pps, tile_columns, tile_rows) = Pps::read(&mut pps, &prefix)?;
+        let vps_hrd_schedules = validate_vps(&mut vps, prefix.vps_sub_layers_minus_one)?;
+        vps.finish_rbsp()?;
+        let parsed_sps = Sps::read(&mut sps, &prefix)?;
+        sps.finish_rbsp()?;
+        let (parsed_pps, tile_columns, tile_rows) = Pps::read(&mut pps, &prefix)?;
+        pps.finish_rbsp()?;
         Ok(Self {
             prefix,
-            sps,
-            pps,
+            vps_hrd_schedules,
+            sps: parsed_sps,
+            pps: parsed_pps,
             tile_columns,
             tile_rows,
         })
@@ -32,9 +38,12 @@ pub(crate) struct Sps {
     pub sao: bool,
     pub temporal_mvp: bool,
     pub short: Vec<ShortTerm>,
+    pub short_start: usize,
+    pub short_end: usize,
     pub long: Option<Vec<LongTerm>>,
     pub vui_start: usize,
     pub vui_end: usize,
+    pub vui: Option<VuiIdentity>,
 }
 
 impl Sps {
@@ -51,12 +60,14 @@ impl Sps {
         if bits.flag()? {
             return Err(Error::Unsupported); // PCM is outside the supported rewriting profile.
         }
+        let short_start = bits.consumed;
         let count = bits.ue(64)? as usize;
         let mut short = Vec::new();
         short.try_reserve_exact(count).map_err(|_| Error::Limit)?;
         for _ in 0..count {
             short.push(ShortTerm::read(bits, &short, false)?);
         }
+        let short_end = bits.consumed;
         let long = if bits.flag()? {
             let count = bits.ue(32)? as usize;
             let mut values = Vec::new();
@@ -71,9 +82,9 @@ impl Sps {
         let temporal_mvp = bits.flag()?;
         bits.flag()?; // strong_intra_smoothing_enabled_flag
         let vui_start = bits.consumed;
-        if bits.flag()? {
-            validate_vui(bits, prefix.max_sub_layers - 1)?;
-        }
+        let vui = if bits.flag()? {
+            Some(read_vui(bits, prefix.max_sub_layers - 1)?)
+        } else { None };
         let vui_end = bits.consumed;
         if bits.flag()? {
             return Err(Error::Unsupported);
@@ -82,9 +93,12 @@ impl Sps {
             sao,
             temporal_mvp,
             short,
+            short_start,
+            short_end,
             long,
             vui_start,
             vui_end,
+            vui,
         })
     }
 }
@@ -233,7 +247,8 @@ fn timing(bits: &mut Bits<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-fn validate_vps(bits: &mut Bits<'_>, sublayers: u32) -> Result<(), Error> {
+fn validate_vps(bits: &mut Bits<'_>, sublayers: u32) -> Result<Vec<Range<usize>>, Error> {
+    let mut schedules = Vec::new();
     bits.skip_profile_tier_level(sublayers)?;
     let first = if bits.flag()? { 0 } else { sublayers };
     for _ in first..=sublayers {
@@ -255,33 +270,50 @@ fn validate_vps(bits: &mut Bits<'_>, sublayers: u32) -> Result<(), Error> {
             if index == 0 || bits.flag()? {
                 common = Some(HrdCommon::read(bits)?);
             }
+            let start = bits.consumed;
             common
                 .ok_or(Error::Metadata)?
                 .validate_sublayers(bits, sublayers)?;
+            schedules.try_reserve(1).map_err(|_| Error::Limit)?;
+            schedules.push(start..bits.consumed);
         }
     }
     if bits.flag()? {
         return Err(Error::Unsupported);
     }
-    Ok(())
+    Ok(schedules)
 }
 
-fn validate_vui(bits: &mut Bits<'_>, sublayers: u32) -> Result<(), Error> {
-    if bits.flag()? && bits.read(8)? == 255 {
+/// Same parsed VUI identity as the JVM source inspector. The retained source
+/// template is unchanged; unmodelled presentation-only flags are still parsed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VuiIdentity {
+    aspect: Option<u32>,
+    sar: Option<(u32, u32)>,
+    video_signal: Option<u32>,
+    colour: Option<u32>,
+    timing: Option<(u32, u32)>,
+    hrd: bool,
+    restriction: bool,
+}
+
+fn read_vui(bits: &mut Bits<'_>, sublayers: u32) -> Result<VuiIdentity, Error> {
+    let aspect = if bits.flag()? { Some(bits.read(8)?) } else { None };
+    let sar = if aspect == Some(255) {
         let (width, height) = (bits.read(16)?, bits.read(16)?);
         if width == 0 || height == 0 {
             return Err(Error::Metadata);
         }
-    }
+        Some((width, height))
+    } else { None };
     if bits.flag()? {
         bits.flag()?;
     }
-    if bits.flag()? {
-        bits.read(4)?;
-        if bits.flag()? {
-            bits.read(24)?;
-        }
-    }
+    let (video_signal, colour) = if bits.flag()? {
+        let signal = bits.read(4)?;
+        let colour = if bits.flag()? { Some(bits.read(24)?) } else { None };
+        (Some(signal), colour)
+    } else { (None, None) };
     if bits.flag()? {
         bits.ue(5)?;
         bits.ue(5)?;
@@ -292,20 +324,25 @@ fn validate_vui(bits: &mut Bits<'_>, sublayers: u32) -> Result<(), Error> {
             bits.ue(32768)?;
         }
     }
-    if bits.flag()? {
-        timing(bits)?;
-        if bits.flag()? {
-            HrdCommon::read(bits)?.validate_sublayers(bits, sublayers)?;
-        }
-    }
-    if bits.flag()? {
+    let mut hrd = false;
+    let timing = if bits.flag()? {
+        let tick = bits.read(32)?;
+        let scale = bits.read(32)?;
+        if tick == 0 || scale == 0 { return Err(Error::Metadata); }
+        if bits.flag()? { bits.ue(32767)?; }
+        hrd = bits.flag()?;
+        if hrd { HrdCommon::read(bits)?.validate_sublayers(bits, sublayers)?; }
+        Some((tick, scale))
+    } else { None };
+    let restriction = bits.flag()?;
+    if restriction {
         bits.read(3)?;
         bits.ue(32767)?;
         for _ in 0..4 {
             bits.ue(16)?;
         }
     }
-    Ok(())
+    Ok(VuiIdentity { aspect, sar, video_signal, colour, timing, hrd, restriction })
 }
 
 #[derive(Clone, Copy)]

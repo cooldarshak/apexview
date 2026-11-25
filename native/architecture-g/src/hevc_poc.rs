@@ -8,6 +8,7 @@ pub struct Tracker {
     previous_lsb: i64,
     reference: bool,
     irap_epoch: Option<u64>,
+    after_eos: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,6 +74,14 @@ impl Tracker {
             poc,
             irap_epoch: self.irap_epoch,
         })
+    }
+
+    pub(crate) fn end_of_sequence(&mut self) {
+        self.after_eos = true;
+    }
+
+    pub(crate) fn take_end_of_sequence(&mut self) -> bool {
+        std::mem::take(&mut self.after_eos)
     }
 
     pub fn has_reference(&self) -> bool {

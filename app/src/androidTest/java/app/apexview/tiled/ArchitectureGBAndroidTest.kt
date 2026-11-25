@@ -52,6 +52,34 @@ class ArchitectureGBAndroidTest {
 
     /** Run on every mandatory API, including Android 10. Exact reduction
      * must not use BigInteger's newer Android exact-conversion methods. */
+    private fun verifyNativeProtectedParameters(sourceInit: ByteArray, expectedInit: ByteArray,
+                                                rate: Int, denominator: Int) {
+        val source = requireNotNull(CmafBoxInspector.inspect(sourceInit).tracks.single().hevcConfiguration)
+        val expected = requireNotNull(CmafBoxInspector.inspect(expectedInit).tracks.single().hevcConfiguration)
+        val sps = expected.sps.single()
+        val pps = expected.pps.single()
+        val request = HevcOutputParameterSetWriter.Request(
+            expected.vps.single().vpsId, sps.spsId, pps.ppsId,
+            sps.width, sps.height, requireNotNull(pps.tileColumnWidthsInCtbs),
+            requireNotNull(pps.tileRowHeightsInCtbs), pps.loopFilterAcrossTiles == true,
+            rate, denominator)
+        val sets = source.rawVpsNals + source.rawSpsNals + source.rawPpsNals
+        val reference = HevcOutputParameterSetWriter.generate(sets[0], sets[1], sets[2], request)
+        val native = requireNotNull(NativeProtectedPlan.matchingOutputParameters(sets, request, reference))
+        assertArrayEquals(expected.rawVpsNals.single(), native.vps)
+        assertArrayEquals(expected.rawSpsNals.single(), native.sps)
+        assertArrayEquals(expected.rawPpsNals.single(), native.pps)
+        assertNull(NativeProtectedPlan.matchingOutputParameters(sets, request, reference) { packet, kind ->
+            require(kind == 4)
+            packet[0] = 0
+            NativeStitchingEngine.protectedPlan(packet, kind)
+        })
+        assertNull(NativeProtectedPlan.matchingOutputParameters(sets, request, reference) { _, _ ->
+            byteArrayOf(0, 0, 0, 1, 0)
+        })
+        Log.i("PitwallGB", "GB protected clear output parameter native/JVM exact parity PASS")
+    }
+
     private fun verifyFrameRateArithmetic() {
         assertEquals(50 to 1, reducePositiveHevcFrameRate(90_000L, 1_800L))
         assertEquals(30_000 to 1_001, reducePositiveHevcFrameRate(60_000L, 2_002L))
@@ -115,6 +143,7 @@ class ArchitectureGBAndroidTest {
         val expectedInit = ByteArray(initSize).also { expectedBuffer.get(it) }
         val expectedMedia = ByteArray(mediaSize).also { expectedBuffer.get(it) }
         assertFalse(expectedBuffer.hasRemaining())
+        verifyNativeProtectedParameters(inits[0], expectedInit, numerator, denominator)
         verifyProtectedMetadata(expectedInit)
         verifyProtectedPlan(inits[0], media[0], expectedInit)
         verifyProtectedPictures(inits, media, expectedInit)
@@ -451,6 +480,52 @@ class ArchitectureGBAndroidTest {
 
     /** Same actual JVM composer and native worker, but the second source has
      * three-byte lengths, exact in-band sets, AUD/SEI and terminal padding. */
+    /** Encode the same zero crop with the opposite presence flag.
+     * The JVM metadata, source cells, timing and actual video must be equal. */
+    private fun equivalentSpsEncoding(nal: ByteArray): ByteArray {
+        val rbsp = HevcBitstream.ebspToRbsp(nal.copyOfRange(2, nal.size))
+        val reader = HevcBitReader(rbsp)
+        reader.readBits(4)
+        val layers = reader.readBits(3)
+        reader.readBit()
+        repeat(3) { reader.readBits(32) }
+        val profiles = BooleanArray(layers)
+        val levels = BooleanArray(layers)
+        repeat(layers) { i -> profiles[i] = reader.readBit() != 0; levels[i] = reader.readBit() != 0 }
+        if (layers > 0) repeat(8-layers) { reader.readBits(2) }
+        repeat(layers) { i ->
+            if (profiles[i]) { reader.readBits(32); reader.readBits(32); reader.readBits(24) }
+            if (levels[i]) reader.readBits(8)
+        }
+        reader.readUnsignedExpGolomb()
+        val chroma = reader.readUnsignedExpGolomb()
+        if (chroma == 3L) reader.readBit()
+        reader.readUnsignedExpGolomb()
+        reader.readUnsignedExpGolomb()
+        val start = reader.positionBits
+        val signalled = reader.readBit() != 0
+        if (signalled) repeat(4) { require(reader.readUnsignedExpGolomb() == 0L) }
+        val end = reader.positionBits
+        val all = rbsp.flatMap { value -> (7 downTo 0).map { (value.toInt() ushr it) and 1 } }
+        val stop = all.indexOfLast { it == 1 }
+        val replacement = if (signalled) listOf(0) else listOf(1,1,1,1,1)
+        val bits = (all.take(start) + replacement + all.subList(end, stop+1)).toMutableList()
+        while (bits.size % 8 != 0) bits.add(0)
+        val out = java.io.ByteArrayOutputStream()
+        out.write(nal, 0, 2)
+        var zeros = 0
+        bits.chunked(8).forEach { chunk ->
+            val value = chunk.fold(0) { a, bit -> (a shl 1) or bit }
+            if (zeros == 2 && value <= 3) { out.write(3); zeros = 0 }
+            out.write(value)
+            zeros = if (value == 0) minOf(2, zeros+1) else 0
+        }
+        val variant = out.toByteArray()
+        assertFalse(nal.contentEquals(variant))
+        assertEquals(HevcParameterSets.parseSps(nal), HevcParameterSets.parseSps(variant))
+        return variant
+    }
+
     private fun verifyClearVariant(
         request: HevcClearCmafGridComposer.Request, geometry: NativeClearArchiveJob.Geometry,
         inits: List<ByteArray>, media: List<ByteArray>, expectedInit: ByteArray, expectedMedia: ByteArray,
@@ -473,7 +548,9 @@ class ArchitectureGBAndroidTest {
             val end = data.position() + requireNotNull(timing.sampleSizeBytes).toInt()
             val nals = mutableListOf<ByteArray>()
             if (index == 0) {
-                nals += config.rawVpsNals + config.rawSpsNals + config.rawPpsNals
+                nals += config.rawVpsNals
+                nals += config.rawSpsNals.map(::equivalentSpsEncoding)
+                nals += config.rawPpsNals
                 nals += byteArrayOf(0x46, 0x01, 0x50) // AUD
             }
             while (data.position() < end) {

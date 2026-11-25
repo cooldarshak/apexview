@@ -256,6 +256,7 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeProte
             1 => crate::protected_plan::slice_prefix(&input),
             2 => crate::protected_plan::sample_map(&input),
             3 => crate::protected_plan::slice_batch(&input),
+            4 => crate::protected_plan::output_parameters(&input),
             _ => Err(crate::bmff::Error::Unsupported),
         };
         input.fill(0);

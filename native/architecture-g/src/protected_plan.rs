@@ -18,6 +18,45 @@ fn read_nal<'a>(r: &mut Reader<'a>) -> Result<&'a [u8], Error> {
     r.take(n)
 }
 
+/// GBO1: clear VPS/SPS/PPS template plus checked output geometry and rate.
+/// Share the native output writer with the clear atlas. No sample data,
+/// protected init container, PSSH, key, IV or license enters this command.
+pub fn output_parameters(packet: &[u8]) -> Result<Vec<u8>, Error> {
+    if packet.len() > MAX_PACKET { return Err(Error::Limit); }
+    let mut r = Reader::new(packet);
+    if r.take(4)? != b"GBO1" { return Err(Error::Unsupported); }
+    let ids = [r.u32()?, r.u32()?, r.u32()?];
+    let width = r.u32()?;
+    let height = r.u32()?;
+    let frame_rate = (r.u32()?, r.u32()?);
+    let flags = r.u32()?;
+    let columns = r.u32()? as usize;
+    let rows = r.u32()? as usize;
+    if flags & !3 != 0 || !(1..=20).contains(&columns) || !(1..=22).contains(&rows) {
+        return Err(Error::Limit);
+    }
+    let mut col_widths = [0;20];
+    let mut row_heights = [0;22];
+    for v in &mut col_widths[..columns] { *v = r.u32()?; }
+    for v in &mut row_heights[..rows] { *v = r.u32()?; }
+    let sets = [read_nal(&mut r)?, read_nal(&mut r)?, read_nal(&mut r)?];
+    r.finish()?;
+    let output = crate::hevc_output::Request {
+        ids, width, height, columns: &col_widths[..columns],
+        rows: &row_heights[..rows], frame_rate,
+        loop_across_tiles: flags & 1 != 0, uncropped: flags & 2 != 0,
+    }.generate(sets)?;
+    let mut result = Vec::new();
+    let size = 12 + output.nals.iter().map(Vec::len).sum::<usize>();
+    if size > MAX_PACKET { return Err(Error::Limit); }
+    result.try_reserve_exact(size).map_err(|_| Error::Limit)?;
+    for nal in output.nals {
+        result.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+        result.extend_from_slice(&nal);
+    }
+    Ok(result)
+}
+
 /// GBS1, destination, opaque flag, filter override (0 absent, 1 false,
 /// 2 true), then six length-prefixed parameter sets and a clear NAL prefix.
 /// Independently parse HEVC syntax, never interpret data beyond the prefix.

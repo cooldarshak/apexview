@@ -223,13 +223,15 @@ impl<'a> Fragment<'a> {
         let moof = moof.ok_or(Error::Metadata)?;
         let mdat = mdat.ok_or(Error::Metadata)?;
         let traf = moof.children().require(b"traf")?;
-        let mfhd = moof.children().require(b"mfhd")?;
-        let mut movie = Reader::new(mfhd.payload);
-        if movie.full()? != (0, 0) {
-            return Err(Error::Unsupported);
-        }
-        let sequence = movie.u32()?;
-        movie.finish()?;
+        // Source sequence is informational: the output sequence belongs to
+        // the composition request. The reference does not require source mfhd.
+        let sequence = if let Some(mfhd) = moof.children().optional(b"mfhd")? {
+            let mut movie = Reader::new(mfhd.payload);
+            if movie.full()? != (0, 0) { return Err(Error::Unsupported); }
+            let value = movie.u32()?;
+            movie.finish()?;
+            value
+        } else { 0 };
         let children = traf.children();
         let defaults = parse_tfhd(children.clone().require(b"tfhd")?, track)?;
         let decode_time = parse_tfdt(children.clone().require(b"tfdt")?)?;
@@ -508,9 +510,10 @@ mod tests {
         variant[mdat-4..mdat].copy_from_slice(&(size+3).to_be_bytes());
         drop(variant.splice(mdat+4..mdat+4, [0xaa,0xbb,0xcc]));
         assert_eq!(Fragment::parse(&variant, &init).unwrap().samples, reference.samples);
-        // A size-zero final mdat extends to the containing extent.
+        // The JVM composer rejects size-to-end boxes. Match that policy.
         variant[mdat-4..mdat].copy_from_slice(&0u32.to_be_bytes());
-        assert_eq!(Fragment::parse(&variant, &init).unwrap().samples, reference.samples);
+        assert!(Fragment::parse(&variant, &init).is_err());
+        variant[mdat-4..mdat].copy_from_slice(&(size+3).to_be_bytes());
         // Trailing unreferenced data, and offsets into the header or outside
         // the enclosing extent, must still fail.
         variant.push(0xaa);
@@ -520,6 +523,26 @@ mod tests {
             variant[trun..trun+4].copy_from_slice(&bad.to_be_bytes());
             assert!(Fragment::parse(&variant, &init).is_err());
         }
+    }
+
+    #[test]
+    fn optional_source_mfhd_does_not_change_sample_timing_or_payload() {
+        let bytes = initialization();
+        let init = Initialization::parse(&bytes).unwrap();
+        let original = fragment(90000);
+        let reference = Fragment::parse(&original, &init).unwrap();
+        let mut variant = original.clone();
+        let start = variant.windows(4).position(|x| x == b"mfhd").unwrap()-4;
+        let length = u32::from_be_bytes(variant[start..start+4].try_into().unwrap()) as usize;
+        let moof_size = u32::from_be_bytes(variant[..4].try_into().unwrap());
+        variant[..4].copy_from_slice(&(moof_size-length as u32).to_be_bytes());
+        drop(variant.drain(start..start+length));
+        let offset_at = variant.windows(4).position(|x| x == b"trun").unwrap()+12;
+        let offset = i32::from_be_bytes(variant[offset_at..offset_at+4].try_into().unwrap());
+        variant[offset_at..offset_at+4].copy_from_slice(&(offset-length as i32).to_be_bytes());
+        let parsed = Fragment::parse(&variant, &init).unwrap();
+        assert_eq!(parsed.sequence, 0);
+        assert_eq!(parsed.samples, reference.samples);
     }
 
     #[test]

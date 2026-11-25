@@ -113,6 +113,19 @@ impl<'a> Bits<'a> {
         Ok(value)
     }
 
+    /// Validate the stop bit and all remaining alignment/padding bytes before
+    /// any semantic key discards the original encoding.
+    pub(crate) fn finish_rbsp(&mut self) -> Result<(), Error> {
+        if !self.flag()? { return Err(Error::Nal); }
+        while self.pending != 0 {
+            if self.flag()? { return Err(Error::Nal); }
+        }
+        while self.bytes < self.ebsp.len() {
+            if self.next_byte()? != 0 { return Err(Error::Nal); }
+        }
+        Ok(())
+    }
+
     pub(crate) fn skip_profile_tier_level(
         &mut self,
         sublayers_minus_one: u32,
@@ -147,6 +160,11 @@ pub struct StreamPrefix {
     pub display_width: u32,
     pub display_height: u32,
     pub(crate) crop: [u32; 4],
+    pub(crate) crop_start: usize,
+    pub(crate) crop_end: usize,
+    pub(crate) ordering_start: usize,
+    pub(crate) ordering_end: usize,
+    pub(crate) ordering: [[u32; 3]; 7],
     pub width_in_ctbs: u32,
     pub height_in_ctbs: u32,
     pub max_sub_layers: u32,
@@ -199,6 +217,7 @@ impl StreamPrefix {
         let width = bits.ue(32768)?;
         let height = bits.ue(32768)?;
         let (mut display_width, mut display_height) = (width, height);
+        let crop_start = bits.consumed;
         let mut crop = [0; 4];
         if bits.flag()? {
             for value in &mut crop { *value = bits.ue(32768)?; }
@@ -209,18 +228,22 @@ impl StreamPrefix {
             display_width = width.checked_sub(crop_width * x).ok_or(Error::Metadata)?;
             display_height = height.checked_sub(crop_height * y).ok_or(Error::Metadata)?;
         }
+        let crop_end = bits.consumed;
         if display_width == 0 || display_height == 0 {
             return Err(Error::Metadata);
         }
         let bit_depth_luma = bits.ue(8)? + 8;
         let bit_depth_chroma = bits.ue(8)? + 8;
         let poc_lsb_bits = 4 + bits.ue(12)?;
+        let ordering_start = bits.consumed;
         let first_layer = if bits.flag()? { 0 } else { sub_layers };
-        for _ in first_layer..=sub_layers {
-            bits.ue(32)?; // sps_max_dec_pic_buffering_minus1
-            bits.ue(32)?; // sps_max_num_reorder_pics
-            bits.ue(1024)?; // sps_max_latency_increase_plus1
+        let mut ordering = [[0; 3]; 7];
+        for layer in &mut ordering[first_layer as usize..=sub_layers as usize] {
+            *layer = [bits.ue(32)?, bits.ue(32)?, bits.ue(1024)?];
         }
+        let inferred = ordering[sub_layers as usize];
+        ordering[..first_layer as usize].fill(inferred);
+        let ordering_end = bits.consumed;
         let log2_ctb = 3 + bits.ue(3)? + bits.ue(3)?;
         if log2_ctb > 6 {
             return Err(Error::Unsupported);
@@ -239,6 +262,11 @@ impl StreamPrefix {
             display_width,
             display_height,
             crop,
+            crop_start,
+            crop_end,
+            ordering_start,
+            ordering_end,
+            ordering,
             width_in_ctbs: width.div_ceil(ctb),
             height_in_ctbs: height.div_ceil(ctb),
             max_sub_layers: sub_layers + 1,

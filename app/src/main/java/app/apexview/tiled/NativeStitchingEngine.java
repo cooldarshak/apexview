@@ -80,7 +80,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
     private static native byte[] nativeProtectedPlan(byte[] packet, int kind);
     static byte[] protectedPlan(byte[] packet, int kind) {
         if (packet == null || packet.length == 0 || packet.length > 2 * MIB ||
-            (kind != 1 && kind != 2 && kind != 3)) return null;
+            (kind < 1 || kind > 4)) return null;
         System.loadLibrary("pitwall_g0");
         if (nativeAbi() != 2) return null;
         return nativeProtectedPlan(packet, kind);
