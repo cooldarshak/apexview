@@ -2,6 +2,12 @@
 
 **Current Architecture G checkpoint (25 November 2026):** [Build 876](https://github.com/cooldarshak/apexview/actions/runs/45633549000), exact source `b57d0c370fc5cd48e4c8bb5e305c6f58bbb8f8e5`, verified GREEN in all five mandatory jobs: build/host 139272862915, API36 139282184962, API29 139282184981, API31 139282185346, final signed publication 139284550470. User G-B sign-off retained. The next consolidated G-C candidate implements further copy/allocation reduction, measured-bandwidth Auto selection and native worker trace instrumentation. Exact-source candidate CI and physical profiling are still required.
 
+### Build 877 failure correction (G-C)
+
+- Build 877, run 45638564822, source `409ccbd1f676054fdfe1a04fffe6020930153f3c`: all 52 Rust host unit tests passed, then mandatory Clippy rejected the eight-argument fragment writer. Android ABI/build/instrumentation and publication did not complete.
+- Group previous fragment end and standalone flag into the typed FragmentBoundary value, keeping the original caller-owned trackers and reusable header slab. Same values, same validation, same lifetime and buffer bounds. No lint suppression or test relaxation.
+- All 38 production wiring tests passed on the corrected candidate against exact Build 877 dependencies verified by Git blob SHA; existing parity tests and strengthened signature/temporal boundary assertions retained. Full exact-source CI still required; Build 876 remains the last verified green baseline.
+
 ### G-C continuation after verified Build 876
 
 - G.9/G.10: route existing authorized DASH DataSpec reads through the same bounded HLS/CMAF reader. Preserve complete DataSpec including flags, position, length, request headers and resolved URI; retain DASH's EOF/size validation with a one-byte probe for known lengths, reject no-progress/truncation/oversize and wipe partial transfers. Known-length responses now use one final array instead of a scratch buffer, growing ByteArrayOutputStream and full final clone. Unknown-length response still coalesces once. No authentication, protected-sample or key handling change.

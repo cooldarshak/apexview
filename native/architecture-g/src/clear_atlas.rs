@@ -55,6 +55,12 @@ struct Placement {
     address: u32,
 }
 
+/// Temporal boundary for a validated fragment within the caller's window.
+pub(crate) struct FragmentBoundary {
+    pub previous_end: Option<i64>,
+    pub standalone: bool,
+}
+
 pub struct Atlas {
     sources: Vec<Source>,
     output: Parameters,
@@ -236,7 +242,8 @@ impl Atlas {
         output: &mut [u8],
     ) -> Result<usize, Error> {
         let mut trackers = [Tracker::default(); MAX_FEEDS];
-        self.write_window_fragment(input, sequence, output, &mut trackers, None, true, &mut Vec::new())
+        self.write_window_fragment(input, sequence, output, &mut trackers,
+            FragmentBoundary { previous_end: None, standalone: true }, &mut Vec::new())
             .map(|(size, _, _)| size)
     }
 
@@ -248,10 +255,10 @@ impl Atlas {
         sequence: u32,
         output: &mut [u8],
         trackers: &mut [Tracker; MAX_FEEDS],
-        previous_end: Option<i64>,
-        standalone: bool,
+        boundary: FragmentBoundary,
         header_slab: &mut Vec<u8>,
     ) -> Result<(usize, i64, bool), Error> {
+        let FragmentBoundary { previous_end, standalone } = boundary;
         if input.len() != self.sources.len() {
             return Err(Error::Metadata);
         }

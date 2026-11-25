@@ -5,7 +5,7 @@
 //! request; Rust verifies every output seam and every selected slice.
 //! Each source block carries a bounded window beginning at random access.
 use crate::bmff::{Error, Reader, MAX_ATLAS_BYTES};
-use crate::clear_atlas::{Atlas, Cell, Grid, MAX_FEEDS};
+use crate::clear_atlas::{Atlas, Cell, FragmentBoundary, Grid, MAX_FEEDS};
 use crate::hevc_poc::Tracker;
 
 const MAGIC: &[u8; 4] = b"GBC1";
@@ -176,8 +176,8 @@ impl Dispatcher {
             let start = cursor.checked_add(if window { 4 } else { 0 }).ok_or(Error::Limit)?;
             let destination = output.get_mut(start..).ok_or(Error::Capacity)?;
             let (size, end, gate) = atlas.write_window_fragment(
-                &row[..feeds], number, destination, &mut trackers, previous_end, count == 1,
-                &mut self.header_slab,
+                &row[..feeds], number, destination, &mut trackers,
+                FragmentBoundary { previous_end, standalone: count == 1 }, &mut self.header_slab,
             )?;
             can_gate_filter &= gate;
             if window {

@@ -677,6 +677,13 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("rewrite_tile_into_slab", atlas)
         self.assertIn("write_slab_nal_parts", atlas)
         self.assertIn("header_slab.clear()", atlas)
+        self.assertIn("boundary: FragmentBoundary", atlas)
+        self.assertIn("let FragmentBoundary { previous_end, standalone } = boundary;", atlas)
+        self.assertIn("FragmentBoundary { previous_end: None, standalone: true }", atlas)
+        self.assertIn("FragmentBoundary { previous_end, standalone: count == 1 }", dispatch)
+        signature = atlas.split("fn write_window_fragment(", 1)[1].split(") -> Result", 1)[0]
+        self.assertLessEqual(len([arg for arg in signature.splitlines() if arg.strip().endswith(",")]), 7)
+        self.assertNotIn("allow(clippy::too_many_arguments)", atlas)
         self.assertIn("&mut self.header_slab", dispatch)
         self.assertIn("self.header_slab = Vec::new()", dispatch)
         self.assertIn('NativeTrace::begin(c"PitwallNativeAtlas")', contents(rust + "engine.rs"))
