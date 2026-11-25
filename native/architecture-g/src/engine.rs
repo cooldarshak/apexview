@@ -72,6 +72,11 @@ impl Budget {
     }
 }
 struct Buffers { input:Vec<u8>,output:Vec<u8> }
+impl Buffers {
+    fn new(budget:Budget)->Option<Self> {
+        Some(Self{input:buffer(budget.input)?,output:buffer(budget.output)?})
+    }
+}
 fn buffer(capacity:usize)->Option<Vec<u8>> {
     let mut out=Vec::new();
     out.try_reserve_exact(capacity).ok()?;
@@ -134,20 +139,22 @@ pub struct Engine {
 }
 impl Engine {
     pub fn new(budget:Budget)->Option<Self> {
-        Self::new_reserved(budget, budget.reserved()?)
+        Self::new_reserved(budget, budget.reserved()?, false)
     }
     // Clear atlas JNI transfers directly to/from the owned slot, not the
     // separate G-A bridge. Keep the same queue, lease and workspace bounds.
     pub fn new_atlas(budget:Budget)->Option<Self> {
-        Self::new_reserved(budget, budget.reserved_atlas()?)
+        Self::new_reserved(budget, budget.reserved_atlas()?, true)
     }
-    fn new_reserved(budget:Budget,reserved_bytes:usize)->Option<Self> {
+    fn new_reserved(budget:Budget,reserved_bytes:usize,compact_atlas:bool)->Option<Self> {
         let mut slots=Vec::new();
         slots.try_reserve_exact(budget.slots).ok()?;
-        for _ in 0..budget.slots {
-            slots.push(Slot{buffers:Some(Buffers{
-                input:buffer(budget.input)?,output:buffer(budget.output)?}),
-                stage:Stage::Free,work:None,result:0});
+        // The serialized production bridge normally uses one slot. Reserve
+        // every logical slot in the admission ceiling, but materialize the
+        // spare compact atlas payload pair only for genuine overlap.
+        for index in 0..budget.slots {
+            let buffers=if !compact_atlas || index==0 {Some(Buffers::new(budget)?)} else {None};
+            slots.push(Slot{buffers,stage:Stage::Free,work:None,result:0});
         }
         let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false}),Condvar::new()));
         let cloned=Arc::clone(&shared);
@@ -204,7 +211,15 @@ impl Engine {
         if generation!=s.generation {return STALE;}
         let free=s.slots.iter().filter(|slot|slot.stage==Stage::Free).count();
         if free==0 || (!foreground && free<2) {return BACKPRESSURE;}
-        let Some(index)=s.slots.iter().position(|slot|slot.stage==Stage::Free) else {return BACKPRESSURE;};
+        let Some(index)=s.slots.iter().position(|slot|slot.stage==Stage::Free && slot.buffers.is_some())
+            .or_else(||s.slots.iter().position(|slot|slot.stage==Stage::Free)) else {return BACKPRESSURE;};
+        // Free/unallocated is distinct from Running/temporarily owned by the
+        // worker. No active slot can be selected or evicted here.
+        if s.slots[index].buffers.is_none() {
+            let Some(buffers)=Buffers::new(self.budget) else {return BACKPRESSURE;};
+            s.slots[index].buffers=Some(buffers);
+        }
+        if Instant::now()>=deadline {return DEADLINE;}
         // Tokens never repeat across engines, including on 32-bit targets.
         let Ok(raw)=NEXT_TOKEN.fetch_update(Ordering::Relaxed,Ordering::Relaxed,
             |v|v.checked_add(1).filter(|next|i64::try_from(*next).is_ok())) else {return INVALID;};
@@ -356,6 +371,41 @@ mod tests {
         });
         assert!(token>0);
         assert_eq!(engine.read_with(token,0,1,|_|panic!("unacquired output")),INVALID);
+        assert!(engine.close());
+    }
+
+    #[test]
+    fn compact_spare_slot_is_lazy_and_preserves_foreground_admission() {
+        let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
+        let mut engine=Engine::new_atlas(b).unwrap();
+        let g=engine.generation();
+        assert_eq!(engine.reserved(),b.reserved_atlas().unwrap());
+        {
+            let s=engine.shared.0.lock().unwrap();
+            assert!(s.slots[0].buffers.is_some());
+            assert!(s.slots[1].buffers.is_none());
+        }
+        // A malformed atlas is safely rejected, but its failed result still
+        // occupies the slot until release, just like a ready/read lease.
+        for _ in 0..4 {
+            let token=engine.submit_clear_atlas(g,b"GBC1",false,5000);
+            assert!(token>0);
+            assert_eq!(wait(&engine,token),INVALID);
+            assert_eq!(engine.release(token),1);
+            assert!(engine.shared.0.lock().unwrap().slots[1].buffers.is_none());
+        }
+        let first=engine.submit_clear_atlas(g,b"GBC1",false,5000);
+        assert!(first>0);
+        assert_eq!(wait(&engine,first),INVALID);
+        assert_eq!(engine.submit_clear_atlas(g,b"GBC1",false,5000),BACKPRESSURE);
+        let foreground=engine.submit_clear_atlas(g,b"GBC1",true,5000);
+        assert!(foreground>first);
+        assert_eq!(wait(&engine,foreground),INVALID);
+        assert_eq!(engine.submit_clear_atlas(g,b"GBC1",true,5000),BACKPRESSURE);
+        assert!(engine.shared.0.lock().unwrap().slots[1].buffers.is_some());
+        assert_eq!(engine.release(first),1);
+        assert_eq!(engine.release(foreground),1);
+        assert_eq!(engine.seek(),g+1);
         assert!(engine.close());
     }
 

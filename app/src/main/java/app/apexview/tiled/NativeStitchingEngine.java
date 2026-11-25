@@ -62,8 +62,9 @@ public final class NativeStitchingEngine implements AutoCloseable {
         // just because a device has a particular model or RAM class.
         long surplus=availableBytes-osThresholdBytes;
         long ceiling=surplus/8;
-        // The archive bridge serializes jobs; two slots preserve the
-        // foreground reservation without preallocating unused 4-slot arenas.
+        // The archive bridge serializes jobs; two logical slots preserve
+        // the foreground reservation. Rust lazily materializes the spare
+        // pair only on overlap, while admission still charges both slots.
         // On low RAM use exact sizes, on other devices try bounded growth
         // headroom first, then exact sizing if the larger arena won't fit.
         int grownInput=(int)Math.min(MAX_ATLAS_PACKET,observedInput+(observedInput+3L)/4);
