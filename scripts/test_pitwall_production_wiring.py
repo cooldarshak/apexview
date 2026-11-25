@@ -572,8 +572,30 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("rewriteInspectedProtectedParts(", rewriter)
         self.assertIn("parts.verifyCopiedTail(output, offset)", rewriter)
         self.assertIn("sample.copyInto(result, cursor)", writer)
+        self.assertIn("else sample.writeTo(output)", writer)
+        self.assertIn("NativeFragmentLease.build(totalFragmentBytes.toInt())", writer)
+        self.assertIn("writeBytes(output, null)", writer)
+        self.assertIn("validate(readable)", writer)
+        self.assertIn("plannedPayload", writer)
         self.assertIn("encryption.subsampleRanges == sample.subsampleRanges", writer)
         self.assertNotIn("sample.copyOfRange(mapped.nalOffset, sourceNalEnd)", rewriter)
+
+    def test_gb_rolling_clear_dispatch_uses_existing_validated_native_engine(self):
+        base = "app/src/main/java/app/apexview/tiled/"
+        rolling = contents(base + "ClearCmafArchiveComposition.kt")
+        capture = contents(base + "F1HlsFeedCapture.kt")
+        archive = contents(base + "F1ArchiveFeedCapture.kt")
+        app = contents("app/src/main/java/app/apexview/AppState.kt")
+        self.assertIn("nativeClear.compose(validated", rolling)
+        self.assertIn("nativeClear.publish(produced.nativeEpoch)", rolling)
+        self.assertIn("independentlyDecodable && previous == 0", rolling)
+        self.assertIn("nativeClear.invalidateForSeek()", rolling)
+        self.assertIn("nativeClear.close()", rolling)
+        self.assertIn("HISTORY_DEPENDENT_OR_MULTI_FRAGMENT", rolling)
+        self.assertIn("clearComposition.compose(", capture)
+        self.assertIn("nativeRequested = nativeRequested", capture)
+        self.assertIn("nativeRequested = nativeRequested", archive)
+        self.assertIn("nativeContext = context, nativeRequested = { settings.nativeRustStitching", app)
 
     def test_post834_pitwall_control_and_media_use_paired_tls(self):
         base = "app/src/main/java/app/apexview/"

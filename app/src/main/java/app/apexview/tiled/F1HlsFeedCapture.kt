@@ -38,7 +38,9 @@ private suspend fun <T, R> mapArchiveFeedsBounded(
 
 /** Reads the HLS/CMAF actually supplied by player_tm, without another PLAY or media player. */
 internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximumHeight: Int = 2160,
-                                private val maximumOutputWidth: Int = 4096, private val minimumCaptureHeight: Int = 0, fullPictures: Boolean = minimumCaptureHeight > 0) {
+                                private val maximumOutputWidth: Int = 4096, private val minimumCaptureHeight: Int = 0, fullPictures: Boolean = minimumCaptureHeight > 0,
+                                nativeContext: android.content.Context? = null,
+                                nativeRequested: () -> Boolean = { false }) {
     private data class Offer(val feed: F1DashFeedCapture.Feed, val uri: Uri, val format: Format?, val master: HlsMultivariantPlaylist?, val audioGroupId: String? = null, val subtitleGroupId: String? = null)
     private class Init(val uri: Uri, val offset: Long, val length: Long, val bytes: ByteArray, val report: CmafBoxInspector.Report)
     private val reader = CmafHttpReader(factory)
@@ -49,7 +51,8 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     // Emit source-quality changes immediately, but not the identical rendition
     // snapshot on every 200-300ms rolling capture poll.
     private val renditionDiagnostics = BoundedChangeLog()
-    private val clearComposition = ClearCmafArchiveComposition(fullPictures = fullPictures)
+    private val clearComposition = ClearCmafArchiveComposition(fullPictures = fullPictures,
+        nativeContext = nativeContext?.applicationContext, nativeRequested = nativeRequested)
     private val compositionDispatcher: ExecutorCoroutineDispatcher = Executors.newSingleThreadExecutor { task ->
         Thread({
             // Active rolling composition is playback-critical: prefer it over

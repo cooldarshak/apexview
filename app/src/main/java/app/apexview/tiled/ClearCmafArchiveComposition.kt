@@ -1,7 +1,27 @@
 package app.apexview.tiled
 
 /** Runtime adapter for genuinely clear HEVC CMAF. Protected tracks remain rejected by the composer. */
-internal class ClearCmafArchiveComposition(private val fullPictures: Boolean = false) {
+internal class ClearCmafArchiveComposition(
+    private val fullPictures: Boolean = false,
+    private val nativeContext: android.content.Context? = null,
+    private val nativeRequested: () -> Boolean = { false },
+    private val nativeClear: NativeClearArchiveBridge = NativeClearArchiveBridge(),
+) {
+    private var configured = false
+    private val routeChanges = BoundedChangeLog()
+    internal var lastRoute: NativeStitchingSelection.Decision =
+        NativeStitchingSelection.resolve(false, NativeStitchingSelection.Path.CLEAR_CANDIDATE)
+        private set
+
+    private fun reportRoute(requested: Boolean, actual: String, reason: String) {
+        lastRoute = NativeStitchingSelection.Decision(requested,
+            if (actual == "RUST") NativeStitchingSelection.Route.RUST else NativeStitchingSelection.Route.JVM,
+            reason)
+        val evidence = "GB_CLEAR_ROLLING requested=${if (requested) "RUST" else "JVM"} " +
+            "actual=$actual reason=$reason"
+        if (routeChanges.shouldLog(evidence, android.os.SystemClock.elapsedRealtime()))
+            android.util.Log.i("ApexviewSingleDecoder", evidence)
+    }
     private var geometry: ProtectedHevcLiveComposition.SourceGeometry? = null
     private var initialization: ByteArray? = null
     private val history = mutableListOf<ProtectedHevcLiveComposition.OutputFragment>()
@@ -41,7 +61,7 @@ internal class ClearCmafArchiveComposition(private val fullPictures: Boolean = f
         val composingFeeds = feeds.map { feed ->
             feed.copy(mediaFragments = (if (independentlyDecodable) emptyList() else sourceHistory[feed.label].orEmpty()) + feed.mediaFragments)
         }
-        val output = HevcClearCmafGridComposer.compose(HevcClearCmafGridComposer.Request(
+        val request = HevcClearCmafGridComposer.Request(
             composingFeeds, HevcOutputGridDimensions(columns * (if (fullPictures) sourceColumns else 1), rows * (if (fullPictures) sourceRows else 1)),
             if (fullPictures) (0 until columns * rows).flatMap { slot ->
                 (0 until sourceRows).flatMap { y -> (0 until sourceColumns).map { x ->
@@ -51,7 +71,41 @@ internal class ClearCmafArchiveComposition(private val fullPictures: Boolean = f
             } else feeds.indices.map { HevcTizenGridComposer.CellSelection(it, 0, it % columns, it / columns) },
             firstOutputSequenceNumber = sequence - previous,
             frameRateNumerator = (timescale / divisor).toInt(), frameRateDenominator = (sampleDuration / divisor).toInt()
-        ))
+        )
+        val requested = nativeRequested()
+        if (requested != configured) {
+            configured = requested
+            if (requested && nativeContext != null) nativeClear.enable(nativeContext)
+            else nativeClear.disable(if (requested) "NO_DEVICE_BUDGET_CONTEXT" else "USER_DISABLED", requested)
+        }
+        val expectedInit = initialization
+        val eligible = independentlyDecodable && previous == 0 &&
+            request.feeds.all { it.mediaFragments.size == 1 } && expectedInit != null
+        val produced = if (requested && nativeClear.candidate && eligible) {
+            val validated = request.copy(feeds = request.feeds.map { feed ->
+                val init = CmafBoxInspector.inspect(feed.initializationSegment)
+                feed.copy(validatedInitialization = init,
+                    inspectedMedia = feed.mediaFragments.map { bytes ->
+                        HevcClearCmafGridComposer.InspectedMedia.inspect(bytes, init)
+                    })
+            })
+            nativeClear.compose(validated, requireNotNull(expectedInit), foreground = true,
+                timeoutMs = 5_000L) { HevcClearCmafGridComposer.compose(validated) }
+        } else {
+            // Do not reuse a proof across a history-dependent boundary.
+            // Keep its original random-access history and full JVM checks.
+            if (requested && nativeClear.candidate && expectedInit != null && !eligible)
+                nativeClear.invalidateForSeek()
+            reportRoute(requested, "JVM", when {
+                !requested -> "USER_DISABLED"
+                nativeContext == null -> "NO_DEVICE_BUDGET_CONTEXT"
+                !nativeClear.candidate -> nativeClear.decision.reason
+                expectedInit == null -> "INITIAL_REFERENCE_PENDING"
+                else -> "HISTORY_DEPENDENT_OR_MULTI_FRAGMENT"
+            })
+            NativeClearArchiveBridge.Produced(HevcClearCmafGridComposer.compose(request))
+        }
+        val output = produced.output
         val initReport = CmafBoxInspector.inspect(output.initializationSegment)
         val outputTrack = initReport.tracks.single()
         output.mediaFragments.take(previous).forEach { it.fill(0) }
@@ -68,16 +122,21 @@ internal class ClearCmafArchiveComposition(private val fullPictures: Boolean = f
                 }
                 require(initialization!!.contentEquals(output.initializationSegment)) { "Clear archive initialization changed" }
             }
-            if (initialization == null) initialization = output.initializationSegment.copyOf()
-            history += newFragments
-            feeds.forEach { feed ->
-                val stored = sourceHistory.getOrPut(feed.label) { mutableListOf() }
-                if (independentlyDecodable) { stored.forEach { it.fill(0) }; stored.clear() }
-                stored += feed.mediaFragments.map { it.copyOf() }
+            nativeClear.publish(produced.nativeEpoch) {
+                if (initialization == null) initialization = output.initializationSegment.copyOf()
+                history += newFragments
+                feeds.forEach { feed ->
+                    val stored = sourceHistory.getOrPut(feed.label) { mutableListOf() }
+                    if (independentlyDecodable) { stored.forEach { it.fill(0) }; stored.clear() }
+                    stored += feed.mediaFragments.map { it.copyOf() }
+                }
+                sequence += newFragments.size
+                while (history.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) history.removeAt(0).zero()
+                status = "CLEAR_HEVC_CMAF_COMPOSED_NOT_YET_PLAYED; layout=${columns}x${rows}"
             }
-            sequence += newFragments.size
-            while (history.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) history.removeAt(0).zero()
-            status = "CLEAR_HEVC_CMAF_COMPOSED_NOT_YET_PLAYED; layout=${columns}x${rows}"
+            if (requested && eligible)
+                reportRoute(requested, if (produced.nativeEpoch != null) "RUST" else "JVM",
+                    if (produced.nativeEpoch != null) "VALIDATED_CLEAR_ROLLING" else nativeClear.decision.reason)
         } catch (error: Throwable) { newFragments.forEach { it.zero() }; throw error
         } finally { output.initializationSegment.fill(0) }
     }
@@ -91,6 +150,7 @@ internal class ClearCmafArchiveComposition(private val fullPictures: Boolean = f
     }
 
     fun reset() {
+        nativeClear.close()
         initialization?.fill(0); initialization = null; geometry = null
         history.forEach { it.zero() }; history.clear()
         sourceHistory.values.flatten().forEach { it.fill(0) }; sourceHistory.clear(); sequence = 1L; status = "WAITING_FOR_CLEAR_CMAF"

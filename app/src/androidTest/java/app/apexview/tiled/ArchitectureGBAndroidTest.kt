@@ -97,6 +97,7 @@ class ArchitectureGBAndroidTest {
         verifyProtectedPictures(inits, media, expectedInit)
         verifyProtectedSequence(inits, media, expectedInit)
         verifyClearVariant(request, geometry, inits, media, expectedInit, expectedMedia)
+        verifyLargerClearFeedCounts(request, inits, media)
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         var references = 0
         fun reference(): HevcClearCmafGridComposer.Output {
@@ -153,6 +154,9 @@ class ArchitectureGBAndroidTest {
             assertNull(fallback.nativeEpoch)
             verify(fallback)
             assertEquals(3, references)
+            // The failed native worker was joined before fallback; reuse the
+            // same disabled bridge for the real rolling clear capture adapter.
+            verifyRollingClearBridge(context, bridge, request, inits, media)
         }
         var attempts = 0
         NativeClearArchiveBridge { _, _, _ ->
@@ -171,6 +175,126 @@ class ArchitectureGBAndroidTest {
             assertTrue(bridge.decision.requested)
         }
         Log.i("PitwallGB", "GB archive route exact parity, native-only next fragment, seek publication fence and explicit fallback PASS")
+    }
+
+    /** Use distinct logical source slots populated from the two independent
+     * clear fixtures. Exercises complete 4/6/8-feed assembly, not merely
+     * configuration cache slots. This is not physical F1 playback proof. */
+    private fun verifyLargerClearFeedCounts(
+        template: HevcClearCmafGridComposer.Request,
+        inits: List<ByteArray>, media: List<ByteArray>
+    ) {
+        val sourceConfig = requireNotNull(CmafBoxInspector.inspect(inits.first()).tracks.single().hevcConfiguration)
+        val sourcePps = sourceConfig.pps.single()
+        val cols = sourcePps.numTileColumns
+        val rows = sourcePps.numTileRows
+        val mib = 1024L * 1024L
+        for (count in listOf(4, 6, 8)) {
+            // Two atlas rows of complete source pictures keep every output
+            // tile within supported HEVC row/column limits.
+            val atlasColumns = count / 2
+            val outputColumns = atlasColumns * cols
+            val outputRows = 2 * rows
+            val feeds = List(count) { i ->
+                val source = i % inits.size
+                val report = CmafBoxInspector.inspect(inits[source])
+                HevcClearCmafGridComposer.Feed(inits[source], listOf(media[source]), "fixture-$i", report,
+                    listOf(HevcClearCmafGridComposer.InspectedMedia.inspect(media[source], report)))
+            }
+            val cells = (0 until outputRows).flatMap { y ->
+                (0 until outputColumns).map { x ->
+                    HevcTizenGridComposer.CellSelection((y / rows) * atlasColumns + x / cols,
+                        (y % rows) * cols + x % cols, x, y)
+                }
+            }
+            val request = template.copy(feeds = feeds,
+                outputGrid = HevcOutputGridDimensions(outputColumns, outputRows), cells = cells)
+            val expected = HevcClearCmafGridComposer.compose(request)
+            try {
+                val cfg = requireNotNull(CmafBoxInspector.inspect(expected.initializationSegment).tracks.single().hevcConfiguration)
+                val sps = cfg.sps.single()
+                val pps = cfg.pps.single()
+                val geometry = NativeClearArchiveJob.Geometry(sps.width, sps.height,
+                    requireNotNull(pps.tileColumnWidthsInCtbs), requireNotNull(pps.tileRowHeightsInCtbs), cells)
+                val packet = NativeClearArchiveJob.encode(request.outputTrackId, request.firstOutputSequenceNumber,
+                    request.frameRateNumerator, request.frameRateDenominator, geometry,
+                    feeds.map { it.initializationSegment }, feeds.map { it.mediaFragments.single() }).bytes
+                try {
+                    val budget = requireNotNull(NativeStitchingEngine.planClearAtlas(false,
+                        1024*mib, 128*mib, 256*mib, packet.size,
+                        Math.addExact(8, Math.addExact(expected.initializationSegment.size, expected.mediaFragments.single().size))))
+                    NativeStitchingEngine.open(budget).use { engine ->
+                        val actual = NativeClearArchiveJob.execute(engine, packet, true, 10_000) {}
+                        try {
+                            assertArrayEquals("Native clear init for $count source slots", expected.initializationSegment, actual.initialization)
+                            assertArrayEquals("Native clear media for $count source slots", expected.mediaFragments.single(), actual.media)
+                        } finally { actual.wipe() }
+                    }
+                } finally { packet.fill(0) }
+            } finally {
+                expected.initializationSegment.fill(0)
+                expected.mediaFragments.forEach { it.fill(0) }
+            }
+        }
+        Log.i("PitwallGB", "GB clear 4/6/8 source-slot complete CMAF exact JVM/native parity PASS")
+    }
+
+    /** Rolling HLS composition uses the actual published path, not only the
+     * finite archive bridge. Repeat the independent clear fixture with a
+     * contiguous decode clock and require exact native/JVM output. */
+    private fun verifyRollingClearBridge(
+        context: android.content.Context, bridge: NativeClearArchiveBridge,
+        request: HevcClearCmafGridComposer.Request, inits: List<ByteArray>,
+        media: List<ByteArray>,
+    ) {
+        var requested = true
+        val rolling = ClearCmafArchiveComposition(fullPictures = true,
+            nativeContext = context, nativeRequested = { requested }, nativeClear = bridge)
+        val reports = inits.map { CmafBoxInspector.inspect(it) }
+        val firstTiming = CmafBoxInspector.inspect(media.first(), reports.first()).fragments.single()
+        val duration = requireNotNull(firstTiming.totalDurationTicks)
+        val dts = requireNotNull(firstTiming.baseDecodeTimeTicks)
+        fun shifted(bytes: ByteArray, offset: Long): ByteArray = bytes.copyOf().apply {
+            val time = findType(this, "tfdt") + 4
+            val buffer = ByteBuffer.wrap(this).order(ByteOrder.BIG_ENDIAN)
+            val value = Math.addExact(dts, offset)
+            when (this[time].toInt()) {
+                0 -> { require(value in 0..0xffffffffL); buffer.putInt(time+4, value.toInt()) }
+                1 -> buffer.putLong(time+4, value)
+                else -> error("Unsupported fixture tfdt")
+            }
+        }
+        try {
+            repeat(4) { index ->
+                if (index == 3) requested = false
+                val inputs = inits.indices.map { i ->
+                    HevcClearCmafGridComposer.Feed(inits[i],
+                        listOf(shifted(media[i], Math.multiplyExact(duration, index.toLong()))), "fixture-$i")
+                }
+                val expected = HevcClearCmafGridComposer.compose(request.copy(feeds = inputs,
+                    outputTrackId = 1, firstOutputSequenceNumber = index+1L))
+                try {
+                    rolling.compose(inputs)
+                    val decision = rolling.lastRoute
+                    val expectedRoute = if (index in 1..2) NativeStitchingSelection.Route.RUST
+                        else NativeStitchingSelection.Route.JVM
+                    assertEquals("Rolling route index=$index reason=${decision.reason}", expectedRoute, decision.actual)
+                    assertEquals(requested, decision.requested)
+                    val window = requireNotNull(rolling.outputWindow())
+                    try {
+                        assertArrayEquals(expected.initializationSegment, window.initializationSegment)
+                        val last = window.fragments.last()
+                        assertEquals(index+1L, last.sequenceNumber)
+                        assertArrayEquals(expected.mediaFragments.single(), last.mediaFragment)
+                    } finally { window.zero() }
+                } finally {
+                    expected.initializationSegment.fill(0)
+                    expected.mediaFragments.forEach { it.fill(0) }
+                    inputs.forEach { it.mediaFragments.forEach { b -> b.fill(0) } }
+                }
+            }
+        } finally { rolling.reset() }
+        Log.i("PitwallGB", "GB rolling clear HLS actual Rust publication, contiguous timing, JVM reference and OFF parity PASS")
     }
 
     /** Same actual JVM composer and native worker, but the second source has

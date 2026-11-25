@@ -3143,7 +3143,8 @@ class AppState(
                 if (selectedTiles.size > 4) 540 else 720)
         } else composedQuality.targetHeight.takeIf { it > 0 } ?: 2160
         val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty(),
-            maximumHeight = maxHeight, fullPictures = mixedRequested)
+            maximumHeight = maxHeight, fullPictures = mixedRequested,
+            nativeContext = context, nativeRequested = { settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff })
         android.util.Log.i("ApexviewSingleDecoder", "F1_PROTECTED_MIXED_PREFLIGHT requested=" +
             PerFeedQualityPolicy.description(labels, selectedQualities) +
             " maxSourceHeight=$maxHeight fullPictures=true cbcsGate=REQUIRED")

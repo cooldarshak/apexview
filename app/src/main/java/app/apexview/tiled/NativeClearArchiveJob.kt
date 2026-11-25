@@ -7,7 +7,7 @@ import java.nio.ByteOrder
 /**
  * Exact GBC1 wire contract for the already-verified native atlas worker.
  * Source ownership remains with the archive producer until submission copies
- * the packet. Only validated, unencrypted, finite clear video enters this path.
+ * the packet. Only validated, independently decodable, unencrypted clear fragments enter this path.
  */
 internal object NativeClearArchiveJob {
     const val MAX_PACKET = 8 * 1024 * 1024

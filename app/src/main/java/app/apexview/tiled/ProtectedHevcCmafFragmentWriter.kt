@@ -247,18 +247,18 @@ internal object ProtectedHevcCmafFragmentWriter {
         require(totalFragmentBytes <= MAX_FRAGMENT_BYTES) {
             "$context: generated fragment exceeds the output size bound"
         }
-        fun writeBytes(output: ByteBuffer, heap: ByteArray?) {
+        fun writeBytes(output: ByteBuffer, result: ByteArray?) {
             output.put(styp).put(selectedMoof)
             output.putInt(Math.addExact(mdatBytes, 8L).toInt())
             output.put('m'.code.toByte()).put('d'.code.toByte())
                 .put('a'.code.toByte()).put('t'.code.toByte())
             request.samples.forEach { sample ->
-                val start = output.position()
-                if (heap != null) {
-                    sample.copyInto(heap, start)
-                    output.position(Math.addExact(start, sample.size))
+                val cursor = output.position()
+                if (result != null) {
+                    sample.copyInto(result, cursor)
+                    output.position(Math.addExact(cursor, sample.size))
                 } else sample.writeTo(output)
-                check(output.position()-start == sample.size)
+                check(output.position()-cursor == sample.size)
             }
             check(output.position() == totalFragmentBytes.toInt()) {
                 "$context: validated mdat samples did not fill the output fragment"
