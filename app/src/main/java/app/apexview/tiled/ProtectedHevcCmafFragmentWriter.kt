@@ -34,6 +34,10 @@ internal object ProtectedHevcCmafFragmentWriter {
             val plan = plannedPayload
             if (plan == null) sampleBytes.copyInto(target, offset) else plan.copyInto(target, offset)
         }
+        fun writeTo(target: ByteBuffer) {
+            val plan = plannedPayload
+            if (plan == null) target.put(sampleBytes) else plan.writeTo(target)
+        }
     }
 
     data class Request(
@@ -52,6 +56,14 @@ internal object ProtectedHevcCmafFragmentWriter {
     private const val MAX_SAMPLE_COUNT = 4096
     private const val MAX_SUBSAMPLES = 4096
 
+    /** Exactly one owned backing. Native is admitted only for the explicitly
+     * selected local path; legacy consumers still receive a heap array. */
+    internal class Owned(val heap: ByteArray?, val native: NativeFragmentLease?) : AutoCloseable {
+        init { require((heap == null) != (native == null)) }
+        val size get() = heap?.size ?: requireNotNull(native).size
+        override fun close() { heap?.fill(0); native?.close() }
+    }
+
     fun write(
         outputInitializationSegment: ByteArray,
         request: Request,
@@ -59,7 +71,29 @@ internal object ProtectedHevcCmafFragmentWriter {
         preferNativeHeader: Boolean = false,
         onNativeHeaderResult: (Boolean) -> Unit = {},
         directNativeHeader: Boolean = false,
-    ): ByteArray {
+    ): ByteArray = requireNotNull(writeInternal(outputInitializationSegment, request, context,
+        preferNativeHeader, onNativeHeaderResult, directNativeHeader, false).heap)
+
+    fun writeOwned(
+        outputInitializationSegment: ByteArray,
+        request: Request,
+        context: String = "Protected HEVC CMAF fragment writer",
+        preferNativeHeader: Boolean = false,
+        onNativeHeaderResult: (Boolean) -> Unit = {},
+        directNativeHeader: Boolean = false,
+        preferNativeStorage: Boolean = false,
+    ): Owned = writeInternal(outputInitializationSegment, request, context, preferNativeHeader,
+        onNativeHeaderResult, directNativeHeader, preferNativeStorage)
+
+    private fun writeInternal(
+        outputInitializationSegment: ByteArray,
+        request: Request,
+        context: String = "Protected HEVC CMAF fragment writer",
+        preferNativeHeader: Boolean = false,
+        onNativeHeaderResult: (Boolean) -> Unit = {},
+        directNativeHeader: Boolean,
+        preferNativeStorage: Boolean,
+    ): Owned {
         require(request.trackId in 1..UINT32_MAX &&
             request.baseDecodeTimeTicks >= 0L &&
             request.sequenceNumber in 1..UINT32_MAX) {
@@ -213,30 +247,27 @@ internal object ProtectedHevcCmafFragmentWriter {
         require(totalFragmentBytes <= MAX_FRAGMENT_BYTES) {
             "$context: generated fragment exceeds the output size bound"
         }
-        val result = ByteArray(totalFragmentBytes.toInt())
-        try {
-        var cursor = 0
-        styp.copyInto(result, destinationOffset = cursor)
-        cursor = Math.addExact(cursor, styp.size)
-        selectedMoof.copyInto(result, destinationOffset = cursor)
-        cursor = Math.addExact(cursor, selectedMoof.size)
-        ByteBuffer.wrap(result).order(ByteOrder.BIG_ENDIAN).apply {
-            position(cursor)
-            putInt(Math.addExact(mdatBytes, 8L).toInt())
-            put('m'.code.toByte())
-            put('d'.code.toByte())
-            put('a'.code.toByte())
-            put('t'.code.toByte())
+        fun writeBytes(output: ByteBuffer, heap: ByteArray?) {
+            output.put(styp).put(selectedMoof)
+            output.putInt(Math.addExact(mdatBytes, 8L).toInt())
+            output.put('m'.code.toByte()).put('d'.code.toByte())
+                .put('a'.code.toByte()).put('t'.code.toByte())
+            request.samples.forEach { sample ->
+                val start = output.position()
+                if (heap != null) {
+                    sample.copyInto(heap, start)
+                    output.position(Math.addExact(start, sample.size))
+                } else sample.writeTo(output)
+                check(output.position()-start == sample.size)
+            }
+            check(output.position() == totalFragmentBytes.toInt()) {
+                "$context: validated mdat samples did not fill the output fragment"
+            }
         }
-        cursor = Math.addExact(cursor, 8)
-        request.samples.forEach { sample ->
-            sample.copyInto(result, cursor)
-            cursor = Math.addExact(cursor, sample.size)
-        }
-        check(cursor == result.size) { "$context: validated mdat samples did not fill the output fragment" }
 
+        fun validate(output: ByteBuffer) {
         val validation = CmafBoxInspector.inspect(
-            result, priorInitialization = initReport
+            output, priorInitialization = initReport
         )
         require(validation.errors.isEmpty() && validation.fragments.size == 1) {
             "$context: generated protected fragment failed independent CMAF inspection: " +
@@ -279,20 +310,43 @@ internal object ProtectedHevcCmafFragmentWriter {
                 "$context: generated sample " + index + " CBCS IV/subsample map failed round-trip validation"
             }
         }
-        if (preferNativeHeader) {
-            onNativeHeaderResult(nativeAccepted)
-            android.util.Log.i("ApexviewSingleDecoder",
-                "GB_PROTECTED_HEADER result=${if (!nativeAccepted) "JVM_FALLBACK" else if (direct) "RUST_VALIDATED" else "RUST_EXACT_MATCH"} metadataOnly=true")
         }
-        return result
+        var heap: ByteArray? = null
+        var native: NativeFragmentLease? = null
+        var transferred = false
+        try {
+            if (preferNativeStorage && direct && nativeAccepted) {
+                native = NativeFragmentLease.build(totalFragmentBytes.toInt()) { output ->
+                    writeBytes(output, null)
+                    val readable = output.duplicate().apply { flip() }
+                    validate(readable)
+                }
+            }
+            if (native == null) {
+                val result = ByteArray(totalFragmentBytes.toInt())
+                heap = result
+                val output = ByteBuffer.wrap(result).order(ByteOrder.BIG_ENDIAN)
+                writeBytes(output, result)
+                output.flip()
+                validate(output)
+            }
+            if (preferNativeHeader) {
+                onNativeHeaderResult(nativeAccepted)
+                android.util.Log.i("ApexviewSingleDecoder",
+                    "GB_PROTECTED_HEADER result=${if (!nativeAccepted) "JVM_FALLBACK" else if (direct) "RUST_VALIDATED" else "RUST_EXACT_MATCH"} " +
+                        "storage=${if (native != null) "RUST_OWNED" else "JVM"}")
+            }
+            val owned = Owned(heap, native)
+            transferred = true
+            return owned
         } catch (failure: Throwable) {
-            result.fill(0)
             if (direct && nativeAccepted && failure is RuntimeException) {
                 onNativeHeaderResult(false)
-                return write(outputInitializationSegment, request, context)
+                return writeInternal(outputInitializationSegment, request, context, false, {}, false, false)
             }
             throw failure
         } finally {
+            if (!transferred) { heap?.fill(0); native?.close() }
             if (nativeAccepted) selectedMoof.fill(0)
         }
     }

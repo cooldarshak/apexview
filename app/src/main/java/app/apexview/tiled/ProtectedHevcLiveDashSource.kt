@@ -36,10 +36,12 @@ internal object ProtectedHevcComposedDashPackageBuilder {
         val fragmentCount: Int,
         val startNumber: Long,
         val presentationTimeOffsetTicks: Long,
-        val availabilityStartTimeMs: Long
+        val availabilityStartTimeMs: Long,
+        val nativeResources: Map<String, NativeFragmentLease> = emptyMap()
     ) {
         fun zero() {
             resources.values.forEach { it.fill(0) }
+            nativeResources.values.forEach { it.close() }
         }
     }
 
@@ -110,6 +112,7 @@ internal object ProtectedHevcComposedDashPackageBuilder {
         val timeline = StringBuilder()
         val urls = StringBuilder()
         val resources = linkedMapOf<String, ByteArray>()
+        val pendingNative = linkedMapOf<String, NativeFragmentLease>()
         if (!validationOnly) resources["init.mp4"] = if (takeOwnership) init else init.copyOf()
 
         window.fragments.forEachIndexed { index, fragment ->
@@ -130,10 +133,7 @@ internal object ProtectedHevcComposedDashPackageBuilder {
                     "Protected output fragment $index is not decode-time contiguous"
                 }
             }
-            val report = CmafBoxInspector.inspect(
-                fragment.mediaFragment,
-                priorInitialization = initReport
-            )
+            val report = fragment.inspect(initReport)
             require(report.errors.isEmpty() && !report.initializationSegmentPresent &&
                 report.fragments.size == 1) {
                 "Protected output fragment $index is invalid: " +
@@ -161,7 +161,7 @@ internal object ProtectedHevcComposedDashPackageBuilder {
             previousEnd = end
             previousSequence = fragment.sequenceNumber
             sampleCount = Math.addExact(sampleCount, fragment.sampleCount)
-            totalBytes = Math.addExact(totalBytes, fragment.mediaFragment.size.toLong())
+            totalBytes = Math.addExact(totalBytes, fragment.size.toLong())
             durations += fragment.durationTicks
             timeline.append(
                 """<S t="${fragment.baseDecodeTimeTicks}" d="${fragment.durationTicks}"/>"""
@@ -169,7 +169,9 @@ internal object ProtectedHevcComposedDashPackageBuilder {
             val name = "segment-${fragment.sequenceNumber}.m4s"
             urls.append("""<SegmentURL media="$name"/>""")
             if (!validationOnly) {
-                resources[name] = if (takeOwnership) fragment.mediaFragment else fragment.mediaFragment.copyOf()
+                val native = fragment.nativeMedia
+                if (takeOwnership && native != null) pendingNative[name] = native
+                else resources[name] = if (takeOwnership) fragment.mediaFragment else fragment.copyMediaBytes()
             }
         }
 
@@ -222,6 +224,15 @@ internal object ProtectedHevcComposedDashPackageBuilder {
 </MPD>"""
 
         if (!validationOnly) resources["manifest.mpd"] = manifest.toByteArray(Charsets.UTF_8)
+        // Only retain after all validation succeeds. The store gets its own
+        // lease, independent of the caller's cancellation/zero lifecycle.
+        val nativeResources = linkedMapOf<String, NativeFragmentLease>()
+        try {
+            pendingNative.forEach { (name, native) -> nativeResources[name] = native.retain() }
+        } catch (failure: Throwable) {
+            nativeResources.values.forEach { it.close() }
+            throw failure
+        }
         return Package(
             manifest = manifest,
             resources = resources,
@@ -231,7 +242,8 @@ internal object ProtectedHevcComposedDashPackageBuilder {
             fragmentCount = window.fragments.size,
             startNumber = first.sequenceNumber,
             presentationTimeOffsetTicks = presentationTimeOffsetTicks,
-            availabilityStartTimeMs = availabilityStartTimeMs
+            availabilityStartTimeMs = availabilityStartTimeMs,
+            nativeResources = nativeResources
         )
     }
 
@@ -426,7 +438,11 @@ internal class ProtectedDashResourceStore(
     private val maxReaders: Int = 8
 ) {
     init { require(maxBytes > 0 && maxReaders > 0) }
-    private class Resource(val bytes: ByteArray) {
+    private class Resource(val heap: ByteArray?, val native: NativeFragmentLease?) {
+        init { require((heap == null) != (native == null)) }
+        val size get() = heap?.size ?: requireNotNull(native).size
+        val identity: Any get() = heap ?: requireNotNull(native)
+        fun dispose() { heap?.fill(0); native?.close() }
         var users = 0
         var retired = false
     }
@@ -437,10 +453,23 @@ internal class ProtectedDashResourceStore(
     private var readerCount = 0
 
     class Lease internal constructor(
-        val bytes: ByteArray,
+        private val heap: ByteArray?,
+        private val native: NativeFragmentLease?,
         private val onClose: () -> Unit
     ) : AutoCloseable {
+        // Existing heap-only callers and tests retain this contract. Native
+        // Media3 reads use readTo and never materialize an entire fragment.
+        val bytes: ByteArray get() = requireNotNull(heap)
+        val size: Int get() = heap?.size ?: requireNotNull(native).size
         private var closed = false
+
+        @Synchronized fun readTo(target: ByteArray, offset: Int, start: Int, count: Int) {
+            check(!closed)
+            require(start >= 0 && count >= 0 && start <= size-count &&
+                offset >= 0 && offset <= target.size-count)
+            if (heap != null) heap.copyInto(target, offset, start, start+count)
+            else requireNotNull(native).readTo(target, offset, start, count)
+        }
 
         @Synchronized override fun close() {
             if (!closed) {
@@ -452,21 +481,29 @@ internal class ProtectedDashResourceStore(
 
     data class Snapshot(val currentBytes: Long, val retiredReadBytes: Long, val retiredResources: Int)
     @Synchronized fun snapshot(): Snapshot = Snapshot(
-        current.values.sumOf { it.bytes.size.toLong() },
-        retired.sumOf { it.bytes.size.toLong() }, retired.size)
+        current.values.sumOf { it.size.toLong() },
+        retired.sumOf { it.size.toLong() }, retired.size)
 
     @Synchronized fun replace(next: ProtectedHevcComposedDashPackageBuilder.Package) {
         // The publisher transfers detached, uniquely owned arrays. Reject aliasing
         // before changing the active map; otherwise retiring one name could erase
         // the bytes a different name or in-flight reader still owns.
-        require(next.resources.values.sumOf { it.size.toLong() } <= maxBytes) { "Protected DASH window exceeds its memory budget" }
-        val seen = java.util.IdentityHashMap<ByteArray, Boolean>()
-        current.values.forEach { seen[it.bytes] = true }
-        retired.forEach { seen[it.bytes] = true }
-        val nextResources = LinkedHashMap<String, Resource>(next.resources.size)
+        require(next.resources.keys.intersect(next.nativeResources.keys).isEmpty())
+        require(next.resources.values.sumOf { it.size.toLong() } +
+            next.nativeResources.values.sumOf { it.size.toLong() } <= maxBytes) {
+            "Protected DASH window exceeds its memory budget"
+        }
+        val seen = java.util.IdentityHashMap<Any, Boolean>()
+        current.values.forEach { seen[it.identity] = true }
+        retired.forEach { seen[it.identity] = true }
+        val nextResources = LinkedHashMap<String, Resource>(next.resources.size+next.nativeResources.size)
         next.resources.forEach { (name, bytes) ->
             require(seen.put(bytes, true) == null) { "Protected DASH resource ownership already transferred" }
-            nextResources[name] = Resource(bytes)
+            nextResources[name] = Resource(bytes, null)
+        }
+        next.nativeResources.forEach { (name, native) ->
+            require(seen.put(native, true) == null) { "Protected DASH native lease ownership already transferred" }
+            nextResources[name] = Resource(null, native)
         }
         val previous = current
         current = nextResources
@@ -476,18 +513,18 @@ internal class ProtectedDashResourceStore(
     @Synchronized fun acquire(name: String): Lease? {
         val resource = current[name] ?: return null
         check(!resource.retired) { "Cannot acquire a retired protected DASH resource" }
-        if (readerCount >= maxReaders || (resource.users == 0 && resource.bytes.size.toLong() > maxBytes - pinnedBytes)) return null
-        if (resource.users++ == 0) { pinned.add(resource); pinnedBytes += resource.bytes.size }
+        if (readerCount >= maxReaders || (resource.users == 0 && resource.size.toLong() > maxBytes - pinnedBytes)) return null
+        if (resource.users++ == 0) { pinned.add(resource); pinnedBytes += resource.size }
         readerCount++
-        return Lease(resource.bytes) {
+        return Lease(resource.heap, resource.native) {
             synchronized(this) {
                 check(resource.users > 0) { "Protected DASH lease was released twice" }
                 readerCount--
                 if (--resource.users == 0) {
-                    pinned.remove(resource); pinnedBytes -= resource.bytes.size
+                    pinned.remove(resource); pinnedBytes -= resource.size
                     if (resource.retired) {
                         retired.remove(resource)
-                        resource.bytes.fill(0)
+                        resource.dispose()
                     }
                 }
             }
@@ -503,7 +540,7 @@ internal class ProtectedDashResourceStore(
     private fun retire(resource: Resource) {
         check(!resource.retired) { "Protected DASH resource retired twice" }
         resource.retired = true
-        if (resource.users == 0) resource.bytes.fill(0)
+        if (resource.users == 0) resource.dispose()
         else retired.add(resource)
     }
 }
@@ -520,9 +557,10 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
         window: ProtectedHevcLiveComposition.OutputWindow,
         widevinePssh: ByteArray?
     ) {
-        check(!released) { "Protected live DASH source is released" }
         var transferred = false
+        var pending: ProtectedHevcComposedDashPackageBuilder.Package? = null
         try {
+            check(!released) { "Protected live DASH source is released" }
             val first = window.fragments.firstOrNull()
                 ?: throw IllegalArgumentException("No protected output fragments are available")
             val last = window.fragments.last()
@@ -553,17 +591,26 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
                 clearOutput = clearOutput,
                 takeOwnership = true,
             )
+            pending = next
             // No multi-MB copies between validated window and Media3 package.
             // Once published, the resource store is its sole owner and securely
             // zeroes the buffers only when the last reader releases a lease.
             resources.replace(next)
             transferred = true
+            pending = null
             val retained = resources.snapshot()
             android.util.Log.i("ApexviewSingleDecoder", "PROTECTED_DASH_RESOURCE_BYTES " +
                 "currentBytes=${retained.currentBytes} retiredReadBytes=${retained.retiredReadBytes} " +
                 "retiredResources=${retained.retiredResources} media3DeliveredBytesTotal=${media3DeliveredBytes.get()}")
         } finally {
-            if (!transferred) window.zero()
+            if (!transferred) {
+                pending?.nativeResources?.values?.forEach { it.close() }
+                window.zero()
+            } else {
+                // Heap ownership transferred exactly as before. Native
+                // ownership is independent; release the caller's tokens.
+                window.fragments.forEach { it.nativeMedia?.close() }
+            }
         }
     }
 
@@ -600,12 +647,12 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
             val acquired = owner.acquireResource(name)
                 ?: throw IOException("Protected composed DASH resource is not in the live window: $name")
             try {
-                val bytes = acquired.bytes
+                val size = acquired.size
                 val start = dataSpec.position
-                if (start < 0L || start > bytes.size.toLong()) {
+                if (start < 0L || start > size.toLong()) {
                     throw EOFException("Protected composed byte range starts outside $name")
                 }
-                val available = bytes.size.toLong() - start
+                val available = size.toLong() - start
                 val requested = if (dataSpec.length == C.LENGTH_UNSET.toLong()) available else dataSpec.length
                 if (requested < 0L || requested > available || requested > Int.MAX_VALUE.toLong()) {
                     throw EOFException("Protected composed byte range exceeds $name")
@@ -628,10 +675,10 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
                 throw IndexOutOfBoundsException("Invalid protected DASH read bounds")
             }
             if (length == 0) return 0
-            val bytes = currentLease?.bytes ?: throw IOException("Protected DASH data source is not open")
+            val lease = currentLease ?: throw IOException("Protected DASH data source is not open")
             if (currentPosition >= endPosition) return C.RESULT_END_OF_INPUT
             val count = minOf(length, endPosition - currentPosition)
-            bytes.copyInto(buffer, offset, currentPosition, currentPosition + count)
+            lease.readTo(buffer, offset, currentPosition, count)
             delivered+=count
             currentPosition += count
             return count

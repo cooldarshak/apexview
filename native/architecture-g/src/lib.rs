@@ -9,6 +9,8 @@ pub mod clear_atlas;
 pub mod cbcs_metadata;
 pub mod protected_header;
 pub mod protected_plan;
+#[cfg(any(target_os = "android", test))]
+mod fragment_storage;
 pub mod cmaf_input;
 pub mod cmaf_init;
 pub mod hevc_nal;

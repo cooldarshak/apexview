@@ -78,7 +78,9 @@ internal class F1ArchiveFeedCapture(
 
     val hlsProgrammes get() = if (usingHls) hls.programmes else emptyMap()
 
-    fun outputWindow(group: String) = if (usingHls) hls.outputWindow(group) else ProtectedHevcLiveComposition.outputWindow(group)
+    fun outputWindow(group: String, shareNative: Boolean = false) =
+        if (usingHls) hls.outputWindow(group, shareNative)
+        else ProtectedHevcLiveComposition.outputWindow(group, shareNative)
     fun widevinePssh(): ByteArray? = if (usingHls) hls.widevinePssh() else dash.widevinePssh()
     override fun reset() { dash.reset(); hls.reset(); usingHls = false }
 }

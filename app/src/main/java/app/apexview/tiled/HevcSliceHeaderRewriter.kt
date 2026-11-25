@@ -93,6 +93,28 @@ internal object HevcSliceHeaderRewriter {
             output.put(backing, tailStart, copiedTailBytes)
         }
 
+        /** Write the validated borrowed parts into the native destination and
+         * independently compare the unchanged tail, without a full NAL copy. */
+        fun writeVerifiedTo(output: java.nio.ByteBuffer) {
+            val start = output.position()
+            writeTo(output)
+            val source = java.nio.ByteBuffer.wrap(backing).order(java.nio.ByteOrder.BIG_ENDIAN)
+            val destination = output.duplicate().order(java.nio.ByteOrder.BIG_ENDIAN)
+            var i = 0
+            while (copiedTailBytes-i >= 8) {
+                require(destination.getLong(start+prefix.size+i) == source.getLong(tailStart+i)) {
+                    "Rewritten HEVC tail changed at byte $i"
+                }
+                i += 8
+            }
+            while (i < copiedTailBytes) {
+                require(destination.get(start+prefix.size+i) == backing[tailStart+i]) {
+                    "Rewritten HEVC tail changed at byte $i"
+                }
+                i++
+            }
+        }
+
         /** Preserve the original parser's 8194-byte fast path and full fallback. */
         fun verifyHeader(sps: HevcParameterSets.SpsMetadata,
                          pps: HevcParameterSets.PpsMetadata): HevcSliceHeaderParser.SliceHeader {

@@ -16,6 +16,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class ArchitectureGBAndroidTest {
     @Test
     fun stitchedTiledFragmentUsesNativeWorkerAndGenerationFencedLease() {
@@ -289,6 +290,23 @@ class ArchitectureGBAndroidTest {
                 assertTrue("Direct native protected metadata must not silently fall back", matched)
                 assertArrayEquals(baseline, direct)
                 direct.fill(0)
+                // Same writer and unchanged CBCS metadata, but the entire
+                // final mdat lives in a bounded Rust allocation.
+                ProtectedHevcCmafFragmentWriter.writeOwned(init, request,
+                    preferNativeHeader = true, onNativeHeaderResult = { assertTrue(it) },
+                    directNativeHeader = true, preferNativeStorage = true).use { owned ->
+                    assertNull("Native owner must not allocate a heap fragment", owned.heap)
+                    val lease = requireNotNull(owned.native)
+                    assertArrayEquals(baseline, lease.copyBytes())
+                    assertEquals(CmafBoxInspector.inspect(baseline, CmafBoxInspector.inspect(init)).fragments,
+                        lease.inspect(CmafBoxInspector.inspect(init)).fragments)
+                    val retained = lease.retain()
+                    lease.close()
+                    val range = ByteArray(7)
+                    retained.readTo(range, 0, baseline.size-range.size, range.size)
+                    assertArrayEquals(baseline.copyOfRange(baseline.size-range.size, baseline.size), range)
+                    retained.close()
+                }
                 val moof = ByteBuffer.wrap(baseline).int
                 val header = baseline.copyOfRange(0, moof)
                 val auxiliarySizes = List(2) { ivWidth + 14 }
@@ -554,6 +572,26 @@ class ArchitectureGBAndroidTest {
         assertArrayEquals(expected, directFragment)
         directFragment.fill(0)
         directPicture.sampleBytes.fill(0)
+        // Exercise the real borrowed plan -> Rust allocation -> local DASH
+        // builder -> Media3 data-source path, not a materialized test sample.
+        val nativePublicationPlanner = NativeProtectedPlan(outSets, { true },
+            { error("Native publication plan rejected") }, direct = true)
+        ProtectedHevcPictureComposer.plan(fresh(), outSps, outPps,
+            fullPictureColumns = 2, nativePlan = nativePublicationPlanner).use { picture ->
+            val request = ProtectedHevcCmafFragmentWriter.Request(trackId, picture.decodeTimeTicks, 1, 16,
+                listOf(ProtectedHevcCmafFragmentWriter.Sample(ByteArray(0), picture.subsampleRanges,
+                    iv, ProtectedValueFingerprint.fromBytes("iv", iv), picture.durationTicks,
+                    picture.sampleFlags, picture.compositionOffsetTicks, plannedPayload = picture.payload)))
+            ProtectedHevcCmafFragmentWriter.writeOwned(protectedInit, request,
+                preferNativeHeader = true, onNativeHeaderResult = { assertTrue(it) },
+                directNativeHeader = true, preferNativeStorage = true).use { owned ->
+                assertNull(owned.heap)
+                val memory = requireNotNull(owned.native)
+                assertEquals(1, nativePublicationPlanner.matchedBatches)
+                assertArrayEquals(expected, memory.copyBytes())
+                verifyNativePublication(protectedInit, picture, memory, expected)
+            }
+        }
         // Crypto-identity rejection precedes any native planning call.
         var nativeCalls = 0
         val forbidden = NativeProtectedPlan(outSets, { true }, { error("Unauthorized native admission") }) { _, _ ->
@@ -574,6 +612,91 @@ class ArchitectureGBAndroidTest {
         listOf(expected, actual, baseline.sampleBytes, candidate.sampleBytes, protectedInit, iv).forEach { it.fill(0) }
         sources.forEach { it.sampleBytes.fill(0) }
         Log.i("PitwallGB", "GB complete two-source protected-labelled picture and CMAF differential, incompatible IV rejected before native admission PASS")
+    }
+
+    /** Native ownership is shared across the history, publication generation
+     * and an active Media3 reader. A replacement/release cannot erase bytes
+     * pinned by that reader; legacy and cast callers still receive heap data. */
+    private fun verifyNativePublication(
+        init: ByteArray, picture: ProtectedHevcPictureComposer.PlannedPicture,
+        memory: NativeFragmentLease, expected: ByteArray
+    ) {
+        val cfg = requireNotNull(CmafBoxInspector.inspect(init).tracks.single().hevcConfiguration)
+        val sps = cfg.sps.single()
+        val history = ProtectedHevcLiveComposition.OutputFragment(1, ByteArray(0),
+            picture.timescale, picture.decodeTimeTicks, picture.durationTicks, 1,
+            sps.displayWidth, sps.displayHeight, emptyMap(), memory.retain())
+        val first = ProtectedHevcLiveComposition.OutputWindow(init.copyOf(), listOf(history.detached()))
+        val legacy = history.legacyDetached()
+        assertNull(legacy.nativeMedia)
+        assertArrayEquals(expected, legacy.mediaFragment)
+        legacy.zero()
+        val pssh = byteArrayOf(1, 2, 3, 4) // synthetic placeholder, never sent to a CDM
+        val builder = ProtectedHevcComposedDashPackageBuilder
+        builder.build(first, pssh, picture.decodeTimeTicks, 1L, validationOnly = true).useForTest()
+        val source = ProtectedHevcLiveDashSource()
+        val reader = source.dataSourceFactory().createDataSource()
+        try {
+            source.publish(first, pssh)
+            first.fragments.forEach { it.nativeMedia?.close() }
+            val uri = android.net.Uri.parse("https://apexview.invalid/composed/segment-1.m4s")
+            val spec = androidx.media3.datasource.DataSpec.Builder().setUri(uri).build()
+            assertEquals(expected.size.toLong(), reader.open(spec))
+            val prefix = ByteArray(17)
+            assertEquals(prefix.size, reader.read(prefix, 0, prefix.size))
+            assertArrayEquals(expected.copyOfRange(0,prefix.size), prefix)
+            // A new generation owns a distinct retained lease of the same
+            // immutable backing, with no detached whole-fragment copy.
+            val next = ProtectedHevcLiveComposition.OutputWindow(init.copyOf(), listOf(history.detached()))
+            source.publish(next, pssh)
+            history.zero()
+            source.release()
+            val tail = ByteArray(expected.size-prefix.size)
+            var offset = 0
+            while (offset < tail.size) {
+                val count = reader.read(tail, offset, minOf(4093,tail.size-offset))
+                assertTrue(count > 0)
+                offset += count
+            }
+            assertArrayEquals(expected.copyOfRange(prefix.size, expected.size), tail)
+            assertEquals(androidx.media3.common.C.RESULT_END_OF_INPUT, reader.read(tail,0,1))
+            tail.fill(0); prefix.fill(0)
+        } finally {
+            reader.close()
+            source.release()
+            history.zero()
+            pssh.fill(0)
+        }
+        // A rejected writer releases its unpublished allocation. Fill all
+        // remaining admission slots, then check explicit backpressure.
+        try {
+            NativeFragmentLease.build(19) { error("synthetic writer rejection") }
+            throw AssertionError("Rejected writer published native memory")
+        } catch (_: IllegalStateException) { }
+        val held = mutableListOf<NativeFragmentLease>()
+        try {
+            repeat(11) {
+                held += requireNotNull(NativeFragmentLease.build(32) { b ->
+                    repeat(32) { b.put(0x55.toByte()) }
+                })
+            }
+            assertNull(NativeFragmentLease.build(32) { error("Arena exceeded live-slot limit") })
+        } finally { held.forEach { it.close() } }
+        // A closed owner cannot be resurrected or read.
+        val closed = memory.retain()
+        closed.close()
+        try {
+            closed.retain()
+            throw AssertionError("Retired native lease was re-acquired")
+        } catch (_: IllegalStateException) { }
+        Log.i("PitwallGB", "GB Rust-owned direct CMAF publication, native history sharing, range reads and retired Media3 reader PASS")
+    }
+
+    private fun ProtectedHevcComposedDashPackageBuilder.Package.useForTest() {
+        try {
+            assertTrue(resources.isEmpty())
+            assertTrue(nativeResources.isEmpty())
+        } finally { zero() }
     }
 
     /** Every coded picture of the independent tiled fixture, with alternating
@@ -671,15 +794,18 @@ class ArchitectureGBAndroidTest {
         val rustPoc = sources.map { HevcPocTracker() }
         val expectedSamples = mutableListOf<ProtectedHevcCmafFragmentWriter.Sample>()
         val actualSamples = mutableListOf<ProtectedHevcCmafFragmentWriter.Sample>()
+        val nativePlans = mutableListOf<ProtectedHevcPictureComposer.PlannedPicture>()
         val planner = NativeProtectedPlan(outSets, { true }, { error("Direct sequence rejected") }, direct = true)
         var firstDts = 0L
         for (frame in 0 until frameCount) {
             val reference = ProtectedHevcPictureComposer.plan(sources.mapIndexed { i, s ->
                 s[frame].copy(pocTracker = jvmPoc[i])
             }, outSps, outPps, fullPictureColumns = 2).use { it.materialize() }
-            val actual = ProtectedHevcPictureComposer.plan(sources.mapIndexed { i, s ->
+            val actualPlan = ProtectedHevcPictureComposer.plan(sources.mapIndexed { i, s ->
                 s[frame].copy(pocTracker = rustPoc[i])
-            }, outSps, outPps, fullPictureColumns = 2, nativePlan = planner).use { it.materialize() }
+            }, outSps, outPps, fullPictureColumns = 2, nativePlan = planner)
+            nativePlans += actualPlan
+            val actual = actualPlan.materialize()
             assertArrayEquals("picture $frame", reference.sampleBytes, actual.sampleBytes)
             assertEquals(reference.subsampleRanges, actual.subsampleRanges)
             assertEquals(reference.fullPictureOrderCount, actual.fullPictureOrderCount)
@@ -703,6 +829,23 @@ class ArchitectureGBAndroidTest {
             ProtectedHevcCmafFragmentWriter.Request(trackId, firstDts, 1, 16, actualSamples),
             preferNativeHeader = true, onNativeHeaderResult = { assertTrue(it) }, directNativeHeader = true)
         assertArrayEquals(reference, result)
+        // The full 50-picture sequence also uses the real borrowed-payload
+        // writer directly into native-owned storage, not just sample arrays.
+        val borrowed = nativePlans.map { picture ->
+            ProtectedHevcCmafFragmentWriter.Sample(ByteArray(0), picture.subsampleRanges, iv, ivIdentity,
+                picture.durationTicks, picture.sampleFlags, picture.compositionOffsetTicks,
+                plannedPayload = picture.payload)
+        }
+        try {
+            ProtectedHevcCmafFragmentWriter.writeOwned(protectedInit,
+                ProtectedHevcCmafFragmentWriter.Request(trackId, firstDts, 1, 16, borrowed),
+                preferNativeHeader = true, onNativeHeaderResult = { assertTrue(it) },
+                directNativeHeader = true, preferNativeStorage = true).use { owned ->
+                assertNull(owned.heap)
+                val lease = requireNotNull(owned.native)
+                assertArrayEquals(reference, lease.copyBytes())
+            }
+        } finally { nativePlans.forEach { it.close() } }
         listOf(reference, result, protectedInit, iv).forEach { it.fill(0) }
         (expectedSamples + actualSamples).forEach { it.sampleBytes.fill(0) }
         sources.flatten().forEach { it.sampleBytes.fill(0) }

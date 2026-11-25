@@ -3241,8 +3241,8 @@ class AppState(
                             val durationUs = audioMaster.feed.player.duration.takeIf { it > 0L }?.let { Math.multiplyExact(it, 1000L) }
                             if (ArchiveBufferPolicy.ready(snapshot.outputTiming, clockUs, durationUs,
                                     minimumLeadUs = ArchiveBufferPolicy.protectedLeadUs(playbackSpeed))) {
-                                prepared = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                    capture.outputWindow(group)
+                                prepared = acquireLocalCompositionWindow {
+                                    capture.outputWindow(group, shareNative = true)
                                 }
                             }
                             if (prepared == null) {
@@ -3253,6 +3253,7 @@ class AppState(
                             }
                         }
                         prepared.also { window ->
+                            try {
                             recordProtectedRenditions(labels, window.sourceGeometry)
                             val licenses = selectedTiles.map { it.feed.sourceStream.licenseUrl }
                             if (!capture.clearOutput && !protectedFeedsShareLicense(licenses)) {
@@ -3299,6 +3300,10 @@ class AppState(
                                 window.zero()
                                 throw IOException("Composed source initialization failed: ${DiagnosticRedaction.redact(error.message.orEmpty()).take(180)}")
                             } finally { pssh?.fill(0) }
+                            } catch (failure: Throwable) {
+                                window.zero()
+                                throw failure
+                            }
                         }
                     },
                     releaseSources = {
@@ -3339,13 +3344,25 @@ class AppState(
                         // Transfer a detached owner into the live DASH source;
                         // otherwise the startup cleanup would zero actively
                         // leased Media3 fragments after our zero-copy publisher.
-                        val handoffWindow = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                            window.detached()
+                        val startPosition = (audioMaster.feed.player.currentPosition -
+                            requireNotNull(composedArchiveOriginMs)).coerceAtLeast(0L)
+                        val handoffPssh = capture.widevinePssh()
+                        var handoffWindow: ProtectedHevcLiveComposition.OutputWindow? = null
+                        try {
+                            // Record ownership inside IO so cancellation on return
+                            // cannot strand a detached native lease.
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                handoffWindow = window.detached()
+                            }
+                            val ownedWindow = requireNotNull(handoffWindow)
+                            handoffWindow = null
+                            host.feed.startProtectedComposedPlayback(ownedWindow, handoffPssh,
+                                clearOutput = capture.clearOutput, startPositionMs = startPosition,
+                                playWhenReady = false)
+                        } finally {
+                            handoffWindow?.zero()
+                            handoffPssh?.fill(0)
                         }
-                        host.feed.startProtectedComposedPlayback(handoffWindow, capture.widevinePssh(),
-                            clearOutput = capture.clearOutput,
-                            startPositionMs = (audioMaster.feed.player.currentPosition - requireNotNull(composedArchiveOriginMs)).coerceAtLeast(0L),
-                            playWhenReady = false)
                         archiveCompositionStarting = false
                         showProtectedCompositionPresentation(host, selectedTiles,
                             audioMaster, sceneLayout = true)
@@ -3399,10 +3416,12 @@ class AppState(
                     lastSnapshot = snapshot
                     snapshot.failure?.takeUnless { it.retryable }?.let { throw IOException(it.reason) }
                     val updatedWindow = if (snapshot.capturedFeeds > 0)
-                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                            capture.outputWindow(group)
+                        acquireLocalCompositionWindow {
+                            capture.outputWindow(group, shareNative = true)
                         } else null
                     updatedWindow?.let { updated ->
+                        var handedOff = false
+                        try {
                         // A rolling adaptive rendition can change atlas geometry.
                         // Capture source rectangles before publishing zeroes the window;
                         // refresh only scene metadata, never add another decoder.
@@ -3417,13 +3436,18 @@ class AppState(
                                 expandedVerifiedGeometry = proposed
                             }
                         }
-                        host.feed.publishProtectedComposedOutput(updated, capture.widevinePssh())
+                        val pssh = capture.widevinePssh()
+                        handedOff = true
+                        host.feed.publishProtectedComposedOutput(updated, pssh)
                         if (protectedRollingScene?.layout != nextLayout) {
                             protectedRollingScene = ProtectedRollingScene(labels.toList(), nextLayout)
                             android.util.Log.i("ApexviewSingleDecoder",
                                 "F1_PROTECTED_SCENE_GEOMETRY_CHANGED atlas=" +
                                 nextLayout.atlasWidth + "x" + nextLayout.atlasHeight +
                                 " sourceCrops=" + nextLayout.geometry.mixedSourceRects.size)
+                        }
+                        } finally {
+                            if (!handedOff) updated.zero()
                         }
                     }
                     if (composedArchiveFillingBuffer && ArchiveBufferPolicy.ready(snapshot.outputTiming,
@@ -3517,6 +3541,21 @@ class AppState(
      * then stitches them into one HEVC representation. This is the Android/Media3 equivalent
      * acquisition stage: direct DASH DataSource requests only, never an extra player or decoder.
      */
+    private suspend fun acquireLocalCompositionWindow(
+        read: () -> ProtectedHevcLiveComposition.OutputWindow?
+    ): ProtectedHevcLiveComposition.OutputWindow? {
+        var acquired: ProtectedHevcLiveComposition.OutputWindow? = null
+        try {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                acquired = read()
+            }
+            return acquired
+        } catch (failure: Throwable) {
+            acquired?.zero()
+            throw failure
+        }
+    }
+
     private fun startRealF1DashCapture(contentId: Long, labels: List<String>) {
         val byLabel = tiles.filter { it.contentId == contentId }.associateBy {
             it.channel.channelId?.let { id -> "channel-$id" } ?: "default-channel"
@@ -3561,13 +3600,14 @@ class AppState(
                 val latestOutputVersion = if (!composedPlaybackStarted || snapshot.capturedFeeds > 0)
                     ProtectedHevcLiveComposition.latestOutputVersion(group) else null
                 val outputWindow = if (publication.shouldPublish(latestOutputVersion))
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        ProtectedHevcLiveComposition.outputWindow(group)
+                    acquireLocalCompositionWindow {
+                        ProtectedHevcLiveComposition.outputWindow(group, shareNative = true)
                     } else null
                 if (outputWindow != null) {
-                    val pssh = capture.widevinePssh()
+                    var pssh: ByteArray? = null
                     var published = false
                     try {
+                        pssh = capture.widevinePssh()
                         val expandedLayout = if (labels.size > 6)
                             app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
                                 outputWindow, labels.size, clearOutput = false) else null

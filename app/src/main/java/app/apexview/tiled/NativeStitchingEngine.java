@@ -64,6 +64,18 @@ public final class NativeStitchingEngine implements AutoCloseable {
     }
 
     private static native int nativeAbi();
+    private static native long nativeFragmentAllocate(int size);
+    private static native ByteBuffer nativeFragmentView(long id);
+    private static native long nativeFragmentRelease(long id);
+    private static native void nativeFragmentTrim();
+    static long allocateFragment(int size) {
+        System.loadLibrary("pitwall_g0");
+        return nativeAbi() == 2 ? nativeFragmentAllocate(size) : INVALID;
+    }
+    static ByteBuffer fragmentView(long id) { return nativeFragmentView(id); }
+    static long releaseFragment(long id) { return nativeFragmentRelease(id); }
+    static void trimFragments() { nativeFragmentTrim(); }
+
     private static native byte[] nativeProtectedHeader(byte[] packet);
     private static native byte[] nativeProtectedPlan(byte[] packet, int kind);
     static byte[] protectedPlan(byte[] packet, int kind) {

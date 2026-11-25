@@ -190,10 +190,16 @@ internal object CmafBoxInspector {
     private const val MAX_BOXES = 20_000
     private const val MAX_DEPTH = 12
 
-    fun inspect(data: ByteArray, priorInitialization: Report? = null): Report {
-        require(data.size >= 8) { "Input is too small to contain an ISO-BMFF box" }
+    fun inspect(data: ByteArray, priorInitialization: Report? = null): Report =
+        inspect(ByteBuffer.wrap(data), priorInitialization)
+
+    /** Inspect a bounded immutable direct or heap view, without materializing
+     * mdat or retaining the buffer. Do not change caller position/limit. */
+    fun inspect(input: ByteBuffer, priorInitialization: Report? = null): Report {
+        val data = input.slice().order(ByteOrder.BIG_ENDIAN)
+        require(data.limit() >= 8) { "Input is too small to contain an ISO-BMFF box" }
         val errors = mutableListOf<String>()
-        val boxes = parseBoxes(data, 0, data.size, 0, intArrayOf(0), errors)
+        val boxes = parseBoxes(data, 0, data.limit(), 0, intArrayOf(0), errors)
         val ftyp = boxes.firstOrNull { it.type == "ftyp" }?.let { payload(data, it) }
         val major = ftyp?.takeIf { it.remaining() >= 8 }?.let { readFourCc(it) }
         val brands = mutableListOf<String>()
@@ -258,7 +264,7 @@ internal object CmafBoxInspector {
         )
     }
 
-    private fun track(data: ByteArray, trak: Box, errors: MutableList<String>): TrackMetadata {
+    private fun track(data: ByteBuffer, trak: Box, errors: MutableList<String>): TrackMetadata {
         val all = flatten(trak).toMutableList()
         val trackId = all.firstOrNull { it.type == "tkhd" }?.let { readTrackId(payload(data, it)) }
         val handler = all.firstOrNull { it.type == "hdlr" }?.let { payload(data, it) }?.let { p ->
@@ -294,7 +300,7 @@ internal object CmafBoxInspector {
                 val entryStart = stsdBox.start + stsdBox.headerSize + 8
                 val entryEndLong = entryStart.toLong() + entrySize
                 val boxEnd = stsdBox.start.toLong() + stsdBox.size
-                if (entrySize >= 8 && entryEndLong <= boxEnd && entryEndLong <= data.size.toLong()) {
+                if (entrySize >= 8 && entryEndLong <= boxEnd && entryEndLong <= data.limit().toLong()) {
                     val entryEnd = entryEndLong.toInt()
                     val childStart = when {
                         sampleEntry == "wvtt" -> entryStart + 16
@@ -419,7 +425,7 @@ internal object CmafBoxInspector {
     }
 
     private fun parseTrexDefaults(
-        data: ByteArray,
+        data: ByteBuffer,
         moov: Box,
         errors: MutableList<String>
     ): Map<Long, TrexDefaults> {
@@ -448,7 +454,7 @@ internal object CmafBoxInspector {
     }
 
     private fun parseFragmentTrack(
-        data: ByteArray,
+        data: ByteBuffer,
         moofStart: Int,
         traf: Box,
         isFirstTraf: Boolean,
@@ -696,7 +702,7 @@ internal object CmafBoxInspector {
      * per sample. Other chunk-group layouts fail closed instead of guessing their boundaries.
      */
     private fun parseExternalAuxiliaryRecords(
-        data: ByteArray,
+        data: ByteBuffer,
         baseOffset: Long,
         offsets: List<Long>,
         sizes: List<Int>,
@@ -725,7 +731,7 @@ internal object CmafBoxInspector {
             val size = sizes[index]
             require(size >= 0) { "Negative saiz entry size" }
             val end = Math.addExact(start, size.toLong())
-            require(start >= 0 && end <= data.size.toLong()) {
+            require(start >= 0 && end <= data.limit().toLong()) {
                 "saio sample auxiliary record lies outside the supplied media segment"
             }
             start to end
@@ -749,7 +755,7 @@ internal object CmafBoxInspector {
             require(size >= ivSize) {
                 "saiz record is shorter than its effective IV"
             }
-            val record = ByteBuffer.wrap(data, start, size).slice().order(ByteOrder.BIG_ENDIAN)
+            val record = region(data, start, size)
             val ivIdentity = if (ivSize > 0) {
                 readProtectedFingerprint(record, ivSize, "iv")
             } else null
@@ -936,7 +942,7 @@ internal object CmafBoxInspector {
     )
 
     private fun parseSampleGroupEncryption(
-        data: ByteArray,
+        data: ByteBuffer,
         traf: Box,
         sampleCount: Int,
         trackMetadata: TrackMetadata?,
@@ -1487,7 +1493,7 @@ internal object CmafBoxInspector {
         return p.int.toLong() and 0xffffffffL
     }
 
-    private fun parseBoxes(data: ByteArray, start: Int, end: Int, depth: Int, count: IntArray,
+    private fun parseBoxes(data: ByteBuffer, start: Int, end: Int, depth: Int, count: IntArray,
                            errors: MutableList<String>): List<Box> {
         require(depth <= MAX_DEPTH) { "ISO-BMFF nesting exceeds limit" }
         val result = mutableListOf<Box>()
@@ -1496,7 +1502,7 @@ internal object CmafBoxInspector {
             if (end - pos < 8) { errors += "Trailing bytes after final complete box"; break }
             if (++count[0] > MAX_BOXES) throw IllegalArgumentException("ISO-BMFF box count exceeds limit")
             val size32 = uint32(data, pos)
-            val type = String(data, pos + 4, 4, Charsets.ISO_8859_1)
+            val type = readFourCc(region(data, pos + 4, 4))
             var header = 8
             val size = when (size32) {
                 0L -> (end - pos).toLong()
@@ -1520,12 +1526,17 @@ internal object CmafBoxInspector {
     }
 
     private fun flatten(box: Box): List<Box> = listOf(box) + box.children.flatMap { flatten(it) }
-    private fun payload(data: ByteArray, box: Box): ByteBuffer =
-        ByteBuffer.wrap(data, box.start + box.headerSize, box.size - box.headerSize).slice().order(ByteOrder.BIG_ENDIAN)
-    private fun uint32(data: ByteArray, p: Int): Long =
+    private fun payload(data: ByteBuffer, box: Box): ByteBuffer =
+        region(data, box.start + box.headerSize, box.size - box.headerSize)
+    private fun region(data: ByteBuffer, start: Int, size: Int): ByteBuffer {
+        require(start >= 0 && size >= 0 && start <= data.limit()-size)
+        return data.duplicate().apply { position(start); limit(start+size) }
+            .slice().order(ByteOrder.BIG_ENDIAN)
+    }
+    private fun uint32(data: ByteBuffer, p: Int): Long =
         ((data[p].toLong() and 255) shl 24) or ((data[p+1].toLong() and 255) shl 16) or
             ((data[p+2].toLong() and 255) shl 8) or (data[p+3].toLong() and 255)
-    private fun uint64(data: ByteArray, p: Int): Long {
+    private fun uint64(data: ByteBuffer, p: Int): Long {
         val hi = uint32(data, p)
         val lo = uint32(data, p + 4)
         require(hi <= Int.MAX_VALUE.toLong()) { "Box size exceeds supported signed range" }

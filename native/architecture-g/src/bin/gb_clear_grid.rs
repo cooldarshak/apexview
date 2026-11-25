@@ -13,6 +13,7 @@ use pitwall_g0::{
     hevc_parameters::Parameters,
     hevc_poc::Tracker,
     hevc_slice::Slice,
+    protected_plan,
 };
 use std::{
     env, fs,
@@ -221,6 +222,10 @@ fn compose(
             fragment, expected,
             "native fragment {index} differs from JVM in {input:?}"
         );
+        // Independent encoded cases (single slice, 2x2, mixed resolutions).
+        // Check repeated protected clear-prefix batches with exact-key cache
+        // reuse and explicit invalidation; inputs here are entirely clear.
+        verify_configuration_cache(&tracks, &output_track, &parsed, &parameters);
         let actual = Fragment::parse(&fragment, &output_track).unwrap();
         assert_eq!(actual.sequence, sequence);
         for (actual, source) in actual.samples.iter().zip(&parsed[0].samples) {
@@ -269,6 +274,77 @@ fn compose(
     }
     assert_eq!(frame, 50);
     stream
+}
+
+// Locate the byte-aligned header end in a fully clear, independently
+// encoded test NAL. Synthetic labels only; no protected content.
+fn header_end(nal: &[u8], header_bytes: usize) -> usize {
+    let mut zeroes = 0;
+    let mut decoded = 0;
+    for (i, &v) in nal.iter().enumerate().skip(2) {
+        if zeroes >= 2 && v == 3 {
+            zeroes = 0;
+            continue;
+        }
+        decoded += 1;
+        if decoded == header_bytes { return i+1; }
+        zeroes = if v == 0 { zeroes+1 } else { 0 };
+    }
+    panic!("missing aligned header");
+}
+
+fn append_nal(packet: &mut Vec<u8>, nal: &[u8]) {
+    packet.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+    packet.extend_from_slice(nal);
+}
+
+fn verify_configuration_cache(
+    tracks: &[Initialization<'_>;2], output_track: &Initialization<'_>,
+    parsed: &[Fragment<'_>;2], parameters: &[Parameters;2],
+) {
+    let output = Parameters::parse(output_track.configuration.parameter_sets()).unwrap();
+    let source_sets = tracks.each_ref().map(|t| t.configuration.parameter_sets());
+    let output_sets = output_track.configuration.parameter_sets();
+    let (nal, _) = NalUnits::new(parsed[0].samples[0].bytes,4).unwrap().next().unwrap().unwrap();
+    let slice = parameters[0].read_slice(nal).unwrap();
+    let syntax = output.rewrite_syntax(&slice,0).unwrap();
+    let end = header_end(nal,syntax.header_bytes);
+    assert!(end < nal.len());
+    let clear = &nal[..end];
+    // Include 2, 4, 6, 8 source slots in cache-key and admission coverage.
+    // Repeated clear encoded triplets are deliberately used for larger counts;
+    // this does not claim independent multi-feed protected playback.
+    for feeds in [2u32,4,6,8] {
+        let mut batch = b"GBS2".to_vec();
+        for field in [feeds,1] { batch.extend_from_slice(&field.to_be_bytes()); }
+        for i in 0..feeds {
+            for nal in source_sets[(i%2) as usize] { append_nal(&mut batch,nal); }
+        }
+        for nal in output_sets { append_nal(&mut batch,nal); }
+        for field in [0u32,0,1,0] { batch.extend_from_slice(&field.to_be_bytes()); }
+        append_nal(&mut batch,clear);
+        let mut single = b"GBS1".to_vec();
+        for field in [0u32,1,0] { single.extend_from_slice(&field.to_be_bytes()); }
+        for nal in source_sets[0].into_iter().chain(output_sets) { append_nal(&mut single,nal); }
+        append_nal(&mut single,clear);
+        let one = protected_plan::slice_prefix(&single).unwrap();
+        protected_plan::clear_configuration_cache();
+        let before = protected_plan::configuration_cache_counts();
+        let first = protected_plan::slice_batch(&batch).unwrap();
+        assert_eq!(&first[..4],&1u32.to_be_bytes());
+        assert_eq!(&first[8..],one.as_slice());
+        assert_eq!(protected_plan::configuration_cache_counts(),(before.0,before.1+1));
+        assert_eq!(protected_plan::slice_batch(&batch).unwrap(),first);
+        assert_eq!(protected_plan::configuration_cache_counts(),(before.0+1,before.1+1));
+        // Corrupt the first parameter-set NAL header without changing length.
+        let mut changed = batch.clone();
+        changed[16] ^= 0x80;
+        assert!(protected_plan::slice_batch(&changed).is_err());
+        assert_eq!(protected_plan::slice_batch(&batch).unwrap(),first);
+        protected_plan::clear_configuration_cache();
+        assert_eq!(protected_plan::slice_batch(&batch).unwrap(),first);
+        assert_eq!(protected_plan::configuration_cache_counts(),(before.0+2,before.1+2));
+    }
 }
 
 // Test the actual encoded second input with legal shorter prefixes and

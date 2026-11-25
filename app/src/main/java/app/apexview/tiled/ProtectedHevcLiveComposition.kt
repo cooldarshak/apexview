@@ -40,13 +40,28 @@ internal object ProtectedHevcLiveComposition {
         val sampleCount: Int,
         val width: Int,
         val height: Int,
-        val alignmentOffsetsMillis: Map<String, Long?>
+        val alignmentOffsetsMillis: Map<String, Long?>,
+        // Only local opt-in publication can hold this backing. Legacy and
+        // cast callers request a heap-detached window instead.
+        internal val nativeMedia: NativeFragmentLease? = null,
     ) {
-        fun zero() = mediaFragment.fill(0)
+        init { require(nativeMedia == null || mediaFragment.isEmpty()) }
+        val size: Int get() = nativeMedia?.size ?: mediaFragment.size
+        fun copyMediaBytes(): ByteArray = nativeMedia?.copyBytes() ?: mediaFragment.copyOf()
+        fun inspect(init: CmafBoxInspector.Report): CmafBoxInspector.Report =
+            nativeMedia?.inspect(init) ?: CmafBoxInspector.inspect(mediaFragment, init)
+        fun zero() { mediaFragment.fill(0); nativeMedia?.close() }
 
         fun detached() = copy(
-            mediaFragment = mediaFragment.copyOf(),
-            alignmentOffsetsMillis = alignmentOffsetsMillis.toMap()
+            mediaFragment = if (nativeMedia == null) mediaFragment.copyOf() else ByteArray(0),
+            alignmentOffsetsMillis = alignmentOffsetsMillis.toMap(),
+            nativeMedia = nativeMedia?.retain()
+        )
+
+        fun legacyDetached() = copy(
+            mediaFragment = copyMediaBytes(),
+            alignmentOffsetsMillis = alignmentOffsetsMillis.toMap(),
+            nativeMedia = null
         )
     }
 
@@ -57,11 +72,18 @@ internal object ProtectedHevcLiveComposition {
     ) {
         /** Only the startup handoff needs a second owner: its startup
          * coordinator unconditionally clears the preflight-owned window. */
-        fun detached() = OutputWindow(
-            initializationSegment.copyOf(),
-            fragments.map(OutputFragment::detached),
-            sourceGeometry
-        )
+        fun detached(): OutputWindow {
+            val initialization = initializationSegment.copyOf()
+            val retained = ArrayList<OutputFragment>(fragments.size)
+            try {
+                fragments.forEach { retained += it.detached() }
+                return OutputWindow(initialization, retained, sourceGeometry)
+            } catch (failure: Throwable) {
+                initialization.fill(0)
+                retained.forEach(OutputFragment::zero)
+                throw failure
+            }
+        }
 
         fun zero() {
             initializationSegment.fill(0)
@@ -169,6 +191,7 @@ internal object ProtectedHevcLiveComposition {
             outputParameters = null
             outputHistory.forEach(OutputFragment::zero)
             outputHistory.clear()
+            if (localNativeHeader) NativeFragmentLease.trim()
             hasPublishedOutput = false
             status = "CLEARED"
         }
@@ -337,7 +360,7 @@ internal object ProtectedHevcLiveComposition {
         val output = session.outputHistory.lastOrNull() ?: return null
         return OutputSegment(
             initializationSegment = init.copyOf(),
-            mediaFragment = output.mediaFragment.copyOf(),
+            mediaFragment = output.copyMediaBytes(),
             timescale = output.timescale,
             baseDecodeTimeTicks = output.baseDecodeTimeTicks,
             sampleCount = output.sampleCount,
@@ -349,15 +372,23 @@ internal object ProtectedHevcLiveComposition {
 
     /** A bounded rolling output window for the live DASH representation. */
     @Synchronized
-    fun outputWindow(group: String): OutputWindow? {
+    fun outputWindow(group: String, shareNative: Boolean = false): OutputWindow? {
         val session = sessions[group] ?: return null
         val init = session.outputInitializationSegment ?: return null
         if (session.outputHistory.isEmpty()) return null
-        return OutputWindow(
-            initializationSegment = init.copyOf(),
-            fragments = session.outputHistory.map(OutputFragment::detached),
-            sourceGeometry = session.sourceGeometry,
-        )
+        val initialization = init.copyOf()
+        val retained = ArrayList<OutputFragment>(session.outputHistory.size)
+        try {
+            session.outputHistory.forEach { fragment ->
+                retained += if (shareNative && session.localNativeHeader) fragment.detached()
+                    else fragment.legacyDetached()
+            }
+            return OutputWindow(initialization, retained, session.sourceGeometry)
+        } catch (failure: Throwable) {
+            initialization.fill(0)
+            retained.forEach(OutputFragment::zero)
+            throw failure
+        }
     }
 
     @Synchronized
@@ -1002,6 +1033,7 @@ internal object ProtectedHevcLiveComposition {
                 direct = directNative)
             else null
         var nativeHeaderMatched = false
+        var unpublished: ProtectedHevcCmafFragmentWriter.Owned? = null
         try {
             val pictureComposeStartedNs = System.nanoTime()
             var previousDecodeTime: Long? = null
@@ -1088,7 +1120,7 @@ internal object ProtectedHevcLiveComposition {
                 requireNotNull(firstMasterBuffer.picture.timing.decodeTimeTicks)
             }
             val fragmentWriteStartedNs = System.nanoTime()
-            val mediaFragment = ProtectedHevcCmafFragmentWriter.write(
+            val ownedFragment = ProtectedHevcCmafFragmentWriter.writeOwned(
                 outputInitializationSegment = outputInit,
                 request = ProtectedHevcCmafFragmentWriter.Request(
                     trackId = requireNotNull(firstTrack.trackId),
@@ -1106,8 +1138,10 @@ internal object ProtectedHevcLiveComposition {
                         session.nativeVerifiedEpoch = -1L
                     }
                 },
-                directNativeHeader = directNative
+                directNativeHeader = directNative,
+                preferNativeStorage = directNative && nativeEnabled() && session.localNativeHeader
             )
+            unpublished = ownedFragment
             val fragmentWriteElapsedMs = (System.nanoTime() - fragmentWriteStartedNs) / 1_000_000L
             val nativeComplete = nativePlan != null && nativeEnabled() && nativeHeaderMatched &&
                 nativePlan.matchedSlices > 0 && nativePlan.matchedMaps == composedSamples.size &&
@@ -1122,14 +1156,15 @@ internal object ProtectedHevcLiveComposition {
             }
             val newOutput = OutputFragment(
                 sequenceNumber = session.outputSequenceNumber,
-                mediaFragment = mediaFragment,
+                mediaFragment = ownedFragment.heap ?: ByteArray(0),
                 timescale = requireNotNull(firstTrack.timescale),
                 baseDecodeTimeTicks = firstComposedDts,
                 durationTicks = durationTicks,
                 sampleCount = composedSamples.size,
                 width = outputSps.displayWidth,
                 height = outputSps.displayHeight,
-                alignmentOffsetsMillis = proof.offsetsByFeed.mapValues { it.value.offsetMillis }
+                alignmentOffsetsMillis = proof.offsetsByFeed.mapValues { it.value.offsetMillis },
+                nativeMedia = ownedFragment.native
             )
             // Validate the new **unpublished** protected fragment together with the
             // previously retained outputs. If an 8-feed bitrate cannot hold the
@@ -1137,13 +1172,14 @@ internal object ProtectedHevcLiveComposition {
             // mutating the committed history or retaining another ciphertext array.
             val evictions = try {
                 ProtectedOutputHistoryPolicy.evictions(
-                    session.outputHistory.map { it.mediaFragment.size } + newOutput.mediaFragment.size
+                    session.outputHistory.map { it.size } + newOutput.size
                 )
             } catch (failure: Throwable) {
                 newOutput.zero()
                 throw failure
             }
             session.outputHistory += newOutput
+            unpublished = null // History now owns the heap buffer or native lease.
             repeat(evictions) { session.outputHistory.removeAt(0).zero() }
             session.outputSequenceNumber = Math.addExact(session.outputSequenceNumber, 1L)
             session.lastComposedMasterSequenceOrdinal =
@@ -1158,7 +1194,8 @@ internal object ProtectedHevcLiveComposition {
                 "GB_PROTECTED_PUBLICATION requested=${if (session.nativeHeaderRequested) "RUST" else "JVM"} " +
                     "actualComputation=${if (nativeComplete && nativeEnabled() && directNative) "RUST" else "JVM"} " +
                     "proof=${if (nativeComplete && !directNative) "EXACT_REFERENCE" else if (nativeComplete) "INDEPENDENT_VALIDATION" else "JVM_FALLBACK"} " +
-                    "payloadCopy=JVM_AUTHORIZED_BORROWED generation=$nativeEpoch")
+                    "storage=${if (newOutput.nativeMedia != null) "RUST_OWNED" else "JVM"} " +
+                    "payloadCopy=AUTHORIZED_BORROWED generation=$nativeEpoch")
             session.status = "REAL_PROTECTED_F1_CMAF_COMPOSED_NOT_YET_PLAYED"
             session.lastFailure = null
             val allocated = allocatedAtStart?.let { before ->
@@ -1179,12 +1216,13 @@ internal object ProtectedHevcLiveComposition {
                 "composerThreadCpuMs=${((android.os.Debug.threadCpuTimeNanos() - composeStartedCpuNs) / 1_000_000L).coerceAtLeast(0)} " +
                 "fragmentWriteMs=$fragmentWriteElapsedMs " +
                 "feeds=${session.labels.size} sampleCount=${newOutput.sampleCount} " +
-                "outputBytes=${newOutput.mediaFragment.size} retainedSegments=${session.outputHistory.size} " +
-                "retainedBytes=${session.outputHistory.sumOf { it.mediaFragment.size.toLong() }} " +
+                "outputBytes=${newOutput.size} retainedSegments=${session.outputHistory.size} " +
+                "retainedBytes=${session.outputHistory.sumOf { it.size.toLong() }} " +
                 "processAllocBytesDuringSegment=${allocated ?: -1L} processGcDuringSegment=${collections ?: -1L} " +
                 "protectedSampleStagingBytesAvoided=${plannedPictures.sumOf { it.payload.size.toLong() }} " +
                 "protectedPayloadUnmodified=true")
         } finally {
+            unpublished?.close()
             plannedPictures.forEach { it.close() }
             outputBytesToClear.forEach { it.fill(0) }
         }

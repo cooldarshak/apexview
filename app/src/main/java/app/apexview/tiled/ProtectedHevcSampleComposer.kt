@@ -41,6 +41,23 @@ internal object ProtectedHevcSampleComposer {
             }
             check(cursor == offset + size)
         }
+        /** Same ordered length prefixes and independently verified borrowed
+         * bytes, directly into the final owner. No intermediate full sample. */
+        fun writeTo(output: java.nio.ByteBuffer) {
+            check(!closed)
+            require(output.remaining() >= size)
+            val start = output.position()
+            for (slice in slices) {
+                for (shift in nalLengthSize-1 downTo 0)
+                    output.put(((slice.size ushr (shift*8)) and 0xff).toByte())
+                val writer = requireNotNull(slice.writeTo) { "Missing bounded sample writer" }
+                val before = output.position()
+                writer(output)
+                require(output.position()-before == slice.size)
+            }
+            check(output.position()-start == size)
+        }
+
         fun materialize(): Result {
             val output = ByteArray(size)
             try {
@@ -61,7 +78,8 @@ internal object ProtectedHevcSampleComposer {
         val encryptedByteCount: Long,
         val header: () -> HevcBitstream.NalHeader,
         val copyInto: (ByteArray, Int) -> Unit,
-        val close: () -> Unit
+        val close: () -> Unit,
+        val writeTo: ((java.nio.ByteBuffer) -> Unit)? = null
     )
 
     fun compose(
@@ -71,7 +89,8 @@ internal object ProtectedHevcSampleComposer {
     ): Result = plan(slices.map { slice ->
         Slice(slice.nal.size, slice.protectionRanges, slice.encryptedByteCount,
             { HevcBitstream.readNalHeader(slice.nal) },
-            { output, offset -> slice.nal.copyInto(output, offset) }, {})
+            { output, offset -> slice.nal.copyInto(output, offset) }, {},
+            { output -> output.put(slice.nal); Unit })
     }, nalLengthSize, context).use { it.materialize() }
 
     /** Ownership of the rewritten clear prefixes transfers only on success. */
@@ -82,7 +101,7 @@ internal object ProtectedHevcSampleComposer {
         nativePlan: NativeProtectedPlan? = null
     ): Plan = plan(slices.map { slice ->
         Slice(slice.size, slice.protectionRanges, slice.encryptedByteCount,
-            { slice.parts.header() }, slice::copyInto, slice::close)
+            { slice.parts.header() }, slice::copyInto, slice::close, slice.parts::writeVerifiedTo)
     }, nalLengthSize, context, nativePlan)
 
     private fun plan(slices: List<Slice>, nalLengthSize: Int, context: String,

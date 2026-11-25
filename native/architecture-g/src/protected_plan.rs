@@ -4,6 +4,7 @@
 use crate::bmff::{Error, Reader};
 use crate::clear_slice;
 use crate::hevc_parameters::Parameters;
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub const MAX_PACKET: usize = 2 * 1024 * 1024;
 const MAX_PREFIX: usize = 16 * 1024;
@@ -71,6 +72,68 @@ fn rewrite_one(
     Ok(out)
 }
 
+// Exact raw clear triplets, not a hash or representation label, define
+// reusable analysis. One process-wide immutable entry, bounded by the GBS2
+// packet limits; no media bytes, protection identity or license is cached.
+struct Configuration {
+    sets: Vec<[Vec<u8>; 3]>,
+    parsed: Vec<Parameters>,
+}
+impl Configuration {
+    fn matches(&self, sets: &[[&[u8]; 3]]) -> bool {
+        self.sets.len() == sets.len() && self.sets.iter().zip(sets).all(|(old, new)|
+            old.iter().zip(new).all(|(a,b)| a.as_slice() == *b))
+    }
+
+    fn new(sets: &[[&[u8]; 3]]) -> Result<Self, Error> {
+        let mut raw = Vec::new();
+        let mut parsed = Vec::new();
+        raw.try_reserve_exact(sets.len()).map_err(|_| Error::Limit)?;
+        parsed.try_reserve_exact(sets.len()).map_err(|_| Error::Limit)?;
+        for set in sets {
+            parsed.push(Parameters::parse(*set)?);
+            let mut owned = [Vec::new(), Vec::new(), Vec::new()];
+            for (dest, src) in owned.iter_mut().zip(set) {
+                dest.try_reserve_exact(src.len()).map_err(|_| Error::Limit)?;
+                dest.extend_from_slice(src);
+            }
+            raw.push(owned);
+        }
+        Ok(Self { sets: raw, parsed })
+    }
+}
+#[derive(Default)]
+struct ConfigurationCache {
+    active: Option<Arc<Configuration>>,
+    hits: u64,
+    misses: u64,
+}
+impl ConfigurationCache {
+    fn get(&mut self, sets: &[[&[u8]; 3]]) -> Result<Arc<Configuration>, Error> {
+        if let Some(active) = self.active.as_ref().filter(|a| a.matches(sets)) {
+            self.hits = self.hits.saturating_add(1);
+            return Ok(Arc::clone(active));
+        }
+        // A malformed new set must not silently reuse an older parse.
+        let parsed = Arc::new(Configuration::new(sets)?);
+        self.active = Some(Arc::clone(&parsed));
+        self.misses = self.misses.saturating_add(1);
+        Ok(parsed)
+    }
+}
+static CONFIGURATION_CACHE: OnceLock<Mutex<ConfigurationCache>> = OnceLock::new();
+fn configuration_cache() -> &'static Mutex<ConfigurationCache> {
+    CONFIGURATION_CACHE.get_or_init(|| Mutex::new(ConfigurationCache::default()))
+}
+pub fn clear_configuration_cache() {
+    if let Ok(mut cache) = configuration_cache().lock() { cache.active = None; }
+}
+/// Counts successful exact-key cache hits and newly parsed configurations;
+/// used by independently encoded host fixtures. No parameter bytes exposed.
+pub fn configuration_cache_counts() -> (u64, u64) {
+    configuration_cache().lock().map_or((0,0), |c| (c.hits,c.misses))
+}
+
 /// GBS2: bounded whole-picture clear-header batch. Each feed's parameter
 /// triplet and the output triplet are parsed once, then borrowed for every
 /// checked placement. No opaque media is accepted. Output consists of the
@@ -84,12 +147,14 @@ pub fn slice_batch(packet: &[u8]) -> Result<Vec<u8>, Error> {
     if !(1..=8).contains(&feeds) || !(1..=440).contains(&count) {
         return Err(Error::Limit);
     }
-    let mut sources = Vec::new();
-    sources.try_reserve_exact(feeds).map_err(|_| Error::Limit)?;
-    for _ in 0..feeds {
-        sources.push(Parameters::parse([read_nal(&mut r)?, read_nal(&mut r)?, read_nal(&mut r)?])?);
+    let mut sets = Vec::new();
+    sets.try_reserve_exact(feeds+1).map_err(|_| Error::Limit)?;
+    for _ in 0..=feeds {
+        sets.push([read_nal(&mut r)?, read_nal(&mut r)?, read_nal(&mut r)?]);
     }
-    let output = Parameters::parse([read_nal(&mut r)?, read_nal(&mut r)?, read_nal(&mut r)?])?;
+    let configuration = configuration_cache().lock().map_err(|_| Error::Metadata)?.get(&sets)?;
+    let sources = &configuration.parsed[..feeds];
+    let output = &configuration.parsed[feeds];
     let mut out = Vec::new();
     out.extend_from_slice(&(count as u32).to_be_bytes());
     let mut last = None;
@@ -104,7 +169,7 @@ pub fn slice_batch(packet: &[u8]) -> Result<Vec<u8>, Error> {
         };
         let clear = read_nal(&mut r)?;
         let mut rewritten = rewrite_one(sources.get(feed).ok_or(Error::Metadata)?,
-            &output, destination, opaque, filter, clear)?;
+            output, destination, opaque, filter, clear)?;
         let required = 4 + rewritten.len();
         if required > MAX_PACKET - out.len() {
             rewritten.fill(0);

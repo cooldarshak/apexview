@@ -266,3 +266,42 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeProte
     }));
     result.ok().flatten().unwrap_or(std::ptr::null_mut())
 }
+
+// Private generic fragment memory. Java serializes lifetime of each direct
+// view and never exposes it to Media3 or other callers; only bounded reads
+// are permitted after publication. The handle is not an address.
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragmentAllocate(
+    _env: JNIEnv<'_>, _class: JClass<'_>, size: jint,
+) -> jlong {
+    guarded(|| usize::try_from(size).ok().and_then(crate::fragment_storage::allocate).unwrap_or(BACKPRESSURE))
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragmentView(
+    mut env: JNIEnv<'_>, _class: JClass<'_>, id: jlong,
+) -> jobject {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some((ptr, len)) = crate::fragment_storage::view(id) else { return std::ptr::null_mut(); };
+        // SAFETY: a private Java owner holds the handle until every view is
+        // retired; the native arena does not access live allocations.
+        match unsafe { env.new_direct_byte_buffer(ptr, len) } {
+            Ok(buffer) => jni::objects::JObject::from(buffer).into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })).unwrap_or(std::ptr::null_mut())
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragmentRelease(
+    _env: JNIEnv<'_>, _class: JClass<'_>, id: jlong,
+) -> jlong {
+    guarded(|| if crate::fragment_storage::release(id) { 1 } else { STALE })
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragmentTrim(
+    _env: JNIEnv<'_>, _class: JClass<'_>,
+) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        crate::fragment_storage::trim();
+        crate::protected_plan::clear_configuration_cache();
+    }));
+}

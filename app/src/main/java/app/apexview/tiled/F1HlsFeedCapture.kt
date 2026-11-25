@@ -565,8 +565,9 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         }
     }
 
-    fun outputWindow(group: String): ProtectedHevcLiveComposition.OutputWindow? =
-        if (clearOutput == true) clearComposition.outputWindow() else ProtectedHevcLiveComposition.outputWindow(group)
+    fun outputWindow(group: String, shareNative: Boolean = false): ProtectedHevcLiveComposition.OutputWindow? =
+        if (clearOutput == true) clearComposition.outputWindow()
+        else ProtectedHevcLiveComposition.outputWindow(group, shareNative)
 
     fun widevinePssh(): ByteArray? = pssh?.copyOf()
 
