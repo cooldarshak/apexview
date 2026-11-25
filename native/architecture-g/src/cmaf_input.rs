@@ -172,6 +172,21 @@ fn parse_trex(view: BoxView<'_>, track_id: u32) -> Result<Defaults, Error> {
     Ok(value)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct TrackContext {
+    track_id: u32,
+    defaults: Defaults,
+}
+
+impl Initialization<'_> {
+    pub(crate) fn fragment_context(&self) -> TrackContext {
+        TrackContext {
+            track_id: self.track_id,
+            defaults: self.defaults,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sample<'a> {
     pub bytes: &'a [u8],
@@ -190,6 +205,10 @@ pub struct Fragment<'a> {
 
 impl<'a> Fragment<'a> {
     pub fn parse(bytes: &'a [u8], initialization: &Initialization<'_>) -> Result<Self, Error> {
+        Self::parse_with_context(bytes, initialization.fragment_context())
+    }
+
+    pub(crate) fn parse_with_context(bytes: &'a [u8], track: TrackContext) -> Result<Self, Error> {
         let mut moof = None;
         let mut mdat = None;
         for view in Boxes::root(bytes)? {
@@ -212,7 +231,7 @@ impl<'a> Fragment<'a> {
         let sequence = movie.u32()?;
         movie.finish()?;
         let children = traf.children();
-        let defaults = parse_tfhd(children.clone().require(b"tfhd")?, initialization)?;
+        let defaults = parse_tfhd(children.clone().require(b"tfhd")?, track)?;
         let decode_time = parse_tfdt(children.clone().require(b"tfdt")?)?;
         let trun = children.require(b"trun")?;
         let samples = parse_trun(trun, moof.offset, mdat, decode_time, defaults)?;
@@ -224,7 +243,7 @@ impl<'a> Fragment<'a> {
     }
 }
 
-fn parse_tfhd(view: BoxView<'_>, init: &Initialization<'_>) -> Result<Defaults, Error> {
+fn parse_tfhd(view: BoxView<'_>, init: TrackContext) -> Result<Defaults, Error> {
     const FLAGS: u32 = 0x020000 | 0x000002 | 0x000008 | 0x000010 | 0x000020;
     let mut reader = Reader::new(view.payload);
     let (version, flags) = reader.full()?;

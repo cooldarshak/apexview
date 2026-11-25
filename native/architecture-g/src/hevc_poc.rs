@@ -90,6 +90,8 @@ mod tests {
             temporal_id_plus_one,
             poc_lsb,
             slice_type: 1,
+            output_flag: None,
+            colour_plane: None,
         }
     }
 

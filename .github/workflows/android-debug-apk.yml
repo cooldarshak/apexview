@@ -380,6 +380,9 @@ jobs:
             --fixture-dir "$RUNNER_TEMP/apexview-hevc-fixtures" \
             --tile-dir "$RUNNER_TEMP/apexview-hevc-tile-fixtures" \
             --output-dir "$RUNNER_TEMP/apexview-hevc-output-parameters"
+          cp "$RUNNER_TEMP/apexview-hevc-output-parameters/gb_clear_job.bin" \
+             "$RUNNER_TEMP/apexview-hevc-output-parameters/gb_clear_expected.bin" \
+             "$RUNNER_TEMP/apexview-hevc-tile-fixtures/"
 
       - name: Stage composed clear CMAF for Media3 device instrumentation
         run: |

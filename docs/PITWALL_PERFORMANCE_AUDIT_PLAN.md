@@ -48,6 +48,10 @@ Build 858 passed all five jobs, including exact-source API29/31/36 instrumentati
 
 The next G-B batch generates clear parameter sets, slice offsets and fragments in Rust from original inputs. Local comparison passed for 150 independently decoded pictures across single-tile, full 2×2 and mixed-width sources. Synthetic CBCS tests check inline subsample coverage, IV widths and auxiliary layout. G.3/G.4/G.5/G.16 remain open for production playback integration and protected parity. No change to release acceptance or the default playback engine.
 
+Build 859 passed all five jobs at `938c29342c0e20726cd4711f1583aced0263306a`, with exact Rust-generated initialization and media, 150 decoded frame comparisons over three clear cases, API29/31/36 instrumentation and signed publication. [Build 859](https://github.com/cooldarshak/apexview/actions/runs/45546930661).
+
+The clear atlas worker batch writes the real CMAF result into an admitted Rust output slot. It reuses the bounded G-A queue and leases, checks exact init/layout/generation identity for cached configurations, and adds mandatory Android JNI tests for byte parity, seek invalidation and malformed rejection. Synthetic CBCS checks also cover compatible track/sample-group identities and reject changed KIDs. The archive playback route, controlled switch and protected parity remain open.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |

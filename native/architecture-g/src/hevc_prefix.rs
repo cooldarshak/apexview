@@ -281,12 +281,20 @@ impl StreamPrefix {
         if !dependent {
             bits.read(self.extra_header_bits)?;
             let slice_type = bits.ue(2)?;
-            if self.output_flag_present {
-                bits.flag()?;
-            }
-            if self.separate_colour_plane && bits.read(2)? > 2 {
-                return Err(Error::Nal);
-            }
+            let output_flag = if self.output_flag_present {
+                Some(bits.flag()?)
+            } else {
+                None
+            };
+            let colour_plane = if self.separate_colour_plane {
+                let plane = bits.read(2)?;
+                if plane > 2 {
+                    return Err(Error::Nal);
+                }
+                Some(plane)
+            } else {
+                None
+            };
             let poc_lsb = if matches!(header.unit_type, 19 | 20) {
                 None
             } else {
@@ -297,6 +305,8 @@ impl StreamPrefix {
                 slice_type,
                 temporal_id_plus_one: header.temporal_id_plus_one,
                 poc_lsb,
+                output_flag,
+                colour_plane,
             });
         }
         Ok((
@@ -318,6 +328,8 @@ pub struct PicturePrefix {
     pub slice_type: u32,
     pub temporal_id_plus_one: u8,
     pub poc_lsb: Option<u32>,
+    pub output_flag: Option<bool>,
+    pub colour_plane: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

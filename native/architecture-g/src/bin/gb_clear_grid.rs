@@ -3,9 +3,11 @@
 mod support;
 
 use pitwall_g0::{
+    clear_atlas::{Atlas, Cell, Grid},
     clear_cmaf::{self, NalSample},
     cmaf_init,
     cmaf_input::{Fragment, HevcConfiguration, Initialization, Sample},
+    engine::{Budget, Engine, INVALID, STALE},
     hevc_nal::NalUnits,
     hevc_output,
     hevc_parameters::Parameters,
@@ -15,6 +17,7 @@ use pitwall_g0::{
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 fn main() {
@@ -28,7 +31,8 @@ fn main() {
         ("tiled", 50, false, input.join("tiled"), None),
         ("mixed", 50, true, input.join("mixed"), None),
     ] {
-        let bytes = compose(&source, reference, samples, uncropped);
+        let lease_assets = (name == "tiled").then_some(output.as_path());
+        let bytes = compose(&source, reference, samples, uncropped, lease_assets);
         fs::write(output.join(format!("hevc_rust_gb_{name}.mp4")), &bytes).unwrap();
         println!(
             "G-B Rust clear {name} byte-exact: 2 feeds, 50 frames, \
@@ -43,6 +47,7 @@ fn compose(
     syntax: Option<&Path>,
     samples_per_fragment: i64,
     uncropped: bool,
+    lease_assets: Option<&Path>,
 ) -> Vec<u8> {
     let expected_init = fs::read(input.join("grid-init.mp4")).unwrap();
     let source_init = [0, 1].map(|i| fs::read(input.join(format!("feed-{i}-init.mp4"))).unwrap());
@@ -57,6 +62,33 @@ fn compose(
         .iter()
         .flat_map(|p| p.tile_columns.iter().copied())
         .collect();
+    let first_columns = parameters[0].tile_columns.len();
+    let second_columns = parameters[1].tile_columns.len();
+    let mut cells = Vec::new();
+    for row in 0..parameters[0].tile_rows.len() {
+        cells.extend((0..first_columns).map(|tile| Cell {
+            feed: 0,
+            tile: row * first_columns + tile,
+        }));
+        cells.extend((0..second_columns).map(|tile| Cell {
+            feed: 1,
+            tile: row * second_columns + tile,
+        }));
+    }
+    let atlas = Atlas::new(
+        &source_init.each_ref().map(Vec::as_slice),
+        Grid {
+            width: parameters.iter().map(|p| p.prefix.coded_width).sum(),
+            height: parameters[0].prefix.coded_height,
+            columns: &columns,
+            rows: &parameters[0].tile_rows,
+            cells: &cells,
+            frame_rate: (25, 1),
+        },
+        9,
+    )
+    .unwrap();
+    assert_eq!(atlas.initialization(), expected_init);
     let rows = &parameters[0].tile_rows;
     let coded_height = parameters[0].prefix.coded_height;
     assert_eq!(*rows, parameters[1].tile_rows);
@@ -195,6 +227,43 @@ fn compose(
             assert_same_timing(actual, source);
             picture_tiles(actual, output, &output_addresses);
         }
+        let mut leased_output = vec![0x93; expected.len()];
+        let inputs = fragments.each_ref().map(Vec::as_slice);
+        assert_eq!(
+            atlas
+                .write_fragment(&inputs, sequence, &mut leased_output)
+                .unwrap(),
+            expected.len()
+        );
+        assert_eq!(
+            leased_output, expected,
+            "atlas worker payload differs from JVM"
+        );
+        leased_output.fill(0x93);
+        let shorter = inputs[1].get(..inputs[1].len() - 1).unwrap();
+        assert!(atlas
+            .write_fragment(&[inputs[0], shorter], sequence, &mut leased_output)
+            .is_err());
+        assert!(leased_output.iter().all(|&byte| byte == 0x93));
+        if let Some(assets) = lease_assets {
+            let request = Grid {
+                width: output.prefix.coded_width,
+                height: output.prefix.coded_height,
+                columns: &columns,
+                rows,
+                cells: &cells,
+                frame_rate: (25, 1),
+            };
+            let packet = atlas_packet(&request, 9, sequence, &source_init, &fragments);
+            let mut expected_result = Vec::new();
+            expected_result.extend_from_slice(&(initialized.len() as u32).to_be_bytes());
+            expected_result.extend_from_slice(&(expected.len() as u32).to_be_bytes());
+            expected_result.extend_from_slice(&initialized);
+            expected_result.extend_from_slice(&expected);
+            verify_native_lease(&packet, &expected_result);
+            fs::write(assets.join("gb_clear_job.bin"), packet).unwrap();
+            fs::write(assets.join("gb_clear_expected.bin"), expected_result).unwrap();
+        }
         stream.extend_from_slice(&fragment);
     }
     assert_eq!(frame, 50);
@@ -244,4 +313,97 @@ fn assert_same_timing(left: &Sample<'_>, right: &Sample<'_>) {
     assert_eq!(left.duration, right.duration);
     assert_eq!(left.composition_offset, right.composition_offset);
     assert_eq!(left.flags, right.flags);
+}
+
+fn atlas_packet(
+    grid: &Grid<'_>,
+    track: u32,
+    sequence: u32,
+    initialization: &[Vec<u8>; 2],
+    media: &[Vec<u8>; 2],
+) -> Vec<u8> {
+    let mut packet = b"GBC1".to_vec();
+    for field in [
+        track,
+        sequence,
+        grid.width,
+        grid.height,
+        grid.frame_rate.0,
+        grid.frame_rate.1,
+    ] {
+        packet.extend_from_slice(&field.to_be_bytes());
+    }
+    for field in [2, grid.columns.len() as u16, grid.rows.len() as u16, 0] {
+        packet.extend_from_slice(&field.to_be_bytes());
+    }
+    for &dimension in grid.columns.iter().chain(grid.rows) {
+        packet.extend_from_slice(&dimension.to_be_bytes());
+    }
+    for cell in grid.cells {
+        packet.extend_from_slice(&(cell.feed as u16).to_be_bytes());
+        packet.extend_from_slice(&(cell.tile as u16).to_be_bytes());
+    }
+    for (init, fragment) in initialization.iter().zip(media) {
+        for size in [init.len(), fragment.len()] {
+            packet.extend_from_slice(&(size as u32).to_be_bytes());
+        }
+        packet.extend_from_slice(init);
+        packet.extend_from_slice(fragment);
+    }
+    packet
+}
+
+fn verify_native_lease(packet: &[u8], expected: &[u8]) {
+    let mut engine = Engine::new(Budget {
+        slots: 2,
+        input: packet.len(),
+        output: expected.len(),
+        ceiling: 12 * 1024 * 1024,
+    })
+    .unwrap();
+    let generation = engine.generation();
+    let token = engine.submit_clear_atlas(generation, packet, true, 5000);
+    assert!(token > 0);
+    assert_eq!(await_result(&engine, token), expected.len() as i64);
+    let mut lease = vec![0x93; expected.len()];
+    assert_eq!(engine.copy(token, 0, &mut lease), expected.len() as i64);
+    assert_eq!(lease, expected);
+    assert_eq!(engine.seek(), generation + 1);
+    assert_eq!(engine.copy(token, 0, &mut lease), STALE);
+    assert_eq!(engine.release(token), 1);
+
+    let generation = engine.generation();
+    let warm = engine.submit_clear_atlas(generation, packet, true, 5000);
+    assert_eq!(await_result(&engine, warm), expected.len() as i64);
+    assert_eq!(engine.release(warm), 1);
+    let mut incompatible = packet.to_vec();
+    // Output coded width in the request. A different layout cannot reuse the
+    // cached source configuration from the previous native job.
+    incompatible[12..16].copy_from_slice(&1u32.to_be_bytes());
+    let changed = engine.submit_clear_atlas(generation, &incompatible, true, 5000);
+    assert_eq!(await_result(&engine, changed), INVALID);
+    assert_eq!(engine.release(changed), 1);
+    let rebuilt = engine.submit_clear_atlas(generation, packet, true, 5000);
+    assert_eq!(await_result(&engine, rebuilt), expected.len() as i64);
+    assert_eq!(engine.copy(rebuilt, 0, &mut lease), expected.len() as i64);
+    assert_eq!(lease, expected);
+    assert_eq!(engine.release(rebuilt), 1);
+    let invalid =
+        engine.submit_clear_atlas(engine.generation(), &packet[..packet.len() - 1], true, 5000);
+    assert!(invalid > 0);
+    assert_eq!(await_result(&engine, invalid), INVALID);
+    assert_eq!(engine.release(invalid), 1);
+    assert!(engine.close());
+}
+
+fn await_result(engine: &Engine, token: i64) -> i64 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let result = engine.acquire(token);
+        if result != 0 {
+            return result;
+        }
+        assert!(Instant::now() < deadline, "clear atlas worker timeout");
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }

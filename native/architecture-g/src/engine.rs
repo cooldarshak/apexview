@@ -1,6 +1,5 @@
-//! G-A bounded native execution foundation. Only the already validated clear
-//! Annex-B conversion kernel is dispatched in this phase. No player or DRM calls.
-use crate::convert_fixed_batch;
+//! Bounded native execution for conversion controls and clear atlas media jobs.
+use crate::{atlas_job, convert_fixed_batch};
 use std::cell::UnsafeCell;
 use std::sync::{Arc,Condvar,Mutex};
 use std::sync::atomic::{AtomicUsize,Ordering};
@@ -63,9 +62,14 @@ fn buffer(capacity:usize)->Option<Vec<u8>> {
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 enum Stage { Free,Queued,Running,Ready,Reading,Failed }
+#[derive(Clone, Copy)]
+enum Command {
+    Convert { prefix: usize, count: usize },
+    ClearAtlas,
+}
 #[derive(Clone,Copy)]
 struct Work {
-    token:i64,generation:i64,len:usize,prefix:usize,count:usize,
+    token:i64,generation:i64,len:usize,command:Command,
     foreground:bool,deadline:Instant,
 }
 struct Slot {
@@ -134,9 +138,26 @@ impl Engine {
     /// cannot consume the final free slot; foreground wins among queued work.
     pub fn submit(&self,generation:i64,source:&[u8],prefix:usize,count:usize,
                   foreground:bool,slack_ms:u64)->i64 {
-        if source.is_empty() || source.len()>self.budget.input ||
-            !(1..=4).contains(&prefix) || !(1..=64).contains(&count) ||
-            !source.len().is_multiple_of(count) || !(1..=60_000).contains(&slack_ms) {
+        if !(1..=4).contains(&prefix) || !(1..=64).contains(&count) ||
+            !source.len().is_multiple_of(count) {
+            return INVALID;
+        }
+        self.enqueue(generation, source, Command::Convert { prefix, count }, foreground, slack_ms)
+    }
+    /// Clear CMAF jobs require extra parser/rewrite headroom. Run with the same
+    /// single worker, lease, queue priority, deadline and generation checks.
+    pub fn submit_clear_atlas(&self, generation: i64, source: &[u8],
+                              foreground: bool, slack_ms: u64) -> i64 {
+        let remaining = self.budget.ceiling - self.reserved();
+        if atlas_job::workspace_reserve(self.budget.input, self.budget.output)
+            .is_none_or(|additional| additional > remaining) {
+            return BACKPRESSURE;
+        }
+        self.enqueue(generation, source, Command::ClearAtlas, foreground, slack_ms)
+    }
+    fn enqueue(&self, generation: i64, source: &[u8], command: Command,
+               foreground: bool, slack_ms: u64) -> i64 {
+        if source.is_empty() || source.len() > self.budget.input || !(1..=60_000).contains(&slack_ms) {
             return INVALID;
         }
         let Some(deadline)=Instant::now().checked_add(Duration::from_millis(slack_ms)) else {return INVALID;};
@@ -152,7 +173,7 @@ impl Engine {
         let token=i64::try_from(raw).expect("checked token");
         let slot=&mut s.slots[index];
         slot.buffers.as_mut().expect("free buffers").input[..source.len()].copy_from_slice(source);
-        slot.work=Some(Work{token,generation,len:source.len(),prefix,count,foreground,deadline});
+        slot.work=Some(Work{token,generation,len:source.len(),command,foreground,deadline});
         slot.stage=Stage::Queued;
         self.shared.1.notify_one();
         token
@@ -221,11 +242,13 @@ impl Engine {
 }
 impl Drop for Engine {fn drop(&mut self){self.close();}}
 fn run_worker(shared:Shared) {
+    let mut atlas = atlas_job::Dispatcher::default();
     loop {
         let (index,work,mut buffers)={
             let mut s=shared.0.lock().expect("engine mutex");
             loop {
                 if s.closed{return;}
+                atlas.invalidate(s.generation);
                 if let Some(index)=s.next() {
                     let slot=&mut s.slots[index];
                     let work=slot.work.expect("queued work");
@@ -239,8 +262,12 @@ fn run_worker(shared:Shared) {
             }
         };
         let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
-            convert_fixed_batch(&buffers.input[..work.len],work.len/work.count,
-                work.count,work.prefix,&mut buffers.output)
+            let input = &buffers.input[..work.len];
+            match work.command {
+                Command::Convert { prefix, count } =>
+                    convert_fixed_batch(input, work.len / count, count, prefix, &mut buffers.output),
+                Command::ClearAtlas => atlas.run(work.generation, input, &mut buffers.output).ok(),
+            }
         }));
         let mut s=shared.0.lock().expect("engine mutex");
         let obsolete=s.closed || work.generation!=s.generation;
@@ -267,6 +294,15 @@ mod tests {
             thread::yield_now();
         }
     }
+    #[test]
+    fn clear_atlas_requires_workspace_headroom_beyond_fixed_slots() {
+        let budget = Budget { slots: 2, input: 32, output: 32, ceiling: 1024 * 1024 };
+        let engine = Engine::new(budget).unwrap();
+        let generation = engine.generation();
+        assert_eq!(engine.submit_clear_atlas(generation, b"GBC1", true, 5000), BACKPRESSURE);
+        assert!(engine.submit(generation, &[2, 2, 1], 1, 1, true, 5000) > 0);
+    }
+
     #[test]
     fn checked_budget_rejects_overflow_and_insufficient_headroom(){
         assert_eq!(budget().reserved(),Some(3*(4096+8192)+WORKER_STACK+OVERHEAD_RESERVE));
@@ -320,7 +356,7 @@ mod tests {
     fn deadline_priority_and_fifo_ties(){
         let now=Instant::now();
         let mk=|token,foreground,ms|Slot{buffers:None,stage:Stage::Queued,
-            work:Some(Work{token,generation:1,len:3,prefix:1,count:1,foreground,
+            work:Some(Work{token,generation:1,len:3,command:Command::Convert{prefix:1,count:1},foreground,
                 deadline:now+Duration::from_millis(ms)}),result:0};
         let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false};
         assert_eq!(s.next(),Some(2));s.slots[2].stage=Stage::Running;
@@ -356,7 +392,7 @@ mod tests {
         {
             let mut s=e.shared.0.lock().unwrap();
             let slot=&mut s.slots[0];
-            slot.work=Some(Work{token:42,generation:1,len:3,prefix:1,count:1,
+            slot.work=Some(Work{token:42,generation:1,len:3,command:Command::Convert{prefix:1,count:1},
                 foreground:true,deadline:Instant::now()});
             slot.stage=Stage::Queued;
             e.shared.1.notify_one();

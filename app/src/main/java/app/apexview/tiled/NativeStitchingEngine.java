@@ -5,7 +5,7 @@ import java.nio.ByteBuffer;
 /**
  * G-A native engine ownership contract. Explicitly opened by a background
  * owner; no native library load during startup, no DRM/Media3 interception.
- * Only clear validated diagnostic conversion work is supported until G-B.
+ * Supports bounded clear conversion and atlas jobs for explicit callers.
  * Native-owned bridge views are private and invalidated before deterministic close.
  */
 public final class NativeStitchingEngine implements AutoCloseable {
@@ -51,6 +51,8 @@ public final class NativeStitchingEngine implements AutoCloseable {
     private static native ByteBuffer nativeBridge(long handle,boolean output);
     private static native long nativeSubmit(long handle,long generation,ByteBuffer input,int length,
                                             int prefix,int count,boolean foreground,long slackMs);
+    private static native long nativeSubmitClearAtlas(long handle, long generation, ByteBuffer input,
+                                                      int length, boolean foreground, long slackMs);
     private static native long nativeAcquire(long handle,long token);
     private static native long nativeCopy(long handle,long token,int offset,ByteBuffer output,int length);
     private static native long nativeRelease(long handle,long token);
@@ -97,14 +99,24 @@ public final class NativeStitchingEngine implements AutoCloseable {
     }
     public synchronized long generation(){return handle==0?CLOSED:generation;}
     public synchronized long submit(long expected,byte[] bytes,int prefix,int count,boolean foreground,long slack) {
-        if(handle==0)return CLOSED;
-        if(expected!=generation)return STALE;
-        if(bytes==null || bytes.length==0 || bytes.length>input.capacity())return INVALID;
-        input.clear();input.put(bytes); // explicit array-to-native bridge copy
-        javaInputBytes=add(javaInputBytes,bytes.length);
-        long result=nativeSubmit(handle,expected,input,bytes.length,prefix,count,foreground,slack);
-        if(result>0)nativeInputBytes=add(nativeInputBytes,bytes.length);
-        else rejectedSubmits=add(rejectedSubmits,1);
+        return submitJob(expected, bytes, prefix, count, foreground, slack, false);
+    }
+    public synchronized long submitClearAtlas(long expected, byte[] bytes, boolean foreground, long slack) {
+        return submitJob(expected, bytes, 0, 0, foreground, slack, true);
+    }
+    private long submitJob(long expected, byte[] bytes, int prefix, int count, boolean foreground,
+                           long slack, boolean clearAtlas) {
+        if (handle == 0) return CLOSED;
+        if (expected != generation) return STALE;
+        if (bytes == null || bytes.length == 0 || bytes.length > input.capacity()) return INVALID;
+        input.clear();
+        input.put(bytes);
+        javaInputBytes = add(javaInputBytes, bytes.length);
+        long result = clearAtlas
+            ? nativeSubmitClearAtlas(handle, expected, input, bytes.length, foreground, slack)
+            : nativeSubmit(handle, expected, input, bytes.length, prefix, count, foreground, slack);
+        if (result > 0) nativeInputBytes = add(nativeInputBytes, bytes.length);
+        else rejectedSubmits = add(rejectedSubmits, 1);
         return result;
     }
     public synchronized long acquire(long token){return handle==0?CLOSED:nativeAcquire(handle,token);}

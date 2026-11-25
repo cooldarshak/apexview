@@ -108,6 +108,17 @@ run_g0_gate() {
   adb logcat -d -s PitwallGA:I '*:S' >> "$ga_report"
   cat "$ga_report" >> "$report"
   cat "$ga_report"
+  local gb_report="${RUNNER_TEMP:?}/pitwall-gb-api-$sdk-instrumentation.txt"
+  if ! run_required_instrumentation \
+    app.apexview.tiled.ArchitectureGBAndroidTest \
+    'OK (1 test)' "$gb_report"; then
+    adb logcat -d -s PitwallGB:I '*:S' >> "$gb_report" || true
+    cat "$gb_report"
+    return 1
+  fi
+  adb logcat -d -s PitwallGB:I '*:S' >> "$gb_report"
+  cat "$gb_report" >> "$report"
+  cat "$gb_report"
 }
 
 wait_for_android_services

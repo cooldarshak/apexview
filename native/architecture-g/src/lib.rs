@@ -2,7 +2,9 @@
 #![deny(unsafe_code)]
 
 mod annex_b;
+mod atlas_job;
 mod bmff;
+pub mod clear_atlas;
 pub mod cbcs_metadata;
 pub mod cmaf_input;
 pub mod cmaf_init;
