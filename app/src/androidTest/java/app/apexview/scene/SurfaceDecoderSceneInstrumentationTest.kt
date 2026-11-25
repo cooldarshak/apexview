@@ -58,7 +58,11 @@ class SurfaceDecoderSceneInstrumentationTest {
         val initializations = AtomicInteger()
         val activeDecoders = AtomicInteger()
         val maxActiveDecoders = AtomicInteger()
-        val correlation = SceneCodecTimestampCorrelation().apply { active = true }
+        val correlation = SceneCodecTimestampCorrelation()
+        // The renderer owns and periodically drains interval correlation metrics.
+        // Capture real callback evidence independently for each surface generation.
+        val initialCodecFrame = CountDownLatch(1)
+        val codecFrameEvidence = AtomicReference(initialCodecFrame)
         val original = listOf(
             VideoWindow(10, 0, 0f, 0f, 400f, 225f, 0f),
             VideoWindow(11, 1, 400f, 300f, 400f, 225f, 1f)
@@ -93,7 +97,11 @@ class SurfaceDecoderSceneInstrumentationTest {
                         presentationTimeUs: Long, releaseTimeNs: Long, format: Format,
                         mediaFormat: MediaFormat?,
                     ) {
-                        correlation.onCodecFrame(presentationTimeUs, releaseTimeNs, System.nanoTime())
+                        val evidence = codecFrameEvidence.get()
+                        if (correlation.active && presentationTimeUs in 0L..(Long.MAX_VALUE / 1000L)) {
+                            correlation.onCodecFrame(presentationTimeUs, releaseTimeNs, System.nanoTime())
+                            evidence.countDown()
+                        }
                     }
                 })
                 playback!!.player.addListener(object : Player.Listener {
@@ -131,6 +139,9 @@ class SurfaceDecoderSceneInstrumentationTest {
             assertTrue("No frame reached the independent video SurfaceView",
                 firstFrame.await(30, TimeUnit.SECONDS))
             failures.get()?.let { throw AssertionError(it) }
+            assertTrue("Codec PTS listener must execute on the initial real video renderer",
+                initialCodecFrame.await(5, TimeUnit.SECONDS))
+            assertTrue("Initial decoder surface must own timestamp correlation", correlation.active)
             // Capture only clear synthetic GPU pixels: this is not protected
             // F1 output and is never an authorization or DRM-bypass path.
             val originalImage = capture()
@@ -142,7 +153,7 @@ class SurfaceDecoderSceneInstrumentationTest {
                 surface!!.bind(playback!!.player, scene(original.map { window ->
                     window.copy(x = if (window.source == 0) 400f else 0f,
                         y = if (window.source == 0) 300f else 0f)
-                }))
+                }), correlation = correlation)
             }
             val deadline = SystemClock.elapsedRealtime() + 5_000L
             var observed = false
@@ -154,6 +165,7 @@ class SurfaceDecoderSceneInstrumentationTest {
                 if (!observed) SystemClock.sleep(50)
             } while (!observed && SystemClock.elapsedRealtime() < deadline)
             assertTrue("Moving camera windows must reuse the same surface", observed)
+            assertTrue("Layout-only updates must preserve timestamp correlation", correlation.active)
             assertEquals("Scene layout updates must not recreate the decoder",
                 1, initializations.get())
             assertEquals("Only one decoder may be active during unchanged layout",
@@ -163,8 +175,11 @@ class SurfaceDecoderSceneInstrumentationTest {
             // created SurfaceView can present a fresh seeked frame. Repeat on
             // the actual EGL and MediaCodec pipeline, not a mock view.
             val recreated = CountDownLatch(1)
+            val recreatedCodecFrame = CountDownLatch(1)
             instrumentation.runOnMainSync {
                 surface!!.release()
+                assertFalse("Retired surface must release timestamp correlation", correlation.active)
+                codecFrameEvidence.set(recreatedCodecFrame)
                 activity.root.removeView(surface)
                 surface = ProtectedDecoderSceneView(activity, protectedOutput = false).apply {
                     onFirstFrame = { recreated.countDown() }
@@ -186,8 +201,9 @@ class SurfaceDecoderSceneInstrumentationTest {
             } finally { recovered.recycle() }
             assertTrue("Surface handoff must not spawn two concurrently active decoders",
                 maxActiveDecoders.get() <= 1)
-            assertTrue("Codec PTS listener must execute on real video renderer",
-                correlation.snapshotAndReset().codecFrames >= 1L)
+            assertTrue("Codec PTS listener must execute on the recreated real video renderer",
+                recreatedCodecFrame.await(5, TimeUnit.SECONDS))
+            assertTrue("Recreated decoder surface must own timestamp correlation", correlation.active)
         } finally {
             instrumentation.runOnMainSync {
                 surface?.release()
