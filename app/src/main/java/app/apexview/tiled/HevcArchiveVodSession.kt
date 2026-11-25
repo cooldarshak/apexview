@@ -494,6 +494,7 @@ internal class HevcArchiveVodSession(
                     "producerCpuMs=${((android.os.Debug.threadCpuTimeNanos() - cpuAtStart) / 1_000_000L).coerceAtLeast(0)} " +
                     "processAllocBytesDuringSegment=${allocatedDuringProduction ?: -1L} " +
                     "processGcDuringSegment=${gcDuringProduction ?: -1L} " +
+                    "sourceInputBytes=${batches.sumOf { batch -> batch.sumOf { it.size.toLong() } }} " +
                     "outputBytes=${composed.mediaFragments.last().size} " +
                     "sourceAnnexBBytesAvoided=${composed.sourceAnnexBBytesAvoided} " +
                     "sourceNalCopyBytesAvoided=${composed.sourceNalCopyBytesAvoided} " +

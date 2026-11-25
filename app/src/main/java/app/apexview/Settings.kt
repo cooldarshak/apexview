@@ -78,6 +78,15 @@ class Settings(context: Context) {
     var showStats by mutableStateOf(prefs.getBoolean("showStats", false))
         private set
 
+    /** G-A stores the request; actual native playback is gated by integrated capability. */
+    var nativeRustStitching by mutableStateOf(prefs.getBoolean("nativeRustStitching", false))
+        private set
+
+    fun updateNativeRustStitching(value: Boolean) {
+        nativeRustStitching = value
+        prefs.edit().putBoolean("nativeRustStitching", value).apply()
+    }
+
     /** Opt-in clear GLES SurfaceView A/B. Never changes Widevine or decoder selection. */
     var clearSceneSurfaceExperiment by mutableStateOf(prefs.getBoolean("clearSceneSurfaceExperiment", false))
         private set

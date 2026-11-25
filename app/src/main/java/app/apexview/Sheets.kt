@@ -1,5 +1,7 @@
 package app.apexview
 
+import app.apexview.tiled.NativeStitchingSelection
+
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -465,6 +467,14 @@ fun SettingsScreen(app: AppState) {
                     style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
                 SwitchRow("Software DRM", s.softwareDrm, s::updateSoftwareDrm)
+                SwitchRow(NativeStitchingSelection.LABEL,
+                    s.nativeRustStitching, app::setNativeStitchingPreference)
+                Text(
+                    if (s.nativeRustStitching)
+                        "Requested: Rust. Active: current JVM engine. Native playback integration is not available in this build."
+                    else "OFF uses the current JVM engine. The experimental native engine is not yet available for playback.",
+                    style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
                 Text("Stream type", style = Type.footnote, modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 2.dp))
                 F1TvApi.PLATFORMS.forEach { platform ->
                     val name = platform.lowercase().split('_').joinToString(" ") { it.replaceFirstChar(Char::uppercase) }

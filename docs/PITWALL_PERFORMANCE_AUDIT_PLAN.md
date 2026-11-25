@@ -32,6 +32,8 @@ Build 851 GREEN; first physical ARM diagnostic passed all 290 byte comparisons. 
 
 Build 852: Rust host checks passed; JVM fixture exporter selected sample-only instead of owned-NAL-only output. Corrected test configuration and explicit ownership assertions; full CI pending. All differential coverage retained.
 
+G.0 signed off by user; Build 853 GREEN. G-A consolidated native engine foundation, bounded lease lifecycle, scheduler, JNI, persisted request/explicit JVM fallback and regression candidate; production playback unchanged. Deferred physical and further acceptance gates remain tracked in Architecture G plan.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |

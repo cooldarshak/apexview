@@ -1,5 +1,7 @@
 package app.apexview
 
+import app.apexview.tiled.NativeStitchingSelection
+
 import androidx.media3.common.C
 import android.content.Context
 import androidx.compose.runtime.getValue
@@ -1225,6 +1227,7 @@ class AppState(
             message = "Protected multiview casting needs two to six explicit F1 channels from one session."
             return
         }
+        logStitchingEngine(NativeStitchingSelection.Path.CAST)
         // Native Cast uses the same independently validated mixed protected atlas.
         // No decoder is allocated by the phone's protected CMAF capture.
         val selectedQualities = selected.map(::qualityFor)
@@ -1499,6 +1502,21 @@ class AppState(
             session.mixedSourceRects.map { app.apexview.scene.VideoSourceRect(it.x, it.y, it.width, it.height) },
             session.frameRate)
     }
+    fun setNativeStitchingPreference(value: Boolean) {
+        val path = NativeStitchingSelection.Path.NON_COMPOSED
+        val previous = NativeStitchingSelection.resolve(settings.nativeRustStitching, path)
+        settings.updateNativeRustStitching(value)
+        val next = NativeStitchingSelection.resolve(value, path)
+        android.util.Log.i("ApexviewSingleDecoder", next.diagnostic(path) +
+            " restartRequired=${NativeStitchingSelection.requiresRestart(previous,next)}")
+        // Both effective engines remain JVM in G-A. No pointless player reset.
+    }
+
+    private fun logStitchingEngine(path: NativeStitchingSelection.Path) {
+        val choice = NativeStitchingSelection.resolve(settings.nativeRustStitching,path)
+        android.util.Log.i("ApexviewSingleDecoder",choice.diagnostic(path))
+    }
+
     fun setDecoderPreference(mode: DecoderMode) {
         if (mode == DecoderMode.MULTIPLE && tiles.size > MAX_FEEDS) {
             message = "Remove feeds until four remain before switching to Multiple decoders."
@@ -2794,6 +2812,7 @@ class AppState(
             }
             return
         }
+        logStitchingEngine(NativeStitchingSelection.Path.CLEAR_CANDIDATE)
         val sourcePlan = ArchiveCompositionSourcePolicy.select(selected.map { it.feed.sourceStream })
         // Check the same-channel authorized HLS alternative before handing a replay to
         // the DASH/CBCS backend. Only its actual CMAF initialization may establish clear.
@@ -3040,6 +3059,7 @@ class AppState(
 
     /** Validate authorised archive media completely before changing any source decoder. */
     private fun startRollingArchiveSingleDecoderComposition(contentId: Long, attempt: Int = 0) {
+        logStitchingEngine(NativeStitchingSelection.Path.PROTECTED)
         val selectedTiles = tiles.filter { it.contentId == contentId }
         val previousLayout = layoutMode
         if (selectedTiles.size !in 2..8 || selectedTiles.size != tiles.size) {
@@ -3451,6 +3471,7 @@ class AppState(
             tile.channel.channelId?.let { "channel-$it" } ?: "default-channel"
         }
         if (labels.distinct().size != labels.size) return
+        logStitchingEngine(NativeStitchingSelection.Path.LIVE)
         startRealF1DashCapture(contentId, labels)
     }
 

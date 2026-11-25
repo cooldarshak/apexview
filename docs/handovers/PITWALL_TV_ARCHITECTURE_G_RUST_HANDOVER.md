@@ -333,6 +333,14 @@ Next candidate improves clear-only large-tail validation via safe word-at-a-time
 
 Build 852 run 45531190914 job 138926626978 at 212b7bd2100c4f67846a7759d8e3eed618b30cda: all 14 Rust unit tests passed, host ABI and Clippy passed; JVM stopped at HevcSliceHeaderRewriterTest.exportsAllEncodedTwoFeedSliceFixtures line 300, IndexOutOfBoundsException empty vclNals. Exact composer contract: retainRewritten = includeAnnexBOutput || !emitSampleData; previous test requested includeAnnexBOutput=false with default emitSampleData=true, so retained only sampleData and deliberately released materialized vclNals (not borrowed parts). Correct test requests both false, the existing owned-NAL-only mode, and explicitly requires 2 owned NALs, 2 evidence records, empty sampleData and empty nalParts per picture. All 100 real encoded and six synthetic differential cases remain mandatory. No production code or workflow change. Full JVM/Rust differential CI still pending, no local claim of test pass. Build 851 last green. Phone evidence retained, TV validation deferred.
 
+### G.0 signed off by user; Build 853 verified GREEN; G-A consolidated foundation
+
+User explicitly signed off G.0 and authorized G-A. Record engineering phase gate complete by user decision; deferred physical acceptance not waived: TCL native test, matched JVM playback/DRM baseline on both devices, sustained playback and physical 16KB remain unmeasured. Build 853 run 45532016787 commit 912f9c01093a702be5eb6cc37269c34311091e8a all five jobs GREEN. Fourteen Rust tests, six synthetic and 100 real encoded native/scalar/JVM slice comparisons, three matched clear CMAF C++/Rust comparisons, all emulator tests. 131765-byte case address30 JVM/scalar/optimized p50 99977/112776/27809ns, 3.60x vs JVM, 4.06x vs scalar same host; no playback claim. Cargo-ndk cache hit. Physical SDK36 diagnostic passed 290 cases previously. G.0 project sign-off complete, physical gates carried forward.
+
+G-A candidate: bounded native execution/ownership contract (engine.rs) with single reusable worker, fallible fixed allocation of 2–8 input/output slots, checked budget includes bridge buffers, worker stack and reserve, foreground earliest-deadline scheduling, prefetch reserved slot, explicit admission failure and deadlines, monotonic tokens, exclusive acquisition, read range, release, generation invalidation and worker join. Registry permits only one active native engine per process, checked monotonically increasing opaque session handles; JNI copies from private reusable Java direct buffer into native slots, worker never holds JVM address, publication copies back into private direct buffer, no raw native pointer escapes. Native buffers deterministic on close; Java direct buffers GC-managed, no claim true zero-copy. Existing G.0 diagnostic unchanged. Native dispatch is existing clear conversion only; actual full stitching and protected compatibility remain G-B. No engine is instantiated by default or by Settings; requested selection stored OFF default and explicit requested/actual/fallback text and route diagnostics; actual JVM remains for all paths until integrated clear route; no unnecessary player reset while effective route unchanged. Existing DRM, cast, decoder/quality choices untouched. No hidden fallback. Java budget uses observed maxima, OS reserve and available/JVM headroom, no arbitrary low-RAM reservation. One worker pending physical tuning. Added host deterministic randomized state stress, deadline/priority/ownership/close/seek, malformed data and two mandatory Android JNI tests across all APIs; JUnit settings persistence and memory/deadline policy tests. Full CI pending. No native production dispatch until G-B. Sanitizer/leak tooling and actual device-adaptive integration/measurements remain outstanding, do not claim complete G-A acceptance.
+
+G.1 active path review: AppState.startArchiveSingleDecoderComposition selects authorized HLS candidate before clear inspection; protected rolling and TV live paths use ProtectedHevcLiveComposition/ProtectedHevcLiveDashSource; Native Cast separate protected capture. HevcArchiveVodSession uses bounded ArchiveWorkAdmission, separate foreground/prefetch network pools, single-flight ArchiveSegmentDelivery, immutable validated initializations, BoundedArchiveFragmentCache and ArchiveFragmentLease. CmafHttpReader allocates known-length body once; unknown length chunks are coalesced into a final array. Archive composition already logs fetch, parse, rewrite, packaging, verification, producer CPU/slack, process-wide alloc/GC, final bytes and avoided source NAL/tail staging; add aggregate source input bytes to compare boundary bytes without conflating ART process counters with thread allocation. ResourceDataSource.read copies leased bytes to Media3 caller; protected takeOwnership=true transfers output directly into store, read copies to Media3; retain old leases until read release. Remaining G-C copy accounting includes actual Media3 internal sample queue/codec, protected runtime allocation and physical traces. Do not rewrite existing network/DRM paths in G-A.
+
 ### Benchmarks and decision gate
 
 Use identical algorithms, fixture bytes, outputs, optimization levels, compiler settings and comparable CPU/thermal states. Include realistic clear and synthetic protected-metadata fixtures, source resolutions and multifeed arrangements, not only trivial loops. Benchmark NAL scanning; bitstream read/write; slice-header operations; binary parsing; CMAF fragment assembly; copying/publication; arena allocation; JNI overhead; concurrent buffer ownership. Keep C++ limited to representative kernels; no alternative full player or production C++ engine.
@@ -347,26 +355,26 @@ All rows start Not started. Update the coding, automated, physical and measured-
 
 | ID | Workstream / required deliverable | Priority | Coding | Automated | Physical / measurement |
 | --- | --- | --- | --- | --- | --- |
-| G.1 | Audit/profile existing JVM stitcher, establish repeatable baseline | P0 | Not started | Pending | Pending |
-| G.2 | Fixed-capacity native input/output memory arenas | P0 | Not started | Pending | Pending |
+| G.1 | Audit/profile existing JVM stitcher, establish repeatable baseline | P0 | Active path audit and source input counter; physical baseline deferred | CI pending | Pending |
+| G.2 | Fixed-capacity native input/output memory arenas | P0 | Bounded native slot implementation | CI pending | Pending |
 | G.3 | Port native HEVC parsing and stitching with exact invariants | P0 | Not started | Pending | Pending |
 | G.4 | Native CMAF moof/mdat assembly, exact sizes/offsets/timestamps | P0 | Not started | Pending | Pending |
 | G.5 | Preserve existing DRM compatibility validations and authorized pipeline | P0 | Not started | Pending | Pending |
-| G.6 | Explicit buffer ownership, leases and lifecycle | P0 | Not started | Pending | Pending |
-| G.7 | Bounded queues, backpressure and deadline-aware producer/consumer coordination | P0 | Not started | Pending | Pending |
-| G.8 | Reusable Direct ByteBuffer integration, checked JNI ownership | P0 | Not started | Pending | Pending |
+| G.6 | Explicit buffer ownership, leases and lifecycle | P0 | Exclusive leases and joined lifecycle | CI pending | Pending |
+| G.7 | Bounded queues, backpressure and deadline-aware producer/consumer coordination | P0 | Bounded single worker and deadline admission | CI pending | Pending |
+| G.8 | Reusable Direct ByteBuffer integration, checked JNI ownership | P0 | Checked JNI session and reusable direct buffers | CI pending | Pending |
 | G.9 | Reduce network-to-native copies with measured boundary accounting | P1 | Not started | Pending | Pending |
 | G.10 | Reduce Media3 publication copies without speculative fork | P1 | Not started | Pending | Pending |
 | G.11 | ARM NEON optimization only where profiling justifies it | P1 | Not started | Pending | Pending |
 | G.12 | Allocation-free steady-state stitching hot path where achievable | P1 | Not started | Pending | Pending |
-| G.13 | Cancellation, seek-generation invalidation, stale publication prevention | P1 | Not started | Pending | Pending |
+| G.13 | Cancellation, seek-generation invalidation, stale publication prevention | P1 | Generation invalidation and stale release | CI pending | Pending |
 | G.14 | Compatible feed switching and bounded priority prefetch | P1 | Not started | Pending | Pending |
-| G.15 | Leak detection, fuzzing, sanitizer and safety tests | P0 | Not started | Pending | Pending |
+| G.15 | Leak detection, fuzzing, sanitizer and safety tests | P0 | State stress and malformed input tests; leak/sanitizer pending | CI pending | Pending |
 | G.16 | Byte-for-byte JVM/native differential regression plus independent decode | P0 | Not started | Pending | Pending |
-| G.17 | Adaptive memory budgets for low-RAM devices | P0 | Not started | Pending | Pending |
+| G.17 | Adaptive memory budgets for low-RAM devices | P0 | Budget policy implemented; device sizing integration pending | CI pending | Pending |
 | G.18 | Sustained CPU/memory/power/thermal and playback profiling | P0 | Not started | Pending | Pending |
 | G.19 | Preserve every existing playback feature and mode | P0 | Not started | Pending | Pending |
-| G.20 | Android phone/TV ABI, API, alignment and signed update compatibility | P0 | Not started | Pending | Pending |
+| G.20 | Android phone/TV ABI, API, alignment and signed update compatibility | P0 | ABI/JNI diagnostics candidate | CI pending | Pending |
 
 ### Proposed consolidated implementation batches (refine after audit)
 
@@ -620,7 +628,7 @@ The user explicitly authorized a new dedicated branch for Architecture G and a c
 | Mobile-only development | Required; Rust-specific end-to-end workflow not yet demonstrated |
 | Rust CI and module | Not implemented in Architecture G |
 | Native engine | Not implemented |
-| G.0, G.1–G.20 | Build 851 GREEN; first ARM diagnostic PASS (TV deferred). Seventh batch real encoded slice differential and safe tail scan optimization candidate pending. G.1–G.20 production implementation not started |
+| G.0, G.1–G.20 | G.0 user sign-off accepted; Build 853 GREEN, deferred physical gates retained. G-A foundation candidate committed; full CI and outstanding engineering acceptance pending; G-B–G-D not started |
 | Physical Rust benchmark / protected compatibility | Pending |
 | Measured performance gains | None established |
 | Native default or release | Not approved |
