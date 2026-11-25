@@ -110,6 +110,11 @@ jobs:
           g++ --version >> "$report/toolchain.txt"
           cargo test --locked
           cargo clippy --locked --all-targets -- -D warnings
+          # Separate pinned host-only diagnostic toolchain; Android stays on 1.91.1.
+          rustup toolchain install nightly-2025-11-15 --profile minimal
+          RUSTFLAGS="-Zsanitizer=address" CARGO_TARGET_DIR="$RUNNER_TEMP/pitwall-ga-asan-target" \
+            ASAN_OPTIONS="detect_leaks=1:halt_on_error=1:exitcode=98" LSAN_OPTIONS="exitcode=98" \
+            cargo +nightly-2025-11-15 test --locked --lib --target x86_64-unknown-linux-gnu -- --test-threads=1 2>&1 | tee "$report/ga-asan-lsan.txt"
           cargo build --locked --release --bins
           target/release/feasibility_bench "$report/fixtures/kernel-vectors.txt" | tee "$report/kernel-host.txt"
           g++ -std=c++17 -O3 -Wall -Wextra control.cpp -o "$report/control"

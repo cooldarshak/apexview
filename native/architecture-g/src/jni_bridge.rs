@@ -62,10 +62,16 @@ pub extern "system" fn Java_app_apexview_tiled_ArchitectureG0Probe_nativeConvert
 
 // G-A session registry. One engine per process until measured headroom supports
 // overlapping sessions. Handles are monotonically assigned, never raw pointers.
-use crate::engine::{Budget,Engine,BACKPRESSURE,CLOSED,STALE};
-use jni::sys::{jboolean,jlong};
+use crate::engine::{Budget,BridgeBuffer,Engine,BACKPRESSURE,CLOSED,STALE};
+use jni::sys::{jboolean,jlong,jobject};
 use std::sync::{Mutex,OnceLock};
-struct Registry {serial:i64,active:Option<(i64,Engine)>}
+struct Session {
+    id:i64,
+    engine:Engine,
+    input:BridgeBuffer,
+    output:BridgeBuffer,
+}
+struct Registry {serial:i64,active:Option<Session>}
 static ENGINES:OnceLock<Mutex<Registry>>=OnceLock::new();
 fn registry()->&'static Mutex<Registry> {
     ENGINES.get_or_init(||Mutex::new(Registry{serial:0,active:None}))
@@ -73,16 +79,19 @@ fn registry()->&'static Mutex<Registry> {
 fn guarded(f:impl FnOnce()->i64)->jlong {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(i64::from(PANIC))
 }
-fn engine_call(handle:jlong,f:impl FnOnce(&Engine)->i64)->i64 {
+fn session_call(handle:jlong,f:impl FnOnce(&Session)->i64)->i64 {
     let r=registry().lock().expect("engine registry");
     match r.active.as_ref() {
-        Some((id,engine)) if *id==handle=>f(engine),
+        Some(session) if session.id==handle=>f(session),
         _=>STALE,
     }
 }
+fn engine_call(handle:jlong,f:impl FnOnce(&Engine)->i64)->i64 {
+    session_call(handle,|session|f(&session.engine))
+}
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeAbi(
-    _env:JNIEnv<'_>,_class:JClass<'_>)->jint {1}
+    _env:JNIEnv<'_>,_class:JClass<'_>)->jint {2}
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeOpen(
     _env:JNIEnv<'_>,_class:JClass<'_>,slots:jint,input:jint,output:jint,ceiling:jlong)->jlong {
@@ -94,9 +103,30 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeOpen(
         let mut r=registry().lock().expect("engine registry");
         if r.active.is_some(){return BACKPRESSURE;}
         let Some(id)=r.serial.checked_add(1) else {return i64::from(INVALID);};
+        let Some(input)=BridgeBuffer::new(input) else {return BACKPRESSURE;};
+        let Some(output)=BridgeBuffer::new(output) else {return BACKPRESSURE;};
         let Some(engine)=Engine::new(budget) else {return BACKPRESSURE;};
-        r.serial=id;r.active=Some((id,engine));id
+        r.serial=id;r.active=Some(Session{id,engine,input,output});id
     })
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeBridge(
+    mut env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong,output:jboolean)->jobject {
+    catch_unwind(AssertUnwindSafe(||{
+        let r=registry().lock().expect("engine registry");
+        let Some(session)=r.active.as_ref().filter(|s|s.id==handle) else {return std::ptr::null_mut();};
+        let bridge=if output!=0{&session.output}else{&session.input};
+        // SAFETY: these are nonmoving registry-owned UnsafeCell allocations.
+        // Only the private Java session holds the two views; it synchronizes
+        // operations and drops both references before nativeClose. The worker
+        // only accesses separate owned slot buffers. No view is returned to
+        // Media3 or arbitrary callers, and no Java view survives session close.
+        let result=unsafe{env.new_direct_byte_buffer(bridge.address(),bridge.capacity())};
+        match result {
+            Ok(buffer)=>jni::objects::JObject::from(buffer).into_raw(),
+            Err(_)=>std::ptr::null_mut(),
+        }
+    })).unwrap_or(std::ptr::null_mut())
 }
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeSubmit(
@@ -110,11 +140,13 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeSubmi
         }
         let Ok(ptr)=env.get_direct_buffer_address(&input) else {return i64::from(INVALID);};
         if ptr.is_null(){return i64::from(INVALID);}
-        // SAFETY: Java's private input view is stable under its session monitor;
-        // JNI local reference retains it. Engine copies into an owned native slot
-        // synchronously; no address or local reference enters the worker queue.
-        let bytes=unsafe{slice::from_raw_parts(ptr.cast_const(),n)};
-        engine_call(handle,|e|e.submit(generation,bytes,p,c,foreground!=0,ms))
+        session_call(handle,|session|{
+            if ptr!=session.input.address() || n>session.input.capacity(){return i64::from(INVALID);}
+            // SAFETY: exact live registry buffer; Java monitor excludes writes
+            // and close; registry lock retains allocation for the entire call.
+            let bytes=unsafe{slice::from_raw_parts(ptr.cast_const(),n)};
+            session.engine.submit(generation,bytes,p,c,foreground!=0,ms)
+        })
     })
 }
 #[no_mangle]
@@ -136,10 +168,13 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeCopy(
         }
         let Ok(ptr)=env.get_direct_buffer_address(&output) else {return i64::from(INVALID);};
         if ptr.is_null(){return i64::from(INVALID);}
-        // SAFETY: a private, writable Java direct buffer, synchronized with close
-        // and other operations; the local reference keeps it live for this copy.
-        let dst=unsafe{slice::from_raw_parts_mut(ptr,n)};
-        engine_call(handle,|e|e.copy(token,offset,dst))
+        session_call(handle,|session|{
+            if ptr!=session.output.address() || n>session.output.capacity(){return i64::from(INVALID);}
+            // SAFETY: exact live private writable output allocation. Java
+            // monitor and registry lock exclude other access and destruction.
+            let dst=unsafe{slice::from_raw_parts_mut(ptr,n)};
+            session.engine.copy(token,offset,dst)
+        })
     })
 }
 #[no_mangle]
@@ -157,9 +192,12 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeClose
     _env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong)->jlong {
     guarded(||{
         let mut r=registry().lock().expect("engine registry");
-        if !r.active.as_ref().is_some_and(|(id,_)|*id==handle){return CLOSED;}
-        // Keep admission closed until old worker joined and memory freed.
-        let (_,mut engine)=r.active.take().expect("active engine");
-        if engine.close(){1}else{i64::from(PANIC)}
+        if !r.active.as_ref().is_some_and(|s|s.id==handle){return CLOSED;}
+        // Java has dropped private views. Join while admission remains locked,
+        // then drop the slots and both native bridge allocations together.
+        let mut session=r.active.take().expect("active engine");
+        let joined=session.engine.close();
+        drop(session);
+        if joined{1}else{i64::from(PANIC)}
     })
 }

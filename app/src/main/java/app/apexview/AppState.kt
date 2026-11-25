@@ -839,7 +839,10 @@ class AppState(
                             preferredHeights = castTiles.associate {
                                 it.feed.sourceStream.profileLabel to qualityFor(it).targetHeight
                             },
-                        ).also { ownedSession = it }
+                        ).also {
+                            ownedSession = it
+                            if(settings.nativeRustStitching) it.configureNativeBudget(context)
+                        }
                     } finally { capture.reset() }
                 }
                 android.util.Log.i("PitwallCast", "CAST_SOURCE_QUALITY actual=${session.sourceDisplayWidth}x${session.sourceDisplayHeight} feeds=${session.sourceLabels.size} atlas=${session.width}x${session.height} decoderMode=$decoderMode layoutReceiver=$usesLayoutCastReceiver")
@@ -2907,6 +2910,7 @@ class AppState(
                         val minimumHeight = if (composedQuality == VideoQuality.P1080) 1080 else 0
                         val session = capture.prepareVod(sourcePlan.feeds, probePositionMs, host.feed.sourceStream.profileLabel,
                             preferredHeight, settings.commentary, minimumHeight, desired)
+                        if(settings.nativeRustStitching) session.configureNativeBudget(context)
                         android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_QUALITY content=$contentId " +
                             "feeds=${selected.size} requested=${PerFeedQualityPolicy.description(desired.keys.toList(), selected.map(::qualityFor))} " +
                             "source=${session.sourceDisplayWidth}x${session.sourceDisplayHeight} mixed=${session.mixedSourceRects.isNotEmpty()} " +

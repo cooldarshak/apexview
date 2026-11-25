@@ -41,6 +41,12 @@ class ArchitectureGAAndroidTest {
             assertEquals(NativeStitchingEngine.STALE,engine.acquire(b))
             assertEquals(1L,engine.release(a))
             assertEquals(NativeStitchingEngine.STALE,engine.release(a))
+            val stats=engine.copyStats()
+            assertEquals(24L,stats.javaInputBytes)
+            assertEquals(12L,stats.nativeInputBytes)
+            assertEquals(6L,stats.nativeOutputBytes)
+            assertEquals(6L,stats.javaOutputBytes)
+            assertEquals(2L,stats.rejectedSubmits)
         }
         Log.i("PitwallGA","GA bounded native worker/lease/generation PASS")
     }
@@ -62,7 +68,28 @@ class ArchitectureGAAndroidTest {
             engine.close()
             assertEquals(NativeStitchingEngine.CLOSED,engine.generation())
         }
-        repeat(8){NativeStitchingEngine.open(budget()).use { assertEquals(1L,it.generation()) }}
-        Log.i("PitwallGA","GA malformed batch/exclusive admission/repeated shutdown PASS")
+        // Real Android device headroom provider: either bounded admission or
+        // explicit low-memory rejection; never silently overcommit.
+        val context=androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        val observed=NativeStitchingDeviceBudget.sample(context)
+        assertNotNull(observed)
+        val candidate=NativeStitchingDeviceBudget.plan(observed!!,4096,8192)
+        if(candidate!=null) {
+            assertTrue(candidate.reservedBytes<=candidate.ceilingBytes)
+            NativeStitchingDeviceBudget.open(context,4096,8192).use { assertEquals(1L,it.generation()) }
+        }
+        var previous=0L
+        repeat(32){
+            NativeStitchingEngine.open(budget()).use { next ->
+                assertEquals(1L,next.generation())
+                val token=next.submit(next.generation(),byteArrayOf(2,2,1),1,1,true,5000)
+                assertTrue(token>previous)
+                if(previous>0)assertEquals(NativeStitchingEngine.STALE,next.acquire(previous))
+                previous=token
+                assertEquals(6L,wait(next,token))
+                // Deliberately leave an acquired read for deterministic close.
+            }
+        }
+        Log.i("PitwallGA","GA malformed batch/exclusive admission/native bridge churn/device budget PASS")
     }
 }

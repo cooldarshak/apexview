@@ -1,7 +1,25 @@
 //! G-A bounded native execution foundation. Only the already validated clear
 //! Annex-B conversion kernel is dispatched in this phase. No player or DRM calls.
 use crate::convert_fixed_batch;
+use std::cell::UnsafeCell;
 use std::sync::{Arc,Condvar,Mutex};
+use std::sync::atomic::{AtomicUsize,Ordering};
+static NEXT_TOKEN:AtomicUsize=AtomicUsize::new(1);
+
+// Owned by the JNI registry. UnsafeCell makes external, scoped Java writes
+// explicit; this type never creates a Rust reference to the external bytes.
+pub struct BridgeBuffer { bytes:Vec<UnsafeCell<u8>> }
+impl BridgeBuffer {
+    pub fn new(capacity:usize)->Option<Self> {
+        if !(1..=MAX_BUFFER).contains(&capacity){return None;}
+        let mut bytes=Vec::new();
+        bytes.try_reserve_exact(capacity).ok()?;
+        bytes.resize_with(capacity,||UnsafeCell::new(0));
+        Some(Self{bytes})
+    }
+    pub fn capacity(&self)->usize{self.bytes.len()}
+    pub fn address(&self)->*mut u8{self.bytes.as_ptr().cast::<u8>().cast_mut()}
+}
 use std::thread::{self,JoinHandle};
 use std::time::{Duration,Instant};
 
@@ -67,7 +85,6 @@ impl Slot {
 struct State {
     slots:Vec<Slot>,
     generation:i64,
-    serial:i64,
     closed:bool,
 }
 impl State {
@@ -102,7 +119,7 @@ impl Engine {
                 input:buffer(budget.input)?,output:buffer(budget.output)?}),
                 stage:Stage::Free,work:None,result:0});
         }
-        let shared=Arc::new((Mutex::new(State{slots,generation:1,serial:0,closed:false}),Condvar::new()));
+        let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false}),Condvar::new()));
         let cloned=Arc::clone(&shared);
         let worker=thread::Builder::new().name("pitwall-native-stitch".into())
             .stack_size(WORKER_STACK).spawn(move || run_worker(cloned)).ok()?;
@@ -129,8 +146,10 @@ impl Engine {
         let free=s.slots.iter().filter(|slot|slot.stage==Stage::Free).count();
         if free==0 || (!foreground && free<2) {return BACKPRESSURE;}
         let Some(index)=s.slots.iter().position(|slot|slot.stage==Stage::Free) else {return BACKPRESSURE;};
-        let Some(token)=s.serial.checked_add(1) else {return INVALID;};
-        s.serial=token;
+        // Tokens never repeat across engines, including on 32-bit targets.
+        let Ok(raw)=NEXT_TOKEN.fetch_update(Ordering::Relaxed,Ordering::Relaxed,
+            |v|v.checked_add(1).filter(|next|i64::try_from(*next).is_ok())) else {return INVALID;};
+        let token=i64::try_from(raw).expect("checked token");
         let slot=&mut s.slots[index];
         slot.buffers.as_mut().expect("free buffers").input[..source.len()].copy_from_slice(source);
         slot.work=Some(Work{token,generation,len:source.len(),prefix,count,foreground,deadline});
@@ -303,7 +322,7 @@ mod tests {
         let mk=|token,foreground,ms|Slot{buffers:None,stage:Stage::Queued,
             work:Some(Work{token,generation:1,len:3,prefix:1,count:1,foreground,
                 deadline:now+Duration::from_millis(ms)}),result:0};
-        let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,serial:4,closed:false};
+        let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false};
         assert_eq!(s.next(),Some(2));s.slots[2].stage=Stage::Running;
         assert_eq!(s.next(),Some(3));s.slots[3].stage=Stage::Running;
         assert_eq!(s.next(),Some(1));s.slots[1].stage=Stage::Running;
@@ -329,6 +348,46 @@ mod tests {
                 assert_eq!(e.release(token),1);
             }
         }
+    }
+    #[test]
+    fn expired_queued_work_never_reaches_read_lease(){
+        let e=Engine::new(budget()).unwrap();
+        // Deterministically insert an expired job under the state lock.
+        {
+            let mut s=e.shared.0.lock().unwrap();
+            let slot=&mut s.slots[0];
+            slot.work=Some(Work{token:42,generation:1,len:3,prefix:1,count:1,
+                foreground:true,deadline:Instant::now()});
+            slot.stage=Stage::Queued;
+            e.shared.1.notify_one();
+        }
+        assert_eq!(wait(&e,42),DEADLINE);
+        let mut bytes=[0x55;6];
+        assert_eq!(e.copy(42,0,&mut bytes),INVALID);
+        assert_eq!(bytes,[0x55;6]);
+        assert_eq!(e.release(42),1);
+    }
+    #[test]
+    fn repeated_native_bridge_and_worker_churn_releases_every_owner(){
+        let mut previous=0;
+        for _ in 0..64 {
+            let input=BridgeBuffer::new(4096).unwrap();
+            let output=BridgeBuffer::new(8192).unwrap();
+            assert_eq!(input.capacity(),4096);
+            assert_eq!(output.capacity(),8192);
+            assert_ne!(input.address(),output.address());
+            let mut e=Engine::new(budget()).unwrap();
+            let token=e.submit(e.generation(),&[2,2,1],1,1,true,5000);
+            assert!(token>previous);
+            if previous>0 {assert_eq!(e.acquire(previous),STALE);}
+            previous=token;
+            assert_eq!(wait(&e,token),6);
+            if token%2==0{assert_eq!(e.seek(),2);}
+            // Teardown also owns abandoned read leases: no native pointer escaped.
+            assert!(e.close());
+        }
+        assert!(BridgeBuffer::new(0).is_none());
+        assert!(BridgeBuffer::new(MAX_BUFFER+1).is_none());
     }
     #[test]
     fn concurrent_seek_does_not_publish_old_generation(){

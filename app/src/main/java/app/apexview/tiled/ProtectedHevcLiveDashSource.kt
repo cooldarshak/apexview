@@ -510,6 +510,7 @@ internal class ProtectedDashResourceStore(
 
 internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = false) {
     private val resources = ProtectedDashResourceStore()
+    private val media3DeliveredBytes=java.util.concurrent.atomic.AtomicLong()
     private var presentationTimeOffsetTicks: Long? = null
     private var availabilityStartTimeMs: Long? = null
     private var released = false
@@ -560,7 +561,7 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
             val retained = resources.snapshot()
             android.util.Log.i("ApexviewSingleDecoder", "PROTECTED_DASH_RESOURCE_BYTES " +
                 "currentBytes=${retained.currentBytes} retiredReadBytes=${retained.retiredReadBytes} " +
-                "retiredResources=${retained.retiredResources}")
+                "retiredResources=${retained.retiredResources} media3DeliveredBytesTotal=${media3DeliveredBytes.get()}")
         } finally {
             if (!transferred) window.zero()
         }
@@ -588,6 +589,7 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
         private var currentPosition = 0
         private var endPosition = 0
         private var currentUri: Uri? = null
+        private var delivered=0L
 
         override fun addTransferListener(transferListener: TransferListener) = Unit
 
@@ -608,7 +610,7 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
                 if (requested < 0L || requested > available || requested > Int.MAX_VALUE.toLong()) {
                     throw EOFException("Protected composed byte range exceeds $name")
                 }
-                currentLease?.close()
+                close()
                 currentLease = acquired
                 currentPosition = start.toInt()
                 endPosition = currentPosition + requested.toInt()
@@ -630,6 +632,7 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
             if (currentPosition >= endPosition) return C.RESULT_END_OF_INPUT
             val count = minOf(length, endPosition - currentPosition)
             bytes.copyInto(buffer, offset, currentPosition, currentPosition + count)
+            delivered+=count
             currentPosition += count
             return count
         }
@@ -639,6 +642,8 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
         override fun getResponseHeaders(): Map<String, List<String>> = emptyMap()
 
         override fun close() {
+            if(delivered>0)owner.media3DeliveredBytes.addAndGet(delivered)
+            delivered=0
             currentLease?.close()
             currentLease = null
             currentPosition = 0

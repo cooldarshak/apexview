@@ -53,12 +53,14 @@ class CmafHttpReaderTest {
         val response = reader(original, original.size.toLong()).read(uri, original.size)
         assertArrayEquals(original, response.bytes)
         assertEquals(uri, response.uri)
+        assertEquals(0L,response.coalescedCopyBytes)
     }
 
     @Test fun unknownLengthStillUsesBoundedFallbackAndReturnsAllBytes() {
         val original = ByteArray(130_099) { i -> (i * 13).toByte() }
         val response = reader(original, C.LENGTH_UNSET.toLong()).read(uri, original.size)
         assertArrayEquals(original, response.bytes)
+        assertEquals(original.size.toLong(),response.coalescedCopyBytes)
     }
 
     @Test fun bothKnownLengthAndUnknownLengthRejectTruncationAndZeroProgress() {

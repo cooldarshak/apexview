@@ -53,6 +53,17 @@ internal class HevcArchiveVodSession(
             require(it.errors.isEmpty() && it.tracks.size == 1) { "Invalid archive source initialization" }
         }
     }
+    private val nativeBudgetObservation = NativeStitchingBudgetObservation()
+    @Volatile private var nativeBudgetContext: android.content.Context? = null
+    private val httpCoalescedBytes = java.util.concurrent.atomic.AtomicLong()
+    private val media3DeliveredBytes = java.util.concurrent.atomic.AtomicLong()
+
+    /** Enable only for an explicit Rust request. No arena allocation in G-A. */
+    fun configureNativeBudget(context: android.content.Context) {
+        nativeBudgetContext=context.applicationContext
+        nativeBudgetObservation.log(context.applicationContext)
+    }
+
     private val cache = BoundedArchiveFragmentCache()
     private val compatibleMaps = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val cacheLock = Any()
@@ -483,6 +494,11 @@ internal class HevcArchiveVodSession(
                     android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
                         ?.let { (it - first).coerceAtLeast(0L) }
                 }
+                val sourceInputBytes=batches.sumOf { batch -> batch.sumOf { it.size.toLong() } }
+                val outputBytes=composed.mediaFragments.last().size.toLong()
+                if(nativeBudgetObservation.observe(sourceInputBytes,outputBytes)) {
+                    nativeBudgetContext?.let { nativeBudgetObservation.log(it) }
+                }
                 val producerMs = (System.nanoTime() - started) / 1_000_000L
                 val mediaMs = groups[number].durationUs / 1000L
                 android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs " +
@@ -494,7 +510,8 @@ internal class HevcArchiveVodSession(
                     "producerCpuMs=${((android.os.Debug.threadCpuTimeNanos() - cpuAtStart) / 1_000_000L).coerceAtLeast(0)} " +
                     "processAllocBytesDuringSegment=${allocatedDuringProduction ?: -1L} " +
                     "processGcDuringSegment=${gcDuringProduction ?: -1L} " +
-                    "sourceInputBytes=${batches.sumOf { batch -> batch.sumOf { it.size.toLong() } }} " +
+                    "sourceInputBytes=$sourceInputBytes httpCoalescedBytesTotal=${httpCoalescedBytes.get()} " +
+                    "media3DeliveredBytesTotal=${media3DeliveredBytes.get()} " +
                     "outputBytes=${composed.mediaFragments.last().size} " +
                     "sourceAnnexBBytesAvoided=${composed.sourceAnnexBBytesAvoided} " +
                     "sourceNalCopyBytesAvoided=${composed.sourceNalCopyBytesAvoided} " +
@@ -572,8 +589,10 @@ internal class HevcArchiveVodSession(
                     } finally { alternate.fill(0) }
                 }
             }
-            val bytes = reader.read(UriUtil.resolveToUri(input.playlist.baseUri, segment.url), 8 * 1024 * 1024,
-                segment.byteRangeOffset, segment.byteRangeLength).bytes
+            val response = reader.read(UriUtil.resolveToUri(input.playlist.baseUri, segment.url), 8 * 1024 * 1024,
+                segment.byteRangeOffset, segment.byteRangeLength)
+            httpCoalescedBytes.addAndGet(response.coalescedCopyBytes)
+            val bytes = response.bytes
             synchronized(retained) {
                 if (aborted.get() || closed || Thread.currentThread().isInterrupted) {
                     bytes.fill(0); throw IOException("Archive session closed")
@@ -695,6 +714,7 @@ internal class HevcArchiveVodSession(
         private var resource: ArchiveFragmentLease? = null
         private var cursor = 0
         private var end = 0
+        private var delivered = 0L
         override fun addTransferListener(listener: TransferListener) {}
         override fun getUri(): Uri? = uri
         override fun open(spec: DataSpec): Long {
@@ -731,10 +751,15 @@ internal class HevcArchiveVodSession(
             if (cursor >= end) return C.RESULT_END_OF_INPUT
             val count = minOf(length, end - cursor)
             body.readInto(buffer, offset, cursor, count)
+            delivered += count
             cursor += count
             return count
         }
-        override fun close() { resource?.close(); resource = null; uri = null; cursor = 0; end = 0 }
+        override fun close() {
+            if(delivered>0)session.media3DeliveredBytes.addAndGet(delivered)
+            delivered=0
+            resource?.close(); resource = null; uri = null; cursor = 0; end = 0
+        }
     }
 
     companion object {

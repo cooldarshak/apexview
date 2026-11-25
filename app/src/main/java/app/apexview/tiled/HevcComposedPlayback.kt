@@ -98,6 +98,7 @@ internal class HevcComposedPlayback(
         private var currentPosition = 0
         private var endPosition = 0
         private var currentUri: Uri? = null
+        private var delivered=0L
 
         override fun addTransferListener(transferListener: TransferListener) = Unit
 
@@ -121,6 +122,7 @@ internal class HevcComposedPlayback(
                 throw EOFException("Composed CMAF byte range exceeds $name")
             }
 
+            close()
             currentBytes = bytes
             currentPosition = start.toInt()
             endPosition = currentPosition + requested.toInt()
@@ -135,6 +137,7 @@ internal class HevcComposedPlayback(
             if (currentPosition >= endPosition) return C.RESULT_END_OF_INPUT
             val count = minOf(length, endPosition - currentPosition)
             bytes.copyInto(buffer, offset, currentPosition, currentPosition + count)
+            delivered+=count
             currentPosition += count
             return count
         }
@@ -144,6 +147,8 @@ internal class HevcComposedPlayback(
         override fun getResponseHeaders(): Map<String, List<String>> = emptyMap()
 
         override fun close() {
+            if(delivered>0)android.util.Log.i("ApexviewSingleDecoder","COMPOSED_RESOURCE_BYTES media3DeliveredBytes=$delivered")
+            delivered=0
             currentBytes = null
             currentPosition = 0
             endPosition = 0

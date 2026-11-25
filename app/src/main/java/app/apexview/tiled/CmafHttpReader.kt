@@ -7,7 +7,7 @@ import androidx.media3.datasource.DataSpec
 
 /** Bounded authorised reads only. Does not request keys or interpret licence endpoints. */
 internal class CmafHttpReader(private val factory: DataSource.Factory) {
-    class Response(val uri: Uri, val bytes: ByteArray)
+    class Response(val uri: Uri, val bytes: ByteArray, val coalescedCopyBytes: Long = 0)
 
     fun read(uri: Uri, limit: Int, offset: Long = 0, length: Long = C.LENGTH_UNSET.toLong()): Response {
         require(offset >= 0 && (length == C.LENGTH_UNSET.toLong() || length in 1..limit.toLong())) {
@@ -95,7 +95,7 @@ internal class CmafHttpReader(private val factory: DataSource.Factory) {
                     chunk.copyInto(complete, destinationOffset = copied, endIndex = amount)
                     copied += amount
                 }
-                return Response(source.uri ?: uri, complete)
+                return Response(source.uri ?: uri, complete, copied.toLong())
             } finally {
                 // Clear transient ciphertext after both successful handoff and
                 // exceptions. Never clear the final caller-owned response.

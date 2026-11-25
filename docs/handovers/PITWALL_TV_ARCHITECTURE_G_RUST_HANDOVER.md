@@ -341,6 +341,12 @@ G-A candidate: bounded native execution/ownership contract (engine.rs) with sing
 
 G.1 active path review: AppState.startArchiveSingleDecoderComposition selects authorized HLS candidate before clear inspection; protected rolling and TV live paths use ProtectedHevcLiveComposition/ProtectedHevcLiveDashSource; Native Cast separate protected capture. HevcArchiveVodSession uses bounded ArchiveWorkAdmission, separate foreground/prefetch network pools, single-flight ArchiveSegmentDelivery, immutable validated initializations, BoundedArchiveFragmentCache and ArchiveFragmentLease. CmafHttpReader allocates known-length body once; unknown length chunks are coalesced into a final array. Archive composition already logs fetch, parse, rewrite, packaging, verification, producer CPU/slack, process-wide alloc/GC, final bytes and avoided source NAL/tail staging; add aggregate source input bytes to compare boundary bytes without conflating ART process counters with thread allocation. ResourceDataSource.read copies leased bytes to Media3 caller; protected takeOwnership=true transfers output directly into store, read copies to Media3; retain old leases until read release. Remaining G-C copy accounting includes actual Media3 internal sample queue/codec, protected runtime allocation and physical traces. Do not rewrite existing network/DRM paths in G-A.
 
+### Build 854 GREEN; G-A consolidated completion candidate
+
+Build 854 run 45534701432 commit fbdf85d28c28d11d64094d5f1402fdd8f099178f: all five jobs passed; 20 Rust unit tests; existing 106 clear slice differential cases, three CMAF cases, all three Android APIs (including G-A ownership tests), signed upgrade and publication verified. User requires all remaining G-A coding in one consolidated pass. No extra physical sign-off requested now.
+
+G.1: completed foundation audit and explicit boundary instrumentation for finite clear archive, protected rolling and legacy composed delivery. HTTP reader reports exact successful unknown-length coalescing bytes, zero for exact-length response; archive aggregates media-source coalescing and Media3 DataSource copy bytes (completed reads when resource closed), existing source/fragment/CPU/ART counters retained. Protected and legacy sources account exact successful DataSource read bytes, no content or credential logged. These measure only our boundary, not internal HTTP/Media3/codec or thread-exclusive allocations. G-C/G-D physical instrumentation and protected hot-path attribution remain. G.17: observe actual aggregate source and output high-water sizes from JVM composition, attach application context on explicit Rust request, sample OS available/threshold/low-memory and JVM headroom, reject oversized or insufficient budgets rather than lower quality or allocate. Same device budget provider used by native admission API; actual media-engine invocation belongs to G-B. No arena allocation on current playback, no additional player restart. G.6/G.8: native registry owns both bridge allocations as nonmoving UnsafeCell byte vectors; private Java direct views never escape synchronized session; exact address and capacity checked against live opaque handle before forming slices, Java drops views before close, Rust joins worker and frees slots and bridges together. G.0 diagnostic remains GC-managed and independent. JNI ABI bumped to 2, existing diagnostic ABI unchanged. Global checked lease tokens cannot collide across sequential engine sessions. Explicit bridge copy counters report attempted Java input, accepted native input, successful native output and Java output, rejections; no true zero-copy claim. G.7/G.13/G.15: deterministic expired-work rejection, 64 host and 32 Android repeated engine/bridge lifecycles with abandoned read leases, stale-token cross-session rejection, preexisting random/concurrent seek and malformed cases retained. Mandatory pinned nightly host ASan+LSan run on complete Rust lib tests, separate from stable Android build. Host sanitizer covers Rust foundation and native-owned bridge allocations, not Android-specific JNI unsafe calls; Android runtime checks cover those boundaries on three APIs. Added four-ABI JNI symbol gate including nativeBridge. All original build/signing/decoder/DRM gates remain. G-A coding scope complete candidate; automated verification pending; no measured physical TV/16KB acceptance or G-B implementation claimed. Rust toolchain unavailable in local environment, full CI authoritative.
+
 ### Benchmarks and decision gate
 
 Use identical algorithms, fixture bytes, outputs, optimization levels, compiler settings and comparable CPU/thermal states. Include realistic clear and synthetic protected-metadata fixtures, source resolutions and multifeed arrangements, not only trivial loops. Benchmark NAL scanning; bitstream read/write; slice-header operations; binary parsing; CMAF fragment assembly; copying/publication; arena allocation; JNI overhead; concurrent buffer ownership. Keep C++ limited to representative kernels; no alternative full player or production C++ engine.
@@ -355,26 +361,26 @@ All rows start Not started. Update the coding, automated, physical and measured-
 
 | ID | Workstream / required deliverable | Priority | Coding | Automated | Physical / measurement |
 | --- | --- | --- | --- | --- | --- |
-| G.1 | Audit/profile existing JVM stitcher, establish repeatable baseline | P0 | Active path audit and source input counter; physical baseline deferred | CI pending | Pending |
-| G.2 | Fixed-capacity native input/output memory arenas | P0 | Bounded native slot implementation | CI pending | Pending |
+| G.1 | Audit/profile existing JVM stitcher, establish repeatable baseline | P0 | Foundation audit + boundary counters complete; physical profile G-C/D | Build 854 baseline green; candidate CI pending | Deferred |
+| G.2 | Fixed-capacity native input/output memory arenas | P0 | Bounded native arena foundation complete | Build 854 baseline green; candidate CI pending | Deferred |
 | G.3 | Port native HEVC parsing and stitching with exact invariants | P0 | Not started | Pending | Pending |
 | G.4 | Native CMAF moof/mdat assembly, exact sizes/offsets/timestamps | P0 | Not started | Pending | Pending |
 | G.5 | Preserve existing DRM compatibility validations and authorized pipeline | P0 | Not started | Pending | Pending |
-| G.6 | Explicit buffer ownership, leases and lifecycle | P0 | Exclusive leases and joined lifecycle | CI pending | Pending |
-| G.7 | Bounded queues, backpressure and deadline-aware producer/consumer coordination | P0 | Bounded single worker and deadline admission | CI pending | Pending |
-| G.8 | Reusable Direct ByteBuffer integration, checked JNI ownership | P0 | Checked JNI session and reusable direct buffers | CI pending | Pending |
+| G.6 | Explicit buffer ownership, leases and lifecycle | P0 | Deterministic native slots/bridge ownership and joined close complete | Build 854 baseline green; candidate CI pending | Deferred |
+| G.7 | Bounded queues, backpressure and deadline-aware producer/consumer coordination | P0 | Bounded deadline scheduler and expiry tests complete | Build 854 baseline green; candidate CI pending | Deferred |
+| G.8 | Reusable Direct ByteBuffer integration, checked JNI ownership | P0 | Checked native-owned direct bridge, batch JNI and copy accounting complete | Build 854 baseline green; candidate CI pending | Deferred |
 | G.9 | Reduce network-to-native copies with measured boundary accounting | P1 | Not started | Pending | Pending |
 | G.10 | Reduce Media3 publication copies without speculative fork | P1 | Not started | Pending | Pending |
 | G.11 | ARM NEON optimization only where profiling justifies it | P1 | Not started | Pending | Pending |
 | G.12 | Allocation-free steady-state stitching hot path where achievable | P1 | Not started | Pending | Pending |
-| G.13 | Cancellation, seek-generation invalidation, stale publication prevention | P1 | Generation invalidation and stale release | CI pending | Pending |
+| G.13 | Cancellation, seek-generation invalidation, stale publication prevention | P1 | Generation cancellation and globally unique stale leases complete | Build 854 baseline green; candidate CI pending | Deferred |
 | G.14 | Compatible feed switching and bounded priority prefetch | P1 | Not started | Pending | Pending |
-| G.15 | Leak detection, fuzzing, sanitizer and safety tests | P0 | State stress and malformed input tests; leak/sanitizer pending | CI pending | Pending |
+| G.15 | Leak detection, fuzzing, sanitizer and safety tests | P0 | Foundation stress, ASan/LSan and Android lifecycle gates added | Build 854 baseline green; candidate CI pending | Deferred |
 | G.16 | Byte-for-byte JVM/native differential regression plus independent decode | P0 | Not started | Pending | Pending |
-| G.17 | Adaptive memory budgets for low-RAM devices | P0 | Budget policy implemented; device sizing integration pending | CI pending | Pending |
+| G.17 | Adaptive memory budgets for low-RAM devices | P0 | Observed device-headroom planning and admission provider complete; G-B dispatch pending | Build 854 baseline green; candidate CI pending | Deferred |
 | G.18 | Sustained CPU/memory/power/thermal and playback profiling | P0 | Not started | Pending | Pending |
 | G.19 | Preserve every existing playback feature and mode | P0 | Not started | Pending | Pending |
-| G.20 | Android phone/TV ABI, API, alignment and signed update compatibility | P0 | ABI/JNI diagnostics candidate | CI pending | Pending |
+| G.20 | Android phone/TV ABI, API, alignment and signed update compatibility | P0 | Four-ABI symbols, alignment, signed upgrade and runtime gates retained | Build 854 baseline green; candidate CI pending | Deferred |
 
 ### Proposed consolidated implementation batches (refine after audit)
 
@@ -628,7 +634,7 @@ The user explicitly authorized a new dedicated branch for Architecture G and a c
 | Mobile-only development | Required; Rust-specific end-to-end workflow not yet demonstrated |
 | Rust CI and module | Not implemented in Architecture G |
 | Native engine | Not implemented |
-| G.0, G.1–G.20 | G.0 user sign-off accepted; Build 853 GREEN, deferred physical gates retained. G-A foundation candidate committed; full CI and outstanding engineering acceptance pending; G-B–G-D not started |
+| G.0, G.1–G.20 | G.0 user sign-off complete. Build 854 GREEN. G-A coding completion candidate; CI and carried physical gates pending. G-B–G-D not started |
 | Physical Rust benchmark / protected compatibility | Pending |
 | Measured performance gains | None established |
 | Native default or release | Not approved |

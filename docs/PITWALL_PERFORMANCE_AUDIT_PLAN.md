@@ -34,6 +34,8 @@ Build 852: Rust host checks passed; JVM fixture exporter selected sample-only in
 
 G.0 signed off by user; Build 853 GREEN. G-A consolidated native engine foundation, bounded lease lifecycle, scheduler, JNI, persisted request/explicit JVM fallback and regression candidate; production playback unchanged. Deferred physical and further acceptance gates remain tracked in Architecture G plan.
 
+Build 854 GREEN (all five jobs, 20 Rust tests). G-A completion candidate adds deterministic native-owned private bridge buffers, cross-session token uniqueness, device-headroom admission and measured JVM boundary counters, mandatory ASan/LSan and churn/symbol regressions. All existing playback/DRM paths unchanged. Full CI pending; physical and G-B–G-D gates remain separate.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |

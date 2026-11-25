@@ -6,7 +6,7 @@ import java.nio.ByteBuffer;
  * G-A native engine ownership contract. Explicitly opened by a background
  * owner; no native library load during startup, no DRM/Media3 interception.
  * Only clear validated diagnostic conversion work is supported until G-B.
- * Private reused direct buffers are GC-managed; native slots free on close.
+ * Native-owned bridge views are private and invalidated before deterministic close.
  */
 public final class NativeStitchingEngine implements AutoCloseable {
     public static final long INVALID=-1, STALE=-2, PANIC=-3, BACKPRESSURE=-4, DEADLINE=-5, CLOSED=-6;
@@ -48,6 +48,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
 
     private static native int nativeAbi();
     private static native long nativeOpen(int slots,int input,int output,long ceiling);
+    private static native ByteBuffer nativeBridge(long handle,boolean output);
     private static native long nativeSubmit(long handle,long generation,ByteBuffer input,int length,
                                             int prefix,int count,boolean foreground,long slackMs);
     private static native long nativeAcquire(long handle,long token);
@@ -59,17 +60,36 @@ public final class NativeStitchingEngine implements AutoCloseable {
     private long handle;
     private long generation=1;
     private ByteBuffer input,output;
+    private long javaInputBytes,nativeInputBytes,nativeOutputBytes,javaOutputBytes,rejectedSubmits;
     public final Budget budget;
+
+    /** Counts only these explicit bridge boundaries, not Media3/codec internals. */
+    public static final class CopyStats {
+        public final long javaInputBytes,nativeInputBytes,nativeOutputBytes,javaOutputBytes,rejectedSubmits;
+        private CopyStats(long ji,long ni,long no,long jo,long rejected) {
+            javaInputBytes=ji;nativeInputBytes=ni;nativeOutputBytes=no;javaOutputBytes=jo;rejectedSubmits=rejected;
+        }
+    }
+    public synchronized CopyStats copyStats() {
+        return new CopyStats(javaInputBytes,nativeInputBytes,nativeOutputBytes,javaOutputBytes,rejectedSubmits);
+    }
+    private static long add(long a,long b){return a>Long.MAX_VALUE-b?Long.MAX_VALUE:a+b;}
     private NativeStitchingEngine(long handle,Budget budget) {
         this.handle=handle;this.budget=budget;
-        input=ByteBuffer.allocateDirect(budget.inputBytes);
-        output=ByteBuffer.allocateDirect(budget.outputBytes);
+        input=nativeBridge(handle,false);
+        output=nativeBridge(handle,true);
+        if(input==null || output==null || !input.isDirect() || !output.isDirect() ||
+            input.capacity()!=budget.inputBytes || output.capacity()!=budget.outputBytes ||
+            input.isReadOnly() || output.isReadOnly()) {
+            input=null;output=null;
+            throw new IllegalStateException("Native bridge view unavailable");
+        }
     }
     /** Only call on a worker, after explicit engine admission. */
     public static NativeStitchingEngine open(Budget budget) {
         if(budget==null)throw new IllegalArgumentException("Native memory budget unavailable");
         System.loadLibrary("pitwall_g0");
-        if(nativeAbi()!=1)throw new IllegalStateException("G-A ABI mismatch");
+        if(nativeAbi()!=2)throw new IllegalStateException("G-A ABI mismatch");
         long id=nativeOpen(budget.slots,budget.inputBytes,budget.outputBytes,budget.ceilingBytes);
         if(id<=0)throw new IllegalStateException("Native admission failed: "+id);
         try{return new NativeStitchingEngine(id,budget);}
@@ -80,8 +100,12 @@ public final class NativeStitchingEngine implements AutoCloseable {
         if(handle==0)return CLOSED;
         if(expected!=generation)return STALE;
         if(bytes==null || bytes.length==0 || bytes.length>input.capacity())return INVALID;
-        input.clear();input.put(bytes); // explicit bridge copy; native takes its own slot copy
-        return nativeSubmit(handle,expected,input,bytes.length,prefix,count,foreground,slack);
+        input.clear();input.put(bytes); // explicit array-to-native bridge copy
+        javaInputBytes=add(javaInputBytes,bytes.length);
+        long result=nativeSubmit(handle,expected,input,bytes.length,prefix,count,foreground,slack);
+        if(result>0)nativeInputBytes=add(nativeInputBytes,bytes.length);
+        else rejectedSubmits=add(rejectedSubmits,1);
+        return result;
     }
     public synchronized long acquire(long token){return handle==0?CLOSED:nativeAcquire(handle,token);}
     public synchronized long read(long token,int sourceOffset,byte[] target,int targetOffset,int length) {
@@ -89,7 +113,11 @@ public final class NativeStitchingEngine implements AutoCloseable {
         if(target==null || sourceOffset<0 || targetOffset<0 || length<=0 ||
             length>output.capacity() || targetOffset>target.length-length)return INVALID;
         long result=nativeCopy(handle,token,sourceOffset,output,length);
-        if(result==length){output.position(0);output.get(target,targetOffset,length);}
+        if(result==length){
+            nativeOutputBytes=add(nativeOutputBytes,length);
+            output.position(0);output.get(target,targetOffset,length);
+            javaOutputBytes=add(javaOutputBytes,length);
+        }
         return result;
     }
     public synchronized long release(long token){return handle==0?CLOSED:nativeRelease(handle,token);}
@@ -102,9 +130,10 @@ public final class NativeStitchingEngine implements AutoCloseable {
     @Override public synchronized void close(){
         if(handle==0)return;
         long id=handle;handle=0;
-        try {
-            long result=nativeClose(id);
-            if(result!=1)throw new IllegalStateException("Native close failed: "+result);
-        } finally {input=null;output=null;}
+        // No view is exposed outside this monitor. Clear references before
+        // Rust joins the worker and frees the exact backing allocations.
+        input=null;output=null;
+        long result=nativeClose(id);
+        if(result!=1)throw new IllegalStateException("Native close failed: "+result);
     }
 }

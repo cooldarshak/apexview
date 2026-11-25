@@ -45,6 +45,23 @@ class NativeStitchingFoundationTest {
             assertTrue(on.diagnostic(path).contains("actual=JVM"))
         }
     }
+    @Test fun observedDeviceHeadroomAndHighWaterControlAdmission() {
+        val mib=1024L*1024L
+        val sizes=app.apexview.tiled.NativeStitchingBudgetObservation()
+        assertFalse(sizes.observe(-1,1024))
+        assertTrue(sizes.observe(mib,mib))
+        assertFalse(sizes.observe(mib/2,mib))
+        assertTrue(sizes.observe(mib/2,2*mib))
+        assertEquals(mib,sizes.sizes().input)
+        assertEquals(2*mib,sizes.sizes().output)
+        val head=app.apexview.tiled.NativeStitchingDeviceBudget.Headroom(true,false,512*mib,128*mib,128*mib)
+        val plan=app.apexview.tiled.NativeStitchingDeviceBudget.plan(head,mib,2*mib)
+        assertNotNull(plan)
+        assertEquals(2,plan!!.slots)
+        assertNull(app.apexview.tiled.NativeStitchingDeviceBudget.plan(head.copy(lowMemory=true),mib,mib))
+        assertNull(app.apexview.tiled.NativeStitchingDeviceBudget.plan(head.copy(available=128*mib),mib,mib))
+        assertNull(app.apexview.tiled.NativeStitchingDeviceBudget.plan(head,Long.MAX_VALUE,mib))
+    }
     @Test fun budgetsAndDeadlineSlackAreConservative() {
         val mib=1024L*1024L
         val low=NativeStitchingEngine.plan(true,512*mib,128*mib,128*mib,1024*1024,1024*1024)!!
