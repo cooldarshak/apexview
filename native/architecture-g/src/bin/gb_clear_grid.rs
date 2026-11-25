@@ -254,6 +254,7 @@ fn compose(
                 cells: &cells,
                 frame_rate: (25, 1),
             };
+            verify_extended_profile(&request, sequence, &source_init, &fragments, &expected_init, &expected);
             let packet = atlas_packet(&request, 9, sequence, &source_init, &fragments);
             let mut expected_result = Vec::new();
             expected_result.extend_from_slice(&(initialized.len() as u32).to_be_bytes());
@@ -268,6 +269,77 @@ fn compose(
     }
     assert_eq!(frame, 50);
     stream
+}
+
+// Test the actual encoded second input with legal shorter prefixes and
+// access-unit metadata; the expected bytes still come from the independent
+// JVM fixture, and the normal FFmpeg pixel/timing gate remains unchanged.
+fn verify_extended_profile(
+    grid: &Grid<'_>, sequence: u32, initialization: &[Vec<u8>; 2],
+    fragments: &[Vec<u8>; 2], expected_init: &[u8], expected: &[u8],
+) {
+    let original = Initialization::parse(&initialization[1]).unwrap();
+    let fragment = Fragment::parse(&fragments[1], &original).unwrap();
+    let mut short_init = initialization[1].clone();
+    let hvcc = short_init.windows(4).position(|w| w == b"hvcC").unwrap() + 4;
+    short_init[hvcc + 21] = (short_init[hvcc + 21] & 0xfc) | 2;
+    assert_eq!(Initialization::parse(&short_init).unwrap().configuration.nal_length_size(), 3);
+    let mut variant_samples = Vec::new();
+    for (index, sample) in fragment.samples.iter().enumerate() {
+        let mut encoded = Vec::new();
+        let mut append = |nal: &[u8], padding: bool| {
+            let len = nal.len() + if padding { 2 } else { 0 };
+            assert!(len < 1 << 24);
+            encoded.extend_from_slice(&(len as u32).to_be_bytes()[1..]);
+            encoded.extend_from_slice(nal);
+            if padding {
+                encoded.extend_from_slice(&[0, 0]);
+            }
+        };
+        if index == 0 {
+            for set in original.configuration.parameter_sets() {
+                append(set, false);
+            }
+            append(&[0x46, 1, 0x50], false);
+        }
+        for (nal_index, unit) in NalUnits::new(sample.bytes, 4).unwrap().enumerate() {
+            let (nal, _) = unit.unwrap();
+            append(nal, index == 0 && nal_index == 0);
+        }
+        if index == 0 {
+            append(&[0x50, 1, 0x80], false);
+        }
+        variant_samples.push(encoded);
+    }
+    let rebuild = |samples: &[Vec<u8>]| {
+        let layout: Vec<_> = samples.iter().zip(&fragment.samples).map(|(data, sample)| clear_cmaf::Sample {
+            data, duration: sample.duration, cto: i32::try_from(sample.composition_offset).unwrap(),
+            flags: sample.flags,
+        }).collect();
+        let mut out = vec![0; clear_cmaf::size(&layout).unwrap()];
+        clear_cmaf::write(original.track_id, fragment.sequence,
+            fragment.decode_time as u64, &layout, &mut out).unwrap();
+        out
+    };
+    let variant = rebuild(&variant_samples);
+    let atlas = Atlas::new(
+        &[&initialization[0], &short_init],
+        Grid { width: grid.width, height: grid.height, columns: grid.columns, rows: grid.rows,
+            cells: grid.cells, frame_rate: grid.frame_rate },
+        9,
+    ).unwrap();
+    assert_eq!(atlas.initialization(), expected_init);
+    let mut actual = vec![0x93; expected.len()];
+    assert_eq!(atlas.write_fragment(&[&fragments[0], &variant], sequence, &mut actual).unwrap(), expected.len());
+    assert_eq!(actual, expected);
+    // Changed in-band parameter identity must fail before output mutation.
+    let vps_len = original.configuration.parameter_sets()[0].len();
+    variant_samples[0][3 + vps_len - 1] ^= 1;
+    let bad = rebuild(&variant_samples);
+    actual.fill(0x93);
+    assert!(atlas.write_fragment(&[&fragments[0], &bad], sequence, &mut actual).is_err());
+    assert!(actual.iter().all(|&byte| byte == 0x93));
+    println!("G-B extended clear profile: exact output and changed in-band rejection PASS");
 }
 
 fn tile_addresses(parameters: &Parameters) -> Vec<u32> {

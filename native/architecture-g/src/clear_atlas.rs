@@ -36,6 +36,7 @@ pub struct Grid<'a> {
 struct Source {
     context: TrackContext,
     nal_prefix: usize,
+    parameter_sets: [Vec<u8>; 3],
     parameters: Parameters,
     tiles: Vec<Tile>,
 }
@@ -78,17 +79,36 @@ impl Atlas {
             .map_err(|_| Error::Limit)?;
         for input in inputs {
             let init = Initialization::parse(input)?;
-            let parameters = Parameters::parse(init.configuration.parameter_sets())?;
+            let sets = init.configuration.parameter_sets();
+            let parameters = Parameters::parse(sets)?;
+            // Match the JVM's F1/Tizen profile. Cross-feed temporal motion
+            // prediction has not been proven safe for lossless stitching.
+            if parameters.sps.temporal_mvp {
+                return Err(Error::Unsupported);
+            }
+            let mut parameter_sets = [Vec::new(), Vec::new(), Vec::new()];
+            for (owned, source) in parameter_sets.iter_mut().zip(sets) {
+                let source = trim_terminal_zeros(source)?;
+                owned.try_reserve_exact(source.len()).map_err(|_| Error::Limit)?;
+                owned.extend_from_slice(source);
+            }
             let tiles = tile_locations(&parameters)?;
             sources.push((
                 init,
                 Source {
                     context: init.fragment_context(),
                     nal_prefix: init.configuration.nal_length_size(),
+                    parameter_sets,
                     parameters,
                     tiles,
                 },
             ));
+        }
+        // The reference output initialization declares four-byte NAL lengths.
+        // Secondary inputs may have another legal length width, but a first
+        // source with a shorter prefix must stay on the existing JVM route.
+        if sources[0].1.nal_prefix != 4 {
+            return Err(Error::Unsupported);
         }
         let template_index = grid.cells.first().ok_or(Error::Metadata)?.feed;
         let (template_init, template) = sources.get(template_index).ok_or(Error::Metadata)?;
@@ -303,24 +323,55 @@ impl Source {
         slices
             .try_reserve_exact(self.tiles.len())
             .map_err(|_| Error::Limit)?;
-        let mut units = NalUnits::new(sample.bytes, self.nal_prefix)?;
-        for (index, tile) in self.tiles.iter().enumerate() {
-            let (nal, _) = units.next().ok_or(Error::Nal)??;
-            let slice = self.parameters.read_slice(nal)?;
-            if slice.prefix.first != (index == 0)
-                || slice.prefix.address != tile.address
-                || slice.prefix.picture.is_none()
-                || slice.entry_points != 0
+        for unit in NalUnits::new(sample.bytes, self.nal_prefix)? {
+            let (nal, header) = unit?;
+            if header.layer_id != 0 ||
+                u32::from(header.temporal_id_plus_one) > self.parameters.prefix.max_sub_layers
             {
                 return Err(Error::Unsupported);
             }
-            slices.push(slice);
+            let nal = trim_terminal_zeros(nal)?;
+            match header.unit_type {
+                32..=34 => {
+                    // Require exact in-band parameter identity. Even a
+                    // semantically equivalent but differently encoded set
+                    // takes the existing conservative JVM fallback.
+                    if nal != self.parameter_sets[usize::from(header.unit_type - 32)].as_slice() {
+                        return Err(Error::Metadata);
+                    }
+                }
+                35..=40 => {} // reference discards AUD/EOS/EOB/filler/SEI
+                0..=31 => {
+                    let index = slices.len();
+                    let tile = self.tiles.get(index).ok_or(Error::Metadata)?;
+                    let slice = self.parameters.read_slice(nal)?;
+                    if slice.prefix.first != (index == 0)
+                        || slice.prefix.address != tile.address
+                        || slice.prefix.picture.is_none()
+                        || slice.entry_points != 0
+                    {
+                        return Err(Error::Unsupported);
+                    }
+                    slices.push(slice);
+                }
+                _ => return Err(Error::Unsupported),
+            }
         }
-        if units.next().is_some() {
-            return Err(Error::Unsupported);
+        if slices.len() != self.tiles.len() {
+            return Err(Error::Metadata);
         }
         Ok(slices)
     }
+}
+
+/// JVM's Annex-B-equivalent composition strips terminal zero bytes before
+/// rewriting a clear NAL. Do so on a borrowed range, not a full sample copy.
+fn trim_terminal_zeros(nal: &[u8]) -> Result<&[u8], Error> {
+    let end = nal.iter().rposition(|&byte| byte != 0).map_or(0, |i| i + 1);
+    if end < 2 {
+        return Err(Error::Nal);
+    }
+    Ok(&nal[..end])
 }
 
 fn tile_locations(parameters: &Parameters) -> Result<Vec<Tile>, Error> {

@@ -1,4 +1,5 @@
-//! G.0 feasibility only. No production playback or protected payload processing.
+//! Bounded native clear stitching and metadata-only protected compatibility.
+//! Protected payload processing and DRM authorization remain with the existing pipeline.
 #![deny(unsafe_code)]
 
 mod annex_b;
@@ -6,6 +7,7 @@ mod atlas_job;
 mod bmff;
 pub mod clear_atlas;
 pub mod cbcs_metadata;
+pub mod protected_header;
 pub mod cmaf_input;
 pub mod cmaf_init;
 pub mod hevc_nal;

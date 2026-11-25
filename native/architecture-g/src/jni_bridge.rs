@@ -219,3 +219,25 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeClose
         if joined{1}else{i64::from(PANIC)}
     })
 }
+
+// Synchronous bounded metadata-only call. No direct buffer or ciphertext,
+// no native engine registry/arena, no retained JNI references.
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeProtectedHeader(
+    env: JNIEnv<'_>, _class: JClass<'_>, packet: jni::objects::JByteArray<'_>,
+) -> jni::sys::jbyteArray {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let len = usize::try_from(env.get_array_length(&packet).ok()?).ok()?;
+        if len == 0 || len > crate::protected_header::MAX_PACKET {
+            return None;
+        }
+        let mut input = env.convert_byte_array(&packet).ok()?;
+        let generated = crate::protected_header::write(&input);
+        input.fill(0);
+        let mut output = generated.ok()?;
+        let result = env.byte_array_from_slice(&output).ok().map(|value| value.into_raw());
+        output.fill(0);
+        result
+    }));
+    result.ok().flatten().unwrap_or(std::ptr::null_mut())
+}

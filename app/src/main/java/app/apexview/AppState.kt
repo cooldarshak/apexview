@@ -638,6 +638,7 @@ class AppState(
         if (castPlaybackHandedOff || !castingActive) return
         if (!localChosen) remoteCastClock.update(castFramePositionMs, playing, playbackSpeed, castRelay!!.session.durationUs / 1000)
         castPlaybackHandedOff = true
+        ProtectedHevcLiveComposition.updateLocalNativeHeaderPreference(false)
         sendCaptionPreferenceToReceiver()
         tiles.forEach { it.feed.suspendForRemotePlayback(true) }
         if ((nativeComposedCast != null || directCast != null) && (protectedCompositionHost != null || playbackWork.captureJob != null)) {
@@ -651,6 +652,7 @@ class AppState(
         if (!castPlaybackHandedOff) return
         val target = remoteCastClock.positionMs()
         castPlaybackHandedOff = false
+        ProtectedHevcLiveComposition.updateLocalNativeHeaderPreference(settings.nativeRustStitching && !castingActive)
         tiles.forEach {
             it.feed.suspendForRemotePlayback(false)
             val localTarget = app.apexview.cast.local.ReceiverTimeline.restorePosition(remoteWallClockBaseMs, target, it.feed.windowStartMs())
@@ -1527,6 +1529,7 @@ class AppState(
             (value || session.nativeStitchingCandidate ||
                 session.nativeStitchingDecision.actual == NativeStitchingSelection.Route.RUST)
         settings.updateNativeRustStitching(value)
+        ProtectedHevcLiveComposition.updateLocalNativeHeaderPreference(value && !castingActive && !castPlaybackHandedOff)
         // Retire the old generation before the existing coordinator prepares
         // a replacement. During Cast defer ON until local playback returns.
         session?.disableNativeClear(if (restart) "PREFERENCE_RESTART" else
@@ -3150,7 +3153,8 @@ class AppState(
         playbackWork.prepareCapture(capture) {
             ProtectedHevcLiveComposition.clearSelection(group, discardInitialization = true)
         }
-        ProtectedHevcLiveComposition.selectFeeds(group, labels, fullPictures = mixedRequested)
+        ProtectedHevcLiveComposition.selectFeeds(group, labels, fullPictures = mixedRequested,
+            localNativeHeader = true, nativeHeaderRequested = settings.nativeRustStitching && !castingActive)
         val startup = ArchiveCompositionStartup()
         var lastSnapshot: F1DashFeedCapture.Snapshot? = null
         var releasedCount = 0
@@ -3536,7 +3540,8 @@ class AppState(
         playbackWork.prepareCapture(capture) {
             ProtectedHevcLiveComposition.clearSelection(group, discardInitialization = true)
         }
-        ProtectedHevcLiveComposition.selectFeeds(group, labels)
+        ProtectedHevcLiveComposition.selectFeeds(group, labels, localNativeHeader = true,
+            nativeHeaderRequested = settings.nativeRustStitching && !castingActive)
         val selectedTiles = labels.mapNotNull { byLabel[it] }
         val host = selectedTiles.firstOrNull { !it.audible } ?: selectedTiles.first()
         val audioTile = selectedTiles.firstOrNull { it !== host && it.audible }

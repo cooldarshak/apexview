@@ -64,6 +64,16 @@ public final class NativeStitchingEngine implements AutoCloseable {
     }
 
     private static native int nativeAbi();
+    private static native byte[] nativeProtectedHeader(byte[] packet);
+
+    /** Explicit opt-in, metadata only. The caller retains all existing
+     * authorized DRM validation and compares exact output against JVM. */
+    public static byte[] protectedHeader(byte[] packet) {
+        if (packet == null || packet.length == 0 || packet.length > 2 * MIB) return null;
+        System.loadLibrary("pitwall_g0");
+        if (nativeAbi() != 2) return null;
+        return nativeProtectedHeader(packet);
+    }
     private static native long nativeOpen(int slots,int input,int output,long ceiling);
     private static native ByteBuffer nativeBridge(long handle,boolean output);
     private static native long nativeSubmit(long handle,long generation,ByteBuffer input,int length,

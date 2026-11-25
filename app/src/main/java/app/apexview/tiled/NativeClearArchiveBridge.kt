@@ -133,10 +133,11 @@ internal class NativeClearArchiveBridge(
         }
         try {
             checkCurrent(selected.epoch)
-            val sources = request.feeds.map { feed ->
+            val sources = request.feeds.mapIndexed { index, feed ->
                 val initReport = requireNotNull(feed.validatedInitialization)
                 val track = initReport.tracks.single()
                 requireClear(track)
+                if (index == 0) require(track.hevcConfiguration?.nalLengthSize == 4)
                 val media = feed.mediaFragments.single()
                 val fragment = requireNotNull(feed.inspectedMedia).single().reportFor(media, initReport).fragments.single()
                 requireClear(fragment)
@@ -148,6 +149,7 @@ internal class NativeClearArchiveBridge(
             val track = outputReport.tracks.single()
             requireClear(track)
             val cfg = requireNotNull(track.hevcConfiguration)
+            require(cfg.nalLengthSize == 4)
             val sps = cfg.sps.single()
             val pps = cfg.pps.single()
             val geometry = NativeClearArchiveJob.Geometry(sps.width, sps.height,
@@ -250,7 +252,7 @@ internal class NativeClearArchiveBridge(
             !track.sampleAuxiliaryOffsetsPresent && !track.sampleGroupDescriptionPresent && !track.sampleToGroupPresent &&
             track.sampleDescriptionCount == 1)
         val cfg = requireNotNull(track.hevcConfiguration)
-        require(cfg.nalLengthSize == 4 && cfg.parameterSetErrors.isEmpty() &&
+        require(cfg.nalLengthSize in 1..4 && cfg.parameterSetErrors.isEmpty() &&
             cfg.vps.size == 1 && cfg.sps.size == 1 && cfg.pps.size == 1)
     }
 

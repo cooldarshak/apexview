@@ -126,7 +126,11 @@ internal object ProtectedHevcLiveComposition {
         val labels: List<String>,
         val sourceTileIndices: List<Int>,
         val fullPictures: Boolean,
+        val localNativeHeader: Boolean,
+        nativeHeaderRequested: Boolean,
     ) {
+        @Volatile var nativeHeaderRequested = nativeHeaderRequested
+        @Volatile var nativeHeaderRejected = false
         var sourceGeometry: SourceGeometry? = null
         // Equivalent to the clear VOD session's cachedMixedAtlas. These keys
         // contain ONLY SHA-256 VPS/SPS/PPS fingerprints (never CBCS identities).
@@ -182,6 +186,8 @@ internal object ProtectedHevcLiveComposition {
         labels: List<String>,
         sourceTileIndices: List<Int> = List(labels.size) { 0 },
         fullPictures: Boolean = false,
+        localNativeHeader: Boolean = false,
+        nativeHeaderRequested: Boolean = false,
     ) {
         require(group.isNotBlank()) { "Protected composition group is required" }
         val selected = labels.distinct()
@@ -193,7 +199,8 @@ internal object ProtectedHevcLiveComposition {
             "One non-negative source tile index is required per selected feed"
         }
         sessions.remove(group)?.clear()
-        val session = Session(group, selected, sourceTileIndices, fullPictures)
+        val session = Session(group, selected, sourceTileIndices, fullPictures,
+            localNativeHeader, localNativeHeader && nativeHeaderRequested)
         sessions[group] = session
         // Media3 may already have fetched the active init before the user selects feeds.
         // Reuse only the bounded, paired init snapshot; media fragments are captured after selection.
@@ -213,6 +220,15 @@ internal object ProtectedHevcLiveComposition {
             sessions.remove(oldest)?.clear()
         }
         sessionIndex = sessions.toMap()
+    }
+
+    /** Only explicit local protected routes opt in to the metadata-only
+     * experiment. Do not take the long composition monitor from the UI. */
+    fun updateLocalNativeHeaderPreference(enabled: Boolean) {
+        sessionIndex.values.filter { it.localNativeHeader }.forEach { session ->
+            if (enabled && !session.nativeHeaderRequested) session.nativeHeaderRejected = false
+            session.nativeHeaderRequested = enabled
+        }
     }
 
     @Synchronized
@@ -1050,7 +1066,11 @@ internal object ProtectedHevcLiveComposition {
                     perSampleIvSize = sourceEncryption.perSampleIvSize,
                     samples = composedSamples
                 ),
-                context = "Live protected F1 composed fragment"
+                context = "Live protected F1 composed fragment",
+                preferNativeHeader = session.nativeHeaderRequested && !session.nativeHeaderRejected,
+                onNativeHeaderResult = { matched ->
+                    if (!matched) session.nativeHeaderRejected = true
+                }
             )
             val fragmentWriteElapsedMs = (System.nanoTime() - fragmentWriteStartedNs) / 1_000_000L
             val durationTicks = composedSamples.fold(0L) { total, sample ->

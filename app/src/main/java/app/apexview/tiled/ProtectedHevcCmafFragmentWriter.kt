@@ -55,7 +55,9 @@ internal object ProtectedHevcCmafFragmentWriter {
     fun write(
         outputInitializationSegment: ByteArray,
         request: Request,
-        context: String = "Protected HEVC CMAF fragment writer"
+        context: String = "Protected HEVC CMAF fragment writer",
+        preferNativeHeader: Boolean = false,
+        onNativeHeaderResult: (Boolean) -> Unit = {},
     ): ByteArray {
         require(request.trackId in 1..UINT32_MAX &&
             request.baseDecodeTimeTicks >= 0L &&
@@ -201,11 +203,19 @@ internal object ProtectedHevcCmafFragmentWriter {
             "$context: generated fragment exceeds the output size bound"
         }
         val result = ByteArray(totalFragmentBytes.toInt())
+        var nativeMoof: ByteArray? = null
         try {
+        if (preferNativeHeader) {
+            nativeMoof = NativeProtectedHeader.matchingHeader(moof, request, auxiliarySizes)
+            onNativeHeaderResult(nativeMoof != null)
+            android.util.Log.i("ApexviewSingleDecoder",
+                "GB_PROTECTED_HEADER result=${if (nativeMoof != null) "RUST_EXACT_MATCH" else "JVM_FALLBACK"} " +
+                    "actualStitcher=JVM metadataOnly=true")
+        }
         var cursor = 0
         styp.copyInto(result, destinationOffset = cursor)
         cursor = Math.addExact(cursor, styp.size)
-        moof.copyInto(result, destinationOffset = cursor)
+        (nativeMoof ?: moof).copyInto(result, destinationOffset = cursor)
         cursor = Math.addExact(cursor, moof.size)
         ByteBuffer.wrap(result).order(ByteOrder.BIG_ENDIAN).apply {
             position(cursor)
@@ -266,6 +276,8 @@ internal object ProtectedHevcCmafFragmentWriter {
         } catch (failure: Throwable) {
             result.fill(0)
             throw failure
+        } finally {
+            nativeMoof?.fill(0)
         }
     }
 
