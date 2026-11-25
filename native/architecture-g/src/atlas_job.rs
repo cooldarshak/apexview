@@ -1,9 +1,14 @@
 //! Clear worker packet. All fields are big-endian and borrow bounded input.
-//! The output is [initialization size, media size, initialization, media].
+//! GBC1 output is [initialization size, media size, initialization, media].
+//! GBC2 retains the header, then length-prefixes each of 2..=4 media fragments.
+//! Each source block carries a bounded window beginning at random access.
 use crate::bmff::{Error, Reader, MAX_BYTES};
-use crate::clear_atlas::{Atlas, Cell, Grid};
+use crate::clear_atlas::{Atlas, Cell, Grid, MAX_FEEDS};
+use crate::hevc_poc::Tracker;
 
 const MAGIC: &[u8; 4] = b"GBC1";
+const WINDOW_MAGIC: &[u8; 4] = b"GBC2";
+const MAX_WINDOW: usize = 4;
 const OUTPUT_HEADER: usize = 8;
 
 /// Conservative workspace ceiling for this worker command in addition to the
@@ -49,9 +54,11 @@ impl Dispatcher {
             return Err(Error::Limit);
         }
         let mut reader = Reader::new(input);
-        if reader.take(4)? != MAGIC {
-            return Err(Error::Unsupported);
-        }
+        let window = match reader.take(4)? {
+            magic if magic == MAGIC => false,
+            magic if magic == WINDOW_MAGIC => true,
+            _ => return Err(Error::Unsupported),
+        };
         let track = reader.u32()?;
         let sequence = reader.u32()?;
         if track == 0 || sequence == 0 {
@@ -63,10 +70,13 @@ impl Dispatcher {
         let feeds = usize::from(reader.u16()?);
         let column_count = usize::from(reader.u16()?);
         let row_count = usize::from(reader.u16()?);
-        if !(2..=24).contains(&feeds)
+        let field = usize::from(reader.u16()?);
+        let count = if window { field } else { 1 };
+        if !(2..=MAX_FEEDS).contains(&feeds)
             || !(1..=20).contains(&column_count)
             || !(1..=22).contains(&row_count)
-            || reader.u16()? != 0
+            || (window && !(2..=MAX_WINDOW).contains(&count))
+            || (!window && field != 0)
         {
             return Err(Error::Limit);
         }
@@ -87,13 +97,23 @@ impl Dispatcher {
         // The packet's changing sequence is excluded. Assembly-relevant header,
         // layout and init byte identities are included without a hash collision.
         let geometry = &input[12..input.len() - reader.rest().len()];
-        let mut inits = [&[][..]; 24];
-        let mut media = [&[][..]; 24];
-        for (init, media) in inits[..feeds].iter_mut().zip(&mut media[..feeds]) {
+        let mut inits = [&[][..]; MAX_FEEDS];
+        let mut media = [[&[][..]; MAX_FEEDS]; MAX_WINDOW];
+        for (feed, init) in inits[..feeds].iter_mut().enumerate() {
             let init_size = reader.u32()? as usize;
             let media_size = reader.u32()? as usize;
             *init = reader.take(init_size)?;
-            *media = reader.take(media_size)?;
+            let block = reader.take(media_size)?;
+            if window {
+                let mut parts = Reader::new(block);
+                for row in &mut media[..count] {
+                    let size = parts.u32()? as usize;
+                    row[feed] = parts.take(size)?;
+                }
+                parts.finish()?;
+            } else {
+                media[0][feed] = block;
+            }
         }
         reader.finish()?;
         self.invalidate(generation);
@@ -136,12 +156,27 @@ impl Dispatcher {
         let atlas = &self.cached.as_ref().ok_or(Error::Metadata)?.atlas;
         let init = atlas.initialization();
         let media_offset = OUTPUT_HEADER + init.len();
-        let media_output = output.get_mut(media_offset..).ok_or(Error::Limit)?;
-        let size = atlas.write_fragment(&media[..feeds], sequence, media_output)?;
+        let mut cursor = media_offset;
+        let mut trackers = [Tracker::default(); MAX_FEEDS];
+        let mut previous_end = None;
+        for (index, row) in media[..count].iter().enumerate() {
+            let number = sequence.checked_add(index as u32).ok_or(Error::Limit)?;
+            let start = cursor.checked_add(if window { 4 } else { 0 }).ok_or(Error::Limit)?;
+            let destination = output.get_mut(start..).ok_or(Error::Limit)?;
+            let (size, end) = atlas.write_window_fragment(
+                &row[..feeds], number, destination, &mut trackers, previous_end,
+            )?;
+            if window {
+                output[cursor..start].copy_from_slice(&(size as u32).to_be_bytes());
+            }
+            cursor = start.checked_add(size).ok_or(Error::Limit)?;
+            previous_end = Some(end);
+        }
+        let size = cursor - media_offset;
         output[..4].copy_from_slice(&(init.len() as u32).to_be_bytes());
         output[4..OUTPUT_HEADER].copy_from_slice(&(size as u32).to_be_bytes());
         output[OUTPUT_HEADER..media_offset].copy_from_slice(init);
-        Ok(media_offset + size)
+        Ok(cursor)
     }
 }
 

@@ -16,7 +16,8 @@ internal object HevcClearCmafInitSegmentWriter {
         val trackId: Long,
         val mediaTimescale: Long,
         val parameterSets: HevcOutputParameterSetWriter.Output,
-        val handlerName: String = "ApexView HEVC"
+        val handlerName: String = "ApexView HEVC",
+        val nalLengthSize: Int = 4
     )
 
     /**
@@ -124,7 +125,7 @@ internal object HevcClearCmafInitSegmentWriter {
             "HEVC bit depth is outside hvcC range"
         }
 
-        val hvcC = writeHevcConfiguration(output, sps)
+        val hvcC = writeHevcConfiguration(output, sps, request.nalLengthSize)
         val ftyp = box(
             "ftyp",
             ascii("iso6") + uint32(1) + ascii("iso6") + ascii("cmfc") + ascii("hvc1")
@@ -147,18 +148,22 @@ internal object HevcClearCmafInitSegmentWriter {
 
     internal fun writeHevcConfiguration(
         output: HevcOutputParameterSetWriter.Output,
-        sps: HevcParameterSets.SpsMetadata
+        sps: HevcParameterSets.SpsMetadata,
+        nalLengthSize: Int = 4
     ): ByteArray = writeSourceHevcConfiguration(
         listOf(32 to output.vps, 33 to output.sps, 34 to output.pps),
         sps,
-        output.levelIdc
+        output.levelIdc,
+        nalLengthSize
     )
 
     private fun writeSourceHevcConfiguration(
         parameterSets: List<Pair<Int, ByteArray>>,
         sps: HevcParameterSets.SpsMetadata,
-        levelIdc: Int = sps.profileTierLevel.levelIdc
+        levelIdc: Int = sps.profileTierLevel.levelIdc,
+        nalLengthSize: Int = 4
     ): ByteArray {
+        require(nalLengthSize in 1..4)
         val ptl = sps.profileTierLevel
         parameterSets.forEach { (type, nal) ->
             require(HevcBitstream.parseNalHeader(nal).type == type) {
@@ -172,7 +177,7 @@ internal object HevcClearCmafInitSegmentWriter {
         val profileByte = (ptl.profileSpace shl 6) or
             (if (ptl.tierFlag) 0x20 else 0) or ptl.profileIdc
         val packedTemporal = (sps.maxSubLayers shl 3) or
-            (if (sps.temporalIdNesting) 0x04 else 0) or 0x03
+            (if (sps.temporalIdNesting) 0x04 else 0) or (nalLengthSize - 1)
 
         val record = ByteArrayOutputStream()
         record.write(uint8(1))

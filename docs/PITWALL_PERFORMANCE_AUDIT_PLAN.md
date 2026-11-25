@@ -1,6 +1,6 @@
 # PITWALL TV: SINGLE CONSOLIDATED RELEASE AND ACCEPTANCE PLAN
 
-**Current Architecture G checkpoint (25 November 2026):** Build 865 GREEN, Build 867 FAILED on API29 instrumentation only; compilation, host tests, independent decoding, signed APK assembly and API31/36 runtime gates passed. API29-compatible exact frame-rate correction candidate pending CI. User reaffirmed targeted low-copy Rust with strengthened all-applicable-stitching coverage, not full-app rewrite. G-B remains open; G-C/D gated.
+**Current Architecture G checkpoint (25 November 2026):** Build 868 verified GREEN (all five jobs, source `badf7d22a2d21b2bf61b027dc5598f343258d13b`); G-B bounded dependent/multi-fragment clear and expanded profile candidate pending exact CI. Targeted low-copy Rust with strengthened all-applicable-stitching coverage, not full-app rewrite. G-B remains open for residual supported-profile equivalence and physical acceptance; G-C/D gated.
 
 ## Current status — 24 November 2026, Build 841 TLS failure correction
 
@@ -137,6 +137,33 @@ The objective remains smooth, stable playback on resource-constrained Android TV
 | Fallback | ON requests native on applicable paths; unsupported/admission/operational failure is explicit, reason-coded, and cannot be counted as successful Rust playback. Safe existing JVM fallback only where authorized and supported, with no quality/decoder/DRM changes or silent preference reset. Direct passthrough is not a fallback. |
 
 G-B closes the shared clear/protected stitching core, bounded native ownership and correctness regression coverage; integrate eligible local producers and inventory every remaining stitching owner. G-C owns remaining producer/receiver integration (including cast stitching paths), network/publication copies, adaptive memory/deadline/concurrency, and profiling-driven optimizations. G-D requires the complete mode matrix with real on-device A/B evidence, correct actual-engine attribution and sustained race-length results. A mode that still needs stitching but uses JVM because native integration is absent remains an open coverage requirement, not NOT_APPLICABLE. No phase completion inferred merely from green CI or use of Rust for one component. Keep all twenty G workstreams and eight refinements; no weakening of original sixteen-workstream release matrix. Do not start G-C/G-D implementation without approval.
+
+### Build 868 verified and consolidated G-B dependent-window/profile candidate
+
+[Build 868](https://github.com/cooldarshak/apexview/actions/runs/45592893405) completed all five jobs successfully: build 139131394462, API31 139137122592, API36 139137122999, API29 139137123072, signed publication 139138749358. Exact source `badf7d22a2d21b2bf61b027dc5598f343258d13b`. This closes the observed API29 rolling frame-rate regression. Build 867's protected storage, 4/6/8 logical slots, rolling and differential gates are retained in 868. No physical or real F1 performance proof.
+
+The user authorized all remaining G-B coding in one consolidated batch. This candidate implements the following rather than starting G-C:
+
+- Preserve byte-for-byte GBC1 single-fragment protocol. GBC2 adds an explicitly bounded 2–4 fragment window per feed starting at random access, with same-window native picture-order tracking, exact cross-fragment decode continuity, checked sequence arithmetic, total 8 MiB input/output admission, and per-fragment final lease reads. The worker does not retain inter-job picture state; canceled/failed jobs never publish partial output. Rolling clear HLS uses retained anchor history, including a multi-fragment incoming group. Unanchored/oversized windows explicitly fall back; finite archive seeking still requires independent segments (existing JVM contract, not weakened).
+- Preserve exact JVM reference comparison on first window/profile and on changed source init bytes, geometry, frame rate, output track, count or generation. Check independently inspected output timing/flags for every fragment and wipe failed output and retired proof snapshots. Rust cross-feed timing uses exact rational i128 products for different timescales, compares the JVM dependency flag mask and rejects reserved bits. Preserve the first source clock and exact manual quality.
+- Support a legal short first-source NAL prefix in native clear output and correct the JVM clear init writer to advertise the same NAL width as the produced media. Preserve existing four-byte default and existing secondary-width/in-band negative tests. Replace both remaining finite archive BigInteger exact-conversion calls: shared API29-safe checked frame-rate reduction and signed microseconds-to-ticks conversion with explicit Long-range rejection. Exact source preflight initially detected the second call; after correcting it, both targeted production wiring regressions passed without weakening assertions. The coordinated change contract passed on the candidate path set.
+- Mandatory Android fixture regressions split existing independently encoded 50-picture samples at non-sync boundaries and require actual rolling Rust publication for 1/2/4-fragment windows, exact JVM output, contiguous timing, original independent and OFF parity, and short first-source prefix. Host fixture adds exact reference repackaging, generation/late malformed rejection, mixed-clock parity and an additional independently FFmpeg-decoded 50-picture history stream. These are fixture tests, not real authorized F1 playback.
+
+Route/profile audit (candidate, no physical claims):
+
+| Route or profile | Disposition |
+| --- | --- |
+| Clear finite multifeed local | Existing GBC1 bridge, corrected API29 timing; independent seek points retained |
+| Clear rolling multifeed local | GBC1 plus GBC2 anchored windows; safe explicit fallback beyond existing bounded-history/admission policy |
+| Protected local live/replay | Existing authorized JVM validation and native direct clear-header/metadata/output storage path, 868 automated baseline; no changes to authorization or security boundaries |
+| Direct single-feed or multiple decoder | No artificial stitcher; NOT_APPLICABLE only where genuinely direct |
+| Applicable Cast stitching | Still open G-C integration, not marked native or NOT_APPLICABLE |
+| First/secondary NAL prefix widths; exact rational source timing | Native coverage expanded; candidate gates pending |
+| Custom scaling lists, PCM, WPP, dependent slice segments, nonzero layers and unsupported extensions | Existing conservative reference/rewriter safety restrictions retained; never relax merely to increase Rust coverage |
+| Semantically equal but differently encoded in-band parameter sets; source configurations accepted by JVM compatibility but not identical after native normalization; JVM-admitted container variants outside stricter native extent/base policy | Residual native equivalence coding/corpus gaps, explicit fallback; not counted as completed or universally unsupported |
+| Protected profiles outside proved native syntax/metadata range | Retain authorization and opaque-byte invariant; residual supported-profile audit and real device acceptance remain open |
+
+Candidate full compilation, host/ASan, API29/31/36 and signed publication not yet established. Remaining G-B work is not transferred to G-C: close residual supported-profile equivalence with safe implementation and differential fixtures, inspect actual device-admitted corpus and verify real authorized playback. G-C Cast and optimization, G-D physical performance matrix remain gated. No arbitrary Rust percentage, feature removal, silent quality reduction, or DRM bypass.
 
 ### Build 867 exact failure and Android compatibility correction candidate
 

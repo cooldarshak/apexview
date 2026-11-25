@@ -191,7 +191,8 @@ internal object HevcClearCmafGridComposer {
             HevcClearCmafInitSegmentWriter.Request(
                 trackId = request.outputTrackId,
                 mediaTimescale = requireNotNull(first.track.timescale),
-                parameterSets = composed.outputParameters
+                parameterSets = composed.outputParameters,
+                nalLengthSize = first.config.nalLengthSize
             )
         )
 

@@ -16,3 +16,16 @@ internal fun reducePositiveHevcFrameRate(numerator: Long, denominator: Long): Pa
     }
     return Math.toIntExact(numerator / a) to Math.toIntExact(denominator / a)
 }
+
+/** Exact signed conversion, preserving truncation toward zero and overflow rejection
+ * without BigInteger.longValueExact (not available on Android API 29).
+ */
+internal fun scaleHevcMicrosToTicks(micros: Long, scale: Long): Long {
+    require(scale > 0L)
+    val value = java.math.BigInteger.valueOf(micros)
+        .multiply(java.math.BigInteger.valueOf(scale))
+        .divide(java.math.BigInteger.valueOf(1_000_000L))
+    if (value < java.math.BigInteger.valueOf(Long.MIN_VALUE) ||
+        value > java.math.BigInteger.valueOf(Long.MAX_VALUE)) throw ArithmeticException("HEVC time conversion overflow")
+    return value.toLong()
+}

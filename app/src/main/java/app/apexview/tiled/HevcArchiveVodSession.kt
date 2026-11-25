@@ -420,7 +420,7 @@ internal class HevcArchiveVodSession(
             val atlas = if (mixedAtlas == null) requireNotNull(uniformAtlasPlan) {
                 "Full archive feeds exceed composed picture size; choose fewer feeds or a lower common HEVC rendition"
             } else null
-            val divisor = java.math.BigInteger.valueOf(trackScale).gcd(java.math.BigInteger.valueOf(step)).longValueExact()
+            val (frameRateNumerator, frameRateDenominator) = reducePositiveHevcFrameRate(trackScale, step)
             val cells = mixedAtlas?.cells ?: uniformCells
             val ownedInits = synchronized(cacheLock) {
                 checkOpen()
@@ -440,7 +440,7 @@ internal class HevcArchiveVodSession(
                         composingFeeds,
                         mixedAtlas?.grid ?: HevcOutputGridDimensions(columns * requireNotNull(atlas).columns, rows * atlas.rows), cells,
                         firstOutputSequenceNumber = anchor + 1L,
-                        frameRateNumerator = (trackScale / divisor).toInt(), frameRateDenominator = (step / divisor).toInt())
+                        frameRateNumerator = frameRateNumerator, frameRateDenominator = frameRateDenominator)
                     val expectedInit = if (nativeClear.candidate) synchronized(cacheLock) {
                         checkOpen(); initialization?.copyOf()
                     } else null
@@ -807,8 +807,7 @@ internal class HevcArchiveVodSession(
 
     companion object {
         val MANIFEST_URI: Uri = Uri.parse("apexview-archive:///manifest.mpd")
-        private fun scaleUs(us: Long, scale: Long): Long = java.math.BigInteger.valueOf(us)
-            .multiply(java.math.BigInteger.valueOf(scale)).divide(java.math.BigInteger.valueOf(1_000_000)).longValueExact()
+        private fun scaleUs(us: Long, scale: Long): Long = scaleHevcMicrosToTicks(us, scale)
 
         private fun align(inputs: List<Input>, clockLabel: String): List<Group> {
             require(inputs.isNotEmpty())

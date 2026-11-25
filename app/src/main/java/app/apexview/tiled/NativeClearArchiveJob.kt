@@ -5,12 +5,13 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Exact GBC1 wire contract for the already-verified native atlas worker.
+ * Exact GBC1 / bounded GBC2 wire contract for the native atlas worker.
  * Source ownership remains with the archive producer until submission copies
- * the packet. Only validated, independently decodable, unencrypted clear fragments enter this path.
+ * the packet. Only validated unencrypted windows beginning at random access enter this path.
  */
 internal object NativeClearArchiveJob {
     const val MAX_PACKET = 8 * 1024 * 1024
+    const val MAX_WINDOW = 4
 
     data class Geometry(val width: Int, val height: Int, val columns: List<Int>,
                         val rows: List<Int>, val cells: List<HevcTizenGridComposer.CellSelection>)
@@ -19,43 +20,63 @@ internal object NativeClearArchiveJob {
         fun wipe() { initialization.fill(0); media.fill(0) }
     }
 
-    fun size(geometry: Geometry, inits: List<ByteArray>, media: List<ByteArray>): Int {
+    data class WindowOutput(val initialization: ByteArray, val media: List<ByteArray>) {
+        fun wipe() { initialization.fill(0); media.forEach { it.fill(0) } }
+    }
+
+    fun size(geometry: Geometry, inits: List<ByteArray>, media: List<ByteArray>): Int =
+        windowSize(geometry, inits, media.map { listOf(it) })
+
+    fun windowSize(geometry: Geometry, inits: List<ByteArray>, media: List<List<ByteArray>>): Int {
         require(inits.size in 2..24 && inits.size == media.size)
+        val count = media.first().size
+        require(count in 1..MAX_WINDOW && media.all { it.size == count })
         require(geometry.width > 0 && geometry.height > 0)
         require(geometry.columns.size in 1..20 && geometry.rows.size in 1..22)
         require(geometry.columns.all { it > 0 } && geometry.rows.all { it > 0 })
         require(geometry.cells.size == geometry.columns.size * geometry.rows.size)
         var bytes = 36L + 4L * (geometry.columns.size + geometry.rows.size + geometry.cells.size)
         inits.indices.forEach { i ->
-            require(inits[i].isNotEmpty() && media[i].isNotEmpty())
-            bytes += 8L + inits[i].size + media[i].size
+            require(inits[i].isNotEmpty() && media[i].all { it.isNotEmpty() })
+            bytes += 8L + inits[i].size + media[i].sumOf { it.size.toLong() + if (count > 1) 4L else 0L }
         }
         require(bytes in 1..MAX_PACKET.toLong()) { "Native clear packet exceeds bound" }
         return bytes.toInt()
     }
 
     fun encode(track: Long, sequence: Long, rateNumerator: Int, rateDenominator: Int,
-               geometry: Geometry, inits: List<ByteArray>, media: List<ByteArray>): Encoded {
+               geometry: Geometry, inits: List<ByteArray>, media: List<ByteArray>): Encoded =
+        encodeWindow(track, sequence, rateNumerator, rateDenominator, geometry, inits, media.map { listOf(it) })
+
+    fun encodeWindow(track: Long, sequence: Long, rateNumerator: Int, rateDenominator: Int,
+                     geometry: Geometry, inits: List<ByteArray>, media: List<List<ByteArray>>): Encoded {
         require(track in 1..0xffffffffL && sequence in 1..0xffffffffL)
         require(rateNumerator > 0 && rateDenominator > 0)
         val ordered = geometry.cells.sortedWith(compareBy<HevcTizenGridComposer.CellSelection> { it.outputRow }
             .thenBy { it.outputColumn })
-        val length = size(geometry, inits, media)
+        val length = windowSize(geometry, inits, media)
+        val count = media.first().size
+        require(sequence + count - 1L <= 0xffffffffL)
         ordered.forEachIndexed { i, cell ->
             require(cell.outputRow == i / geometry.columns.size && cell.outputColumn == i % geometry.columns.size)
             require(cell.feedIndex in inits.indices && cell.sourceTileIndex in 0..65535)
         }
         val packet = ByteBuffer.allocate(length).order(ByteOrder.BIG_ENDIAN)
-        packet.put(byteArrayOf(0x47, 0x42, 0x43, 0x31))
+        packet.put(byteArrayOf(0x47, 0x42, 0x43, (if (count == 1) 0x31 else 0x32).toByte()))
         packet.putInt(track.toInt()).putInt(sequence.toInt()).putInt(geometry.width).putInt(geometry.height)
         packet.putInt(rateNumerator).putInt(rateDenominator)
         packet.putShort(inits.size.toShort()).putShort(geometry.columns.size.toShort())
-            .putShort(geometry.rows.size.toShort()).putShort(0)
+            .putShort(geometry.rows.size.toShort()).putShort((if (count == 1) 0 else count).toShort())
         geometry.columns.forEach { packet.putInt(it) }
         geometry.rows.forEach { packet.putInt(it) }
         ordered.forEach { packet.putShort(it.feedIndex.toShort()).putShort(it.sourceTileIndex.toShort()) }
         inits.indices.forEach { i ->
-            packet.putInt(inits[i].size).putInt(media[i].size).put(inits[i]).put(media[i])
+            val blockSize = media[i].sumOf { it.size.toLong() + if (count > 1) 4L else 0L }.toInt()
+            packet.putInt(inits[i].size).putInt(blockSize).put(inits[i])
+            media[i].forEach { bytes ->
+                if (count > 1) packet.putInt(bytes.size)
+                packet.put(bytes)
+            }
         }
         check(!packet.hasRemaining())
         return Encoded(packet.array())
@@ -65,6 +86,13 @@ internal object NativeClearArchiveJob {
      * final JVM-owned arrays. Never allocate another full concatenated result. */
     fun execute(engine: NativeStitchingEngine, packet: ByteArray, foreground: Boolean,
                 timeoutMs: Long, checkCurrent: () -> Unit): Output {
+        val out = executeWindow(engine, packet, 1, foreground, timeoutMs, checkCurrent)
+        return Output(out.initialization, out.media.single())
+    }
+
+    fun executeWindow(engine: NativeStitchingEngine, packet: ByteArray, count: Int,
+                      foreground: Boolean, timeoutMs: Long, checkCurrent: () -> Unit): WindowOutput {
+        require(count in 1..MAX_WINDOW)
         require(timeoutMs in 1..60_000)
         checkCurrent()
         val token = engine.submitClearAtlas(engine.generation(), packet, foreground, timeoutMs)
@@ -72,7 +100,7 @@ internal object NativeClearArchiveJob {
         val started = System.nanoTime()
         var terminal = false
         var init: ByteArray? = null
-        var media: ByteArray? = null
+        val media = ArrayList<ByteArray>(count)
         var transferred = false
         try {
             var length: Long
@@ -92,17 +120,32 @@ internal object NativeClearArchiveJob {
             val mediaSize = b.int
             check(initSize > 0 && mediaSize > 0 && 8L + initSize + mediaSize == length)
             val initBytes = ByteArray(initSize).also { init = it }
-            val mediaBytes = ByteArray(mediaSize).also { media = it }
             check(engine.read(token, 8, initBytes, 0, initSize) == initSize.toLong())
-            check(engine.read(token, 8 + initSize, mediaBytes, 0, mediaSize) == mediaSize.toLong())
+            var cursor = 8 + initSize
+            val end = length.toInt()
+            val field = ByteArray(4)
+            repeat(count) {
+                checkCurrent()
+                val size = if (count == 1) mediaSize else {
+                    check(end - cursor >= 4)
+                    check(engine.read(token, cursor, field, 0, 4) == 4L)
+                    cursor += 4
+                    ByteBuffer.wrap(field).order(ByteOrder.BIG_ENDIAN).int
+                }
+                check(size > 0 && size <= end - cursor)
+                val bytes = ByteArray(size).also { media.add(it) }
+                check(engine.read(token, cursor, bytes, 0, size) == size.toLong())
+                cursor += size
+            }
+            check(cursor == end)
             checkCurrent()
             check(engine.release(token) == 1L)
             terminal = false
             transferred = true
-            return Output(initBytes, mediaBytes)
+            return WindowOutput(initBytes, media)
         } finally {
             if (!transferred) {
-                init?.fill(0); media?.fill(0)
+                init?.fill(0); media.forEach { it.fill(0) }
                 // Failed jobs/ready leases can be released. A pending job must
                 // be generation-fenced, not released or overwritten.
                 if (terminal) engine.release(token) else engine.seek()

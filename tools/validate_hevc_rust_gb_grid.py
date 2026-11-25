@@ -70,6 +70,8 @@ def main():
                           args.tile_dir / "source_vod_alt_tiled_2x2.hevc"),
             validate_case(args.output_dir, "mixed", [640, 128], tiled,
                           args.tile_dir / "source_vod_mixed_tiled_2x2.hevc"),
+            validate_case(args.output_dir, "history", [512, 128], tiled,
+                          args.tile_dir / "source_vod_alt_tiled_2x2.hevc"),
         ],
         "native_slice_syntax_matches_jvm": True,
         "native_output_parameter_sets_match_jvm": True,

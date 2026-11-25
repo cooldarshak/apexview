@@ -260,6 +260,7 @@ fn compose(
                 frame_rate: (25, 1),
             };
             verify_extended_profile(&request, sequence, &source_init, &fragments, &expected_init, &expected);
+            verify_mixed_clock(&request, sequence, &source_init, &fragments, &expected_init, &expected);
             let packet = atlas_packet(&request, 9, sequence, &source_init, &fragments);
             let mut expected_result = Vec::new();
             expected_result.extend_from_slice(&(initialized.len() as u32).to_be_bytes());
@@ -267,6 +268,8 @@ fn compose(
             expected_result.extend_from_slice(&initialized);
             expected_result.extend_from_slice(&expected);
             verify_native_lease(&packet, &expected_result);
+            verify_dependent_window(&request, sequence, &source_init, &fragments,
+                &expected_init, &expected, assets);
             fs::write(assets.join("gb_clear_job.bin"), packet).unwrap();
             fs::write(assets.join("gb_clear_expected.bin"), expected_result).unwrap();
         }
@@ -499,6 +502,149 @@ fn atlas_packet(
         packet.extend_from_slice(fragment);
     }
     packet
+}
+
+// Repackage the exact independent encoded samples at non-sync boundaries.
+// No new encoding, fabricated reference data or modification of HEVC payloads.
+// Match the JVM's exact cross-timescale comparison with a second source
+// using twice the clock rate but the same physical sample timings.
+fn verify_mixed_clock(
+    grid: &Grid<'_>, sequence: u32, inits: &[Vec<u8>; 2],
+    fragments: &[Vec<u8>; 2], expected_init: &[u8], expected: &[u8],
+) {
+    let original = Initialization::parse(&inits[1]).unwrap();
+    let fragment = Fragment::parse(&fragments[1], &original).unwrap();
+    let mut changed_init = inits[1].clone();
+    let mdhd = changed_init.windows(4).position(|w| w == b"mdhd").unwrap() + 4;
+    let scale_at = match changed_init[mdhd] { 0 => mdhd + 12, 1 => mdhd + 20, _ => panic!("mdhd version") };
+    changed_init[scale_at..scale_at + 4].copy_from_slice(&(original.timescale * 2).to_be_bytes());
+    let changed = Initialization::parse(&changed_init).unwrap();
+    assert_eq!(changed.timescale, original.timescale * 2);
+    let samples: Vec<_> = fragment.samples.iter().map(|sample| clear_cmaf::Sample {
+        data: sample.bytes, duration: sample.duration * 2, flags: sample.flags,
+        cto: i32::try_from(sample.composition_offset * 2).unwrap(),
+    }).collect();
+    let mut media = vec![0; clear_cmaf::size(&samples).unwrap()];
+    assert_eq!(clear_cmaf::write(changed.track_id, sequence,
+        (fragment.decode_time * 2) as u64, &samples, &mut media), Some(media.len()));
+    let atlas = Atlas::new(
+        &[&inits[0], &changed_init],
+        Grid { width: grid.width, height: grid.height, columns: grid.columns,
+            rows: grid.rows, cells: grid.cells, frame_rate: grid.frame_rate }, 9,
+    ).unwrap();
+    assert_eq!(atlas.initialization(), expected_init);
+    let mut output = vec![0; expected.len()];
+    assert_eq!(atlas.write_fragment(&[&fragments[0], &media], sequence, &mut output).unwrap(), expected.len());
+    assert_eq!(output, expected);
+    // Changing the clock without matching the media must still be rejected.
+    assert!(atlas.write_fragment(&[&fragments[0], &fragments[1]], sequence, &mut output).is_err());
+    println!("G-B mixed source clock exact rational timing PASS");
+}
+
+fn split_fragment(
+    fragment: &Fragment<'_>, track: u32, sequence: u32, boundaries: &[usize],
+) -> Vec<Vec<u8>> {
+    boundaries.windows(2).enumerate().map(|(part, range)| {
+        let source = &fragment.samples[range[0]..range[1]];
+        let samples: Vec<_> = source.iter().map(|sample| clear_cmaf::Sample {
+            data: sample.bytes, duration: sample.duration, flags: sample.flags,
+            cto: i32::try_from(sample.composition_offset).unwrap(),
+        }).collect();
+        let mut bytes = vec![0; clear_cmaf::size(&samples).unwrap()];
+        assert_eq!(clear_cmaf::write(track, sequence + part as u32,
+            source[0].decode_time as u64, &samples, &mut bytes), Some(bytes.len()));
+        bytes
+    }).collect()
+}
+
+fn window_packet(
+    grid: &Grid<'_>, sequence: u32, inits: &[Vec<u8>; 2],
+    fragments: &[Vec<u8>; 2], windows: &[Vec<Vec<u8>>; 2],
+) -> Vec<u8> {
+    let mut packet = atlas_packet(grid, 9, sequence, inits, fragments);
+    packet.truncate(36 + 4 * (grid.columns.len() + grid.rows.len() + grid.cells.len()));
+    packet[3] = b'2';
+    packet[34..36].copy_from_slice(&4u16.to_be_bytes());
+    for (init, window) in inits.iter().zip(windows) {
+        let size: usize = window.iter().map(|bytes| 4 + bytes.len()).sum();
+        packet.extend_from_slice(&(init.len() as u32).to_be_bytes());
+        packet.extend_from_slice(&(size as u32).to_be_bytes());
+        packet.extend_from_slice(init);
+        for bytes in window {
+            packet.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            packet.extend_from_slice(bytes);
+        }
+    }
+    packet
+}
+
+fn verify_dependent_window(
+    grid: &Grid<'_>, sequence: u32, inits: &[Vec<u8>; 2],
+    fragments: &[Vec<u8>; 2], expected_init: &[u8], expected: &[u8], assets: &Path,
+) {
+    let output_track = Initialization::parse(expected_init).unwrap();
+    let reference = Fragment::parse(expected, &output_track).unwrap();
+    let count = reference.samples.len();
+    let mut boundaries = vec![0];
+    for part in 1..4 {
+        let start = (count * part / 4).max(boundaries.last().unwrap() + 1);
+        boundaries.push((start..count).find(|&index|
+            reference.samples[index].flags & 0x1_0000 != 0).unwrap());
+    }
+    boundaries.push(count);
+    let windows = [0, 1].map(|feed| {
+        let track = Initialization::parse(&inits[feed]).unwrap();
+        let fragment = Fragment::parse(&fragments[feed], &track).unwrap();
+        split_fragment(&fragment, track.track_id, sequence, &boundaries)
+    });
+    let reference_window = split_fragment(&reference, 9, sequence, &boundaries);
+    let size: usize = reference_window.iter().map(|bytes| bytes.len() + 4).sum();
+    let mut lease = Vec::new();
+    lease.extend_from_slice(&(expected_init.len() as u32).to_be_bytes());
+    lease.extend_from_slice(&(size as u32).to_be_bytes());
+    lease.extend_from_slice(expected_init);
+    for bytes in &reference_window {
+        lease.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        lease.extend_from_slice(bytes);
+    }
+    let packet = window_packet(grid, sequence, inits, fragments, &windows);
+    verify_native_lease(&packet, &lease);
+
+    // Independently decode the actual worker-produced stream. The exact lease
+    // comparison above also proves every fragment matches the reference.
+    let mut engine = Engine::new(Budget {
+        slots: 2, input: packet.len(), output: lease.len(), ceiling: 12 * 1024 * 1024,
+    }).unwrap();
+    let token = engine.submit_clear_atlas(engine.generation(), &packet, true, 5000);
+    assert!(token > 0);
+    assert_eq!(await_result(&engine, token), lease.len() as i64);
+    let mut actual = vec![0; lease.len()];
+    assert_eq!(engine.copy(token, 0, &mut actual), lease.len() as i64);
+    assert_eq!(actual, lease);
+    assert_eq!(engine.release(token), 1);
+    let mut stream = actual[8..8 + expected_init.len()].to_vec();
+    let mut cursor = 8 + expected_init.len();
+    for _ in 0..4 {
+        let size = u32::from_be_bytes(actual[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        stream.extend_from_slice(&actual[cursor..cursor + size]);
+        cursor += size;
+    }
+    assert_eq!(cursor, actual.len());
+    fs::write(assets.join("hevc_rust_gb_history.mp4"), stream).unwrap();
+    // A late malformed fragment must not publish the already-written prefix.
+    let mut bad = windows;
+    bad[1][3][4..8].copy_from_slice(b"bad!");
+    let invalid_packet = window_packet(grid, sequence, inits, fragments, &bad);
+    let invalid = engine.submit_clear_atlas(engine.generation(), &invalid_packet, true, 5000);
+    assert!(invalid > 0);
+    assert_eq!(await_result(&engine, invalid), INVALID);
+    let mut rejected = [0x93; 8];
+    assert!(engine.copy(invalid, 0, &mut rejected) < 0);
+    assert_eq!(rejected, [0x93; 8]);
+    assert_eq!(engine.release(invalid), 1);
+    assert!(engine.close());
+    println!("G-B dependent 4-fragment clear window byte parity, cancellation and late rejection PASS");
 }
 
 fn verify_native_lease(packet: &[u8], expected: &[u8]) {

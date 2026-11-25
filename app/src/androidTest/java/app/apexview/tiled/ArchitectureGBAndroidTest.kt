@@ -64,6 +64,11 @@ class ArchitectureGBAndroidTest {
         for ((n, d) in listOf(Long.MAX_VALUE to 1L, 1L to Long.MAX_VALUE)) {
             assertTrue(runCatching { reducePositiveHevcFrameRate(n, d) }.exceptionOrNull() is ArithmeticException)
         }
+        assertEquals(90_000L, scaleHevcMicrosToTicks(1_000_000L, 90_000L))
+        assertEquals(-1L, scaleHevcMicrosToTicks(-19L, 90_000L))
+        assertEquals(Long.MAX_VALUE, scaleHevcMicrosToTicks(Long.MAX_VALUE, 1_000_000L))
+        assertEquals(Long.MIN_VALUE, scaleHevcMicrosToTicks(Long.MIN_VALUE, 1_000_000L))
+        assertTrue(runCatching { scaleHevcMicrosToTicks(Long.MAX_VALUE, 2_000_000L) }.exceptionOrNull() is ArithmeticException)
         Log.i("PitwallGB", "GB API-compatible exact frame-rate reduction and overflow rejection PASS")
     }
 
@@ -282,15 +287,17 @@ class ArchitectureGBAndroidTest {
                 else -> error("Unsupported fixture tfdt")
             }
         }
+        var sequence = 1L
+        var offset = 0L
         try {
             repeat(4) { index ->
                 if (index == 3) requested = false
                 val inputs = inits.indices.map { i ->
                     HevcClearCmafGridComposer.Feed(inits[i],
-                        listOf(shifted(media[i], Math.multiplyExact(duration, index.toLong()))), "fixture-$i")
+                        listOf(shifted(media[i], offset)), "fixture-$i")
                 }
                 val expected = HevcClearCmafGridComposer.compose(request.copy(feeds = inputs,
-                    outputTrackId = 1, firstOutputSequenceNumber = index+1L))
+                    outputTrackId = 1, firstOutputSequenceNumber = sequence))
                 try {
                     rolling.compose(inputs)
                     val decision = rolling.lastRoute
@@ -302,7 +309,7 @@ class ArchitectureGBAndroidTest {
                     try {
                         assertArrayEquals(expected.initializationSegment, window.initializationSegment)
                         val last = window.fragments.last()
-                        assertEquals(index+1L, last.sequenceNumber)
+                        assertEquals(sequence, last.sequenceNumber)
                         assertArrayEquals(expected.mediaFragments.single(), last.mediaFragment)
                     } finally { window.zero() }
                 } finally {
@@ -310,9 +317,85 @@ class ArchitectureGBAndroidTest {
                     expected.mediaFragments.forEach { it.fill(0) }
                     inputs.forEach { it.mediaFragments.forEach { b -> b.fill(0) } }
                 }
+                sequence++
+                offset = Math.addExact(offset, duration)
+                if (index == 2) {
+                    // Retain the original independent-fragment/OFF checks, then
+                    // exercise actual dependent fragments before disabling Rust.
+                    verifyRollingDependentWindow(rolling, request, inits, media, sequence, offset)
+                    sequence += 4L
+                    offset = Math.addExact(offset, duration)
+                }
             }
         } finally { rolling.reset() }
         Log.i("PitwallGB", "GB rolling clear HLS actual Rust publication, contiguous timing, JVM reference and OFF parity PASS")
+    }
+
+    /** Split genuine encoded pictures at non-sync sample boundaries without
+     * changing payloads, flags, or cadence. Publish 1, then 1, then 2 pieces
+     * through the production rolling path (GBC1, GBC2 with 2 and 4 fragments). */
+    private fun verifyRollingDependentWindow(
+        rolling: ClearCmafArchiveComposition, request: HevcClearCmafGridComposer.Request,
+        inits: List<ByteArray>, media: List<ByteArray>, sequence: Long, offset: Long,
+    ) {
+        val reports = inits.map { CmafBoxInspector.inspect(it) }
+        val first = CmafBoxInspector.inspect(media.first(), reports.first()).fragments.single()
+        val timings = first.sampleTimings
+        val boundaries = mutableListOf(0)
+        for (part in 1..3) {
+            val target = timings.size * part / 4
+            val cut = (maxOf(target, boundaries.last() + 1) until timings.size)
+                .first { (requireNotNull(timings[it].sampleFlags) and 0x10000L) != 0L }
+            boundaries += cut
+        }
+        boundaries += timings.size
+        val windows = media.mapIndexed { feed, source ->
+            val track = reports[feed].tracks.single()
+            val fragment = CmafBoxInspector.inspect(source, reports[feed]).fragments.single()
+            val data = ByteBuffer.wrap(source).order(ByteOrder.BIG_ENDIAN)
+            data.position(data.int + 8)
+            val samples = fragment.sampleTimings.map { timing ->
+                val bytes = ByteArray(requireNotNull(timing.sampleSizeBytes).toInt()).also { data.get(it) }
+                HevcClearCmafFragmentWriter.Sample(bytes, requireNotNull(timing.durationTicks),
+                    requireNotNull(timing.compositionOffsetTicks), requireNotNull(timing.sampleFlags))
+            }
+            assertFalse(data.hasRemaining())
+            try {
+                boundaries.zipWithNext().mapIndexed { part, (start, end) ->
+                    val base = Math.addExact(requireNotNull(fragment.sampleTimings[start].decodeTimeTicks), offset)
+                    HevcClearCmafFragmentWriter.write(requireNotNull(track.trackId), part + 1L,
+                        base, samples.subList(start, end), false, false)
+                }
+            } finally { samples.forEach { it.data.fill(0) } }
+        }
+        val fullFeeds = inits.indices.map { i ->
+            HevcClearCmafGridComposer.Feed(inits[i], windows[i], "fixture-$i")
+        }
+        val reference = HevcClearCmafGridComposer.compose(request.copy(feeds = fullFeeds,
+            outputTrackId = 1, firstOutputSequenceNumber = sequence))
+        try {
+            for ((start, end) in listOf(0 to 1, 1 to 2, 2 to 4)) {
+                rolling.compose(fullFeeds.map { it.copy(mediaFragments = it.mediaFragments.subList(start, end)) })
+                assertEquals("Dependent rolling window $start..$end: ${rolling.lastRoute.reason}",
+                    NativeStitchingSelection.Route.RUST, rolling.lastRoute.actual)
+                val window = requireNotNull(rolling.outputWindow())
+                try {
+                    assertArrayEquals(reference.initializationSegment, window.initializationSegment)
+                    val actual = window.fragments.takeLast(end - start)
+                    assertEquals(end - start, actual.size)
+                    actual.forEachIndexed { index, fragment ->
+                        val position = start + index
+                        assertEquals(sequence + position, fragment.sequenceNumber)
+                        assertArrayEquals(reference.mediaFragments[position], fragment.mediaFragment)
+                    }
+                } finally { window.zero() }
+            }
+        } finally {
+            reference.initializationSegment.fill(0)
+            reference.mediaFragments.forEach { it.fill(0) }
+            windows.flatten().forEach { it.fill(0) }
+        }
+        Log.i("PitwallGB", "GB dependent clear HLS 2/4-fragment windows preserve POC, timing and exact JVM output PASS")
     }
 
     /** Same actual JVM composer and native worker, but the second source has
@@ -379,6 +462,30 @@ class ArchitectureGBAndroidTest {
                 assertArrayEquals(reference.initializationSegment, result.initialization)
                 assertArrayEquals(reference.mediaFragments.single(), result.media)
             } finally { result.wipe() }
+            // Make the three-byte source the reference input, preserving the
+            // tile placement. Its output hvcC and every NAL length must agree.
+            val reversed = variantRequest.copy(feeds = variantRequest.feeds.reversed(),
+                cells = variantRequest.cells.map { it.copy(feedIndex = 1 - it.feedIndex) })
+            val shortReference = HevcClearCmafGridComposer.compose(reversed)
+            try {
+                val shortCfg = requireNotNull(CmafBoxInspector.inspect(shortReference.initializationSegment)
+                    .tracks.single().hevcConfiguration)
+                assertEquals(3, shortCfg.nalLengthSize)
+                val shortPacket = NativeClearArchiveJob.encode(request.outputTrackId,
+                    request.firstOutputSequenceNumber, request.frameRateNumerator, request.frameRateDenominator,
+                    geometry.copy(cells = reversed.cells), variantInits.reversed(), variantMedia.reversed()).bytes
+                try {
+                    val actual = NativeClearArchiveJob.execute(engine, shortPacket, true, 5_000) {}
+                    try {
+                        assertArrayEquals(shortReference.initializationSegment, actual.initialization)
+                        assertArrayEquals(shortReference.mediaFragments.single(), actual.media)
+                        assertTrue(CmafBoxInspector.inspect(actual.media, CmafBoxInspector.inspect(actual.initialization)).errors.isEmpty())
+                    } finally { actual.wipe() }
+                } finally { shortPacket.fill(0) }
+            } finally {
+                shortReference.initializationSegment.fill(0)
+                shortReference.mediaFragments.forEach { it.fill(0) }
+            }
             // Invalid in-band VPS identity must fail, including after the
             // worker has cached this exact initialization and geometry.
             val badSets = samples.first().nals.toMutableList()

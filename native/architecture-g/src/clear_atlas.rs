@@ -12,7 +12,7 @@ use crate::hevc_parameters::Parameters;
 use crate::hevc_poc::{Identity, Tracker};
 use crate::hevc_slice::Slice;
 
-const MAX_FEEDS: usize = 24;
+pub(crate) const MAX_FEEDS: usize = 24;
 const MAX_COLUMNS: usize = 20;
 const MAX_ROWS: usize = 22;
 const MAX_SEGMENT_SLICES: usize = 16_384;
@@ -35,6 +35,7 @@ pub struct Grid<'a> {
 
 struct Source {
     context: TrackContext,
+    timescale: u32,
     nal_prefix: usize,
     parameter_sets: [Vec<u8>; 3],
     parameters: Parameters,
@@ -58,6 +59,7 @@ pub struct Atlas {
     output: Parameters,
     placements: Vec<Placement>,
     track: u32,
+    output_nal_prefix: usize,
     initialization: Vec<u8>,
 }
 
@@ -97,6 +99,7 @@ impl Atlas {
                 init,
                 Source {
                     context: init.fragment_context(),
+                    timescale: init.timescale,
                     nal_prefix: init.configuration.nal_length_size(),
                     parameter_sets,
                     parameters,
@@ -104,18 +107,13 @@ impl Atlas {
                 },
             ));
         }
-        // The reference output initialization declares four-byte NAL lengths.
-        // Secondary inputs may have another legal length width, but a first
-        // source with a shorter prefix must stay on the existing JVM route.
-        if sources[0].1.nal_prefix != 4 {
-            return Err(Error::Unsupported);
-        }
+        let output_nal_prefix = sources[0].1.nal_prefix;
         let template_index = grid.cells.first().ok_or(Error::Metadata)?.feed;
         let (template_init, template) = sources.get(template_index).ok_or(Error::Metadata)?;
-        let timescale = template_init.timescale;
+        let timescale = sources[0].0.timescale;
         let prefix = template.parameters.prefix;
-        if sources.iter().any(|(init, source)| {
-            init.timescale != timescale || source.parameters.prefix.log2_ctb != prefix.log2_ctb
+        if sources.iter().any(|(_, source)| {
+            source.parameters.prefix.log2_ctb != prefix.log2_ctb
         }) {
             return Err(Error::Unsupported);
         }
@@ -167,7 +165,8 @@ impl Atlas {
         if represented[..sources.len()].contains(&false) {
             return Err(Error::Metadata);
         }
-        let hvcc = generated.hvcc()?;
+        let mut hvcc = generated.hvcc()?;
+        hvcc[21] = (hvcc[21] & !3) | (output_nal_prefix as u8 - 1);
         let init_request = cmaf_init::Request {
             track_id: track,
             timescale,
@@ -190,6 +189,7 @@ impl Atlas {
             output: generated.parameters,
             placements,
             track,
+            output_nal_prefix,
             initialization,
         })
     }
@@ -204,6 +204,21 @@ impl Atlas {
         sequence: u32,
         output: &mut [u8],
     ) -> Result<usize, Error> {
+        let mut trackers = [Tracker::default(); MAX_FEEDS];
+        self.write_window_fragment(input, sequence, output, &mut trackers, None)
+            .map(|(size, _)| size)
+    }
+
+    /// The caller owns a bounded window and fresh trackers; no reference state
+    /// survives cancellation, rejection or a seek.
+    pub(crate) fn write_window_fragment(
+        &self,
+        input: &[&[u8]],
+        sequence: u32,
+        output: &mut [u8],
+        trackers: &mut [Tracker; MAX_FEEDS],
+        previous_end: Option<i64>,
+    ) -> Result<(usize, i64), Error> {
         if input.len() != self.sources.len() {
             return Err(Error::Metadata);
         }
@@ -216,6 +231,9 @@ impl Atlas {
             fragments.push(Fragment::parse_with_context(media, source.context)?);
         }
         let reference = &fragments[0];
+        if previous_end.is_some_and(|end| end != reference.decode_time) {
+            return Err(Error::Timing);
+        }
         if fragments
             .iter()
             .any(|fragment| fragment.samples.len() != reference.samples.len())
@@ -231,7 +249,6 @@ impl Atlas {
         if pictures.saturating_mul(source_tiles + self.placements.len()) > MAX_SEGMENT_SLICES {
             return Err(Error::Limit);
         }
-        let mut trackers = [Tracker::default(); MAX_FEEDS];
         let mut picture_parts = Vec::new();
         picture_parts
             .try_reserve_exact(pictures)
@@ -245,10 +262,10 @@ impl Atlas {
             let mut order: Option<Identity> = None;
             for (feed, (source, fragment)) in self.sources.iter().zip(&fragments).enumerate() {
                 let incoming = &fragment.samples[index];
-                match_timing(source_sample, incoming)?;
+                match_timing(source_sample, self.sources[0].timescale, incoming, source.timescale)?;
                 let slices = source.slices(incoming)?;
                 let picture = slices[0].prefix.picture.ok_or(Error::Metadata)?;
-                if index == 0
+                if previous_end.is_none() && index == 0
                     && (!(16..=21).contains(&picture.nal_type) || incoming.flags & 0x1_0000 != 0)
                 {
                     return Err(Error::Unsupported);
@@ -267,7 +284,7 @@ impl Atlas {
                 let position = trackers[feed].advance(
                     picture,
                     source.parameters.prefix.poc_lsb_bits,
-                    index == 0,
+                    previous_end.is_none() && index == 0,
                 )?;
                 if order.is_some_and(|previous| previous != position) {
                     return Err(Error::Timing);
@@ -284,7 +301,7 @@ impl Atlas {
                     self.output
                         .rewrite_tile(&feed_slices[feed][tile], placement.address, None)?;
                 output_bytes = output_bytes
-                    .checked_add(nal.header.len() + nal.tail.len() + 4)
+                    .checked_add(nal.header.len() + nal.tail.len() + self.output_nal_prefix)
                     .ok_or(Error::Limit)?;
                 if output_bytes > output.len().min(MAX_BYTES) {
                     return Err(Error::Limit);
@@ -305,15 +322,18 @@ impl Atlas {
                 cto: i32::try_from(sample.composition_offset).map_err(|_| Error::Timing)?,
             });
         }
-        clear_cmaf::write_nal_parts(
+        let last = reference.samples.last().ok_or(Error::Timing)?;
+        let end = last.decode_time.checked_add(i64::from(last.duration)).ok_or(Error::Timing)?;
+        let size = clear_cmaf::write_nal_parts(
             self.track,
             sequence,
             reference.decode_time as u64,
             &samples,
-            4,
+            self.output_nal_prefix,
             output,
         )
-        .ok_or(Error::Limit)
+        .ok_or(Error::Limit)?;
+        Ok((size, end))
     }
 }
 
@@ -402,20 +422,23 @@ fn tile_locations(parameters: &Parameters) -> Result<Vec<Tile>, Error> {
     Ok(result)
 }
 
-fn match_timing(a: &Sample<'_>, b: &Sample<'_>) -> Result<(), Error> {
-    if (
-        a.duration,
-        a.flags,
-        a.decode_time,
-        a.composition_offset,
-        a.presentation_time,
-    ) != (
-        b.duration,
-        b.flags,
-        b.decode_time,
-        b.composition_offset,
-        b.presentation_time,
-    ) {
+fn match_timing(a: &Sample<'_>, a_scale: u32, b: &Sample<'_>, b_scale: u32) -> Result<(), Error> {
+    if (a.flags | b.flags) & 0xf000_0000 != 0 {
+        return Err(Error::Metadata);
+    }
+    if a_scale == 0 || b_scale == 0 || (a.flags ^ b.flags) & 0x0fff_0000 != 0 {
+        return Err(Error::Timing);
+    }
+    // Exact rational clock comparison. The i64-by-u32 product fits i128;
+    // never round timestamps or alter the first source's output clock.
+    let equal = |left: i64, right: i64| {
+        i128::from(left) * i128::from(b_scale) == i128::from(right) * i128::from(a_scale)
+    };
+    if !equal(i64::from(a.duration), i64::from(b.duration))
+        || !equal(a.decode_time, b.decode_time)
+        || !equal(a.composition_offset, b.composition_offset)
+        || !equal(a.presentation_time, b.presentation_time)
+    {
         return Err(Error::Timing);
     }
     Ok(())

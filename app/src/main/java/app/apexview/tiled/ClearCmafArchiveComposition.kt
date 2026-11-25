@@ -79,8 +79,10 @@ internal class ClearCmafArchiveComposition(
             else nativeClear.disable(if (requested) "NO_DEVICE_BUDGET_CONTEXT" else "USER_DISABLED", requested)
         }
         val expectedInit = initialization
-        val eligible = independentlyDecodable && previous == 0 &&
-            request.feeds.all { it.mediaFragments.size == 1 } && expectedInit != null
+        val windowCount = request.feeds.first().mediaFragments.size
+        val eligible = (independentlyDecodable && previous == 0 || previous > 0) &&
+            windowCount in 1..NativeClearArchiveJob.MAX_WINDOW &&
+            request.feeds.all { it.mediaFragments.size == windowCount } && expectedInit != null
         val produced = if (requested && nativeClear.candidate && eligible) {
             val validated = request.copy(feeds = request.feeds.map { feed ->
                 val init = CmafBoxInspector.inspect(feed.initializationSegment)
@@ -92,8 +94,8 @@ internal class ClearCmafArchiveComposition(
             nativeClear.compose(validated, requireNotNull(expectedInit), foreground = true,
                 timeoutMs = 5_000L) { HevcClearCmafGridComposer.compose(validated) }
         } else {
-            // Do not reuse a proof across a history-dependent boundary.
-            // Keep its original random-access history and full JVM checks.
+            // An unanchored or oversized window must not reuse a native proof.
+            // Keep the original full JVM checks and explicit fallback.
             if (requested && nativeClear.candidate && expectedInit != null && !eligible)
                 nativeClear.invalidateForSeek()
             reportRoute(requested, "JVM", when {
@@ -101,21 +103,25 @@ internal class ClearCmafArchiveComposition(
                 nativeContext == null -> "NO_DEVICE_BUDGET_CONTEXT"
                 !nativeClear.candidate -> nativeClear.decision.reason
                 expectedInit == null -> "INITIAL_REFERENCE_PENDING"
-                else -> "HISTORY_DEPENDENT_OR_MULTI_FRAGMENT"
+                else -> "CLEAR_WINDOW_UNANCHORED_OR_OUTSIDE_NATIVE_BOUND"
             })
             NativeClearArchiveBridge.Produced(HevcClearCmafGridComposer.compose(request))
         }
         val output = produced.output
+        var published = false
+        try {
         val initReport = CmafBoxInspector.inspect(output.initializationSegment)
+        require(initReport.errors.isEmpty())
         val outputTrack = initReport.tracks.single()
         output.mediaFragments.take(previous).forEach { it.fill(0) }
         val newFragments = output.mediaFragments.drop(previous).mapIndexed { index, bytes ->
-            val metadata = CmafBoxInspector.inspect(bytes, initReport).fragments.single()
+            val inspected = CmafBoxInspector.inspect(bytes, initReport)
+            require(inspected.errors.isEmpty())
+            val metadata = inspected.fragments.single()
             ProtectedHevcLiveComposition.OutputFragment(sequence + index, bytes, timescale,
                 requireNotNull(metadata.baseDecodeTimeTicks), requireNotNull(metadata.totalDurationTicks), metadata.sampleCount,
                 requireNotNull(outputTrack.width), requireNotNull(outputTrack.height), feeds.associate { it.label to 0L })
         }
-        try {
             history.lastOrNull()?.let { previous ->
                 require(previous.baseDecodeTimeTicks + previous.durationTicks == newFragments.first().baseDecodeTimeTicks) {
                     "Clear archive output is not decode-time contiguous"
@@ -134,11 +140,14 @@ internal class ClearCmafArchiveComposition(
                 while (history.size > ArchiveBufferPolicy.RETAINED_SEGMENTS) history.removeAt(0).zero()
                 status = "CLEAR_HEVC_CMAF_COMPOSED_NOT_YET_PLAYED; layout=${columns}x${rows}"
             }
+            published = true
             if (requested && eligible)
                 reportRoute(requested, if (produced.nativeEpoch != null) "RUST" else "JVM",
                     if (produced.nativeEpoch != null) "VALIDATED_CLEAR_ROLLING" else nativeClear.decision.reason)
-        } catch (error: Throwable) { newFragments.forEach { it.zero() }; throw error
-        } finally { output.initializationSegment.fill(0) }
+        } finally {
+            output.initializationSegment.fill(0)
+            if (!published) output.mediaFragments.forEach { it.fill(0) }
+        }
     }
 
     fun outputTiming(): CmafWindowTiming? = CmafWindowTiming.from(history)
