@@ -3,6 +3,10 @@
 
 > Instructions to the next engineering chat: read this entire document before acting. Continue the existing project in its existing working branch. Rust is the selected native implementation language. Start with Phase G.0, not a wholesale rewrite. Preserve all existing features and the original 16-workstream plan. Execute implementation only when instructed to proceed. This document is the single active Architecture G handover and engineering ledger; update it in place rather than creating competing G plans.
 
+### Build 857 verified GREEN — current execution checkpoint (25 November 2026)
+
+Build 857 [run 45539807100](https://github.com/cooldarshak/apexview/actions/runs/45539807100), commit 9dcbef0abc3fb92c35eb6c57d0db665cdb254fb1. Five jobs green including final signed publication. Stable Rust and pinned nightly ASan/LSan 22/22 each; 106 slice exact differential cases, three clear CMAF cases and existing independent decoder/pixel gates; four ABI symbols/ELF/ZIP alignment, signed upgrade, API29/31/36 G.0 4 tests and G-A 2 tests per API. Native bridge churn, device budget and lease/generation logs PASS; existing original tests retained. APK 14989576250; test APK 14989281975; symbols 14989211632; host evidence 14987924146; combined runtime 14989436492. G.0 signed off by user; G-A foundation coding and automated verification complete. **G-B next when explicitly instructed.** Existing diagnostic kernels and clear conversion dispatch do not amount to production Rust HEVC/CMAF stitching. Setting default OFF, actual JVM all paths, clear/protected native route pending. Physical TCL, ARM G-A, matched full playback/DRM and 16KB runtime gates carried forward, not waived. See [new detailed Build 857 handover](PITWALL_TV_BUILD_857_ARCHITECTURE_G_HANDOVER_2026-11-25.md). Maintain this file as canonical G ledger; new handover is a dated snapshot, not a competing plan.
+
 ## 1. Project context and exact starting checkpoint
 
 - Repository: `cooldarshak/apexview`
@@ -206,30 +210,30 @@ Review earlier project research (Android performance/TV samples, reference HEVC 
 
 ## 9. Phase G.0 — mandatory validation before production port
 
-Initial status for every G.0 row: **Not started** (coding/automation/physical evidence open). Treat G.0 as one consolidated phase with meaningful batches and real gates. Build a minimal Rust module and representative benchmarks, not three full engines.
+**Phase signed off by user after Build 853; G.0 is closed as an engineering gate.** Carry outstanding physical evidence forward rather than inventing results. The following table records exact completion boundaries.
 
-| ID | Required validation and deliverable |
-| --- | --- |
-| G.0.1 | Audit latest JVM stitcher, actual active entry points, clear/protected paths and existing tests |
-| G.0.2 | Identify real remaining allocations/copies, quantify ownership and publication points |
-| G.0.3 | Establish matched CPU/memory/latency baselines on current JVM, both target devices |
-| G.0.4 | Integrate minimal Rust native module behind diagnostic feature gate |
-| G.0.5 | Configure pinned Cargo/rustc/NDK/cargo-ndk/JNI-RS and locked dependencies |
-| G.0.6 | Compile ARM32 and ARM64; preserve all existing ABIs, verify x86_64 emulator |
-| G.0.7 | Integrate into existing GitHub Actions without weakening prior checks |
-| G.0.8 | Verify signed APK packaging and upgrade compatibility |
-| G.0.9 | Verify library loading on S22 and TCL using phone-operable logs |
-| G.0.10 | Verify reusable Direct ByteBuffer interoperability, bounds, read/write ownership |
-| G.0.11 | Prototype fixed-capacity arena, lease/generation and exhaustion behavior |
-| G.0.12 | Representative equivalent JVM/Rust/C++ micro- and fixture benchmarks |
-| G.0.13 | Deterministic output equivalence against current JVM and independent fixtures |
-| G.0.14 | Native ownership/cancellation/seek/close tests including stale lease and races |
-| G.0.15 | 4KB/16KB ELF/APK alignment plus runtime compatibility evidence |
-| G.0.16 | Native crash reporting and build-ID symbolication from mobile-accessible artifacts |
-| G.0.17 | Verify authorized DRM integration unchanged; native prototype does not weaken policy |
-| G.0.18 | Establish physical-device benchmark collection, upload and analysis through phone |
-| G.0.19 | Demonstrate complete mobile-only workflow, no PC required |
-| G.0.20 | Evidence-based final feasibility report for selected Rust, comparison with limited C++ control and go/no-go |
+| ID | Required validation and deliverable | Build 857 checkpoint |
+| --- | --- | --- |
+| G.0.1 | Audit latest JVM stitcher, actual active entry points, clear/protected paths and existing tests | Active clear/protected routes audited; retain actual runtime profiling |
+| G.0.2 | Identify real remaining allocations/copies, quantify ownership and publication points | Source ownership/copy inventory and boundary counters implemented; complete Media3/codec attribution G-C |
+| G.0.3 | Establish matched CPU/memory/latency baselines on current JVM, both target devices | Matched physical JVM baseline on both devices deferred |
+| G.0.4 | Integrate minimal Rust native module behind diagnostic feature gate | Minimal JNI diagnostic implemented; G-A adds bounded worker |
+| G.0.5 | Configure pinned Cargo/rustc/NDK/cargo-ndk/JNI-RS and locked dependencies | Stable Rust 1.91.1, NDK 28.2.13676358, cargo-ndk 4.1.2, JNI 0.21.1, lock verified |
+| G.0.6 | Compile ARM32 and ARM64; preserve all existing ABIs, verify x86_64 emulator | All four ABI builds; x86_64 emulators verified |
+| G.0.7 | Integrate into existing GitHub Actions without weakening prior checks | Existing CI with host, sanitizer, differential, packaging and runtime gates |
+| G.0.8 | Verify signed APK packaging and upgrade compatibility | Signed custom APK, cert identity and upgrade marker pass |
+| G.0.9 | Verify library loading on S22 and TCL using phone-operable logs | Phone API36 diagnostic pass; TCL deferred |
+| G.0.10 | Verify reusable Direct ByteBuffer interoperability, bounds, read/write ownership | Private direct buffers checked; G-A native-owned views and copies verified |
+| G.0.11 | Prototype fixed-capacity arena, lease/generation and exhaustion behavior | Bounded arenas, exclusive leases, exhaustion and generations tested |
+| G.0.12 | Representative equivalent JVM/Rust/C++ micro- and fixture benchmarks | Host JVM/Rust/C++ controls and physical phone microbenchmarks; not full playback |
+| G.0.13 | Deterministic output equivalence against current JVM and independent fixtures | 106 slice cases and 3 CMAF cases; existing independent decode gates; full native compose G-B |
+| G.0.14 | Native ownership/cancellation/seek/close tests including stale lease and races | Host stress, stale lease/close and Android lifecycle tests pass |
+| G.0.15 | 4KB/16KB ELF/APK alignment plus runtime compatibility evidence | 4KB runtime verified; 16KB ELF/ZIP alignment pass; physical 16KB runtime deferred |
+| G.0.16 | Native crash reporting and build-ID symbolication from mobile-accessible artifacts | GNU build IDs, unstripped/packaged match, source symbolication evidence |
+| G.0.17 | Verify authorized DRM integration unchanged; native prototype does not weaken policy | Existing authorization/DRM untouched; real protected native pipeline still G-B |
+| G.0.18 | Establish physical-device benchmark collection, upload and analysis through phone | Phone diagnostic log collected; full matched playback traces deferred |
+| G.0.19 | Demonstrate complete mobile-only workflow, no PC required | GitHub Actions + phone APK install/aShell workflow demonstrated; TV native run deferred |
+| G.0.20 | Evidence-based final feasibility report for selected Rust, comparison with limited C++ control and go/no-go | Rust selected; user sign-off to proceed; no production-default authorization |
 
 ### G.0 execution checkpoint — first consolidated feasibility batch (24 November 2026)
 
@@ -365,30 +369,30 @@ Rust is selected. Go forward if equal or better than C++, or within the proposed
 
 ## 10. Architecture G master engineering plan — G.1–G.20
 
-All rows start Not started. Update the coding, automated, physical and measured-result columns with exact evidence, not speculative percentages. P0 gates protect correctness, safety and compatibility; P1 work is grouped into coherent follow-up batches. Architecture G extends the original plan; no independent competing roadmap.
+Build 857 is the verified G-A foundation baseline. G.0 is signed off by the user. G-A foundation coding and automated gates are complete; G-B–G-D are not started as integrated phases. Existing diagnostic kernels do not establish production stitching. Update coding, automated, physical and measured-result columns with exact evidence. P0 gates protect correctness, safety and compatibility; P1 work is grouped into coherent follow-up batches. Architecture G extends the original plan; no independent competing roadmap.
 
 | ID | Workstream / required deliverable | Priority | Coding | Automated | Physical / measurement |
 | --- | --- | --- | --- | --- | --- |
-| G.1 | Audit/profile existing JVM stitcher, establish repeatable baseline | P0 | Foundation audit + boundary counters complete; physical profile G-C/D | Build 854 baseline green; candidate CI pending | Deferred |
-| G.2 | Fixed-capacity native input/output memory arenas | P0 | Bounded native arena foundation complete | Build 854 baseline green; candidate CI pending | Deferred |
+| G.1 | Audit/profile existing JVM stitcher, establish repeatable baseline | P0 | Foundation audit + boundary counters complete; physical profile G-C/D | Build 857 GREEN; foundation gates passed | Deferred |
+| G.2 | Fixed-capacity native input/output memory arenas | P0 | Bounded native arena foundation complete | Build 857 GREEN; foundation gates passed | Deferred |
 | G.3 | Port native HEVC parsing and stitching with exact invariants | P0 | Not started | Pending | Pending |
 | G.4 | Native CMAF moof/mdat assembly, exact sizes/offsets/timestamps | P0 | Not started | Pending | Pending |
 | G.5 | Preserve existing DRM compatibility validations and authorized pipeline | P0 | Not started | Pending | Pending |
-| G.6 | Explicit buffer ownership, leases and lifecycle | P0 | Deterministic native slots/bridge ownership and joined close complete | Build 854 baseline green; candidate CI pending | Deferred |
-| G.7 | Bounded queues, backpressure and deadline-aware producer/consumer coordination | P0 | Bounded deadline scheduler and expiry tests complete | Build 854 baseline green; candidate CI pending | Deferred |
-| G.8 | Reusable Direct ByteBuffer integration, checked JNI ownership | P0 | Checked native-owned direct bridge, batch JNI and copy accounting complete | Build 854 baseline green; candidate CI pending | Deferred |
+| G.6 | Explicit buffer ownership, leases and lifecycle | P0 | Deterministic native slots/bridge ownership and joined close complete | Build 857 GREEN; foundation gates passed | Deferred |
+| G.7 | Bounded queues, backpressure and deadline-aware producer/consumer coordination | P0 | Bounded deadline scheduler and expiry tests complete | Build 857 GREEN; foundation gates passed | Deferred |
+| G.8 | Reusable Direct ByteBuffer integration, checked JNI ownership | P0 | Checked native-owned direct bridge, batch JNI and copy accounting complete | Build 857 GREEN; foundation gates passed | Deferred |
 | G.9 | Reduce network-to-native copies with measured boundary accounting | P1 | Not started | Pending | Pending |
 | G.10 | Reduce Media3 publication copies without speculative fork | P1 | Not started | Pending | Pending |
 | G.11 | ARM NEON optimization only where profiling justifies it | P1 | Not started | Pending | Pending |
 | G.12 | Allocation-free steady-state stitching hot path where achievable | P1 | Not started | Pending | Pending |
-| G.13 | Cancellation, seek-generation invalidation, stale publication prevention | P1 | Generation cancellation and globally unique stale leases complete | Build 854 baseline green; candidate CI pending | Deferred |
+| G.13 | Cancellation, seek-generation invalidation, stale publication prevention | P1 | Generation cancellation and globally unique stale leases complete | Build 857 GREEN; foundation gates passed | Deferred |
 | G.14 | Compatible feed switching and bounded priority prefetch | P1 | Not started | Pending | Pending |
-| G.15 | Leak detection, fuzzing, sanitizer and safety tests | P0 | Foundation stress, ASan/LSan and Android lifecycle gates added | Build 854 baseline green; candidate CI pending | Deferred |
+| G.15 | Leak detection, fuzzing, sanitizer and safety tests | P0 | Foundation stress, ASan/LSan and Android lifecycle gates added | Build 857 GREEN; foundation gates passed | Deferred |
 | G.16 | Byte-for-byte JVM/native differential regression plus independent decode | P0 | Not started | Pending | Pending |
-| G.17 | Adaptive memory budgets for low-RAM devices | P0 | Observed device-headroom planning and admission provider complete; G-B dispatch pending | Build 854 baseline green; candidate CI pending | Deferred |
+| G.17 | Adaptive memory budgets for low-RAM devices | P0 | Observed device-headroom planning and admission provider complete; G-B dispatch pending | Build 857 GREEN; foundation gates passed | Deferred |
 | G.18 | Sustained CPU/memory/power/thermal and playback profiling | P0 | Not started | Pending | Pending |
 | G.19 | Preserve every existing playback feature and mode | P0 | Not started | Pending | Pending |
-| G.20 | Android phone/TV ABI, API, alignment and signed update compatibility | P0 | Four-ABI symbols, alignment, signed upgrade and runtime gates retained | Build 854 baseline green; candidate CI pending | Deferred |
+| G.20 | Android phone/TV ABI, API, alignment and signed update compatibility | P0 | Four-ABI symbols, alignment, signed upgrade and runtime gates retained | Build 857 GREEN; foundation gates passed | Deferred |
 
 ### Proposed consolidated implementation batches (refine after audit)
 
@@ -402,18 +406,18 @@ Dependencies overlap intentionally: safety/differential/compatibility checks run
 
 ### 10.1 Mandatory refinement ledger — eight improvements integrated into existing IDs
 
-These are additional acceptance requirements within G.0/G.1–G.20 and the original workstreams, not a separate competing roadmap. All eight start **Not started** for Architecture G. Audit existing implementations first; retain and reuse any already-proven mechanisms rather than duplicating them.
+These are additional acceptance requirements within G.0/G.1–G.20 and the original workstreams, not a separate competing roadmap. Status reflects Build 857; remaining media integration and physical acceptance are not waived. Audit existing implementations first; retain and reuse any already-proven mechanisms rather than duplicating them.
 
 | Refinement | Workstream mapping | Implementation and verification | Status |
 | --- | --- | --- | --- |
-| R1 Fused processing | G.3, G.4, G.9, G.12, G.16 | Fuse compatible scan/parse/rewrite/assembly passes; use checked size planning and write to final leased output where permitted; eliminate complete intermediate materializations only after equivalence; measure bytes copied, allocations, CPU and p99; independent decode and protected invariant tests. | Not started |
-| R2 Deadline-aware scheduling | G.7, G.13, G.14 | Prioritize earliest required playback fragments and seeks over speculative prefetch; derive deadlines/slack from media timeline, playback speed, buffer and measured delivery; bound queues, avoid starvation and respect cancellation/generation; test slow CDN, stalled consumer, seeks and speed changes. | Not started |
-| R3 Device-adaptive arenas | G.2, G.6, G.17 | Size bounded arenas using actual fragment distribution, feed geometry, process headroom, low-RAM indicators and codec/overlay needs; enforce total ceiling including in-flight leases and old/new generations; controlled exhaustion, trim at safe boundaries, no arbitrary large TV preallocation; measure native/JVM/PSS and race endurance. | Not started |
-| R4 Adaptive native worker pool | G.6, G.7, G.13, G.18 | Reusable bounded workers with conservative measured concurrency; preserve order and dependencies, leave CPU capacity for codec/audio/UI/GL/Cast; no thread per feed or forced use of all cores; test 1-worker vs measured alternatives, thermal/CPU contention, cancellation and shutdown; no model-specific hacks. | Not started |
-| R5 Batched JNI | G.8, G.9, G.12 | Submit fragment/work batches instead of per-NAL JNI crossings, reuse direct views and metadata descriptors; measure JNI call rate/copy/allocation cost; retain checked handles, leases and no unwind across JNI; validate both ARM ABIs and teardown. Android JNI guidance: https://developer.android.com/training/articles/perf-jni | Not started |
-| R6 Reusable stream analysis | G.3, G.14, G.16 | Bounded cache of validated stream configuration and safe reusable parsing results keyed by stream identity, rendition, codec configuration and relevant generation; invalidate/revalidate at discontinuity, configuration change, seek or track replacement as required; never reuse frame-varying or security-sensitive metadata incorrectly; test stale cache and differential results. | Not started |
-| R7 Layout-aware adaptive quality | G.14, G.17, G.19, existing P1.3 | When Auto is selected, consider actual visible feed dimensions, available compatible renditions, bandwidth, decoder constraints and thermal/memory headroom; use hysteresis to avoid oscillation; preserve explicit manual per-feed selections and existing output geometry, no silent downgrade; verify resize, saved layouts, portrait/TV and Cast. | Not started |
-| R8 End-to-end attribution | G.0, G.1, G.18, existing P0.3/P1.2 | Correlate generation, fragment/sample IDs and timestamps across CDN, queueing, processing, publication, Media3, decoder, surface/presentation, overlay and Cast; separate CPU and wall time, copy bytes, GC, missed deadlines and frame drops; low-overhead bounded diagnostics with no credentials/media; matched physical A/B. | Not started |
+| R1 Fused processing | G.3, G.4, G.9, G.12, G.16 | Fuse compatible scan/parse/rewrite/assembly passes; use checked size planning and write to final leased output where permitted; eliminate complete intermediate materializations only after equivalence; measure bytes copied, allocations, CPU and p99; independent decode and protected invariant tests. | Diagnostic kernels proven; full fused engine pending G-B/C |
+| R2 Deadline-aware scheduling | G.7, G.13, G.14 | Prioritize earliest required playback fragments and seeks over speculative prefetch; derive deadlines/slack from media timeline, playback speed, buffer and measured delivery; bound queues, avoid starvation and respect cancellation/generation; test slow CDN, stalled consumer, seeks and speed changes. | Foundation complete; actual media deadlines/switching integration pending |
+| R3 Device-adaptive arenas | G.2, G.6, G.17 | Size bounded arenas using actual fragment distribution, feed geometry, process headroom, low-RAM indicators and codec/overlay needs; enforce total ceiling including in-flight leases and old/new generations; controlled exhaustion, trim at safe boundaries, no arbitrary large TV preallocation; measure native/JVM/PSS and race endurance. | Foundation complete; physical sizing and peak PSS pending |
+| R4 Adaptive native worker pool | G.6, G.7, G.13, G.18 | Reusable bounded workers with conservative measured concurrency; preserve order and dependencies, leave CPU capacity for codec/audio/UI/GL/Cast; no thread per feed or forced use of all cores; test 1-worker vs measured alternatives, thermal/CPU contention, cancellation and shutdown; no model-specific hacks. | One bounded native worker implemented; adaptive concurrency tuning pending G-C/D |
+| R5 Batched JNI | G.8, G.9, G.12 | Submit fragment/work batches instead of per-NAL JNI crossings, reuse direct views and metadata descriptors; measure JNI call rate/copy/allocation cost; retain checked handles, leases and no unwind across JNI; validate both ARM ABIs and teardown. Android JNI guidance: https://developer.android.com/training/articles/perf-jni | Foundation complete; real fragment dispatch/copy reduction pending |
+| R6 Reusable stream analysis | G.3, G.14, G.16 | Bounded cache of validated stream configuration and safe reusable parsing results keyed by stream identity, rendition, codec configuration and relevant generation; invalidate/revalidate at discontinuity, configuration change, seek or track replacement as required; never reuse frame-varying or security-sensitive metadata incorrectly; test stale cache and differential results. | Existing JVM reuse retained; native config cache pending G-B |
+| R7 Layout-aware adaptive quality | G.14, G.17, G.19, existing P1.3 | When Auto is selected, consider actual visible feed dimensions, available compatible renditions, bandwidth, decoder constraints and thermal/memory headroom; use hysteresis to avoid oscillation; preserve explicit manual per-feed selections and existing output geometry, no silent downgrade; verify resize, saved layouts, portrait/TV and Cast. | Pending G-C/D; current per-feed preferences preserved |
+| R8 End-to-end attribution | G.0, G.1, G.18, existing P0.3/P1.2 | Correlate generation, fragment/sample IDs and timestamps across CDN, queueing, processing, publication, Media3, decoder, surface/presentation, overlay and Cast; separate CPU and wall time, copy bytes, GC, missed deadlines and frame drops; low-overhead bounded diagnostics with no credentials/media; matched physical A/B. | Boundary counters implemented; full end-to-end physical attribution pending G-C/D |
 
 The scheduler must respond to downstream backpressure and bounded buffer availability; faster stitching must not blindly increase production or SurfaceFlinger congestion. The worker pool and arenas are common infrastructure but must not create contention in modes that do not stitch. Use measured concurrency and bounded memory rather than assuming the Rust port alone fixes TV rendering.
 
@@ -610,7 +614,7 @@ Investigate on-device G first: no added network hop, dedicated cloud costs, serv
 
 The user explicitly authorized a new dedicated branch for Architecture G and a consolidated updated plan, not implementation. All G changes must stay on feature/architecture-g-rust-stitching; main and feature/pitwall-performance-audit-plan remain unchanged unless separately authorized. Keep this inherited handover filename as the single active revised plan in the new branch to avoid duplicate contradictory ledgers. Preserve parent 16-workstream plan and 14-item status. No source, CI or dependency changes in this documentation pass; do not manually trigger a build or open a merge request. Existing push-triggered CI, if any, is governed by existing workflow configuration.
 
-## 23. Immediate next-chat execution checklist
+## 23. Historical initial-chat execution checklist (superseded by Build 857 checkpoint above; do not restart G.0)
 
 1. Connect GitHub and inspect latest main/working branch refs, source, plans, latest successful signed APK and CI logs.
 2. Confirm Build 842 or newer exact baseline; read the existing plan and all relevant handover/reference docs.
@@ -626,26 +630,20 @@ The user explicitly authorized a new dedicated branch for Architecture G and a c
 
 | Item | Status |
 | --- | --- |
-| Latest exact baseline | Build 842 GREEN; b9752ac9115b252c9de1f444662b8eb1252e751e |
-| Existing 13-item coding scope | Addressed in source with green automated suite; real-device acceptance open |
-| Original 16-workstream plan | Preserved; full requirement closure/physical acceptance not certified |
-| Architecture G conceptual design | Revision 2 consolidated; eight refinements mapped to existing G IDs |
-| Dedicated Architecture G branch | feature/architecture-g-rust-stitching; parent checkpoint 1c479fd6fa6ab5d8b0809d3e37f51ce6336a9028 |
-| User settings toggle / engine selector | Approved requirement; not implemented; default OFF |
-| Eight refinements R1–R8 | Planned, not started |
-| Media3 publication levels | Planned; evidence-gated |
-| TV root-cause confirmation | Fresh source and physical trace analysis pending G.0 |
-| Language | Rust selected by user |
-| Rust/C++ research | Architectural discussion completed; original references need G.0 verification |
-| Final repository-specific feasibility | G.0 pending |
-| Android mobile/TV support | Supported in principle; actual APK/ABI/runtime proof pending |
-| Mobile-only development | Required; Rust-specific end-to-end workflow not yet demonstrated |
-| Rust CI and module | Not implemented in Architecture G |
-| Native engine | Not implemented |
-| G.0, G.1–G.20 | G.0 user sign-off complete. Build 854 GREEN. G-A coding completion candidate; CI and carried physical gates pending. G-B–G-D not started |
-| Physical Rust benchmark / protected compatibility | Pending |
-| Measured performance gains | None established |
-| Native default or release | Not approved |
-| Main branch | Do not change |
+| Last exact tested baseline | Build 857 GREEN; 9dcbef0abc3fb92c35eb6c57d0db665cdb254fb1 |
+| G.0 | Signed off by user; physical deferrals carried forward |
+| G-A | Foundation coding and automated verification complete; physical acceptance open |
+| G-B | Next, when user authorizes: G.3/G.4/G.5/G.16 exact native port |
+| G-C | Pending: G.9/G.10/G.11/G.12/G.14 |
+| G-D | Pending: G.18/G.19 and carried physical gates |
+| User settings toggle | Implemented and persisted, OFF by default; actual JVM until integrated eligibility |
+| Existing original 13-item coding scope and 16-workstream plan | Preserved; no new release acceptance claim |
+| Native code | G-A bounded native worker and native-owned private direct bridge; current dispatch is clear conversion, not full media stitching |
+| Rust toolchain/CI | Pinned and verified on four Android ABIs; mobile-only development demonstrated |
+| Phone physical | G.0 diagnostic pass; full G-A and playback A/B pending |
+| TV and 16KB physical | Deferred; not waived |
+| DRM | Existing authorized paths unchanged; actual native protected support pending G-B |
+| Main and parent branches | Unchanged; no merge or release authorization |
 
-**Final objective:** production-quality, safe, efficient, low-copy Rust stitching that genuinely improves Android phone and TV playback while preserving all existing Pitwall TV features, authorized security boundaries and the mobile-only workflow. Build 842 is the reference, not an excuse to rewrite functioning components. Begin with measured feasibility, then complete the agreed consolidated work.
+**Use the [Build 857 new-chat handover](PITWALL_TV_BUILD_857_ARCHITECTURE_G_HANDOVER_2026-11-25.md) for next execution.** Build 857 is the reference, and only the user can authorize next phase or default switch. Preserve every feature and original plan.
+

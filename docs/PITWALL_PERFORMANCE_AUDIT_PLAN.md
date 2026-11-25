@@ -40,6 +40,8 @@ Build 855 stable and ASan/LSan Rust tests 22/22 passed each; Kotlin compile fail
 
 Build 856 stopped at coordinated-change contract (missing changed regression test in prior fix). Added targeted archive observer regression and reused exact verified output fragment for both size attribution and budget observation. No policy relaxation. Full CI pending.
 
+Build 857 verified GREEN (25 Nov 2026): run 45539807100, source 9dcbef0abc3fb92c35eb6c57d0db665cdb254fb1. G.0 user sign-off and G-A foundation coding/automated gates complete; stable and ASan/LSan 22/22, exact 106 slice comparisons, four ABIs, three Android runtime APIs, signed upgrade and final publication. Item 6 Architecture G is no longer deferred; next integrated phase G-B (G.3/G.4/G.5/G.16), only on user instruction. Native selector is persisted OFF, effective JVM until actual validated pipeline integration. Physical TCL/ARM G-A, matched playback/DRM, 16KB runtime and 16-workstream release acceptance remain open. See canonical [Architecture G plan](handovers/PITWALL_TV_ARCHITECTURE_G_RUST_HANDOVER.md) and [Build 857 handover](handovers/PITWALL_TV_BUILD_857_ARCHITECTURE_G_HANDOVER_2026-11-25.md). Historical rows below describing Architecture G as deferred refer to the original pre-G batch, not today's status. No source/workflow changes or new APK from this handover.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |
