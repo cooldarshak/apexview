@@ -577,8 +577,9 @@ class ArchitectureGBAndroidTest {
     }
 
     /** Every coded picture of the independent tiled fixture, with alternating
-     * header-only/three-clear-CABAC-byte synthetic labels. Track POC across
-     * the sequence and require exact native/JVM payload and metadata equality. */
+     * header-only/three-clear-CABAC-byte synthetic labels when the latter
+     * leaves a nonempty opaque tail. Short slices use the supported header-only
+     * splice instead. Track POC and require exact native/JVM output equality. */
     private fun verifyProtectedSequence(inits: List<ByteArray>, media: List<ByteArray>, outputInit: ByteArray) {
         val outConfig = requireNotNull(CmafBoxInspector.inspect(outputInit).tracks.single().hevcConfiguration)
         val outSets = outConfig.rawVpsNals + outConfig.rawSpsNals + outConfig.rawPpsNals
@@ -586,6 +587,9 @@ class ArchitectureGBAndroidTest {
         val outPps = outConfig.pps.single()
         val iv = ByteArray(16) { 47 }
         val ivIdentity = ProtectedValueFingerprint.fromBytes("iv", iv)
+        var headerOnlySlices = 0
+        var threeClearSlices = 0
+        var shortSliceFallbacks = 0
         val sources = inits.indices.map { feed ->
             val protectedInit = syntheticProtectedInit(inits[feed], 16)
             val protectedReport = CmafBoxInspector.inspect(protectedInit)
@@ -599,18 +603,46 @@ class ArchitectureGBAndroidTest {
             data.position(data.int + 8)
             val samples = timing.sampleTimings.mapIndexed { index, t ->
                 val sample = ByteArray(requireNotNull(t.sampleSizeBytes).toInt()).also { data.get(it) }
-                val nals = ByteBuffer.wrap(sample)
-                val ranges = mutableListOf<CmafBoxInspector.SubsampleEncryptionRange>()
-                while (nals.hasRemaining()) {
-                    val nal = ByteArray(nals.int).also { nals.get(it) }
-                    val parsed = HevcSliceHeaderParser.parse(nal, sps, pps)
-                    val opaque = index % 2 == 0
-                    val ref = HevcSliceHeaderRewriter.rewrite(nal, sps, pps, sps, pps,
-                        parsed.sliceSegmentAddress, preserveOpaqueCabacTail = opaque)
-                    val clearEnd = ref.sourceTailOffset + if (opaque) 0 else 1
-                    require(clearEnd < nal.size)
-                    ranges += CmafBoxInspector.SubsampleEncryptionRange(4 + clearEnd, (nal.size-clearEnd).toLong())
-                    ref.nal.fill(0); nal.fill(0)
+                // This input is genuinely clear test media. Inspect it before
+                // applying synthetic CBCS labels, rather than guessing that
+                // every encoded slice has at least four CABAC bytes.
+                val clearLayout = ProtectedHevcSampleLayout.inspect(sample, 4,
+                    listOf(CmafBoxInspector.SubsampleEncryptionRange(sample.size, 0)))
+                val access = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(
+                    sample, clearLayout, sps, pps, cfg.vps.single())
+                require(access.slices.size == clearLayout.nals.size) {
+                    "Fixture must contain one independently coded VCL NAL per source tile"
+                }
+                val ranges = clearLayout.nals.map { nal ->
+                    val slice = access.slices.single { it.nalIndex == nal.index }
+                    val threeClearEnd = slice.thirdClearCabacByteOffset?.plus(1)
+                    val wantsThree = index % 2 != 0
+                    val canUseThree = threeClearEnd != null && threeClearEnd < nal.nalLength
+                    val useThree = wantsThree && canUseThree
+                    val clearEnd = if (useThree) requireNotNull(threeClearEnd)
+                        else requireNotNull(slice.firstOpaqueCabacByteOffset)
+                    require(clearEnd in 3 until nal.nalLength) {
+                        "Invalid synthetic splice feed=$feed picture=$index nal=${nal.index} length=${nal.nalLength} clear=$clearEnd"
+                    }
+                    if (useThree) threeClearSlices++ else headerOnlySlices++
+                    if (wantsThree && !canUseThree) shortSliceFallbacks++
+                    CmafBoxInspector.SubsampleEncryptionRange(4 + clearEnd,
+                        (nal.nalLength - clearEnd).toLong())
+                }
+                // Confirm the actual protected inspection agrees with the
+                // synthetic labels before giving the sample to either engine.
+                val labelledLayout = ProtectedHevcSampleLayout.inspect(sample, 4, ranges)
+                val labelled = ProtectedHevcAccessUnitInspector.inspectLengthPrefixedSample(
+                    sample, labelledLayout, sps, pps, cfg.vps.single())
+                require(labelled.slices.size == access.slices.size)
+                labelled.slices.forEach { slice ->
+                    val nal = labelledLayout.nals[slice.nalIndex]
+                    val expectedClearEnd = if (slice.clearCabacBytes >= 3)
+                        requireNotNull(slice.thirdClearCabacByteOffset) + 1
+                        else requireNotNull(slice.firstOpaqueCabacByteOffset)
+                    require(slice.readyForCurrentHeaderRewriter &&
+                        expectedClearEnd == nal.clearNalPrefixBytes &&
+                        nal.clearNalPrefixBytes < nal.nalLength)
                 }
                 ProtectedHevcCmafFragmentWriter.Sample(sample, ranges, iv, ivIdentity,
                     requireNotNull(t.durationTicks), requireNotNull(t.sampleFlags),
@@ -630,6 +662,11 @@ class ArchitectureGBAndroidTest {
         val frameCount = sources.first().size
         assertTrue(frameCount >= 25)
         assertTrue(sources.all { it.size == frameCount })
+        assertTrue("Full sequence must exercise the header-only splice", headerOnlySlices > 0)
+        assertTrue("Full sequence must exercise the three-clear-byte splice", threeClearSlices > 0)
+        assertTrue("Full sequence must exercise the short-slice regression", shortSliceFallbacks > 0)
+        assertEquals(frameCount * requireNotNull(outPps.tileColumnWidthsInCtbs).size *
+            requireNotNull(outPps.tileRowHeightsInCtbs).size, headerOnlySlices + threeClearSlices)
         val jvmPoc = sources.map { HevcPocTracker() }
         val rustPoc = sources.map { HevcPocTracker() }
         val expectedSamples = mutableListOf<ProtectedHevcCmafFragmentWriter.Sample>()
@@ -669,7 +706,9 @@ class ArchitectureGBAndroidTest {
         listOf(reference, result, protectedInit, iv).forEach { it.fill(0) }
         (expectedSamples + actualSamples).forEach { it.sampleBytes.fill(0) }
         sources.flatten().forEach { it.sampleBytes.fill(0) }
-        Log.i("PitwallGB", "GB direct protected-labelled sequence: frames=$frameCount slices=${planner.matchedSlices} exact POC/sample/fragment parity PASS")
+        Log.i("PitwallGB", "GB direct protected-labelled sequence: frames=$frameCount slices=${planner.matchedSlices} " +
+            "headerOnly=$headerOnlySlices threeClear=$threeClearSlices shortSliceFallbacks=$shortSliceFallbacks " +
+            "exact POC/sample/fragment parity PASS")
     }
 
     private fun syntheticProtectedInit(clear: ByteArray, ivWidth: Int): ByteArray {
