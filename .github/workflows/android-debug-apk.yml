@@ -378,6 +378,7 @@ jobs:
             "$RUNNER_TEMP/apexview-hevc-output-parameters"
           python3 tools/validate_hevc_rust_gb_grid.py \
             --fixture-dir "$RUNNER_TEMP/apexview-hevc-fixtures" \
+            --tile-dir "$RUNNER_TEMP/apexview-hevc-tile-fixtures" \
             --output-dir "$RUNNER_TEMP/apexview-hevc-output-parameters"
 
       - name: Stage composed clear CMAF for Media3 device instrumentation

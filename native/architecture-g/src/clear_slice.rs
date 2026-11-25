@@ -3,7 +3,7 @@
 const HEADER: usize = 8192;
 const MAX: usize = 8 * 1024 * 1024;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Syntax {
     pub address_end: usize,
     pub entry_start: usize,
@@ -18,26 +18,29 @@ pub struct Syntax {
     pub no_output: bool,
 }
 
-struct Writer<'a> { data: &'a mut [u8], pos: usize }
+pub(crate) struct Writer<'a> {
+    pub(crate) data: &'a mut [u8],
+    pub(crate) pos: usize,
+}
 impl Writer<'_> {
-    fn bit(&mut self, v: u32) -> Option<()> {
+    pub(crate) fn bit(&mut self, v: u32) -> Option<()> {
         let b = self.data.get_mut(self.pos / 8)?;
         if v != 0 { *b |= 1 << (7 - self.pos % 8); }
         self.pos += 1;
         Some(())
     }
-    fn bits(&mut self,v:u32,n:usize)->Option<()> {
+    pub(crate) fn bits(&mut self,v:u32,n:usize)->Option<()> {
         if n>32 || (n<32 && v>>n != 0) {return None;}
         for i in (0..n).rev() {self.bit((v>>i)&1)?;}
         Some(())
     }
-    fn ue(&mut self,v:u32)->Option<()> {
+    pub(crate) fn ue(&mut self,v:u32)->Option<()> {
         let code=v.checked_add(1)?;
         let width=(32-code.leading_zeros()) as usize;
         for _ in 1..width {self.bit(0)?;}
         self.bits(code,width)
     }
-    fn copy(&mut self,src:&[u8],from:usize,to:usize)->Option<()> {
+    pub(crate) fn copy(&mut self,src:&[u8],from:usize,to:usize)->Option<()> {
         if from>to || to>src.len()*8 {return None;}
         for i in from..to { self.bit(u32::from((src[i/8]>>(7-i%8))&1))?; }
         Some(())
@@ -98,7 +101,7 @@ pub fn rewrite_scalar(source:&[u8], s:Syntax, output:&mut [u8])->Option<usize> {
 }
 
 fn rewrite_impl<const FAST: bool>(source: &[u8], s: Syntax, output: &mut [u8]) -> Option<usize> {
-    with_rewritten_parts::<FAST, _>(source, s, |prefix, tail| {
+    with_rewritten_parts::<FAST, _>(source, s, None, |prefix, tail| {
         let total = prefix.len() + tail.len();
         let out = output.get_mut(..total)?;
         let (header, payload) = out.split_at_mut(prefix.len());
@@ -114,9 +117,15 @@ pub struct Parts<'a> {
 }
 
 /// Owns the escaped header only. The VCL payload remains in the caller's clear
-/// input until final fragment assembly. Syntax still comes from the JVM reference.
+/// input until final fragment assembly.
 pub fn rewrite_parts(source: &[u8], syntax: Syntax) -> Option<Parts<'_>> {
-    with_rewritten_parts::<true, _>(source, syntax, |prefix, tail| {
+    rewrite_parts_with_filter(source, syntax, None)
+}
+
+pub(crate) fn rewrite_parts_with_filter(
+    source: &[u8], syntax: Syntax, loop_filter: Option<(usize, bool)>,
+) -> Option<Parts<'_>> {
+    with_rewritten_parts::<true, _>(source, syntax, loop_filter, |prefix, tail| {
         let mut header = Vec::new();
         header.try_reserve_exact(prefix.len()).ok()?;
         header.extend_from_slice(prefix);
@@ -127,6 +136,7 @@ pub fn rewrite_parts(source: &[u8], syntax: Syntax) -> Option<Parts<'_>> {
 fn with_rewritten_parts<'a, const FAST: bool, T>(
     source: &'a [u8],
     s: Syntax,
+    loop_filter: Option<(usize, bool)>,
     consume: impl FnOnce(&[u8], &'a [u8]) -> T,
 ) -> Option<T> {
     if !(5..=MAX).contains(&source.len()) || source[0]&0x81 != 0 ||
@@ -150,7 +160,16 @@ fn with_rewritten_parts<'a, const FAST: bool, T>(
         if s.dependent_flag_present {w.bit(0)?;}
         w.bits(s.destination,s.address_bits)?;
     }
-    w.copy(&rbsp,s.address_end,s.entry_start)?;
+    if let Some((bit, value)) = loop_filter {
+        if !(s.address_end..s.entry_start).contains(&bit) {
+            return None;
+        }
+        w.copy(&rbsp, s.address_end, bit)?;
+        w.bit(u32::from(value))?;
+        w.copy(&rbsp, bit + 1, s.entry_start)?;
+    } else {
+        w.copy(&rbsp, s.address_end, s.entry_start)?;
+    }
     if s.tiles {w.ue(0)?;}
     w.copy(&rbsp,s.entry_end,s.alignment)?;
     w.bit(1)?;
@@ -224,6 +243,19 @@ mod tests {
             assert_eq!(rewrite(&source,syntax,&mut fast),None);
             assert_eq!(fast,[0x77;64]);
         }
+    }
+
+    #[test]
+    fn optional_loop_filter_only_patches_the_verified_coding_bit() {
+        let source = [2, 1, 0xf8, 1, 2, 3];
+        let syntax = Syntax {
+            address_end: 2, entry_start: 4, entry_end: 4, alignment: 4, header_bytes: 1,
+            destination: 0, address_bits: 0, pps: 0, dependent_flag_present: false,
+            tiles: false, no_output: false,
+        };
+        let patched = rewrite_parts_with_filter(&source, syntax, Some((3, false))).unwrap();
+        assert_eq!([patched.header.as_slice(), patched.tail].concat(), [2, 1, 0xe8, 1, 2, 3]);
+        assert!(rewrite_parts_with_filter(&source, syntax, Some((4, false))).is_none());
     }
 
     #[test]

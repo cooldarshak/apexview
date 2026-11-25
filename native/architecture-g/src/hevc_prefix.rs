@@ -1,21 +1,21 @@
 //! Bounded early HEVC syntax shared by stream and picture identity checks.
-//! RPS, full slice validation and output parameter generation are separate work.
+//! Other modules continue past these fields for slice parsing and output rewriting.
 use crate::bmff::Error;
 use crate::hevc_nal;
 
 const MAX_PREFIX_BYTES: usize = 8192;
 
-struct Bits<'a> {
+pub(crate) struct Bits<'a> {
     ebsp: &'a [u8],
     bytes: usize,
-    consumed: usize,
+    pub(crate) consumed: usize,
     current: u8,
     pending: u8,
     zeros: u8,
 }
 
 impl<'a> Bits<'a> {
-    fn new(nal: &'a [u8], expected_type: u8) -> Result<Self, Error> {
+    pub(crate) fn new(nal: &'a [u8], expected_type: u8) -> Result<Self, Error> {
         let header = hevc_nal::header(nal)?;
         if header.unit_type != expected_type || header.layer_id != 0 {
             return Err(Error::Nal);
@@ -51,7 +51,22 @@ impl<'a> Bits<'a> {
         Ok(value)
     }
 
-    fn read(&mut self, count: u32) -> Result<u32, Error> {
+    pub(crate) fn read_rbsp(nal: &'a [u8], unit_type: u8) -> Result<Vec<u8>, Error> {
+        if nal.len() > MAX_PREFIX_BYTES + 2 {
+            return Err(Error::Limit);
+        }
+        let mut bits = Self::new(nal, unit_type)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(nal.len() - 2)
+            .map_err(|_| Error::Limit)?;
+        while bits.bytes < bits.ebsp.len() {
+            bytes.push(bits.next_byte()?);
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn read(&mut self, count: u32) -> Result<u32, Error> {
         let mut value = 0u32;
         for _ in 0..count {
             if self.pending == 0 {
@@ -65,11 +80,11 @@ impl<'a> Bits<'a> {
         Ok(value)
     }
 
-    fn flag(&mut self) -> Result<bool, Error> {
+    pub(crate) fn flag(&mut self) -> Result<bool, Error> {
         Ok(self.read(1)? == 1)
     }
 
-    fn ue(&mut self, max: u32) -> Result<u32, Error> {
+    pub(crate) fn ue(&mut self, max: u32) -> Result<u32, Error> {
         let mut zeros = 0;
         while !self.flag()? {
             zeros += 1;
@@ -85,7 +100,23 @@ impl<'a> Bits<'a> {
         }
     }
 
-    fn skip_profile_tier_level(&mut self, sublayers_minus_one: u32) -> Result<(), Error> {
+    pub(crate) fn se(&mut self, min: i32, max: i32) -> Result<i32, Error> {
+        let code = self.ue(u32::MAX - 1)?;
+        let value = if code & 1 == 0 {
+            -((code / 2) as i32)
+        } else {
+            (code / 2 + 1) as i32
+        };
+        if !(min..=max).contains(&value) {
+            return Err(Error::Nal);
+        }
+        Ok(value)
+    }
+
+    pub(crate) fn skip_profile_tier_level(
+        &mut self,
+        sublayers_minus_one: u32,
+    ) -> Result<(), Error> {
         // Both profile_tier_level general fields and a signalled sub-layer
         // profile carry 2+1+5+32+48 bits. Each level contributes 8 more.
         self.read(32)?;
@@ -118,16 +149,28 @@ pub struct StreamPrefix {
     pub width_in_ctbs: u32,
     pub height_in_ctbs: u32,
     pub max_sub_layers: u32,
+    pub(crate) vps_sub_layers_minus_one: u32,
     pub pps_id: u32,
     separate_colour_plane: bool,
+    pub(crate) chroma_array_type: u32,
+    pub(crate) chroma_format: u32,
+    pub(crate) bit_depth_luma: u32,
+    pub(crate) bit_depth_chroma: u32,
+    pub(crate) log2_ctb: u32,
     pub poc_lsb_bits: u32,
-    dependent_slices: bool,
+    pub(crate) dependent_slices: bool,
     output_flag_present: bool,
     extra_header_bits: u32,
 }
 
 impl StreamPrefix {
-    pub fn parse([vps, sps, pps]: [&[u8]; 3]) -> Result<Self, Error> {
+    pub fn parse(nals: [&[u8]; 3]) -> Result<Self, Error> {
+        Ok(Self::prefixes(nals)?.0)
+    }
+
+    pub(crate) fn prefixes<'a>(
+        [vps, sps, pps]: [&'a [u8]; 3],
+    ) -> Result<(Self, Bits<'a>, Bits<'a>, Bits<'a>), Error> {
         let mut bits = Bits::new(vps, 32)?;
         let vps_id = bits.read(4)?;
         bits.read(2)?; // base_layer_internal_flag and base_layer_available_flag
@@ -138,6 +181,7 @@ impl StreamPrefix {
             return Err(Error::Unsupported);
         }
 
+        let vps = bits;
         let mut bits = Bits::new(sps, 33)?;
         if bits.read(4)? != vps_id {
             return Err(Error::Metadata);
@@ -165,8 +209,8 @@ impl StreamPrefix {
         if display_width == 0 || display_height == 0 {
             return Err(Error::Metadata);
         }
-        bits.ue(8)?; // bit_depth_luma_minus8
-        bits.ue(8)?; // bit_depth_chroma_minus8
+        let bit_depth_luma = bits.ue(8)? + 8;
+        let bit_depth_chroma = bits.ue(8)? + 8;
         let poc_lsb_bits = 4 + bits.ue(12)?;
         let first_layer = if bits.flag()? { 0 } else { sub_layers };
         for _ in first_layer..=sub_layers {
@@ -180,12 +224,13 @@ impl StreamPrefix {
         }
         let ctb = 1 << log2_ctb;
 
+        let sps = bits;
         let mut bits = Bits::new(pps, 34)?;
         let pps_id = bits.ue(63)?;
         if bits.ue(15)? != sps_id {
             return Err(Error::Metadata);
         }
-        Ok(Self {
+        let prefix = Self {
             coded_width: width,
             coded_height: height,
             display_width,
@@ -193,16 +238,27 @@ impl StreamPrefix {
             width_in_ctbs: width.div_ceil(ctb),
             height_in_ctbs: height.div_ceil(ctb),
             max_sub_layers: sub_layers + 1,
+            vps_sub_layers_minus_one: vps_sub_layers,
             pps_id,
             separate_colour_plane,
+            chroma_array_type: if separate_colour_plane { 0 } else { chroma },
+            chroma_format: chroma,
+            bit_depth_luma,
+            bit_depth_chroma,
+            log2_ctb,
             poc_lsb_bits,
             dependent_slices: bits.flag()?,
             output_flag_present: bits.flag()?,
             extra_header_bits: bits.read(3)?,
-        })
+        };
+        Ok((prefix, vps, sps, bits))
     }
 
     pub fn slice(&self, nal: &[u8]) -> Result<SlicePrefix, Error> {
+        Ok(self.slice_reader(nal)?.0)
+    }
+
+    pub(crate) fn slice_reader<'a>(&self, nal: &'a [u8]) -> Result<(SlicePrefix, Bits<'a>), Error> {
         let header = hevc_nal::header(nal)?;
         if header.unit_type > 21 || u32::from(header.temporal_id_plus_one) > self.max_sub_layers {
             return Err(Error::Unsupported);
@@ -243,13 +299,16 @@ impl StreamPrefix {
                 poc_lsb,
             });
         }
-        Ok(SlicePrefix {
-            first,
-            address,
-            address_end_bit,
-            no_output_of_prior,
-            picture,
-        })
+        Ok((
+            SlicePrefix {
+                first,
+                address,
+                address_end_bit,
+                no_output_of_prior,
+                picture,
+            },
+            bits,
+        ))
     }
 }
 

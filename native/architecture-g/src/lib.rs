@@ -3,11 +3,16 @@
 
 mod annex_b;
 mod bmff;
+pub mod cbcs_metadata;
 pub mod cmaf_input;
 pub mod cmaf_init;
 pub mod hevc_nal;
+pub mod hevc_output;
+pub mod hevc_parameters;
 pub mod hevc_poc;
 pub mod hevc_prefix;
+pub mod hevc_slice;
+mod hevc_references;
 pub mod feasibility;
 pub mod clear_cmaf;
 pub mod clear_slice;

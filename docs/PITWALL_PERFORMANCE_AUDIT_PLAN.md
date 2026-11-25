@@ -44,6 +44,10 @@ Build 857 verified GREEN (25 Nov 2026): run 45539807100, source 9dcbef0abc3fb92c
 
 G-B started after verifying Build 857 and the documentation-only branch tip. The first batch adds bounded Rust clear CMAF and early HEVC parsing, POC tracking, initialization/fragment packaging, and an exact 50-frame two-feed output check with independent FFmpeg pixels and packet timing. The fixture uses JVM-validated slice plans and output parameter sets. G.3/G.4/G.16 remain partial, with live dispatch, remaining syntax and the broader differential corpus open. G.5 retains the authorized JVM/Widevine path and adds clear-side protection rejection tests. Native protected compatibility, exact-source CI and physical gates remain open. The [Architecture G plan](handovers/PITWALL_TV_ARCHITECTURE_G_RUST_HANDOVER.md) records the workstream details.
 
+Build 858 passed all five jobs, including exact-source API29/31/36 instrumentation and final signed publication. Its tested commit is `26f2721a112e94d3aaf0154b09dd6c15a79ef015`. The first two-feed Rust CMAF gate ran in that build. [Build 858](https://github.com/cooldarshak/apexview/actions/runs/45545086735).
+
+The next G-B batch generates clear parameter sets, slice offsets and fragments in Rust from original inputs. Local comparison passed for 150 independently decoded pictures across single-tile, full 2×2 and mixed-width sources. Synthetic CBCS tests check inline subsample coverage, IV widths and auxiliary layout. G.3/G.4/G.5/G.16 remain open for production playback integration and protected parity. No change to release acceptance or the default playback engine.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |

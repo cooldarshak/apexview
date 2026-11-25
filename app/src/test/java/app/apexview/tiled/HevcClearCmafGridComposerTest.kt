@@ -41,41 +41,7 @@ class HevcClearCmafGridComposerTest {
         assumeTrue("Independent HEVC source fixtures are not configured", fixtureDir != null)
 
         val feeds = listOf("feed_a.hevc", "feed_b.hevc").mapIndexed { index, name ->
-            val stream = File(fixtureDir!!, name).readBytes()
-            val nals = HevcBitstream.splitAnnexB(stream)
-            val vps = nals.first { it.type == 32 }.bytes
-            val sps = nals.first { it.type == 33 }.bytes
-            val pps = nals.first { it.type == 34 }.bytes
-            val init = HevcClearCmafInitSegmentWriter.writeSource(
-                trackId = index + 1L,
-                mediaTimescale = 90_000,
-                vpsNal = vps,
-                spsNal = sps,
-                ppsNal = pps
-            )
-            val pictures = splitPictures(nals)
-            assertEquals(50, pictures.size)
-            val samples = pictures.map { picture ->
-                val firstType = HevcBitstream.parseNalHeader(picture.first()).type
-                HevcClearCmafFragmentWriter.Sample(
-                    data = lengthPrefix(picture),
-                    durationTicks = 3_600,
-                    compositionTimeOffsetTicks = 0,
-                    sampleFlags = if (firstType in 16..23) 0x02000000L else 0x01010000L
-                )
-            }
-            val fragments = samples.chunked(25).mapIndexed { fragmentIndex, fragmentSamples ->
-                HevcClearCmafFragmentWriter.write(
-                    trackId = index + 1L,
-                    sequenceNumber = fragmentIndex.toLong() + 1L,
-                    baseDecodeTimeTicks = fragmentIndex.toLong() * 25L * 3_600L,
-                    samples = fragmentSamples,
-                    sourceTrackEncrypted = false,
-                    sourceFragmentHasEncryptionMetadata = false
-                )
-            }
-            assertEquals(2, fragments.size)
-            HevcClearCmafGridComposer.Feed(init, fragments, "synthetic-feed-$index")
+            fixtureFeed(File(fixtureDir!!, name), index, 25)
         }
 
         // Exercise the real independently encoded source, not a fake parser.
@@ -165,18 +131,7 @@ class HevcClearCmafGridComposerTest {
         }
 
         System.getenv("PITWALL_GB_CMAF_INPUT_DIR")?.let { path ->
-            val target = File(path)
-            check(target.mkdirs() || target.isDirectory)
-            feeds.forEachIndexed { feed, source ->
-                File(target, "feed-$feed-init.mp4").writeBytes(source.initializationSegment)
-                source.mediaFragments.forEachIndexed { fragment, bytes ->
-                    File(target, "feed-$feed-fragment-$fragment.m4s").writeBytes(bytes)
-                }
-            }
-            File(target, "grid-init.mp4").writeBytes(output.initializationSegment)
-            output.mediaFragments.forEachIndexed { fragment, bytes ->
-                File(target, "grid-fragment-$fragment.m4s").writeBytes(bytes)
-            }
+            exportFixture(File(path), feeds, output)
         }
 
         val composedBytes = output.mediaFragments.fold(output.initializationSegment) { acc, fragment ->
@@ -221,6 +176,90 @@ class HevcClearCmafGridComposerTest {
         assertTrue(evidenceDirectory!!.mkdirs() || evidenceDirectory.isDirectory)
         File(evidenceDirectory, "hevc_tizen_cmaf_grid.mpd").writeText(dashPackage.manifest)
         File(evidenceDirectory, "hevc_tizen_cmaf_grid.mp4").writeBytes(composedBytes)
+    }
+
+    @Test
+    fun exportsTwoFullTiledFeedsForRustDifferential() {
+        val directory = System.getenv("PITWALL_GB_CMAF_INPUT_DIR")?.let(::File) ?: return
+        val tileDir = File(requireNotNull(System.getenv("APEXVIEW_HEVC_TILE_FIXTURE_DIR")))
+        val grid = HevcOutputGridDimensions(columns = 4, rows = 2)
+        val cells = (0 until 8).map { output ->
+            val (column, row) = (output % 4) to (output / 4)
+            HevcTizenGridComposer.CellSelection(column / 2, row * 2 + column % 2, column, row)
+        }
+        val fixtureCases = listOf(
+            Triple("tiled", "source_vod_alt_tiled_2x2.hevc", 512),
+            Triple("mixed", "source_vod_mixed_tiled_2x2.hevc", 640),
+        )
+        fixtureCases.forEach { (name, secondSource, width) ->
+            val sources = listOf("source_vod_tiled_2x2.hevc", secondSource)
+            val feeds = sources.mapIndexed { index, source -> fixtureFeed(File(tileDir, source), index, 50) }
+            val result = HevcClearCmafGridComposer.compose(
+                HevcClearCmafGridComposer.Request(feeds, grid, cells, outputTrackId = 9, frameRateNumerator = 25)
+            )
+            assertEquals(50, result.sampleCount)
+            assertEquals(width, result.displayWidth)
+            assertEquals(128, result.displayHeight)
+            assertEquals(400, result.evidence.size)
+            exportFixture(File(directory, name), feeds, result)
+        }
+    }
+
+    private fun fixtureFeed(
+        input: File, index: Int, picturesPerFragment: Int
+    ): HevcClearCmafGridComposer.Feed {
+        val nals = HevcBitstream.splitAnnexB(input.readBytes())
+        val vps = nals.first { it.type == 32 }.bytes
+        val sps = nals.first { it.type == 33 }.bytes
+        val pps = nals.first { it.type == 34 }.bytes
+        val init = HevcClearCmafInitSegmentWriter.writeSource(
+            trackId = index + 1L,
+            mediaTimescale = 90_000,
+            vpsNal = vps,
+            spsNal = sps,
+            ppsNal = pps
+        )
+        val pictures = splitPictures(nals)
+        assertEquals(50, pictures.size)
+        val samples = pictures.map { picture ->
+            val firstType = HevcBitstream.parseNalHeader(picture.first()).type
+            HevcClearCmafFragmentWriter.Sample(
+                data = lengthPrefix(picture),
+                durationTicks = 3_600,
+                compositionTimeOffsetTicks = 0,
+                sampleFlags = if (firstType in 16..23) 0x02000000L else 0x01010000L
+            )
+        }
+        val fragments = samples.chunked(picturesPerFragment).mapIndexed { fragmentIndex, fragmentSamples ->
+            HevcClearCmafFragmentWriter.write(
+                trackId = index + 1L,
+                sequenceNumber = fragmentIndex.toLong() + 1L,
+                baseDecodeTimeTicks = fragmentIndex.toLong() * picturesPerFragment * 3_600L,
+                samples = fragmentSamples,
+                sourceTrackEncrypted = false,
+                sourceFragmentHasEncryptionMetadata = false
+            )
+        }
+        assertEquals(50 / picturesPerFragment, fragments.size)
+        return HevcClearCmafGridComposer.Feed(init, fragments, "synthetic-feed-$index")
+    }
+
+    private fun exportFixture(
+        target: File,
+        feeds: List<HevcClearCmafGridComposer.Feed>,
+        output: HevcClearCmafGridComposer.Output,
+    ) {
+        check(target.mkdirs() || target.isDirectory)
+        feeds.forEachIndexed { feed, source ->
+            File(target, "feed-$feed-init.mp4").writeBytes(source.initializationSegment)
+            source.mediaFragments.forEachIndexed { fragment, bytes ->
+                File(target, "feed-$feed-fragment-$fragment.m4s").writeBytes(bytes)
+            }
+        }
+        File(target, "grid-init.mp4").writeBytes(output.initializationSegment)
+        output.mediaFragments.forEachIndexed { fragment, bytes ->
+            File(target, "grid-fragment-$fragment.m4s").writeBytes(bytes)
+        }
     }
 
     private fun splitPictures(nals: List<HevcBitstream.NalUnit>): List<List<ByteArray>> {
