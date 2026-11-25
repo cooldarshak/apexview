@@ -78,13 +78,15 @@ internal object ProtectedHevcSampleComposer {
     fun planBorrowed(
         slices: List<ProtectedHevcSliceHeaderRewriter.Borrowed>,
         nalLengthSize: Int,
-        context: String
+        context: String,
+        nativePlan: NativeProtectedPlan? = null
     ): Plan = plan(slices.map { slice ->
         Slice(slice.size, slice.protectionRanges, slice.encryptedByteCount,
             { slice.parts.header() }, slice::copyInto, slice::close)
-    }, nalLengthSize, context)
+    }, nalLengthSize, context, nativePlan)
 
-    private fun plan(slices: List<Slice>, nalLengthSize: Int, context: String): Plan {
+    private fun plan(slices: List<Slice>, nalLengthSize: Int, context: String,
+                     nativePlan: NativeProtectedPlan? = null): Plan {
         require(slices.isNotEmpty()) { "$context: no protected slice NALs were supplied" }
         require(slices.size <= MAX_NAL_UNITS) { "$context: too many slice NALs" }
         require(nalLengthSize in 1..4) { "$context: unsupported NAL length size" }
@@ -178,8 +180,10 @@ internal object ProtectedHevcSampleComposer {
             "$context: generated CENC subsample map changed the encrypted byte count"
         }
 
+        val verifiedRanges = nativePlan?.matchingMap(slices, nalLengthSize,
+            totalSampleBytes.toInt(), subsampleRanges) ?: subsampleRanges
         return Plan(totalSampleBytes.toInt(), nalLengthSize, slices.size,
-            subsampleRanges, encryptedTotal, slices.toList())
+            verifiedRanges, encryptedTotal, slices.toList())
     }
 
     private fun validateNalProtectionMap(

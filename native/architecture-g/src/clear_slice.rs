@@ -1,5 +1,5 @@
-//! Feasibility-only clear slice-header transformation with JVM-validated syntax offsets.
-//! No protected samples, no production parsing or player integration.
+//! Bounded clear slice-header transformation.
+//! The protected adapter supplies only independently verified clear prefix bytes.
 const HEADER: usize = 8192;
 const MAX: usize = 8 * 1024 * 1024;
 
@@ -101,7 +101,7 @@ pub fn rewrite_scalar(source:&[u8], s:Syntax, output:&mut [u8])->Option<usize> {
 }
 
 fn rewrite_impl<const FAST: bool>(source: &[u8], s: Syntax, output: &mut [u8]) -> Option<usize> {
-    with_rewritten_parts::<FAST, _>(source, s, None, |prefix, tail| {
+    with_rewritten_parts::<FAST, _>(source, s, None, false, |prefix, tail| {
         let total = prefix.len() + tail.len();
         let out = output.get_mut(..total)?;
         let (header, payload) = out.split_at_mut(prefix.len());
@@ -125,7 +125,7 @@ pub fn rewrite_parts(source: &[u8], syntax: Syntax) -> Option<Parts<'_>> {
 pub(crate) fn rewrite_parts_with_filter(
     source: &[u8], syntax: Syntax, loop_filter: Option<(usize, bool)>,
 ) -> Option<Parts<'_>> {
-    with_rewritten_parts::<true, _>(source, syntax, loop_filter, |prefix, tail| {
+    with_rewritten_parts::<true, _>(source, syntax, loop_filter, false, |prefix, tail| {
         let mut header = Vec::new();
         header.try_reserve_exact(prefix.len()).ok()?;
         header.extend_from_slice(prefix);
@@ -133,13 +133,29 @@ pub(crate) fn rewrite_parts_with_filter(
     })?
 }
 
+/// The supplied slice is only the validated clear prefix; no opaque payload
+/// is passed to this function. The tail offset is an offset in the original
+/// NAL; the authorized caller retains and validates the unchanged tail.
+pub(crate) fn rewrite_checked_prefix(
+    source: &[u8], syntax: Syntax, loop_filter: Option<(usize, bool)>, opaque: bool,
+) -> Option<(Vec<u8>, usize)> {
+    with_rewritten_parts::<true, _>(source, syntax, loop_filter, opaque, |prefix, tail| {
+        let mut header = Vec::new();
+        header.try_reserve_exact(prefix.len()).ok()?;
+        header.extend_from_slice(prefix);
+        Some((header, source.len() - tail.len()))
+    })?
+}
+
 fn with_rewritten_parts<'a, const FAST: bool, T>(
     source: &'a [u8],
     s: Syntax,
     loop_filter: Option<(usize, bool)>,
+    opaque: bool,
     consume: impl FnOnce(&[u8], &'a [u8]) -> T,
 ) -> Option<T> {
-    if !(5..=MAX).contains(&source.len()) || source[0]&0x81 != 0 ||
+    let minimum = if opaque { 3 } else { 5 };
+    if !(minimum..=MAX).contains(&source.len()) || source[0]&0x81 != 0 ||
         source[1]>>3 != 0 || source[1]&7==0 || (source[0]>>1)>21 ||
         s.header_bytes==0 || s.header_bytes>HEADER-3 ||
         s.address_end>s.entry_start || s.entry_start>s.entry_end ||
@@ -147,9 +163,15 @@ fn with_rewritten_parts<'a, const FAST: bool, T>(
         s.address_bits>32 || (s.address_bits<32 && s.destination>>s.address_bits!=0) {
         return None;
     }
-    let required=s.header_bytes+3;
+    let required=s.header_bytes+if opaque {0} else {3};
     let mut rbsp=[0u8;HEADER];
-    let tail=decode_prefix::<FAST>(source,&mut rbsp,required)?;
+    let decoded_tail=decode_prefix::<FAST>(source,&mut rbsp,required)?;
+    let tail=if opaque {
+        // The aligned header ends in a nonzero byte. Do not read the
+        // next byte or any opaque data when deriving the splice.
+        if source[decoded_tail] == 0 { return None; }
+        decoded_tail.checked_add(1)?
+    } else { decoded_tail };
     let mut zeros;
     let mut header=[0u8;HEADER];
     let mut w=Writer{data:&mut header,pos:0};
@@ -175,18 +197,21 @@ fn with_rewritten_parts<'a, const FAST: bool, T>(
     w.bit(1)?;
     while !w.pos.is_multiple_of(8) {w.bit(0)?;}
     let n=w.pos/8;
-    if n+2>HEADER {return None;}
-    header[n..n+2].copy_from_slice(&rbsp[s.header_bytes..s.header_bytes+2]);
+    let clear_cabac=if opaque {0} else {2};
+    if n+clear_cabac>HEADER {return None;}
+    if opaque && header.get(n.checked_sub(1)?)? == &0 {return None;}
+    header[n..n+clear_cabac].copy_from_slice(&rbsp[s.header_bytes..s.header_bytes+clear_cabac]);
     let mut prefix=[0u8;HEADER*2];
     prefix[..2].copy_from_slice(&source[..2]);
     let mut pos=2;
     zeros=0;
-    for &v in &header[..n+2] {
+    for &v in &header[..n+clear_cabac] {
         if zeros>=2 && v<=3 {prefix[pos]=3;pos+=1;zeros=0;}
         prefix[pos]=v;pos+=1;
         zeros=if v==0 {zeros+1} else {0};
     }
-    if zeros>=2 && rbsp[s.header_bytes+2]<=3 {prefix[pos]=3;pos+=1;}
+    if !opaque && zeros>=2 && rbsp[s.header_bytes+2]<=3 {prefix[pos]=3;pos+=1;}
+    if opaque && prefix[pos-1]==0 {return None;}
     let total=pos.checked_add(source.len()-tail)?;
     if total > MAX { return None; }
     Some(consume(&prefix[..pos], &source[tail..]))

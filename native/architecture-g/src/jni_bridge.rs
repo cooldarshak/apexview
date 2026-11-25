@@ -241,3 +241,27 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeProte
     }));
     result.ok().flatten().unwrap_or(std::ptr::null_mut())
 }
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeProtectedPlan(
+    env: JNIEnv<'_>, _class: JClass<'_>, packet: jni::objects::JByteArray<'_>, kind: jint,
+) -> jni::sys::jbyteArray {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let len = usize::try_from(env.get_array_length(&packet).ok()?).ok()?;
+        if len == 0 || len > crate::protected_plan::MAX_PACKET {
+            return None;
+        }
+        let mut input = env.convert_byte_array(&packet).ok()?;
+        let generated = match kind {
+            1 => crate::protected_plan::slice_prefix(&input),
+            2 => crate::protected_plan::sample_map(&input),
+            _ => Err(crate::bmff::Error::Unsupported),
+        };
+        input.fill(0);
+        let mut output = generated.ok()?;
+        let result = env.byte_array_from_slice(&output).ok().map(|value| value.into_raw());
+        output.fill(0);
+        result
+    }));
+    result.ok().flatten().unwrap_or(std::ptr::null_mut())
+}

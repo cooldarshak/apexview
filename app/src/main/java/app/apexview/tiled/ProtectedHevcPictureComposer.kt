@@ -119,6 +119,7 @@ internal object ProtectedHevcPictureComposer {
         fullPictureColumns: Int? = null,
         /** Mixed full-frame layout verified against the same source-cell model as clear VOD. */
         mixedCells: List<HevcTizenGridComposer.CellSelection>? = null,
+        nativePlan: NativeProtectedPlan? = null,
     ): PlannedPicture {
         require(feeds.size in MIN_FEEDS..MAX_FEEDS) {
             "$context: between $MIN_FEEDS and $MAX_FEEDS protected feeds are supported"
@@ -277,11 +278,18 @@ internal object ProtectedHevcPictureComposer {
                 destinationAddress = address,
                 context = context + " (" + feed.input.feedId + ")"
             )
+            if (nativePlan != null) {
+                val config = requireNotNull(feed.input.track.hevcConfiguration)
+                val mapped = feed.layout.nals.single { it.index == slice.nalIndex }
+                nativePlan.verifySlice(config.rawVpsNals + config.rawSpsNals + config.rawPpsNals,
+                    feed.input.sampleBytes, mapped, rewritten.last())
+            }
         }
         val payload = ProtectedHevcSampleComposer.planBorrowed(
             slices = rewritten,
             nalLengthSize = outputNalLengthSize,
-            context = context
+            context = context,
+            nativePlan = nativePlan
         )
         composed = payload
         // Only commit POC state after every validation, rewrite and sample-map build succeeded.

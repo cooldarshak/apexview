@@ -24,7 +24,7 @@ internal object HevcSliceHeaderRewriter {
      * retain this view only synchronously until their final fragment is written.
      */
     internal class Parts internal constructor(
-        private val prefix: ByteArray,
+        private var prefix: ByteArray,
         private val backing: ByteArray,
         private val tailStart: Int,
         val copiedTailBytes: Int,
@@ -52,6 +52,16 @@ internal object HevcSliceHeaderRewriter {
             if (limit > prefixCount)
                 backing.copyInto(bytes, prefixCount, tailStart, tailStart + limit - prefixCount)
             return bytes
+        }
+
+        /** Transfer an independently generated clear prefix only on exact
+         * identity with the already validated JVM reference and splice. */
+        internal fun adoptVerifiedNativePrefix(candidate: ByteArray, tailOffset: Int): Boolean {
+            check(!closed)
+            if (tailOffset != sourceTailOffset || !candidate.contentEquals(prefix)) return false
+            prefix.fill(0)
+            prefix = candidate
+            return true
         }
 
         fun header(): HevcBitstream.NalHeader {

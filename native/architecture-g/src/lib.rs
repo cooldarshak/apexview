@@ -8,6 +8,7 @@ mod bmff;
 pub mod clear_atlas;
 pub mod cbcs_metadata;
 pub mod protected_header;
+pub mod protected_plan;
 pub mod cmaf_input;
 pub mod cmaf_init;
 pub mod hevc_nal;

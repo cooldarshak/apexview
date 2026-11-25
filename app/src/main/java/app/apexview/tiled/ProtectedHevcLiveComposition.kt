@@ -972,6 +972,11 @@ internal object ProtectedHevcLiveComposition {
         val composedSamples = mutableListOf<ProtectedHevcCmafFragmentWriter.Sample>()
         val outputBytesToClear = mutableListOf<ByteArray>()
         val plannedPictures = mutableListOf<ProtectedHevcPictureComposer.PlannedPicture>()
+        val nativePlan = if (session.nativeHeaderRequested && !session.nativeHeaderRejected)
+            NativeProtectedPlan(listOf(outputParameters.vps, outputParameters.sps, outputParameters.pps),
+                enabled = { session.nativeHeaderRequested && !session.nativeHeaderRejected },
+                reject = { session.nativeHeaderRejected = true })
+            else null
         try {
             val pictureComposeStartedNs = System.nanoTime()
             var previousDecodeTime: Long? = null
@@ -1014,6 +1019,7 @@ internal object ProtectedHevcLiveComposition {
                     alignmentProof = proof,
                     fullPictureColumns = if (session.fullPictures && mixedPlan == null) gridColumns else null,
                     mixedCells = mixedPlan?.cells,
+                    nativePlan = nativePlan,
                 )
                 plannedPictures += composed
                 val masterBuffered = session.feeds.getValue(masterFeedId).picturesByOrdinal[
@@ -1073,6 +1079,10 @@ internal object ProtectedHevcLiveComposition {
                 }
             )
             val fragmentWriteElapsedMs = (System.nanoTime() - fragmentWriteStartedNs) / 1_000_000L
+            if (nativePlan != null) android.util.Log.i("ApexviewSingleDecoder",
+                "GB_PROTECTED_PLANNING matchedSlices=${nativePlan.matchedSlices} " +
+                    "matchedMaps=${nativePlan.matchedMaps} " +
+                    "fallback=${session.nativeHeaderRejected} actualStitcher=JVM differential=true")
             val durationTicks = composedSamples.fold(0L) { total, sample ->
                 Math.addExact(total, sample.durationTicks)
             }

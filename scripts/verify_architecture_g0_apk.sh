@@ -53,7 +53,7 @@ for abi in armeabi-v7a arm64-v8a x86 x86_64; do
         "$report/$abi-unstripped-build-id.txt" "$report/$abi-packaged-build-id.txt" \
         | tee "$report/$abi-build-id.txt"
     "$ndk/llvm-nm" --defined-only --dynamic "$full" > "$report/$abi-symbols.txt"
-    for symbol in nativeAbi nativeOpen nativeBridge nativeSubmit nativeSubmitClearAtlas nativeAcquire nativeCopy nativeRelease nativeSeek nativeClose nativeProtectedHeader; do
+    for symbol in nativeAbi nativeOpen nativeBridge nativeSubmit nativeSubmitClearAtlas nativeAcquire nativeCopy nativeRelease nativeSeek nativeClose nativeProtectedHeader nativeProtectedPlan; do
         grep -Eq "[[:space:]]Java_app_apexview_tiled_NativeStitchingEngine_$symbol$" "$report/$abi-symbols.txt"
     done
     address="$(awk '$3=="Java_app_apexview_tiled_ArchitectureG0Probe_nativeConvert"{print $1}' "$report/$abi-symbols.txt")"
