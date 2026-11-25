@@ -36,6 +36,8 @@ G.0 signed off by user; Build 853 GREEN. G-A consolidated native engine foundati
 
 Build 854 GREEN (all five jobs, 20 Rust tests). G-A completion candidate adds deterministic native-owned private bridge buffers, cross-session token uniqueness, device-headroom admission and measured JVM boundary counters, mandatory ASan/LSan and churn/symbol regressions. All existing playback/DRM paths unchanged. Full CI pending; physical and G-B–G-D gates remain separate.
 
+Build 855 stable and ASan/LSan Rust tests 22/22 passed each; Kotlin compile failed from duplicate local outputBytes declaration. Corrected by reusing existing verified fragment size; no safety or test reduction. Full CI pending.
+
 ### Current 16-workstream ledger
 
 | ID | Workstream | Coding status (Build 839 + newly identified scope) | Physical/release acceptance |

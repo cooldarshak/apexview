@@ -495,8 +495,9 @@ internal class HevcArchiveVodSession(
                         ?.let { (it - first).coerceAtLeast(0L) }
                 }
                 val sourceInputBytes=batches.sumOf { batch -> batch.sumOf { it.size.toLong() } }
-                val outputBytes=composed.mediaFragments.last().size.toLong()
-                if(nativeBudgetObservation.observe(sourceInputBytes,outputBytes)) {
+                // Reuse the exact verified fragment already in scope, not a
+                // second local with the same name or a new payload allocation.
+                if(nativeBudgetObservation.observe(sourceInputBytes,outputBytes.size.toLong())) {
                     nativeBudgetContext?.let { nativeBudgetObservation.log(it) }
                 }
                 val producerMs = (System.nanoTime() - started) / 1_000_000L
