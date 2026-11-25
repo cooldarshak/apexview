@@ -2,8 +2,8 @@
 //! A session owns the validated configuration. Frame data borrows only
 //! the corresponding media fragment and is written into the caller's output.
 use crate::bmff::{Error, MAX_ATLAS_BYTES};
-use crate::clear_cmaf::{self, NalSample};
-use crate::clear_slice::Parts;
+use crate::clear_cmaf::{self, SlabNalSample};
+use crate::clear_slice::SlabPart;
 use crate::cmaf_init;
 use crate::cmaf_input::{Fragment, HevcConfiguration, Initialization, Sample, TrackContext};
 use crate::hevc_nal::NalUnits;
@@ -236,7 +236,7 @@ impl Atlas {
         output: &mut [u8],
     ) -> Result<usize, Error> {
         let mut trackers = [Tracker::default(); MAX_FEEDS];
-        self.write_window_fragment(input, sequence, output, &mut trackers, None, true)
+        self.write_window_fragment(input, sequence, output, &mut trackers, None, true, &mut Vec::new())
             .map(|(size, _, _)| size)
     }
 
@@ -250,11 +250,13 @@ impl Atlas {
         trackers: &mut [Tracker; MAX_FEEDS],
         previous_end: Option<i64>,
         standalone: bool,
+        header_slab: &mut Vec<u8>,
     ) -> Result<(usize, i64, bool), Error> {
         if input.len() != self.sources.len() {
             return Err(Error::Metadata);
         }
         require_bounded_bytes(input)?;
+        let parse_trace = crate::engine::NativeTrace::begin(c"PitwallNativeParse");
         let mut fragments = Vec::new();
         fragments
             .try_reserve_exact(input.len())
@@ -262,6 +264,7 @@ impl Atlas {
         for (source, &media) in self.sources.iter().zip(input) {
             fragments.push(Fragment::parse_with_context(media, source.context)?);
         }
+        drop(parse_trace);
         let reference = &fragments[0];
         if previous_end.is_some_and(|end| end != reference.decode_time) {
             return Err(Error::Timing);
@@ -285,7 +288,9 @@ impl Atlas {
         // All payload tails still borrow the validated input; no full picture
         // or concatenated payload is materialized.
         let parts_count = pictures.checked_mul(self.placements.len()).ok_or(Error::Limit)?;
-        let mut picture_parts = Vec::<Parts<'_>>::new();
+        let mut picture_parts = Vec::<SlabPart<'_>>::new();
+        header_slab.clear();
+        let header_ceiling = output.len().min(MAX_ATLAS_BYTES);
         picture_parts.try_reserve_exact(parts_count).map_err(|_| Error::Limit)?;
         let mut feed_slices: Vec<Vec<(usize, Slice<'_>)>> = Vec::new();
         feed_slices.try_reserve_exact(self.sources.len()).map_err(|_| Error::Limit)?;
@@ -296,6 +301,7 @@ impl Atlas {
         }
         let mut output_bytes = 0usize;
         let mut can_gate_filter = self.own_seams;
+        let rewrite_trace = crate::engine::NativeTrace::begin(c"PitwallNativePictures");
         for (index, source_sample) in reference.samples.iter().enumerate() {
             let mut order: Option<Identity> = None;
             for (feed, (source, fragment)) in self.sources.iter().zip(&fragments).enumerate() {
@@ -352,7 +358,8 @@ impl Atlas {
                     if !gate { return Err(Error::Metadata); }
                     Some(slice.loop_filter_across_slices == Some(true))
                 } else { None };
-                let nal = self.output.rewrite_tile(slice, placement.address, filter)?;
+                let nal = self.output.rewrite_tile_into_slab(slice, placement.address, filter,
+                    header_slab, header_ceiling)?;
                 output_bytes = output_bytes
                     .checked_add(nal.header.len() + nal.tail.len() + self.output_nal_prefix)
                     .ok_or(Error::Limit)?;
@@ -361,6 +368,7 @@ impl Atlas {
                 picture_parts.push(nal);
             }
         }
+        drop(rewrite_trace);
         if (standalone || self.output.pps.loop_across_tiles)
             && self.output.pps.loop_across_tiles != can_gate_filter {
             return Err(Error::Metadata);
@@ -376,7 +384,7 @@ impl Atlas {
         }
         for (sample, nals) in reference.samples.iter()
             .zip(picture_parts.chunks_exact(self.placements.len())) {
-            samples.push(NalSample {
+            samples.push(SlabNalSample {
                 nals,
                 duration: sample.duration,
                 flags: sample.flags,
@@ -385,13 +393,15 @@ impl Atlas {
         }
         let last = reference.samples.last().ok_or(Error::Timing)?;
         let end = last.decode_time.checked_add(i64::from(last.duration)).ok_or(Error::Timing)?;
-        let required = clear_cmaf::nal_parts_size(&samples, self.output_nal_prefix).ok_or(Error::Limit)?;
+        let required = clear_cmaf::slab_nal_parts_size(&samples, header_slab, self.output_nal_prefix).ok_or(Error::Limit)?;
         if required > output.len() { return Err(Error::Capacity); }
-        let size = clear_cmaf::write_nal_parts(
+        let _write_trace = crate::engine::NativeTrace::begin(c"PitwallNativeMdat");
+        let size = clear_cmaf::write_slab_nal_parts(
             self.track,
             sequence,
             reference.decode_time as u64,
             &samples,
+            header_slab,
             self.output_nal_prefix,
             output,
         )

@@ -32,6 +32,21 @@ class HevcArchiveRenditionPlanTest {
             setOf(1920 to 1080), null, 0, 24, 4096))
     }
 
+    @Test fun commonAutoUsesAggregateOfferedBitrateAndRetainsGeometryGates() {
+        val a = listOf(Triple(480,270,200_000), Triple(960,540,800_000),
+            Triple(1280,720,1_500_000), Triple(1920,1080,3_000_000))
+        val costs = HevcArchiveRenditionPlan.aggregateBitrates(listOf(a, a))
+        assertEquals(3_000_000L, costs[1280 to 720])
+        assertEquals(960 to 540, HevcArchiveRenditionPlan.choose(rungs, 1080, 0, 2, 4096, costs, 2_000_000L))
+        assertEquals(1280 to 720, HevcArchiveRenditionPlan.choose(rungs, 1080, 0, 2, 4096, costs, 3_000_000L))
+        assertEquals(480 to 270, HevcArchiveRenditionPlan.choose(rungs, 1080, 0, 2, 4096, costs, 1L))
+        assertEquals(1280 to 720, HevcArchiveRenditionPlan.choose(rungs, 720, 720, 4, 4096, costs, 1L))
+        assertEquals(1920 to 1080, HevcArchiveRenditionPlan.choose(rungs, 1080, 0, 2, 4096, costs, null))
+        val unknown = HevcArchiveRenditionPlan.aggregateBitrates(listOf(a, a.map { it.copy(third = -1) }))
+        assertTrue(unknown.isEmpty())
+        assertEquals(1920 to 1080, HevcArchiveRenditionPlan.choose(rungs, 1080, 0, 2, 4096, unknown, 1L))
+    }
+
     @Test fun normalPhonePlaybackKeepsItsExistingLowerRungs() {
         assertEquals(960 to 540, HevcArchiveRenditionPlan.choose(rungs, 540, 0, 4, 4096))
     }

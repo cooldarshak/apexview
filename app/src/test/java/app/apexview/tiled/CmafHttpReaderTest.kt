@@ -56,6 +56,19 @@ class CmafHttpReaderTest {
         assertEquals(0L,response.coalescedCopyBytes)
     }
 
+    @Test fun dashDataSpecUsesExactRangeAndRejectsUnderreportedLength() {
+        val original = ByteArray(48) { it.toByte() }
+        val range = DataSpec.Builder().setUri(uri).setPosition(16).setLength(32).build()
+        val result = reader(original, 32L).read(range, 64, verifyEnd = true)
+        assertArrayEquals(original.copyOfRange(16, 48), result.bytes)
+        assertEquals(0L, result.coalescedCopyBytes)
+        val full = DataSpec.Builder().setUri(uri).build()
+        assertThrows(PermanentCaptureException::class.java) {
+            reader(original, 16L).read(full, 64, verifyEnd = true)
+        }
+        assertArrayEquals(original, reader(original, C.LENGTH_UNSET.toLong()).read(full, 64, verifyEnd = true).bytes)
+    }
+
     @Test fun unknownLengthStillUsesBoundedFallbackAndReturnsAllBytes() {
         val original = ByteArray(130_099) { i -> (i * 13).toByte() }
         val response = reader(original, C.LENGTH_UNSET.toLong()).read(uri, original.size)

@@ -26,7 +26,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import java.util.concurrent.Executors
-import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.util.concurrent.CancellationException
 import kotlin.math.abs
@@ -53,6 +52,7 @@ internal class F1DashFeedCapture(
     dataSourceFactory: DataSource.Factory? = null,
     private val minimumVideoHeight: Int = 0,
     private val autoPreferredHeight: Int? = null,
+    private val autoBandwidthBps: Long? = null,
 ) : CmafCaptureLifecycle {
     data class Feed(
         val label: String,
@@ -106,6 +106,7 @@ internal class F1DashFeedCapture(
             )
         )
 
+    private val reader = CmafHttpReader(httpFactory)
     private val compositionDispatcher: ExecutorCoroutineDispatcher = Executors.newSingleThreadExecutor { task ->
         Thread({
             // Active rolling composition is playback-critical: prefer it over
@@ -602,8 +603,15 @@ internal class F1DashFeedCapture(
         // Existing hard capture bounds and compatibility remain authoritative.
         // A soft Auto preference only applies to the common route.
         val preferred = autoPreferredHeight?.coerceIn(1, maximumVideoHeight)
-        return if (maximumVideoHeight <= 1080 || minimumVideoHeight > 0 || preferred != null)
-            HevcArchiveRenditionPlan.choose(common, preferred ?: maximumVideoHeight, minimumVideoHeight, feeds.size, 4096)
+        val costs = if (autoBandwidthBps != null) HevcArchiveRenditionPlan.aggregateBitrates(feeds.map { loaded ->
+            loaded.period.adaptationSets
+                .filter { it.type == C.TRACK_TYPE_VIDEO || it.representations.any(::isHevc) }
+                .flatMap { it.representations }.filter(::isHevc)
+                .map { Triple(it.format.width, it.format.height, it.format.bitrate) }
+        }) else emptyMap()
+        return if (maximumVideoHeight <= 1080 || minimumVideoHeight > 0 || preferred != null || autoBandwidthBps != null)
+            HevcArchiveRenditionPlan.choose(common, preferred ?: maximumVideoHeight, minimumVideoHeight, feeds.size, 4096,
+                costs, autoBandwidthBps)
         else common.maxWithOrNull(compareBy<Pair<Int, Int>> { it.second }.thenBy { it.first })
     }
 
@@ -693,31 +701,13 @@ internal class F1DashFeedCapture(
     private fun readDataSpec(
         dataSpec: DataSpec, maximumBytes: Int, context: String, onOpened: (Uri) -> Unit = {}
     ): ByteArray {
-        val dataSource: DataSource = httpFactory.createDataSource()
-        try {
-            val length = dataSource.open(dataSpec)
-            dataSource.uri?.let(onOpened)
-            if (length > maximumBytes.toLong()) {
-                throw PermanentCaptureException("$context exceeds the ${maximumBytes / (1024 * 1024)} MB capture limit")
-            }
-            val output = ByteArrayOutputStream(if (length in 1..maximumBytes.toLong()) length.toInt() else 64 * 1024)
-            val buffer = ByteArray(32 * 1024)
-            var total = 0
-            while (true) {
-                val count = dataSource.read(buffer, 0, buffer.size)
-                if (count == C.RESULT_END_OF_INPUT) break
-                if (count <= 0) continue
-                total = Math.addExact(total, count)
-                if (total > maximumBytes) {
-                    throw PermanentCaptureException("$context exceeds the configured capture limit")
-                }
-                output.write(buffer, 0, count)
-            }
-            if (total < 8) throw PermanentCaptureException("$context is too small to contain a CMAF box")
-            return output.toByteArray()
-        } finally {
-            runCatching { dataSource.close() }
+        val response = reader.read(dataSpec, maximumBytes, verifyEnd = true)
+        if (response.bytes.size < 8) {
+            response.bytes.fill(0)
+            throw PermanentCaptureException("$context is too small to contain a CMAF box")
         }
+        onOpened(response.uri)
+        return response.bytes
     }
 
     private companion object {

@@ -14,23 +14,25 @@ internal class F1ArchiveFeedCapture(
     nativeContext: android.content.Context? = null,
     nativeRequested: () -> Boolean = { false },
     autoPreferredHeight: Int? = null,
+    autoBandwidthBps: Long? = null,
 ) : CmafCaptureLifecycle {
     private val factory = dataSourceFactory ?: DefaultHttpDataSource.Factory().setUserAgent(userAgent)
         .setAllowCrossProtocolRedirects(false)
         .setDefaultRequestProperties(mapOf("ascendontoken" to ascendon, "entitlementtoken" to entitlement))
-    private val dash = F1DashFeedCapture(userAgent, ascendon, entitlement, dataSourceFactory = factory, maximumVideoHeight = maximumHeight, minimumVideoHeight = minimumHeight, autoPreferredHeight = autoPreferredHeight)
+    private val dash = F1DashFeedCapture(userAgent, ascendon, entitlement, dataSourceFactory = factory, maximumVideoHeight = maximumHeight, minimumVideoHeight = minimumHeight, autoPreferredHeight = autoPreferredHeight, autoBandwidthBps = autoBandwidthBps)
     private val hls = F1HlsFeedCapture(factory, maximumHeight, minimumCaptureHeight = minimumHeight,
         fullPictures = fullPictures, nativeContext = nativeContext, nativeRequested = nativeRequested,
-        autoPreferredHeight = autoPreferredHeight)
+        autoPreferredHeight = autoPreferredHeight, autoBandwidthBps = autoBandwidthBps)
     private var usingHls = false
     val clearOutput get() = usingHls && hls.clearOutput == true
     val protection get() = if (usingHls) when (hls.clearOutput) { true -> "CLEAR"; false -> "CBCS"; null -> "UNVERIFIED" } else "CBCS"
 
     suspend fun prepareVod(feeds: List<F1DashFeedCapture.Feed>, positionMs: Long, clockLabel: String,
                            preferredHeight: Int, commentary: String, minimumHeight: Int = 0,
-                           preferredHeights: Map<String, Int> = emptyMap()): HevcArchiveVodSession {
+                           preferredHeights: Map<String, Int> = emptyMap(),
+                           autoBandwidthBps: Long? = null): HevcArchiveVodSession {
         // A cancellation/reset of an older capture cannot zero an in-flight preparation's maps.
-        val worker = F1HlsFeedCapture(factory)
+        val worker = F1HlsFeedCapture(factory, autoBandwidthBps = autoBandwidthBps)
         return try { worker.prepareVod(feeds, positionMs, clockLabel, preferredHeight, commentary, minimumHeight, preferredHeights) }
         finally { worker.reset() }
     }

@@ -133,6 +133,33 @@ pub(crate) fn rewrite_parts_with_filter(
     })?
 }
 
+/// An offset into the fragment-local header slab, plus a borrowed clear payload.
+pub(crate) struct SlabPart<'a> {
+    pub(crate) header: std::ops::Range<usize>,
+    pub(crate) tail: &'a [u8],
+}
+
+/// The same validated rewrite as Parts, without a separate heap object per NAL.
+/// The caller's ceiling is the already admitted output capacity.
+pub(crate) fn rewrite_into_slab<'a>(
+    source: &'a [u8], syntax: Syntax, loop_filter: Option<(usize, bool)>,
+    slab: &mut Vec<u8>, ceiling: usize,
+) -> Result<SlabPart<'a>, crate::bmff::Error> {
+    use crate::bmff::Error;
+    with_rewritten_parts::<true, _>(source, syntax, loop_filter, false, |prefix, tail| {
+        let start = slab.len();
+        let end = start.checked_add(prefix.len()).ok_or(Error::Limit)?;
+        if end > ceiling { return Err(Error::Capacity); }
+        // Geometric but bounded growth: never reserve an arbitrary large arena.
+        if end > slab.capacity() {
+            let next = end.max(slab.capacity().saturating_mul(2).max(256).min(ceiling));
+            slab.try_reserve_exact(next - start).map_err(|_| Error::Limit)?;
+        }
+        slab.extend_from_slice(prefix);
+        Ok(SlabPart { header: start..end, tail })
+    }).ok_or(Error::Nal)?
+}
+
 /// The supplied slice is only the validated clear prefix; no opaque payload
 /// is passed to this function. The tail offset is an offset in the original
 /// NAL; the authorized caller retains and validates the unchanged tail.
@@ -268,6 +295,32 @@ mod tests {
             assert_eq!(rewrite(&source,syntax,&mut fast),None);
             assert_eq!(fast,[0x77;64]);
         }
+    }
+
+    #[test]
+    fn slab_rewrite_matches_owned_header_and_bounded_growth() {
+        let source = [2, 1, 0xf8, 1, 2, 3];
+        let syntax = Syntax {
+            address_end: 2, entry_start: 4, entry_end: 4, alignment: 4, header_bytes: 1,
+            destination: 0, address_bits: 0, pps: 0, dependent_flag_present: false,
+            tiles: false, no_output: false,
+        };
+        let expected = rewrite_parts_with_filter(&source, syntax, Some((3, false))).unwrap();
+        let mut slab = Vec::new();
+        for _ in 0..100 {
+            let part = rewrite_into_slab(&source, syntax, Some((3, false)), &mut slab, 4096).unwrap();
+            assert_eq!(&slab[part.header], expected.header.as_slice());
+            assert_eq!(part.tail, expected.tail);
+        }
+        let len = slab.len();
+        assert_eq!(rewrite_into_slab(&source, syntax, Some((3, false)), &mut slab, len).err(),
+            Some(crate::bmff::Error::Capacity));
+        assert_eq!(slab.len(), len);
+        assert!(slab.capacity() <= 4096);
+        let capacity = slab.capacity();
+        slab.clear();
+        assert!(rewrite_into_slab(&source, syntax, Some((3, false)), &mut slab, 4096).is_ok());
+        assert_eq!(slab.capacity(), capacity);
     }
 
     #[test]

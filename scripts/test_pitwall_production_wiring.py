@@ -646,6 +646,42 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("nativeJobTimeoutMs", session)
         self.assertIn("memoryWarmLimit", session)
 
+    def test_gc_dashed_capture_slab_and_measured_bandwidth_are_wired(self):
+        base = "app/src/main/java/app/apexview/"
+        tiled = base + "tiled/"
+        rust = "native/architecture-g/src/"
+        dash = contents(tiled + "F1DashFeedCapture.kt")
+        reader = contents(tiled + "CmafHttpReader.kt")
+        app = contents(base + "AppState.kt")
+        player = contents(base + "FeedPlayer.kt")
+        archive = contents(tiled + "F1ArchiveFeedCapture.kt")
+        hls = contents(tiled + "F1HlsFeedCapture.kt")
+        planner = contents(tiled + "HevcArchiveRenditionPlan.kt")
+        self.assertIn("reader.read(dataSpec, maximumBytes, verifyEnd = true)", dash)
+        self.assertNotIn("ByteArrayOutputStream(", dash)
+        self.assertIn("val size = source.open(spec)", reader)
+        self.assertIn("source.read(probe, 0, 1)", reader)
+        self.assertIn("exact.fill(0)", reader)
+        self.assertIn("compositionBandwidthMeter.addEventListener(", app)
+        self.assertIn("compositionBandwidthMeter.removeEventListener(compositionBandwidthListener)", app)
+        self.assertIn("network != compositionBandwidthNetwork", app)
+        self.assertIn("bytes >= 64L * 1024", app)
+        self.assertIn("compositionBandwidthBudget(castTiles.map(::qualityFor))", app)
+        self.assertIn("DefaultBandwidthMeter.getSingletonInstance(context)", player)
+        self.assertIn("autoBandwidthBps = autoBandwidthBps", archive)
+        self.assertIn("aggregateBitrates", dash)
+        self.assertIn("aggregateBitrates", hls)
+        self.assertIn("sizes.all { (bandwidthCosts[it] ?: 0L) > 0L }", planner)
+        atlas = contents(rust + "clear_atlas.rs")
+        dispatch = contents(rust + "atlas_job.rs")
+        self.assertIn("rewrite_tile_into_slab", atlas)
+        self.assertIn("write_slab_nal_parts", atlas)
+        self.assertIn("header_slab.clear()", atlas)
+        self.assertIn("&mut self.header_slab", dispatch)
+        self.assertIn("self.header_slab = Vec::new()", dispatch)
+        self.assertIn('NativeTrace::begin(c"PitwallNativeAtlas")', contents(rust + "engine.rs"))
+        self.assertIn('NativeTrace::begin(c"PitwallNativePictures")', atlas)
+
     def test_gc_reuse_and_auto_preparation_are_wired(self):
         base = "app/src/main/java/app/apexview/"
         tiled = base + "tiled/"

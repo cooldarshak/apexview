@@ -41,7 +41,8 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                                 private val maximumOutputWidth: Int = 4096, private val minimumCaptureHeight: Int = 0, fullPictures: Boolean = minimumCaptureHeight > 0,
                                 nativeContext: android.content.Context? = null,
                                 nativeRequested: () -> Boolean = { false },
-                                private val autoPreferredHeight: Int? = null) {
+                                private val autoPreferredHeight: Int? = null,
+                                private val autoBandwidthBps: Long? = null) {
     private data class Offer(val feed: F1DashFeedCapture.Feed, val uri: Uri, val format: Format?, val master: HlsMultivariantPlaylist?, val audioGroupId: String? = null, val subtitleGroupId: String? = null)
     private class Init(val uri: Uri, val offset: Long, val length: Long, val bytes: ByteArray, val report: CmafBoxInspector.Report)
     private val reader = CmafHttpReader(factory)
@@ -673,7 +674,12 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         val declared = perFeed.filter { list -> list.any { it.format != null } }
         if (declared.isEmpty()) return perFeed.map { it.first() }
         val common = declared.map { list -> list.map { it.format!!.width to it.format.height }.toSet() }.reduce { a, b -> a intersect b }
-        val size = HevcArchiveRenditionPlan.choose(common, preferredHeight, minimumHeight, feedCount, maximumOutputWidth)
+        val costs = if (autoBandwidthBps != null && declared.size == perFeed.size)
+            HevcArchiveRenditionPlan.aggregateBitrates(declared.map { variants ->
+                variants.mapNotNull { offer -> offer.format?.let { Triple(it.width, it.height, it.bitrate) } }
+            }) else emptyMap()
+        val size = HevcArchiveRenditionPlan.choose(common, preferredHeight, minimumHeight, feedCount, maximumOutputWidth,
+            costs, autoBandwidthBps)
             ?: throw PermanentCaptureException(if (minimumHeight > 0)
                 "No common HEVC rendition of at least ${minimumHeight}p fits $feedCount feeds. Try fewer feeds or select a lower quality."
                 else "No common HEVC rendition fits $feedCount feeds in the composed picture; choose fewer feeds or a lower source rendition")

@@ -482,6 +482,7 @@ class FeedPlayer(
             .setMediaSourceFactory(sources)
             .setLoadControl(loadControl)
             .setTrackSelector(sourceTrackSelector)
+            .setBandwidthMeter(androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(context))
             .build()
         val codecReleaseTiming = CodecReleaseTiming()
         var lastCodecReleaseLogNs = 0L

@@ -26,6 +26,7 @@ pub(crate) fn workspace_reserve(input_capacity: usize, output_capacity: usize) -
 #[derive(Default)]
 pub(crate) struct Dispatcher {
     cached: Option<Cached>,
+    header_slab: Vec<u8>,
 }
 
 struct Cached {
@@ -45,6 +46,7 @@ impl Dispatcher {
             .is_some_and(|cache| cache.generation != generation)
         {
             self.cached = None;
+            self.header_slab = Vec::new();
         }
     }
 
@@ -175,6 +177,7 @@ impl Dispatcher {
             let destination = output.get_mut(start..).ok_or(Error::Capacity)?;
             let (size, end, gate) = atlas.write_window_fragment(
                 &row[..feeds], number, destination, &mut trackers, previous_end, count == 1,
+                &mut self.header_slab,
             )?;
             can_gate_filter &= gate;
             if window {

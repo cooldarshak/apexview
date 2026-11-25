@@ -11,12 +11,22 @@ internal class CmafHttpReader(private val factory: DataSource.Factory) {
 
     fun read(uri: Uri, limit: Int, offset: Long = 0, length: Long = C.LENGTH_UNSET.toLong()): Response {
         require(offset >= 0 && (length == C.LENGTH_UNSET.toLong() || length in 1..limit.toLong())) {
-            "HLS byte range is invalid or exceeds its capture limit"
+            "CMAF byte range is invalid or exceeds its capture limit"
+        }
+        return read(DataSpec.Builder().setUri(uri).setPosition(offset).setLength(length).build(), limit)
+    }
+
+    /** Shared DASH/HLS path; don't reconstruct a DASH DataSpec and lose request flags. */
+    fun read(spec: DataSpec, limit: Int, verifyEnd: Boolean = false): Response {
+        val uri = spec.uri
+        val length = spec.length
+        require(spec.position >= 0 && (length == C.LENGTH_UNSET.toLong() || length in 1..limit.toLong())) {
+            "CMAF byte range is invalid or exceeds its capture limit"
         }
         require(limit > 0) { "CMAF capture budget must be positive" }
         val source = factory.createDataSource()
         try {
-            val size = source.open(DataSpec.Builder().setUri(uri).setPosition(offset).setLength(length).build())
+            val size = source.open(spec)
             if (size > limit) throw PermanentCaptureException("CMAF response exceeds its capture limit")
             // Media3 DataSource.open() reports the exact transfer length when
             // Content-Length or DataSpec range bounds are known. Avoid the
@@ -41,6 +51,15 @@ internal class CmafHttpReader(private val factory: DataSource.Factory) {
                     }
                     if (length != C.LENGTH_UNSET.toLong() && exact.size.toLong() != length) {
                         throw PermanentCaptureException("HLS byte-range response was truncated")
+                    }
+                    if (verifyEnd) {
+                        val probe = ByteArray(1)
+                        try {
+                            if (Thread.currentThread().isInterrupted)
+                                throw java.io.InterruptedIOException("CMAF read cancelled")
+                            if (source.read(probe, 0, 1) != C.RESULT_END_OF_INPUT)
+                                throw PermanentCaptureException("Known-length CMAF response did not end at its declared size")
+                        } finally { probe.fill(0) }
                     }
                     return Response(source.uri ?: uri, exact)
                 } catch (error: Exception) {

@@ -843,6 +843,7 @@ class AppState(
                             preferredHeights = castTiles.associate {
                                 it.feed.sourceStream.profileLabel to qualityFor(it).targetHeight
                             },
+                            autoBandwidthBps = compositionBandwidthBudget(castTiles.map(::qualityFor)),
                         ).also {
                             ownedSession = it
                             if(settings.nativeRustStitching) it.configureNativeClear(context)
@@ -1284,7 +1285,8 @@ class AppState(
                     live, if (live) 0L else clock.player.duration.takeIf { it > 0 } ?: durationMs,
                     dashOffset, hlsOffset, audio.feed.sourceStream.profileLabel, liveEdge, windowUtc,
                     tls = requireNotNull(localConnection?.secureSession),
-                    nativeContext = context, initialNativeRequested = settings.nativeRustStitching)
+                    nativeContext = context, initialNativeRequested = settings.nativeRustStitching,
+                    autoBandwidthBps = compositionBandwidthBudget(selectedQualities))
                 val next = requireNotNull(owned)
                 preparingNativeCast = next
                 kotlinx.coroutines.withTimeout(60_000) {
@@ -1615,6 +1617,30 @@ class AppState(
     // Video budget: only feeds you can see decode video, each at its tile's size, less as the phone heats up.
 
     private val power = context.getSystemService(android.os.PowerManager::class.java)
+    // The same default singleton used by Media3 source players. Only a real
+    // transfer callback establishes an estimate; never use its initial guess.
+    private val compositionBandwidthMeter =
+        androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(context)
+    private val compositionConnectivity = context.getSystemService(android.net.ConnectivityManager::class.java)
+    private var compositionBandwidthNetwork: android.net.Network? = null
+    private var compositionBandwidthEstimate = 0L
+    private var compositionBandwidthSampleMs = -1L
+    private val compositionBandwidthListener = androidx.media3.exoplayer.upstream.BandwidthMeter.EventListener { elapsed, bytes, estimate ->
+        if (elapsed > 0 && bytes >= 64L * 1024 && estimate > 0) {
+            compositionBandwidthNetwork = compositionConnectivity?.activeNetwork
+            compositionBandwidthEstimate = estimate
+            compositionBandwidthSampleMs = android.os.SystemClock.elapsedRealtime()
+        }
+    }
+    private fun compositionBandwidthBudget(qualities: List<VideoQuality>): Long? {
+        val network = compositionConnectivity?.activeNetwork ?: return null
+        if (network != compositionBandwidthNetwork) return null
+        val budget = ComposedBandwidthPolicy.budget(qualities, compositionBandwidthEstimate,
+            compositionBandwidthSampleMs, android.os.SystemClock.elapsedRealtime(), playbackSpeed)
+        if (budget != null) android.util.Log.i("ApexviewSingleDecoder",
+            "GC_AUTO_BANDWIDTH feeds=${qualities.size} budgetBps=$budget speed=$playbackSpeed preparationOnly=true")
+        return budget
+    }
     /** The phone's thermal status (PowerManager.THERMAL_STATUS_*). */
     var thermal by mutableIntStateOf(power?.currentThermalStatus ?: android.os.PowerManager.THERMAL_STATUS_NONE)
         private set
@@ -1630,6 +1656,7 @@ class AppState(
     }
 
     init {
+        compositionBandwidthMeter.addEventListener(android.os.Handler(android.os.Looper.getMainLooper()), compositionBandwidthListener)
         power?.addThermalStatusListener(context.mainExecutor, thermalListener)
         VideoThermalBudget.startupNotice(thermal)?.let { message = it }
         // Feeds come and go, move, hide behind each other and off screen; twice a second is soon enough.
@@ -1651,6 +1678,7 @@ class AppState(
         stopLocalDiscovery()
         googleCastRemoteClient?.unregisterCallback(googleRemoteCallback)
         stopProtectedCompositionPresentation(restorePlayer = false)
+        compositionBandwidthMeter.removeEventListener(compositionBandwidthListener)
         power?.removeThermalStatusListener(thermalListener)
         updater.close()
     }
@@ -2948,7 +2976,8 @@ class AppState(
                             ?: autoCompositionHeight("FINITE_CLEAR", selected, autoBaseline) ?: autoBaseline
                         val minimumHeight = if (composedQuality == VideoQuality.P1080) 1080 else 0
                         val session = capture.prepareVod(sourcePlan.feeds, probePositionMs, host.feed.sourceStream.profileLabel,
-                            preferredHeight, settings.commentary, minimumHeight, desired)
+                            preferredHeight, settings.commentary, minimumHeight, desired,
+                            autoBandwidthBps = compositionBandwidthBudget(selected.map(::qualityFor)))
                         if (settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff)
                             session.configureNativeClear(context)
                         android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_QUALITY content=$contentId " +
@@ -3159,7 +3188,8 @@ class AppState(
         val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty(),
             maximumHeight = maxHeight, fullPictures = mixedRequested,
             nativeContext = context, nativeRequested = { settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff },
-            autoPreferredHeight = autoPreferredHeight)
+            autoPreferredHeight = autoPreferredHeight,
+            autoBandwidthBps = compositionBandwidthBudget(selectedQualities))
         android.util.Log.i("ApexviewSingleDecoder", "F1_PROTECTED_MIXED_PREFLIGHT requested=" +
             PerFeedQualityPolicy.description(labels, selectedQualities) +
             " maxSourceHeight=$maxHeight fullPictures=true cbcsGate=REQUIRED")
@@ -3592,6 +3622,7 @@ class AppState(
             ascendon = api.ascendon.orEmpty(),
             entitlement = api.entitlement.orEmpty(),
             autoPreferredHeight = autoCompositionHeight("LIVE_LOCAL", labels.mapNotNull { byLabel[it] }, 2160),
+            autoBandwidthBps = compositionBandwidthBudget(labels.mapNotNull { byLabel[it] }.map(::qualityFor)),
         )
         val group = "live-content-$contentId-${java.util.UUID.randomUUID()}"
         playbackWork.prepareCapture(capture) {

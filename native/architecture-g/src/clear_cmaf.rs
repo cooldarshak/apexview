@@ -1,6 +1,6 @@
 //! Bounded clear fragment packaging, matching HevcClearCmafFragmentWriter.
 use crate::bmff::MAX_ATLAS_BYTES;
-use crate::clear_slice::Parts;
+use crate::clear_slice::{Parts, SlabPart};
 
 const MAX_SAMPLES: usize = 4096;
 const MAX_NALS_PER_SAMPLE: usize = 4096;
@@ -14,6 +14,13 @@ pub struct Sample<'a> {
 
 pub struct NalSample<'a> {
     pub nals: &'a [Parts<'a>],
+    pub duration: u32,
+    pub cto: i32,
+    pub flags: u32,
+}
+
+pub(crate) struct SlabNalSample<'a> {
+    pub nals: &'a [SlabPart<'a>],
     pub duration: u32,
     pub cto: i32,
     pub flags: u32,
@@ -43,13 +50,7 @@ impl NalSample<'_> {
         if self.nals.is_empty() || self.nals.len() > MAX_NALS_PER_SAMPLE {
             return None;
         }
-        let size = self.nals.iter().try_fold(0usize, |total, nal| {
-            let nal_size = nal.header.len().checked_add(nal.tail.len())?;
-            if length_size < 4 && nal_size >= 1usize << (8 * length_size) {
-                return None;
-            }
-            total.checked_add(length_size)?.checked_add(nal_size)
-        })?;
+        let size = nal_size_total(self.nals.iter().map(|nal| Some((nal.header.len(), nal.tail.len()))), length_size)?;
         Some(Layout {
             size,
             duration: self.duration,
@@ -57,6 +58,33 @@ impl NalSample<'_> {
             flags: self.flags,
         })
     }
+}
+
+impl SlabNalSample<'_> {
+    fn layout(&self, slab: &[u8], length_size: usize) -> Option<Layout> {
+        if self.nals.is_empty() || self.nals.len() > MAX_NALS_PER_SAMPLE {
+            return None;
+        }
+        let size = nal_size_total(self.nals.iter().map(|nal|
+            Some((slab.get(nal.header.clone())?.len(), nal.tail.len()))), length_size)?;
+        Some(Layout { size, duration: self.duration, cto: self.cto, flags: self.flags })
+    }
+}
+
+fn nal_size_total(mut parts: impl Iterator<Item = Option<(usize, usize)>>, length_size: usize) -> Option<usize> {
+    parts.try_fold(0usize, |total, part| {
+        let (header, tail) = part?;
+        let nal_size = header.checked_add(tail)?;
+        if length_size < 4 && nal_size >= 1usize << (8 * length_size) {
+            return None;
+        }
+        total.checked_add(length_size)?.checked_add(nal_size)
+    })
+}
+
+pub(crate) fn slab_nal_parts_size(samples: &[SlabNalSample<'_>], slab: &[u8], length_size: usize) -> Option<usize> {
+    if !(1..=4).contains(&length_size) { return None; }
+    total_size(samples.iter().map(|sample| sample.layout(slab, length_size)))
 }
 
 fn total_size(mut layout: impl ExactSizeIterator<Item = Option<Layout>>) -> Option<usize> {
@@ -199,6 +227,27 @@ pub fn write_nal_parts(
     Some(total)
 }
 
+/// Direct final mdat publication from validated header ranges and borrowed tails.
+pub(crate) fn write_slab_nal_parts(
+    track: u32, sequence: u32, decode_time: u64, samples: &[SlabNalSample<'_>],
+    slab: &[u8], length_size: usize, output: &mut [u8],
+) -> Option<usize> {
+    let total = slab_nal_parts_size(samples, slab, length_size)?;
+    let layout = samples.iter().map(|sample| sample.layout(slab, length_size));
+    let mut w = start_fragment(track, sequence, decode_time, layout, total, output)?;
+    for sample in samples {
+        for nal in sample.nals {
+            let header = &slab[nal.header.clone()]; // ranges checked before any output write
+            let size = (header.len() + nal.tail.len()) as u32;
+            w.bytes(&size.to_be_bytes()[4 - length_size..]);
+            w.bytes(header);
+            w.bytes(nal.tail);
+        }
+    }
+    debug_assert_eq!(w.pos, total);
+    Some(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +273,33 @@ mod tests {
         assert_eq!(write(1, 2, 3, &samples, &mut out[..118]), None);
         assert_eq!(write(1, 2, 3, &[], &mut out), None);
         assert_eq!(out, before);
+    }
+
+    #[test]
+    fn slab_parts_match_owned_parts_and_reject_invalid_ranges_atomically() {
+        let slab = [2, 1, 0xcc, 2, 1, 0x11];
+        let parts = [
+            SlabPart { header: 0..3, tail: &[0xab, 0xce] },
+            SlabPart { header: 3..6, tail: &[0xdd] },
+        ];
+        let owned = [
+            Parts { header: slab[..3].to_vec(), tail: &[0xab, 0xce] },
+            Parts { header: slab[3..].to_vec(), tail: &[0xdd] },
+        ];
+        let samples = [SlabNalSample { nals: &parts, duration: 17, cto: -5, flags: 3 }];
+        let reference = [NalSample { nals: &owned, duration: 17, cto: -5, flags: 3 }];
+        for width in 1..=4 {
+            let mut expected = [0x77; 150];
+            let mut actual = expected;
+            assert_eq!(write_slab_nal_parts(9, 2, 40, &samples, &slab, width, &mut actual),
+                write_nal_parts(9, 2, 40, &reference, width, &mut expected));
+            assert_eq!(actual, expected);
+        }
+        let invalid = [SlabPart { header: 0..7, tail: &[1] }];
+        let samples = [SlabNalSample { nals: &invalid, duration: 17, cto: -5, flags: 3 }];
+        let mut out = [0x77; 150];
+        assert_eq!(write_slab_nal_parts(9, 2, 40, &samples, &slab, 4, &mut out), None);
+        assert_eq!(out, [0x77; 150]);
     }
 
     #[test]

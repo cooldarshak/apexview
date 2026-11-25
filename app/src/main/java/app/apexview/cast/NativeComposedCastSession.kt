@@ -26,6 +26,7 @@ internal class NativeComposedCastSession(
     tls: app.apexview.cast.local.PitwallTls.Session,
     private val nativeContext: android.content.Context? = null,
     initialNativeRequested: Boolean = false,
+    autoBandwidthBps: Long? = null,
 ) : AutoCloseable {
     val sourceLabels = feeds.map { it.label }
     private val group = "cast-${UUID.randomUUID()}"
@@ -34,7 +35,8 @@ internal class NativeComposedCastSession(
     @Volatile private var nativeRequested = initialNativeRequested
     fun setNativePreference(enabled: Boolean) { nativeRequested = enabled }
     private val capture = F1ArchiveFeedCapture(userAgent, ascendon, entitlement, factory, 0, preferredHeight,
-        fullPictures = true, nativeContext = nativeContext, nativeRequested = { nativeRequested })
+        fullPictures = true, nativeContext = nativeContext, nativeRequested = { nativeRequested },
+        autoBandwidthBps = autoBandwidthBps)
     private val initialAudioIndex = feeds.indexOfFirst { it.label == audioLabel }.also { require(it >= 0) }
     private val audioReader = CmafHttpReader(factory)
     private val sidecars = RelayMediaBudget()

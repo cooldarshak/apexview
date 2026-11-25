@@ -32,6 +32,43 @@ pub const OUTPUT_CAPACITY:i64=-7;
 const MAX_BUFFER:usize=crate::bmff::MAX_ATLAS_BYTES;
 const MAX_BUDGET:usize=192*1024*1024;
 const WORKER_STACK:usize=512*1024;
+
+// Android NDK tracing is a no-op on host and when tracing is disabled.
+// The API is present on all supported Android API levels (29+).
+#[cfg(target_os = "android")]
+#[link(name = "android")]
+unsafe extern "C" {
+    fn ATrace_isEnabled() -> bool;
+    fn ATrace_beginSection(name: *const std::ffi::c_char);
+    fn ATrace_endSection();
+}
+pub(crate) struct NativeTrace {
+    #[cfg(target_os = "android")]
+    active: bool,
+}
+impl NativeTrace {
+    pub(crate) fn begin(name: &'static std::ffi::CStr) -> Self {
+        #[cfg(target_os = "android")]
+        {
+            // SAFETY: NDK ATrace accepts a static NUL-terminated name and
+            // records only the current worker thread. Scope is ended on it.
+            let active = unsafe { ATrace_isEnabled() };
+            if active { unsafe { ATrace_beginSection(name.as_ptr()) }; }
+            Self { active }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = name;
+            Self {}
+        }
+    }
+}
+impl Drop for NativeTrace {
+    fn drop(&mut self) {
+        #[cfg(target_os = "android")]
+        if self.active { unsafe { ATrace_endSection() }; }
+    }
+}
 const OVERHEAD_RESERVE:usize=64*1024;
 
 #[derive(Clone,Copy,Debug)]
@@ -295,8 +332,11 @@ fn run_worker(shared:Shared) {
             match work.command {
                 Command::Convert { prefix, count } =>
                     convert_fixed_batch(input, work.len / count, count, prefix, &mut buffers.output).ok_or(INVALID),
-                Command::ClearAtlas => atlas.run(work.generation, input, &mut buffers.output)
-                    .map_err(|error| if error == crate::bmff::Error::Capacity { OUTPUT_CAPACITY } else { INVALID }),
+                Command::ClearAtlas => {
+                    let _trace = NativeTrace::begin(c"PitwallNativeAtlas");
+                    atlas.run(work.generation, input, &mut buffers.output)
+                        .map_err(|error| if error == crate::bmff::Error::Capacity { OUTPUT_CAPACITY } else { INVALID })
+                },
             }
         }));
         let mut s=shared.0.lock().expect("engine mutex");

@@ -1,6 +1,6 @@
 //! Native bounded slice parsing and rewrite offsets for the supported profile.
 use crate::bmff::Error;
-use crate::clear_slice::{rewrite_parts_with_filter, Parts, Syntax};
+use crate::clear_slice::{rewrite_parts_with_filter, rewrite_into_slab, Parts, SlabPart, Syntax};
 use crate::hevc_parameters::Parameters;
 use crate::hevc_prefix::{Bits, SlicePrefix};
 use crate::hevc_references::{address_bits, References};
@@ -179,6 +179,18 @@ impl Parameters {
             None => None,
         };
         rewrite_parts_with_filter(slice.nal, syntax, loop_filter).ok_or(Error::Nal)
+    }
+
+    pub(crate) fn rewrite_tile_into_slab<'a>(
+        &self, slice: &Slice<'a>, destination: u32, loop_filter: Option<bool>,
+        slab: &mut Vec<u8>, ceiling: usize,
+    ) -> Result<SlabPart<'a>, Error> {
+        let syntax = self.rewrite_syntax(slice, destination)?;
+        let loop_filter = match loop_filter {
+            Some(value) => Some((slice.loop_filter_bit.ok_or(Error::Metadata)?, value)),
+            None => None,
+        };
+        rewrite_into_slab(slice.nal, syntax, loop_filter, slab, ceiling)
     }
 
     /// Maps one validated independently coded slice onto an output CTB cell.

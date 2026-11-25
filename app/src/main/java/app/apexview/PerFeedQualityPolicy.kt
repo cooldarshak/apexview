@@ -48,3 +48,15 @@ internal object ComposedAutoQualityPolicy {
         return minOf(stable, prior ?: stable, pressureTarget)
     }
 }
+
+/** Fresh measured connection rate, with reserve for programme audio and delivery variability.
+ * Never use the meter's initial guessed estimate or apply a budget to manual preferences. */
+internal object ComposedBandwidthPolicy {
+    fun budget(qualities: List<VideoQuality>, estimate: Long, sampledMs: Long,
+               nowMs: Long, speed: Float): Long? {
+        if (qualities.isEmpty() || qualities.any { it != VideoQuality.AUTO } ||
+            estimate <= 0 || sampledMs < 0 || nowMs < sampledMs || nowMs - sampledMs > 30_000L ||
+            !speed.isFinite() || speed <= 0f) return null
+        return (estimate * 0.70 / maxOf(1.0, speed.toDouble())).toLong().takeIf { it > 0L }
+    }
+}

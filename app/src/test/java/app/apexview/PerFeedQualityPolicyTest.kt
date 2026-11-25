@@ -58,6 +58,18 @@ class PerFeedQualityPolicyTest {
         assertEquals(270, ComposedAutoQualityPolicy.preferredHeight(auto, listOf(500f, 200f), 270, null, false))
     }
 
+    @Test fun bandwidthBudgetUsesFreshRealSamplesAndNeverManualCaps() {
+        val auto = listOf(VideoQuality.AUTO, VideoQuality.AUTO)
+        assertEquals(7_000_000L, ComposedBandwidthPolicy.budget(auto, 10_000_000L, 1000L, 2000L, 1f))
+        assertEquals(3_500_000L, ComposedBandwidthPolicy.budget(auto, 10_000_000L, 1000L, 2000L, 2f))
+        assertNull(ComposedBandwidthPolicy.budget(auto, 10_000_000L, 1000L, 31_001L, 1f))
+        assertNull(ComposedBandwidthPolicy.budget(auto, 10_000_000L, -1L, 2000L, 1f))
+        assertNull(ComposedBandwidthPolicy.budget(auto, 0L, 1000L, 2000L, 1f))
+        assertNull(ComposedBandwidthPolicy.budget(auto, 10_000_000L, 1000L, 2000L, Float.NaN))
+        assertNull(ComposedBandwidthPolicy.budget(listOf(VideoQuality.AUTO, VideoQuality.P1080),
+            10_000_000L, 1000L, 2000L, 1f))
+    }
+
     @Test fun qualityPresetsOfferMoreThanTwoHardcodedResolutions() {
         assertEquals(540, VideoQuality.P540.targetHeight)
         assertEquals(360, VideoQuality.P360.targetHeight)
