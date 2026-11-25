@@ -568,6 +568,11 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         }
     }
 
+    fun stitchingRoute(group: String): String = if (clearOutput == true) {
+        val route = clearComposition.lastRoute
+        "${route.actual}:${route.reason}"
+    } else ProtectedHevcLiveComposition.stitchingRoute(group)
+
     fun outputWindow(group: String, shareNative: Boolean = false): ProtectedHevcLiveComposition.OutputWindow? =
         if (clearOutput == true) clearComposition.outputWindow()
         else ProtectedHevcLiveComposition.outputWindow(group, shareNative)

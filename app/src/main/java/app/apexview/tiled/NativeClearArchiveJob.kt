@@ -18,6 +18,7 @@ internal object NativeClearArchiveJob {
                         val rows: List<Int>, val cells: List<HevcTizenGridComposer.CellSelection>,
                         val loopAcrossTiles: Boolean = false)
     data class Encoded(val bytes: ByteArray)
+    data class Parts(val arrays: Array<ByteArray>, val size: Int)
     data class Output(val initialization: ByteArray, val media: ByteArray) {
         fun wipe() { initialization.fill(0); media.fill(0) }
     }
@@ -52,6 +53,17 @@ internal object NativeClearArchiveJob {
 
     fun encodeWindow(track: Long, sequence: Long, rateNumerator: Int, rateDenominator: Int,
                      geometry: Geometry, inits: List<ByteArray>, media: List<List<ByteArray>>): Encoded {
+        val parts = encodeParts(track, sequence, rateNumerator, rateDenominator, geometry, inits, media)
+        val packet = ByteBuffer.allocate(parts.size)
+        parts.arrays.forEach { packet.put(it) }
+        check(!packet.hasRemaining())
+        return Encoded(packet.array())
+    }
+
+    // Only small wire descriptors are allocated. Source arrays are borrowed
+    // synchronously from the validated archive producer until JNI submission.
+    fun encodeParts(track: Long, sequence: Long, rateNumerator: Int, rateDenominator: Int,
+                    geometry: Geometry, inits: List<ByteArray>, media: List<List<ByteArray>>): Parts {
         require(track in 1..0xffffffffL && sequence in 1..0xffffffffL)
         require(rateNumerator > 0 && rateDenominator > 0)
         val ordered = geometry.cells.sortedWith(compareBy<HevcTizenGridComposer.CellSelection> { it.outputRow }
@@ -63,7 +75,7 @@ internal object NativeClearArchiveJob {
             require(cell.outputRow == i / geometry.columns.size && cell.outputColumn == i % geometry.columns.size)
             require(cell.feedIndex in inits.indices && cell.sourceTileIndex in 0..65535)
         }
-        val packet = ByteBuffer.allocate(length).order(ByteOrder.BIG_ENDIAN)
+        val packet = ByteBuffer.allocate(36 + 4 * (geometry.columns.size + geometry.rows.size + geometry.cells.size)).order(ByteOrder.BIG_ENDIAN)
         packet.put(byteArrayOf(0x47, 0x42, 0x43,
             (if (geometry.loopAcrossTiles) 0x33 else if (count == 1) 0x31 else 0x32).toByte()))
         packet.putInt(track.toInt()).putInt(sequence.toInt()).putInt(geometry.width).putInt(geometry.height)
@@ -73,16 +85,20 @@ internal object NativeClearArchiveJob {
         geometry.columns.forEach { packet.putInt(it) }
         geometry.rows.forEach { packet.putInt(it) }
         ordered.forEach { packet.putShort(it.feedIndex.toShort()).putShort(it.sourceTileIndex.toShort()) }
+        check(!packet.hasRemaining())
+        val parts = ArrayList<ByteArray>(1 + inits.size * (2 + 2 * count))
+        parts.add(packet.array())
         inits.indices.forEach { i ->
             val blockSize = media[i].sumOf { it.size.toLong() + if (count > 1) 4L else 0L }.toInt()
-            packet.putInt(inits[i].size).putInt(blockSize).put(inits[i])
+            parts.add(ByteBuffer.allocate(8).putInt(inits[i].size).putInt(blockSize).array())
+            parts.add(inits[i])
             media[i].forEach { bytes ->
-                if (count > 1) packet.putInt(bytes.size)
-                packet.put(bytes)
+                if (count > 1) parts.add(ByteBuffer.allocate(4).putInt(bytes.size).array())
+                parts.add(bytes)
             }
         }
-        check(!packet.hasRemaining())
-        return Encoded(packet.array())
+        check(parts.size <= 256 && parts.sumOf { it.size.toLong() } == length.toLong())
+        return Parts(parts.toTypedArray(), length)
     }
 
     /** The entire lease is acquired once, then copied directly into its two
@@ -95,10 +111,31 @@ internal object NativeClearArchiveJob {
 
     fun executeWindow(engine: NativeStitchingEngine, packet: ByteArray, count: Int,
                       foreground: Boolean, timeoutMs: Long, checkCurrent: () -> Unit): WindowOutput {
+        return executeSubmitted(engine, count, timeoutMs, checkCurrent) {
+            engine.submitClearAtlas(engine.generation(), packet, foreground, timeoutMs)
+        }
+    }
+
+    fun executeWindow(engine: NativeStitchingEngine, packet: Parts, count: Int,
+                      foreground: Boolean, timeoutMs: Long, checkCurrent: () -> Unit): WindowOutput =
+        executeSubmitted(engine, count, timeoutMs, checkCurrent) {
+            if (engine.budget.compactAtlas)
+                engine.submitClearAtlasParts(engine.generation(), packet.arrays, packet.size, foreground, timeoutMs)
+            else {
+                // Keep the diagnostic G-A bridge compatible with injected test engines.
+                val combined = ByteBuffer.allocate(packet.size)
+                packet.arrays.forEach { combined.put(it) }
+                try { engine.submitClearAtlas(engine.generation(), combined.array(), foreground, timeoutMs) }
+                finally { combined.array().fill(0) }
+            }
+        }
+
+    private fun executeSubmitted(engine: NativeStitchingEngine, count: Int, timeoutMs: Long,
+                                 checkCurrent: () -> Unit, submit: () -> Long): WindowOutput {
         require(count in 1..MAX_WINDOW)
         require(timeoutMs in 1..60_000)
         checkCurrent()
-        val token = engine.submitClearAtlas(engine.generation(), packet, foreground, timeoutMs)
+        val token = submit()
         check(token > 0) { "Native clear admission: $token" }
         val started = System.nanoTime()
         var terminal = false

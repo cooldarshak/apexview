@@ -58,6 +58,12 @@ internal class HevcArchiveVodSession(
     @Volatile private var nativeBudgetContext: android.content.Context? = null
     private val httpCoalescedBytes = java.util.concurrent.atomic.AtomicLong()
     private val media3DeliveredBytes = java.util.concurrent.atomic.AtomicLong()
+    @Volatile private var nativeDemand: ArchiveBufferPolicy.NativeDemand? = null
+
+    fun updateNativePlaybackDemand(positionMs: Long, bufferedMs: Long, speed: Float, advancing: Boolean) {
+        nativeDemand = ArchiveBufferPolicy.NativeDemand(positionMs.coerceAtLeast(0L), bufferedMs.coerceAtLeast(0L),
+            speed, advancing, android.os.SystemClock.elapsedRealtime())
+    }
 
     /** Enable only for an explicit Rust request. No arena allocation in G-A. */
     fun configureNativeBudget(context: android.content.Context) {
@@ -246,6 +252,7 @@ internal class HevcArchiveVodSession(
     /** Stop stale warm-ahead work as soon as a user seeks to a different fragment. */
     fun prioritizeSeek(positionMs: Long) {
         val target = segmentAt(ArchiveTimelineSearch.msToUs(positionMs))
+        nativeDemand = null // never use the pre-seek clock for the new target
         synchronized(cacheLock) { if (!closed) nativeClear.invalidateForSeek() }
         preemptUnrelatedWarmup(target, seek = true)
     }
@@ -269,13 +276,24 @@ internal class HevcArchiveVodSession(
         // sample and makes a real p95 impossible to calculate from exported logs.
         android.util.Log.i("ApexviewSingleDecoder",
             "ARCHIVE_VOD_REQUEST number=$number cached=$wasCached waitMs=$waitMs")
+        val headroom = nativeBudgetContext?.let { context ->
+            runCatching { NativeStitchingDeviceBudget.sample(context) }.getOrNull()
+        }
+        val observed = nativeBudgetObservation.sizes()
+        val memoryWarmLimit = ArchiveBufferPolicy.memoryWarmLimit(warmLimit, headroom, observed.input, observed.output)
         synchronized(warmLock) {
-            if (!closed && warmLimit > 0 && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
-                val next = ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, warmLimit)
+            if (!closed && memoryWarmLimit > 0 && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
+                val next = ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, memoryWarmLimit)
                 warmer.purge()
                 warmTask = warmer.submit {
                     for (candidate in next) {
                         if (closed || Thread.currentThread().isInterrupted || candidate - number > warmLimit) break
+                        val currentMemory = nativeBudgetContext?.let { context ->
+                            runCatching { NativeStitchingDeviceBudget.sample(context) }.getOrNull()
+                        }
+                        val currentSizes = nativeBudgetObservation.sizes()
+                        if (candidate - number > ArchiveBufferPolicy.memoryWarmLimit(warmLimit, currentMemory,
+                            currentSizes.input, currentSizes.output)) break
                         synchronized(warmLock) {
                             warmActiveNumber = candidate
                             warmActiveTid = android.os.Process.myTid()
@@ -446,9 +464,11 @@ internal class HevcArchiveVodSession(
                     } else null
                     if (expectedInit == null) NativeClearArchiveBridge.Produced(HevcClearCmafGridComposer.compose(request))
                     else try {
+                        val timeout = ArchiveBufferPolicy.nativeJobTimeoutMs(groups[number].startUs / 1_000L,
+                            groups[number].durationUs / 1_000L, nativeDemand, android.os.SystemClock.elapsedRealtime())
                         nativeClear.compose(request, expectedInit,
                             foreground = Thread.currentThread().name != "ApexviewVodWarm",
-                            timeoutMs = (groups[number].durationUs / 1_000L).coerceIn(1L, 5_000L)) {
+                            timeoutMs = timeout) {
                             HevcClearCmafGridComposer.compose(request)
                         }
                     } finally { expectedInit.fill(0) }

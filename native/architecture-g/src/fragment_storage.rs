@@ -19,22 +19,26 @@ struct Arena {
     charged: usize,
 }
 impl Arena {
-    fn allocate(&mut self, size: usize) -> Option<i64> {
-        if size == 0 || size > MAX_FRAGMENT || self.live.len() >= MAX_LIVE {
+    fn allocate(&mut self, size: usize) -> Option<i64> { self.allocate_bounded(size, MAX_BYTES) }
+    fn allocate_bounded(&mut self, size: usize, limit: usize) -> Option<i64> {
+        let limit=limit.min(MAX_BYTES);
+        if size == 0 || size > MAX_FRAGMENT || size > limit || self.live.len() >= MAX_LIVE {
             return None;
         }
         let serial = self.serial.checked_add(1)?;
+        if self.charged>limit { self.trim(); }
+        if self.charged>limit {return None;}
         let bytes = if let Some(i) = self.free.iter().position(|b| b.len() == size) {
             self.free.swap_remove(i)
         } else {
-            while size > MAX_BYTES.saturating_sub(self.charged) {
+            while size > limit.saturating_sub(self.charged) {
                 let old = self.free.pop()?;
                 self.charged -= old.capacity();
             }
             let mut bytes = Vec::new();
             bytes.try_reserve_exact(size).ok()?;
             let charged = self.charged.checked_add(bytes.capacity())?;
-            if charged > MAX_BYTES { return None; }
+            if charged > limit { return None; }
             bytes.resize(size, 0);
             self.charged = charged;
             bytes
@@ -73,6 +77,8 @@ fn arena() -> &'static Mutex<Arena> { ARENA.get_or_init(|| Mutex::new(Arena::def
 #[cfg(target_os = "android")]
 pub fn allocate(size: usize) -> Option<i64> { arena().lock().ok()?.allocate(size) }
 #[cfg(target_os = "android")]
+pub fn allocate_bounded(size: usize, limit: usize) -> Option<i64> { arena().lock().ok()?.allocate_bounded(size,limit) }
+#[cfg(target_os = "android")]
 pub fn release(id: i64) -> bool { arena().lock().is_ok_and(|mut a| a.release(id)) }
 #[cfg(target_os = "android")]
 pub fn trim() { if let Ok(mut a) = arena().lock() { a.trim(); } }
@@ -90,6 +96,22 @@ pub fn view(id: i64) -> Option<(*mut u8, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shrinking_headroom_never_evicts_live_readers() {
+        let mut a=Arena::default();
+        let keep=a.allocate_bounded(32,64).unwrap();
+        let retired=a.allocate_bounded(32,64).unwrap();
+        a.live.get_mut(&keep).unwrap().fill(0x63);
+        assert!(a.release(retired));
+        assert!(a.allocate_bounded(16,31).is_none());
+        assert_eq!(a.charged,32);
+        assert_eq!(a.live.get(&keep).unwrap(), &[0x63;32]);
+        let next=a.allocate_bounded(16,48).unwrap();
+        assert_eq!(a.charged,48);
+        assert!(a.release(keep)); assert!(a.release(next));
+        assert_eq!(a.charged,0);
+    }
+
     #[test]
     fn bounded_reuse_and_retirement() {
         let mut a = Arena::default();

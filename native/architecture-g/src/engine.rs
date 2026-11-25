@@ -44,12 +44,14 @@ pub struct Budget {
 impl Budget {
     /// Includes native payload buffers, two private JVM bridge buffers,
     /// worker stack reservation and conservative control overhead.
-    pub fn reserved(self)->Option<usize> {
+    pub fn reserved(self)->Option<usize> { self.reserved_with_bridge(true) }
+    pub fn reserved_atlas(self)->Option<usize> { self.reserved_with_bridge(false) }
+    fn reserved_with_bridge(self, bridge:bool)->Option<usize> {
         if !(2..=8).contains(&self.slots) ||
             !(1..=MAX_BUFFER).contains(&self.input) ||
             !(1..=MAX_BUFFER).contains(&self.output) ||
             self.ceiling>MAX_BUDGET {return None;}
-        let bytes=(self.input.checked_add(self.output)?).checked_mul(self.slots+1)?
+        let bytes=(self.input.checked_add(self.output)?).checked_mul(self.slots+usize::from(bridge))?
             .checked_add(WORKER_STACK+OVERHEAD_RESERVE)?;
         (bytes<=self.ceiling).then_some(bytes)
     }
@@ -113,10 +115,18 @@ pub struct Engine {
     shared:Shared,
     worker:Option<JoinHandle<()>>,
     budget:Budget,
+    reserved_bytes:usize,
 }
 impl Engine {
     pub fn new(budget:Budget)->Option<Self> {
-        budget.reserved()?;
+        Self::new_reserved(budget, budget.reserved()?)
+    }
+    // Clear atlas JNI transfers directly to/from the owned slot, not the
+    // separate G-A bridge. Keep the same queue, lease and workspace bounds.
+    pub fn new_atlas(budget:Budget)->Option<Self> {
+        Self::new_reserved(budget, budget.reserved_atlas()?)
+    }
+    fn new_reserved(budget:Budget,reserved_bytes:usize)->Option<Self> {
         let mut slots=Vec::new();
         slots.try_reserve_exact(budget.slots).ok()?;
         for _ in 0..budget.slots {
@@ -128,13 +138,13 @@ impl Engine {
         let cloned=Arc::clone(&shared);
         let worker=thread::Builder::new().name("pitwall-native-stitch".into())
             .stack_size(WORKER_STACK).spawn(move || run_worker(cloned)).ok()?;
-        Some(Self{shared,worker:Some(worker),budget})
+        Some(Self{shared,worker:Some(worker),budget,reserved_bytes})
     }
     pub fn generation(&self)->i64 {
         let state=self.shared.0.lock().expect("engine mutex");
         if state.closed {CLOSED} else {state.generation}
     }
-    pub fn reserved(&self)->usize {self.budget.reserved().expect("validated budget")}
+    pub fn reserved(&self)->usize {self.reserved_bytes}
     /// Caller derives deadline from media buffer slack. Speculative work
     /// cannot consume the final free slot; foreground wins among queued work.
     pub fn submit(&self,generation:i64,source:&[u8],prefix:usize,count:usize,
@@ -149,16 +159,28 @@ impl Engine {
     /// single worker, lease, queue priority, deadline and generation checks.
     pub fn submit_clear_atlas(&self, generation: i64, source: &[u8],
                               foreground: bool, slack_ms: u64) -> i64 {
+        self.submit_clear_atlas_with(generation, source.len(), foreground, slack_ms, |dst| {
+            dst.copy_from_slice(source); true
+        })
+    }
+    pub fn submit_clear_atlas_with(&self, generation:i64, len:usize, foreground:bool,
+                                    slack_ms:u64, fill:impl FnOnce(&mut [u8])->bool)->i64 {
         let remaining = self.budget.ceiling - self.reserved();
         if atlas_job::workspace_reserve(self.budget.input, self.budget.output)
             .is_none_or(|additional| additional > remaining) {
             return BACKPRESSURE;
         }
-        self.enqueue(generation, source, Command::ClearAtlas, foreground, slack_ms)
+        self.enqueue_with(generation, len, Command::ClearAtlas, foreground, slack_ms, fill)
     }
     fn enqueue(&self, generation: i64, source: &[u8], command: Command,
                foreground: bool, slack_ms: u64) -> i64 {
-        if source.is_empty() || source.len() > self.budget.input || !(1..=60_000).contains(&slack_ms) {
+        self.enqueue_with(generation,source.len(),command,foreground,slack_ms,|dst|{
+            dst.copy_from_slice(source); true
+        })
+    }
+    fn enqueue_with(&self,generation:i64,len:usize,command:Command,foreground:bool,
+                    slack_ms:u64,fill:impl FnOnce(&mut [u8])->bool)->i64 {
+        if len == 0 || len > self.budget.input || !(1..=60_000).contains(&slack_ms) {
             return INVALID;
         }
         let Some(deadline)=Instant::now().checked_add(Duration::from_millis(slack_ms)) else {return INVALID;};
@@ -173,8 +195,10 @@ impl Engine {
             |v|v.checked_add(1).filter(|next|i64::try_from(*next).is_ok())) else {return INVALID;};
         let token=i64::try_from(raw).expect("checked token");
         let slot=&mut s.slots[index];
-        slot.buffers.as_mut().expect("free buffers").input[..source.len()].copy_from_slice(source);
-        slot.work=Some(Work{token,generation,len:source.len(),command,foreground,deadline});
+        let destination=&mut slot.buffers.as_mut().expect("free buffers").input[..len];
+        if !fill(destination) { destination.fill(0); return INVALID; }
+        if Instant::now()>=deadline { destination.fill(0); return DEADLINE; }
+        slot.work=Some(Work{token,generation,len,command,foreground,deadline});
         slot.stage=Stage::Queued;
         self.shared.1.notify_one();
         token
@@ -196,16 +220,20 @@ impl Engine {
         }
     }
     pub fn copy(&self,token:i64,offset:usize,destination:&mut [u8])->i64 {
+        self.read_with(token,offset,destination.len(),|src|{destination.copy_from_slice(src);true})
+    }
+    pub fn read_with(&self,token:i64,offset:usize,count:usize,read:impl FnOnce(&[u8])->bool)->i64 {
         let s=self.shared.0.lock().expect("engine mutex");
         if s.closed{return CLOSED;}
         let Some(i)=s.index(token) else {return STALE;};
         let slot=&s.slots[i];
         if slot.work.expect("active slot").generation!=s.generation{return STALE;}
-        if slot.stage!=Stage::Reading || destination.is_empty(){return INVALID;}
+        if slot.stage!=Stage::Reading || count==0{return INVALID;}
         let len=slot.result as usize;
-        if offset>len || destination.len()>len-offset{return INVALID;}
-        destination.copy_from_slice(&slot.buffers.as_ref().expect("read buffers").output[offset..offset+destination.len()]);
-        destination.len() as i64
+        if offset>len || count>len-offset{return INVALID;}
+        if read(&slot.buffers.as_ref().expect("read buffers").output[offset..offset+count]) {
+            count as i64
+        } else { INVALID }
     }
     pub fn release(&self,token:i64)->i64 {
         let mut s=self.shared.0.lock().expect("engine mutex");
@@ -296,6 +324,23 @@ mod tests {
             thread::yield_now();
         }
     }
+    #[test]
+    fn direct_atlas_slot_transfer_is_bounded_and_atomic() {
+        let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
+        let mut engine=Engine::new_atlas(b).unwrap();
+        assert_eq!(engine.reserved()+b.input+b.output,b.reserved().unwrap());
+        let generation=engine.generation();
+        assert_eq!(engine.submit_clear_atlas_with(generation,8,true,5000,|dst|{
+            dst.fill(0x71);false
+        }),INVALID);
+        let token=engine.submit_clear_atlas_with(generation,4,true,5000,|dst|{
+            dst.copy_from_slice(b"bad!");true
+        });
+        assert!(token>0);
+        assert_eq!(engine.read_with(token,0,1,|_|panic!("unacquired output")),INVALID);
+        assert!(engine.close());
+    }
+
     #[test]
     fn real_four_feed_budget_is_admitted_without_weakening_workspace_checks() {
         let input = 6_300_000;

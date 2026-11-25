@@ -28,9 +28,10 @@ internal class ComposedCmafRelay(address: String, private val peer: InetAddress?
     internal fun publishResources(
         next: Map<String, ByteArray>,
         shared: Map<String, SharedRelayResource> = emptyMap(),
+        native: Map<String, app.apexview.tiled.NativeFragmentLease> = emptyMap(),
     ) {
         check(!closed.get())
-        resources.publish(next, shared)
+        resources.publish(next, shared, native)
     }
     init { accepting.execute {
         while (!closed.get()) {

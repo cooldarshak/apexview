@@ -573,7 +573,7 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("parts.verifyCopiedTail(output, offset)", rewriter)
         self.assertIn("sample.copyInto(result, cursor)", writer)
         self.assertIn("else sample.writeTo(output)", writer)
-        self.assertIn("NativeFragmentLease.build(totalFragmentBytes.toInt())", writer)
+        self.assertIn("NativeFragmentLease.build(totalFragmentBytes.toInt(), nativeContext)", writer)
         self.assertIn("writeBytes(output, null)", writer)
         self.assertIn("validate(readable)", writer)
         self.assertIn("plannedPayload", writer)
@@ -597,7 +597,8 @@ class ProductionWiringTests(unittest.TestCase):
         bridge = contents(base + "NativeClearArchiveBridge.kt")
         worker = contents("native/architecture-g/src/atlas_job.rs")
         atlas = contents("native/architecture-g/src/clear_atlas.rs")
-        self.assertIn("NativeClearArchiveJob.encodeWindow", bridge)
+        self.assertIn("NativeClearArchiveJob.encodeParts", bridge)
+        self.assertIn("val parts = encodeParts(", contents(base + "NativeClearArchiveJob.kt"))
         self.assertIn("NativeClearArchiveJob.executeWindow", bridge)
         self.assertIn('b"GBC2"', worker)
         self.assertIn("previous_end = Some(end)", worker)
@@ -606,6 +607,33 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("nativeRequested = nativeRequested", capture)
         self.assertIn("nativeRequested = nativeRequested", archive)
         self.assertIn("nativeContext = context, nativeRequested = { settings.nativeRustStitching", app)
+
+    def test_gc_compact_atlas_and_cast_native_ownership(self):
+        base = "app/src/main/java/app/apexview/tiled/"
+        cast = "app/src/main/java/app/apexview/cast/"
+        java = contents(base + "NativeStitchingEngine.java")
+        jni = contents("native/architecture-g/src/jni_bridge.rs")
+        engine = contents("native/architecture-g/src/engine.rs")
+        job = contents(base + "NativeClearArchiveJob.kt")
+        for name in ("nativeOpenAtlas", "nativeSubmitAtlasParts", "nativeReadAtlasArray", "nativeFragmentAllocateBounded"):
+            self.assertIn(name, java)
+            self.assertIn(name, jni)
+            self.assertIn(name, contents("scripts/verify_architecture_g0_apk.sh"))
+        self.assertIn("reserved_atlas", engine)
+        self.assertIn("get_byte_array_region", jni)
+        self.assertIn("set_byte_array_region", jni)
+        self.assertIn("parts.add(inits[i])", job)
+        self.assertIn("submitClearAtlasParts", job)
+        live = contents(base + "ProtectedHevcLiveComposition.kt")
+        self.assertIn("updateCastNativeHeaderPreference", live)
+        self.assertIn("session.lastNativePublication", live)
+        self.assertIn("shareNative = true", contents(cast + "NativeComposedCastSession.kt"))
+        self.assertIn("video.nativeResources", contents(cast + "CastDashPublication.kt"))
+        self.assertIn("lease.storageIdentity", contents(cast + "RelayResourceStore.kt"))
+        self.assertIn("32 * 1024", contents(base + "NativeFragmentLease.kt"))
+        session = contents(base + "HevcArchiveVodSession.kt")
+        self.assertIn("nativeJobTimeoutMs", session)
+        self.assertIn("memoryWarmLimit", session)
 
     def test_gb_native_profile_and_protected_chunk_admission_remain_wired(self):
         base = "app/src/main/java/app/apexview/tiled/"

@@ -12,7 +12,11 @@ internal class RelayResourceStore(
     private val maxReaders: Int = 3,
 ) : AutoCloseable {
     init { require(maxBytes > 0 && maxResources > 0 && maxReaders > 0) }
-    private class Entry(val bytes: ByteArray, val identity: Any, val release: () -> Unit) {
+    private class Entry(val heap: ByteArray?, val identity: Any, val release: () -> Unit,
+                        val native: app.apexview.tiled.NativeFragmentLease? = null) {
+        init { require((heap == null) != (native == null)) }
+        val size: Int get() = heap?.size ?: requireNotNull(native).size
+        val backing: Any get() = heap ?: requireNotNull(native).storageIdentity
         var current = true
         var readers = 0
     }
@@ -22,13 +26,15 @@ internal class RelayResourceStore(
     private var pinnedBytes = 0L
     private var closed = false
 
-    class Lease internal constructor(private val bytes: ByteArray, private val release: () -> Unit) : AutoCloseable {
-        val size = bytes.size
+    class Lease internal constructor(private val heap: ByteArray?, private val release: () -> Unit,
+                                     private val native: app.apexview.tiled.NativeFragmentLease? = null) : AutoCloseable {
+        val size = heap?.size ?: requireNotNull(native).size
         private var closed = false
         @Synchronized fun writeTo(output: OutputStream, start: Int, count: Int) {
             check(!closed)
             require(start >= 0 && count >= 0 && start <= size - count)
-            output.write(bytes, start, count)
+            if (heap != null) output.write(heap, start, count)
+            else requireNotNull(native).writeTo(output, start, count)
         }
         @Synchronized override fun close() {
             if (closed) return
@@ -37,15 +43,17 @@ internal class RelayResourceStore(
         }
     }
     data class Snapshot(val currentBytes: Long, val pinnedBytes: Long, val readers: Int)
-    @Synchronized fun snapshot() = Snapshot(current.values.sumOf { it.bytes.size.toLong() }, pinnedBytes, readers)
+    @Synchronized fun snapshot() = Snapshot(current.values.sumOf { it.size.toLong() }, pinnedBytes, readers)
 
     @Synchronized fun publish(
         next: Map<String, ByteArray>,
         shared: Map<String, SharedRelayResource> = emptyMap(),
+        native: Map<String, app.apexview.tiled.NativeFragmentLease> = emptyMap(),
     ) {
         check(!closed)
-        require(next.size.toLong() + shared.size <= maxResources &&
-            next.values.sumOf { it.size.toLong() } + shared.values.sumOf { it.size.toLong() } <= maxBytes) {
+        require(next.size.toLong() + shared.size + native.size <= maxResources &&
+            next.values.sumOf { it.size.toLong() } + shared.values.sumOf { it.size.toLong() } +
+                native.values.sumOf { it.size.toLong() } <= maxBytes) {
             "Receiver media window exceeds its bounded memory budget"
         }
         val existing = IdentityHashMap<Any, Entry>()
@@ -53,11 +61,12 @@ internal class RelayResourceStore(
         val retired = IdentityHashMap<Any, Entry>()
         pinned.filterNot { it.current }.forEach { retired[it.identity] = it }
         val backingOwners = IdentityHashMap<Any, Any>()
-        current.values.forEach { backingOwners[it.bytes] = it.identity }
-        pinned.forEach { backingOwners[it.bytes] = it.identity }
+        current.values.forEach { backingOwners[it.backing] = it.identity }
+        pinned.forEach { backingOwners[it.backing] = it.identity }
         val seen = IdentityHashMap<Any, Boolean>()
-        val replacement = LinkedHashMap<String, Entry>(next.size + shared.size)
+        val replacement = LinkedHashMap<String, Entry>(next.size + shared.size + native.size)
         val acquired = mutableListOf<SharedRelayResource.Retained>()
+        val redundantNative = mutableListOf<app.apexview.tiled.NativeFragmentLease>()
         fun validate(name: String, identity: Any, backing: Any) {
             val currentOwner = backingOwners[backing]
             require(name.matches(resourceName) && name != "." && name != ".." &&
@@ -70,7 +79,7 @@ internal class RelayResourceStore(
             next.forEach { (name, bytes) ->
                 validate(name, bytes, bytes)
                 require(bytes.isNotEmpty() && !retired.containsKey(bytes)) { "Invalid or previously retired relay resource" }
-                replacement[name] = existing[bytes] ?: Entry(bytes, bytes) { bytes.fill(0) }
+                replacement[name] = existing[bytes] ?: Entry(bytes, bytes, { bytes.fill(0) })
             }
             shared.forEach { (name, resource) ->
                 validate(name, resource, resource.bufferIdentity)
@@ -78,6 +87,20 @@ internal class RelayResourceStore(
                     val handle = resource.retainForRelay()
                     acquired.add(handle)
                     Entry(handle.bytes, resource, handle.release)
+                }
+            }
+            native.forEach { (name, lease) ->
+                val identity = lease.storageIdentity
+                validate(name, identity, identity)
+                val previous = existing[identity] ?: retired[identity]
+                if (previous != null) {
+                    // A rolling window may include a separately retained token
+                    // for an already-published immutable native allocation.
+                    require(previous.native !== lease && previous.size == lease.size)
+                    redundantNative += lease
+                    replacement[name] = previous
+                } else {
+                    replacement[name] = Entry(null, identity, { lease.close() }, lease)
                 }
             }
         } catch (failure: Throwable) {
@@ -89,25 +112,26 @@ internal class RelayResourceStore(
         retained.forEach { it.current = true }
         current = replacement
         previous.values.filterNot { it in retained }.forEach(::retire)
+        redundantNative.forEach { it.close() }
     }
 
     @Synchronized fun acquire(name: String): Lease? {
         val entry = current[name] ?: return null
-        if (readers >= maxReaders || (entry.readers == 0 && entry.bytes.size.toLong() > maxBytes - pinnedBytes))
+        if (readers >= maxReaders || (entry.readers == 0 && entry.size.toLong() > maxBytes - pinnedBytes))
             return null
-        if (entry.readers++ == 0) { pinned.add(entry); pinnedBytes += entry.bytes.size }
+        if (entry.readers++ == 0) { pinned.add(entry); pinnedBytes += entry.size }
         readers++
-        return Lease(entry.bytes) {
+        return Lease(entry.heap, {
             synchronized(this) {
                 check(entry.readers > 0 && readers > 0)
                 readers--
                 if (--entry.readers == 0) {
                     pinned.remove(entry)
-                    pinnedBytes -= entry.bytes.size
+                    pinnedBytes -= entry.size
                     if (!entry.current) entry.release()
                 }
             }
-        }
+        }, entry.native)
     }
 
     private fun retire(entry: Entry) {

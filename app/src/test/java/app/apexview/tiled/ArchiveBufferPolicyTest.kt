@@ -9,6 +9,20 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class ArchiveBufferPolicyTest {
+    @Test fun nativeDemandUsesFreshPlaybackClockAndMemoryLimitsOnlySpeculation() {
+        val demand = ArchiveBufferPolicy.NativeDemand(1000L, 9000L, 1.5f, true, 100L)
+        assertEquals(2000L, ArchiveBufferPolicy.nativeJobTimeoutMs(1000L, 3000L, demand, 100L))
+        assertEquals(4000L, ArchiveBufferPolicy.nativeJobTimeoutMs(7000L, 3000L, demand, 100L))
+        assertEquals(3000L, ArchiveBufferPolicy.nativeJobTimeoutMs(7000L, 3000L, demand, 2201L))
+        val mib = 1024L * 1024
+        val roomy = NativeStitchingDeviceBudget.Headroom(false, false, 2048*mib, 128*mib, 512*mib)
+        assertEquals(2, ArchiveBufferPolicy.memoryWarmLimit(2, roomy, 6*mib, 8*mib))
+        assertEquals(1, ArchiveBufferPolicy.memoryWarmLimit(1, roomy, 6*mib, 8*mib))
+        assertEquals(0, ArchiveBufferPolicy.memoryWarmLimit(2, roomy.copy(lowMemory = true), 6*mib, 8*mib))
+        assertEquals(0, ArchiveBufferPolicy.memoryWarmLimit(2, roomy.copy(jvmHeadroom = 8*mib), 6*mib, 8*mib))
+        assertEquals(2, ArchiveBufferPolicy.memoryWarmLimit(2, null, 6*mib, 8*mib))
+    }
+
     @Test fun allEightFeedsShareOneFiniteNetworkCaptureDeadline() {
         val started = -40_000_000_000L
         val limitMs = ArchiveFetchDeadline.GROUP_TIMEOUT_MS

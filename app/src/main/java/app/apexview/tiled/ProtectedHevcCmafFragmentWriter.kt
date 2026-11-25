@@ -82,8 +82,9 @@ internal object ProtectedHevcCmafFragmentWriter {
         onNativeHeaderResult: (Boolean) -> Unit = {},
         directNativeHeader: Boolean = false,
         preferNativeStorage: Boolean = false,
+        nativeContext: android.content.Context? = null,
     ): Owned = writeInternal(outputInitializationSegment, request, context, preferNativeHeader,
-        onNativeHeaderResult, directNativeHeader, preferNativeStorage)
+        onNativeHeaderResult, directNativeHeader, preferNativeStorage, nativeContext)
 
     private fun writeInternal(
         outputInitializationSegment: ByteArray,
@@ -93,6 +94,7 @@ internal object ProtectedHevcCmafFragmentWriter {
         onNativeHeaderResult: (Boolean) -> Unit = {},
         directNativeHeader: Boolean,
         preferNativeStorage: Boolean,
+        nativeContext: android.content.Context? = null,
     ): Owned {
         require(request.trackId in 1..UINT32_MAX &&
             request.baseDecodeTimeTicks >= 0L &&
@@ -316,7 +318,7 @@ internal object ProtectedHevcCmafFragmentWriter {
         var transferred = false
         try {
             if (preferNativeStorage && direct && nativeAccepted) {
-                native = NativeFragmentLease.build(totalFragmentBytes.toInt()) { output ->
+                native = NativeFragmentLease.build(totalFragmentBytes.toInt(), nativeContext) { output ->
                     writeBytes(output, null)
                     val readable = output.duplicate().apply { flip() }
                     validate(readable)

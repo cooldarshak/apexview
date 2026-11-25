@@ -18,9 +18,14 @@ public final class NativeStitchingEngine implements AutoCloseable {
     public static final class Budget {
         public final int slots, inputBytes, outputBytes;
         public final long ceilingBytes, reservedBytes;
+        public final boolean compactAtlas;
         private Budget(int slots,int input,int output,long ceiling) {
+            this(slots,input,output,ceiling,false);
+        }
+        private Budget(int slots,int input,int output,long ceiling,boolean compactAtlas) {
             this.slots=slots;inputBytes=input;outputBytes=output;ceilingBytes=ceiling;
-            reservedBytes=(slots+1L)*(input+(long)output)+RESERVE;
+            this.compactAtlas=compactAtlas;
+            reservedBytes=(slots+(compactAtlas?0L:1L))*(input+(long)output)+RESERVE;
         }
     }
     /**
@@ -73,11 +78,13 @@ public final class NativeStitchingEngine implements AutoCloseable {
         return 4L*input+output+8*MIB;
     }
     private static Budget atlasBudget(long ceiling,long jvmHeadroom,int input,int output) {
+        // Keep the conservative source/reference/output allowance, even though
+        // there is no longer a concatenated Java input packet.
         long javaTransient=input+2L*output+8*MIB;
         // Charge native arena + workspace + the Java transfer staging against
         // the same OS surplus. Keep Java headroom independently checked.
         if (javaTransient>jvmHeadroom || javaTransient>=ceiling) return null;
-        Budget b=new Budget(2,input,output,Math.min(MAX_ATLAS_BUDGET,ceiling-javaTransient));
+        Budget b=new Budget(2,input,output,Math.min(MAX_ATLAS_BUDGET,ceiling-javaTransient),true);
         return b.reservedBytes+atlasWorkspaceBytes(input,output)<=b.ceilingBytes?b:null;
     }
 
@@ -90,12 +97,17 @@ public final class NativeStitchingEngine implements AutoCloseable {
 
     private static native int nativeAbi();
     private static native long nativeFragmentAllocate(int size);
+    private static native long nativeFragmentAllocateBounded(int size,long limit);
     private static native ByteBuffer nativeFragmentView(long id);
     private static native long nativeFragmentRelease(long id);
     private static native void nativeFragmentTrim();
     static long allocateFragment(int size) {
         System.loadLibrary("pitwall_g0");
         return nativeAbi() == 2 ? nativeFragmentAllocate(size) : INVALID;
+    }
+    static long allocateFragmentBounded(int size,long limit) {
+        System.loadLibrary("pitwall_g0");
+        return nativeAbi() == 2 ? nativeFragmentAllocateBounded(size,limit) : INVALID;
     }
     static ByteBuffer fragmentView(long id) { return nativeFragmentView(id); }
     static long releaseFragment(long id) { return nativeFragmentRelease(id); }
@@ -121,6 +133,11 @@ public final class NativeStitchingEngine implements AutoCloseable {
     }
     private static native long nativeOpen(int slots,int input,int output,long ceiling);
     private static native ByteBuffer nativeBridge(long handle,boolean output);
+    private static native long nativeOpenAtlas(int slots,int input,int output,long ceiling);
+    private static native long nativeSubmitAtlasParts(long handle,long generation,byte[][] parts,int length,
+                                                       boolean foreground,long slackMs);
+    private static native long nativeReadAtlasArray(long handle,long token,int sourceOffset,byte[] target,
+                                                     int targetOffset,int length);
     private static native long nativeSubmit(long handle,long generation,ByteBuffer input,int length,
                                             int prefix,int count,boolean foreground,long slackMs);
     private static native long nativeSubmitClearAtlas(long handle, long generation, ByteBuffer input,
@@ -150,6 +167,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
     private static long add(long a,long b){return a>Long.MAX_VALUE-b?Long.MAX_VALUE:a+b;}
     private NativeStitchingEngine(long handle,Budget budget) {
         this.handle=handle;this.budget=budget;
+        if(budget.compactAtlas)return; // no extra bridge allocation/view
         input=nativeBridge(handle,false);
         output=nativeBridge(handle,true);
         if(input==null || output==null || !input.isDirect() || !output.isDirect() ||
@@ -164,7 +182,8 @@ public final class NativeStitchingEngine implements AutoCloseable {
         if(budget==null)throw new IllegalArgumentException("Native memory budget unavailable");
         System.loadLibrary("pitwall_g0");
         if(nativeAbi()!=2)throw new IllegalStateException("G-A ABI mismatch");
-        long id=nativeOpen(budget.slots,budget.inputBytes,budget.outputBytes,budget.ceilingBytes);
+        long id=budget.compactAtlas?nativeOpenAtlas(budget.slots,budget.inputBytes,budget.outputBytes,budget.ceilingBytes)
+            :nativeOpen(budget.slots,budget.inputBytes,budget.outputBytes,budget.ceilingBytes);
         if(id<=0)throw new IllegalStateException("Native admission failed: "+id);
         try{return new NativeStitchingEngine(id,budget);}
         catch(RuntimeException|Error failure){nativeClose(id);throw failure;}
@@ -174,13 +193,30 @@ public final class NativeStitchingEngine implements AutoCloseable {
         return submitJob(expected, bytes, prefix, count, foreground, slack, false);
     }
     public synchronized long submitClearAtlas(long expected, byte[] bytes, boolean foreground, long slack) {
+        if(budget.compactAtlas)return bytes==null?INVALID:submitClearAtlasParts(expected,new byte[][]{bytes},bytes.length,foreground,slack);
         return submitJob(expected, bytes, 0, 0, foreground, slack, true);
+    }
+    public synchronized long submitClearAtlasParts(long expected,byte[][] parts,int length,boolean foreground,long slack) {
+        if(handle==0)return CLOSED;
+        if(expected!=generation)return STALE;
+        if(!budget.compactAtlas || parts==null || parts.length<1 || parts.length>256 ||
+            length<=0 || length>budget.inputBytes)return INVALID;
+        long total=0;
+        for(byte[] part:parts){
+            if(part==null || part.length==0)return INVALID;
+            total+=part.length;
+        }
+        if(total!=length)return INVALID;
+        long result=nativeSubmitAtlasParts(handle,expected,parts,length,foreground,slack);
+        if(result>0)nativeInputBytes=add(nativeInputBytes,length);
+        else rejectedSubmits=add(rejectedSubmits,1);
+        return result;
     }
     private long submitJob(long expected, byte[] bytes, int prefix, int count, boolean foreground,
                            long slack, boolean clearAtlas) {
         if (handle == 0) return CLOSED;
         if (expected != generation) return STALE;
-        if (bytes == null || bytes.length == 0 || bytes.length > input.capacity()) return INVALID;
+        if (budget.compactAtlas || bytes == null || bytes.length == 0 || bytes.length > input.capacity()) return INVALID;
         input.clear();
         input.put(bytes);
         javaInputBytes = add(javaInputBytes, bytes.length);
@@ -195,7 +231,12 @@ public final class NativeStitchingEngine implements AutoCloseable {
     public synchronized long read(long token,int sourceOffset,byte[] target,int targetOffset,int length) {
         if(handle==0)return CLOSED;
         if(target==null || sourceOffset<0 || targetOffset<0 || length<=0 ||
-            length>output.capacity() || targetOffset>target.length-length)return INVALID;
+            length>budget.outputBytes || targetOffset>target.length-length)return INVALID;
+        if(budget.compactAtlas){
+            long result=nativeReadAtlasArray(handle,token,sourceOffset,target,targetOffset,length);
+            if(result==length)javaOutputBytes=add(javaOutputBytes,length);
+            return result;
+        }
         long result=nativeCopy(handle,token,sourceOffset,output,length);
         if(result==length){
             nativeOutputBytes=add(nativeOutputBytes,length);

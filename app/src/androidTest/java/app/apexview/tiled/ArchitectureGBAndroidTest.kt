@@ -57,7 +57,89 @@ class ArchitectureGBAndroidTest {
             assertTrue("Actual worker must report insufficient output capacity: $failed",
                 failed is NativeClearArchiveJob.OutputCapacityException)
         }
+        verifyCompactTransfer(input, expected)
+        verifyNativeRelayOwnership()
+        verifyCastRouteIsolation()
         verifyArchiveBridge(input, expected)
+    }
+
+    private fun verifyCompactTransfer(input: ByteArray, expected: ByteArray) {
+        val budget = requireNotNull(NativeStitchingEngine.planClearAtlas(false,
+            1024L*1024*1024, 32L*1024*1024, 128L*1024*1024, input.size, expected.size))
+        assertTrue(budget.compactAtlas)
+        assertEquals(2L * (budget.inputBytes.toLong() + budget.outputBytes) + 576L * 1024,
+            budget.reservedBytes)
+        NativeStitchingEngine.open(budget).use { engine ->
+            val generation = engine.generation()
+            val parts = arrayOf(input.copyOfRange(0, 37), input.copyOfRange(37, input.size))
+            assertEquals(NativeStitchingEngine.INVALID,
+                engine.submitClearAtlasParts(generation, parts, input.size - 1, true, 5000))
+            val token = engine.submitClearAtlasParts(generation, parts, input.size, true, 5000)
+            assertTrue(token > 0)
+            assertEquals(expected.size.toLong(), await(engine, token))
+            val actual = ByteArray(expected.size + 2) { 91 }
+            assertEquals(expected.size.toLong(), engine.read(token, 0, actual, 1, expected.size))
+            assertEquals(91.toByte(), actual.first())
+            assertEquals(91.toByte(), actual.last())
+            assertArrayEquals(expected, actual.copyOfRange(1, actual.size - 1))
+            val stats = engine.copyStats()
+            assertEquals(0L, stats.javaInputBytes)
+            assertEquals(input.size.toLong(), stats.nativeInputBytes)
+            assertEquals(0L, stats.nativeOutputBytes)
+            assertEquals(expected.size.toLong(), stats.javaOutputBytes)
+            assertEquals(generation + 1, engine.seek())
+            assertEquals(NativeStitchingEngine.STALE, engine.read(token, 0, actual, 1, expected.size))
+            assertEquals(1L, engine.release(token))
+        }
+        Log.i("PitwallGC", "Compact direct slot transfer, exact parity and stale lease rejection PASS")
+    }
+
+    private fun verifyNativeRelayOwnership() {
+        val bytes = byteArrayOf(11, 22, 33, 44)
+        val native = requireNotNull(NativeFragmentLease.build(bytes.size) { it.put(bytes) })
+        val store = app.apexview.cast.RelayResourceStore(16L, 4, 2)
+        try {
+            store.publish(emptyMap(), native = mapOf("video.m4s" to native.retain()))
+            requireNotNull(store.acquire("video.m4s")).use { reader ->
+                store.publish(emptyMap(), native = mapOf("video.m4s" to native.retain()))
+                assertEquals(4L, store.snapshot().currentBytes)
+                val first = native.retain()
+                val second = native.retain()
+                try {
+                    assertTrue(runCatching {
+                        store.publish(emptyMap(), native = mapOf("a.m4s" to first, "b.m4s" to second))
+                    }.exceptionOrNull() is IllegalArgumentException)
+                } finally { first.close(); second.close() }
+                store.publish(mapOf("new.m4s" to byteArrayOf(1)))
+                native.close()
+                store.close()
+                val out = java.io.ByteArrayOutputStream()
+                reader.writeTo(out, 1, 2)
+                assertArrayEquals(byteArrayOf(22, 33), out.toByteArray())
+            }
+            assertEquals(0L, store.snapshot().pinnedBytes)
+        } finally { store.close(); native.close() }
+        Log.i("PitwallGC", "Native relay backing reuse, alias rejection and pinned reader retirement PASS")
+    }
+
+    private fun verifyCastRouteIsolation() {
+        val local = "gc-test-local"
+        val cast = "gc-test-cast"
+        try {
+            ProtectedHevcLiveComposition.selectFeeds(local, listOf("a", "b"),
+                localNativeHeader = true, nativeHeaderRequested = true)
+            ProtectedHevcLiveComposition.selectFeeds(cast, listOf("a", "b"),
+                castNativeHeader = true, nativeHeaderRequested = true)
+            assertEquals("JVM:REFERENCE_PENDING", ProtectedHevcLiveComposition.stitchingRoute(cast))
+            ProtectedHevcLiveComposition.updateLocalNativeHeaderPreference(false)
+            assertEquals("JVM:USER_DISABLED", ProtectedHevcLiveComposition.stitchingRoute(local))
+            assertEquals("JVM:REFERENCE_PENDING", ProtectedHevcLiveComposition.stitchingRoute(cast))
+            ProtectedHevcLiveComposition.updateCastNativeHeaderPreference(cast, false)
+            assertEquals("JVM:USER_DISABLED", ProtectedHevcLiveComposition.stitchingRoute(cast))
+        } finally {
+            ProtectedHevcLiveComposition.clearSelection(local, true)
+            ProtectedHevcLiveComposition.clearSelection(cast, true)
+        }
     }
 
     /** Run on every mandatory API, including Android 10. Exact reduction
@@ -141,6 +223,11 @@ class ArchitectureGBAndroidTest {
         val geometry = NativeClearArchiveJob.Geometry(width, height, colWidths, rowHeights, cells)
         assertArrayEquals(input, NativeClearArchiveJob.encode(track, sequence, numerator, denominator,
             geometry, inits, media).bytes)
+        val parts = NativeClearArchiveJob.encodeParts(track, sequence, numerator, denominator,
+            geometry, inits, media.map { listOf(it) })
+        assertEquals(input.size, parts.size)
+        assertTrue(inits.all { init -> parts.arrays.any { it === init } })
+        assertTrue(media.all { fragment -> parts.arrays.any { it === fragment } })
         val sources = inits.indices.map { i ->
             val report = CmafBoxInspector.inspect(inits[i])
             HevcClearCmafGridComposer.Feed(inits[i], listOf(media[i]), "fixture-$i", report,

@@ -68,8 +68,8 @@ use std::sync::{Mutex,OnceLock};
 struct Session {
     id:i64,
     engine:Engine,
-    input:BridgeBuffer,
-    output:BridgeBuffer,
+    input:Option<BridgeBuffer>,
+    output:Option<BridgeBuffer>,
 }
 struct Registry {serial:i64,active:Option<Session>}
 static ENGINES:OnceLock<Mutex<Registry>>=OnceLock::new();
@@ -95,17 +95,29 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeAbi(
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeOpen(
     _env:JNIEnv<'_>,_class:JClass<'_>,slots:jint,input:jint,output:jint,ceiling:jlong)->jlong {
+    open_session(slots,input,output,ceiling,false)
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeOpenAtlas(
+    _env:JNIEnv<'_>,_class:JClass<'_>,slots:jint,input:jint,output:jint,ceiling:jlong)->jlong {
+    open_session(slots,input,output,ceiling,true)
+}
+fn open_session(slots:jint,input:jint,output:jint,ceiling:jlong,compact:bool)->jlong {
     guarded(||{
         let (Ok(slots),Ok(input),Ok(output),Ok(ceiling))=(usize::try_from(slots),usize::try_from(input),
             usize::try_from(output),usize::try_from(ceiling)) else {return i64::from(INVALID);};
         let budget=Budget{slots,input,output,ceiling};
-        if budget.reserved().is_none(){return i64::from(INVALID);}
+        let reserved=if compact {budget.reserved_atlas()} else {budget.reserved()};
+        if reserved.is_none(){return i64::from(INVALID);}
         let mut r=registry().lock().expect("engine registry");
         if r.active.is_some(){return BACKPRESSURE;}
         let Some(id)=r.serial.checked_add(1) else {return i64::from(INVALID);};
-        let Some(input)=BridgeBuffer::new(input) else {return BACKPRESSURE;};
-        let Some(output)=BridgeBuffer::new(output) else {return BACKPRESSURE;};
-        let Some(engine)=Engine::new(budget) else {return BACKPRESSURE;};
+        let (input,output)=if compact {(None,None)} else {
+            let Some(input)=BridgeBuffer::new(input) else {return BACKPRESSURE;};
+            let Some(output)=BridgeBuffer::new(output) else {return BACKPRESSURE;};
+            (Some(input),Some(output))
+        };
+        let Some(engine)=(if compact {Engine::new_atlas(budget)} else {Engine::new(budget)}) else {return BACKPRESSURE;};
         r.serial=id;r.active=Some(Session{id,engine,input,output});id
     })
 }
@@ -115,7 +127,7 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeBridg
     catch_unwind(AssertUnwindSafe(||{
         let r=registry().lock().expect("engine registry");
         let Some(session)=r.active.as_ref().filter(|s|s.id==handle) else {return std::ptr::null_mut();};
-        let bridge=if output!=0{&session.output}else{&session.input};
+        let Some(bridge)=(if output!=0{session.output.as_ref()}else{session.input.as_ref()}) else {return std::ptr::null_mut();};
         // SAFETY: these are nonmoving registry-owned UnsafeCell allocations.
         // Only the private Java session holds the two views; it synchronizes
         // operations and drops both references before nativeClose. The worker
@@ -139,7 +151,8 @@ fn submit_from_bridge(
     let Ok(ptr) = env.get_direct_buffer_address(input) else { return i64::from(INVALID); };
     if ptr.is_null() { return i64::from(INVALID); }
     session_call(handle, |session| {
-        if ptr != session.input.address() || n > session.input.capacity() { return i64::from(INVALID); }
+        let Some(bridge)=session.input.as_ref() else {return i64::from(INVALID);};
+        if ptr != bridge.address() || n > bridge.capacity() { return i64::from(INVALID); }
         // SAFETY: exact live registry buffer; the Java session monitor excludes
         // writes and close. The registry lock retains its backing allocation.
         let bytes = unsafe { slice::from_raw_parts(ptr.cast_const(), n) };
@@ -187,12 +200,66 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeCopy(
         let Ok(ptr)=env.get_direct_buffer_address(&output) else {return i64::from(INVALID);};
         if ptr.is_null(){return i64::from(INVALID);}
         session_call(handle,|session|{
-            if ptr!=session.output.address() || n>session.output.capacity(){return i64::from(INVALID);}
+            let Some(bridge)=session.output.as_ref() else {return i64::from(INVALID);};
+            if ptr!=bridge.address() || n>bridge.capacity(){return i64::from(INVALID);}
             // SAFETY: exact live private writable output allocation. Java
             // monitor and registry lock exclude other access and destruction.
             let dst=unsafe{slice::from_raw_parts_mut(ptr,n)};
             session.engine.copy(token,offset,dst)
         })
+    })
+}
+// No pinned Java arrays, no raw pointer retained, and no aggregate heap
+// packet or extra bridge buffer. JNI copies each source region directly into
+// the exclusive unpublished native input slot during this synchronous call.
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeSubmitAtlasParts(
+    mut env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong,generation:jlong,
+    parts:jni::objects::JObjectArray<'_>,length:jint,foreground:jboolean,slack:jlong)->jlong {
+    guarded(||{
+        let (Ok(len),Ok(ms))=(usize::try_from(length),u64::try_from(slack)) else {return i64::from(INVALID);};
+        if len==0 || len>crate::bmff::MAX_ATLAS_BYTES{return i64::from(INVALID);}
+        let Ok(count)=env.get_array_length(&parts) else {return i64::from(INVALID);};
+        if !(1..=256).contains(&count){return i64::from(INVALID);}
+        engine_call(handle,|engine|engine.submit_clear_atlas_with(generation,len,foreground!=0,ms,|dst|{
+            let mut offset=0usize;
+            for index in 0..count {
+                let Ok(obj)=env.get_object_array_element(&parts,index) else {return false;};
+                let array=jni::objects::JByteArray::from(obj);
+                if array.is_null(){return false;}
+                let Ok(n)=env.get_array_length(&array) else {return false;};
+                let Ok(n)=usize::try_from(n) else {return false;};
+                let Some(end)=offset.checked_add(n) else {return false;};
+                if n==0 || end>dst.len(){return false;}
+                // SAFETY: i8 and u8 have identical byte layout and alignment.
+                // The native slot is exclusively borrowed until this call returns.
+                let target=unsafe{slice::from_raw_parts_mut(dst[offset..end].as_mut_ptr().cast::<i8>(),n)};
+                let ok=env.get_byte_array_region(&array,0,target).is_ok();
+                let released=env.delete_local_ref(array).is_ok();
+                if !ok || !released{return false;}
+                offset=end;
+            }
+            offset==dst.len()
+        }))
+    })
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeReadAtlasArray(
+    env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong,token:jlong,offset:jint,
+    target:jni::objects::JByteArray<'_>,target_offset:jint,length:jint)->jlong {
+    guarded(||{
+        let (Ok(offset),Ok(start),Ok(n))=(usize::try_from(offset),usize::try_from(target_offset),
+            usize::try_from(length)) else {return i64::from(INVALID);};
+        if n==0 || n>crate::bmff::MAX_ATLAS_BYTES{return i64::from(INVALID);}
+        let Ok(cap)=env.get_array_length(&target) else {return i64::from(INVALID);};
+        let Ok(cap)=usize::try_from(cap) else {return i64::from(INVALID);};
+        if start>cap || n>cap-start{return i64::from(INVALID);}
+        engine_call(handle,|engine|engine.read_with(token,offset,n,|src|{
+            // SAFETY: signed byte reinterpretation, borrowed read lease remains
+            // locked for the complete synchronous JNI region copy.
+            let signed=unsafe{slice::from_raw_parts(src.as_ptr().cast::<i8>(),src.len())};
+            env.set_byte_array_region(&target,target_offset,signed).is_ok()
+        }))
     })
 }
 #[no_mangle]
@@ -276,6 +343,15 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragm
     _env: JNIEnv<'_>, _class: JClass<'_>, size: jint,
 ) -> jlong {
     guarded(|| usize::try_from(size).ok().and_then(crate::fragment_storage::allocate).unwrap_or(BACKPRESSURE))
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragmentAllocateBounded(
+    _env: JNIEnv<'_>, _class: JClass<'_>, size: jint, limit:jlong,
+) -> jlong {
+    guarded(|| {
+        let (Ok(size),Ok(limit))=(usize::try_from(size),usize::try_from(limit)) else {return i64::from(INVALID);};
+        crate::fragment_storage::allocate_bounded(size,limit).unwrap_or(BACKPRESSURE)
+    })
 }
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragmentView(

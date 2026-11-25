@@ -11,7 +11,7 @@ internal class CastDashPublication(
     val reusedBytes: Long get() = shared.values.sumOf { it.size.toLong() }
 
     fun addResource(name: String, bytes: SharedRelayResource) {
-        check(name !in video.resources && name !in shared)
+        check(name !in video.resources && name !in video.nativeResources && name !in shared)
         shared[name] = bytes
     }
 
@@ -22,7 +22,7 @@ internal class CastDashPublication(
     fun publish(relay: ComposedCmafRelay) {
         val manifest = video.manifest.replace("</Period>", "$adaptationSets</Period>").toByteArray()
         try {
-            relay.publishResources(video.resources + ("manifest.mpd" to manifest), shared)
+            relay.publishResources(video.resources + ("manifest.mpd" to manifest), shared, video.nativeResources)
         } catch (failure: Throwable) {
             manifest.fill(0)
             throw failure

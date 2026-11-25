@@ -148,6 +148,8 @@ internal object ProtectedHevcLiveComposition {
         val sourceTileIndices: List<Int>,
         val fullPictures: Boolean,
         val localNativeHeader: Boolean,
+        val castNativeHeader: Boolean,
+        val nativeContext: android.content.Context?,
         nativeHeaderRequested: Boolean,
     ) {
         @Volatile var nativeHeaderRequested = nativeHeaderRequested
@@ -156,9 +158,11 @@ internal object ProtectedHevcLiveComposition {
         // The UI can invalidate without taking the long composition monitor.
         val nativeEpoch = java.util.concurrent.atomic.AtomicLong(0L)
         @Volatile var nativeVerifiedEpoch = -1L
+        @Volatile var lastNativePublication = false
         fun invalidateNativeProof() {
             nativeEpoch.incrementAndGet()
             nativeVerifiedEpoch = -1L
+            lastNativePublication = false
         }
         var sourceGeometry: SourceGeometry? = null
         // Equivalent to the clear VOD session's cachedMixedAtlas. These keys
@@ -194,7 +198,7 @@ internal object ProtectedHevcLiveComposition {
             nativeParameterEpoch = -1L
             outputHistory.forEach(OutputFragment::zero)
             outputHistory.clear()
-            if (localNativeHeader) NativeFragmentLease.trim()
+            if (localNativeHeader || castNativeHeader) NativeFragmentLease.trim()
             hasPublishedOutput = false
             status = "CLEARED"
         }
@@ -223,6 +227,8 @@ internal object ProtectedHevcLiveComposition {
         fullPictures: Boolean = false,
         localNativeHeader: Boolean = false,
         nativeHeaderRequested: Boolean = false,
+        castNativeHeader: Boolean = false,
+        nativeContext: android.content.Context? = null,
     ) {
         require(group.isNotBlank()) { "Protected composition group is required" }
         val selected = labels.distinct()
@@ -235,7 +241,8 @@ internal object ProtectedHevcLiveComposition {
         }
         sessions.remove(group)?.clear()
         val session = Session(group, selected, sourceTileIndices, fullPictures,
-            localNativeHeader, localNativeHeader && nativeHeaderRequested)
+            localNativeHeader, castNativeHeader, nativeContext?.applicationContext,
+            (localNativeHeader || castNativeHeader) && nativeHeaderRequested)
         sessions[group] = session
         // Media3 may already have fetched the active init before the user selects feeds.
         // Reuse only the bounded, paired init snapshot; media fragments are captured after selection.
@@ -266,6 +273,25 @@ internal object ProtectedHevcLiveComposition {
                 session.invalidateNativeProof()
                 if (enabled) session.nativeHeaderRejected = false
             }
+        }
+    }
+
+    fun updateCastNativeHeaderPreference(group: String, enabled: Boolean) {
+        val session = sessionIndex[group]?.takeIf { it.castNativeHeader } ?: return
+        if (enabled != session.nativeHeaderRequested) {
+            session.nativeHeaderRequested = enabled
+            session.invalidateNativeProof()
+            if (enabled) session.nativeHeaderRejected = false
+        }
+    }
+
+    fun stitchingRoute(group: String): String {
+        val session = sessionIndex[group] ?: return "UNAVAILABLE"
+        return when {
+            !session.nativeHeaderRequested -> "JVM:USER_DISABLED"
+            session.nativeHeaderRejected -> "JVM:NATIVE_VALIDATION_REJECTED"
+            session.lastNativePublication && session.nativeVerifiedEpoch == session.nativeEpoch.get() -> "RUST:VALIDATED_PROTECTED_COMPUTATION"
+            else -> "JVM:REFERENCE_PENDING"
         }
     }
 
@@ -383,7 +409,7 @@ internal object ProtectedHevcLiveComposition {
         val retained = ArrayList<OutputFragment>(session.outputHistory.size)
         try {
             session.outputHistory.forEach { fragment ->
-                retained += if (shareNative && session.localNativeHeader) fragment.detached()
+                retained += if (shareNative && (session.localNativeHeader || session.castNativeHeader)) fragment.detached()
                     else fragment.legacyDetached()
             }
             return OutputWindow(initialization, retained, session.sourceGeometry)
@@ -1167,7 +1193,8 @@ internal object ProtectedHevcLiveComposition {
                     }
                 },
                 directNativeHeader = directNative,
-                preferNativeStorage = directNative && nativeEnabled() && session.localNativeHeader
+                preferNativeStorage = directNative && nativeEnabled() && (session.localNativeHeader || session.castNativeHeader),
+                nativeContext = session.nativeContext
             )
             unpublished = ownedFragment
             val fragmentWriteElapsedMs = (System.nanoTime() - fragmentWriteStartedNs) / 1_000_000L
@@ -1218,6 +1245,7 @@ internal object ProtectedHevcLiveComposition {
             // Exact first-fragment differential or independent direct checks
             // are only certified once the bounded history actually owns output.
             if (nativeComplete && nativeEnabled()) session.nativeVerifiedEpoch = nativeEpoch
+            session.lastNativePublication = nativeComplete && nativeEnabled() && directNative
             android.util.Log.i("ApexviewSingleDecoder",
                 "GB_PROTECTED_PUBLICATION requested=${if (session.nativeHeaderRequested) "RUST" else "JVM"} " +
                     "actualComputation=${if (nativeComplete && nativeEnabled() && directNative) "RUST" else "JVM"} " +

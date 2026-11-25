@@ -81,6 +81,9 @@ internal class F1ArchiveFeedCapture(
 
     val hlsProgrammes get() = if (usingHls) hls.programmes else emptyMap()
 
+    fun stitchingRoute(group: String): String = if (usingHls) hls.stitchingRoute(group)
+        else ProtectedHevcLiveComposition.stitchingRoute(group)
+
     fun outputWindow(group: String, shareNative: Boolean = false) =
         if (usingHls) hls.outputWindow(group, shareNative)
         else ProtectedHevcLiveComposition.outputWindow(group, shareNative)

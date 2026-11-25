@@ -50,7 +50,11 @@ internal class NativeStitchingBudgetObservation {
         // A diagnostic/admission projection must never interrupt JVM playback.
         try {
             val headroom=NativeStitchingDeviceBudget.sample(context)
-            val b=headroom?.let { NativeStitchingDeviceBudget.plan(it,size.input,size.output) }
+            val b=headroom?.takeIf { !it.lowMemory && size.input in 1..Int.MAX_VALUE.toLong() &&
+                size.output in 1..Int.MAX_VALUE.toLong() }?.let {
+                NativeStitchingEngine.planClearAtlas(it.lowRam,it.available,it.threshold,it.jvmHeadroom,
+                    size.input.toInt(),size.output.toInt())
+            }
             Log.i("ApexviewSingleDecoder","GA_DEVICE_BUDGET planningOnly=true inputPeak=${size.input} " +
                 "outputPeak=${size.output} available=${headroom?.available ?: -1} " +
                 "threshold=${headroom?.threshold ?: -1} jvmHeadroom=${headroom?.jvmHeadroom ?: -1} " +

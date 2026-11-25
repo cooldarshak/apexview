@@ -24,12 +24,17 @@ internal class NativeComposedCastSession(
     val live: Boolean, val durationMs: Long, private val dashClockOffsetMs: Long, private val hlsClockOffsetMs: Long,
     audioLabel: String, private val startAtLiveEdge: Boolean = false, val phoneWindowStartMs: Long? = null,
     tls: app.apexview.cast.local.PitwallTls.Session,
+    private val nativeContext: android.content.Context? = null,
+    initialNativeRequested: Boolean = false,
 ) : AutoCloseable {
     val sourceLabels = feeds.map { it.label }
     private val group = "cast-${UUID.randomUUID()}"
     val compositionGroup: String get() = group
     init { require(feeds.size in 2..6 && sourceLabels.distinct().size == feeds.size) }
-    private val capture = F1ArchiveFeedCapture(userAgent, ascendon, entitlement, factory, 0, preferredHeight, fullPictures = true)
+    @Volatile private var nativeRequested = initialNativeRequested
+    fun setNativePreference(enabled: Boolean) { nativeRequested = enabled }
+    private val capture = F1ArchiveFeedCapture(userAgent, ascendon, entitlement, factory, 0, preferredHeight,
+        fullPictures = true, nativeContext = nativeContext, nativeRequested = { nativeRequested })
     private val initialAudioIndex = feeds.indexOfFirst { it.label == audioLabel }.also { require(it >= 0) }
     private val audioReader = CmafHttpReader(factory)
     private val sidecars = RelayMediaBudget()
@@ -67,11 +72,14 @@ internal class NativeComposedCastSession(
     var protectedOutput = true
         private set
     init {
-        ProtectedHevcLiveComposition.selectFeeds(group, sourceLabels, fullPictures = true)
+        ProtectedHevcLiveComposition.selectFeeds(group, sourceLabels, fullPictures = true,
+            castNativeHeader = true, nativeHeaderRequested = nativeRequested, nativeContext = nativeContext)
     }
     suspend fun update(phoneClockMs: Long): F1DashFeedCapture.Snapshot = withContext(Dispatchers.IO) {
       gate.withLock {
         check(!closed)
+        // Preference changes are applied at a complete validated publication boundary.
+        ProtectedHevcLiveComposition.updateCastNativeHeaderPreference(group, nativeRequested)
         val ahead = if (captured) 12_000 else 0L
         val snapshot = if (live && startAtLiveEdge && !captured) capture.captureNext(group, feeds)
             else if (live) capture.captureLiveAtPosition(group, feeds,
@@ -82,7 +90,7 @@ internal class NativeComposedCastSession(
         ProtectedHevcLiveComposition.rejectionReason(group)?.let { throw PermanentCaptureException(it) }
         if (snapshot.capturedFeeds == 0) return@withContext snapshot
         val sourceUs = requireNotNull(snapshot.alignedSegmentTimeUs)
-        val window = capture.outputWindow(group) ?: return@withContext snapshot
+        val window = capture.outputWindow(group, shareNative = true) ?: return@withContext snapshot
         val pssh = capture.widevinePssh()
         var packaged: ProtectedHevcComposedDashPackageBuilder.Package? = null
         var windowTransferred = false
@@ -141,6 +149,9 @@ internal class NativeComposedCastSession(
                 clearOutput = capture.clearOutput, takeOwnership = true)
             packaged = video
             windowTransferred = true
+            // Heap arrays transfer to the package. Its native entries retained
+            // separate leases; the detached window's original tokens end here.
+            window.fragments.forEach { it.nativeMedia?.close() }
             val publication = CastDashPublication(video)
             for (track in audioTracks.values) track.appendTo(publication, requireNotNull(sourceStartUs))
             textTracks.values.forEach { it.appendTo(publication) }
@@ -150,6 +161,8 @@ internal class NativeComposedCastSession(
             geometry = shape; width = video.width; height = video.height
             protectedOutput = !capture.clearOutput || audioTracks.values.any { it.encrypted }
             captured = true
+            android.util.Log.i("PitwallCast", "GC_CAST_STITCHING requested=${if (nativeRequested) "RUST" else "JVM"} " +
+                "route=${capture.stitchingRoute(group)} nativePublishedBytes=${video.nativeResources.values.sumOf { it.size.toLong() }}")
             android.util.Log.i("PitwallCast", "PROTECTED_CMAF_RELAY sources=${feeds.size} source=${shape.displayWidth}x${shape.displayHeight} atlas=${width}x$height encrypted=$protectedOutput frames=${video.sampleCount} fullPictures=true sharedPublicationBytes=${publication.reusedBytes} sharedRetainedBytes=${sidecars.bytesInUse()}")
         } finally { packaged?.zero(); if (!windowTransferred) window.zero(); pssh?.fill(0) }
         snapshot

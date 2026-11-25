@@ -365,6 +365,36 @@ internal object ArchiveBufferPolicy {
     fun preemptWarmup(requested: Int, cached: Boolean, active: Int?, seek: Boolean = false): Boolean =
         (seek || !cached) && active != requested
 
+    data class NativeDemand(val positionMs: Long, val bufferedMs: Long, val speed: Float,
+                            val advancing: Boolean, val observedMs: Long)
+
+    /** A fresh clock determines how much media time remains before demand.
+     * A current/uncached seek or startup retains one segment of processing
+     * allowance; do not turn imminent demand into a guaranteed timeout. */
+    fun nativeJobTimeoutMs(startMs: Long, durationMs: Long, demand: NativeDemand?, nowMs: Long): Long {
+        val fallback = durationMs.coerceIn(1L, 5_000L)
+        if (demand == null || !demand.speed.isFinite() || demand.speed <= 0f ||
+            nowMs < demand.observedMs || nowMs - demand.observedMs > 2_000L) return fallback
+        val elapsed = if (demand.advancing) (nowMs - demand.observedMs) * demand.speed.toDouble() else 0.0
+        val untilStart = (startMs.toDouble() - demand.positionMs - elapsed).coerceAtLeast(0.0)
+        val remainingBuffered = (demand.bufferedMs - elapsed).coerceAtLeast(0.0)
+        val mediaAllowance = maxOf(durationMs.toDouble(), minOf(untilStart, remainingBuffered))
+        return (mediaAllowance / demand.speed).toLong().coerceIn(1L, 5_000L)
+    }
+
+    /** Restrict speculative groups only, based on observed transfer sizes.
+     * JVM/native foreground and manual quality choices are never gated here. */
+    fun memoryWarmLimit(thermalLimit: Int, headroom: NativeStitchingDeviceBudget.Headroom?,
+                        input: Long, output: Long): Int {
+        if (headroom == null) return thermalLimit
+        if (headroom.lowMemory || headroom.available <= headroom.threshold) return 0
+        if (input <= 0 || output <= 0 || input > Int.MAX_VALUE || output > Int.MAX_VALUE)
+            return minOf(thermalLimit, 1)
+        val charge = input + 2L * output + 8L * 1024 * 1024
+        val spare = minOf((headroom.available - headroom.threshold) / 8, headroom.jvmHeadroom / 2)
+        return minOf(thermalLimit, (spare / charge).coerceIn(0L, 2L).toInt())
+    }
+
     /** Keep the segment containing the audio clock plus two following segments. */
     fun maximumLeadUs(candidates: List<ArchiveDashSegmentSelector.Candidate>, positionUs: Long): Long {
         if (candidates.isEmpty()) return 0

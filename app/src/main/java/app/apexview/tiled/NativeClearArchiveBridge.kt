@@ -123,7 +123,6 @@ internal class NativeClearArchiveBridge(
         var baseline: HevcClearCmafGridComposer.Output? = null
         var computingReference = false
         var nativeOutput: NativeClearArchiveJob.WindowOutput? = null
-        var packet: ByteArray? = null
         var reason = "NATIVE_CLEAR_VALIDATION_REJECTED"
         fun referenceOutput(): HevcClearCmafGridComposer.Output {
             baseline?.let { return it }
@@ -231,9 +230,8 @@ internal class NativeClearArchiveBridge(
                 if (engine == null || required > requireNotNull(engine).budget.outputBytes) openSized(required)
             }
             reason = "NATIVE_CLEAR_WORKER_REJECTED"
-            val encoded = NativeClearArchiveJob.encodeWindow(request.outputTrackId, request.firstOutputSequenceNumber,
-                request.frameRateNumerator, request.frameRateDenominator, geometry, inits, media).bytes
-            packet = encoded
+            val encoded = NativeClearArchiveJob.encodeParts(request.outputTrackId, request.firstOutputSequenceNumber,
+                request.frameRateNumerator, request.frameRateDenominator, geometry, inits, media)
             val started = System.nanoTime()
             var active = requireNotNull(engine)
             val out = try {
@@ -285,10 +283,10 @@ internal class NativeClearArchiveBridge(
             checkCurrent(selected.epoch)
             val stats = active.copyStats()
             Log.i("ApexviewSingleDecoder", "GB_CLEAR_NATIVE_FRAGMENT generation=${selected.epoch} " +
-                "referenceCompared=${baseline != null} wallMs=${(System.nanoTime() - started) / 1_000_000L} " +
+                "referenceCompared=${baseline != null} sequence=${request.firstOutputSequenceNumber} deadlineMs=$timeoutMs wallMs=${(System.nanoTime() - started) / 1_000_000L} " +
                 "inputBytes=${encoded.size} outputBytes=${out.media.sumOf { it.size.toLong() }} fragments=$count javaInputBytes=${stats.javaInputBytes} " +
                 "nativeInputBytes=${stats.nativeInputBytes} nativeOutputBytes=${stats.nativeOutputBytes} " +
-                "javaOutputBytes=${stats.javaOutputBytes} rejectedSubmits=${stats.rejectedSubmits}")
+                "javaOutputBytes=${stats.javaOutputBytes} rejectedSubmits=${stats.rejectedSubmits} compactAtlas=${active.budget.compactAtlas}")
             if (needReference) {
                 clearProof()
                 verifiedInits = inits.map { it.copyOf() }
@@ -315,7 +313,6 @@ internal class NativeClearArchiveBridge(
             if (computingReference) throw error
             return fallback("NATIVE_CLEAR_LIBRARY_UNAVAILABLE")
         } finally {
-            packet?.fill(0)
             nativeOutput?.wipe()
             baseline?.let { it.initializationSegment.fill(0); it.mediaFragments.forEach { bytes -> bytes.fill(0) } }
             work.unlock()

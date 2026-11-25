@@ -845,13 +845,17 @@ class AppState(
                             },
                         ).also {
                             ownedSession = it
-                            if(settings.nativeRustStitching) it.configureNativeBudget(context)
+                            if(settings.nativeRustStitching) it.configureNativeClear(context)
                         }
                     } finally { capture.reset() }
                 }
-                // Reused local clear sessions must not change the Cast source
-                // route before independent receiver parity is certified.
-                session.disableNativeClear("CAST_ROUTE", settings.nativeRustStitching)
+                // The receiver consumes the same validated CMAF bytes. Reuse
+                // the active owner rather than create a competing native arena.
+                if (settings.nativeRustStitching) {
+                    val previous = singleDecoderScenePlayer?.archiveSceneSession
+                    if (previous !== session) previous?.disableNativeClear("CAST_OWNER_TRANSFER", true)
+                    session.configureNativeClear(context)
+                } else session.disableNativeClear("USER_DISABLED", false)
                 android.util.Log.i("PitwallCast", "CAST_SOURCE_QUALITY actual=${session.sourceDisplayWidth}x${session.sourceDisplayHeight} feeds=${session.sourceLabels.size} atlas=${session.width}x${session.height} decoderMode=$decoderMode layoutReceiver=$usesLayoutCastReceiver")
                 val manager = context.getSystemService(android.net.ConnectivityManager::class.java)
                 val network = manager.allNetworks.firstOrNull { network -> manager.getNetworkCapabilities(network)?.let {
@@ -1279,7 +1283,8 @@ class AppState(
                         else commonQuality.targetHeight.takeIf { it > 0 } ?: 720, settings.commentary,
                     live, if (live) 0L else clock.player.duration.takeIf { it > 0 } ?: durationMs,
                     dashOffset, hlsOffset, audio.feed.sourceStream.profileLabel, liveEdge, windowUtc,
-                    tls = requireNotNull(localConnection?.secureSession))
+                    tls = requireNotNull(localConnection?.secureSession),
+                    nativeContext = context, initialNativeRequested = settings.nativeRustStitching)
                 val next = requireNotNull(owned)
                 preparingNativeCast = next
                 kotlinx.coroutines.withTimeout(60_000) {
@@ -1530,10 +1535,15 @@ class AppState(
                 session.nativeStitchingDecision.actual == NativeStitchingSelection.Route.RUST)
         settings.updateNativeRustStitching(value)
         ProtectedHevcLiveComposition.updateLocalNativeHeaderPreference(value && !castingActive && !castPlaybackHandedOff)
-        // Retire the old generation before the existing coordinator prepares
-        // a replacement. During Cast defer ON until local playback returns.
-        session?.disableNativeClear(if (restart) "PREFERENCE_RESTART" else
-            if (castingActive || castPlaybackHandedOff) "CAST_ROUTE" else "PREFERENCE_CHANGED", value)
+        // Cast owners apply the new preference at a complete fragment boundary.
+        // A baked scene retains its existing clear archive producer.
+        nativeComposedCast?.setNativePreference(value)
+        preparingNativeCast?.setNativePreference(value)
+        val castArchive = castRelay?.session ?: if (bakedCastSession != null) session else null
+        if (castArchive != null && value) castArchive.configureNativeClear(context)
+        else castArchive?.disableNativeClear("USER_DISABLED", false)
+        if (session !== castArchive) session?.disableNativeClear(if (restart) "PREFERENCE_RESTART" else
+            "PREFERENCE_CHANGED", value)
         val path = if (session != null) NativeStitchingSelection.Path.VERIFIED_CLEAR
             else NativeStitchingSelection.Path.NON_COMPOSED
         val next = session?.nativeStitchingDecision ?: NativeStitchingSelection.resolve(value, path)
@@ -2997,6 +3007,8 @@ class AppState(
                 var lastEvidenceAt = 0L
                 var readySince: Long? = null
                 while (true) {
+                    prepared?.updateNativePlaybackDemand(host.feed.player.currentPosition,
+                        host.feed.player.totalBufferedDuration, playbackSpeed, playing && !host.feed.buffering)
                     host.feed.problem?.let { throw IOException("Composed playback failed: $it") }
                     if (host.feed.hasRenderedFirstFrame && observedActiveVideoDecoders > 1) throw IOException("Expected one active video decoder; callbacks report $observedActiveVideoDecoders")
                     if (host.feed.hasRenderedFirstFrame && host.feed.activeVideoDecoderHardware == "hardware NO") throw IOException("Composed video selected a software decoder")
@@ -3155,7 +3167,8 @@ class AppState(
             ProtectedHevcLiveComposition.clearSelection(group, discardInitialization = true)
         }
         ProtectedHevcLiveComposition.selectFeeds(group, labels, fullPictures = mixedRequested,
-            localNativeHeader = true, nativeHeaderRequested = settings.nativeRustStitching && !castingActive)
+            localNativeHeader = true, nativeHeaderRequested = settings.nativeRustStitching && !castingActive,
+            nativeContext = context)
         val startup = ArchiveCompositionStartup()
         var lastSnapshot: F1DashFeedCapture.Snapshot? = null
         var releasedCount = 0
@@ -3581,7 +3594,7 @@ class AppState(
             ProtectedHevcLiveComposition.clearSelection(group, discardInitialization = true)
         }
         ProtectedHevcLiveComposition.selectFeeds(group, labels, localNativeHeader = true,
-            nativeHeaderRequested = settings.nativeRustStitching && !castingActive)
+            nativeHeaderRequested = settings.nativeRustStitching && !castingActive, nativeContext = context)
         val selectedTiles = labels.mapNotNull { byLabel[it] }
         val host = selectedTiles.firstOrNull { !it.audible } ?: selectedTiles.first()
         val audioTile = selectedTiles.firstOrNull { it !== host && it.audible }

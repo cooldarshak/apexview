@@ -16,6 +16,7 @@ internal class NativeFragmentLease private constructor(private val shared: Share
     }
     private var closed = false
     val size: Int get() = shared.size
+    internal val storageIdentity: Any get() = shared
 
     @Synchronized fun retain(): NativeFragmentLease {
         check(!closed)
@@ -31,7 +32,9 @@ internal class NativeFragmentLease private constructor(private val shared: Share
         require(start >= 0 && count >= 0 && start <= size-count &&
             offset >= 0 && offset <= target.size-count)
         synchronized(shared) {
-            val b = requireNotNull(shared.buffer).asReadOnlyBuffer()
+            // Private immutable backing, cursor protected by the shared
+            // monitor. Avoid a new ByteBuffer wrapper for every Media3 read.
+            val b = requireNotNull(shared.buffer)
             b.position(start); b.get(target, offset, count)
         }
     }
@@ -39,8 +42,26 @@ internal class NativeFragmentLease private constructor(private val shared: Share
     @Synchronized fun inspect(priorInitialization: CmafBoxInspector.Report): CmafBoxInspector.Report {
         check(!closed)
         return synchronized(shared) {
-            CmafBoxInspector.inspect(requireNotNull(shared.buffer).asReadOnlyBuffer(), priorInitialization)
+            CmafBoxInspector.inspect(requireNotNull(shared.buffer).asReadOnlyBuffer().apply { position(0) }, priorInitialization)
         }
+    }
+
+    /** Only a bounded transfer scratch buffer is needed for HTTP/TLS.
+     * Each socket reader holds its independent lease until the write ends. */
+    @Synchronized fun writeTo(output: java.io.OutputStream, start: Int, count: Int) {
+        check(!closed)
+        require(start >= 0 && count >= 0 && start <= size - count)
+        if (count == 0) return
+        val scratch = ByteArray(minOf(count, 32 * 1024))
+        try {
+            var sent = 0
+            while (sent < count) {
+                val n = minOf(scratch.size, count - sent)
+                readTo(scratch, 0, start + sent, n)
+                output.write(scratch, 0, n)
+                sent += n
+            }
+        } finally { scratch.fill(0) }
     }
 
     fun copyBytes(): ByteArray = ByteArray(size).also { readTo(it, 0, 0, it.size) }
@@ -60,9 +81,21 @@ internal class NativeFragmentLease private constructor(private val shared: Share
     companion object {
         /** Only admission failures return null. A writer/validation failure
          * releases the unpublishable allocation and propagates unchanged. */
-        fun build(size: Int, writer: (ByteBuffer) -> Unit): NativeFragmentLease? {
+        fun build(size: Int, writer: (ByteBuffer) -> Unit): NativeFragmentLease? =
+            build(size, null, writer)
+
+        fun build(size: Int, context: android.content.Context?, writer: (ByteBuffer) -> Unit): NativeFragmentLease? {
             if (size <= 0) return null
-            val id = try { NativeStitchingEngine.allocateFragment(size) }
+            val limit = if (context == null) 64L * 1024 * 1024 else {
+                val h = NativeStitchingDeviceBudget.sample(context) ?: return null
+                if (h.lowMemory || h.available <= h.threshold) { trim(); return null }
+                minOf(64L * 1024 * 1024, (h.available - h.threshold) / 8)
+            }
+            if (size.toLong() > limit) { trim(); return null }
+            val id = try {
+                if (context == null) NativeStitchingEngine.allocateFragment(size)
+                else NativeStitchingEngine.allocateFragmentBounded(size, limit)
+            }
                 catch (_: RuntimeException) { return null }
                 catch (_: LinkageError) { return null }
             if (id <= 0) return null
@@ -75,7 +108,7 @@ internal class NativeFragmentLease private constructor(private val shared: Share
                 writer(buffer)
                 check(buffer.position() == size)
                 buffer.flip()
-                val lease = NativeFragmentLease(Shared(id, buffer, size))
+                val lease = NativeFragmentLease(Shared(id, buffer.asReadOnlyBuffer(), size))
                 transferred = true
                 return lease
             } finally {
