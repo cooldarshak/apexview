@@ -1003,9 +1003,6 @@ class FeedPlayer(
         validatePrepared: () -> Unit = {},
     ) {
         val nextSource = ProtectedHevcLiveDashSource(clearOutput)
-        firstFrameRendered = false
-        error = null
-        problem = null
         var publisherStarted = false
         val previous = protectedLiveDashSource
         var handoffInstalled = false
@@ -1022,6 +1019,9 @@ class FeedPlayer(
             // Revalidate the caller's exact selection before taking the
             // Media3 host or replacing a source on the application looper.
             validatePrepared()
+            firstFrameRendered = false
+            error = null
+            problem = null
             val mediaItem = MediaItem.Builder()
                 .setUri(Uri.parse(PROTECTED_COMPOSED_MANIFEST_URI))
                 .setMimeType(MimeTypes.APPLICATION_MPD)
