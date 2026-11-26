@@ -34,11 +34,15 @@ internal class BakedCastSegmentQueue(
         require(sample.video && sample.ptsUs >= 0 && sample.ptsUs > latestVideoUs) {
             "The scene encoder did not produce monotonically increasing timestamps"
         }
-        latestVideoUs = sample.ptsUs
-        if (!sample.keyFrame && video.isEmpty()) return
+        if (!sample.keyFrame && video.isEmpty()) {
+            latestVideoUs = sample.ptsUs
+            sample.bytes.fill(0)
+            return
+        }
         require(video.size < maxVideo && sample.bytes.size.toLong() <= remainingBytes()) {
             "Baked Cast video publication backlog exhausted"
         }
+        latestVideoUs = sample.ptsUs
         video.addLast(sample)
         pendingBytes += sample.bytes.size
         recordMemory()
@@ -102,11 +106,14 @@ internal class BakedCastSegmentQueue(
         require(duration in 800_000L..4_000_000L) { "Baked Cast GOP exceeds segment duration" }
         val picture = mutableListOf<BakedCastTransportStream.Sample>()
         while (video.isNotEmpty() && video.first().ptsUs < boundary.ptsUs) picture += remove(video)
-        while (audio.isNotEmpty() && audio.first().ptsUs < first.ptsUs) remove(audio)
+        while (audio.isNotEmpty() && audio.first().ptsUs < first.ptsUs) remove(audio).bytes.fill(0)
         val commentary = mutableListOf<BakedCastTransportStream.Sample>()
         while (audio.isNotEmpty() && audio.first().ptsUs < boundary.ptsUs) commentary += remove(audio)
         recordMemory()
-        require(commentary.isNotEmpty()) { "The Cast segment has no commentary" }
+        if (commentary.isEmpty()) {
+            picture.forEach { it.bytes.fill(0) }
+            throw IllegalArgumentException("The Cast segment has no commentary")
+        }
         return Ready(picture, commentary, duration).also {
             publishing[it] = it.bytes
             publishingBytes += it.bytes
@@ -122,6 +129,7 @@ internal class BakedCastSegmentQueue(
     }
 
     fun clear() {
+        video.forEach { it.bytes.fill(0) }; audio.forEach { it.bytes.fill(0) }
         video.clear(); audio.clear(); pendingBytes = 0L
         audioMetadata = LongArray(0)
         recordMemory()
