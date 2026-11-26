@@ -9,13 +9,16 @@ import androidx.compose.runtime.setValue
 import app.apexview.cast.local.TimingMessageChunks
 import org.json.JSONObject
 
-internal class CastTimingReceiver {
+internal class CastTimingReceiver(private val nowMs: () -> Long = SystemClock::elapsedRealtime) {
     var geometry by mutableStateOf<CastTimingProtocol.Geometry?>(null)
         private set
     var frame by mutableStateOf<CastTimingProtocol.Frame?>(null)
         private set
-    private val assembler = TimingMessageChunks.Assembler(SystemClock::elapsedRealtime)
+    private val assembler = TimingMessageChunks.Assembler(nowMs)
     private var tableId = -1L
+    private var epochAwareTables = false
+    private var tableEpoch: Long? = null
+    private val emptyTable = CastTimingProtocol.Table(emptyList(), emptyMap(), emptyMap())
     /** Independent Compose state: a new tower table must display even when its associated
      * car-motion frame is late, stale or temporarily rejected across a video seek. */
     var currentTable by mutableStateOf<CastTimingProtocol.Table?>(null)
@@ -42,6 +45,8 @@ internal class CastTimingReceiver {
         geometry = null
         frame = null
         tableId = -1
+        epochAwareTables = false
+        tableEpoch = null
         currentTable = null
         tablePackets = 0L
         framePackets = 0L
@@ -73,7 +78,7 @@ internal class CastTimingReceiver {
         val clockEpoch: Long,
     )
 
-    fun health(nowMs: Long = SystemClock.elapsedRealtime()) = Health(
+    fun health(nowMs: Long = this.nowMs()) = Health(
         framePackets, tablePackets, rejectedFrames, rejectedTableVersion,
         rejectedClockEpoch, rejectedGeometry, rejectedSequence,
         aheadTableFramesRecovered,
@@ -88,7 +93,33 @@ internal class CastTimingReceiver {
         clockEpoch++
         pendingLegacySeek = fromMs to toMs
         frame = null
+        // Older peers never sent a table epoch. Keep their established
+        // compatibility behavior; updated peers cannot display old ranks.
+        if (epochAwareTables) {
+            currentTable = null
+            tableEpoch = null
+        }
     }
+
+    private fun incomingEpoch(j: JSONObject): Long? =
+        if (j.has("clockEpoch")) j.getLong("clockEpoch") else null
+
+    private fun acceptsEpoch(epoch: Long?): Boolean =
+        epoch == null || epoch >= 0L && (epoch == clockEpoch ||
+            CastTimingEpochPolicy.adoptInitialEpoch(framePackets, lastSequence,
+                pendingLegacySeek != null, epoch))
+
+    private fun acceptsTableEpoch(epoch: Long?): Boolean =
+        if (epoch == null) !epochAwareTables else acceptsEpoch(epoch)
+
+    private fun tableForFrame(epoch: Long?): CastTimingProtocol.Table? =
+        if (!epochAwareTables) currentTable
+        else if (epoch != null && epoch == tableEpoch) currentTable ?: emptyTable
+        else emptyTable
+
+    private fun canRecoverAheadTable(incoming: Long): Boolean =
+        tableId >= 0L && tableId < Long.MAX_VALUE && incoming == tableId + 1L &&
+            (currentTable != null || epochAwareTables)
     /** Synchronous contract retained for regression tests and lightweight callers. */
     fun accept(packet: JSONObject, playbackId: String) {
         val j = assembler.accept(packet) ?: return
@@ -119,7 +150,9 @@ internal class CastTimingReceiver {
             "table" -> {
                 require(j.getInt("version") == 1)
                 val version = j.getLong("id")
-                if (version > tableId || currentTable == null) {
+                val epoch = incomingEpoch(j)
+                if (acceptsTableEpoch(epoch) && version >= tableId &&
+                    (version > tableId || currentTable == null || epoch != tableEpoch)) {
                     decodedTable = withContext(Dispatchers.Default) {
                         CastTimingProtocol.readTable(j.getJSONArray("rows"), j.optJSONArray("stoppedDrivers"))
                     }
@@ -127,17 +160,13 @@ internal class CastTimingReceiver {
             }
             "frame" -> {
                 val incomingTableId = j.getLong("tableId")
-                val canUseTable = incomingTableId == tableId ||
-                    (tableId >= 0L && tableId < Long.MAX_VALUE &&
-                        incomingTableId == tableId + 1L && currentTable != null)
+                val canUseTable = incomingTableId >= 0L &&
+                    (incomingTableId == tableId || canRecoverAheadTable(incomingTableId))
                 val geometryName = j.getString("geometry")
                 val validGeometry = geometryName.isEmpty() || geometryName == geometry?.id
-                val incomingEpoch = if (j.has("clockEpoch")) j.getLong("clockEpoch") else null
-                val validEpoch = incomingEpoch == null ||
-                    (incomingEpoch >= 0L && (incomingEpoch == clockEpoch ||
-                        CastTimingEpochPolicy.adoptInitialEpoch(
-                            framePackets, lastSequence, pendingLegacySeek != null, incomingEpoch)))
-                val table = currentTable
+                val epoch = incomingEpoch(j)
+                val validEpoch = acceptsEpoch(epoch)
+                val table = tableForFrame(epoch)
                 if (j.getLong("sequence") > lastSequence && canUseTable &&
                     validGeometry && validEpoch && table != null) {
                     decodedFrame = withContext(Dispatchers.Default) {
@@ -171,18 +200,21 @@ internal class CastTimingReceiver {
             "table" -> {
                 require(j.getInt("version") == 1)
                 val id = j.getLong("id")
-                if (id < tableId) return
-                if (id == tableId && currentTable != null) {
+                val epoch = incomingEpoch(j)
+                if (id < 0L || id < tableId || !acceptsTableEpoch(epoch)) return
+                if (id == tableId && currentTable != null && epoch == tableEpoch) {
                     // Periodic same-version snapshots are valid proof that the
                     // tower transport is alive. Do not reparse or recompose rows.
-                    lastTableReceivedMs = SystemClock.elapsedRealtime()
+                    lastTableReceivedMs = nowMs()
                     return
                 }
                 val updated = decodedTable ?: CastTimingProtocol.readTable(j.getJSONArray("rows"), j.optJSONArray("stoppedDrivers"))
                 tableId = id
+                if (epoch != null) epochAwareTables = true
+                tableEpoch = epoch
                 currentTable = updated
                 tablePackets++
-                lastTableReceivedMs = SystemClock.elapsedRealtime()
+                lastTableReceivedMs = nowMs()
             }
             "frame" -> {
                 val sequence = j.getLong("sequence")
@@ -193,17 +225,20 @@ internal class CastTimingReceiver {
                 // New marker positions should survive a pending tower table
                 // packet, but only one generation ahead and only when a
                 // previous validated tower table already exists.
-                val oneAhead = tableId >= 0L && tableId < Long.MAX_VALUE &&
-                    incomingTableId == tableId + 1L && currentTable != null
-                if (incomingTableId != tableId && !oneAhead) {
+                val oneAhead = canRecoverAheadTable(incomingTableId)
+                if (incomingTableId < 0L || (incomingTableId != tableId && !oneAhead)) {
                     rejectedFrames++; rejectedTableVersion++; return
                 }
                 if (j.getString("geometry").isNotEmpty() && j.getString("geometry") != geometry?.id) {
                     rejectedFrames++; rejectedGeometry++; return
                 }
-                val acceptedTable = currentTable ?: return
-                if (j.has("clockEpoch")) {
-                    val incomingEpoch = j.getLong("clockEpoch")
+                val epoch = incomingEpoch(j)
+                if (epochAwareTables && epoch == null) {
+                    rejectedFrames++; rejectedClockEpoch++; return
+                }
+                val acceptedTable = tableForFrame(epoch) ?: return
+                if (epoch != null) {
+                    val incomingEpoch = epoch
                     if (incomingEpoch < 0L) {
                         rejectedFrames++; rejectedClockEpoch++; return
                     }
@@ -226,12 +261,19 @@ internal class CastTimingReceiver {
                         if (kotlin.math.abs(position - from) < kotlin.math.abs(position - to)) return
                     }
                 }
-                frame = decodedFrame ?: CastTimingProtocol.decodeFrame(j, acceptedTable)
+                val next = decodedFrame ?: CastTimingProtocol.decodeFrame(j, acceptedTable)
+                // First-frame epoch adoption may differ from a preceding
+                // table candidate. Never publish that table with this frame.
+                if (epochAwareTables && tableEpoch != epoch) {
+                    currentTable = null
+                    tableEpoch = null
+                }
+                frame = next
                 if (oneAhead) aheadTableFramesRecovered++
                 pendingLegacySeek = null
                 lastSequence = sequence
                 framePackets++
-                lastFrameReceivedMs = SystemClock.elapsedRealtime()
+                lastFrameReceivedMs = nowMs()
             }
         }
     }
