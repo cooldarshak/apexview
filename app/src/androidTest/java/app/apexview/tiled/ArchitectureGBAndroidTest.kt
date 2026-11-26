@@ -134,6 +134,35 @@ class ArchitectureGBAndroidTest {
         val truncated = parts.copyOf()
         truncated[2] = truncated[2].copyOf(truncated[2].size-1)
         assertFalse(NativeHotPath.audioMetadata(truncated,longArrayOf(-1,-1,-1),result))
+        val input = IntArray(192)
+        input[0] = 2048; input[1] = 2049; input[64] = 2051
+        val padded = IntArray(192) { -1 }
+        assertTrue(NativeHotPath.normalizeSectors(input, intArrayOf(2,5,1,3,0,4), padded))
+        assertArrayEquals(intArrayOf(2048,2049,0,0,0), padded.copyOfRange(0,5))
+        assertArrayEquals(intArrayOf(2051,0,0), padded.copyOfRange(64,67))
+        assertFalse(NativeHotPath.normalizeSectors(input,intArrayOf(2,65,1,3,0,4),padded))
+        var requested = true
+        val reference = app.apexview.cast.BakedCastTransportStream()
+        val candidate = app.apexview.cast.BakedCastTransportStream { requested }
+        repeat(20) { n ->
+            requested = n % 3 != 1
+            val base = n * 1_000_000L
+            val video = ByteArray(160 + n * 2111) { it.toByte() }
+            val audio = ByteArray(7 + n * 17) { it.toByte() }
+            audio[0] = 0xff.toByte(); audio[1] = 0xf1.toByte()
+            val samples = listOf(
+                app.apexview.cast.BakedCastTransportStream.Sample(base,video,true,true),
+                app.apexview.cast.BakedCastTransportStream.Sample(base,audio,false),
+                app.apexview.cast.BakedCastTransportStream.Sample(base+20_000,audio,false),
+            )
+            val expected = reference.segment(samples)
+            if (requested) {
+                requireNotNull(candidate.nativeSegment(samples,null)).use { assertArrayEquals(expected,it.copyBytes()) }
+            } else {
+                assertNull(candidate.nativeSegment(samples,null))
+                assertArrayEquals(expected,candidate.segment(samples))
+            }
+        }
     }
 
     @Test

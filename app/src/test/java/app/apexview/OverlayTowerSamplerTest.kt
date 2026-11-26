@@ -118,6 +118,8 @@ class OverlayTowerSamplerTest {
                 },
             )
             assertEquals("timing/sector row parity at $now", reference.rows, actual.rows)
+            assertEquals(reference.rows.associate { (id, state) -> id to List(3, state::towerSector) },
+                actual.normalizedSectors)
             assertEquals("flag/lap/countdown header parity at $now", reference.header, actual.header)
             assertEquals("gear/speed parity at $now", reference.speeds, actual.speeds)
             assertEquals("tyre/age parity at $now",

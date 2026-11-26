@@ -199,10 +199,17 @@ internal class BoundedArchiveFragmentCache(
         pinned.filterNot { it.cached }.sumOf { it.size.toLong() })
     private fun recordMemory() {
         // Native fragment backing is already charged in the Rust arena.
-        val uniqueHeap = (entries.values + pinned.filterNot { it.cached }).filter { it.bytes != null }
+        var owned = 0L
+        var leased = 0L
+        for (entry in entries.values) if (entry.bytes != null) {
+            owned += entry.size
+            if (entry.readers > 0) leased += entry.size
+        }
+        for (entry in pinned) if (!entry.cached && entry.bytes != null) {
+            owned += entry.size; leased += entry.size
+        }
         app.apexview.MediaMemoryAccounting.process.record(this,
-            app.apexview.MediaMemoryAccounting.Kind.ARCHIVE_CACHE,
-            uniqueHeap.sumOf { it.size.toLong() }, uniqueHeap.filter { it.readers > 0 }.sumOf { it.size.toLong() })
+            app.apexview.MediaMemoryAccounting.Kind.ARCHIVE_CACHE, owned, leased)
     }
     /** Foreground keeps its original admission and retry contract. Do not
      * start speculative production while retired readers consume the cache

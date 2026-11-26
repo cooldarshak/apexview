@@ -48,6 +48,54 @@ internal fun CardState.towerSector(index: Int): SectorCell? {
     return SectorCell(current?.time.orEmpty(), current?.pace ?: Pace.NONE, strip, current?.previousTime.orEmpty())
 }
 
+/** A tower-only owner keeps immutable mini-sector strips across unrelated
+ * speed, tyre, position and header updates. The original CardState is never
+ * changed. Rust handles bounded numeric padding; the reference path remains
+ * available for longer histories or unavailable JNI. */
+internal class TowerSectorNormalizer(private val nativeRequested: Boolean) {
+    private data class Cached(val current: List<SectorCell?>, val previous: List<SectorCell?>,
+        val normalized: List<SectorCell?>)
+    private val rows = HashMap<String, Cached>()
+    private val counts = IntArray(6)
+    private val input = IntArray(192)
+    private val output = IntArray(192)
+    private var actual: Boolean? = null
+
+    fun sample(number: String, state: CardState): List<SectorCell?> {
+        val cached = rows[number]
+        if (cached != null && cached.current == state.sectors && cached.previous == state.lapSectors)
+            return cached.normalized
+        var bounded = true
+        var needsPadding = false
+        for (i in 0..2) {
+            val current = state.sectors.getOrNull(i)?.segments.orEmpty()
+            val previous = state.lapSectors.getOrNull(i)?.segments?.size ?: 0
+            counts[2*i] = current.size
+            counts[2*i+1] = maxOf(current.size, previous)
+            needsPadding = needsPadding || previous > current.size
+            if (counts[2*i+1] > 64) bounded = false
+            else current.forEachIndexed { j, value -> input[64*i+j] = value }
+        }
+        val native = nativeRequested && bounded && needsPadding &&
+            app.apexview.tiled.NativeHotPath.normalizeSectors(input, counts, output)
+        if (nativeRequested && needsPadding && actual != native) {
+            actual = native
+            android.util.Log.i("PitwallNativeHotPath", "TOWER_SECTOR_ENGINE requested=RUST actual=" +
+                if (native) "RUST reason=STRIP_NORMALIZED" else "JVM reason=NATIVE_LIMIT_OR_UNAVAILABLE")
+        }
+        val result = List(3) { i ->
+            val current = state.sectors.getOrNull(i)
+            if (!native) state.towerSector(i)
+            else if (counts[2*i] == counts[2*i+1]) current
+            else SectorCell(current?.time.orEmpty(), current?.pace ?: Pace.NONE,
+                List(counts[2*i+1]) { j -> output[i*64+j] }, current?.previousTime.orEmpty())
+        }
+        rows[number] = Cached(state.sectors, state.lapSectors, result)
+        return result
+    }
+    fun retainOnly(numbers: Set<String>) { rows.keys.retainAll(numbers) }
+}
+
 /**
  * One driver's timing through the session, as recorded snapshots: each change to the sectors,
  * last lap, gap, position or pit status keeps a full copy of the state, so [at] is a lookup

@@ -17,7 +17,8 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertRegex(laptop, r"TimingTowerContents\(timing, visible\.rows")
         self.assertIn("TvTowerRow(timing.drivers[number]", laptop)
         row = source("TvTowerRow.kt")
-        self.assertIn("remember(number, driver?.tla, state, kmh, gear, speedUnit)", row)
+        self.assertIn("remember(number, driver?.tla, state, kmh, gear, speedUnit, sectorsForDraw)", row)
+        self.assertIn("remember(state.sectors, state.lapSectors)", row)
         self.assertNotIn("remember(number, driver?.tla, state, tyre, kmh, gear, speedUnit)", row)
 
     def test_map_animation_is_draw_phase_and_flags_are_not_recorded_every_frame(self):
@@ -98,6 +99,15 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("OverlayEdgeProjection(nativeRequested)", track)
         self.assertIn("NativeCircuitProjection(timing.geometry)", track)
         self.assertIn("app.settings.nativeRustStitching", sender)
+
+    def test_gc_native_transport_sector_and_exact_forecast(self):
+        self.assertIn("NativeHotPath.transport", source("cast/BakedCastTransportStream.kt"))
+        self.assertIn("NativeFragmentLease.build", source("cast/BakedCastTransportStream.kt"))
+        self.assertIn("native = native", source("cast/BakedCastHlsSession.kt"))
+        self.assertIn("muxer.encodedSize(samples).toLong()", source("cast/BakedCastHlsSession.kt"))
+        self.assertIn("NativeHotPath.normalizeSectors", source("DriverTiming.kt"))
+        self.assertIn("sectorNormalizer.sample(number, row)", source("OverlayTowerSampler.kt"))
+        self.assertIn("normalizedSectors = visible.normalizedSectors", source("Laptop.kt"))
 
     def test_gc_expanded_native_flag_audio_and_prediction_paths(self):
         self.assertIn("NativeHotPath.flags", source("LiveTiming.kt"))

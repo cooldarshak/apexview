@@ -848,3 +848,76 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeAudioMetadata
     }));
     match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
 }
+
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeTransport(
+    mut env:JNIEnv<'_>,_class:JClass<'_>,parts:JObjectArray<'_>,metadata:JLongArray<'_>,
+    continuity:JIntArray<'_>,output:JByteBuffer<'_>,
+)->jint {
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        let n=usize::try_from(env.get_array_length(&parts).ok()?).ok()?;
+        if !(2..=2397).contains(&n)||env.get_array_length(&metadata).ok()? as usize!=3*n||
+            env.get_array_length(&continuity).ok()?!=4{return None;}
+        let len=env.get_direct_buffer_capacity(&output).ok()?;
+        if len==0||len>64*1024*1024||env.call_method(&output,"isReadOnly","()Z",&[]).ok()?.z().ok()?{return None;}
+        let ptr=env.get_direct_buffer_address(&output).ok()?;
+        if ptr.is_null(){return None;}
+        let mut initial=[0i32;4];env.get_int_array_region(&continuity,0,&mut initial).ok()?;
+        if initial.iter().any(|v|!(0..=15).contains(v)){return None;}
+        // SAFETY: unpublished private lease, checked extent. Caller will
+        // expose only after successful complete writing and continuity update.
+        let bytes=unsafe{slice::from_raw_parts_mut(ptr,len)};
+        let mut writer=crate::ts_mux::Writer::new(bytes,initial.map(|v|v as u8))?;
+        writer.tables()?;
+        let mut prior_pts=-1i64;let mut previous_video=true;
+        let mut cache=[0i8;32*1024];
+        for i in 0..n{
+            let mut meta=[0i64;3];env.get_long_array_region(&metadata,(3*i)as i32,&mut meta).ok()?;
+            let video=meta[2]&1!=0;let key=meta[2]&2!=0;
+            if !(0..=3).contains(&meta[2])||meta[0]<prior_pts||
+                meta[0]==prior_pts&&video&&!previous_video{return None;}
+            prior_pts=meta[0];previous_video=video;
+            let array=JByteArray::from(env.get_object_array_element(&parts,i as i32).ok()?);
+            let size=usize::try_from(meta[1]).ok()?;
+            if env.get_array_length(&array).ok()? as usize!=size{return None;}
+            let mut cache_start=0usize;let mut cache_end=0usize;
+            writer.sample(meta[0],size,video,key,|mut offset,mut dst|{
+                while !dst.is_empty(){
+                    if offset<cache_start||offset>=cache_end{
+                        cache_start=offset;cache_end=offset.checked_add((size.checked_sub(offset)?).min(cache.len()))?;
+                        if cache_end==cache_start{return None;}
+                        env.get_byte_array_region(&array,offset as i32,&mut cache[..cache_end-cache_start]).ok()?;
+                    }
+                    let count=dst.len().min(cache_end-offset);
+                    let source=&cache[offset-cache_start..offset-cache_start+count];
+                    // SAFETY: i8/u8 same extent and alignment, private initialized cache.
+                    let source=unsafe{slice::from_raw_parts(source.as_ptr().cast::<u8>(),count)};
+                    dst[..count].copy_from_slice(source);
+                    offset+=count;dst=&mut dst[count..];
+                }
+                Some(())
+            })?;
+            env.delete_local_ref(array).ok()?;
+        }
+        let final_counts=writer.finish()?.map(i32::from);
+        env.set_int_array_region(&continuity,0,&final_counts).ok()?;Some(())
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeNormalizeSectors(
+    env:JNIEnv<'_>,_class:JClass<'_>,input:JIntArray<'_>,counts:JIntArray<'_>,output:JIntArray<'_>,
+)->jint {
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        if env.get_array_length(&input).ok()?!=192||env.get_array_length(&counts).ok()?!=6||
+            env.get_array_length(&output).ok()?!=192{return None;}
+        let mut values=[0i32;192];let mut sizes=[0i32;6];let mut out=[0i32;192];
+        env.get_int_array_region(&input,0,&mut values).ok()?;
+        env.get_int_array_region(&counts,0,&mut sizes).ok()?;
+        hot_path::normalize_sectors(&values,&sizes,&mut out)?;
+        env.set_int_array_region(&output,0,&out).ok()?;Some(())
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}

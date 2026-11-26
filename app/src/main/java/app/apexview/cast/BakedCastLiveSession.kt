@@ -20,10 +20,11 @@ internal class BakedCastLiveSession(
     val programmeLabel: String, val feeds: Int, scope: CoroutineScope,
     tls: app.apexview.cast.local.PitwallTls.Session? = null,
     nativeAudioRequested: Boolean = false,
+    nativeContext: android.content.Context? = null,
     private val onFailure: (String) -> Unit,
 ) : AutoCloseable {
     @Volatile private var nativeAudioPreference = nativeAudioRequested
-    private val hls = BakedCastHlsSession(address, peer, tls, { nativeAudioPreference })
+    private val hls = BakedCastHlsSession(address, peer, tls, { nativeAudioPreference }, nativeContext)
     fun setNativePreference(value: Boolean) { nativeAudioPreference = value }
     private val audioReader = reader
     private val audioSource = audioUri
@@ -58,10 +59,8 @@ internal class BakedCastLiveSession(
                     val started = System.nanoTime()
                     // Single owner of mux continuity counters and segment ordering.
                     // Never hold the session lock across packing or relay publication.
-                    val forecast = app.apexview.tiled.SpeculativeMemoryAdmission.process.beginForeground(ready.bytes)
                     try { hls.append(ready.video + ready.audio, ready.durationUs) }
                     finally {
-                        forecast.close()
                         synchronized(this@BakedCastLiveSession) { pending.finish(ready) }
                     }
                     val muxMs = (System.nanoTime() - started) / 1_000_000L
@@ -143,6 +142,7 @@ internal class BakedCastLiveSession(
         synchronized(this) {
             if (stopped) return
             stopped = true
+            pending.clear()
             publishRequests.close()
             if (!firstSegment.isCompleted) firstSegment.completeExceptionally(IllegalStateException(reason))
         }

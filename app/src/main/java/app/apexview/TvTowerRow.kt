@@ -28,7 +28,7 @@ import kotlin.math.abs
 internal fun TvTowerRow(
     driver: DriverInfo?, number: String, state: CardState, tyre: Tyre?, kmh: Int?, gear: Int?,
     speedUnit: String, highlight: Boolean, rowHeight: Dp,
-    drawProbe: OverlayPerformanceProbe? = null, onClick: () -> Unit,
+    drawProbe: OverlayPerformanceProbe? = null, normalizedSectors: List<SectorCell?>? = null, onClick: () -> Unit,
 ) {
     val paint = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
     val widthCache = remember { TowerTextWidthCache() }
@@ -37,9 +37,12 @@ internal fun TvTowerRow(
     val currentDensity = LocalDensity.current
     // A tower sample can be republished while this driver's fields stay identical. Keep the
     // formatted text, synthesized strip cells and accessibility description across those draws.
-    val content = remember(number, driver?.tla, state, kmh, gear, speedUnit) {
+    val sectorsForDraw = normalizedSectors ?: remember(state.sectors, state.lapSectors) {
+        List(3, state::towerSector)
+    }
+    val content = remember(number, driver?.tla, state, kmh, gear, speedUnit, sectorsForDraw) {
         Trace.beginSection("PitwallTowerTextPrepare")
-        try { TowerRowText.prepare(driver?.tla ?: number, state, kmh, gear, speedUnit) }
+        try { TowerRowText.prepare(driver?.tla ?: number, state, kmh, gear, speedUnit, sectorsForDraw) }
         finally { Trace.endSection() }
     }
     val (name, lastLap, bestLap, position, interval, leader, gearText, speed, sectors) = content
@@ -239,7 +242,8 @@ internal data class TowerRowText(
     val sectors: List<SectorCell?>,
 ) {
     companion object {
-        fun prepare(name: String, state: CardState, kmh: Int?, gear: Int?, speedUnit: String): TowerRowText {
+        fun prepare(name: String, state: CardState, kmh: Int?, gear: Int?, speedUnit: String,
+            normalizedSectors: List<SectorCell?>? = null): TowerRowText {
             val lastLap = when {
                 state.retired -> "OUT"
                 state.stopped -> "STOP"
@@ -252,7 +256,7 @@ internal data class TowerRowText(
             val leader = state.toLeader ?: "–"
             val gearText = gear?.let { if (it == 0) "N" else it.toString() } ?: "–"
             val speed = kmh?.let { speedIn(it, speedUnit).toString() } ?: "–"
-            val sectors = (0..2).map(state::towerSector)
+            val sectors = normalizedSectors ?: (0..2).map(state::towerSector)
             // The live TalkBack summary is prepared separately from stable row fields.
             return TowerRowText(name, lastLap, bestLap, position, interval, leader, gearText, speed, sectors)
         }

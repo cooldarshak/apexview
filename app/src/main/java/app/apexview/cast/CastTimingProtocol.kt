@@ -172,7 +172,7 @@ internal object CastTimingProtocol {
                 val gear = if (sampled != null) sampled.speeds[n]?.second else timing.speeds[n]?.gearAt(now)
                 put(JSONArray().put(n).put(s.position ?: JSONObject.NULL).put(s.inPit).put(s.retired)
                     .put(s.positionChange ?: JSONObject.NULL).put(sector(s.lastLap)).put(sector(s.bestLap))
-                    .put(JSONArray().apply { repeat(3) { put(sector(s.towerSector(it))) } })
+                    .put(JSONArray().apply { repeat(3) { put(sector(sampled?.normalizedSectors?.get(n)?.getOrNull(it) ?: s.towerSector(it))) } })
                     .put(s.gap?.safe() ?: JSONObject.NULL).put(s.toLeader?.safe() ?: JSONObject.NULL).put(s.ahead?.safe() ?: JSONObject.NULL)
                     .put(tyre?.compound?.safe(24) ?: JSONObject.NULL).put(tyre?.laps ?: 0)
                     .put(speed ?: JSONObject.NULL).put(gear ?: JSONObject.NULL))

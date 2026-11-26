@@ -1,6 +1,7 @@
 package app.apexview.cast
 
 import app.apexview.tiled.NativeHotPath
+import app.apexview.tiled.NativeFragmentLease
 
 /**
  * Muxes baked AVC pictures and selected AAC commentary on one 90 kHz clock.
@@ -11,9 +12,7 @@ internal class BakedCastTransportStream(private val nativeRequested: () -> Boole
     data class Sample(val ptsUs: Long, val bytes: ByteArray, val video: Boolean, val keyFrame: Boolean = false)
 
     private val continuity = IntArray(8192)
-    private val scaleResult = LongArray(1)
     private val pesHeader = ByteArray(14)
-    private var nativeClock: Boolean? = null
     private val pat = byteArrayOf(0) + section(byteArrayOf(
         0, 0xb0.toByte(), 13, 0, 1, 0xc1.toByte(), 0, 0, 0, 1, 0xf0.toByte(), 0,
     ))
@@ -24,7 +23,7 @@ internal class BakedCastTransportStream(private val nativeRequested: () -> Boole
         0x0f, 0xe1.toByte(), 1, 0xf0.toByte(), 0,
     ))
 
-    fun segment(samples: List<Sample>): ByteArray {
+    private fun validate(samples: List<Sample>) {
         require(samples.any { !it.video }) { "A baked Cast segment needs commentary" }
         require(samples.firstOrNull { it.video }?.keyFrame == true) { "A baked Cast segment must start with a video key frame" }
         require(samples.all { it.ptsUs >= 0 && it.bytes.isNotEmpty() })
@@ -33,28 +32,63 @@ internal class BakedCastTransportStream(private val nativeRequested: () -> Boole
             it.bytes.size <= 65527
         }) { "Baked Cast commentary requires AAC ADTS frames" }
 
-        // Exact transport extent before allocating. No geometric BAOS growth,
-        // no toByteArray clone, and no whole access-unit PES concatenation.
+    }
+
+    fun encodedSize(samples: List<Sample>): Int {
         var packetCount = 2L
         for (sample in samples) {
             val size = sample.bytes.size.toLong() + pesHeader.size
             val firstCapacity = if (sample.video) 176L else 184L
             packetCount = Math.addExact(packetCount, 1 + (maxOf(0L, size - firstCapacity) + 183L) / 184L)
         }
-        val output = ByteArray(Math.toIntExact(Math.multiplyExact(packetCount, 188L)))
+        return Math.toIntExact(Math.multiplyExact(packetCount, 188L))
+    }
+
+    private var transportActual: Boolean? = null
+    private fun reportTransport(actual: Boolean, reason: String) {
+        if (transportActual == actual) return
+        transportActual = actual
+        android.util.Log.i("PitwallNativeHotPath", "AUDIO_TRANSPORT_ENGINE requested=RUST actual=" +
+            (if (actual) "RUST" else "JVM") + " reason=" + reason)
+    }
+
+    /** Both engines share the continuity state. Commit the native counters
+     * only after complete bounded writing; a failed candidate is unpublished. */
+    fun nativeSegment(samples: List<Sample>, context: android.content.Context?): NativeFragmentLease? {
+        if (!nativeRequested()) { transportActual = null; return null }
+        if (!NativeHotPath.available()) { reportTransport(false, "NATIVE_UNAVAILABLE"); return null }
+        validate(samples)
+        val ordered = samples.sortedWith(compareBy<Sample> { it.ptsUs }.thenByDescending { it.video })
+        val parts = Array(ordered.size) { ordered[it].bytes }
+        val meta = LongArray(ordered.size * 3)
+        ordered.forEachIndexed { index, sample ->
+            meta[3*index] = sample.ptsUs
+            meta[3*index+1] = sample.bytes.size.toLong()
+            meta[3*index+2] = (if (sample.video) 1L else 0L) or (if (sample.keyFrame) 2L else 0L)
+        }
+        val counts = intArrayOf(continuity[0], continuity[PMT], continuity[VIDEO], continuity[AUDIO])
+        val result = try {
+            NativeFragmentLease.build(encodedSize(samples), context) { buffer ->
+                check(NativeHotPath.transport(parts, meta, counts, buffer)) { "Native TS extent rejected" }
+                buffer.position(buffer.capacity())
+            }
+        } catch (_: IllegalStateException) { null }
+        if (result == null) { reportTransport(false, "ADMISSION_OR_NATIVE_REJECTED"); return null }
+        continuity[0] = counts[0]; continuity[PMT] = counts[1]
+        continuity[VIDEO] = counts[2]; continuity[AUDIO] = counts[3]
+        reportTransport(true, "DIRECT_LEASE_PUBLISHED")
+        return result
+    }
+
+    fun segment(samples: List<Sample>): ByteArray {
+        validate(samples)
+        // Exact transport extent, no BAOS growth, clone or whole PES concat.
+        val output = ByteArray(encodedSize(samples))
         var at = packetize(output, 0, 0, pat)
         at = packetize(output, at, PMT, pmt)
-        val requested = nativeRequested()
         val ordered = samples.sortedWith(compareBy<Sample> { it.ptsUs }.thenByDescending { it.video })
         for (sample in ordered) {
-            val actual = requested && nativeClock != false && NativeHotPath.scaleUs(sample.ptsUs, 90_000, scaleResult)
-            if (requested && actual != nativeClock) {
-                nativeClock = actual
-                android.util.Log.i("PitwallNativeHotPath", "AUDIO_MUX_CLOCK requested=RUST actual=" +
-                    if (actual) "RUST reason=PTS_SCALED" else "JVM reason=NATIVE_BATCH_UNAVAILABLE")
-            } else if (!requested) nativeClock = null
-            val ticks = if (actual) scaleResult[0] else
-                (sample.ptsUs / 100 * 9) + ((sample.ptsUs % 100) * 9 / 100)
+            val ticks = (sample.ptsUs / 100 * 9) + ((sample.ptsUs % 100) * 9 / 100)
             val pts = (ticks + 9_000) and PTS_MASK
             val length = if (sample.video) 0 else sample.bytes.size + 8
             pesHeader[0] = 0; pesHeader[1] = 0; pesHeader[2] = 1

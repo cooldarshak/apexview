@@ -65,7 +65,7 @@ internal class BakedCastSegmentQueue(
             audioNative = result != null
             android.util.Log.i("PitwallNativeHotPath", "AUDIO_QUEUE_ENGINE requested=RUST actual=" +
                 if (result != null) "RUST reason=BATCH_VALIDATED" else "JVM reason=NATIVE_UNAVAILABLE")
-        } else if (!requested) { audioNative = null; audioMetadata = LongArray(0) }
+        } else if (!requested) { audioNative = null; if (audioMetadata.isNotEmpty()) audioMetadata = LongArray(0) }
         val accepted = if (result != null) {
             require(result >= 0L) { "Baked Cast commentary admission rejected" }
             result

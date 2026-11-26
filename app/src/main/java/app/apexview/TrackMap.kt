@@ -694,11 +694,11 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
     }
     val turns = remember(timing.corners, measurer) { timing.corners.associate { it.number to measurer.label("${it.number}", 9.sp, bold = false) } }
     val marks = remember(timing, timing.startLine) { LineMarks(timing) }
-    val finishLabel = remember(marks) { measurer.label(marks.finishLabel, 8.sp) }
-    val startLabel = remember { measurer.label("START", 8.sp) }
+    val finishLabel = remember(marks, measurer) { measurer.label(marks.finishLabel, 8.sp) }
+    val startLabel = remember(measurer) { measurer.label("START", 8.sp) }
     fun lapPoint(f: Float) = geometryPoint(f).let { g -> fit.map(g[0], g[1]) }
-    val sectors = remember(fit, timing.marshalSectors, nativeGeometry) { sectorPaths(timing, ::lapPoint) }
-    val scLabel = remember { measurer.label("SC", 8.sp) }
+    val sectors = remember(fit, timing.marshalSectors, nativeGeometry) { sectorPaths(timing, ::progress, ::lapPoint) }
+    val scLabel = remember(measurer) { measurer.label("SC", 8.sp) }
     val staticProbe = remember(fit) { OverlayPerformanceProbe("track-static-displaylist") }
     val dynamicProbe = remember(fit) { OverlayPerformanceProbe("track-car-flag-draw") }
     val staticLayer = rememberGraphicsLayer()
@@ -706,9 +706,9 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
     val eventLayer = rememberGraphicsLayer()
     val eventValidity = remember(eventLayer) { OverlayRecordingValidity() }
     val cars = remember(fit, currentCars) { currentCars.map { it to fit.map(it.x, it.y) } }
-    val pitLabel = remember { measurer.label("PIT", 8.sp) }
+    val pitLabel = remember(measurer) { measurer.label("PIT", 8.sp) }
     val stopLine = stop?.let { pitStopLine(timing, it) } ?: noPositionsLine(timing, now)
-    val stopText = remember(stopLine) { stopLine?.let { measurer.label(it, 13.sp) } }
+    val stopText = remember(stopLine, measurer) { stopLine?.let { measurer.label(it, 13.sp) } }
     val pulse = rememberOverlayFlagPulse(flags.track.ending)
     val caption = rememberCaption(measurer, flags, now)
     // Leader and flags are part of the 10Hz metadata sample. Never redo 24
@@ -720,7 +720,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
         ?.let { leader -> cars.firstOrNull { it.first.number == leader }?.first }
         ?.let { lapPoint(progress(it.x, it.y) + SAFETY_CAR_AHEAD) }
     // Only a changed event/flag/pit marker re-records this middle layer.
-    val eventKey = remember(fit, flags.track, flags.yellow,
+    val eventKey = remember(fit, nativeGeometry, measurer, sectors, flags.track, flags.yellow,
         flags.resumption?.announcedUtc, flags.resumption?.atUtc, flags.resumption?.what,
         caption, stop?.number, stop?.carProgress, stop?.ghostProgress,
         stop?.outBehind, stopText) { Any() }
@@ -728,7 +728,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
 
     // Keep the circuit and its labels in their own recorded layer. Moving cars only redraw
     // the foreground, with no offscreen alpha buffer around the entire track map.
-    val circuit: DrawScope.() -> Unit = remember(fit, path, timing.corners, turns, marks.start,
+    val circuit: DrawScope.() -> Unit = remember(fit, path, timing.corners, turns, marks.start, nativeGeometry,
         timing.hasStartFinish, finishLabel, startLabel) {
         {
             drawPath(path, Color.Black.copy(alpha = 0.45f), style = Stroke(7.dp.toPx()))
@@ -736,7 +736,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
             val center = Offset(width / 2, height / 2)
 
             fun mark(f: Float, chequered: Boolean, label: TextLayoutResult) {
-                val g = timing.geometry.pointAt(f)
+                val g = geometryPoint(f)
                 val p = fit.map(g[0], g[1])
                 val ahead = fit.map(g[0] + g[2] * 10f, g[1] + g[3] * 10f)
                 val len = hypot(ahead.x - p.x, ahead.y - p.y).coerceAtLeast(0.001f)
@@ -861,7 +861,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
                 movingCars?.size ?: cars.size)
         }
     }
-    targets?.invoke(cars.map { (car, p) -> car.number to p })
+    if (targets != null) targets(remember(cars) { cars.map { (car, p) -> car.number to p } })
 }
 
 private val FlagYellow = Color(0xFFFFD60A)
@@ -876,8 +876,8 @@ private class SectorShape(val path: Path, val from: Float)
  * Each marshal sector's stretch of the lap, keyed by sector number. [point] places a lap
  * fraction on screen; a sector runs from its own start to the next one's.
  */
-private fun sectorPaths(timing: SessionTiming, point: (Float) -> Offset): Map<Int, SectorShape> {
-    val starts = timing.marshalSectors.sortedBy { it.number }.map { it.number to timing.geometry.progress(it.x, it.y) }
+private fun sectorPaths(timing: SessionTiming, progress: (Float, Float) -> Float, point: (Float) -> Offset): Map<Int, SectorShape> {
+    val starts = timing.marshalSectors.sortedBy { it.number }.map { it.number to progress(it.x, it.y) }
     if (starts.size < 2) return emptyMap()
     return starts.mapIndexed { i, (number, from) ->
         var to = starts[(i + 1) % starts.size].second
@@ -1134,20 +1134,26 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
             clockwise = !timing.geometry.counterClockwise,
         )
     }
+    val nativeGeometry = remember(timing.geometry, nativeRequested) {
+        if (nativeRequested) NativeCircuitProjection(timing.geometry) else null
+    }
+    fun progress(x: Float, y: Float) = nativeGeometry?.progress(x, y) ?: timing.geometry.progress(x, y)
     val measurer = rememberTextMeasurer()
     val names = remember(timing.drivers, labelSizeSp, measurer) {
         timing.drivers.mapValues { measurer.label(it.value.tla, labelSizeSp.sp) }
     }
-    val turns = remember(timing, measurer) {
-        timing.corners.map { timing.geometry.progress(it.x, it.y) to measurer.label("T${it.number}", 8.sp, bold = false) }
+    val turns = remember(timing, measurer, nativeGeometry) {
+        timing.corners.map { progress(it.x, it.y) to measurer.label("T${it.number}", 8.sp, bold = false) }
     }
     val marks = remember(timing, timing.startLine) { LineMarks(timing) }
-    val finishLabel = remember(marks) { measurer.label(marks.finishLabel, 8.sp) }
-    val startLabel = remember { measurer.label("START", 8.sp) }
-    val sectors = remember(ribbon, timing) { sectorPaths(timing, ribbon::point) }
-    val scLabel = remember { measurer.label("SC", 7.sp) }
-    val cars = remember(timing.geometry, currentCars) {
-        currentCars.map { car -> car to timing.geometry.progress(car.x, car.y) }.sortedBy { it.second }
+    val finishLabel = remember(marks, measurer) { measurer.label(marks.finishLabel, 8.sp) }
+    val startLabel = remember(measurer) { measurer.label("START", 8.sp) }
+    val sectors = remember(ribbon, timing, nativeGeometry) { sectorPaths(timing, ::progress, ribbon::point) }
+    val scLabel = remember(measurer) { measurer.label("SC", 7.sp) }
+    val hitProjection = remember(timing.geometry, nativeRequested) { OverlayEdgeProjection(nativeRequested) }
+    val cars = remember(timing.geometry, currentCars, hitProjection) {
+        val count = hitProjection.update(currentCars, timing.geometry)
+        List(count) { i -> hitProjection.car(i) to hitProjection.fraction(i) }
     }
     val pulse = rememberOverlayFlagPulse(flags.track.ending)
     val caption = rememberCaption(measurer, flags, now)
@@ -1159,10 +1165,10 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     val safetyCar = if (!flags.track.safetyCar) null else currentSafetyLeader
         ?.let { leader -> cars.firstOrNull { it.first.number == leader }?.second }
         ?.let { it + SAFETY_CAR_AHEAD }
-    val pitLabel = remember { measurer.label("PIT", 7.sp) }
+    val pitLabel = remember(measurer) { measurer.label("PIT", 7.sp) }
     val stopLine = stop?.let { pitStopLine(timing, it) } ?: noPositionsLine(timing, now)
-    val stopText = remember(stopLine) { stopLine?.let { measurer.label(it, 13.sp) } }
-    val eventKey = remember(ribbon, flags.track, flags.yellow,
+    val stopText = remember(stopLine, measurer) { stopLine?.let { measurer.label(it, 13.sp) } }
+    val eventKey = remember(ribbon, nativeGeometry, measurer, sectors, flags.track, flags.yellow,
         flags.resumption?.announcedUtc, flags.resumption?.atUtc, flags.resumption?.what,
         caption, stop?.number, stop?.carProgress, stop?.ghostProgress,
         stop?.outBehind, stopText) { Any() }
@@ -1299,13 +1305,23 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
                 val label = names[number] ?: continue
                 val along = f * ribbon.perimeter
                 val gap = label.size.width + 6.dp.toPx()
-                val nearMark = taken.any { (at, w) ->
-                    val d = abs(along - at).let { minOf(it, ribbon.perimeter - it) }
-                    d < (w + label.size.width) / 2 + 4.dp.toPx()
+                var nearMark = false
+                for (i in taken.indices) {
+                    val mark = taken[i]
+                    val distance = abs(along - mark.first)
+                    if (minOf(distance, ribbon.perimeter - distance) <
+                        (mark.second + label.size.width) / 2 + 4.dp.toPx()) {
+                        nearMark = true
+                        break
+                    }
                 }
-                val level = (0 until 3).firstOrNull {
-                    (it > 0 || !nearMark) && along - lastAt[it] > gap
-                } ?: 2
+                var level = 2
+                for (row in 0..2) {
+                    if ((row > 0 || !nearMark) && along - lastAt[row] > gap) {
+                        level = row
+                        break
+                    }
+                }
                 lastAt[level] = along
                 val at = p + ribbon.inward(f) * (14 + level * 13).dp.toPx()
                 drawText(label, topLeft = at - Offset(label.size.width / 2f,
@@ -1314,14 +1330,14 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
             if (movingCars != null && flags.track.safetyCar) {
                 val safetyLeader = currentSafetyLeader
                 movingCars.firstOrNull { it.number == safetyLeader }?.let { car ->
-                    val f = timing.geometry.progress(car.x, car.y) + SAFETY_CAR_AHEAD
+                    val f = progress(car.x, car.y) + SAFETY_CAR_AHEAD
                     drawSafetyCar(ribbon.point(f), 7.5.dp.toPx(), scLabel)
                 }
             } else safetyCar?.let { drawSafetyCar(ribbon.point(it), 7.5.dp.toPx(), scLabel) }
             dynamicProbe.record(System.nanoTime() - start, count, count)
         }
     }
-    targets?.invoke(cars.map { (car, f) -> car.number to ribbon.point(f) })
+    if (targets != null) targets(remember(cars, ribbon) { cars.map { (car, f) -> car.number to ribbon.point(f) } })
 }
 
 /**

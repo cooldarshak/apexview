@@ -189,6 +189,7 @@ internal data class TowerSample(
     val header: TowerSessionHeaderData,
     val tyres: Map<String, Tyre?>,
     val speeds: Map<String, Pair<Int?, Int?>>,
+    val normalizedSectors: Map<String, List<SectorCell?>> = emptyMap(),
 ) {
     /** A new polling epoch should not invalidate every visible row if the pixels are unchanged. */
     fun visuallyEquals(other: TowerSample): Boolean = rows == other.rows &&
@@ -227,7 +228,8 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
     val visible = sample ?: return
     val onTop = app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString()
     TimingTowerContents(timing, visible.rows, visible.header, visible.tyres, visible.speeds,
-        onTop, app.settings.speedUnit, app.layoutMode == LayoutMode.TV, app::showOnboard)
+        onTop, app.settings.speedUnit, app.layoutMode == LayoutMode.TV,
+        normalizedSectors = visible.normalizedSectors, onDriver = app::showOnboard)
 }
 
 /** The phone and TV receiver use this same table; receiver data is already sampled on the phone. */
@@ -235,7 +237,8 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
 internal fun TimingTowerContents(
     timing: SessionTiming, rows: List<Pair<String, CardState>>, header: TowerSessionHeaderData,
     tyres: Map<String, Tyre?>, speeds: Map<String, Pair<Int?, Int?>>, onTop: String?,
-    speedUnit: String, tvLayout: Boolean, onDriver: (String) -> Unit,
+    speedUnit: String, tvLayout: Boolean, normalizedSectors: Map<String, List<SectorCell?>> = emptyMap(),
+    onDriver: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val television = remember(context) { isTvDevice(context) }
@@ -289,7 +292,7 @@ internal fun TimingTowerContents(
                         // timing sample. The native row preserves the broadcast columns,
                         // clickable driver, tyre and sectors, and one TalkBack semantics node.
                         TvTowerRow(timing.drivers[number], number, state, tyres[number], kmh, gear,
-                            speedUnit, number == onTop, rowHeight, rowDrawProbe) { onDriver(number) }
+                            speedUnit, number == onTop, rowHeight, rowDrawProbe, normalizedSectors[number]) { onDriver(number) }
                     }
                 }
                 if (rows.isNotEmpty()) {

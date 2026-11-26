@@ -15,6 +15,8 @@ internal class OverlayTowerSampler(
 ) {
     private data class LapSnapshot(val source: DriverLaps, val index: Int, val row: Pair<String, CardState>)
     private val rowCache = HashMap<String, LapSnapshot>()
+    private val sectorNormalizer = TowerSectorNormalizer(nativeRequested)
+    private val scratchSectors = HashMap<String, List<SectorCell?>>()
     private val lapEntries = timing.laps.entries.toList()
     private val tyreEntries = timing.tyres.entries.toList()
     private val nativeLookup = if (nativeRequested) NativeTowerLookup(lapEntries.map { it.value },
@@ -91,6 +93,9 @@ internal class OverlayTowerSampler(
         // Scratch storage never escapes. Publish only the components that
         // actually changed; reuse previous immutable maps and rows otherwise.
         val previousSample = last
+        scratchSectors.clear()
+        for ((number, row) in rows) scratchSectors[number] = sectorNormalizer.sample(number, row)
+        sectorNormalizer.retainOnly(scratchSectors.keys)
         val candidate = TowerSample(
             previousSample?.rows?.takeIf { it == rows } ?: rows.toList(),
             previousSample?.header?.takeIf { it == header } ?: header,
@@ -101,6 +106,7 @@ internal class OverlayTowerSampler(
                 }
             } ?: HashMap(tyres),
             previousSample?.speeds?.takeIf { it == speeds } ?: HashMap(speeds),
+            previousSample?.normalizedSectors?.takeIf { it == scratchSectors } ?: HashMap(scratchSectors),
         )
         val previous = last
         val same = previous != null && previous.visuallyEquals(candidate)

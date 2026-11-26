@@ -189,6 +189,20 @@ pub fn audio_admit(pts_sizes: &[i64], last: i64, remaining: i64, slots: usize) -
     Some(bytes)
 }
 
+/// Three independent strips, each with at most 64 integer mini-sectors.
+pub fn normalize_sectors(input:&[i32],counts:&[i32],out:&mut[i32])->Option<()> {
+    if input.len()!=192||out.len()!=192||counts.len()!=6{return None;}
+    for i in 0..3 {
+        let n=usize::try_from(counts[2*i]).ok()?;
+        let width=usize::try_from(counts[2*i+1]).ok()?;
+        if n>width||width>64{return None;}
+        let at=i*64;
+        out[at..at+n].copy_from_slice(&input[at..at+n]);
+        out[at+n..at+64].fill(0);
+    }
+    Some(())
+}
+
 /// MPEG-4 AAC-LC ADTS header, same supported rates/channels as existing Cast.
 pub fn adts_header(payload_len: usize, sample_rate: i32, channels: i32) -> Option<[u8; 7]> {
     let rates = [96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350];

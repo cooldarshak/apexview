@@ -59,4 +59,16 @@ class BakedCastSegmentQueueTest {
         queue.clear()
     }
 
+    @Test fun invalidBatchNeverPartiallyEnqueuesAudio() {
+        val queue = BakedCastSegmentQueue(maxAudio = 4, maxBytes = 8)
+        queue.offerAudio(listOf(sound(0)))
+        assertTrue(runCatching { queue.offerAudio(listOf(sound(10), sound(10))) }.isFailure)
+        assertEquals(1, queue.audioCount)
+        assertEquals(0L, queue.latestAudioUs)
+        assertEquals(2L, queue.pendingBytes)
+        queue.offerAudio(listOf(sound(10), sound(20), sound(30)))
+        assertEquals(8L, queue.pendingBytes)
+        queue.clear()
+        assertEquals(0L, queue.bytesInFlight)
+    }
 }

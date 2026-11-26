@@ -6,8 +6,11 @@ import java.util.Locale
 /** Rolling HLS publication for the clear, baked-view encoder. Runs on its producer thread. */
 internal class BakedCastHlsSession(address: String, peer: InetAddress?,
     tls: app.apexview.cast.local.PitwallTls.Session? = null,
-    nativeRequested: () -> Boolean = { false }) : AutoCloseable {
-    private data class Segment(val sequence: Long, val durationUs: Long, val bytes: ByteArray) {
+    nativeRequested: () -> Boolean = { false },
+    private val nativeContext: android.content.Context? = null) : AutoCloseable {
+    private data class Segment(val sequence: Long, val durationUs: Long,
+        val bytes: ByteArray?, val native: app.apexview.tiled.NativeFragmentLease?) {
+        init { check((bytes == null) != (native == null)) }
         val name get() = "view-$sequence.ts"
     }
 
@@ -25,13 +28,26 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
     @Synchronized fun append(samples: List<BakedCastTransportStream.Sample>, durationUs: Long) {
         check(!ended)
         require(durationUs in 800_000L..4_000_000L) { "Keep baked Cast segments at or below four seconds" }
-        val packed = muxer.segment(samples)
+        // The queued samples already occupy memory. Forecast only the new
+        // exact transport extent, including packet headers and padding.
+        val forecast = app.apexview.tiled.SpeculativeMemoryAdmission.process.beginForeground(
+            muxer.encodedSize(samples).toLong())
+        val native: app.apexview.tiled.NativeFragmentLease?
+        val packed: ByteArray?
+        try {
+            val headroom = nativeContext?.let { app.apexview.tiled.NativeStitchingDeviceBudget.sample(it) }
+            app.apexview.tiled.NativeStitchingDeviceBudget.observePressure(headroom)
+            native = muxer.nativeSegment(samples, nativeContext)
+            packed = if (native == null) muxer.segment(samples) else null
+        } finally { forecast.close() }
         // Keep retired objects available for in-flight fetches, outside the advertised playlist.
-        window.addLast(Segment(nextSequence++, durationUs, packed))
+        window.addLast(Segment(nextSequence++, durationUs, packed, native))
         retainedUs += durationUs
         // Keep at least three target durations advertised, plus retired media for slow clients.
         while (retainedUs - window.first().durationUs >= 28_000_000L) {
-            retainedUs -= window.removeFirst().durationUs
+            val retired = window.removeFirst()
+            retainedUs -= retired.durationUs
+            retired.native?.close()
         }
         publish()
     }
@@ -65,14 +81,25 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
         // present in the rolling playlist. Avoid copying every retained
         // multi-megabyte segment on each refresh and let the relay zero only
         // retired resources after their final immutable socket read lease closes.
-        relay.publishResources(window.associate { it.name to it.bytes } +
-            ("live.m3u8" to playlist.toByteArray()))
+        val native = linkedMapOf<String, app.apexview.tiled.NativeFragmentLease>()
+        val heap = linkedMapOf("live.m3u8" to playlist.toByteArray())
+        var published = false
+        try {
+            for (segment in window) {
+                segment.bytes?.let { heap[segment.name] = it }
+                segment.native?.let { native[segment.name] = it.retain() }
+            }
+            relay.publishResources(heap, native = native)
+            published = true
+        } finally { if (!published) native.values.forEach { it.close() } }
     }
 
     @Synchronized override fun close() {
         ended = true
-        relay.close()
-        window.clear()
+        try { relay.close() } finally {
+            window.forEach { it.native?.close() }
+            window.clear()
+        }
     }
 }
 

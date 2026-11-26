@@ -92,6 +92,18 @@ public final class NativeHotPath {
         catch (LinkageError | RuntimeException failed) { return false; }
     }
     private static native int nativeAudioMetadata(byte[][] parts,long[] defaults,long[] out);
+    public static boolean transport(byte[][] parts,long[] metadata,int[] continuity,ByteBuffer output) {
+        if (!available()) return false;
+        try { return nativeTransport(parts,metadata,continuity,output)==1; }
+        catch (LinkageError | RuntimeException failed) { return false; }
+    }
+    private static native int nativeTransport(byte[][] parts,long[] metadata,int[] continuity,ByteBuffer output);
+    public static boolean normalizeSectors(int[] input,int[] counts,int[] output) {
+        if (!available()) return false;
+        try { return nativeNormalizeSectors(input,counts,output)==1; }
+        catch (LinkageError | RuntimeException failed) { return false; }
+    }
+    private static native int nativeNormalizeSectors(int[] input,int[] counts,int[] output);
     private static native int nativePointAt(ByteBuffer packet,float fraction,float[] output);
     private static native int nativePrepareGeometry(float[] outline,ByteBuffer packet);
     private static native int nativeProjectGeometry(ByteBuffer packet,float[] xy,int count,float[] fractions,int[] order);

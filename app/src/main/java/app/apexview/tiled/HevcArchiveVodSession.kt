@@ -281,7 +281,7 @@ internal class HevcArchiveVodSession(
             runCatching { NativeStitchingDeviceBudget.sample(context) }.getOrNull()
         }
         val constrained = NativeStitchingDeviceBudget.observePressure(headroom)
-        if (headroom?.lowMemory == true) {
+        if (headroom != null && (headroom.lowMemory || headroom.available <= headroom.threshold)) {
             val freed = cache.trimBehind(number)
             if (freed > 0L) android.util.Log.i("ApexviewSingleDecoder",
                 "GC_ARCHIVE_PRESSURE_TRIM behindBytes=$freed foregroundUnchanged=true")
