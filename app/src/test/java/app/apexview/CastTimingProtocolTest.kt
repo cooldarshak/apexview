@@ -316,3 +316,20 @@ class CastTimingProtocolTest {
         assertThrows(IllegalArgumentException::class.java) { CastTimingProtocol.decodeGeometry(CastTimingProtocol.geometry(timing()).put("outline", "x".repeat(40000))) }
     }
 }
+
+class CastTableFingerprintTest {
+    @org.junit.Test fun reusesUnchangedPublishedTableAndIncludesStoppedDriverChanges() {
+        val cache = app.apexview.cast.CastTableFingerprint()
+        val rows = org.json.JSONArray().put(org.json.JSONArray().put("1").put(1))
+        val empty = org.json.JSONArray()
+        val first = cache.text(rows, empty)
+        org.junit.Assert.assertSame(first, cache.text(rows, empty))
+        val stopped = org.json.JSONArray().put("1")
+        val second = cache.text(rows, stopped)
+        org.junit.Assert.assertNotEquals(first, second)
+        org.junit.Assert.assertSame(second, cache.text(rows, stopped))
+        val equivalentRows = org.json.JSONArray(rows.toString())
+        org.junit.Assert.assertEquals(second, cache.text(equivalentRows, stopped))
+        org.junit.Assert.assertEquals("[][]", cache.text(org.json.JSONArray(), org.json.JSONArray()))
+    }
+}
