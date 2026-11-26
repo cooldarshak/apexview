@@ -788,7 +788,12 @@ private class ReplayPrimaryTimingTopic(
     val chronological: Boolean,
     private val spool: java.io.File?,
     private val text: String?,
+    private var primaryHistory: DriverTimingParse? = null,
 ) {
+    /** Single caller after both downloads finish; never retain a second full
+     * index alongside the ordered primary/supplement merge. */
+    fun takePrimaryHistory(): DriverTimingParse? = primaryHistory.also { primaryHistory = null }
+
     fun reader(): java.io.BufferedReader =
         spool?.bufferedReader() ?: requireNotNull(text).reader().buffered()
 }
@@ -1143,6 +1148,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 spool: java.io.File?, supplementSpool: java.io.File?,
             ): Triple<List<Pair<Long, Int>>, DriverTimingParse, Long> {
                 val primaryPreview = CompletableDeferred<Unit>()
+                val supplementUnavailable = java.util.concurrent.atomic.AtomicBoolean(false)
                 val heartbeatStart = heartbeatTask.await()
                 val initialStart = withTimeoutOrNull(4_000L) { positionClock.await() }
                     ?.takeIf { abs(it - heartbeatStart) > STREAM_START_SLACK_MS } ?: heartbeatStart
@@ -1183,7 +1189,11 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                     ) return Long.MAX_VALUE
                                     return targetUtc(start)
                                 }
-                                for (preview in DriverTimingParser.previews(lines, start, ::previewTarget, nativeRequested(), { job.ensureActive() })) {
+                                var completedPrimary: DriverTimingParse? = null
+                                for (preview in DriverTimingParser.previews(lines, start, ::previewTarget, nativeRequested(), { job.ensureActive() },
+                                    onComplete = { build ->
+                                        if (chronological && supplementUnavailable.get()) completedPrimary = build()
+                                    })) {
                                     val elapsed = android.os.SystemClock.elapsedRealtime() - started
                                     checkpoint("tower-preview", "drivers=${preview.history.laps.size} throughUtcMs=${preview.throughUtcMs} elapsedMs=$elapsed")
                                     withContext(Dispatchers.Main) {
@@ -1201,7 +1211,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                 primaryPreview.complete(Unit)
                                 while (lines.hasNext()) lines.next()
                                 progress("OK TimingData.jsonStream · $characters chars · ${android.os.SystemClock.elapsedRealtime() - started}ms")
-                                ReplayPrimaryTimingTopic(characters, chronological, spool, text?.toString())
+                                ReplayPrimaryTimingTopic(characters, chronological, spool, text?.toString(), completedPrimary)
                             }
                         }
                     } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -1237,21 +1247,29 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                     if (writer != null) writer.appendLine(line) else text?.appendLine(line)
                                 }
                                 checkpoint("tower-supplement", "characters=$characters chronological=$chronological storage=${if (writer == null) "HEAP" else "DISK"}")
-                                ReplayPrimaryTimingTopic(characters, chronological, supplementSpool, text?.toString())
+                                if (last == Long.MIN_VALUE) {
+                                    supplementUnavailable.set(true)
+                                    null
+                                } else ReplayPrimaryTimingTopic(characters, chronological, supplementSpool, text?.toString())
                             }
                         }
                     } catch (cancelled: kotlinx.coroutines.CancellationException) {
                         throw cancelled
                     } catch (error: Exception) {
                         checkpoint("tower-supplement", "unavailable type=${error.javaClass.simpleName}")
+                        supplementUnavailable.set(true)
                         null
                     }
                 }
                 val timingStream = timingTask.await()
                 val timingF1Stream = timingF1Task.await()
+                val completedPrimary = timingStream?.takePrimaryHistory()
                 val history = if (timingStream == null) {
                     progress("TimingData unavailable; timing tower history could not be loaded")
                     DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
+                } else if (timingF1Stream == null && completedPrimary != null) {
+                    checkpoint("tower-history", "reused ordered primary index; supplement unavailable")
+                    completedPrimary
                 } else withContext(Dispatchers.Default) {
                     progress("PARSING timing tower and lap history · ${timingStream.characters} chars")
                     val started = android.os.SystemClock.elapsedRealtime()
