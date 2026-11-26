@@ -12,6 +12,8 @@ import java.nio.ByteOrder
 internal object NativeClearArchiveJob {
     const val MAX_PACKET = NativeStitchingEngine.MAX_ATLAS_PACKET
     class OutputCapacityException : IllegalStateException("Native clear output capacity exceeded")
+    class BackpressureException(val input: Int, val output: Int) :
+        IllegalStateException("Native clear worker backpressure")
     const val MAX_WINDOW = 4
 
     data class Geometry(val width: Int, val height: Int, val columns: List<Int>,
@@ -150,6 +152,8 @@ internal object NativeClearArchiveJob {
         checkCurrent()
         val submittedAt = System.nanoTime()
         val token = submit()
+        if (token == NativeStitchingEngine.BACKPRESSURE)
+            throw BackpressureException(engine.budget.inputBytes, engine.budget.outputBytes)
         check(token > 0) { "Native clear admission: $token" }
         val started = System.nanoTime()
         var terminal = false
@@ -168,6 +172,8 @@ internal object NativeClearArchiveJob {
                 Thread.sleep(2)
             }
             if (length == NativeStitchingEngine.OUTPUT_CAPACITY) throw OutputCapacityException()
+            if (length == NativeStitchingEngine.BACKPRESSURE)
+                throw BackpressureException(engine.budget.inputBytes, engine.budget.outputBytes)
             check(length in 10L..engine.budget.outputBytes.toLong()) { "Native clear result: $length" }
             val readyAt = System.nanoTime()
             val header = ByteArray(8)
