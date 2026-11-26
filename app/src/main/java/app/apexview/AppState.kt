@@ -444,7 +444,7 @@ class AppState(
                 castPairingCode = null; castPairingDecision = null
                 lateinit var next: app.apexview.cast.local.FcastConnection
                 next = app.apexview.cast.local.FcastConnection(scope, socket, { packet ->
-                    if (localConnection === next) receiveLocalCast(packet)
+                    if (localConnection === next) receiveLocalCast(packet, reconnectKey != null)
                 }, { reason ->
                     if (localConnection === next) {
                         val retry = app.apexview.cast.CastRecoveryPolicy.canRetry(
@@ -492,7 +492,7 @@ class AppState(
             }
         }
     }
-    private fun receiveLocalCast(packet: app.apexview.cast.local.FcastProtocol.Packet) {
+    private fun receiveLocalCast(packet: app.apexview.cast.local.FcastProtocol.Packet, automaticRetry: Boolean) {
         val body = packet.body
         val protocol = app.apexview.cast.local.FcastProtocol
         try {
@@ -503,7 +503,7 @@ class AppState(
                         .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1)
                         .put("pitwallOverlays", 1).put("pitwallCaptions", 1).put("pitwallCaptionOwnerControl", 1)
                         .put("pitwallMapPredictionSteps", app.apexview.cast.CastTimingProtocol.MAX_PREDICTION_STEPS)
-                        .put("pitwallRememberedPeers", 1))
+                        .put("pitwallRememberedPeers", 1).put("pitwallAutomaticRetry", automaticRetry))
                 }
                 protocol.INITIAL -> {
                     require(body?.optInt("pitwallScene") == 1) { "This receiver cannot arrange Pitwall video windows" }
