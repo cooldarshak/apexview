@@ -1069,5 +1069,17 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("if id <= self.discard_through", arena)
         self.assertIn("a.trim_pressure()", arena)
 
+    def test_direct_receiver_quality_uses_load_owned_default_selector(self):
+        receiver = contents("app/src/main/java/app/apexview/cast/local/PitwallReceiverActivity.kt")
+        quality = receiver.split("private fun applyDirectQuality(", 1)[1].split("private fun startPlayer(", 1)[0]
+        self.assertIn("player !== current", quality)
+        self.assertIn("val selector = receiverTrackSelector ?: return", quality)
+        self.assertIn("val params = selector.buildUponParameters()", quality)
+        self.assertIn(".setExceedVideoConstraintsIfNecessary(false)", quality)
+        self.assertIn("selector.parameters = params", quality)
+        self.assertNotIn("current.trackSelectionParameters.buildUpon()", quality)
+        self.assertIn("receiverTrackSelector = selector", receiver)
+        self.assertIn("receiverTrackSelector = null", receiver)
+
 if __name__ == "__main__":
     unittest.main()

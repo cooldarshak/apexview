@@ -72,6 +72,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var active by mutableStateOf(false)
     private var generation by mutableIntStateOf(0)
     private var player: ExoPlayer? by mutableStateOf(null)
+    private var receiverTrackSelector: androidx.media3.exoplayer.trackselection.DefaultTrackSelector? = null
     // Context is not attached during Activity field initialization.
     // Restore per-TV caption preferences only after super.onCreate().
     private var captionsOn by mutableStateOf(false)
@@ -538,6 +539,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun applyDirectQuality(current: ExoPlayer, tracks: androidx.media3.common.Tracks) {
         if (!isDirectPlayback() || player !== current) return
+        val selector = receiverTrackSelector ?: return
         val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO }
         val offers = groups.flatMap { group ->
             (0 until group.length).filter { group.isTrackSupported(it) }.mapNotNull { index ->
@@ -558,7 +560,9 @@ class PitwallReceiverActivity : ComponentActivity() {
         }.maxByOrNull { (group, indices) ->
             indices.maxOf { group.getTrackFormat(it).bitrate }
         }
-        val params = current.trackSelectionParameters.buildUpon()
+        // The generic Player builder does not expose DefaultTrackSelector's
+        // strict constraint policy. Use the selector owned by this exact load.
+        val params = selector.buildUponParameters()
             .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
             .setMaxVideoSize(if (directQuality == VideoQuality.AUTO) 1920 else directQuality.maxWidth,
                 if (directQuality == VideoQuality.AUTO) 1080 else directQuality.maxHeight)
@@ -568,7 +572,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                     setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, indices))
                 }
             }.build()
-        if (params != current.trackSelectionParameters) current.trackSelectionParameters = params
+        if (params != selector.parameters) selector.parameters = params
     }
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
@@ -635,6 +639,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                 correlation.onCodecFrame(presentationTimeUs, releaseTimeNs, System.nanoTime())
             }
         })
+        receiverTrackSelector = selector
         scene = nextScene; player = next; active = true; generation++; renderingReported = false; decoderCount = 0
         var receiverAudioDecoders = 0
         fun updateReceiverMemoryOwner() {
@@ -842,6 +847,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         receiverDisplayOwner = null
         standardView?.player = null; standardView = null
         val previous = player; player = null
+        receiverTrackSelector = null
         val previousAuthorization = widevine; widevine = null
         val previousAllocator = activeReceiverAllocator; activeReceiverAllocator = null
         try {
