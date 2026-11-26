@@ -35,4 +35,15 @@ class CastRecoveryPolicyTest {
         assertFalse(CastRecoveryPolicy.localLoadTimedOut("2","2",true,true,false,false))
         assertFalse(CastRecoveryPolicy.localLoadTimedOut("2","2",true,true,true,true))
     }
+    @Test fun renderingAckAndAdoptedMediaMayArriveInEitherOrder() {
+        val ack = CastRecoveryPolicy.matchesRenderingAck("load2", "load2")
+        assertTrue(ack)
+        assertFalse(CastRecoveryPolicy.canHandOffGoogle(false, true, true, ack))
+        assertTrue(CastRecoveryPolicy.canHandOffGoogle(true, true, true, ack))
+        assertFalse(CastRecoveryPolicy.canHandOffGoogle(true, true, true,
+            CastRecoveryPolicy.matchesRenderingAck("load2", null)))
+        assertFalse(CastRecoveryPolicy.matchesRenderingAck("load2", "load1"))
+        assertFalse(CastRecoveryPolicy.matchesRenderingAck("", ""))
+        assertFalse(CastRecoveryPolicy.matchesRenderingAck(" ", " "))
+    }
 }
