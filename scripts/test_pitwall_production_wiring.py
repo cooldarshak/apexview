@@ -113,7 +113,7 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertNotIn('val media3 = "1.5.1"', gradle)
         self.assertIn('prefs.getBoolean("clearSceneSurfaceExperiment", false)', settings)
         self.assertIn("s::updateClearSceneSurfaceExperiment", sheets)
-        self.assertIn("app.bakedCastSession != null || app.castingActive", viewer)
+        self.assertIn("app.bakedCastSession != null || app.bakedQualityTransitionActive || app.castingActive", viewer)
         self.assertIn("app.replayClipRequested || app.replayClipRunning", viewer)
         self.assertIn("app.externalDisplayActive", viewer)
         self.assertIn("selectClearSceneOutput(", viewer)
@@ -1047,6 +1047,27 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("allocate_headroom", contents("native/architecture-g/src/fragment_storage.rs"))
         self.assertIn("GC_HOST_ALLOCATOR", contents("native/architecture-g/src/bin/gb_clear_grid.rs"))
         self.assertIn("gc-memory-host.txt", contents(".github/workflows/android-debug-apk.yml"))
+
+
+    def test_build892_quality_replacement_and_pressure_retirement_wiring(self):
+        base = "app/src/main/java/app/apexview/"
+        app = contents(base + "AppState.kt")
+        viewer = contents(base + "Viewer.kt")
+        publisher = contents(base + "cast/CastTimingPublisher.kt")
+        arena = contents("native/architecture-g/src/fragment_storage.rs")
+        receiver = contents("web/cast/cast-scene-controller.mjs")
+        self.assertIn("BakedQualityTransitionPolicy.canRestart(", app)
+        self.assertIn("releaseCastRelay(preserveQualityRestart = true)", app)
+        self.assertIn("host.archiveSceneSession === archive", app)
+        self.assertIn("app.bakedQualityTransitionActive", viewer)
+        self.assertIn("remote.mediaInfo?.contentId == relay.googleCastMediaUrl", app)
+        self.assertIn('event.optString("playbackId") != googleLoadId', app)
+        self.assertIn("data.playbackId===playbackId", receiver)
+        self.assertIn("val text = tableFingerprint.text(rows, stoppedDrivers)", publisher)
+        self.assertNotIn("JSONObject(currentGeometry.toString())", publisher)
+        self.assertIn("self.discard_through = self.serial", arena)
+        self.assertIn("if id <= self.discard_through", arena)
+        self.assertIn("a.trim_pressure()", arena)
 
 if __name__ == "__main__":
     unittest.main()
