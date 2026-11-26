@@ -78,6 +78,8 @@ class ReplayCoreCacheTest {
         assertEquals(track.at(targetUtc), preview.tracks.getValue("16").at(targetUtc))
         assertEquals(4, preview.laps.getValue("16").at(targetUtc)?.position)
         assertTrue(preview.tracks.getValue("16").n < track.n)
+        assertEquals(laps.lapAt(targetUtc),preview.laps.getValue("16").lapAt(targetUtc))
+        assertEquals(laps.lastCrossing(targetUtc),preview.laps.getValue("16").lastCrossing(targetUtc))
         assertNull(cache.readPreview(targetPosition + 46_000L) {})
         assertEquals(track.n, cache.read {}?.tracks?.get("16")?.n)
 

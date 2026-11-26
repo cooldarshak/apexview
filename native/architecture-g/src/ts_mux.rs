@@ -3,6 +3,49 @@
 pub const MASK:u64=0x1ffffffff;
 pub const PAT:[u8;13]=[0,0,0xb0,13,0,1,0xc1,0,0,0,1,0xf0,0];
 pub const PMT:[u8;23]=[0,2,0xb0,23,0,1,0xc1,0,0,0xe1,0,0xf0,0,0x1b,0xe1,0,0xf0,0,0x0f,0xe1,1,0xf0,0];
+/// Validate one complete ADTS access unit, not just its sync bytes.
+pub fn valid_adts(header:&[u8],len:usize)->bool{
+    if header.len()<7 || header[0]!=255 || header[1]&0xf6!=0xf0{return false;}
+    let header_len=if header[1]&1!=0{7}else{9};
+    let declared=(usize::from(header[3]&3)<<11)|(usize::from(header[4])<<3)|usize::from(header[5]>>5);
+    len>=header_len && declared==len && (header[2]>>2)&15<13
+}
+/// Check the generated transport envelope without allocating or reassembling PES.
+/// Continuity is independently derived from the input counters.
+pub fn verify_packets(out:&[u8],mut counters:[u8;4])->Option<[u8;4]>{
+    if out.len()<4*188||!out.len().is_multiple_of(188){return None;}
+    let mut seen=[false;4];
+    for (index,p) in out.chunks_exact(188).enumerate(){
+        if p[0]!=0x47||p[1]&0x80!=0||p[3]&0xc0!=0{return None;}
+        let pid=(u16::from(p[1]&31)<<8)|u16::from(p[2]);
+        let slot=match pid{0=>0,0x1000=>1,0x100=>2,0x101=>3,_=>return None};
+        if (index<2&&slot!=index)||(index>=2&&slot<2)||p[3]&15!=counters[slot]{return None;}
+        counters[slot]=(counters[slot]+1)&15;
+        let start=p[1]&0x40!=0;
+        let at=match (p[3]>>4)&3{
+            1=>4,3=>5+usize::from(p[4]),_=>return None};
+        if at>=188{return None;}
+        if !seen[slot]&&!start{return None;}
+        if start{
+            if slot<2{
+                let body=p.get(at..)?;
+                if body.len()<5||body[0]!=0||body[1]!=if slot==0{0}else{2}{return None;}
+                let end=4+((usize::from(body[2]&15)<<8)|usize::from(body[3]));
+                let section=body.get(1..end)?;
+                let mut crc=u32::MAX;
+                for &b in section{crc^=u32::from(b)<<24;for _ in 0..8{crc=(crc<<1)^if crc&0x80000000!=0{0x04c11db7}else{0};}}
+                if crc!=0{return None;}
+            }else{
+                let pes=p.get(at..at+14)?;
+                if pes[..3]!=[0,0,1]||pes[3]!=if slot==2{0xe0}else{0xc0}||
+                   pes[7]!=0x80||pes[8]!=5||pes[9]&0xf1!=0x21||pes[11]&1==0||pes[13]&1==0{return None;}
+                if slot==2 && (p[3]&0x30!=0x30||p[4]<7||p[5]&0x10==0){return None;}
+            }
+        }
+        seen[slot]=true;
+    }
+    seen.iter().all(|&v|v).then_some(counters)
+}
 pub struct Writer<'a>{out:&'a mut [u8],at:usize,continuity:[u8;4]}
 impl<'a> Writer<'a>{
     pub fn new(out:&'a mut [u8],continuity:[u8;4])->Option<Self>{
@@ -88,5 +131,23 @@ mod tests{
         assert_eq!(w.finish(),Some([1,1,6,1]));
         assert!(out.chunks_exact(188).all(|p|p[0]==0x47));
         assert_eq!(out[2*188+5],0x50);
+        assert_eq!(verify_packets(&out,[0;4]),Some([1,1,6,1]));
+        let mut damaged=out;
+        damaged[2*188+3]^=1;
+        assert_eq!(verify_packets(&damaged,[0;4]),None);
+        let mut damaged=out;
+        let at=2*188+5+usize::from(damaged[2*188+4]);
+        damaged[at+2]=0;
+        assert_eq!(verify_packets(&damaged,[0;4]),None);
+        let mut damaged=out;
+        damaged[187]^=1;
+        assert_eq!(verify_packets(&damaged,[0;4]),None);
+    }
+    #[test]
+    fn complete_adts_extent_is_required(){
+        let good=[0xff,0xf1,0x4c,0x80,1,0x1f,0xfc,0];
+        assert!(valid_adts(&good,8));
+        assert!(!valid_adts(&good,9));
+        assert!(!valid_adts(&good[..6],8));
     }
 }

@@ -2730,6 +2730,7 @@ class AppState(
     private var replayPreviewContent: Long? = null
     private var replayPreviewPosition: Long? = null
     private var replayPreviewWrite: kotlinx.coroutines.Job? = null
+    private var replayPreviewSaved = false
 
     private fun saveReplayPreview(contentId: Long, positionMs: Long) {
         // A TCL TV can spend minutes parsing complete replay histories. As soon as
@@ -2746,15 +2747,26 @@ class AppState(
         if (archive.tracks.values.none { it.hasPositionAt(targetUtc) } ||
             archive.laps.values.none { it.hasRankAt(targetUtc) }) return
         if (replayPreviewContent == contentId &&
-            replayPreviewPosition?.let { abs(positionMs - it) < 25_000L } == true
+            replayPreviewPosition?.let { abs(positionMs - it) < 25_000L } == true &&
+            (replayPreviewWrite?.isActive == true || replayPreviewSaved)
         ) return
+        // Don't cancel a healthy write every 25 seconds on a slow TV. Let it
+        // commit its bounded window; a later saveWatch can request the next.
+        if (replayPreviewContent == contentId && replayPreviewWrite?.isActive == true) return
         replayPreviewContent = contentId
         replayPreviewPosition = positionMs
+        replayPreviewSaved = false
         replayPreviewWrite?.cancel()
-        replayPreviewWrite = scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            val job = coroutineContext
-            ReplayCoreCache(context.cacheDir, contentId).writePreview(archive, positionMs, videoUtc + playhead.offsetMs) {
-                job.ensureActive()
+        replayPreviewWrite = scope.launch {
+            val saved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val job = coroutineContext
+                ReplayCoreCache(context.cacheDir, contentId) { detail ->
+                    android.util.Log.i("ApexviewTiming", detail)
+                }.writePreview(archive, positionMs, targetUtc) { job.ensureActive() }
+            }
+            if (replayPreviewContent == contentId && replayPreviewPosition == positionMs) {
+                replayPreviewSaved = saved
+                android.util.Log.i("ApexviewTiming", "Replay preview write content=$contentId positionMs=$positionMs saved=$saved")
             }
         }
     }
@@ -2814,6 +2826,7 @@ class AppState(
             pending.cancel()
             replayPreviewContent = null
             replayPreviewPosition = null
+            replayPreviewSaved = false
         }
         scope.launch(kotlinx.coroutines.Dispatchers.IO) {
             pending?.join()

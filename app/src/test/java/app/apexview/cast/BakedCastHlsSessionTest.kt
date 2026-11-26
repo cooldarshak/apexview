@@ -21,7 +21,7 @@ class BakedCastHlsSessionTest {
     fun playlistRollsAndPublishesMuxedVideoAndCommentary() {
         // These payloads exercise transport framing and sequence retention.
         val video = byteArrayOf(0, 0, 0, 1, 0x65)
-        val audio = byteArrayOf(0xff.toByte(), 0xf1.toByte(), 0x50, 0x80.toByte(), 0, 0xff.toByte(), 0xfc.toByte())
+        val audio = BakedAacAdts.wrap(byteArrayOf(1), 48_000, 2)
         BakedCastHlsSession("127.0.0.1", InetAddress.getLoopbackAddress()).use { session ->
             repeat(32) { index ->
                 val time = index * 1_000_000L
@@ -46,6 +46,16 @@ class BakedCastHlsSessionTest {
             session.end()
             assertTrue(URL(session.url).readText().contains("#EXT-X-ENDLIST"))
         }
+    }
+
+    @Test fun invalidAdtsLengthIsRejectedBeforeMux() {
+        val video = BakedCastTransportStream.Sample(0, byteArrayOf(0,0,0,1,0x65), true, true)
+        val audio = BakedAacAdts.wrap(byteArrayOf(1,2,3),48_000,2)
+        val muxer = BakedCastTransportStream()
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            muxer.segment(listOf(video,BakedCastTransportStream.Sample(0,audio.copyOf(audio.size-1),false)))
+        }
+        assertEquals(0,muxer.segment(listOf(video,BakedCastTransportStream.Sample(0,audio,false))).size%188)
     }
 
     @Test

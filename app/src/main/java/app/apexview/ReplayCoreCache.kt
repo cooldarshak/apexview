@@ -164,8 +164,17 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
             checkActive()
             val range = previewRange(history.times, history.times.size, from, until) ?: return@mapNotNull null
             val end = range.last + 1
-            number to DriverLaps(history.times.copyOfRange(range.first, end), history.states.subList(range.first, end),
-                history.crossings, history.lapTimes, history.lapCounts)
+            val lapRange = previewRange(history.lapTimes, history.lapTimes.size, from, until)
+            val crossingRange = previewRange(history.crossings, history.crossings.size, from, until)
+            // Keep up to eight preceding crossings for recent pace calculations,
+            // not the entire race history in a short-lived restart preview.
+            val crossings = crossingRange?.let {
+                history.crossings.copyOfRange((it.first - 8).coerceAtLeast(0), it.last + 1)
+            } ?: LongArray(0)
+            number to DriverLaps(history.times.copyOfRange(range.first, end),
+                history.states.subList(range.first, end).toList(),
+                crossings, lapRange?.let { history.lapTimes.copyOfRange(it.first, it.last + 1) } ?: LongArray(0),
+                lapRange?.let { history.lapCounts.copyOfRange(it.first, it.last + 1) } ?: IntArray(0))
         }.toMap()
         val core = ReplayCore(path, session.type, session.drivers, tracks, states, session.outline,
             session.hasStartFinish, session.startUtcMs, laps, emptyList())
@@ -283,7 +292,14 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
             }
             synchronized(commitLock) {
                 checkActive()
-                if (temporary.length() > limit || !temporary.renameTo(file)) return false
+                if (temporary.length() > limit) {
+                    diagnostic("Replay cache content=$contentId write=oversize")
+                    return false
+                }
+                if (!temporary.renameTo(file)) {
+                    diagnostic("Replay cache content=$contentId write=rename-failed")
+                    return false
+                }
                 val maxFiles = if (previewPositionMs == null) 6 else 12
                 val budget = if (previewPositionMs == null) 192L * 1024 * 1024 else 16L * 1024 * 1024
                 var bytes = file.length()
@@ -294,7 +310,8 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                     }
             }
             return true
-        } catch (_: IOException) {
+        } catch (failure: IOException) {
+            diagnostic("Replay cache content=$contentId write=io-failed type=${failure.javaClass.simpleName}")
             return false
         } finally {
             temporary.delete()

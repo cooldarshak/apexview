@@ -27,11 +27,18 @@ internal class BakedCastTransportStream(private val nativeRequested: () -> Boole
         require(samples.any { !it.video }) { "A baked Cast segment needs commentary" }
         require(samples.firstOrNull { it.video }?.keyFrame == true) { "A baked Cast segment must start with a video key frame" }
         require(samples.all { it.ptsUs >= 0 && it.bytes.isNotEmpty() })
-        require(samples.all { it.video || it.bytes.size >= 7 &&
-            it.bytes[0].toInt() and 255 == 255 && it.bytes[1].toInt() and 246 == 240 &&
-            it.bytes.size <= 65527
-        }) { "Baked Cast commentary requires AAC ADTS frames" }
+        require(samples.all { it.video || validAdts(it.bytes) && !it.keyFrame }) {
+            "Baked Cast commentary requires complete AAC ADTS frames"
+        }
 
+    }
+
+    private fun validAdts(bytes: ByteArray): Boolean {
+        if (bytes.size < 7 || bytes[0].toInt() and 255 != 255 || bytes[1].toInt() and 246 != 240) return false
+        val declared = ((bytes[3].toInt() and 3) shl 11) or
+            ((bytes[4].toInt() and 255) shl 3) or ((bytes[5].toInt() and 255) ushr 5)
+        val header = if (bytes[1].toInt() and 1 != 0) 7 else 9
+        return bytes.size >= header && declared == bytes.size && ((bytes[2].toInt() ushr 2) and 15) < 13
     }
 
     fun encodedSize(samples: List<Sample>): Int {

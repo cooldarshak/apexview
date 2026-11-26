@@ -886,6 +886,12 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeTransport(
             let array=JByteArray::from(env.get_object_array_element(&parts,i as i32).ok()?);
             let size=usize::try_from(meta[1]).ok()?;
             if env.get_array_length(&array).ok()? as usize!=size{return None;}
+            if !video{
+                if size<7||key{return None;}
+                let mut header=[0i8;7];
+                env.get_byte_array_region(&array,0,&mut header).ok()?;
+                if !crate::ts_mux::valid_adts(&header.map(|v|v as u8),size){return None;}
+            }
             let mut cache_start=0usize;let mut cache_end=0usize;
             writer.sample(meta[0],size,video,key,|mut offset,mut dst|{
                 while !dst.is_empty(){
@@ -905,8 +911,9 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeTransport(
             })?;
             env.delete_local_ref(array).ok()?;
         }
-        let final_counts=writer.finish()?.map(i32::from);
-        env.set_int_array_region(&continuity,0,&final_counts).ok()?;Some(())
+        let final_counts=writer.finish()?;
+        if crate::ts_mux::verify_packets(bytes,initial.map(|v|v as u8))?!=final_counts{return None;}
+        env.set_int_array_region(&continuity,0,&final_counts.map(i32::from)).ok()?;Some(())
     }));
     match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
 }

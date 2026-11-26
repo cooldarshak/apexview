@@ -1001,11 +1001,12 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                 val thread = android.os.Process.myTid()
                                 val previousPriority = android.os.Process.getThreadPriority(thread)
                                 try {
-                                    android.os.Process.setThreadPriority(thread, android.os.Process.THREAD_PRIORITY_BACKGROUND)
                                     return parsePositionLines(lines, { job.ensureActive() }, report) { builders ->
                                         val now = android.os.SystemClock.elapsedRealtime()
                                         val target = targetUtc(initialStart)
-                                        if (now - lastPreviewAt < 400 || publishedThrough?.let { target <= it - 10_000 } == true) {
+                                        if (now - lastPreviewAt < 400 || publishedThrough?.let {
+                                            target >= it - 120_000 && target <= it - 10_000
+                                        } == true) {
                                             return@parsePositionLines
                                         }
                                         val snapshot = builders.mapValues { it.value.build() }
@@ -1019,6 +1020,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                             }
                                         }
                                         if (previewOutline.size < 8) return@parsePositionLines
+                                        if (publishedThrough == null) {
+                                            android.os.Process.setThreadPriority(thread, android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                                        }
                                         lastPreviewAt = now
                                         publishedThrough = covering.maxOf { it.endMs }
                                         val outline = previewOutline
