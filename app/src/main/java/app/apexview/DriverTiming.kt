@@ -385,6 +385,18 @@ object DriverTimingParser {
         targetUtc: () -> Long,
         nativeRequested: Boolean,
         checkActive: () -> Unit,
+    ): Sequence<DriverTimingPreview> = previews(lines, streamStart, targetUtc, nativeRequested, checkActive, {})
+
+    /** Completion is invoked only at ordered EOF. The parser no longer owns
+     * or mutates the materialized history, so it can become the final index
+     * without a second JSON pass when no supplemental topic is available. */
+    internal fun previews(
+        lines: Iterator<String>,
+        streamStart: Long,
+        targetUtc: () -> Long,
+        nativeRequested: Boolean,
+        checkActive: () -> Unit,
+        onComplete: (build: () -> DriverTimingParse) -> Unit,
     ): Sequence<DriverTimingPreview> = sequence {
         val statusPolicy = RetirementStatusPolicy(nativeRequested)
         val drivers = mutableMapOf<String, Live>()
@@ -418,6 +430,8 @@ object DriverTimingParser {
                 yield(DriverTimingPreview(time, DriverTimingParse(materialize(drivers, copySnapshots = true), states.finish())))
             }
         }
+        checkActive()
+        onComplete { DriverTimingParse(materialize(drivers, copySnapshots = false), states.finish()) }
     }
 
     fun parse(stream: String, streamStart: Long, timingF1: String = "",
