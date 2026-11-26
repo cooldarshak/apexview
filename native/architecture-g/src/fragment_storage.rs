@@ -191,8 +191,10 @@ impl Arena {
         let atlas=self.ranges.remove(&id).is_some();
         // Final Java owner has retired every view before calling release.
         // Wipe spare capacity as well, before any reuse across outputs.
-        bytes.resize(bytes.capacity(),0);
+        // Wipe initialized bytes once and initialize the spare tail once.
+        // Resizing first would write the spare tail twice on every reuse.
         bytes.fill(0);
+        bytes.resize(bytes.capacity(),0);
         // A lease active at an explicit pressure trim must not recreate
         // the idle backing that trim just reclaimed. New leases may still
         // use the normal bounded cache; active readers remain untouched.
@@ -567,6 +569,57 @@ mod tests {
         assert!(a.release(other));
         assert_eq!(a.charged,0);
         assert_eq!(a.owned_reuses,1);
+    }
+
+    #[test]
+    fn observed_size_reuse_with_two_pinned_readers_and_pressure_1000_cycles() {
+        let mut a=Arena::default();
+        let ceiling=10*1024*1024;
+        let sizes=[8_011_000usize,8_577_000,9_846_000];
+        let mut readers=std::collections::VecDeque::new();
+        a.set_atlas_idle_limit(ceiling);
+        for cycle in 0..1000 {
+            if cycle%100==0 {
+                // Old readers remain immutable; their releases cannot
+                // recreate backing retired at this pressure watermark.
+                a.trim_pressure();
+                a.set_atlas_idle_limit(ceiling);
+            }
+            let len=sizes[(cycle/4)%sizes.len()]+1024;
+            let expected=a.atlas_idle.as_ref()
+                .filter(|v|v.capacity()<=ceiling && reusable_capacity(len,v.capacity()))
+                .map(|v|v.as_ptr());
+            let mut b=a.take_output(len,ceiling).unwrap();
+            if let Some(ptr)=expected { assert_eq!(b.as_ptr(),ptr); }
+            assert_eq!((b[0],b[1024],b[len-1]),(0,0,0));
+            let value=(cycle%251+1) as u8;
+            b[0]=value;
+            b[1024]=value;
+            b[len-1]=value;
+            let cap=b.capacity();
+            assert!(a.charged+cap<=MAX_BYTES);
+            let id=a.adopt(cap,len,1024,len-1024,MAX_BYTES,||Some(b)).unwrap();
+            assert!(a.mark_viewed(id));
+            readers.push_back((id,len,value));
+            for &(held,n,pattern) in &readers {
+                assert_eq!((a.live[&held][0],a.live[&held][1024],a.live[&held][n-1]),
+                    (pattern,pattern,pattern));
+            }
+            if readers.len()>2 {
+                let (retired,_,_)=readers.pop_front().unwrap();
+                assert!(a.release(retired));
+            }
+            assert_eq!(a.live.len(),readers.len());
+            assert!(a.charged<=MAX_BYTES);
+        }
+        assert_eq!(a.adopted,1000);
+        assert!(a.owned_reuses>0);
+        assert_eq!(a.owned_eligible,a.owned_reuses);
+        assert!(a.stale_releases>0);
+        for (id,_,_) in readers {assert!(a.release(id));}
+        a.trim_pressure();
+        assert_eq!(a.charged,0);
+        assert!(a.live.is_empty() && a.atlas_idle.is_none());
     }
 
     #[test]
