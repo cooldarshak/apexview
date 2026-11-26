@@ -242,9 +242,16 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 if (changed) {
                     releaseBakedCastVideoSurface()
                     val selected = checkNotNull(config)
-                    castVideoSurface = EGL14.eglCreateWindowSurface(display, selected, target.surface,
-                        intArrayOf(EGL14.EGL_NONE), 0)
+                    if (!target.attachProducer()) return@post
                     castVideoTarget = target
+                    try {
+                        castVideoSurface = EGL14.eglCreateWindowSurface(display, selected, target.surface,
+                            intArrayOf(EGL14.EGL_NONE), 0)
+                        check(castVideoSurface != EGL14.EGL_NO_SURFACE)
+                    } catch (error: Exception) {
+                        releaseBakedCastVideoSurface()
+                        throw error
+                    }
                     recordGraphicsOwner()
                 }
                 val output = castVideoSurface
@@ -266,24 +273,29 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     private fun detachBakedCastVideo(target: BakedCastGpuCapture.VideoTarget) {
-        gl.post {
+        if (!gl.post {
             if (castVideoTarget === target) {
                 releaseBakedCastVideoSurface()
                 lastPreviewRequestNs = 0L
                 scheduleDisplayFrame()
             }
-        }
+        }) Log.w("ApexviewSingleDecoder", "BAKED_VIDEO_DETACH_QUEUE_CLOSED owner=$graphicsOwnerId")
     }
 
     private fun releaseBakedCastVideoSurface() {
         val old = castVideoSurface
+        val target = castVideoTarget
         castVideoTarget = null
         castVideoSurface = EGL14.EGL_NO_SURFACE
         try {
             if (old != EGL14.EGL_NO_SURFACE && !EGL14.eglDestroySurface(display, old)) {
                 Log.w("ApexviewSingleDecoder", "SCENE_RELEASE_FAILED owner=$graphicsOwnerId epoch=$graphicsLifetime step=cast-window")
             }
-        } finally { recordGraphicsOwner() }
+        } finally {
+            // No further draws can use this target on the producer looper.
+            target?.producerDetached()
+            recordGraphicsOwner()
+        }
     }
 
     fun startReplayClip(source: Window, bounds: Rect, result: (String) -> Unit) {
