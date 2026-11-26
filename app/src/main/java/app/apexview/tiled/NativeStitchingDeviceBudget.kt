@@ -16,6 +16,18 @@ internal object NativeStitchingDeviceBudget {
         return NativeStitchingEngine.plan(headroom.lowRam,headroom.available,headroom.threshold,
             headroom.jvmHeadroom,input.toInt(),output.toInt())
     }
+    /** Both moving an atlas backing and making its necessary immutable copy
+     * use the same admitted tier. JNI additionally subtracts the current
+     * engine's remaining commitment under the registry lock. */
+    fun fragmentHeadroom(h: Headroom?, budget: NativeStitchingEngine.Budget? = null): Long {
+        if (h == null || h.lowMemory || h.threshold < 0L || h.available <= h.threshold) return 0L
+        val spare = h.available - h.threshold
+        if (budget?.foregroundRecovery != true || h.lowRam) return spare / 8
+        val staging = budget.inputBytes.toLong() + 2L * budget.outputBytes + 8L * 1024 * 1024
+        if (h.jvmHeadroom < staging) return 0L
+        return (spare / 4 - staging).coerceAtLeast(0L)
+    }
+
     fun sample(context: Context): Headroom? {
         val manager=context.getSystemService(ActivityManager::class.java) ?: return null
         val info=ActivityManager.MemoryInfo()
