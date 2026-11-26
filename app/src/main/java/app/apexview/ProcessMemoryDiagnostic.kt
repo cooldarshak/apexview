@@ -51,13 +51,17 @@ internal object ProcessMemoryDiagnostic {
     }
 
     fun engineFields(values: LongArray?): String {
-        if (values == null || (values.size != 9 && values.size != 10) || values.any { it < 0L } ||
-            values[2] > values[1] || values[3] > values[1] - values[2] || values[5] < values[2] || values[5] > values[1]) return "nativeEngineArena=UNAVAILABLE"
+        if (values == null || values.size !in setOf(9, 10, 12) || values.any { it < 0L } ||
+            values[2] > values[1] || values[3] > values[1] - values[2] || values[5] < values[2] || values[5] > values[1] ||
+            (values.size == 12 && (values[11] !in 0L..1L || values[11] == 0L && values[10] != 0L)))
+            return "nativeEngineArena=UNAVAILABLE"
         return "nativeEngineId=${values[0]} nativeEngineReservedBytes=${values[1]} " +
             "nativeEnginePayloadBytes=${values[2]} nativeEngineBridgeBytes=${values[3]} " +
             "nativeEnginePayloadAllocations=${values[4]} nativeEnginePeakPayloadBytes=${values[5]} " +
             "nativeEngineInputCopyBytes=${values[6]} nativeEngineOutputCopyBytes=${values[7]} nativeEngineFutureCommitmentBytes=${values[8]}" +
-            (if (values.size == 10) " nativeEngineOwnedRunning=${values[9]} nativeEnginePayloadLowerBound=${values[9] > 0}" else "")
+            (if (values.size >= 10) " nativeEngineOwnedRunning=${values[9]} nativeEnginePayloadLowerBound=${values[9] > 0}" else "") +
+            (if (values.size == 12) " nativeWorkspaceKnownCapacityBytes=${if (values[11] == 1L) values[10].toString() else "UNAVAILABLE"}" +
+                " nativeWorkspaceScope=PARTIAL_OWNED_CAPACITY" else " nativeWorkspaceKnownCapacityBytes=UNAVAILABLE")
     }
 
     // A null snapshot means the library was not loaded or the query failed;
