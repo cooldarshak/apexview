@@ -118,15 +118,28 @@ internal class BakedCastGpuCapture(
         closed = true
         pending?.let { gl.removeCallbacks(it.timeout) }
         pending = null
-        videoTarget?.let { it.close(); detachVideo(it) }
-        ui?.let { input ->
+        val target = videoTarget.also { videoTarget = null }
+        val overlayInput = ui.also { ui = null }
+        val videoInput = video.also { video = null }
+        // Retire every independently owned resource even if another owner fails.
+        fun release(label: String, block: () -> Unit) {
+            try { block() }
+            catch (error: RuntimeException) {
+                android.util.Log.w("PitwallCast", "BAKED_GPU_RELEASE_FAILED owner=$label", error)
+            }
+        }
+        release("video-target") { target?.let { it.close(); detachVideo(it) } }
+        overlayInput?.let { input ->
             // The producer Surface belongs to the Main draw callback. Release it after
             // any outstanding Canvas lock ends, even if its GL queue is abandoned first.
-            main.post { input.surface.release() }
-            input.releaseTexture()
+            release("overlay-surface") {
+                if (!main.post { input.surface.release() })
+                    android.util.Log.w("PitwallCast", "BAKED_GPU_OVERLAY_OWNER_STOPPED")
+            }
+            release("overlay-texture") { input.releaseTexture() }
         }
-        video?.close()
-        shader.close()
+        release("video-input") { videoInput?.close() }
+        release("shader") { shader.close() }
     }
 
     private class Input(width: Int, height: Int, handler: Handler, frameAvailable: () -> Unit) : AutoCloseable {
@@ -151,14 +164,16 @@ internal class BakedCastGpuCapture(
         fun latch() { frames.updateTexImage(); frames.getTransformMatrix(matrix) }
 
         fun releaseTexture() {
-            frames.setOnFrameAvailableListener(null)
-            frames.release()
-            GLES20.glDeleteTextures(1, intArrayOf(id), 0)
+            try { frames.setOnFrameAvailableListener(null) }
+            finally {
+                try { frames.release() }
+                finally { GLES20.glDeleteTextures(1, intArrayOf(id), 0) }
+            }
         }
 
         override fun close() {
-            surface.release()
-            releaseTexture()
+            try { surface.release() }
+            finally { releaseTexture() }
         }
     }
 }
