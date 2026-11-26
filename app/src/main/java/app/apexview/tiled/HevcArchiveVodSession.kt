@@ -39,7 +39,7 @@ internal class HevcArchiveVodSession(
     private val maximumOutputWidth: Int = 4096,
     val audioUri: Uri? = null,
     val audioUris: Map<String, Uri> = emptyMap(),
-    val stableAudioUris: Set<Uri> = emptySet(),
+    stableAudioUris: Set<Uri> = emptySet(),
     captionSources: Map<String, ArchiveCaptionSource> = emptyMap(),
     val offeredSourceDimensions: Map<String, List<Pair<Int, Int>>> = emptyMap(),
 ) : AutoCloseable {
@@ -47,15 +47,20 @@ internal class HevcArchiveVodSession(
                 val initialization: ByteArray, val report: CmafBoxInspector.Report,
                 val initializationMap: HlsMediaPlaylist.Segment)
     private data class Group(val startUs: Long, val durationUs: Long, val indexes: List<Int>)
+    @Volatile var stableAudioUris: Set<Uri> = stableAudioUris
+        private set
     @Volatile var captionSources: Map<String, ArchiveCaptionSource> = captionSources
         private set
 
-    /** Install validated optional captions before exposing the prepared session.
-     * Video-only proof has no dependency on caption network responses. */
-    internal fun installPreparedCaptionSources(sources: Map<String, ArchiveCaptionSource>) {
+    /** Install validated audio/text offers before exposing the prepared session.
+     * The finite video proof does not depend on separate sidecar playlists. */
+    internal fun installPreparedTracks(audio: Set<Uri>, captions: Map<String, ArchiveCaptionSource>) {
         synchronized(cacheLock) {
             checkOpen()
-            captionSources = sources.toMap()
+            require(audio.all { it in audioUris.values })
+            require(captions.keys.all { it in audioUris })
+            stableAudioUris = audio.toSet()
+            captionSources = captions.toMap()
         }
     }
 
