@@ -1257,7 +1257,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                         val accumulator = StateHistoryAccumulator()
                         val laps = traceStage("tower-history") { report ->
                             val job = kotlin.coroutines.coroutineContext
-                            var publishedTarget: Long? = null
+                            var publishedThrough: Long? = null
                             val towerPreviewPending = java.util.concurrent.atomic.AtomicBoolean(false)
                             val threadId = android.os.Process.myTid()
                             val priority = android.os.Process.getThreadPriority(threadId)
@@ -1270,11 +1270,11 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                         ordered, accumulator, nativeRequested(), report, checkActive = { job.ensureActive() }) { through, buildLaps ->
                                         val target = targetUtc(initialStart)
                                         if (!towerPreviewPending.get() && through >= target &&
-                                            publishedTarget?.let { abs(target - it) < 30_000L } != true) {
+                                            publishedThrough?.let { target <= it && (through - it < 30_000L || target <= it - 10_000L) } != true) {
                                             val laps = buildLaps()
                                             if (laps.values.any { it.hasRankAt(target) }) {
                                                 if (towerPreviewPending.compareAndSet(false, true)) {
-                                                    publishedTarget = target
+                                                    publishedThrough = through
                                                     val snapshot = DriverTimingParse(laps, accumulator.finish())
                                                     launch(Dispatchers.Main) {
                                                         try {
