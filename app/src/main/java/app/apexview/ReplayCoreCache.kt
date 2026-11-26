@@ -18,6 +18,8 @@ internal class ReplayCore(
     val startUtc: Long,
     val laps: Map<String, DriverLaps>,
     val parts: List<Pair<Long, Int>>,
+    val previewTowerFromUtc: Long? = null,
+    val previewTowerThroughUtc: Long? = null,
 )
 
 /** Small, disposable cache of completed archives. The original topics remain the source of truth. */
@@ -50,7 +52,10 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
             DataInputStream(file.inputStream().buffered(BUFFER_SIZE)).use { input ->
                 val version = input.readInt()
                 // Version 2 omitted the stopped bit and cannot represent the original history.
-                if (version != VERSION) return miss("rebuild-version-$version")
+                // V4 is a preview-only extension recording the independent
+                // tower coverage. Full V3 indices (including Stopped) are unchanged.
+                if (version != VERSION && !(previewPositionMs != null && version == PREVIEW_VERSION))
+                    return miss("rebuild-version-$version")
                 if (input.readLong() != contentId) return miss("wrong-content")
                 if (previewPositionMs != null &&
                     kotlin.math.abs(input.readLong() - previewPositionMs) > PREVIEW_REUSE_MS
@@ -123,11 +128,14 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                     DriverLaps(times, snapshots, crossings, lapTimes, lapCounts)
                 }
                 val parts = List(input.count(MAX_SAMPLES, 12)) { input.readLong() to input.readInt() }
+                val towerFrom = if (version == PREVIEW_VERSION) input.readLong() else null
+                val towerThrough = if (version == PREVIEW_VERSION) input.readLong() else null
+                if (towerFrom != null && (towerThrough == null || towerFrom > towerThrough)) return miss("invalid-coverage")
                 if (outline.size < 8 || outline.size % 2 != 0 || drivers.isEmpty() ||
                     tracks.isEmpty() || laps.isEmpty() || input.read() != -1
                 ) return miss("invalid-payload")
                 diagnostic("Replay $kind cache content=$contentId result=hit bytes=${file.length()}")
-                ReplayCore(path, type, drivers, tracks, states, outline, hasStartFinish, startUtc, laps, parts)
+                ReplayCore(path, type, drivers, tracks, states, outline, hasStartFinish, startUtc, laps, parts, towerFrom, towerThrough)
             }
         } catch (_: IOException) {
             miss("truncated-or-invalid")
@@ -144,11 +152,15 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
         // when the tracks and tower contain actual data at the target UTC.
         // The checks below enforce that, including for archivePartial snapshots.
         if (path == session.radioBase || path.isBlank() || session.live) return false
+        if (session.archivePartial && !session.towerIndexed && utcMs > session.towerThroughUtc) return false
         if (session.tracks.values.none { it.hasPositionAt(utcMs) } ||
             session.laps.values.none { it.hasRankAt(utcMs) }
         ) return false
         val from = utcMs - 90_000L
         val until = utcMs + 120_000L
+        val towerFrom = maxOf(from, session.previewTowerFromUtc ?: Long.MIN_VALUE)
+        val towerThrough = minOf(until, if (!session.archivePartial || session.towerIndexed) Long.MAX_VALUE else session.towerThroughUtc)
+        if (utcMs !in towerFrom..towerThrough) return false
         val tracks = session.tracks.mapNotNull { (number, track) ->
             checkActive()
             val range = previewRange(track.t, track.n, from, until) ?: return@mapNotNull null
@@ -177,7 +189,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                 lapRange?.let { history.lapCounts.copyOfRange(it.first, it.last + 1) } ?: IntArray(0))
         }.toMap()
         val core = ReplayCore(path, session.type, session.drivers, tracks, states, session.outline,
-            session.hasStartFinish, session.startUtcMs, laps, emptyList())
+            session.hasStartFinish, session.startUtcMs, laps, emptyList(), towerFrom, towerThrough)
         return writeFile(preview, core, positionMs, checkActive)
     }
 
@@ -215,7 +227,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                 }
             }
             DataOutputStream(bounded.buffered(BUFFER_SIZE)).use { output ->
-                output.writeInt(VERSION)
+                output.writeInt(if (previewPositionMs == null) VERSION else PREVIEW_VERSION)
                 output.writeLong(contentId)
                 if (previewPositionMs != null) output.writeLong(previewPositionMs)
                 output.writeUTF(core.path)
@@ -288,6 +300,10 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                 core.parts.forEach { (time, part) ->
                     output.writeLong(time)
                     output.writeInt(part)
+                }
+                if (previewPositionMs != null) {
+                    output.writeLong(requireNotNull(core.previewTowerFromUtc))
+                    output.writeLong(requireNotNull(core.previewTowerThroughUtc))
                 }
             }
             synchronized(commitLock) {
@@ -379,6 +395,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
         val commitLock = Any()
         const val MAX_PREVIEW_BYTES = 16L * 1024 * 1024
         const val VERSION = 3
+        const val PREVIEW_VERSION = 4
         const val PREVIEW_REUSE_MS = 45_000L
         const val TRACK_BLOCK_SAMPLES = 4096
         const val TRACK_SAMPLE_BYTES = Long.SIZE_BYTES + 2 * Int.SIZE_BYTES
