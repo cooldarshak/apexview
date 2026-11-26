@@ -249,6 +249,15 @@ public final class NativeStitchingEngine implements AutoCloseable {
             throw new IllegalStateException("Native bridge view unavailable");
         }
     }
+    /** Preserve the actual native rejection code without parsing exception text. */
+    public static final class OpenException extends IllegalStateException {
+        public final long code;
+        OpenException(long code) {
+            super("Native admission failed: "+code);
+            this.code=code;
+        }
+    }
+
     /** Only call on a worker, after explicit engine admission. */
     public static NativeStitchingEngine open(Budget budget) {
         if(budget==null)throw new IllegalArgumentException("Native memory budget unavailable");
@@ -256,7 +265,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
         if(nativeAbi()!=2)throw new IllegalStateException("G-A ABI mismatch");
         long id=budget.compactAtlas?nativeOpenAtlas(budget.slots,budget.inputBytes,budget.outputBytes,budget.ceilingBytes)
             :nativeOpen(budget.slots,budget.inputBytes,budget.outputBytes,budget.ceilingBytes);
-        if(id<=0)throw new IllegalStateException("Native admission failed: "+id);
+        if(id<=0)throw new OpenException(id);
         try{return new NativeStitchingEngine(id,budget);}
         catch(RuntimeException|Error failure){nativeClose(id);throw failure;}
     }
