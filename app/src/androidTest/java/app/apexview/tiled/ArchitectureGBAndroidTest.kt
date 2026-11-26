@@ -284,10 +284,47 @@ class ArchitectureGBAndroidTest {
             assertTrue("Actual worker must report insufficient output capacity: $failed",
                 failed is NativeClearArchiveJob.OutputCapacityException)
         }
+        verifyBuild896TvAdmission(input, expected)
         verifyCompactTransfer(input, expected)
         verifyNativeRelayOwnership()
         verifyCastRouteIsolation()
         verifyArchiveBridge(input, expected)
+    }
+
+    /** Replay the historical planner observations through the actual Android JNI
+     * worker and known-good media fixture. These are synthetic headroom inputs,
+     * not proof of admission or performance on the physical TCL television. */
+    private fun verifyBuild896TvAdmission(input: ByteArray, expected: ByteArray) {
+        val observations = listOf(
+            longArrayOf(5474084, 7002945, 621977600, 150994944, 303428224),
+            longArrayOf(5226177, 6258463, 651563008, 150994944, 321931440),
+            longArrayOf(5591105, 6324612, 619515904, 150994944, 268680776),
+            longArrayOf(5221449, 6295460, 672854016, 150994944, 323391488),
+        )
+        val mib = 1024L * 1024
+        for (v in observations) {
+            val budget = requireNotNull(NativeStitchingEngine.planClearAtlas(false,
+                v[2], v[3], v[4], v[0].toInt(), v[1].toInt()))
+            assertTrue(budget.compactAtlas)
+            assertTrue(budget.foregroundRecovery)
+            assertTrue(input.size <= budget.inputBytes && expected.size <= budget.outputBytes)
+            assertNull(NativeStitchingEngine.planClearAtlas(true,
+                v[2], v[3], v[4], v[0].toInt(), v[1].toInt()))
+            assertNull(NativeStitchingEngine.planClearAtlas(false,
+                v[3] + 64 * mib, v[3], v[4], v[0].toInt(), v[1].toInt()))
+            NativeStitchingEngine.open(budget).use { engine ->
+                assertEquals(0L, engine.allocatedPayloadBytes())
+                val token = engine.submitClearAtlasParts(engine.generation(),
+                    arrayOf(input), input.size, true, 5000)
+                assertTrue("TV admission vector failed JNI submission: $token", token > 0)
+                assertEquals(expected.size.toLong(), await(engine, token))
+                val actual = ByteArray(expected.size)
+                assertEquals(expected.size.toLong(), engine.read(token, 0, actual, 0, actual.size))
+                assertArrayEquals(expected, actual)
+                assertEquals(1L, engine.release(token))
+            }
+        }
+        Log.i("PitwallGB", "GB Build 896 four TV admission vectors and JNI media parity PASS")
     }
 
     private fun verifyCompactTransfer(input: ByteArray, expected: ByteArray) {
