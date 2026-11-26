@@ -3124,6 +3124,7 @@ class AppState(
         var transferred = false
         var released = 0
         var prepared: app.apexview.tiled.HevcArchiveVodSession? = null
+        var preparedHandoffPosition: Long? = null
         var phase = "PREFLIGHT"
         var failure: String? = null
         var useExistingBackend = false
@@ -3219,16 +3220,6 @@ class AppState(
                         try {
                             host.feed.requireArchiveHardwareSupport(session.codedWidth, session.codedHeight, session.frameRate * playbackSpeed)
                             validateSelection()
-                            if (!replacingActiveScene && !castingActive && !castPlaybackHandedOff) {
-                                // Ordinary clock drift does not invalidate the verified
-                                // finite session. Prepare the currently needed group
-                                // once while the old source is still visible.
-                                val currentPosition = host.feed.player.currentPosition.coerceAtLeast(0)
-                                kotlinx.coroutines.runInterruptible(kotlinx.coroutines.Dispatchers.IO) {
-                                    session.prepareHandoffAt(currentPosition)
-                                }
-                                validateSelection()
-                            }
                             if (bakedQualityReplacement) {
                                 val programme = selected.firstOrNull { it.audible }?.feed?.sourceStream?.profileLabel
                                     ?: session.clockLabel
@@ -3254,6 +3245,18 @@ class AppState(
                             ?.takeIf { it in session.audioUris } ?: session.clockLabel)
                         validateSelection()
                         compositionHandoffOwner = capture
+                        if (!replacingActiveScene && !castingActive && !castPlaybackHandedOff) {
+                            // The old source remains visible during all offer/proof work.
+                            // Freeze only at the actual ownership transition, so the
+                            // prepared fragment and the first decoder request agree.
+                            val target = host.feed.player.currentPosition.coerceAtLeast(0L)
+                            host.feed.player.playWhenReady = false
+                            kotlinx.coroutines.runInterruptible(kotlinx.coroutines.Dispatchers.IO) {
+                                session.prepareHandoffAt(target)
+                            }
+                            validateSelection()
+                            preparedHandoffPosition = target
+                        }
                         if (bakedQualityReplacement && bakedCastSession != null)
                             releaseCastRelay(preserveQualityRestart = true)
                         val before = selected.sumOf { it.feed.activeVideoDecoderCount }
@@ -3269,7 +3272,7 @@ class AppState(
                             ?.takeIf { it in session.audioUris } ?: session.clockLabel
                         session.awaitProgramme(programme)
                         validateSelection()
-                        val handoffPositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
+                        val handoffPositionMs = preparedHandoffPosition ?: host.feed.player.currentPosition.coerceAtLeast(0)
                         sceneOutputSize = 0 to 0
                         // Register the observable host before advertising the
                         // clear HEVC atlas. Otherwise Compose can see a scene
@@ -6951,7 +6954,9 @@ class AppState(
         if (archiveCompositionStarting) {
             val active = singleDecoderScenePlayer ?:
                 tiles.firstOrNull { it.id == singleDecoderFallbackTileId }?.feed
-            active?.player?.playWhenReady = playing
+            // Once decoder ownership is transferring, keep the prepared
+            // clock fixed. The new host will apply the user's latest play state.
+            if (compositionHandoffOwner == null) active?.player?.playWhenReady = playing
             showChrome()
             return
         }
