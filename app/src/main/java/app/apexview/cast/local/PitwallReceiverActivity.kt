@@ -345,7 +345,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     private val manualReconnectRequired = LinkedHashSet<String>()
     private fun disconnectPhone() {
         val owner = connection ?: return
-        owner.secureSession?.trustKey?.let { key ->
+        owner.secureSession?.trustKey?.takeIf { PitwallRememberedPeers.contains(this, it) }?.let { key ->
             manualReconnectRequired.add(key)
             if (manualReconnectRequired.size > 32)
                 manualReconnectRequired.remove(manualReconnectRequired.first())
