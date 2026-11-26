@@ -2884,32 +2884,27 @@ class AppState(
     private var replayPreviewContent: Long? = null
     private var replayPreviewPosition: Long? = null
     private var replayPreviewWrite: kotlinx.coroutines.Job? = null
-    private var replayPreviewSaved = false
+    private var replayPreviewSavedCoverage = 0
 
     private fun saveReplayPreview(contentId: Long, positionMs: Long) {
-        // A TCL TV can spend minutes parsing complete replay histories. As soon as
-        // both overlays have genuine samples at the playhead, persist that bounded
-        // partial window. Otherwise every replay re-open starts from zero because
-        // a full archive load may never finish before the viewer changes session.
-        val archive = timing?.takeIf {
-            timingContentId == contentId && !it.live && it.outline.size >= 8 &&
-                it.tracks.isNotEmpty() && it.laps.isNotEmpty()
-        } ?: return
+        // Do not make a fast tower wait for slow position data, or vice versa.
+        // Both snapshots remain tied to the observed video clock and content.
+        val archive = timing?.takeIf { timingContentId == contentId && !it.live } ?: return
         val playhead = replayPlayhead(contentId, positionMs)
         val videoUtc = playhead.videoUtcMs ?: return
         val targetUtc = videoUtc + playhead.offsetMs
-        if (archive.tracks.values.none { it.hasPositionAt(targetUtc) } ||
-            archive.laps.values.none { it.hasRankAt(targetUtc) }) return
+        val coverage = ReplayPreviewCoverage.at(archive, targetUtc)
+        if (coverage == 0) return
         if (replayPreviewContent == contentId &&
             replayPreviewPosition?.let { abs(positionMs - it) < 25_000L } == true &&
-            (replayPreviewWrite?.isActive == true || replayPreviewSaved)
+            replayPreviewSavedCoverage and coverage == coverage
         ) return
-        // Don't cancel a healthy write every 25 seconds on a slow TV. Let it
-        // commit its bounded window; a later saveWatch can request the next.
+        // A healthy write may take longer on a TV. Complete it first; the next
+        // saveWatch can upgrade a map-only or tower-only preview immediately.
         if (replayPreviewContent == contentId && replayPreviewWrite?.isActive == true) return
         replayPreviewContent = contentId
         replayPreviewPosition = positionMs
-        replayPreviewSaved = false
+        replayPreviewSavedCoverage = 0
         replayPreviewWrite?.cancel()
         replayPreviewWrite = scope.launch {
             val saved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -2919,8 +2914,8 @@ class AppState(
                 }.writePreview(archive, positionMs, targetUtc) { job.ensureActive() }
             }
             if (replayPreviewContent == contentId && replayPreviewPosition == positionMs) {
-                replayPreviewSaved = saved
-                android.util.Log.i("ApexviewTiming", "Replay preview write content=$contentId positionMs=$positionMs saved=$saved")
+                replayPreviewSavedCoverage = if (saved) coverage else 0
+                android.util.Log.i("ApexviewTiming", "Replay preview write content=$contentId positionMs=$positionMs saved=$saved coverage=$coverage")
             }
         }
     }
@@ -2980,7 +2975,7 @@ class AppState(
             pending.cancel()
             replayPreviewContent = null
             replayPreviewPosition = null
-            replayPreviewSaved = false
+            replayPreviewSavedCoverage = 0
         }
         scope.launch(kotlinx.coroutines.Dispatchers.IO) {
             pending?.join()
