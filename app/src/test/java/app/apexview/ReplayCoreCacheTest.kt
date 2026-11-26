@@ -17,7 +17,11 @@ class ReplayCoreCacheTest {
         val sector = SectorCell("28.002", Pace.GREEN, listOf(2049, 2051), "28.800")
         val snapshot = DriverLaps.Snapshot(
             4, listOf(sector, null, null), listOf(null, sector, null), sector,
-            "+1.3", false, "+9.4", "+1.3", bestLap = sector,
+            "+1.3", false, "+9.4", "+1.3", bestLap = sector, stopped = true,
+        )
+        val next = DriverLaps.Snapshot(
+            4, snapshot.sectors, snapshot.lapSectors, sector,
+            "+1.4", false, "+9.5", "+1.4", bestLap = sector,
         )
         val samples = 4097
         val track = DriverTrack(
@@ -26,7 +30,7 @@ class ReplayCoreCacheTest {
             FloatArray(samples) { it * 2f + 3f },
             samples,
         )
-        val laps = DriverLaps(longArrayOf(1000), listOf(snapshot), longArrayOf(1200), longArrayOf(1200), intArrayOf(6))
+        val laps = DriverLaps(longArrayOf(1000, 2000), listOf(snapshot, next), longArrayOf(1200), longArrayOf(1200), intArrayOf(6))
         val source = ReplayCore(
             "2026/Race/", "Race", mapOf("16" to DriverInfo("16", "LEC", 42)),
             mapOf("16" to track), mapOf("16" to StateLog(longArrayOf(1000), arrayOf(LapState.PUSH))),
@@ -49,6 +53,11 @@ class ReplayCoreCacheTest {
         assertEquals(300L, card.runningMs)
         assertEquals(4, card.position)
         assertEquals("+9.4", card.toLeader)
+        assertTrue(card.stopped)
+        val later = requireNotNull(history.at(2500))
+        assertTrue(!later.stopped)
+        org.junit.Assert.assertSame(card.sectors, later.sectors)
+        org.junit.Assert.assertSame(card.lapSectors, later.lapSectors)
         assertEquals(sector.segments, card.bestLap?.segments)
         assertEquals(sector.previousTime, card.sectors.first()?.previousTime)
         assertEquals(source.parts, restored.parts)

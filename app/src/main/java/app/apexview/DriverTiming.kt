@@ -254,6 +254,8 @@ object DriverTimingParser {
         var ahead: String? = null
         var inPit = false
         var retired = false
+        var retirementAssertedAt = Long.MIN_VALUE
+        var retirementCorrectionAt: Long? = null
         var stopped = false
         var laps: Int? = null
         val times = ArrayList<Long>()
@@ -423,7 +425,11 @@ object DriverTimingParser {
         if (d.optBoolean("PitOut")) l.inPit = false
         // Sparse deltas do not reset status. Temporary stopping is not retirement.
         if (d.has("Stopped")) l.stopped = d.optBoolean("Stopped")
-        if (d.optBoolean("Retired")) l.retired = true
+        if (d.optBoolean("Retired")) {
+            l.retired = true
+            l.retirementAssertedAt = t
+            l.retirementCorrectionAt = null
+        }
         // Qualifying gives the gap to the fastest; races the interval to the car ahead.
         d.optString("TimeDiffToFastest").takeIf { d.has("TimeDiffToFastest") }?.let { l.gap = it.ifEmpty { null } }
         d.optJSONObject("IntervalToPositionAhead")?.let { o ->
@@ -441,11 +447,34 @@ object DriverTimingParser {
         val previousLaps = l.laps
         val staleLap = completed != null && previousLaps != null && completed < previousLaps
         val crossing = completed != null && previousLaps != null && completed > previousLaps
-        if (crossing || d.optBoolean("PitOut")) {
-            if (!d.optBoolean("Retired")) l.retired = false
+        // A false retirement flag alone is not reliable: require subsequent
+        // positive progress, and never use a stale lap or a same-time assertion.
+        if (l.retired && !staleLap && t > l.retirementAssertedAt &&
+            d.has("Retired") && !d.isNull("Retired") && d.optString("Retired").equals("false", ignoreCase = true)) {
+            l.retirementCorrectionAt = t
+        }
+        if (crossing || (!staleLap && d.optBoolean("PitOut"))) {
+            if (!d.optBoolean("Retired") && t > l.retirementAssertedAt) {
+                l.retired = false
+                l.retirementCorrectionAt = null
+            }
             if (!d.optBoolean("Stopped")) l.stopped = false
         }
         val sectors = d.opt("Sectors")
+        val correction = l.retirementCorrectionAt
+        if (l.retired && correction != null && t >= correction && t > l.retirementAssertedAt &&
+            !staleLap && !crossing && previousLaps != null && !l.inPit && !l.stopped) {
+            // Only a newly completed first/second split of the current lap is
+            // corroboration. An old split, a late S3 or flags alone are not.
+            forEachSector(sectors) { i, sector ->
+                val seconds = sector.optString("Value").toDoubleOrNull()
+                if (i < 2 && l.sectorValue[i].isEmpty() && seconds != null &&
+                    seconds.isFinite() && seconds > 0) {
+                    l.retired = false
+                    l.retirementCorrectionAt = null
+                }
+            }
+        }
         if (!staleLap) forEachSector(sectors) { i, sector ->
             // At the line, keep the finished lap intact while applying its final split.
             if (!crossing || sector.optString("Value").isNotEmpty() || i == 2 && !sector.has("Value")) {

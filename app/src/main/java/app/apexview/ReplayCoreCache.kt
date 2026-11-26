@@ -81,12 +81,20 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
                         val index = readInt()
                         return if (index == -1) null else sectors[index]
                     }
+                    fun strip(previous: List<SectorCell?>?): List<SectorCell?> {
+                        val a = cell()
+                        val b = cell()
+                        val c = cell()
+                        return if (previous != null && previous[0] === a && previous[1] === b && previous[2] === c)
+                            previous else listOf(a, b, c)
+                    }
+                    var previous: DriverLaps.Snapshot? = null
                     val snapshots = List(times.size) { index ->
                         if (index % 1024 == 0) checkActive()
                         DriverLaps.Snapshot(
                             position = readInt().takeIf { it >= 0 },
-                            sectors = List(3) { cell() },
-                            lapSectors = List(3) { cell() },
+                            sectors = strip(previous?.sectors),
+                            lapSectors = strip(previous?.lapSectors),
                             lastLap = cell(),
                             gap = readNullableString(),
                             inPit = readBoolean(),
@@ -94,7 +102,8 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
                             ahead = readNullableString(),
                             retired = readBoolean(),
                             bestLap = cell(),
-                        )
+                            stopped = readBoolean(),
+                        ).also { previous = it }
                     }
                     val crossings = readTimes()
                     val lapTimes = readTimes()
@@ -233,6 +242,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
                         writeNullableString(snapshot.ahead)
                         writeBoolean(snapshot.retired)
                         cell(snapshot.bestLap)
+                        writeBoolean(snapshot.stopped)
                     }
                     writeTimes(history.crossings)
                     writeTimes(history.lapTimes)
@@ -314,7 +324,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
     }
 
     private companion object {
-        const val VERSION = 2
+        const val VERSION = 3
         const val PREVIEW_REUSE_MS = 45_000L
         const val TRACK_BLOCK_SAMPLES = 4096
         const val TRACK_SAMPLE_BYTES = Long.SIZE_BYTES + 2 * Int.SIZE_BYTES

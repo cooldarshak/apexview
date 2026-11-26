@@ -115,6 +115,24 @@ class DriverTimingTest {
     }
 
     @Test
+    fun retirementCorrectionNeedsFreshCurrentLapProgressAndPreservesHistory() {
+        val stream = listOf(
+            """00:00:01.000{"Lines":{"4":{"NumberOfLaps":3,"Sectors":{"0":{"Value":"30.000"}}}}}""",
+            """00:00:02.000{"Lines":{"4":{"Retired":true}}}""",
+            """00:00:03.000{"Lines":{"4":{"Retired":false,"Sectors":{"0":{"Value":"30.000"}}}}}""",
+            """00:00:04.000{"Lines":{"4":{"NumberOfLaps":2,"Sectors":{"1":{"Value":"28.000"}}}}}""",
+            """00:00:05.000{"Lines":{"4":{"Sectors":{"2":{"Value":"29.000"}}}}}""",
+            """00:00:06.000{"Lines":{"4":{"NumberOfLaps":3,"Sectors":{"1":{"Value":"28.100"}}}}}""",
+            """00:00:07.000{"Lines":{"4":{"Retired":true}}}""",
+        ).joinToString("\n")
+        val history = DriverTimingParser.parse(stream, t0).getValue("4")
+        assertTrue(history.at(t0 + 5_500)!!.retired)
+        assertTrue(!history.at(t0 + 6_500)!!.retired)
+        assertTrue(history.at(t0 + 7_500)!!.retired)
+        assertTrue(history.at(t0 + 2_500)!!.retired)
+    }
+
+    @Test
     fun aLateFinalSectorStillCountsForTheLapItFinished() {
         val late = listOf(
             "00:00:01.000{\"Lines\":{\"4\":{\"NumberOfLaps\":3}}}",
