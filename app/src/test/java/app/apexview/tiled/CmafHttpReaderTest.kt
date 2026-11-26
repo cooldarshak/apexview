@@ -92,6 +92,13 @@ class CmafHttpReaderTest {
         }
     }
 
+    @Test fun singleExactUnknownLengthChunkTransfersOwnershipWithoutCoalescing() {
+        val exact = ByteArray(32 * 1024) { (it * 13).toByte() }
+        val result = reader(exact, C.LENGTH_UNSET.toLong()).read(uri, exact.size)
+        assertArrayEquals(exact, result.bytes)
+        assertEquals(0L, result.coalescedCopyBytes)
+    }
+
     @Test fun unknownLengthAcceptsExactChunkBoundaryAndRejectsOneExtraByte() {
         val exact = ByteArray(64 * 1024) { it.toByte() }
         assertArrayEquals(exact, reader(exact, C.LENGTH_UNSET.toLong()).read(uri, exact.size).bytes)

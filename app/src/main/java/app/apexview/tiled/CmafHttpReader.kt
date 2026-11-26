@@ -107,6 +107,11 @@ internal class CmafHttpReader(private val factory: DataSource.Factory) {
                 if (length != C.LENGTH_UNSET.toLong() && total.toLong() != length) {
                     throw PermanentCaptureException("HLS byte-range response was truncated")
                 }
+                // Transfer ownership directly if the only chunk is already exact.
+                // Removing it from the cleanup list prevents wiping the caller's data.
+                if (chunks.size == 1 && chunks[0].size == total) {
+                    return Response(source.uri ?: uri, chunks.removeAt(0))
+                }
                 val complete = ByteArray(total)
                 var copied = 0
                 for (chunk in chunks) {

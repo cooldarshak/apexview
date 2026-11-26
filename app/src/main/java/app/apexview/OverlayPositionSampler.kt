@@ -89,11 +89,23 @@ internal class OverlayDrawCar(override val number: String) : OverlayMotionCar {
         internal set
 }
 
-/** One owner and one batched JNI call per position sample. JVM retains the
+/** One owner and bounded batched JNI calls per position sample. JVM retains the
  * existing immutable source arrays; native reads only the required samples.
  * The reusable cursor/result storage is never published to another thread.
  */
-private class NativePositionBatch(tracks: Collection<DriverTrack>) {
+private class NativePositionBatch(timing: SessionTiming) {
+    private val tracks = timing.tracks.values
+    private val states = timing.tracks.keys.map { timing.states[it] }
+    private val laps = timing.tracks.keys.map { timing.laps[it] }
+    private val emptyTimes = LongArray(0)
+    private val metadataTimes = (states.map { it?.t ?: emptyTimes } +
+        laps.map { it?.times ?: emptyTimes }).toTypedArray()
+    private val metadataCounts = IntArray(metadataTimes.size) { metadataTimes[it].size }
+    private val metadataIndices = IntArray(metadataTimes.size)
+    fun state(index: Int): LapState =
+        states[index]?.s?.getOrNull(metadataIndices[index]) ?: LapState.UNKNOWN
+    fun retired(index: Int): Boolean =
+        laps[index]?.states?.getOrNull(metadataIndices[states.size + index])?.retired == true
     private val times = tracks.map { it.t }.toTypedArray()
     private val xs = tracks.map { it.x }.toTypedArray()
     private val ys = tracks.map { it.y }.toTypedArray()
@@ -109,7 +121,8 @@ private class NativePositionBatch(tracks: Collection<DriverTrack>) {
     private var reported = false
     fun sample(now: Long): Boolean {
         if (failed) return false
-        if (!NativeHotPath.samplePositions(times, xs, ys, counts, now, cursors, xy, active)) {
+        if (!NativeHotPath.samplePositions(times, xs, ys, counts, now, cursors, xy, active) ||
+            !NativeHotPath.floorIndices(metadataTimes, metadataCounts, now, metadataIndices)) {
             failed = true
             android.util.Log.i("PitwallNativeHotPath", "MAP_ENGINE requested=RUST actual=JVM reason=NATIVE_BATCH_UNAVAILABLE")
             return false
@@ -140,7 +153,7 @@ internal class OverlayPositionSampler(
     private val entries = timing.tracks.map { (id, track) ->
         Entry(id, OverlayPositionCursor(track))
     }
-    private val native = if (nativeRequested) NativePositionBatch(timing.tracks.values) else null
+    private val native = if (nativeRequested) NativePositionBatch(timing) else null
     private var lastMs = Long.MIN_VALUE
     private var lastBeforePositions = false
     private var previous: List<Car> = emptyList()
@@ -166,14 +179,14 @@ internal class OverlayPositionSampler(
         val sampledNative = native?.sample(atMs) == true
         for (index in entries.indices) {
             val entry = entries[index]
-            if (timing.laps[entry.id]?.retiredAt(atMs) == true) continue
+            if (if (sampledNative) native!!.retired(index) else timing.laps[entry.id]?.retiredAt(atMs) == true) continue
             if (sampledNative) {
                 if (native!!.active[index] == 0) continue
             } else if (!entry.cursor.sample(atMs)) continue
             val car = entry.drawCar
             car.x = if (sampledNative) native!!.xy[2 * index] else entry.cursor.x
             car.y = if (sampledNative) native!!.xy[2 * index + 1] else entry.cursor.y
-            car.state = timing.states[entry.id]?.at(atMs) ?: LapState.UNKNOWN
+            car.state = if (sampledNative) native!!.state(index) else timing.states[entry.id]?.at(atMs) ?: LapState.UNKNOWN
             drawCars.add(car)
         }
         return drawCars
@@ -198,13 +211,13 @@ internal class OverlayPositionSampler(
         val sampledNative = native?.sample(atMs) == true
         for (index in entries.indices) {
             val entry = entries[index]
-            if (timing.laps[entry.id]?.retiredAt(atMs) == true) continue
+            if (if (sampledNative) native!!.retired(index) else timing.laps[entry.id]?.retiredAt(atMs) == true) continue
             if (sampledNative) {
                 if (native!!.active[index] == 0) continue
             } else if (!entry.cursor.sample(atMs)) continue
             val x = if (sampledNative) native!!.xy[2 * index] else entry.cursor.x
             val y = if (sampledNative) native!!.xy[2 * index + 1] else entry.cursor.y
-            val state = timing.states[entry.id]?.at(atMs) ?: LapState.UNKNOWN
+            val state = if (sampledNative) native!!.state(index) else timing.states[entry.id]?.at(atMs) ?: LapState.UNKNOWN
             // The published list is compacted when earlier drivers retire or
             // leave position history, so its indices cannot key source drivers.
             val old = entry.previousCar
