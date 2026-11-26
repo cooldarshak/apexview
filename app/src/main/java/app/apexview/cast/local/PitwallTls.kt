@@ -148,6 +148,7 @@ internal object PitwallTls {
         // The local identity is part of the trust key too: reinstall/key
         // renewal cannot silently inherit remembered authorization.
         val trustKey: String get() = PitwallRememberedPeers.key(identity.certificate.encoded, peer.encoded)
+        val peerSelectionIdentity: String get() = PitwallPairingCode.televisionIdentity(peer.encoded)
         val trustManager: X509TrustManager = PeerTrust(peer)
         private val pinnedContext by lazy { identity.context(trustManager) }
         val socketFactory get() = pinnedContext.socketFactory
