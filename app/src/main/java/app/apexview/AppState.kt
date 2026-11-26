@@ -71,6 +71,7 @@ class AppState(
 
     private var api = F1TvApi(userAgent, chromeMajor)
     private val playbackWork = PlaybackWorkCoordinator()
+    private var archiveAudioSelectionJob: Job? = null
     private val timingWork = TimingWorkCoordinator()
     var singleDecoderDiagnostic by mutableStateOf<String?>(null)
         private set
@@ -769,7 +770,12 @@ class AppState(
         if (singleDecoderSceneActive) {
             if (settings.nativeRustStitching && !castingActive)
                 singleDecoderScenePlayer?.archiveSceneSession?.configureNativeClear(context)
-            tiles.firstOrNull { it.audible }?.let { singleDecoderScenePlayer?.selectArchiveAudio(it.feed.sourceStream.profileLabel) }
+            tiles.firstOrNull { it.audible }?.let { tile ->
+                singleDecoderScenePlayer?.let { owner ->
+                    if (!deferArchiveAudioSelection(owner, tile, false))
+                        owner.selectArchiveAudio(tile.feed.sourceStream.profileLabel)
+                }
+            }
             singleDecoderScenePlayer?.setAudible(!mutedAll)
         } else if (settings.decoderMode == DecoderMode.SINGLE && tiles.size >= 2) {
             tiles.firstOrNull()?.let { startArchiveSingleDecoderComposition(it.contentId) }
@@ -959,6 +965,7 @@ class AppState(
                             minimumHeight = 0,
                             preferredHeights = requestedHeights,
                             autoBandwidthBps = compositionBandwidthBudget(selectedQualities),
+                            primaryProgramme = requestedProgramme ?: clockTile.feed.sourceStream.profileLabel,
                         ).also {
                             ownedSession = it
                             it.configureNativeBudget(context)
@@ -992,6 +999,7 @@ class AppState(
                         "ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     val programme = requestedProgramme ?: session.clockLabel
+                    session.awaitProgramme(programme)
                     relay = app.apexview.cast.SceneCastRelay(session, app.apexview.tiled.CmafHttpReader(factory), address,
                         peer = if (usingLocalReceiver) originalConnection?.socket?.inetAddress else null,
                         tls = if (usingLocalReceiver) requireNotNull(originalConnection?.secureSession) else null,
@@ -3191,7 +3199,9 @@ class AppState(
                                 preferredHeight, settings.commentary, minimumHeight, desired,
                                 autoBandwidthBps = compositionBandwidthBudget(selected.map(::qualityFor)),
                                 coldNativeProbe = context.takeIf { settings.nativeRustStitching &&
-                                    !replacingActiveScene && !castingActive && !castPlaybackHandedOff })
+                                    !replacingActiveScene && !castingActive && !castPlaybackHandedOff },
+                                primaryProgramme = selected.firstOrNull { it.audible }?.feed?.sourceStream?.profileLabel
+                                    ?: host.feed.sourceStream.profileLabel)
                         } finally {
                             if (playbackWork.capture === capture)
                                 recordQualityOffers(selected, capture.offeredSourceDimensions)
@@ -3239,6 +3249,10 @@ class AppState(
                         // them alive through validation, then retire before replacing
                         // the one decoder. The waiting quality job owns reconnection.
                         validateSelection()
+                        val session = requireNotNull(prepared)
+                        session.awaitProgramme(selected.firstOrNull { it.audible }?.feed?.sourceStream?.profileLabel
+                            ?.takeIf { it in session.audioUris } ?: session.clockLabel)
+                        validateSelection()
                         compositionHandoffOwner = capture
                         if (bakedQualityReplacement && bakedCastSession != null)
                             releaseCastRelay(preserveQualityRestart = true)
@@ -3251,6 +3265,10 @@ class AppState(
                         android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_HANDOFF preflight=PASS observedReleases=$released activeVideoDecoders=0")
                     },
                     replaceHost = { session ->
+                        val programme = selected.firstOrNull { it.audible }?.feed?.sourceStream?.profileLabel
+                            ?.takeIf { it in session.audioUris } ?: session.clockLabel
+                        session.awaitProgramme(programme)
+                        validateSelection()
                         val handoffPositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
                         sceneOutputSize = 0 to 0
                         // Register the observable host before advertising the
@@ -3272,8 +3290,6 @@ class AppState(
                         if (settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff)
                             session.configureNativeClear(context)
                         else session.disableNativeClear("PREFERENCE_OR_CAST_ROUTE", settings.nativeRustStitching)
-                        val programme = selected.firstOrNull { it.audible }?.feed?.sourceStream?.profileLabel
-                            ?.takeIf { it in session.audioUris } ?: session.clockLabel
                         host.feed.startArchiveVodPlayback(session, handoffPositionMs, playing, programme)
                         singleDecoderFallbackTileId = null
                         transferred = true
@@ -4070,6 +4086,8 @@ class AppState(
 
     /** Stop protected capture and restore the original tile arrangement and feed player. */
     fun stopProtectedCompositionPresentation(restorePlayer: Boolean = true, keepSourceVideoDisabled: Boolean = false) {
+        archiveAudioSelectionJob?.cancel()
+        archiveAudioSelectionJob = null
         cancelQualityRestart()
         // Revoke the publisher BEFORE cancelling; a late catch/finally must never
         // expose a historical CANCELLED result after native playback resumes.
@@ -6326,6 +6344,8 @@ class AppState(
 
     /** Moves the audio to [tile]. Choosing a feed to listen to also ends Mute all. */
     fun setAudio(tile: Tile, byUser: Boolean = false) {
+        archiveAudioSelectionJob?.cancel()
+        archiveAudioSelectionJob = null
         if (byUser) mutedAll = false
         nativeComposedCast?.let { session ->
             tiles.forEach { it.audible = it === tile }
@@ -6372,6 +6392,7 @@ class AppState(
                 message = "This commentary is unavailable for clear Cast."
                 return
             }
+            if (deferArchiveAudioSelection(owner, tile, byUser)) return
             if (restartBaked) releaseCastRelay()
             if (!owner.selectArchiveAudio(label)) {
                 message = "This audio feed is unavailable in the current composition."
@@ -6393,6 +6414,39 @@ class AppState(
             it.feed.setAudible(it.audible && !mutedAll && !castingActive)
         }
         applyCaptionPreference()
+    }
+
+    /** Only a requested alternate waits for its own validation; a superseded
+     * request must not reset a different player or revive a retired cast. */
+    private fun deferArchiveAudioSelection(owner: FeedPlayer, tile: Tile, byUser: Boolean): Boolean {
+        val archive = owner.archiveSceneSession ?: return false
+        val label = tile.feed.sourceStream.profileLabel
+        if (!archive.programmePending(label)) return false
+        val baked = bakedCastSession
+        val relay = castRelay
+        val nativeCast = nativeComposedCast
+        val notice = "Preparing selected commentary…"
+        message = notice
+        val job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            try {
+                archive.awaitProgramme(label)
+                ensureActive()
+                if (tile in tiles && singleDecoderScenePlayer === owner && owner.archiveSceneSession === archive &&
+                    !castPlaybackHandedOff && bakedCastSession === baked && castRelay === relay && nativeComposedCast === nativeCast) {
+                    archiveAudioSelectionJob = null
+                    if (message == notice) message = null
+                    setAudio(tile, byUser)
+                }
+            } finally {
+                if (archiveAudioSelectionJob === coroutineContext[Job]) {
+                    archiveAudioSelectionJob = null
+                    if (message == notice) message = null
+                }
+            }
+        }
+        archiveAudioSelectionJob = job
+        job.start()
+        return true
     }
 
     /** Silences every feed, keeping track of which one had the audio for when it's turned back on. */
