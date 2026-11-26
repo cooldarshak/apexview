@@ -293,6 +293,8 @@ class AppState(
     private var castRemoteBuffering = false
     private var googleHasPlayed by mutableStateOf(false)
     private var googleLoadId = ""
+    private var googleRenderingAckId: String? = null
+    private var googleSettingsAppliedId: String? = null
     private var googleLoading = false
     private var googleLoadWatchdog: Job? = null
     private var localLoadWatchdog: Job? = null
@@ -301,6 +303,15 @@ class AppState(
     private fun currentGoogleMediaMatches(client: com.google.android.gms.cast.framework.media.RemoteMediaClient): Boolean =
         app.apexview.cast.CastRecoveryPolicy.matchesGoogleLoad(googleCastLoadedUrl, googleLoadId,
             client.mediaInfo?.contentId, client.mediaInfo?.customData?.optString("playbackId"))
+
+    private fun ownedGoogleRemoteClient() = googleCastRemoteClient?.takeIf(::currentGoogleMediaMatches)
+
+    private fun applyGoogleOwnedPlaybackSettings(client: com.google.android.gms.cast.framework.media.RemoteMediaClient) {
+        if (googleSettingsAppliedId == googleLoadId || !currentGoogleMediaMatches(client)) return
+        googleSettingsAppliedId = googleLoadId
+        client.setStreamMute(mutedAll)
+        if (playbackSpeed != 1f) client.setPlaybackRate(playbackSpeed.toDouble())
+    }
 
     private fun checkGoogleOwnership(client: com.google.android.gms.cast.framework.media.RemoteMediaClient) {
         if (!googleHasPlayed || googleLoading || googleOwnershipWatchdog?.isActive == true) return
@@ -329,6 +340,7 @@ class AppState(
                 val matches = googleCastLoadedUrl == baked.url && currentGoogleMediaMatches(remote)
                 if (!matches) { checkGoogleOwnership(remote); return }
                 googleOwnershipWatchdog?.cancel(); googleOwnershipWatchdog = null
+                applyGoogleOwnedPlaybackSettings(remote)
                 if (remote.isPlaying && !baked.receiverRendering) {
                     googleLoadWatchdog?.cancel(); googleLoadWatchdog = null
                     baked.receiverRendering = true
@@ -352,6 +364,13 @@ class AppState(
             val matches = googleCastLoadedUrl == relay.googleCastMediaUrl && currentGoogleMediaMatches(remote)
             if (!matches) { checkGoogleOwnership(remote); return }
             googleOwnershipWatchdog?.cancel(); googleOwnershipWatchdog = null
+            applyGoogleOwnedPlaybackSettings(remote)
+            if (usesLayoutCastReceiver && !castSceneConfirmed &&
+                app.apexview.cast.CastRecoveryPolicy.matchesRenderingAck(googleLoadId, googleRenderingAckId)) {
+                castSceneConfirmed = true
+                castStatus = "TV receiver is rendering the phone video layout."
+                message = castStatus
+            }
             if (app.apexview.cast.CastRecoveryPolicy.canHandOffGoogle(matches,
                     remote.isPlaying || remote.isPaused, usesLayoutCastReceiver, castSceneConfirmed) && !googleHasPlayed) {
                 googleHasPlayed = true
@@ -822,7 +841,9 @@ class AppState(
     }
     fun updateGoogleCastAvailability(available: Boolean) {
         googleCastAvailable = available
-        if (!available) googleCastRemoteClient = null
+        // Discovery availability can disappear while an established SDK session remains active.
+        // Only the session lifecycle owns that remote client.
+        if (!available && googleCastSession == null) googleCastRemoteClient = null
     }
     fun onGoogleCastSessionAvailable(session: com.google.android.gms.cast.framework.CastSession) {
         if (localChosen || !googleCastSelected) return
@@ -845,15 +866,15 @@ class AppState(
                 val event = runCatching { JSONObject(text) }.getOrNull() ?: return@setMessageReceivedCallbacks
                 when (event.optString("type")) {
                     "rendering" -> {
-                        // New receivers echo a per-load identity. Unscoped legacy
-                        // acknowledgements cannot confirm a replacement picture.
-                        if (googleLoadId.isEmpty() || event.optString("playbackId") != googleLoadId ||
-                            googleCastRemoteClient?.let(::currentGoogleMediaMatches) != true)
+                        // Receiver ACK and CAF status can arrive in either order.
+                        // Retain only the current identity; onStatusUpdated still
+                        // requires matching adopted media before handing off.
+                        val acknowledgedId = event.optString("playbackId")
+                        if (!app.apexview.cast.CastRecoveryPolicy.matchesRenderingAck(googleLoadId, acknowledgedId))
                             return@setMessageReceivedCallbacks
-                        castSceneConfirmed = true
+                        googleRenderingAckId = acknowledgedId
                         googleRemoteCallback.onStatusUpdated()
-                        castStatus = "TV receiver is rendering the phone video layout."
-                        android.util.Log.i("PitwallCast", "SCENE_RENDERING_CONFIRMED sources=${event.optInt("sources")}")
+                        android.util.Log.i("PitwallCast", "SCENE_RENDERING_ACK sources=${event.optInt("sources")}")
                     }
                     "error" -> {
                         if (googleLoadId.isEmpty() || event.optString("playbackId") != googleLoadId)
@@ -1240,6 +1261,7 @@ class AppState(
             putString(com.google.android.gms.cast.MediaMetadata.KEY_SUBTITLE, "${session.feeds} feeds, map, tower and commentary")
         }
         googleLoadId = java.util.UUID.randomUUID().toString()
+        googleRenderingAckId = null; googleSettingsAppliedId = null
         val media = com.google.android.gms.cast.MediaInfo.Builder(session.url)
             .setContentType("application/x-mpegURL")
             .setStreamType(com.google.android.gms.cast.MediaInfo.STREAM_TYPE_LIVE)
@@ -1256,8 +1278,6 @@ class AppState(
                 return@setResultCallback
             googleLoading = false
             if (result.status.isSuccess) {
-                client.setStreamMute(mutedAll)
-                if (playbackSpeed != 1f) client.setPlaybackRate(playbackSpeed.toDouble())
                 // Only status for this load can retire the previous media.
                 googleRemoteCallback.onStatusUpdated()
                 castStatus = "Google Cast accepted the baked picture and commentary."
@@ -1287,6 +1307,7 @@ class AppState(
             putString(com.google.android.gms.cast.MediaMetadata.KEY_SUBTITLE, "${relay.session.sourceLabels.size} F1 feeds · one HEVC stream")
         }
         googleLoadId = java.util.UUID.randomUUID().toString()
+        googleRenderingAckId = null; googleSettingsAppliedId = null
         val media = com.google.android.gms.cast.MediaInfo.Builder(url)
             .setContentType("application/x-mpegURL")
             .setStreamType(com.google.android.gms.cast.MediaInfo.STREAM_TYPE_BUFFERED)
@@ -1310,8 +1331,6 @@ class AppState(
                     return@setResultCallback
                 googleLoading = false
                 if (result.status.isSuccess) {
-                    if (playbackSpeed != 1f) client.setPlaybackRate(playbackSpeed.toDouble())
-                    client.setStreamMute(mutedAll)
                     googleRemoteCallback.onStatusUpdated()
                     startCastSceneUpdates(relay)
                     castStatus = if (usesLayoutCastReceiver) "TV accepted the stream; waiting for layout rendering confirmation…"
@@ -1380,6 +1399,7 @@ class AppState(
         castSceneConfirmed = false
         googleCastLoadedUrl = null
         googleLoadId = ""
+        googleRenderingAckId = null; googleSettingsAppliedId = null
         if (localConnection == null) app.apexview.cast.local.CastConnectionService.stop(context)
         if (resumeLocal) {
             returnCastPlayback()
@@ -1412,7 +1432,7 @@ class AppState(
         castAwaitingTvApprovalCode = null
         castPreparationJob?.cancel(); castPreparationJob = null
         if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.STOP)
-        else runCatching { googleCastRemoteClient?.stop() }
+        else runCatching { ownedGoogleRemoteClient()?.stop() }
         castResources.closeConnection()
         localReady = false; localTimingSupported = false; localWidevineSupported = false
         localDirectSupported = false; localDirectQualitySupported = false
@@ -6528,7 +6548,7 @@ class AppState(
         mutedAll = !mutedAll
         if (castingActive) {
             if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.SET_VOLUME, JSONObject().put("volume", if (mutedAll) 0 else 1))
-            else googleCastRemoteClient?.setStreamMute(mutedAll)
+            else ownedGoogleRemoteClient()?.setStreamMute(mutedAll)
         }
         if (bakedCastSession != null) singleDecoderScenePlayer?.player?.volume =
             if (mutedAll || bakedCastSession?.receiverRendering == true) 0f else 1f
@@ -7019,7 +7039,7 @@ class AppState(
         if (castingActive) {
             remoteCastClock.update(castFramePositionMs, playing, playbackSpeed, durationMs)
             if (localChosen) localConnection?.send(if (playing) app.apexview.cast.local.FcastProtocol.RESUME else app.apexview.cast.local.FcastProtocol.PAUSE)
-            else googleCastRemoteClient?.let { remote -> if (playing) remote.play() else remote.pause() }
+            else ownedGoogleRemoteClient()?.let { remote -> if (playing) remote.play() else remote.pause() }
             if (castPlaybackHandedOff) { showChrome(); return }
         }
         if (archiveCompositionStarting) {
@@ -7358,7 +7378,7 @@ class AppState(
         if (castingActive) {
             remoteCastClock.update(castFramePositionMs, playing && !castRemoteBuffering, value, durationMs)
             if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.SET_SPEED, JSONObject().put("speed", value))
-            else googleCastRemoteClient?.setPlaybackRate(value.toDouble())
+            else ownedGoogleRemoteClient()?.setPlaybackRate(value.toDouble())
         }
         val slower = value < playbackSpeed
         playbackSpeed = value
@@ -7457,7 +7477,7 @@ class AppState(
             val target = if (durationMs > 0) targetMs.coerceIn(0L, durationMs) else targetMs.coerceAtLeast(0L)
             remoteCastClock.update(target, playing, playbackSpeed, durationMs)
             if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.SEEK, JSONObject().put("time", target / 1000.0))
-            else googleCastRemoteClient?.seek(target)
+            else ownedGoogleRemoteClient()?.seek(target)
             if (castPlaybackHandedOff) { positionMs = target; showChrome(); return }
         }
         val restartRollingComposition = composedArchiveOriginMs != null && decoderMode == DecoderMode.SINGLE
