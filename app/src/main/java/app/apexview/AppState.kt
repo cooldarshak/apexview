@@ -3755,11 +3755,15 @@ class AppState(
                             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                 handoffWindow = window.detached()
                             }
+                            // IO may have suspended across a seek or a new
+                            // quality/selection. Keep the detached lease here
+                            // until its generation is confirmed current.
+                            validateSelection()
                             val ownedWindow = requireNotNull(handoffWindow)
                             handoffWindow = null
                             host.feed.startProtectedComposedPlayback(ownedWindow, handoffPssh,
                                 clearOutput = capture.clearOutput, startPositionMs = startPosition,
-                                playWhenReady = false)
+                                playWhenReady = false, validatePrepared = ::validateSelection)
                         } finally {
                             handoffWindow?.zero()
                             handoffPssh?.fill(0)
