@@ -28,7 +28,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
     private var profile = LapProfile.EVEN
     private var sequence = 0L
     private var lastPlaybackId = ""
-    private var lastClockEpoch = -1L
+    private val publicationEpoch = CastTimingPublicationEpoch()
     private var lastFullSnapshotAt = Long.MIN_VALUE
     private var sourceTiming: SessionTiming? = null
     private var geometry: JSONObject? = null
@@ -50,7 +50,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
     ): List<JSONObject> {
         val elapsed = android.os.SystemClock.elapsedRealtime()
         val epoch = app.castTimingEpoch
-        val epochChanged = epoch != lastClockEpoch
+        val epochChanged = publicationEpoch.requiresSample(epoch)
         // A seek is a new timing generation, not ordinary 200ms motion.
         // Publish the newly sampled table with the next matching frame.
         if (!epochChanged && lastPlaybackId == playbackId && lastFrameAt != Long.MIN_VALUE &&
@@ -58,7 +58,6 @@ internal class CastTimingPublisher(private val context: Context, private val app
         lastFrameAt = elapsed
         val resend = epochChanged || lastPlaybackId != playbackId ||
             lastFullSnapshotAt == Long.MIN_VALUE || elapsed - lastFullSnapshotAt >= 5_000
-        lastClockEpoch = epoch
         if (lastPlaybackId != playbackId) {
             lastPlaybackId = playbackId
             // Never mutate an already published geometry envelope for another load.
@@ -82,7 +81,6 @@ internal class CastTimingPublisher(private val context: Context, private val app
             lastTowerSample = null
             towerSampler = null
         }
-        if (resend) lastFullSnapshotAt = elapsed
         val timing = app.timing
         val oldTiming = sourceTiming
         val timingReplaced = timing !== oldTiming
@@ -203,6 +201,10 @@ internal class CastTimingPublisher(private val context: Context, private val app
         output += message.put("playbackId", playbackId).put("tableId", rowsId).put("sequence", ++sequence).put("clockEpoch", epoch)
         sentFrames++
         val packets = output.flatMap(TimingMessageChunks::split)
+        // Only a complete encoded batch can retire the forced seek sample.
+        // A failed sample/chunk split must still resample on the next attempt.
+        publicationEpoch.commit(epoch)
+        if (resend) lastFullSnapshotAt = elapsed
         if (lastHealthAt == Long.MIN_VALUE || elapsed < lastHealthAt ||
             elapsed - lastHealthAt >= 5_000L) {
             android.util.Log.i("PitwallCast", "TIMING_TX_HEALTH frames=$sentFrames tables=$sentTables " +

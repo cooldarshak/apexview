@@ -249,12 +249,18 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 acquired = session
                 session
             } catch (error: Throwable) {
-                session?.close() ?: owned.forEach { it.initialization.fill(0) }
-                throw error
+                val retirement = ArchiveRetirementSteps(error)
+                val failedSession = session
+                if (failedSession != null) retirement.run { failedSession.close() }
+                else owned.forEach { input -> retirement.run { input.initialization.fill(0) } }
+                retirement.finish()
+                throw error // primary failure, even if cleanup itself failed
             }
         } } catch (error: Throwable) {
             // withContext may cancel while dispatching the resource back to the caller.
-            acquired?.close()
+            val retirement = ArchiveRetirementSteps(error)
+            retirement.run { acquired?.close() }
+            retirement.finish()
             throw error
         }
     }

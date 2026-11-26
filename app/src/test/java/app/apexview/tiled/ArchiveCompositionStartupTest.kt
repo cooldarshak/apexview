@@ -156,4 +156,19 @@ class ArchiveCompositionStartupTest {
         assertTrue(failure === first)
         assertEquals(listOf(second), first.suppressed.toList())
     }
+
+    @Test fun failedCapturePreservesPrimaryCancellationAcrossAllRetirements() {
+        val cancelled = CancellationException("Obsolete capture")
+        val closeFailure = IOException("Session close")
+        val nextFailure = IllegalStateException("Backing release")
+        val events = mutableListOf<Int>()
+        val steps = ArchiveRetirementSteps(cancelled)
+        steps.run { events += 1; throw closeFailure }
+        steps.run { events += 2; throw cancelled }
+        steps.run { events += 3; throw nextFailure }
+        steps.run { events += 4 }
+        assertSame(cancelled, runCatching { steps.finish() }.exceptionOrNull())
+        assertEquals(listOf(1, 2, 3, 4), events)
+        assertEquals(listOf(closeFailure, nextFailure), cancelled.suppressed.toList())
+    }
 }
