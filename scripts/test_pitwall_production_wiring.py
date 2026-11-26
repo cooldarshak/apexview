@@ -1103,7 +1103,27 @@ class ProductionWiringTests(unittest.TestCase):
         android = contents("app/src/androidTest/java/app/apexview/tiled/ArchitectureGBAndroidTest.kt")
         self.assertIn("verifyBuild896TvAdmission(input, expected)", android)
         self.assertIn("NativeStitchingEngine.open(budget).use", android)
-        self.assertIn("5474084, 7002945, 621977600, 150994944, 303428224", android)
+        foundation = contents("app/src/test/java/app/apexview/NativeStitchingFoundationTest.kt")
+        engine = contents("native/architecture-g/src/engine.rs")
+        vectors = [
+            (5474084, 7002945, 621977600, 150994944, 303428224),
+            (5226177, 6258463, 651563008, 150994944, 321931440),
+            (5591105, 6324612, 619515904, 150994944, 268680776),
+            (5221449, 6295460, 672854016, 150994944, 323391488),
+        ]
+        def observed(source):
+            return [tuple(map(int, row)) for row in re.findall(
+                r"longArrayOf\((\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\)", source)]
+        android_admission = android.split("private fun verifyBuild896TvAdmission(", 1)[1].split(
+            "private fun verifyCompactTransfer(", 1)[0]
+        host_admission = foundation.split(
+            "fun build896TvForegroundAtlasAdmissionKeepsNativeAndJavaReserves()", 1)[1].split("@Test", 1)[0]
+        rust_admission = engine.split(
+            "fn build896_tv_exact_native_budget_accepts_workspace_but_not_one_byte_less()", 1)[1].split("#[test]", 1)[0]
+        self.assertEqual(observed(android_admission), vectors)
+        self.assertEqual(observed(host_admission), vectors)
+        self.assertEqual([tuple(map(int, row)) for row in re.findall(
+            r"\((\d+),\s*(\d+)\)", rust_admission)], [v[:2] for v in vectors])
         self.assertIn("val retirement = ArchiveRetirementSteps(error)", capture)
         self.assertLess(publisher.index("val packets = output.flatMap(TimingMessageChunks::split)"),
                         publisher.index("publicationEpoch.commit(epoch)"))

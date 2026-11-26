@@ -1681,3 +1681,92 @@ Resumed the final-scope handover from verified HEAD b183417391230959f16346932707
 
 Full Rust/Cargo, Android/NDK/Gradle and consolidated CI remain unrun; local environment lacks the full toolchain. No unconditional completion claim, no signed build dispatch, no receiver deployment, no physical testing requested. Do not treat isolated JVM evidence as native, Android, integration or physical acceptance. Preserve the existing G.0/G-A/G-B historical gates and do not change quality, entitlement, DRM or decoder requirements. The final-scope handover remains the execution index.
 
+
+## Consolidated source-candidate closure and signed CI gate — 26 November 2026
+
+**Supersedes the previous source-checkpoint status, not the physical acceptance criteria.** Scope is frozen at the post-research final handover. Last verified signed baseline: Build 896, 75577ebf25ab006871d6d034ff3eb57a0795e2d8. Source reconciliation checkpoint: 71f3823cfa8eef41b6dd336f3dc7ff033be8796b (19 commits after 6652615). This closing change adds a cross-language regression contract for all four exact TV admission vectors and synchronizes both master plans. The normal signed CI workflow is the next gate. No new physical result, performance number, universal route proof, release approval, or receiver deployment is implied.
+
+### Finite requirement / owner / regression ledger
+
+Status **S** = identified unconditional implementation and regression source present, submitted as a consolidated candidate; full compiled CI and applicable physical acceptance pending. **E** = evidence-gated optional change; not authorized by current evidence. Historical green results remain historical. This is a requirement-to-owner reconciliation using the previously recorded audits and inspected production entry points, not a claim to have rerun every historical test or inspected every line in every route.
+
+| Requirement | Implementation and regression evidence | Status |
+|---|---|---|
+| G-TV1 | NativeStitchingEngine admission, NativeClearArchiveBridge, Rust engine/atlas workspace bounds, ProcessMemoryDiagnostic; four exact 896 observations now matched in NativeStitchingFoundationTest, Rust engine tests and ArchitectureGBAndroidTest actual JNI fixture submission/read/release. Low-RAM denial and OS/JVM reserves retained. | S |
+| G-TV2 | F1HlsFeedCapture, HevcArchiveVodSession, ArchiveCompositionStartup, ArchiveRetirementSteps, FeedPlayer: exact immutable initialization ownership, mandatory vs optional sidecars, rollback/retirement, seek and programme supersession. ArchiveInitializationBacking and startup/ownership tests; exact media parity retained. | S |
+| G-TV3 | LiveTiming, ReplayCoreCache, ReplayStartupPublication, TimingWorkCoordinator, DriverTiming, AppState; coherent cache V5 preview vs complete V3, independent map/tower readiness, corrected clock/generation and seek-aware CastTimingPublisher/Receiver. ReplayCoreCacheTest, ReplayStartupPublicationTest, TimingPreviewEpochsTest, DriverTimingTest, CastTimingSeekGenerationTest. | S |
+| G-TV4 | PitwallPairingCode, PitwallTls, PitwallRememberedPeers, PitwallCastSheet, PitwallReceiverActivity, FcastConnection: certificate-pair trust, explicit TV confirmation, legacy comparison and revocation/reconnect. Existing TLS/pairing regression and Android TLS instrumentation. | S |
+| G-TV5 | AppState, SceneCastRelay, RelayResourceStore, NativeComposedCastSession, BakedCastLiveSession and FcastConnection: per-load ownership, timeout, lease retention, supersession and local restoration; Cast recovery, native composed and baked relay tests. | S |
+| G-TV6 | Rust ts_mux, BakedCastTransportStream, BakedRustTransportParityTest, independent tools/validate_baked_rust_ts.py reconstructs TS/PES, PAT/PMT, PTS and audio/video bytes and uses FFmpeg/ffprobe. Rust wrap/backward PTS and continuity checks. | S |
+| G-TV7 | AppState and CastRecoveryPolicy: URL+load ID ownership, CAF ACK and status independent ordering, newest pending controls per load, handback and lost-ownership grace. Custom receiver frame callback and cached geometry; standard/baked CAF state remains a proxy, not physical first-frame proof. CastRecoveryPolicyTest and source-wiring contract. | S |
+| G-TV8 | SingleDecoderSceneView, ProtectedDecoderSceneView, ProducerRetirement, SceneEglDisplays, SceneGraphicsOwners, BakedCastGpuCapture, ReplayClipEncoder; exact producer/reader release, idempotent teardown and stale callback fences. ProducerRetirementTest, DisplayLeaseRegistryTest, SceneGraphicsOwnersTest, SceneReleaseStepsTest, SceneSurfaceLifetimeTest, SceneOutputReadinessTest, CaptureRequestLifetimeTest and Surface/Texture/Baked instrumentation. | S |
+| G-C1 | engine.rs/atlas_job.rs/JNI and ProcessMemoryDiagnostic: owned workspace capacity and unknown handling; snapshot and budget boundary regressions. Resident memory still requires measurement. | S |
+| G-C2 | NativeFragmentLease and fragment_storage.rs: bounded reuse, pressure trimming, native vs heap ownership and actual miss counters; Rust storage/retirement and diagnostic regressions. | S |
+| G-C3 | CmafHttpReader, F1ArchiveFeedCapture, F1HlsFeedCapture, HevcArchiveVodSession, ArchiveInitializationBacking, HeapFragmentLease, NativeFragmentLease, ProtectedHevcLiveComposition and NativeComposedCastSession: immutable source/output ownership, exact media, cleanup and direct/rolling/remote integration. Initialization/lease/worker/relay regressions; no unsupported copy-byte estimate. | S |
+| G-C4 | Media3MemoryOwners, FeedPlayer, PitwallReceiverActivity: active/parked allocation and bounded load ownership; Media3MemoryOwnersTest and Media3LoadLedgerLifecycleTest. Private vendor/sample-queue pools are not observable as exact owned bytes. | S |
+| G-C5 | ReplayCoreCache, LiveTiming, ReplayStartupPublication, DriverTiming and independent overlay owners; shared compact data, bounded progressive publication and clock invalidation. Cache, timing, overlay and seek tests. | S |
+| G-C6 | Graphics/codec/Surface/EGL/capture lifetime owners as G-TV8; exact release and late callback guards; unit and renderer instrumentation. | S |
+| G-C7 | Reversible clear SurfaceView experiment, existing TextureView default, graphics/scene cadence diagnostics and renderer regression. Physical same-feature comparison required before promotion. | S for instrumentation/experiment; E for promotion |
+| G-C8 | Keep existing allocator. Replacement/reclaim experiment only after attributable reproducible live-versus-resident gap. | E |
+
+| Inherited requirement | Source and regression mapping | Status |
+|---|---|---|
+| G.1 | Baseline scripts and ProcessMemoryDiagnostic; measured matched baseline still required. | S |
+| G.2 | Native engine arena, budget and workspace; Rust boundary/admission tests. | S |
+| G.3 | Rust clear_atlas and HEVC processing; differential native/Android fixtures. | S |
+| G.4 | Rust clear_cmaf, BMFF and initialization; differential and decoded output checks. | S |
+| G.5 | NativeProtectedPlan, protected header and ProtectedHevcCmafFragmentWriter; existing secure CBCS and authorization checks retained. | S |
+| G.6 | NativeFragmentLease, HeapFragmentLease and ArchiveInitializationBacking; final-reader and range tests. | S |
+| G.7 | ArchiveSegmentDelivery, ArchiveBufferPolicy, bounded native work; deadline, cancellation and pressure regressions. | S |
+| G.8 | JNI owned/direct buffers and NativeStitchingEngine; exact fixture read/release and packaging gates. | S |
+| G.9 | CmafHttpReader and exact authorized HLS/DASH capture; bounded network/input ownership and source contracts. | S |
+| G.10 | HevcArchiveVodSession, FeedPlayer and Media3MemoryOwners; data source, ownership and delivery regressions. | S |
+| G.11 | Additional SIMD only if attributable CPU bottleneck justifies it; no speculative architecture change. | E |
+| G.12 | Rust atlas_job workspace and fragment_storage reuse; capacity/trim regressions. | S |
+| G.13 | Playback/load/clock generations, native worker cleanup and archive cancellation; stale callback and seek regression. | S |
+| G.14 | Per-feed supported quality, archive prefetch/deadline and compatible switching; quality and startup regressions. | S |
+| G.15 | Existing safety, stress, fuzz/sanitizer workflow and bounded-input regressions retained. | S |
+| G.16 | Rust/reference parity, actual Android JNI media fixture and independent decoder gates. | S |
+| G.17 | Exact normal-RAM TV foreground admission vectors and conservative low-RAM/OS/JVM reserve policy. | S |
+| G.18 | Native/managed/graphics/Media3 attribution and cadence instrumentation; no claimed measured reduction. | S |
+| G.19 | Local direct, clear/protected composition and authorized native Cast composition plus baked encoding/receiver rendering; route ownership and relay regressions. No artificial stitching in direct routes. | S |
+| G.20 | Existing four-ABI packaging, upgrade, signed APK and CI gates. | S |
+| G.21 | CmafCastAudio, BakedCastArchiveAudio and native audio metadata/timeline/TS; transport and commentary regressions; platform decode retained. | S |
+| G.22 | TrackMap, OverlayPositionSampler, NativeHotPath, Rust overlay_geometry and CastTimingLayer; independent map publication and sampler tests. | S |
+| G.23 | OverlayTowerSampler, TvTowerRow, native batched timing histories and CastTimingPublisher/Receiver; timing/tower/seek tests. | S |
+| G.24 | Shared local/baked overlay layers, graphics retirement, native numerical sampling and receiver rendering; cadence and graphics regressions. | S |
+| R1 / R2 / R3 | Fused/borrowed transfer, bounded deadline scheduling and adaptive arena; initialization, cancellation and Rust capacity tests. | S |
+| R4 | Existing bounded concurrency retained; additional tuning requires matched measured evidence. | S / E |
+| R5 / R6 / R7 / R8 | Batched JNI and reusable histories/workspace, layout-aware exact quality choices and ownership attribution; native timing, storage, quality and diagnostics regressions. | S |
+| M1 / M2 / M3 / M4 | Attribution, budgets, immutable-copy reduction, lazy ownership via G-C1–4; diagnostic/admission/lease regressions. | S |
+| M5 / M6 / M7 / M8 | Pressure trim, immutable leases, workspace reuse and bounded queues; Rust and archive lifecycle tests. | S |
+| M9 / M10 / M11 | Media3 accounting, bounded timing/media caches, regression suites and CI contracts. | S |
+| M12 | Allocator replacement evidence-dependent, as G-C8. | E |
+| M13 | Graphics ownership and reversible renderer experiment, as G-C6/7. | S / E |
+| P0.1 / P0.2 | Segment producer/deadline and HEVC composition/ownership; G.3–10/17 tests. | S |
+| P0.3 / P0.4 | Graphics/rendering, independent map/tower and timing; G-TV3/8, G.22–24. | S |
+| P1.1 / P1.2 / P1.3 | Atlas correctness, refresh/cadence, quality and thermal policies; preserve baseline tests plus new ownership/admission tests. | S |
+| P2.1 / P2.2 | Cast sender/receiver and playback/timing coordination; G-TV2/3/4/5/6/7/8. | S |
+| P2.3 / P2.4 / P2.5 | Existing release/update gates, secure pairing/authorization and Android TV policy; signed upgrade/TLS/TV admission tests. | S |
+| P2.6 / P2.7 | Retained automated suites and historical core acceptance; current branch CI and physical regression still required. | S |
+| P2.8 / P2.9 | Retained UI/accessibility and caption tracks/appearance, alternate programme sidecars and Cast; startup/quality/CC source contracts. | S |
+| A / B / C / D | Overlay stability, cache, graphics and timing retention: G-TV3/8 and G-C4/5/6. | S |
+| E / F / G / H | Startup, redraw, cadence and route audit: G-TV1/2/5/7/8 and G.19/24. | S |
+| P0-A / P0-B | Manual advertised quality and driver status: inherited source fixes and timing/quality regression contracts retained. | S |
+| P0-C / P0-D | Graphics and memory: G-TV8, G-C1–7, release and admission tests. | S |
+| P1-E / P1-F | Overlay churn and actual driver labels: shared timing, geometry and display-label regression paths retained. | S |
+
+### Final corrections and preflight evidence
+
+- cfaaa6d / 7240e26: invalid initial Cast timing packet must not commit clock epoch, with regression.
+- 249b86c and preceding commits: independent retirement steps, preserve primary failure, newest CAF controls and correlated load ownership, local-load watchdog, exact TS and miss-accounting regressions.
+- a405a5f: four historical TV vectors exercised by Android JNI fixture regression, with low-RAM and low-headroom negative cases.
+- fa3c447: original cancellation remains primary through startup and capture retirement; seek publication epoch advances only after all chunks encode, with failure/retry regression. Isolated exact-blob JVM helper harness passed 1,000 cycles; this is not full Android/JUnit or native execution.
+- 71f3823: audited 288 simple literal checks over changed source, corrected eight stale expectations to the actual stronger ownership/fencing contracts; checked 31 new/replacement source assertions directly. Runner footer counts match nine instrumentation classes and 20 test annotations. Final vector equality contract cross-checks all five host/Android fields and both Rust packet dimensions; direct extraction comparison passed for all four.
+- No further specific unconditional source omission identified within this finite reviewed scope. The normal consolidated signed CI candidate can now run; any actual compile/test failure reopens the affected item and must be fixed without weakening the gate. Full Python/JVM/Android/Rust tests and actual ABI/upgrade/signing remain CI obligations, not local passes.
+
+### Decisions and acceptance boundaries
+
+Retain the conservative normal-RAM recovery ceiling (quarter of measured available surplus), low-RAM denial and exact native capacity limits. Pairing uses physical 96-bit code entry and one TV approval for new trust; not unauthenticated zero-input discovery. Local Cast watchdog is 60 seconds; Google lost ownership grace is two seconds. Optional sidecar validation uses bounded lanes and cannot redefine mandatory playback readiness. Retain TextureView default, reversible clear SurfaceView experiment and existing allocator. No new dependencies or backend promotion. Maintain authorized F1 TV login, entitlement, DRM, manual quality, decoder rules and all supported features; existing safe fallback is not acceptance of an eligible native path.
+
+After consolidated CI, require the documented S22 Ultra/TCL 55C655 real-device matrix (including ARMv7/authorized Widevine, actual requested rendition, single/multiple decoder, map/tower/CC, both Cast families, startup/seek/pacing, reconnect and handback). Compare matched Kotlin/Rust memory and CPU; verify at least 20% lower total PSS, 30% lower stitching CPU and 90% less avoidable overlay allocation churn against the existing targets without reducing media quality or functionality. Exact vendor allocations, protected stream behavior, actual first frame and physical Cast playback cannot be established by synthetic tests alone. M12/G-C8 allocator and M13/G-C7 renderer promotion remain conditional. No physical sign-off or green-build claim before evidence. No further speculative source optimization in this batch.
