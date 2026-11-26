@@ -46,4 +46,25 @@ class CastRecoveryPolicyTest {
         assertFalse(CastRecoveryPolicy.matchesRenderingAck("", ""))
         assertFalse(CastRecoveryPolicy.matchesRenderingAck(" ", " "))
     }
+    @Test fun pendingUserControlsAreLatestOnlyAndOwnedByTheAdoptedLoad() {
+        val controls = GooglePendingLoadControls()
+        controls.begin("first")
+        controls.play("first", true)
+        controls.seek("first", 120)
+        controls.begin("second")
+        controls.play("first", false)
+        controls.seek("first", 100)
+        assertNull(controls.take("second", true))
+        controls.play("second", true)
+        controls.play("second", false)
+        controls.seek("second", 200)
+        controls.seek("second", 350)
+        assertNull(controls.take("second", false))
+        assertNull(controls.take("first", true))
+        assertEquals(GooglePendingLoadControls.Commands(false, 350L), controls.take("second", true))
+        assertNull(controls.take("second", true))
+        controls.begin("")
+        controls.play("", true)
+        assertNull(controls.take("", true))
+    }
 }
