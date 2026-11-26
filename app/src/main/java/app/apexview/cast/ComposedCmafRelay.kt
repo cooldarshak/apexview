@@ -26,6 +26,7 @@ internal class ComposedCmafRelay(address: String, private val peer: InetAddress?
     private val closed = AtomicBoolean(false)
     private val resources = RelayResourceStore()
     private val relayId = java.util.UUID.randomUUID().toString()
+    internal val diagnosticRelayId get() = relayId
     private val relayStartedNs = System.nanoTime()
     private val firstResponses = ConcurrentHashMap.newKeySet<String>()
     internal fun publishResources(
