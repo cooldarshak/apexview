@@ -28,6 +28,7 @@ internal class ArchiveCompositionStartup(
         }
         mark("PREFLIGHT")
         val prepared = preflight() // Failure here must never change a playing source.
+        var primaryFailure: Throwable? = null
         try {
             mark("VALIDATED")
             checkCurrent()
@@ -40,12 +41,21 @@ internal class ArchiveCompositionStartup(
             replaceHost(prepared)
             mark("HOST_INSTALLED")
         } catch (error: Throwable) {
-            mark(if (error is kotlinx.coroutines.CancellationException) "SUPERSEDED" else "FAILED")
+            primaryFailure = error
+            // Diagnostics must not prevent rollback, and cleanup must not
+            // replace the original cancellation/decoder failure.
+            try { mark(if (error is kotlinx.coroutines.CancellationException) "SUPERSEDED" else "FAILED") }
+            catch (diagnosticError: Throwable) { if (diagnosticError !== error) error.addSuppressed(diagnosticError) }
             if (sourceDecodersTouched) try { restoreSources(hostReplaced) }
-            catch (restoreError: Throwable) { error.addSuppressed(restoreError) }
+            catch (restoreError: Throwable) { if (restoreError !== error) error.addSuppressed(restoreError) }
             throw error
         } finally {
-            dispose(prepared)
+            try { dispose(prepared) }
+            catch (disposeError: Throwable) {
+                val failure = primaryFailure
+                if (failure == null) throw disposeError
+                if (disposeError !== failure) failure.addSuppressed(disposeError)
+            }
         }
     }
 }
