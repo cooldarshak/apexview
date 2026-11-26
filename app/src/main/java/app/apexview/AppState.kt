@@ -1644,7 +1644,13 @@ class AppState(
         runCatching {
             val packets = timing.messages(localLoadId, localMapPredictionSteps)
             if (localConnection?.sendTimingBatch(packets) != true) timing.requestFullRefresh()
-        }.onFailure { android.util.Log.w("PitwallCast", "Timing display update failed: ${it.javaClass.simpleName}") }
+        }.onFailure {
+            // Encoding/chunking can fail after the publisher advanced its
+            // table/version state. Retry with all prerequisites, just as
+            // when a bounded transport queue rejects the completed batch.
+            timing.requestFullRefresh()
+            android.util.Log.w("PitwallCast", "Timing display update failed: ${it.javaClass.simpleName}")
+        }
     }
 
     private fun startNativeCastSceneUpdates(session: app.apexview.cast.NativeComposedCastSession, contentId: Long) {
