@@ -5,10 +5,10 @@ export const NAMESPACE='urn:x-cast:app.pitwall.scene';
 export function attachCastScene(context, framework, video, onScene, onError) {
   const manager=context.getPlayerManager();
   let playbackId='', contentId='', baked=false;
-  const report=(message,senderId)=>{
+  const report=(message,senderId,id=playbackId)=>{
     const safe=String(message).replace(/https?:\/\/\S+/gi,'[URL]').slice(0,180);
     onError(safe);
-    context.sendCustomMessage(NAMESPACE,senderId??undefined,{type:'error',message:safe});
+    context.sendCustomMessage(NAMESPACE,senderId??undefined,{type:'error',message:safe,playbackId:id});
   };
   const validate=(value,isBaked)=>{
     const scene=validateScene(value);
@@ -26,8 +26,9 @@ export function attachCastScene(context, framework, video, onScene, onError) {
     return scene;
   };
   manager.setMessageInterceptor(framework.messages.MessageType.LOAD,request=>{
+    const data=request.media?.customData;
+    const requestedId=typeof data?.playbackId==='string'&&data.playbackId.length<=80?data.playbackId:'';
     try {
-      const data=request.media?.customData;
       const isBaked=data?.pitwallBaked===true;
       const next=validate(data?.pitwallScene,isBaked);
       const id=data?.playbackId??'';
@@ -35,7 +36,7 @@ export function attachCastScene(context, framework, video, onScene, onError) {
       playbackId=id; contentId=request.media?.contentId??''; baked=isBaked;
       onScene(next,true);
       return request;
-    } catch(error){report(error.message,request.senderId);return null;}
+    } catch(error){report(error.message,request.senderId,requestedId);return null;}
   });
   context.addCustomMessageListener(NAMESPACE,event=>{
     try {
@@ -50,7 +51,10 @@ export function attachCastScene(context, framework, video, onScene, onError) {
     rendered:sources=>{
       // The CAF player must have adopted this exact media, not the previous
       // load whose final frame can remain visible during preparation.
-      if(contentId&&manager.getMediaInformation()?.contentId!==contentId)return false;
+      const current=manager.getMediaInformation();
+      if(contentId&&current?.contentId!==contentId)return false;
+      // Two loads may reuse a relay URL. Match CAF's adopted custom identity too.
+      if(playbackId&&current?.customData?.playbackId!==playbackId)return false;
       context.sendCustomMessage(NAMESPACE,undefined,{type:'rendering',sources,playbackId});
       return true;
     },
