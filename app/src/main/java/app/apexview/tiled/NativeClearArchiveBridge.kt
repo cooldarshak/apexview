@@ -18,7 +18,7 @@ import java.util.concurrent.locks.ReentrantLock
 internal class NativeClearArchiveBridge(
     private val openEngine: (Context, Int, Int) -> NativeStitchingEngine = { context, input, output ->
       NativeStitchingDeviceBudget.admit {
-        val h = requireNotNull(NativeStitchingDeviceBudget.sample(context))
+        val h = NativeStitchingDeviceBudget.sample(context) ?: throw MemoryAdmissionException(input, output)
         val b = if (h.lowMemory) null else
             NativeStitchingEngine.planClearAtlas(h.lowRam, h.available, h.threshold, h.jvmHeadroom, input, output)
         Log.i("ApexviewSingleDecoder", "GB_CLEAR_MEMORY_ADMISSION input=$input output=$output " +
@@ -29,7 +29,7 @@ internal class NativeClearArchiveBridge(
             "ceilingBytes=${b?.ceilingBytes ?: 0} " +
             "osSurplusBytes=${(h.available-h.threshold).coerceAtLeast(0)} " +
             "admissionReason=${if (h.lowMemory) "OS_LOW_MEMORY" else if (b == null) NativeStitchingEngine.clearAtlasRejection(h.lowRam,h.available,h.threshold,h.jvmHeadroom,input,output) else if (b.foregroundRecovery) "BOUNDED_FOREGROUND_RECOVERY" else "NORMAL"}")
-        val admitted=b ?: throw IllegalStateException("Clear atlas memory admission rejected")
+        val admitted=b ?: throw MemoryAdmissionException(input, output)
         try {
             NativeStitchingEngine.open(admitted)
         } catch (failure: LinkageError) {
@@ -42,9 +42,15 @@ internal class NativeClearArchiveBridge(
       }
     },
 ) : AutoCloseable {
+    private class MemoryAdmissionException(val input: Int, val output: Int) :
+        IllegalStateException("Clear atlas memory admission rejected")
+
+    private data class RetryAdmission(val input: Int, val output: Int, val nextCheckMs: Long)
+
     private data class State(
         val epoch: Long = 0, val requested: Boolean = false, val context: Context? = null,
         val published: Boolean = false, val reason: String? = null, val closed: Boolean = false,
+        val retryAdmission: RetryAdmission? = null,
     )
     data class Produced(val output: HevcClearCmafGridComposer.Output, val nativeEpoch: Long? = null,
                         val nativeMedia: NativeFragmentLease? = null)
@@ -103,7 +109,7 @@ internal class NativeClearArchiveBridge(
         synchronized(control) {
             val old = state
             if (old.context != null && !old.closed)
-                state = old.copy(epoch = old.epoch + 1, published = false)
+                state = old.copy(epoch = old.epoch + 1, published = false, retryAdmission = null, reason = null)
         }
     }
 
@@ -114,7 +120,7 @@ internal class NativeClearArchiveBridge(
         return synchronized(control) {
             checkCurrent(epoch)
             val result = action()
-            state = state.copy(published = true)
+            state = state.copy(published = true, reason = null, retryAdmission = null)
             result
         }
     }
@@ -156,7 +162,7 @@ internal class NativeClearArchiveBridge(
             checkCurrent(selected.epoch)
             synchronized(control) {
                 checkCurrent(selected.epoch)
-                state = state.copy(context = null, published = false, reason = failureReason)
+                state = state.copy(context = null, published = false, reason = failureReason, retryAdmission = null)
             }
             logDecision()
             // Retire and join the failed native owner before computing JVM
@@ -170,8 +176,37 @@ internal class NativeClearArchiveBridge(
             baseline = null
             return Produced(result)
         }
+        fun deferAdmission(input: Int, output: Int) {
+            synchronized(control) {
+                checkCurrent(selected.epoch)
+                state = state.copy(published = false, reason = "NATIVE_CLEAR_MEMORY_ADMISSION_DEFERRED",
+                    retryAdmission = RetryAdmission(input, output,
+                        android.os.SystemClock.elapsedRealtime() + ADMISSION_RECHECK_MS))
+            }
+        }
         try {
             checkCurrent(selected.epoch)
+            // A denied device budget is not a syntax or byte-parity failure.
+            // Poll on the existing producer only, with no extra thread, engine,
+            // or reference probe until the same planner admits the rejected size.
+            selected.retryAdmission?.let { retry ->
+                if (android.os.SystemClock.elapsedRealtime() < retry.nextCheckMs) {
+                    val result = referenceOutput()
+                    baseline = null
+                    return Produced(result)
+                }
+                val h = NativeStitchingDeviceBudget.sample(requireNotNull(selected.context))
+                val admitted = h != null && !h.lowMemory &&
+                    NativeStitchingEngine.planClearAtlas(h.lowRam, h.available, h.threshold,
+                        h.jvmHeadroom, retry.input, retry.output) != null
+                if (!admitted) {
+                    deferAdmission(retry.input, retry.output)
+                    val result = referenceOutput()
+                    baseline = null
+                    return Produced(result)
+                }
+                Log.i("ApexviewSingleDecoder", "GB_CLEAR_MEMORY_ADMISSION_RECHECK admitted=true input=${retry.input} output=${retry.output}")
+            }
             val count = request.feeds.first().mediaFragments.size
             require(count in 1..NativeClearArchiveJob.MAX_WINDOW)
             val sources = request.feeds.map { feed ->
@@ -340,6 +375,16 @@ internal class NativeClearArchiveBridge(
         } catch (cancelled: InterruptedIOException) {
             clearProof()
             throw cancelled
+        } catch (error: MemoryAdmissionException) {
+            if (computingReference) throw error
+            deferAdmission(error.input, error.output)
+            try { closeOwned() }
+            catch (_: RuntimeException) { Log.w("ApexviewSingleDecoder", "GB_CLEAR_NATIVE_CLOSE_FAILED") }
+            catch (_: LinkageError) { Log.w("ApexviewSingleDecoder", "GB_CLEAR_NATIVE_CLOSE_FAILED") }
+            logDecision()
+            val result = referenceOutput()
+            baseline = null
+            return Produced(result)
         } catch (error: RuntimeException) {
             if (computingReference) throw error
             return fallback(reason)
@@ -418,6 +463,7 @@ internal class NativeClearArchiveBridge(
     }
 
     companion object {
+        private const val ADMISSION_RECHECK_MS = 10_000L
         private val retirement by lazy {
             Executors.newSingleThreadExecutor { r -> Thread(r, "PitwallRustRetire").apply { isDaemon = true } }
         }
