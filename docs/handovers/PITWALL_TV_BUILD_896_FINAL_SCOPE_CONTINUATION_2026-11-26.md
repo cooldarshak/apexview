@@ -36,7 +36,7 @@ Read every further reference that contains a binding requirement. Later explicit
 - Repository: cooldarshak/apexview
 - Working branch: feature/architecture-g-rust-stitching
 - Last confirmed green APK: Build 896, version 1.0.1792, commit `75577ebf25ab006871d6d034ff3eb57a0795e2d8`, Actions run 45818263209, as recorded in the previous master plans.
-- **Verified live source head before creation of this handover: `cfeb18be189ba7b9d26bf35e907b3f55f19e226b`.**
+- **Initial verified live source head during handover preparation: `cfeb18be189ba7b9d26bf35e907b3f55f19e226b`.** Subsequent concurrent source checkpoint: `22d4f7ea9bc635c3bb48c6b2a18e780a950e5351`; see section 9.
 - Previous reported checkpoint: `7fd3af4f3470b829d6c76b8fe22d4834e3a5134d`. Git comparison confirmed six additional commits, zero behind, six changed files.
 - New handover is a documentation-only commit subsequent to this source head. Verify head on resumption; do not reset it to a historical SHA.
 - Build gate: CLOSED. No 100% unconditional coding assertion. No new APK or physical testing requested.
@@ -53,7 +53,7 @@ Read every further reference that contains a binding requirement. Later explicit
 | 005cc9e15ea367cc5766833a78b47e2d8b6a4b69 | Preserve primary archive handoff failure through rollback and disposal |
 | cfeb18be189ba7b9d26bf35e907b3f55f19e226b | Cover archive rollback when diagnostics and disposal fail |
 
-Changed files: app/src/main/java/app/apexview/{AppState,FeedPlayer}.kt; app/src/main/java/app/apexview/tiled/{ArchiveCompositionStartup,NativeClearArchiveBridge,NativeClearArchiveJob}.kt; app/src/test/java/app/apexview/tiled/ArchiveCompositionStartupTest.kt. Review the real diff. The final two commits explicitly preserve the primary CancellationException and attach diagnostic, restore and dispose errors as suppressed exceptions; the test asserts rollback/disposal order. Test source is present, full execution not established. Add these six commits to both existing master-plan ledgers when updating them for the next implementation pass.
+Changed files: app/src/main/java/app/apexview/{AppState,FeedPlayer}.kt; app/src/main/java/app/apexview/tiled/{ArchiveCompositionStartup,NativeClearArchiveBridge,NativeClearArchiveJob}.kt; app/src/test/java/app/apexview/tiled/ArchiveCompositionStartupTest.kt. Review the real diff. The final two commits explicitly preserve the primary CancellationException and attach diagnostic, restore and dispose errors as suppressed exceptions; the test asserts rollback/disposal order. Test source is present, full execution not established. The performance plan now records these commits (see section 9). Check the architecture master ledger and reconcile only missing entries.
 
 ### 3.2 Earlier accumulated candidates
 
@@ -142,6 +142,17 @@ Matched same signed APK ON/OFF, identical feeds/rungs/layout/overlay/clock/speed
 
 ## 8. Expected final output from the next execution
 
-Do implementation rather than generating another handover as a substitute. Report exact branch/head, closed requirement IDs with actual code/test evidence, genuine remaining blockers if any, checks executed versus pending, and consolidated run/APK link only when legitimately triggered. No invented percentages, memory savings, startup results or physical sign-off. Keep both authoritative plans synchronized; update the latest six source commits not yet in their existing appendices. User should receive concise plain-language results and precise test instructions only once a verified green consolidated build exists.
+Do implementation rather than generating another handover as a substitute. Report exact branch/head, closed requirement IDs with actual code/test evidence, genuine remaining blockers if any, checks executed versus pending, and consolidated run/APK link only when legitimately triggered. No invented percentages, memory savings, startup results or physical sign-off. Keep both authoritative plans synchronized; reconcile the latest source commits against their existing appendices, including section 9 below. User should receive concise plain-language results and precise test instructions only once a verified green consolidated build exists.
 
 Current status: source candidates committed, full unconditional reconciliation and compilation still outstanding, last confirmed green Build 896. No unattended work implied.
+
+## 9. Concurrent branch advancement observed during handover creation
+
+The branch advanced while this document was being committed. Do not overwrite or undo that work. The verified additional source commits are:
+
+- `d63cb2f96c04fab439952bdab21c8d16602a2a38`: Rust fragment backing wipes initialized bytes and spare capacity once; adds 1,000 actual-size synthetic cycles with 8,011,000 / 8,577,000 / 9,846,000-byte payloads plus prefix, two retained readers, pressure watermark, reuse/identity/immutability, bounded capacity and final retirement. Rust tests unrun.
+- `22d4f7ea9bc635c3bb48c6b2a18e780a950e5351`: preserve existing host first-frame and error state until rolling replacement validates.
+- `8252fe3e632a5660b1cf05a4f55ae1356370028b`: initial creation of this handover.
+- `5b8a7a8d1ac9d68d5a93a1e1b083977af4da3632`: performance plan appendix, "native retirement and rolling handoff follow-up (build gate CLOSED)". This records the eight source commits since 7fd3af4 and reports an isolated exact-blob Kotlin coroutine/JVM test of 1,000 rollback failure sequences and a successful handoff, not a full Android/JUnit run. It also reports the shared ChatGPT link was inaccessible, so source and master plans are authoritative.
+
+The subsequent source checkpoint is 22d4f7e; the observed branch head before this addendum was 5b8a7a8. Re-read the actual current head and both master plans before any implementation; do not replay already-applied changes. All of the above remains uncompiled as a consolidated APK. The build gate remains CLOSED.
