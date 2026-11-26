@@ -773,7 +773,10 @@ class AppState(
             message = castStatus
             return
         }
-        val castQuality = PerFeedQualityPolicy.commonDecoderQuality(castTiles.map(::qualityFor))
+        val selectedQualities = castTiles.map(::qualityFor)
+        val requestedHeights = castTiles.map { it.feed.sourceStream.profileLabel }
+            .zip(selectedQualities.map { it.targetHeight }).toMap()
+        val castQuality = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities)
         val verifiedClear = singleDecoderSceneActive &&
             singleDecoderScenePlayer?.archiveSceneSession?.sourceLabels?.toSet() ==
                 castTiles.map { it.feed.sourceStream.profileLabel }.toSet()
@@ -847,9 +850,8 @@ class AppState(
                 val expectedLabels = selection.map { it.second }.toSet()
                 val activeComposition = (singleDecoderScenePlayer?.archiveSessionForCast() ?: castRelay?.session)
                     ?.takeIf { it.sourceLabels.toSet() == expectedLabels && it.sourceLabels.size == expectedLabels.size &&
-                        (if (castQuality == null) it.mixedSourceRects.size == expectedLabels.size else
-                            castQuality.targetHeight.takeIf { h -> h > 0 }?.let { h -> it.sourceDisplayHeight <= h }
-                            ?: (it.sourceDisplayHeight >= 720)) }
+                        QualityDisclosurePolicy.canReuseCastComposition(requestedHeights,
+                            it.actualSourceDimensions, it.offeredSourceDimensions, replace) }
                 val session = activeComposition ?: run {
                     val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
                     try {
@@ -860,10 +862,8 @@ class AppState(
                             preferredHeight = castQuality?.targetHeight?.takeIf { it > 0 } ?: 720,
                             commentary = settings.commentary,
                             minimumHeight = 0,
-                            preferredHeights = castTiles.associate {
-                                it.feed.sourceStream.profileLabel to qualityFor(it).targetHeight
-                            },
-                            autoBandwidthBps = compositionBandwidthBudget(castTiles.map(::qualityFor)),
+                            preferredHeights = requestedHeights,
+                            autoBandwidthBps = compositionBandwidthBudget(selectedQualities),
                         ).also {
                             ownedSession = it
                             it.configureNativeBudget(context)
@@ -918,6 +918,8 @@ class AppState(
                 require(tiles.map { it.id to it.feed.sourceStream.profileLabel } == selection) {
                     "Feed selection changed during preparation"
                 }
+                if (castTiles.associate { it.feed.sourceStream.profileLabel to qualityFor(it).targetHeight } != requestedHeights)
+                    throw kotlinx.coroutines.CancellationException("Cast source quality changed during preparation")
                 castResources.ensureReplacementCapacity()
                 castResources.retireBaked()
                 castResources.retireArchive(relay)
@@ -1283,6 +1285,8 @@ class AppState(
         // Native Cast uses the same independently validated mixed protected atlas.
         // No decoder is allocated by the phone's protected CMAF capture.
         val selectedQualities = selected.map(::qualityFor)
+        val requestedHeights = selected.map { it.feed.sourceStream.profileLabel }
+            .zip(selectedQualities.map { it.targetHeight }).toMap()
         val mixedRequested = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) == null
         val commonQuality = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) ?: VideoQuality.AUTO
         val socket = localConnection?.socket ?: return
@@ -1307,7 +1311,7 @@ class AppState(
                         "ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
                 owned = app.apexview.cast.NativeComposedCastSession(
                     selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel, it.feed.sourceStream.url,
-                        qualityFor(it).targetHeight.takeIf { height -> height > 0 }) },
+                        requestedHeights.getValue(it.feed.sourceStream.profileLabel).takeIf { height -> height > 0 }) },
                     userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty(), factory,
                     socket.localAddress.hostAddress!!, socket.inetAddress,
                     if (mixedRequested) selectedQualities.maxOf { it.targetHeight }.takeIf { it > 0 } ?: 1080
@@ -1334,6 +1338,8 @@ class AppState(
                     selection == tiles.map { it.id to it.feed.sourceStream.profileLabel }) {
                     "Cast selection or connection changed during preparation"
                 }
+                if (selected.associate { it.feed.sourceStream.profileLabel to qualityFor(it).targetHeight } != requestedHeights)
+                    throw kotlinx.coroutines.CancellationException("Cast source quality changed during preparation")
                 castResources.ensureReplacementCapacity()
                 loadNativeComposedCast(next, selected, targetMs, layout)
                 castResources.retireBaked()
