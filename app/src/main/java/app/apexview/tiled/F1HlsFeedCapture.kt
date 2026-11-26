@@ -81,6 +81,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         minimumHeight: Int = 0,
         preferredHeights: Map<String, Int> = emptyMap(),
         coldNativeProbe: android.content.Context? = null,
+        primaryProgramme: String = clockLabel,
     ): HevcArchiveVodSession {
         var acquired: HevcArchiveVodSession? = null
         try { return withContext(Dispatchers.IO) {
@@ -197,39 +198,53 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 // the obsolete probe to fetch and compose an entire group.
                 val preparedSession = requireNotNull(session)
                 coldNativeProbe?.let(preparedSession::enableColdProbe)
-                // Two bounded sidecar lanes run beside the video proof. Primary
-                // audio is still mandatory; every offered caption is independently
-                // inspected. No unverified text or audio is installed.
+                // Keep all previously selectable programmes, but do not wait
+                // for every optional alternate's playlist before showing video.
+                // Primary audio and primary CC are independently validated so
+                // CC toggles on the current programme never require a restart.
+                val required = setOf(clockLabel, primaryProgramme).filter { it in selectableAudioUris }.toSet()
+                val requiredOffers = indexedOffers.filter { it.second.feed.label in required }
+                val optionalOffers = indexedOffers.filter { it.second.feed.label in selectableAudioUris && it.second.feed.label !in required }
+                    .associateBy { it.second.feed.label }
+                suspend fun captions(index: Int, offer: Offer): ArchiveCaptionSource? =
+                    archiveCaptionSource(offer, playlists[index], clockPlaylist)
                 coroutineScope {
-                    val audioTask = async {
-                        val primary = indexedOffers.firstOrNull { it.second.feed.label == clockLabel }
-                        val stablePrimary = primary?.let { (index, offer) -> stableAudio(index, offer) }
-                        val stableAlternate = mapArchiveFeedsBounded(indexedOffers.filter { it != primary }, concurrency = 1) { (index, offer) ->
-                            stableAudio(index, offer)
+                    val requiredTracks = async {
+                        val audioTask = async {
+                            val verified = mapArchiveFeedsBounded(requiredOffers, concurrency = 1) { (index, offer) ->
+                                stableAudio(index, offer)
+                            }.filterNotNull().toSet()
+                            verified to android.os.SystemClock.elapsedRealtime()
                         }
-                        (listOfNotNull(stablePrimary) + stableAlternate.filterNotNull()).toSet() to android.os.SystemClock.elapsedRealtime()
-                    }
-                    val captionTask = async {
-                        val sources = mapArchiveFeedsBounded(selected.indices.toList(), concurrency = 1) { index ->
-                            val offer = selected[index]
-                            if (offer.feed.label !in selectableAudioUris) null
-                            else archiveCaptionSource(offer, playlists[index], clockPlaylist)?.let { offer.feed.label to it }
-                        }.filterNotNull().toMap()
-                        sources to android.os.SystemClock.elapsedRealtime()
+                        val captionTask = async {
+                            val sources = mapArchiveFeedsBounded(requiredOffers, concurrency = 1) { (index, offer) ->
+                                captions(index, offer)?.let { offer.feed.label to it }
+                            }.filterNotNull().toMap()
+                            sources to android.os.SystemClock.elapsedRealtime()
+                        }
+                        val (stableAudioUris, audioReadyMs) = audioTask.await()
+                        val (captionSources, captionReadyMs) = captionTask.await()
+                        preparedSession.installPreparedTracks(stableAudioUris, captionSources)
+                        // This scope is owned by the session, not the disposable
+                        // capture worker. It holds only exact authorized offers
+                        // and playlist metadata; no source CMAF initialization.
+                        preparedSession.discoverOptionalTracks(optionalOffers.keys.toList()) { label ->
+                            val (index, offer) = optionalOffers.getValue(label)
+                            HevcArchiveVodSession.ProgrammeOffer(stableAudio(index, offer), captions(index, offer))
+                        }
+                        android.util.Log.i("ApexviewPlaybackOffer", "ARCHIVE_AUDIO_STABLE_ELIGIBLE primary=${stableAudioUris.size} optional=${optionalOffers.size}")
+                        audioReadyMs to captionReadyMs
                     }
                     val probeStartedMs = android.os.SystemClock.elapsedRealtime()
                     runInterruptible(Dispatchers.IO) { preparedSession.prepare(positionMs) }
                     val probeReadyMs = android.os.SystemClock.elapsedRealtime()
-                    val (stableAudioUris, audioReadyMs) = audioTask.await()
-                    val (captionSources, captionReadyMs) = captionTask.await()
+                    val (audioReadyMs, captionReadyMs) = requiredTracks.await()
                     coroutineContext.ensureActive()
-                    preparedSession.installPreparedTracks(stableAudioUris, captionSources)
-                    android.util.Log.i("ApexviewPlaybackOffer", "ARCHIVE_AUDIO_STABLE_ELIGIBLE count=${stableAudioUris.size}")
                     val preparedMs = android.os.SystemClock.elapsedRealtime()
                     android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_STARTUP_PHASES feeds=${feeds.size} " +
                         "offersMs=${offersReadyMs - prepareStartedMs} videoInitMs=${videoReadyMs - offersReadyMs} " +
                         "audioMs=${audioReadyMs - sidecarsStartedMs} captionsMs=${captionReadyMs - sidecarsStartedMs} " +
-                        "probeMs=${probeReadyMs - probeStartedMs} totalMs=${preparedMs - prepareStartedMs} overlap=true")
+                        "probeMs=${probeReadyMs - probeStartedMs} totalMs=${preparedMs - prepareStartedMs} overlap=true optionalPending=${optionalOffers.keys.count(preparedSession::programmePending)}")
                 }
                 acquired = session
                 session
