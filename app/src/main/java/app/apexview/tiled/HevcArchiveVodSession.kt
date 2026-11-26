@@ -40,13 +40,25 @@ internal class HevcArchiveVodSession(
     val audioUri: Uri? = null,
     val audioUris: Map<String, Uri> = emptyMap(),
     val stableAudioUris: Set<Uri> = emptySet(),
-    val captionSources: Map<String, ArchiveCaptionSource> = emptyMap(),
+    captionSources: Map<String, ArchiveCaptionSource> = emptyMap(),
     val offeredSourceDimensions: Map<String, List<Pair<Int, Int>>> = emptyMap(),
 ) : AutoCloseable {
     class Input(val label: String, val playlist: HlsMediaPlaylist, val format: Format?,
                 val initialization: ByteArray, val report: CmafBoxInspector.Report,
                 val initializationMap: HlsMediaPlaylist.Segment)
     private data class Group(val startUs: Long, val durationUs: Long, val indexes: List<Int>)
+    @Volatile var captionSources: Map<String, ArchiveCaptionSource> = captionSources
+        private set
+
+    /** Install validated optional captions before exposing the prepared session.
+     * Video-only proof has no dependency on caption network responses. */
+    internal fun installPreparedCaptionSources(sources: Map<String, ArchiveCaptionSource>) {
+        synchronized(cacheLock) {
+            checkOpen()
+            captionSources = sources.toMap()
+        }
+    }
+
     private val groups = align(inputs, clockLabel)
     // Re-parse each exact owned initialization ONCE, not once per 5.76-second segment.
     // The initial read also checks that these immutable reports correspond to the bytes we own.
