@@ -96,6 +96,7 @@ internal class HevcArchiveVodSession(
             require(it.errors.isEmpty() && it.tracks.size == 1) { "Invalid archive source initialization" }
         }
     }
+    private val sourceInitialization = ArchiveInitializationBacking(inputs.map { it.initialization })
     private val nativeClear = NativeClearArchiveBridge()
     private val nativeBudgetObservation = NativeStitchingBudgetObservation()
     @Volatile private var nativeBudgetContext: android.content.Context? = null
@@ -542,17 +543,15 @@ internal class HevcArchiveVodSession(
             } else null
             val (frameRateNumerator, frameRateDenominator) = reducePositiveHevcFrameRate(trackScale, step)
             val cells = mixedAtlas?.cells ?: uniformCells
-            val ownedInits = synchronized(cacheLock) {
-                checkOpen()
-                OwnedArchiveInitializations.snapshot(inputs.map { it.initialization })
-            }
+            checkOpen()
             val sourceInputBytes=batches.sumOf { batch -> batch.sumOf { it.size.toLong() } }
             val compositionStarted = System.nanoTime()
-            val produced = try {
-                // Every pre-composition exception, including feed setup and seek/close
-                // validation, must wipe owned initialization snapshots.
+            val produced = sourceInitialization.read { inits ->
+                // Exact source arrays are immutable and borrowed through the
+                // entire synchronous reference/native job. Closing the session
+                // retires the owner without erasing in-flight validation data.
                 val composingFeeds = inputs.mapIndexed { i, input -> HevcClearCmafGridComposer.Feed(
-                    ownedInits.copies[i], batches.map { it[i] }, input.label, validatedInitializations[i], listOf(inspectedMedia[i])) }
+                    inits[i], batches.map { it[i] }, input.label, validatedInitializations[i], listOf(inspectedMedia[i])) }
                 checkOpen()
                 if (inputs.size == 1) NativeClearArchiveBridge.Produced(
                     HevcClearCmafGridComposer.passThrough(composingFeeds.single(), transferMediaOwnership = true))
@@ -576,7 +575,7 @@ internal class HevcArchiveVodSession(
                         }
                     } finally { expectedInit?.fill(0) }
                 }
-            } finally { ownedInits.close() }
+            }
             val composed = produced.output
             var publishedFragment: ByteArray? = null
             val nativeFragment = produced.nativeMedia
@@ -777,8 +776,10 @@ internal class HevcArchiveVodSession(
                     val alternate = reader.read(UriUtil.resolveToUri(input.playlist.baseUri, map.url),
                         2 * 1024 * 1024, map.byteRangeOffset, map.byteRangeLength).bytes
                     try {
-                        require(alternate.contentEquals(input.initialization)) {
-                            "Archive initialization changed at segment $number; a new decoder period is required"
+                        sourceInitialization.read { inits ->
+                            require(alternate.contentEquals(inits[i])) {
+                                "Archive initialization changed at segment $number; a new decoder period is required"
+                            }
                         }
                         checkOpen()
                         compatibleMaps.add(identity)
@@ -902,7 +903,7 @@ internal class HevcArchiveVodSession(
         prefetchFetchers.shutdownNow()
         synchronized(cacheLock) {
             initialization?.fill(0); initialization = null; cache.clear()
-            inputs.forEach { it.initialization.fill(0) }
+            sourceInitialization.close()
         }
         compatibleMaps.clear()
         nativeBudgetContext = null
