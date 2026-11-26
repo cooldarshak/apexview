@@ -59,3 +59,15 @@ internal class ArchiveCompositionStartup(
         }
     }
 }
+
+/** Independently retire archive-owned resources, preserving the primary error. */
+internal class ArchiveRetirementSteps {
+    private var failure: Throwable? = null
+    fun run(action: () -> Unit) {
+        try { action() } catch (error: Throwable) {
+            val first = failure
+            if (first == null) failure = error else if (first !== error) first.addSuppressed(error)
+        }
+    }
+    fun finish() { failure?.let { throw it } }
+}
