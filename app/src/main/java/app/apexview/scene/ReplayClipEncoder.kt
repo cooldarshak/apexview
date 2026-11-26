@@ -221,20 +221,62 @@ internal class ReplayClipEncoder(
     fun close() {
         if (closed) return
         closed = true
-        if (egl != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, egl)
-        if (program != 0) GLES20.glDeleteProgram(program)
-        if (texture != 0) GLES20.glDeleteTextures(1, intArrayOf(texture), 0)
-        runCatching { codec?.release() }
-        input?.release()
-        if (track >= 0) runCatching { muxer?.stop() }
-        runCatching { muxer?.release() }
-        if (!published) destination?.let { runCatching { resolver.delete(it, null, null) } }
+        // The owning GL thread may currently have the preview or encoder bound.
+        // Never delete names in a foreign context. Restore the caller's binding
+        // before destroying the encoder window whenever it is a different window.
+        val steps = SceneReleaseSteps { step, error ->
+            Log.w("ApexviewSingleDecoder", "REPLAY_ENCODER_RELEASE_FAILED step=$step", error)
+        }
+        val oldEgl = egl
+        val oldProgram = program
+        val oldTexture = texture
+        val oldCodec = codec
+        val oldInput = input
+        val oldMuxer = muxer
+        val oldTrack = track
+        val oldDestination = destination
+        egl = EGL14.EGL_NO_SURFACE
+        program = 0; texture = 0; textureAllocated = false
+        codec = null; input = null; muxer = null; track = -1; destination = null
+        codecHeaders = ByteArray(0)
+        // PixelCopy's request holds its own bitmap reference. Dropping our
+        // reference is safe even when its callback has not run; recycling is not.
+        bitmap = null
+        steps.run("gl-objects") {
+            val current = EGL14.eglGetCurrentContext() == glContext &&
+                EGL14.eglGetCurrentDisplay() == display
+            if (current) {
+                if (oldProgram != 0) GLES20.glDeleteProgram(oldProgram)
+                if (oldTexture != 0) GLES20.glDeleteTextures(1, intArrayOf(oldTexture), 0)
+            } else if (oldProgram != 0 || oldTexture != 0) {
+                Log.w("ApexviewSingleDecoder", "REPLAY_ENCODER_GL_RELEASE_DEFERRED owner=EGL_CONTEXT")
+            }
+        }
+        steps.run("egl-unbind") {
+            if (oldEgl != EGL14.EGL_NO_SURFACE &&
+                EGL14.eglGetCurrentDisplay() == display &&
+                (EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW) == oldEgl ||
+                    EGL14.eglGetCurrentSurface(EGL14.EGL_READ) == oldEgl)) {
+                check(EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
+                    EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT))
+            }
+        }
+        steps.run("egl-window") {
+            if (oldEgl != EGL14.EGL_NO_SURFACE) check(EGL14.eglDestroySurface(display, oldEgl))
+        }
+        steps.run("codec") { oldCodec?.release() }
+        steps.run("input-surface") { oldInput?.release() }
+        steps.run("muxer-stop") { if (oldTrack >= 0) oldMuxer?.stop() }
+        steps.run("muxer-release") { oldMuxer?.release() }
+        steps.run("pending-file") {
+            if (!published) oldDestination?.let { resolver.delete(it, null, null) }
+        }
     }
 
     /** Live sessions never publish a MediaStore file; stop without finalizing an MP4. */
     fun stopCast() {
         check(castSample != null)
-        try { close() } finally { bitmap?.recycle(); bitmap = null }
+        close()
     }
 
 }
