@@ -45,6 +45,22 @@ class ProcessMemoryDiagnosticTest {
         v[20]=99
         assertEquals("nativeFragmentArena=UNAVAILABLE",ProcessMemoryDiagnostic.fragmentFields(v))
     }
+    @Test fun partialWorkspaceIsNotConfusedWithReservationOrUnobservedZero() {
+        val boundary = longArrayOf(1, 100, 40, 0, 2, 60, 15, 25, 90, 0, 17, 1)
+        val measured = ProcessMemoryDiagnostic.engineFields(boundary)
+        assertTrue(measured.contains("nativeWorkspaceKnownCapacityBytes=17"))
+        assertTrue(measured.contains("nativeWorkspaceScope=PARTIAL_OWNED_CAPACITY"))
+        assertTrue(measured.contains("nativeEngineFutureCommitmentBytes=90"))
+        boundary[10] = 0
+        boundary[11] = 0
+        assertTrue(ProcessMemoryDiagnostic.engineFields(boundary).contains("nativeWorkspaceKnownCapacityBytes=UNAVAILABLE"))
+        boundary[10] = 17
+        assertEquals("nativeEngineArena=UNAVAILABLE", ProcessMemoryDiagnostic.engineFields(boundary))
+        boundary[11] = 2
+        assertEquals("nativeEngineArena=UNAVAILABLE", ProcessMemoryDiagnostic.engineFields(boundary))
+        assertTrue(ProcessMemoryDiagnostic.engineFields(longArrayOf(1, 100, 40, 0, 2, 60, 15, 25, 60, 1))
+            .contains("nativeWorkspaceKnownCapacityBytes=UNAVAILABLE"))
+    }
     @Test fun ownedTransferCountersAndRunningLowerBoundAreExplicit() {
         val fragment = ProcessMemoryDiagnostic.fragmentFields(longArrayOf(100, 80, 70, 2, 0, 3, 4, 7, 400))
         assertTrue(fragment.contains("nativeOwnedOutputAllocations=3"))
