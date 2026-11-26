@@ -592,11 +592,13 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeFloorIndices(
     mut env:JNIEnv<'_>,_class:JClass<'_>,times:JObjectArray<'_>,
     counts:JIntArray<'_>,now:jlong,indices:JIntArray<'_>,
 )->jint{
+    // Each driver can contribute lap state, tyre, lap count, speed and gear.
+    const MAX_FLOOR_HISTORIES: usize = 5 * MAX_DRIVERS + 1;
     let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
         let n=usize::try_from(env.get_array_length(&counts).ok()?).ok()?;
-        if n>MAX_DRIVERS||env.get_array_length(&times).ok()? as usize!=n||
+        if n>MAX_FLOOR_HISTORIES||env.get_array_length(&times).ok()? as usize!=n||
             env.get_array_length(&indices).ok()? as usize!=n{return None;}
-        let mut sizes=[0i32;MAX_DRIVERS];let mut out=[-1i32;MAX_DRIVERS];
+        let mut sizes=[0i32;MAX_FLOOR_HISTORIES];let mut out=[-1i32;MAX_FLOOR_HISTORIES];
         env.get_int_array_region(&counts,0,&mut sizes[..n]).ok()?;
         // Output is an existing per-owner scratch array. Previous contents are
         // untrusted hints; the Rust kernel verifies them against this history.
