@@ -47,6 +47,15 @@ class HevcArchiveRenditionPlanTest {
         assertEquals(1920 to 1080, HevcArchiveRenditionPlan.choose(rungs, 1080, 0, 2, 4096, unknown, 1L))
     }
 
+    @Test fun manualDoesNotSilentlyDowngradeAnAdvertisedButIncompatibleHeight() {
+        val offers = setOf(480 to 270, 7000 to 1080)
+        assertNull(HevcArchiveRenditionPlan.chooseManual(offers, 1080, 0, 4, 4096))
+        assertEquals(480 to 270, HevcArchiveRenditionPlan.chooseManual(offers, 720, 0, 4, 4096))
+        assertNull(HevcArchiveRenditionPlan.chooseManual(setOf(960 to 540), 270, 0, 2, 4096))
+        assertNull(HevcArchiveRenditionPlan.chooseManual(rungs, 540, 720, 2, 4096))
+        assertEquals(1920 to 1080, HevcArchiveRenditionPlan.chooseManual(rungs, 1080, 0, 3, 4096))
+    }
+
     @Test fun normalPhonePlaybackKeepsItsExistingLowerRungs() {
         assertEquals(960 to 540, HevcArchiveRenditionPlan.choose(rungs, 540, 0, 4, 4096))
     }

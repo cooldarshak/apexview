@@ -568,8 +568,10 @@ internal class F1DashFeedCapture(
      */
     private fun chooseRequestedRepresentations(feeds: List<LoadedFeed>): List<Representation> {
         val caps = feeds.map { it.feed.preferredHeight?.takeIf { cap -> cap > 0 } }
+        if (caps.any { it != null && it > maximumVideoHeight })
+            throw PermanentCaptureException("Requested manual quality exceeds the supported capture limit of ${maximumVideoHeight}p")
         if (caps.distinct().size <= 1) {
-            val common = chooseCommonHevcSize(feeds)
+            val common = chooseCommonHevcSize(feeds, caps.firstOrNull())
                 ?: throw PermanentCaptureException("Selected feeds expose no common HEVC rendition within the decoder atlas")
             return feeds.map { it.representationFor(common.first, common.second) }
         }
@@ -593,7 +595,7 @@ internal class F1DashFeedCapture(
         return selected
     }
 
-    private fun chooseCommonHevcSize(feeds: List<LoadedFeed>): Pair<Int, Int>? {
+    private fun chooseCommonHevcSize(feeds: List<LoadedFeed>, manualHeight: Int?): Pair<Int, Int>? {
         val common = feeds.map { loaded ->
             loaded.period.adaptationSets
                 .filter { it.type == C.TRACK_TYPE_VIDEO || it.representations.any(::isHevc) }
@@ -603,6 +605,13 @@ internal class F1DashFeedCapture(
                 .filter { (width, height) -> width > 0 && height in maxOf(1, minimumVideoHeight)..maximumVideoHeight }
                 .toSet()
         }.reduce { left, right -> left intersect right }
+        if (manualHeight != null) {
+            if (feeds.all { loaded -> loaded.period.adaptationSets
+                    .flatMap { it.representations }.any { isHevc(it) && it.format.height == manualHeight } } &&
+                common.none { it.second == manualHeight })
+                throw PermanentCaptureException("Requested ${manualHeight}p feeds have incompatible advertised geometries or capture bounds")
+            return HevcArchiveRenditionPlan.chooseManual(common, manualHeight, minimumVideoHeight, feeds.size, 4096)
+        }
         // Existing hard capture bounds and compatibility remain authoritative.
         // A soft Auto preference only applies to the common route.
         val preferred = autoPreferredHeight?.coerceIn(1, maximumVideoHeight)

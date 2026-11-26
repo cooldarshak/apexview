@@ -1280,7 +1280,7 @@ class AppState(
                         "ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
                 owned = app.apexview.cast.NativeComposedCastSession(
                     selected.map { F1DashFeedCapture.Feed(it.feed.sourceStream.profileLabel, it.feed.sourceStream.url,
-                        if (mixedRequested) qualityFor(it).targetHeight else null) },
+                        qualityFor(it).targetHeight.takeIf { height -> height > 0 }) },
                     userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty(), factory,
                     socket.localAddress.hostAddress!!, socket.inetAddress,
                     if (mixedRequested) selectedQualities.maxOf { it.targetHeight }.takeIf { it > 0 } ?: 1080
@@ -3179,7 +3179,7 @@ class AppState(
         // validate SPS/PPS tiles and matching CBCS IV/KID before player handoff.
         val feeds = selectedTiles.zip(labels).map { (tile, label) ->
             F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url,
-                if (mixedRequested) qualityFor(tile).targetHeight else null)
+                qualityFor(tile).targetHeight.takeIf { height -> height > 0 })
         }
         val host = selectedTiles.firstOrNull { !it.audible } ?: selectedTiles.first()
         val audioMaster = selectedTiles.firstOrNull { it !== host && it.audible }
@@ -3622,7 +3622,7 @@ class AppState(
         }
         val feeds = labels.mapNotNull { label ->
             byLabel[label]?.let { tile ->
-                F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url)
+                F1DashFeedCapture.Feed(label, tile.feed.sourceStream.url, qualityFor(tile).targetHeight.takeIf { it > 0 })
             }
         }
         if (feeds.size != labels.size || feeds.size !in 2..8) {

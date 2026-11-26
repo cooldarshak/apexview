@@ -17,6 +17,21 @@ internal object HevcArchiveRenditionPlan {
         }.toMap()
     }
 
+    /**
+     * Manual selection is not Auto. If the requested common height is advertised,
+     * an incompatible atlas must fail rather than disguise the failure as a lower
+     * resolution. If that height is not advertised, try the highest legal lower
+     * height. Never select a higher height or consult the Auto bandwidth budget.
+     */
+    fun chooseManual(common: Set<Pair<Int, Int>>, requestedHeight: Int, minimumHeight: Int,
+                     feeds: Int, maximumWidth: Int): Pair<Int, Int>? {
+        require(requestedHeight > 0 && minimumHeight >= 0)
+        if (requestedHeight < minimumHeight) return null
+        val exact = common.filter { it.second == requestedHeight }.toSet()
+        val allowed = exact.ifEmpty { common.filter { it.second <= requestedHeight }.toSet() }
+        return choose(allowed, null, minimumHeight, feeds, maximumWidth)
+    }
+
     fun choose(common: Set<Pair<Int, Int>>, preferredHeight: Int?, minimumHeight: Int,
                feeds: Int, maximumWidth: Int,
                bandwidthCosts: Map<Pair<Int, Int>, Long> = emptyMap(),

@@ -208,9 +208,12 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     ): Triple<List<Offer>, List<HlsMediaPlaylist>, List<Init>> {
         var offers = perFeed
         val independent = preferredHeights.values.distinct().size > 1
+        val manualHeight = preferredHeights.values.distinct().singleOrNull()?.takeIf { it > 0 }
+        if (preferredHeights.values.any { it > maximumHeight })
+            throw PermanentCaptureException("Requested manual quality exceeds the supported capture limit of ${maximumHeight}p")
         while (true) {
             val selected = if (independent) chooseIndividual(offers, preferredHeights, preferredHeight, minimumHeight)
-                else chooseCommon(offers, preferredHeight, perFeed.size, minimumHeight)
+                else chooseCommon(offers, preferredHeight, perFeed.size, minimumHeight, manualHeight)
             val playlists = mapArchiveFeedsBounded(selected) { offer -> runInterruptible { loadMedia(offer) } }
             require(playlists.all { it.hasEndTag && it.segments.isNotEmpty() }) {
                 "Archive VOD requires complete HLS replay playlists"
@@ -243,7 +246,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 HevcArchiveAtlasPlan.choose(perFeed.size, shape.width, shape.height, maximumOutputWidth, HevcArchiveAtlasPlan.MAX_CODED_HEIGHT) != null
             }
             if (fits) return Triple(selected, playlists, inits)
-            if (independent) throw PermanentCaptureException(
+            if (independent || manualHeight != null) throw PermanentCaptureException(
                 "Selected per-feed HEVC renditions cannot form one decoder-safe atlas. " +
                     "Source SPS/PPS tile boundaries or codec parameters are incompatible: " +
                     sizes.joinToString { "${it.width}x${it.height}" })
@@ -296,11 +299,15 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             val heights = feeds.associate { feed ->
                 feed.label to (feed.preferredHeight?.takeIf { it > 0 } ?: maximumHeight)
             }
-            val individual = heights.values.distinct().size > 1
+            val explicit = feeds.map { it.preferredHeight?.takeIf { height -> height > 0 } }
+            if (explicit.any { it != null && it > maximumHeight })
+                throw PermanentCaptureException("Requested manual quality exceeds the supported capture limit of ${maximumHeight}p")
+            val individual = explicit.distinct().size > 1
+            val manualHeight = explicit.distinct().singleOrNull()
             val selected = if (individual) chooseIndividual(perFeed, heights, maximumHeight, minimumCaptureHeight)
                 else chooseCommon(perFeed, preferredHeight = autoPreferredHeight?.coerceIn(1, maximumHeight)
                     ?: maximumHeight.takeIf { it <= 1080 },
-                    minimumHeight = minimumCaptureHeight)
+                    minimumHeight = minimumCaptureHeight, manualHeight = manualHeight)
             format = selected.first().format
             val renditionReport = "REAL_HLS_RENDITIONS policy=${if (individual) "PER_FEED" else "COMMON"} " +
                 selected.joinToString(", ") { offer ->
@@ -678,7 +685,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         }
     }
 
-    private fun chooseCommon(perFeed: List<List<Offer>>, preferredHeight: Int? = null, feedCount: Int = perFeed.size, minimumHeight: Int = 0): List<Offer> {
+    private fun chooseCommon(perFeed: List<List<Offer>>, preferredHeight: Int? = null, feedCount: Int = perFeed.size, minimumHeight: Int = 0, manualHeight: Int? = null): List<Offer> {
         // A direct media playlist has no rendition declarations; hvcC validates it later.
         val declared = perFeed.filter { list -> list.any { it.format != null } }
         if (declared.isEmpty()) return perFeed.map { it.first() }
@@ -687,9 +694,16 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             HevcArchiveRenditionPlan.aggregateBitrates(declared.map { variants ->
                 variants.mapNotNull { offer -> offer.format?.let { Triple(it.width, it.height, it.bitrate) } }
             }) else emptyMap()
-        val size = HevcArchiveRenditionPlan.choose(common, preferredHeight, minimumHeight, feedCount, maximumOutputWidth,
-            costs, autoBandwidthBps)
-            ?: throw PermanentCaptureException(if (minimumHeight > 0)
+        if (manualHeight != null && declared.all { list -> list.any { it.format?.height == manualHeight } } &&
+            common.none { it.second == manualHeight })
+            throw PermanentCaptureException("Requested ${manualHeight}p feeds have incompatible advertised geometries")
+        val size = (if (manualHeight != null)
+            HevcArchiveRenditionPlan.chooseManual(common, manualHeight, minimumHeight, feedCount, maximumOutputWidth)
+        else HevcArchiveRenditionPlan.choose(common, preferredHeight, minimumHeight, feedCount, maximumOutputWidth,
+            costs, autoBandwidthBps))
+            ?: throw PermanentCaptureException(if (manualHeight != null)
+                "Requested ${manualHeight}p has no compatible common HEVC rendition; choose another quality or fewer feeds."
+                else if (minimumHeight > 0)
                 "No common HEVC rendition of at least ${minimumHeight}p fits $feedCount feeds. Try fewer feeds or select a lower quality."
                 else "No common HEVC rendition fits $feedCount feeds in the composed picture; choose fewer feeds or a lower source rendition")
         return perFeed.map { list -> list.filter { it.format == null || it.format.width == size.first && it.format.height == size.second }
