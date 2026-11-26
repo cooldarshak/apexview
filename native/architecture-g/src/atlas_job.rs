@@ -56,6 +56,21 @@ impl Dispatcher {
         }
     }
 
+    /// Directly owned backing capacities only. Atlas parser structures and
+    /// transient per-job allocations are not included; this is a lower bound,
+    /// not a resident-memory measurement or a new admission allowance.
+    pub(crate) fn known_workspace_capacity(&self) -> usize {
+        let mut bytes = self.header_slab.capacity();
+        if let Some(cache) = &self.cached {
+            bytes = bytes.saturating_add(cache.geometry.capacity());
+            bytes = bytes.saturating_add(cache.inits.capacity().saturating_mul(std::mem::size_of::<Vec<u8>>()));
+            for init in &cache.inits {
+                bytes = bytes.saturating_add(init.capacity());
+            }
+        }
+        bytes
+    }
+
     /// Only the worker owns this scratch. Dropping it at a job boundary
     /// cannot invalidate an immutable fragment or a Media3 read lease.
     pub(crate) fn trim_workspace(&mut self) {
@@ -254,7 +269,9 @@ mod tests {
             ..Dispatcher::default()
         };
         worker.header_slab.extend_from_slice(b"scratch");
+        assert_eq!(worker.known_workspace_capacity(), worker.header_slab.capacity());
         worker.trim_workspace();
+        assert_eq!(worker.known_workspace_capacity(), 0);
         assert_eq!(worker.header_slab.capacity(), 0);
         assert_eq!(worker.small_header_jobs, 0);
         assert!(worker.cached.is_none());
