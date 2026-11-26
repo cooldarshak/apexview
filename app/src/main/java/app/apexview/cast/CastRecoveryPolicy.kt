@@ -8,6 +8,12 @@ internal object CastRecoveryPolicy {
                 "READ_SocketTimeoutException", "WRITE_SocketTimeoutException", "CONTROL_QUEUE_FULL")
     fun canHandOffGoogle(matches: Boolean, playable: Boolean, customLayout: Boolean, layoutConfirmed: Boolean): Boolean =
         matches && playable && (!customLayout || layoutConfirmed)
+    /** CAF media status and the layout receiver's rendered ACK arrive on
+     * independent channels. Retain the current load's ACK even if CAF has
+     * not delivered its matching status yet. Neither alone hands off. */
+    fun matchesRenderingAck(expectedId: String, acknowledgedId: String?): Boolean =
+        expectedId.isNotBlank() && acknowledgedId == expectedId
+
     /** The Android Cast API exposes the loaded content and custom data, not
      * the wire-level mediaSessionId. The relay URL is unique to its owner.
      * Standard receivers may omit custom data; never accept an explicit mismatch. */
