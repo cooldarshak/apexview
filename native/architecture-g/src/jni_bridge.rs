@@ -634,6 +634,33 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeRowOrder(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeAvcAnnexB(
+    env:JNIEnv<'_>,_class:JClass<'_>,input:JByteBuffer<'_>,offset:jint,len:jint,
+    output:JByteArray<'_>,prefix_len:jint,
+)->jint{
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        let start=usize::try_from(offset).ok()?;
+        let size=usize::try_from(len).ok()?;
+        let prefix=usize::try_from(prefix_len).ok()?;
+        if size==0||size>48*1024*1024||
+            start.checked_add(size)?>env.get_direct_buffer_capacity(&input).ok()?||
+            prefix.checked_add(size)?!=env.get_array_length(&output).ok()? as usize{return None;}
+        let ptr=env.get_direct_buffer_address(&input).ok()?;
+        if ptr.is_null(){return None;}
+        // SAFETY: MediaCodec owns the immutable output until the synchronous
+        // encoder callback releases it; range checked against direct capacity.
+        let source=unsafe{slice::from_raw_parts(ptr.add(start),size)};
+        // Validate the entire unit before modifying the final Java array.
+        hot_path::visit_avc_annex_b(source,|_,_|Some(()))?;
+        hot_path::visit_avc_annex_b(source,|at,bytes|{
+            let data=unsafe{slice::from_raw_parts(bytes.as_ptr().cast::<i8>(),bytes.len())};
+            env.set_byte_array_region(&output,(prefix+at) as jint,data).ok()
+        })
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}
+
+#[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeAdts(
     env:JNIEnv<'_>,_class:JClass<'_>,input:JByteBuffer<'_>,len:jint,
     rate:jint,channels:jint,output:JByteArray<'_>,
