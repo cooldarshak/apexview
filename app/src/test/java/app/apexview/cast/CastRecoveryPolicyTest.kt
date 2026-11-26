@@ -18,4 +18,21 @@ class CastRecoveryPolicyTest {
         assertTrue(CastRecoveryPolicy.canHandOffGoogle(true,true,true,true))
         assertTrue(CastRecoveryPolicy.canHandOffGoogle(true,true,false,false))
     }
+    @Test fun explicitStaleGoogleMediaCannotUpdateTheCurrentClock() {
+        assertTrue(CastRecoveryPolicy.matchesGoogleLoad("relay2","load2","relay2","load2"))
+        assertTrue(CastRecoveryPolicy.matchesGoogleLoad("relay2","load2","relay2",null))
+        assertFalse(CastRecoveryPolicy.matchesGoogleLoad("relay2","load2","relay1","load1"))
+        assertFalse(CastRecoveryPolicy.matchesGoogleLoad("relay2","load2","relay2","load1"))
+        assertFalse(CastRecoveryPolicy.matchesGoogleLoad("relay2","load2",null,null))
+        assertFalse(CastRecoveryPolicy.matchesGoogleLoad(null,"",null,null))
+    }
+
+    @Test fun localFirstFrameTimeoutBelongsOnlyToTheUnconfirmedCurrentLoad() {
+        assertTrue(CastRecoveryPolicy.localLoadTimedOut("2","2",true,true,true,false))
+        assertFalse(CastRecoveryPolicy.localLoadTimedOut("1","2",true,true,true,false))
+        assertFalse(CastRecoveryPolicy.localLoadTimedOut("2","2",false,true,true,false))
+        assertFalse(CastRecoveryPolicy.localLoadTimedOut("2","2",true,false,true,false))
+        assertFalse(CastRecoveryPolicy.localLoadTimedOut("2","2",true,true,false,false))
+        assertFalse(CastRecoveryPolicy.localLoadTimedOut("2","2",true,true,true,true))
+    }
 }
