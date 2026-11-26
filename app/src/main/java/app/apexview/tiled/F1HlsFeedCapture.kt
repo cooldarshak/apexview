@@ -112,11 +112,29 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 "HLS declares protection but the selected CMAF track is clear"
             }
             val clockPlaylist = playlists[selected.indexOfFirst { it.feed.label == clockLabel }.coerceAtLeast(0)]
-            val audioOffers = mapArchiveFeedsBounded(indexedOffers) { (index, offer) ->
+            // Resolve advertised URIs synchronously, without any network work.
+            // The session can prove video while mandatory and optional audio
+            // playlist checks run on bounded separate I/O lanes.
+            val separateAudio = indexedOffers.associate { (index, offer) ->
                 val separate = offer.master?.audios.orEmpty().filter { it.url != null &&
                     (offer.audioGroupId == null || it.groupId == offer.audioGroupId) }
                     .sortedWith(compareByDescending<HlsMultivariantPlaylist.Rendition> { it.format.language == commentary }
                         .thenByDescending { (it.format.selectionFlags and C.SELECTION_FLAG_DEFAULT) != 0 }).firstOrNull()?.url
+                index to separate
+            }
+            val audioUris = indexedOffers.mapNotNull { (index, offer) ->
+                val separate = separateAudio[index]
+                // Silent video tiles need no audio rendition. Some HLS variants instead carry
+                // audio in the same playlist; pass those to Media3's audio-only source.
+                val muxed = offer.master?.muxedAudioFormat != null ||
+                    inits[index].report.tracks.any { it.handler == "soun" } ||
+                    offer.format?.codecs.orEmpty().split(',').any { it.trim().startsWith("mp4a") }
+                val audio = separate ?: if (muxed) offer.uri else null
+                android.util.Log.i("ApexviewPlaybackOffer", "${offer.feed.label}: audio=${if (separate != null) "SEPARATE" else if (muxed) "MUXED_ADVERTISED" else "NOT_ADVERTISED"}")
+                audio?.let { offer.feed.label to it }
+            }.toMap()
+            suspend fun stableAudio(index: Int, offer: Offer): Uri? {
+                val separate = separateAudio[index]
                 // Preserve the original mandatory primary-audio validation. For
                 // alternate separate renditions, failed or uncertain inspection
                 // only excludes the source from stable merging, not audio selection.
@@ -156,18 +174,8 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                                 audioPlaylist.durationUs, clockPlaylist.durationUs)
                     }
                 }
-                // Silent video tiles need no audio rendition. Some HLS variants instead carry
-                // audio in the same playlist; pass those to Media3's audio-only source.
-                val muxed = offer.master?.muxedAudioFormat != null ||
-                    inits[index].report.tracks.any { it.handler == "soun" } ||
-                    offer.format?.codecs.orEmpty().split(',').any { it.trim().startsWith("mp4a") }
-                val audio = separate ?: if (muxed) offer.uri else null
-                android.util.Log.i("ApexviewPlaybackOffer", "${offer.feed.label}: audio=${if (separate != null) "SEPARATE" else if (muxed) "MUXED_ADVERTISED" else "NOT_ADVERTISED"}")
-                audio?.let { Triple(offer.feed.label, it, stable) }
-            }.filterNotNull()
-            val audioUris = audioOffers.associate { it.first to it.second }
-            val stableAudioUris = audioOffers.filter { it.third }.map { it.second }.toSet()
-            android.util.Log.i("ApexviewPlaybackOffer", "ARCHIVE_AUDIO_STABLE_ELIGIBLE count=${stableAudioUris.size}")
+                return separate.takeIf { stable }
+            }
             val audio = audioUris[clockLabel] ?: if (commentary == null) null else {
                 // Let the ordinary authorized Media3 HLS path resolve the selected feed's
                 // audio when the selected variant doesn't advertise a separate rendition.
@@ -176,23 +184,31 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 Uri.parse(selected.first { it.feed.label == clockLabel }.feed.manifestUrl)
             }
             val selectableAudioUris = if (audio == null) audioUris else audioUris + (clockLabel to audio)
-            val audioReadyMs = android.os.SystemClock.elapsedRealtime()
+            val sidecarsStartedMs = android.os.SystemClock.elapsedRealtime()
             var session: HevcArchiveVodSession? = null
             val owned = selected.mapIndexed { i, offer -> HevcArchiveVodSession.Input(offer.feed.label, playlists[i], offer.format,
                 inits[i].bytes.copyOf(), inits[i].report,
                 requireNotNull(playlists[i].segments[probeIndexes[i]].initializationSegment)) }
             try {
                 session = HevcArchiveVodSession(reader, owned, clockLabel, maximumOutputWidth = maximumOutputWidth,
-                    audioUri = audio, audioUris = selectableAudioUris, stableAudioUris = stableAudioUris,
+                    audioUri = audio, audioUris = selectableAudioUris,
                     offeredSourceDimensions = offeredSourceDimensions)
                 // A seek cancels blocking capture, rather than waiting for
                 // the obsolete probe to fetch and compose an entire group.
                 val preparedSession = requireNotNull(session)
                 coldNativeProbe?.let(preparedSession::enableColdProbe)
-                // Keep optional discovery on one extra I/O lane. The video
-                // proof can proceed independently, but no caption offers are
-                // omitted and the session is not exposed until validation ends.
+                // Two bounded sidecar lanes run beside the video proof. Primary
+                // audio is still mandatory; every offered caption is independently
+                // inspected. No unverified text or audio is installed.
                 coroutineScope {
+                    val audioTask = async {
+                        val primary = indexedOffers.firstOrNull { it.second.feed.label == clockLabel }
+                        val stablePrimary = primary?.let { (index, offer) -> stableAudio(index, offer) }
+                        val stableAlternate = mapArchiveFeedsBounded(indexedOffers.filter { it != primary }, concurrency = 1) { (index, offer) ->
+                            stableAudio(index, offer)
+                        }
+                        (listOfNotNull(stablePrimary) + stableAlternate.filterNotNull()).toSet() to android.os.SystemClock.elapsedRealtime()
+                    }
                     val captionTask = async {
                         val sources = mapArchiveFeedsBounded(selected.indices.toList(), concurrency = 1) { index ->
                             val offer = selected[index]
@@ -204,13 +220,15 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                     val probeStartedMs = android.os.SystemClock.elapsedRealtime()
                     runInterruptible(Dispatchers.IO) { preparedSession.prepare(positionMs) }
                     val probeReadyMs = android.os.SystemClock.elapsedRealtime()
+                    val (stableAudioUris, audioReadyMs) = audioTask.await()
                     val (captionSources, captionReadyMs) = captionTask.await()
                     coroutineContext.ensureActive()
-                    preparedSession.installPreparedCaptionSources(captionSources)
+                    preparedSession.installPreparedTracks(stableAudioUris, captionSources)
+                    android.util.Log.i("ApexviewPlaybackOffer", "ARCHIVE_AUDIO_STABLE_ELIGIBLE count=${stableAudioUris.size}")
                     val preparedMs = android.os.SystemClock.elapsedRealtime()
                     android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_STARTUP_PHASES feeds=${feeds.size} " +
                         "offersMs=${offersReadyMs - prepareStartedMs} videoInitMs=${videoReadyMs - offersReadyMs} " +
-                        "audioMs=${audioReadyMs - videoReadyMs} captionsMs=${captionReadyMs - audioReadyMs} " +
+                        "audioMs=${audioReadyMs - sidecarsStartedMs} captionsMs=${captionReadyMs - sidecarsStartedMs} " +
                         "probeMs=${probeReadyMs - probeStartedMs} totalMs=${preparedMs - prepareStartedMs} overlap=true")
                 }
                 acquired = session
