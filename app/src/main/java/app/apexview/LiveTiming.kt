@@ -1137,7 +1137,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 }
             }
             suspend fun kotlinx.coroutines.CoroutineScope.loadHistory(
-                spool: java.io.File?,
+                spool: java.io.File?, supplementSpool: java.io.File?,
             ): Triple<List<Pair<Long, Int>>, DriverTimingParse, Long> {
                 val primaryPreview = CompletableDeferred<Unit>()
                 val heartbeatStart = heartbeatTask.await()
@@ -1213,7 +1213,37 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 val timingF1Task = async {
                     // Let the primary standings and position streams start before optional mini-sectors.
                     withTimeoutOrNull(1_500L) { primaryPreview.await() }
-                    fetchOptionalStage(path + "TimingDataF1.jsonStream").orEmpty()
+                    val topic = path + "TimingDataF1.jsonStream"
+                    val job = coroutineContext
+                    try {
+                        supplementSpool?.bufferedWriter().use { writer ->
+                            open(topic).bufferedReader().use { reader ->
+                                val text = if (writer == null) StringBuilder() else null
+                                var characters = 0L
+                                var chronological = true
+                                var last = Long.MIN_VALUE
+                                reader.lineSequence().forEach { line ->
+                                    job.ensureActive()
+                                    characters += line.length + 1L
+                                    if (characters > MAX_REPLAY_TIMING_CHARS) throw IOException("Timing supplement exceeds 64 MiB")
+                                    val prefix = streamPrefixLength(line)
+                                    if (prefix < line.length) {
+                                        val time = streamOffsetMs(line, prefix)
+                                        if (time < last) chronological = false
+                                        last = time
+                                    }
+                                    if (writer != null) writer.appendLine(line) else text?.appendLine(line)
+                                }
+                                checkpoint("tower-supplement", "characters=$characters chronological=$chronological storage=${if (writer == null) "HEAP" else "DISK"}")
+                                ReplayPrimaryTimingTopic(characters, chronological, supplementSpool, text?.toString())
+                            }
+                        }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        checkpoint("tower-supplement", "unavailable type=${error.javaClass.simpleName}")
+                        null
+                    }
                 }
                 val timingStream = timingTask.await()
                 val timingF1Stream = timingF1Task.await()
@@ -1233,10 +1263,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                             val priority = android.os.Process.getThreadPriority(threadId)
                             try {
                                 android.os.Process.setThreadPriority(threadId, android.os.Process.THREAD_PRIORITY_BACKGROUND)
-                                val ordered = timingStream.chronological &&
-                                    timingStreamIsChronological(timingF1Stream) { job.ensureActive() }
+                                val ordered = timingStream.chronological && (timingF1Stream?.chronological ?: true)
                                 timingStream.reader().useLines { lines ->
-                                    DriverTimingParser.parseArchiveLines(lines, timingF1Stream.lineSequence(), initialStart,
+                                    (timingF1Stream?.reader() ?: "".reader().buffered()).useLines { supplement ->
+                                    DriverTimingParser.parseArchiveLines(lines, supplement, initialStart,
                                         ordered, accumulator, nativeRequested(), report, checkActive = { job.ensureActive() }) { through, buildLaps ->
                                         val target = targetUtc(initialStart)
                                         if (!towerPreviewPending.get() && through >= target &&
@@ -1258,6 +1288,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                                 }
                                             }
                                         }
+                                    }
                                     }
                                 }
                             } finally {
@@ -1294,10 +1325,14 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 val spool = positionScratchDir?.let { directory ->
                     runCatching { java.io.File.createTempFile("replay-tower-", ".stream", directory) }.getOrNull()
                 }
+                val supplementSpool = positionScratchDir?.let { directory ->
+                    runCatching { java.io.File.createTempFile("replay-tower-f1-", ".stream", directory) }.getOrNull()
+                }
                 try {
-                    coroutineScope { loadHistory(spool) }
+                    coroutineScope { loadHistory(spool, supplementSpool) }
                 } finally {
                     spool?.delete()
+                    supplementSpool?.delete()
                 }
             }
             val drivers = driverTask.await()
@@ -2163,10 +2198,20 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         conn.readTimeout = 60_000
         conn.setRequestProperty("User-Agent", userAgent)
         conn.setRequestProperty("Authorization", "Bearer $token")
-        val code = conn.responseCode
-        if (code == 401 || code == 403) throw IOException("F1's timing archive refused the login (HTTP $code)")
-        if (code >= 400) throw IOException("HTTP $code for ${path.substringAfterLast('/')}")
-        return conn.inputStream
+        try {
+            val code = conn.responseCode
+            if (code == 401 || code == 403) throw IOException("F1's timing archive refused the login (HTTP $code)")
+            if (code >= 400) throw IOException("HTTP $code for ${path.substringAfterLast('/')}")
+            val body = conn.inputStream
+            return object : java.io.FilterInputStream(body) {
+                override fun close() {
+                    try { super.close() } finally { conn.disconnect() }
+                }
+            }
+        } catch (failure: Throwable) {
+            conn.disconnect()
+            throw failure
+        }
     }
 
     internal fun inflate(quoted: String): String = ArchiveInflater().use { it.decode(quoted) }
