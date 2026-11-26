@@ -217,10 +217,18 @@ internal object NativeClearArchiveJob {
                 (System.nanoTime() - readyAt).coerceAtLeast(0L), nativeMedia)
         } finally {
             if (!transferred) {
-                init?.fill(0); media.forEach { it.fill(0) }; nativeMedia?.close()
-                // Failed jobs/ready leases can be released. A pending job must
-                // be generation-fenced, not released or overwritten.
-                if (terminal) engine.release(token) else engine.seek()
+                // The fragment owner and worker token have independent
+                // lifetimes. A native lease release failure must never skip
+                // cancellation/release of the still-owned worker slot.
+                try {
+                    init?.fill(0)
+                    media.forEach { it.fill(0) }
+                    nativeMedia?.close()
+                } finally {
+                    // Failed jobs/ready leases can be released. A pending job
+                    // must be generation-fenced, not released or overwritten.
+                    if (terminal) engine.release(token) else engine.seek()
+                }
             }
         }
     }
