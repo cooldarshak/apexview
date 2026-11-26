@@ -82,3 +82,16 @@ class VideoQualityAdvisoryTest {
         org.junit.Assert.assertNull(QualityDisclosurePolicy.notice(VideoQuality.AUTO, 360))
     }
 }
+
+class QualityFeedNameTest {
+    @Test fun metadataNamesDoNotExposeInternalChannelIds() {
+        assertEquals("Main · F1 Live", qualityFeedName(Channel("F1 Live", 1025, true), true))
+        assertEquals("Verstappen · Onboard", qualityFeedName(Channel("1 Verstappen", 1009,
+            racingNumber = 1, tla = "VER", driverName = "Verstappen"), false))
+        assertEquals("Main · Russell · Onboard", qualityFeedName(Channel("63 Russell", 1011,
+            racingNumber = 63, tla = "RUS", driverName = "Russell"), true))
+        assertEquals("Video feed", qualityFeedName(Channel("Channel 1016", 1016), false))
+        assertEquals("Driver 6 · Onboard", qualityFeedName(Channel("channel-1039", 1039,
+            racingNumber = 6), false))
+    }
+}

@@ -17,6 +17,21 @@ internal object ComposedSourceRenditions {
     }
 }
 
+/** Metadata-only display name; persistent quality overrides still use profileLabel. */
+internal fun qualityFeedName(channel: Channel, main: Boolean): String {
+    val title = channel.title.trim().takeUnless {
+        it.isEmpty() || it.matches(Regex("(?i)channel[- ]?\\d+"))
+    }
+    val driver = channel.driverName?.trim()?.takeIf { it.isNotEmpty() }
+    val abbreviation = channel.tla?.trim()?.takeIf { it.isNotEmpty() }
+    val onboard = driver != null || channel.racingNumber != null || abbreviation != null
+    val name = if (onboard) {
+        val identity = driver ?: title ?: abbreviation ?: channel.racingNumber?.let { "Driver $it" } ?: "Driver"
+        "$identity · Onboard"
+    } else title ?: if (channel.isDefault) "Broadcast" else "Video feed"
+    return if (main) "Main · $name" else name
+}
+
 /** A user quality preference is a maximum, not a promise from the CDN. */
 internal object QualityDisclosurePolicy {
     /** Real track-group availability only. Do not fabricate a lower CDN rung. */

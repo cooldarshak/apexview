@@ -6714,7 +6714,14 @@ class AppState(
     fun chooseFeedVideoQuality(tileId: Int, choice: VideoQuality?) {
         val tile = tiles.firstOrNull { it.id == tileId } ?: return
         val label = tile.feed.sourceStream.profileLabel
+        val previousQuality = settings.videoQualityForFeed(label)
         settings.updateFeedVideoQuality(label, choice)
+        // Changing inheritance without changing the effective request must not
+        // tear down an otherwise healthy composition or its decoder surfaces.
+        if (previousQuality == settings.videoQualityForFeed(label) && singleDecoderFailure == null) {
+            showChrome()
+            return
+        }
         val selected = tiles.filter { it.contentId == tile.contentId }
         val composed = selected.size > 1 && settings.decoderMode == DecoderMode.SINGLE
         singleDecoderFailure = null

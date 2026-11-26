@@ -210,3 +210,22 @@ class DriverTimingTest {
         assertEquals(3, laps.at(t0 + 3_500)!!.position)
     }
 }
+
+class DriverTimingSnapshotOwnershipTest {
+    @Test fun gapOnlyChangesShareSectorStorageWithoutMutatingHistory() {
+        val stream = listOf(
+            """00:00:01.000{"Lines":{"4":{"NumberOfLaps":1,"Sectors":{"0":{"Value":"30.123"}}}}}""",
+            """00:00:02.000{"Lines":{"4":{"TimeDiffToFastest":"+0.120"}}}""",
+            """00:00:03.000{"Lines":{"4":{"Sectors":{"1":{"Value":"29.456"}}}}}"""
+        ).joinToString("\n")
+        val laps = DriverTimingParser.parse(stream, 0).getValue("4")
+        val first = laps.at(1500)!!
+        val second = laps.at(2500)!!
+        val third = laps.at(3500)!!
+        org.junit.Assert.assertSame(first.sectors, second.sectors)
+        org.junit.Assert.assertSame(first.lapSectors, second.lapSectors)
+        org.junit.Assert.assertNotSame(second.sectors, third.sectors)
+        org.junit.Assert.assertNull(first.sectors[1])
+        org.junit.Assert.assertEquals("29.456", third.sectors[1]?.time)
+    }
+}

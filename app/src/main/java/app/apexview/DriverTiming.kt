@@ -274,7 +274,16 @@ object DriverTimingParser {
 
         fun snap(t: Long) {
             if (snaps.lastOrNull()?.let(::matches) == true) return
-            val copy = DriverLaps.Snapshot(position, sector.toList(), lapSectors.toList(), lastLap, gap, inPit, toLeader, ahead, retired, bestLap, stopped)
+            // Share the immutable lists across gap/position-only snapshots rather
+            // than retaining two new list/backing arrays for every such delta.
+            val previous = snaps.lastOrNull()
+            val currentSectors = previous?.sectors?.takeIf { old ->
+                sector.indices.all { sameCell(old[it], sector[it]) }
+            } ?: sector.toList()
+            val completedSectors = previous?.lapSectors?.takeIf { old ->
+                lapSectors.indices.all { sameCell(old[it], lapSectors[it]) }
+            } ?: lapSectors.toList()
+            val copy = DriverLaps.Snapshot(position, currentSectors, completedSectors, lastLap, gap, inPit, toLeader, ahead, retired, bestLap, stopped)
             if (times.lastOrNull() == t) snaps[snaps.lastIndex] = copy
             else { times += t; snaps += copy }
         }

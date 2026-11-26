@@ -2075,8 +2075,8 @@ private fun VideoQualitySheet(app: AppState) {
                 Text(notice, style = Type.footnote.copy(color = Ink.live),
                     modifier = Modifier.padding(top = 8.dp))
             }
-            val active = app.tiles.distinctBy { it.feed.sourceStream.profileLabel }
-                .sortedBy { if (it.id == app.bigTileIdForUi) 0 else 1 }
+            val active = app.tiles.sortedBy { if (it.id == app.bigTileIdForUi) 0 else 1 }
+                .distinctBy { it.feed.sourceStream.profileLabel }
             if (active.isNotEmpty()) {
                 Text("Each feed", style = Type.title2, modifier = Modifier.padding(top = 24.dp))
                 Text("Choose a quality for each feed, independent of its screen position. Default inherits the selection above.",
@@ -2084,7 +2084,7 @@ private fun VideoQualitySheet(app: AppState) {
                 active.forEach { tile ->
                     val label = tile.feed.sourceStream.profileLabel
                     Column(Modifier.padding(top = 18.dp)) {
-                        Text((if (tile.id == app.bigTileIdForUi) "Main · " else "") + label,
+                        Text(qualityFeedName(tile.channel, tile.id == app.bigTileIdForUi),
                             style = Type.subhead)
                         Segments(
                             options = listOf<VideoQuality?>(null) + VideoQuality.entries,
@@ -2096,9 +2096,9 @@ private fun VideoQualitySheet(app: AppState) {
                         )
                         val actual = app.actualSourceRendition(label)
                         Text(if (actual == null) {
-                            "Requested ceiling: ${app.settings.videoQualityForFeed(label).label} · Actual rendition not yet observed"
+                            "Requested: ${app.settings.videoQualityForFeed(label).label} · Actual rendition not yet observed"
                         } else {
-                            "Requested ceiling: ${app.settings.videoQualityForFeed(label).label} · Playing: " +
+                            "Requested: ${app.settings.videoQualityForFeed(label).label} · Observed source: " +
                                 "${actual.first} × ${actual.second}px"
                         },
                             style = Type.footnote, modifier = Modifier.padding(top = 6.dp))

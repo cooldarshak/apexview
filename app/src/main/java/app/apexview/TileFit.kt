@@ -112,7 +112,8 @@ class TileFitSelectionFactory(private val fit: TileFit) : AdaptiveTrackSelection
                 format.width <= 0 || format.height <= 0 ||
                     format.width * format.height <= minOf(ceiling, fastStartCeiling ?: ceiling)
             }
-            return fits && super.canSelectFormat(format, trackBitrate, effectiveBitrate)
+            return fits && (fit.qualityHeight > 0 ||
+                super.canSelectFormat(format, trackBitrate, effectiveBitrate))
         }
     }
 
