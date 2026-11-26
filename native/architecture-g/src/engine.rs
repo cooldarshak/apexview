@@ -152,12 +152,23 @@ struct State {
     // Coalesced pressure/pause command. The worker, not the caller,
     // retires parser state only at a safe job boundary.
     trim_workspace:bool,
+    // Some only at a worker boundary. None while mutable parser work is
+    // in-flight; never pretend an unobserved allocation is zero.
+    known_workspace_capacity:Option<usize>,
     payload_allocations:u64,
     peak_pairs:usize,
     copied_input:u64,
     copied_output:u64,
 }
 impl State {
+    fn payload_capacity(&self)->usize {
+        self.slots.iter().map(|slot|slot.buffers.as_ref().map_or(slot.running_bytes,
+            |b| b.input.capacity()+b.output.capacity())).sum()
+    }
+    fn owned_running(&self)->usize {
+        self.slots.iter().filter(|slot|slot.stage==Stage::Running &&
+            slot.work.is_some_and(|w|matches!(w.command,Command::ClearAtlasOwned))).count()
+    }
     fn index(&self, token:i64)->Option<usize> {
         if token<=0{return None;}
         self.slots.iter().position(|s|s.work.is_some_and(|w|w.token==token))
@@ -200,7 +211,7 @@ impl Engine {
         }
         let initial_pairs=if compact_atlas {0} else {budget.slots};
         let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false,compact_atlas,trim_workspace:false,
-            payload_allocations:initial_pairs as u64,peak_pairs:initial_pairs,copied_input:0,copied_output:0}),Condvar::new()));
+            known_workspace_capacity:Some(0),payload_allocations:initial_pairs as u64,peak_pairs:initial_pairs,copied_input:0,copied_output:0}),Condvar::new()));
         let cloned=Arc::clone(&shared);
         let worker=thread::Builder::new().name("pitwall-native-stitch".into())
             .stack_size(WORKER_STACK).spawn(move || run_worker(cloned,budget.output)).ok()?;
@@ -213,27 +224,42 @@ impl Engine {
     pub fn reserved(&self)->usize {self.reserved_bytes}
     pub fn owned_running(&self)->usize {
         let s=self.shared.0.lock().expect("engine mutex");
-        s.slots.iter().filter(|slot|slot.stage==Stage::Running &&
-            slot.work.is_some_and(|w|matches!(w.command,Command::ClearAtlasOwned))).count()
+        s.owned_running()
     }
     /// Materialized payload capacity. During owned Running jobs this is a
     /// lower bound: dynamic output is counted at Ready, and until then remains
     /// charged as future commitment. Excludes parser scratch and residency.
     pub fn allocated_payload_bytes(&self)->usize {
         let s=self.shared.0.lock().expect("engine mutex");
-        s.slots.iter().map(|slot|slot.buffers.as_ref().map_or(slot.running_bytes,
-            |b| b.input.capacity()+b.output.capacity())).sum()
+        s.payload_capacity()
     }
     /// Outstanding ceiling not already materialized in slots or bridge. The
     /// OS headroom sample already reflects resident allocations; reserve only
     /// future commitments when another native owner requests new capacity.
     pub fn future_commitment(&self, bridge_bytes:usize)->usize {
+        self.future_from_capacity(self.allocated_payload_bytes(), bridge_bytes)
+    }
+    fn future_from_capacity(&self,payload:usize,bridge_bytes:usize)->usize {
         // The ceiling is a device admission limit, not a planned allocation.
         // Count only actual slot/bridge/stack reservations and bounded scratch.
+        // Keep the conservative workspace forecast until physical residence
+        // and simultaneous ownership are established; known capacity is
+        // diagnostic, not extra headroom.
         let workspace=atlas_job::workspace_reserve(self.budget.input,self.budget.output)
             .unwrap_or(self.budget.ceiling);
         self.reserved_bytes.saturating_add(workspace).min(self.budget.ceiling)
-            .saturating_sub(self.allocated_payload_bytes().saturating_add(bridge_bytes))
+            .saturating_sub(payload.saturating_add(bridge_bytes))
+    }
+    /// One mutex sample, unlike separate JNI calls that could observe
+    /// different phases of an output moving between worker and publication.
+    pub fn memory_snapshot(&self,bridge_bytes:usize)->[u64;11] {
+        let s=self.shared.0.lock().expect("engine mutex");
+        let payload=s.payload_capacity();
+        [self.reserved_bytes as u64,payload as u64,bridge_bytes as u64,
+         s.payload_allocations,(s.peak_pairs*(self.budget.input+self.budget.output)) as u64,
+         s.copied_input,s.copied_output,self.future_from_capacity(payload,bridge_bytes) as u64,
+         s.owned_running() as u64,s.known_workspace_capacity.unwrap_or(0) as u64,
+         u64::from(s.known_workspace_capacity.is_some())]
     }
     /// Counts payload-pair allocations and exact bytes passed across the slot
     /// boundary, not allocator-global or resident-page estimates.
@@ -482,7 +508,11 @@ fn run_worker(shared:Shared,output_ceiling:usize) {
                     atlas.trim_workspace();
                     s.trim_workspace=false;
                 }
+                s.known_workspace_capacity=Some(atlas.known_workspace_capacity());
                 if let Some(index)=s.next() {
+                    // From this point until the next job boundary parser
+                    // capacities may change without holding the state mutex.
+                    s.known_workspace_capacity=None;
                     let slot=&mut s.slots[index];
                     let work=slot.work.expect("queued work");
                     if Instant::now()>=work.deadline {
@@ -515,6 +545,7 @@ fn run_worker(shared:Shared,output_ceiling:usize) {
         }));
         let mut s=shared.0.lock().expect("engine mutex");
         let obsolete=s.closed || work.generation!=s.generation;
+        s.known_workspace_capacity=Some(atlas.known_workspace_capacity());
         let slot=&mut s.slots[index];
         slot.running_bytes=0;
         slot.buffers=Some(buffers);
@@ -573,6 +604,31 @@ mod tests {
         assert_eq!(engine.future_commitment(0),planned);
         assert!(engine.close());
     }
+    #[test]
+    fn memory_snapshot_is_consistent_during_worker_and_trim_boundaries() {
+        let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
+        let mut engine=Engine::new_atlas(b).unwrap();
+        let initial=engine.memory_snapshot(0);
+        assert_eq!(initial[1],0);
+        assert_eq!(&initial[9..],[0,1]);
+        let token=engine.submit(engine.generation(),&[2,2,1],1,1,true,5000);
+        assert!(token>0);
+        for _ in 0..100 {
+            let values=engine.memory_snapshot(0);
+            assert!(values[1]<=values[4] && values[4]<=values[0]);
+            assert_eq!(values[7],engine.future_from_capacity(values[1] as usize,0) as u64);
+            if values[10]==0 {assert_eq!(values[9],0);}
+        }
+        assert!(wait(&engine,token)>0);
+        assert_eq!(&engine.memory_snapshot(0)[9..],[0,1]);
+        assert_eq!(engine.release(token),1);
+        engine.trim_idle_payload();
+        let trimmed=engine.memory_snapshot(0);
+        assert_eq!(trimmed[1],0);
+        assert_eq!(&trimmed[9..],[0,1]);
+        assert!(engine.close());
+    }
+
     #[test]
     fn direct_atlas_slot_transfer_is_bounded_and_atomic() {
         let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
@@ -843,7 +899,7 @@ mod tests {
         let mk=|token,foreground,ms|Slot{buffers:None,stage:Stage::Queued,
             work:Some(Work{token,generation:1,len:3,command:Command::Convert{prefix:1,count:1},foreground,
                 deadline:now+Duration::from_millis(ms)}),result:0,running_bytes:0,small_owned_jobs:0,retire_on_recycle:false};
-        let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false,compact_atlas:false,trim_workspace:false,payload_allocations:0,peak_pairs:0,copied_input:0,copied_output:0};
+        let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false,compact_atlas:false,trim_workspace:false,known_workspace_capacity:Some(0),payload_allocations:0,peak_pairs:0,copied_input:0,copied_output:0};
         assert_eq!(s.next(),Some(2));s.slots[2].stage=Stage::Running;
         assert_eq!(s.next(),Some(3));s.slots[3].stage=Stage::Running;
         assert_eq!(s.next(),Some(1));s.slots[1].stage=Stage::Running;
