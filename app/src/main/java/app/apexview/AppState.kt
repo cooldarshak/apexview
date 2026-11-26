@@ -1356,7 +1356,8 @@ class AppState(
         }
     }
     private fun failGoogleCastLoad(reason: String) {
-        runCatching { googleCastRemoteClient?.stop() }
+        // A different sender may have taken ownership during our load timeout.
+        runCatching { googleCastRemoteClient?.let { if (currentGoogleMediaMatches(it)) it.stop() } }
         releaseCastRelay()
         castBusy = false
         castStatus = reason
