@@ -697,7 +697,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
      * Reuse a parsed ladder only for the exact still-selected offer URL. */
     private fun authorizedOffers(feed: F1DashFeedCapture.Feed): List<Offer> {
         val cached = offers[feed.label]
-        if (cached?.firstOrNull()?.feed?.manifestUrl == feed.manifestUrl) return cached
+        if (cached != null && cached.firstOrNull()?.feed?.manifestUrl == feed.manifestUrl) return cached
         return loadOffers(feed).also { offers[feed.label] = it }
     }
 
