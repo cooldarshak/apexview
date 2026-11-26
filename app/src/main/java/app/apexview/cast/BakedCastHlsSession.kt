@@ -9,8 +9,9 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
     nativeRequested: () -> Boolean = { false },
     private val nativeContext: android.content.Context? = null) : AutoCloseable {
     private data class Segment(val sequence: Long, val durationUs: Long,
-        val bytes: ByteArray?, val native: app.apexview.tiled.NativeFragmentLease?) {
-        init { check((bytes == null) != (native == null)) }
+        val heap: app.apexview.tiled.HeapFragmentLease?, val native: app.apexview.tiled.NativeFragmentLease?) : AutoCloseable {
+        init { check((heap == null) != (native == null)) }
+        override fun close() { if (native != null) native.close() else heap?.close() }
         val name get() = "view-$sequence.ts"
     }
 
@@ -41,13 +42,13 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
             packed = if (native == null) muxer.segment(samples) else null
         } finally { forecast.close() }
         // Keep retired objects available for in-flight fetches, outside the advertised playlist.
-        window.addLast(Segment(nextSequence++, durationUs, packed, native))
+        window.addLast(Segment(nextSequence++, durationUs, packed?.let { app.apexview.tiled.HeapFragmentLease.take(it) }, native))
         retainedUs += durationUs
         // Keep at least three target durations advertised, plus retired media for slow clients.
         while (retainedUs - window.first().durationUs >= 28_000_000L) {
             val retired = window.removeFirst()
             retainedUs -= retired.durationUs
-            retired.native?.close()
+            retired.close()
         }
         publish()
     }
@@ -82,23 +83,32 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
         // multi-megabyte segment on each refresh and let the relay zero only
         // retired resources after their final immutable socket read lease closes.
         val native = linkedMapOf<String, app.apexview.tiled.NativeFragmentLease>()
-        val heap = linkedMapOf("live.m3u8" to playlist.toByteArray())
+        val manifest = playlist.toByteArray()
+        val heap = linkedMapOf<String, app.apexview.tiled.HeapFragmentLease>()
         var published = false
         try {
             for (segment in window) {
-                segment.bytes?.let { heap[segment.name] = it }
+                segment.heap?.let { heap[segment.name] = it.retain() }
                 segment.native?.let { native[segment.name] = it.retain() }
             }
-            relay.publishResources(heap, native = native)
+            relay.publishResources(mapOf("live.m3u8" to manifest), native = native, sharedHeap = heap)
             published = true
-        } finally { if (!published) native.values.forEach { it.close() } }
+        } finally {
+            if (!published) {
+                manifest.fill(0)
+                native.values.forEach { runCatching { it.close() } }
+                heap.values.forEach { runCatching { it.close() } }
+            }
+        }
     }
 
     @Synchronized override fun close() {
         ended = true
         try { relay.close() } finally {
-            window.forEach { it.native?.close() }
+            window.forEach { runCatching { it.close() } }
             window.clear()
+            activeUs = 0L
+            retainedUs = 0L
         }
     }
 }
