@@ -598,11 +598,14 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeFloorIndices(
             env.get_array_length(&indices).ok()? as usize!=n{return None;}
         let mut sizes=[0i32;MAX_DRIVERS];let mut out=[-1i32;MAX_DRIVERS];
         env.get_int_array_region(&counts,0,&mut sizes[..n]).ok()?;
+        // Output is an existing per-owner scratch array. Previous contents are
+        // untrusted hints; the Rust kernel verifies them against this history.
+        env.get_int_array_region(&indices,0,&mut out[..n]).ok()?;
         for i in 0..n{
             let count=usize::try_from(sizes[i]).ok()?;
             let ts=JLongArray::from(env.get_object_array_element(&times,i as i32).ok()?);
             if ts.is_null()||(env.get_array_length(&ts).ok()? as usize)<count{return None;}
-            out[i]=hot_path::floor_index(count,now,|at|history_time(&env,&ts,at))?;
+            out[i]=hot_path::floor_index_hint(count,now,out[i],|at|history_time(&env,&ts,at))?;
             env.delete_local_ref(ts).ok()?;
         }
         env.set_int_array_region(&indices,0,&out[..n]).ok()?;Some(())

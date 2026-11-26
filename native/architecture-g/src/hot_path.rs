@@ -28,6 +28,24 @@ pub fn floor_index(n: usize, now: i64, mut time: impl FnMut(usize) -> Option<i64
     Some(low as i32 - 1)
 }
 
+/// Use the previous published index only as a hint, never as historical truth.
+/// Validate both neighbours, advance a bounded distance for normal playback,
+/// and binary-search for seeks, stale hints or large clock jumps. This avoids
+/// repeated Java timestamp reads without allocating or copying histories.
+pub fn floor_index_hint(n: usize, now: i64, hint: i32, mut time: impl FnMut(usize) -> Option<i64>) -> Option<i32> {
+    if n > MAX_HISTORY { return None; }
+    if n == 0 { return Some(-1); }
+    if hint >= -1 && (hint < 0 || (hint as usize) < n) &&
+        (hint < 0 || time(hint as usize)? <= now) {
+        let mut next = (hint + 1) as usize;
+        for _ in 0..8 {
+            if next == n || time(next)? > now { return Some(next as i32 - 1); }
+            next += 1;
+        }
+    }
+    floor_index(n, now, time)
+}
+
 /// Mirrors OverlayPositionCursor's leading, end-of-history, gap, duplicate
 /// and bounded chronological cursor rules. Outer None = invalid input;
 /// inner None = legitimate missing position. No allocations or raw pointers.
@@ -261,6 +279,26 @@ mod tests {
         }
         assert_eq!(floor_index(0,0,|_|None),Some(-1));
         assert_eq!(floor_index(MAX_HISTORY+1,0,|_|None),None);
+    }
+    #[test]
+    fn floor_hint_is_exact_for_forward_reverse_duplicates_and_invalid_hints() {
+        let times: Vec<i64> = (0..1000).map(|i| i / 3 * 100).collect();
+        let mut hint = -1;
+        for now in (-100..40_000).step_by(17).chain([300,0,-100,10_000,33_300,42_000]) {
+            let expected = floor_index(times.len(),now,|i|times.get(i).copied());
+            let actual = floor_index_hint(times.len(),now,hint,|i|times.get(i).copied());
+            assert_eq!(actual,expected);
+            hint = actual.unwrap();
+        }
+        for hint in [-999,-1,0,50,999,1000,i32::MAX] {
+            assert_eq!(floor_index_hint(times.len(),1234,hint,|i|times.get(i).copied()),
+                floor_index(times.len(),1234,|i|times.get(i).copied()));
+        }
+        let mut reads = 0;
+        assert_eq!(floor_index_hint(times.len(),1000,32,|i| {reads += 1; times.get(i).copied()}),Some(32));
+        assert_eq!(reads,2);
+        assert_eq!(floor_index_hint(0,0,123,|_|None),Some(-1));
+        assert_eq!(floor_index_hint(MAX_HISTORY+1,0,-1,|_|None),None);
     }
     #[test]
     fn cursor_matches_reference_through_gaps_forward_and_seek() {
