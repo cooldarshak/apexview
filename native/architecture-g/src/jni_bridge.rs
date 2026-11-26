@@ -757,3 +757,94 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativePointAt(
     }));
     match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
 }
+
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeFlags(
+    env:JNIEnv<'_>,_class:JClass<'_>,history:JByteBuffer<'_>,now:jlong,out:JLongArray<'_>,
+)->jint{
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        if env.get_array_length(&out).ok()?!=67{return None;}
+        let len=env.get_direct_buffer_capacity(&history).ok()?;
+        if !(40..=327720).contains(&len)||!len.is_multiple_of(8){return None;}
+        let ptr=env.get_direct_buffer_address(&history).ok()?;
+        if ptr.is_null()||!ptr.cast::<i64>().is_aligned(){return None;}
+        // SAFETY: immutable native-order direct buffer is fully initialized
+        // by the caller; capacity/alignment checked. No retained references.
+        let words=unsafe{slice::from_raw_parts(ptr.cast::<i64>(),len/8)};
+        let mut at=5usize;
+        let mut sections=[&[][..];5];
+        for (i,section) in sections.iter_mut().enumerate(){
+            let n=usize::try_from(words[i]).ok()?;
+            if n>8192{return None;}
+            let end=at.checked_add(n)?;
+            *section=words.get(at..end)?;at=end;
+        }
+        if at!=words.len(){return None;}
+        let mut values=[0i64;67];
+        hot_path::flag_picture(sections[0],sections[1],sections[2],sections[3],sections[4],now,&mut values)?;
+        env.set_long_array_region(&out,0,&values).ok()?;Some(())
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeAudioAdmit(
+    env:JNIEnv<'_>,_class:JClass<'_>,metadata:JLongArray<'_>,count:jint,last:jlong,
+    remaining:jlong,slots:jint,
+)->jlong {
+    let result=catch_unwind(AssertUnwindSafe(||->Option<i64>{
+        let count=usize::try_from(count).ok()?;
+        let slots=usize::try_from(slots).ok()?;
+        if count>2048||usize::try_from(env.get_array_length(&metadata).ok()?).ok()?<2*count{return None;}
+        let mut scratch=[0i64;4096];
+        env.get_long_array_region(&metadata,0,&mut scratch[..2*count]).ok()?;
+        hot_path::audio_admit(&scratch[..2*count],last,remaining,slots)
+    }));
+    match result{Ok(Some(bytes))=>bytes,Ok(None)=>i64::from(INVALID),Err(_)=>i64::from(PANIC)}
+}
+
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeAudioMetadata(
+    mut env:JNIEnv<'_>,_class:JClass<'_>,parts:JObjectArray<'_>,defaults:JLongArray<'_>,
+    out:JLongArray<'_>,
+)->jint {
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        let count=usize::try_from(env.get_array_length(&parts).ok()?).ok()?;
+        if !(3..=66).contains(&count)||env.get_array_length(&defaults).ok()?!=3||
+            env.get_array_length(&out).ok()?!=4{return None;}
+        let mut values=[0i64;3];env.get_long_array_region(&defaults,0,&mut values).ok()?;
+        let optional=|v:i64|if v<0{Some(None)}else{Some(Some(u32::try_from(v).ok()?))};
+        let defaults=crate::audio_metadata::Defaults{duration:optional(values[0])?,size:optional(values[1])?,flags:optional(values[2])?};
+        let mut parsed_header=None;
+        let mut start=0i64;let mut end=0i64;let mut samples=0u32;
+        // Only bounded metadata extents are copied, one scratch allocation
+        // reused for all box payloads in this fragment.
+        let mut scratch:Vec<i8>=Vec::new();
+        for i in 0..count{
+            let array=JByteArray::from(env.get_object_array_element(&parts,i as i32).ok()?);
+            let n=usize::try_from(env.get_array_length(&array).ok()?).ok()?;
+            if !(8..=2*1024*1024).contains(&n){return None;}
+            scratch.try_reserve(n.saturating_sub(scratch.len())).ok()?;scratch.resize(n,0);
+            env.get_byte_array_region(&array,0,&mut scratch).ok()?;
+            env.delete_local_ref(array).ok()?;
+            // SAFETY: i8 and u8 have identical size and alignment; immutable
+            // view of initialized scratch, confined to the synchronous call.
+            let bytes=unsafe{slice::from_raw_parts(scratch.as_ptr().cast::<u8>(),n)};
+            match i{
+                0=>{parsed_header=Some(crate::audio_metadata::header(bytes,defaults).ok()?);}
+                1=>{start=crate::audio_metadata::decode_time(bytes).ok()?;end=start;}
+                _=>{
+                    let (number,next)=crate::audio_metadata::run(bytes,parsed_header?.defaults,end).ok()?;
+                    samples=samples.checked_add(number)?;if samples>100_000{return None;}end=next;
+                }
+            }
+        }
+        let h=parsed_header?;
+        if h.empty||samples==0{return None;}
+        env.set_long_array_region(&out,0,&[i64::from(h.track),start,end.checked_sub(start)?,i64::from(samples)]).ok()?;
+        Some(())
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}

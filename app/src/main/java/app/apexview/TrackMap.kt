@@ -655,7 +655,7 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
             cars.map { it.number to timing.geometry.progress(it.x, it.y) })
     }
     TrackDrawingContent(timing, width, height, turn, app.mapOpacity, app.mapDotSizeDp, app.mapLabelSizeSp,
-        now, cars, stop, timing.flags.at(now), targets = if (app.settings.mapDriverSelection) {
+        now, cars, stop, timing.flags.at(now, app.settings.nativeRustStitching), targets = if (app.settings.mapDriverSelection) {
             { targets -> CarTargets(app, targets) }
         } else null, motion = motion, nativeRequested = app.settings.nativeRustStitching)
 }
@@ -1108,7 +1108,7 @@ fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, i
             cars.map { it.number to timing.geometry.progress(it.x, it.y) })
     }
     EdgeDrawingContent(timing, width, height, inset, screenCornerRadius, app.mapOpacity, now,
-        cars, stop, timing.flags.at(now), dotSizeDp = app.mapDotSizeDp, labelSizeSp = app.mapLabelSizeSp,
+        cars, stop, timing.flags.at(now, app.settings.nativeRustStitching), dotSizeDp = app.mapDotSizeDp, labelSizeSp = app.mapLabelSizeSp,
         targets = if (app.settings.mapDriverSelection) {
             { targets -> CarTargets(app, targets) }
         } else null, motion = motion, nativeRequested = app.settings.nativeRustStitching)

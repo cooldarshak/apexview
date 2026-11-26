@@ -93,7 +93,7 @@ internal class OverlayDrawCar(override val number: String) : OverlayMotionCar {
  * existing immutable source arrays; native reads only the required samples.
  * The reusable cursor/result storage is never published to another thread.
  */
-private class NativePositionBatch(timing: SessionTiming) {
+internal class NativePositionBatch(timing: SessionTiming) {
     private val tracks = timing.tracks.values
     private val states = timing.tracks.keys.map { timing.states[it] }
     private val laps = timing.tracks.keys.map { timing.laps[it] }
@@ -119,10 +119,10 @@ private class NativePositionBatch(timing: SessionTiming) {
     val active = IntArray(counts.size)
     private var failed = false
     private var reported = false
-    fun sample(now: Long): Boolean {
+    fun sample(now: Long, includeMetadata: Boolean = true): Boolean {
         if (failed) return false
         if (!NativeHotPath.samplePositions(times, xs, ys, counts, now, cursors, xy, active) ||
-            !NativeHotPath.floorIndices(metadataTimes, metadataCounts, now, metadataIndices)) {
+            includeMetadata && !NativeHotPath.floorIndices(metadataTimes, metadataCounts, now, metadataIndices)) {
             failed = true
             android.util.Log.i("PitwallNativeHotPath", "MAP_ENGINE requested=RUST actual=JVM reason=NATIVE_BATCH_UNAVAILABLE")
             return false

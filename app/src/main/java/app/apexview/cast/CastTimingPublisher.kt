@@ -32,6 +32,8 @@ internal class CastTimingPublisher(private val context: Context, private val app
     private var mapSamplerOwner: SessionTiming? = null
     private var mapSampler: OverlayPositionSampler? = null
     private var mapSamplerNative = false
+    private var prediction: NativeCastPrediction? = null
+    private var lastTowerSample: TowerSample? = null
     private var towerSamplerOwner: SessionTiming? = null
     private var towerSampler: OverlayTowerSampler? = null
     private var towerSamplerNative = false
@@ -52,6 +54,8 @@ internal class CastTimingPublisher(private val context: Context, private val app
             sentTables = 0L
             mapSamplerOwner = null
             mapSampler = null
+            prediction = null
+            lastTowerSample = null
             towerSamplerOwner = null
             towerSampler = null
         }
@@ -66,6 +70,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
         val activeTowerTiming = timing.takeIf { app.towerOpen }
         val towerOwnerChanged = activeTowerTiming !== towerSamplerOwner || nativeRequested != towerSamplerNative
         if (towerOwnerChanged) {
+            lastTowerSample = null
             towerSamplerOwner = activeTowerTiming
             towerSamplerNative = nativeRequested
             towerSampler = activeTowerTiming?.let {
@@ -93,8 +98,12 @@ internal class CastTimingPublisher(private val context: Context, private val app
                     elapsed < lastTableElapsed ||
                     elapsed - lastTableElapsed >= 500L ||
                     timingReplaced || towerOwnerChanged) {
-                    rows = CastTimingProtocol.table(timing, now, requireNotNull(towerSampler).sample(now))
-                    stoppedDrivers = CastTimingProtocol.stoppedDrivers(timing, now)
+                    val sample = requireNotNull(towerSampler).sample(now)
+                    if (sample !== lastTowerSample || timingReplaced || towerOwnerChanged) {
+                        rows = CastTimingProtocol.table(timing, now, sample)
+                        stoppedDrivers = CastTimingProtocol.stoppedDrivers(timing, now, sample)
+                        lastTowerSample = sample
+                    }
                     tableSampled = true
                     lastTableUtc = now
                     lastTableElapsed = elapsed
@@ -126,6 +135,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
         if (activeMapTiming !== mapSamplerOwner || nativeRequested != mapSamplerNative) {
             mapSamplerOwner = activeMapTiming
             mapSamplerNative = nativeRequested
+            prediction = if (nativeRequested) activeMapTiming?.let(::NativeCastPrediction) else null
             mapSampler = activeMapTiming?.let {
                 OverlayPositionSampler(it, OverlayPerformanceProbe("pitwall-cast-sender-position"), nativeRequested)
             }
@@ -138,7 +148,8 @@ internal class CastTimingPublisher(private val context: Context, private val app
             "rows=${rows.length()} cars=${cars.size} trackStart=${timing?.firstTrackUtc} trackEnd=${timing?.lastTrackUtc}")
         val message = CastTimingProtocol.encodeFrame(geometryId, position, now,
             context.resources.displayMetrics.density, context.resources.configuration.fontScale,
-            app, timing, rows, circle, stop, cars, receiverPredictionSteps, stoppedDrivers)
+            app, timing, rows, circle, stop, cars, receiverPredictionSteps, stoppedDrivers,
+            prediction?.sample(now, receiverPredictionSteps))
         message.remove("rows")
         message.remove("stoppedDrivers")
         output += message.put("playbackId", playbackId).put("tableId", rowsId).put("sequence", ++sequence).put("clockEpoch", app.castTimingEpoch)
@@ -157,7 +168,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
         val leader = leaderAt(timing, now)
         val laps = leader?.let { timing.laps[it] }
         val green = laps?.lapWindows(now).orEmpty().filter { (a, b) ->
-            laps!!.pitStops.none { (i, o) -> i < b && o > a } && timing.flags.at((a + b) / 2).track == TrackCondition.CLEAR
+            laps!!.pitStops.none { (i, o) -> i < b && o > a } && timing.flags.at((a + b) / 2, app.settings.nativeRustStitching).track == TrackCondition.CLEAR
         }.takeLast(PitWindow.REFERENCE_LAPS)
         val reference = green.takeIf { it.isNotEmpty() }?.map { it.second - it.first }?.average()?.toLong()
             ?: laps?.typicalLapMs(now) ?: laps?.at(now)?.lastLap?.time?.let(PitWindow::lapTimeMs)

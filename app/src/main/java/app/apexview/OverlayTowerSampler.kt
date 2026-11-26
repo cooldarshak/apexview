@@ -18,7 +18,7 @@ internal class OverlayTowerSampler(
     private val lapEntries = timing.laps.entries.toList()
     private val tyreEntries = timing.tyres.entries.toList()
     private val nativeLookup = if (nativeRequested) NativeTowerLookup(lapEntries.map { it.value },
-        tyreEntries.map { it.value }) else null
+        tyreEntries.map { it.value }, timing.weather) else null
     private val scratchRows = ArrayList<Pair<String, CardState>>(lapEntries.size)
     private val scratchTyres = HashMap<String, Tyre?>(tyreEntries.size)
     private val scratchSpeeds = HashMap<String, Pair<Int?, Int?>>()
@@ -85,7 +85,9 @@ internal class OverlayTowerSampler(
             val old = last?.speeds?.get(number)
             speeds[number] = if (old != null && old.first == speed && old.second == gear) old else (speed to gear)
         }
-        val header = towerSessionHeader(timing, now)
+        val header = towerSessionHeader(timing, now, nativeLookup != null,
+            if (nativeIndices) nativeLookup!!.currentLap() else null,
+            if (nativeIndices) nativeLookup!!.weather() else null, nativeIndices)
         // Scratch storage never escapes. Publish only the components that
         // actually changed; reuse previous immutable maps and rows otherwise.
         val previousSample = last
@@ -125,7 +127,19 @@ internal class OverlayTowerSampler(
  * existing Android session model. Rebuild speed references only when that
  * published source changes; no complete timing-history copy or per-row JNI.
  */
-private class NativeTowerLookup(laps: List<DriverLaps>, tyres: List<TyreLog>) {
+private class NativeTowerLookup(private val laps: List<DriverLaps>, tyres: List<TyreLog>, private val weatherLog: WeatherLog) {
+    private val headerTimes = (laps.map { it.lapTimes } + listOf(weatherLog.times)).toTypedArray()
+    private val headerCounts = headerTimes.map { it.size }.toIntArray()
+    private val headerIndices = IntArray(headerTimes.size)
+    fun currentLap(): Int? {
+        var lap: Int? = null
+        for (i in laps.indices) {
+            val value = laps[i].lapCounts.getOrNull(headerIndices[i])?.plus(1) ?: continue
+            lap = maxOf(lap ?: value, value)
+        }
+        return lap
+    }
+    fun weather(): WeatherReading? = weatherLog.atSnapshot(headerIndices.last())
     private val lapCount = laps.size
     private val times = (laps.map { it.times } + tyres.map { it.times }).toTypedArray()
     private val counts = times.map { it.size }.toIntArray()
@@ -157,7 +171,8 @@ private class NativeTowerLookup(laps: List<DriverLaps>, tyres: List<TyreLog>) {
             speedIndices = IntArray(speedTimes.size)
         }
         if (!NativeHotPath.floorIndices(times, counts, now, indices) ||
-            !NativeHotPath.floorIndices(speedTimes, speedCounts, now, speedIndices)) {
+            !NativeHotPath.floorIndices(speedTimes, speedCounts, now, speedIndices) ||
+            !NativeHotPath.floorIndices(headerTimes, headerCounts, now, headerIndices)) {
             failed = true
             return false
         }

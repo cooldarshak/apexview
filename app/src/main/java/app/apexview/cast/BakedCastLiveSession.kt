@@ -22,15 +22,15 @@ internal class BakedCastLiveSession(
     nativeAudioRequested: Boolean = false,
     private val onFailure: (String) -> Unit,
 ) : AutoCloseable {
-    private val hls = BakedCastHlsSession(address, peer, tls)
     @Volatile private var nativeAudioPreference = nativeAudioRequested
+    private val hls = BakedCastHlsSession(address, peer, tls, { nativeAudioPreference })
     fun setNativePreference(value: Boolean) { nativeAudioPreference = value }
     private val audioReader = reader
     private val audioSource = audioUri
     private var audio: BakedCastArchiveAudio? = null
     private var sourceStartMs = -1L
     private val firstSegment = CompletableDeferred<Unit>()
-    private val pending = BakedCastSegmentQueue()
+    private val pending = BakedCastSegmentQueue(nativeRequested = { nativeAudioPreference })
     // A notification is only a wakeup; the bounded queue owns every sample.
     private val publishRequests = Channel<Unit>(Channel.CONFLATED)
     private var stopped = false

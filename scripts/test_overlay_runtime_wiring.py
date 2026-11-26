@@ -99,6 +99,17 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("NativeCircuitProjection(timing.geometry)", track)
         self.assertIn("app.settings.nativeRustStitching", sender)
 
+    def test_gc_expanded_native_flag_audio_and_prediction_paths(self):
+        self.assertIn("NativeHotPath.flags", source("LiveTiming.kt"))
+        self.assertIn("timing.flags.at(now, app.settings.nativeRustStitching)", source("TrackMap.kt"))
+        self.assertIn("NativeCastPrediction", source("cast/CastTimingPublisher.kt"))
+        self.assertIn("includeMetadata = false", source("cast/NativeCastPrediction.kt"))
+        self.assertIn("NativeHotPath.audioMetadata", source("tiled/CmafBoxInspector.kt"))
+        self.assertIn("CmafBoxInspector.nativeAudioTiming", source("cast/CmafCastAudio.kt"))
+        self.assertIn("NativeHotPath.audioAdmit", source("cast/BakedCastSegmentQueue.kt"))
+        self.assertNotIn("ByteArrayOutputStream", source("cast/BakedCastTransportStream.kt"))
+        self.assertIn("packetCount, 188L", source("cast/BakedCastTransportStream.kt"))
+
     def test_cast_routing_does_not_silently_claim_google_timing_overlays(self):
         app = source("AppState.kt")
         sheet = source("cast/PitwallCastSheet.kt")

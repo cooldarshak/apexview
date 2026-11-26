@@ -306,16 +306,20 @@ internal fun TimingTowerContents(
     }
 }
 
+private val TOWER_WIND_DIRECTIONS = arrayOf("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW")
+
 /** Compact session/track strip, like the header on the F1 timing screen. */
-internal fun towerSessionHeader(timing: SessionTiming, now: Long): TowerSessionHeaderData {
-    val flag = timing.flags.at(now)
+internal fun towerSessionHeader(timing: SessionTiming, now: Long,
+    nativeRequested: Boolean = false, sampledLap: Int? = null,
+    sampledWeather: WeatherReading? = null, sampledHeader: Boolean = false): TowerSessionHeaderData {
+    val flag = timing.flags.at(now, nativeRequested)
     val trackLabel = flag.caption(now) ?: "Track clear"
     val trackColor = when {
         flag.track == TrackCondition.RED -> Color(0xFFFF453A)
         flag.track.safetyCar || flag.track == TrackCondition.VSC || flag.track == TrackCondition.VSC_ENDING -> Color(0xFFFFD60A)
         else -> Color(0xFF30D158)
     }
-    val currentLap = timing.currentLap ?: timing.laps.values.mapNotNull { it.lapAt(now) }.maxOrNull()
+    val currentLap = timing.currentLap ?: if (sampledHeader) sampledLap else timing.laps.values.maxOfOrNull { it.lapAt(now) ?: -1 }?.takeIf { it >= 0 }
     val counter = if (timing.isRace && currentLap != null) {
         "L${currentLap}/${timing.totalLaps ?: "–"}"
     } else {
@@ -328,8 +332,8 @@ internal fun towerSessionHeader(timing: SessionTiming, now: Long): TowerSessionH
             part + clock
         }.orEmpty()
     }
-    val weather = timing.weather.at(now)
-    val directions = arrayOf("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW")
+    val weather = if (sampledHeader) sampledWeather else timing.weather.at(now)
+    val directions = TOWER_WIND_DIRECTIONS
     val windDirection = weather?.windDirectionDegrees?.let {
         directions[((it / 22.5 + 0.5).toInt()).mod(16)]
     }.orEmpty()

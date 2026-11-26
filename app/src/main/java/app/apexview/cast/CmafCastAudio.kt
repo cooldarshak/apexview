@@ -167,6 +167,8 @@ internal class CmafCastAudio(
             transferred = true
         } finally { if (!transferred) bytes.fill(0) }
     }
+    private val nativeMetadata = LongArray(4)
+    private var nativeMetadataActual: Boolean? = null
     private fun append(bytes: ByteArray, sourceUs: Long) {
         var transferred = false
         try {
@@ -174,7 +176,21 @@ internal class CmafCastAudio(
             require(metadata.errors.isEmpty() && metadata.fragments.size == 1) { "Cast audio fragment is invalid" }
             val f = metadata.fragments.single()
             require(f.trackId == report!!.tracks.single().trackId && f.timingComplete && f.sampleCount > 0) { "Cast audio fragment does not match its initialization" }
-            val dts = requireNotNull(f.baseDecodeTimeTicks); val duration = requireNotNull(f.totalDurationTicks)
+            val referenceDts = requireNotNull(f.baseDecodeTimeTicks)
+            val referenceDuration = requireNotNull(f.totalDurationTicks)
+            val requested = nativeRequested()
+            val actual = requested && nativeMetadataActual != false && runCatching {
+                CmafBoxInspector.nativeAudioTiming(bytes, requireNotNull(report), nativeMetadata) &&
+                    nativeMetadata[0] == f.trackId && nativeMetadata[1] == referenceDts &&
+                    nativeMetadata[2] == referenceDuration && nativeMetadata[3] == f.sampleCount.toLong()
+            }.getOrDefault(false)
+            if (requested && nativeMetadataActual != actual) {
+                nativeMetadataActual = actual
+                android.util.Log.i("PitwallNativeHotPath", "AUDIO_METADATA_ENGINE requested=RUST actual=" +
+                    if (actual) "RUST reason=METADATA_PARITY" else "JVM reason=NATIVE_METADATA_UNAVAILABLE_OR_MISMATCH")
+            } else if (!requested) nativeMetadataActual = null
+            val dts = if (actual) nativeMetadata[1] else referenceDts
+            val duration = if (actual) nativeMetadata[2] else referenceDuration
             require(duration > 0)
             if (encrypted) require(f.sampleEncryptionBoxPresent && f.sampleEncryptionStructureComplete) { "Cast audio lost its encryption metadata" }
             else require(!f.sampleEncryptionBoxPresent && !f.sampleAuxiliarySizesPresent &&

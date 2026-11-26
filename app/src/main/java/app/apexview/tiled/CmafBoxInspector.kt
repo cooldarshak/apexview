@@ -193,6 +193,34 @@ internal object CmafBoxInspector {
     fun inspect(data: ByteArray, priorInitialization: Report? = null): Report =
         inspect(ByteBuffer.wrap(data), priorInitialization)
 
+    /** Only existing application-owned timing-box payloads cross JNI.
+     * Authorization and all sample/encryption checks still use inspect().
+     * No mdat, senc, IV, PSSH or license bytes are passed to this kernel.
+     */
+    fun nativeAudioTiming(bytes: ByteArray, initialization: Report, result: LongArray): Boolean {
+        if (!NativeHotPath.available()) return false
+        val track = initialization.tracks.singleOrNull() ?: return false
+        if (track.handler != "soun") return false
+        val errors = mutableListOf<String>()
+        val data = ByteBuffer.wrap(bytes)
+        val root = parseBoxes(data, 0, bytes.size, 0, intArrayOf(0), errors)
+        if (errors.isNotEmpty()) return false
+        val traf = root.singleOrNull { it.type == "moof" }?.children?.singleOrNull { it.type == "traf" } ?: return false
+        val tfhd = traf.children.singleOrNull { it.type == "tfhd" } ?: return false
+        val tfdt = traf.children.singleOrNull { it.type == "tfdt" } ?: return false
+        val runs = traf.children.filter { it.type == "trun" }
+        if (runs.size !in 1..64) return false
+        val defaults = initialization.fragmentDefaults.singleOrNull { it.trackId == track.trackId }
+        val parts = (listOf(tfhd, tfdt) + runs).map { box ->
+            if (box.size - box.headerSize !in 8..2 * 1024 * 1024) return false
+            bytes.copyOfRange(box.start + box.headerSize, box.start + box.size)
+        }.toTypedArray()
+        return try {
+            NativeHotPath.audioMetadata(parts, longArrayOf(defaults?.defaultSampleDuration ?: -1L,
+                defaults?.defaultSampleSize ?: -1L, defaults?.defaultSampleFlags ?: -1L), result)
+        } finally { parts.forEach { it.fill(0) } }
+    }
+
     /** Inspect a bounded immutable direct or heap view, without materializing
      * mdat or retaining the buffer. Do not change caller position/limit. */
     fun inspect(input: ByteBuffer, priorInitialization: Report? = null): Report {

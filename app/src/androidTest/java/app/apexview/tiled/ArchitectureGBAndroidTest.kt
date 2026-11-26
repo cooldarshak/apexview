@@ -107,6 +107,36 @@ class ArchitectureGBAndroidTest {
     }
 
     @Test
+    fun nativeFlagsAudioAdmissionAndMetadataMatchReference() {
+        assertTrue(NativeHotPath.available())
+        val flags = app.apexview.TrackFlags(
+            listOf(app.apexview.SectorFlag(20,2,1), app.apexview.SectorFlag(40,3,2),
+                app.apexview.SectorFlag(60,0,0)),
+            listOf(10L to 4, 80L to 1), listOf(30L),
+            listOf(app.apexview.Resumption(50,100,"restart")), listOf(55L to 70L))
+        for (now in (0L..120L).toList() + listOf(10L,55L,20L)) {
+            val expected = flags.at(now)
+            val actual = flags.at(now,true)
+            assertEquals(expected.track,actual.track)
+            assertEquals(expected.yellow,actual.yellow)
+            assertEquals(expected.resumption,actual.resumption)
+        }
+        assertEquals(30L,requireNotNull(NativeHotPath.audioAdmit(longArrayOf(1,10,2,20),2,0,30,2)))
+        assertTrue(requireNotNull(NativeHotPath.audioAdmit(longArrayOf(1,10,1,20),2,0,30,2)) < 0)
+        assertTrue(requireNotNull(NativeHotPath.audioAdmit(longArrayOf(1,10,2,20),2,0,29,2)) < 0)
+        fun words(vararg values: Int): ByteArray = ByteBuffer.allocate(values.size*4)
+            .also { b -> values.forEach { b.putInt(it) } }.array()
+        val parts = arrayOf(words(0x020008,7,1024),words(0x01000000,0,48000),
+            words(0x01000a01,2,100,256,-1,192,0))
+        val result = LongArray(4)
+        assertTrue(NativeHotPath.audioMetadata(parts,longArrayOf(-1,-1,-1),result))
+        assertArrayEquals(longArrayOf(7,48000,2048,2),result)
+        val truncated = parts.copyOf()
+        truncated[2] = truncated[2].copyOf(truncated[2].size-1)
+        assertFalse(NativeHotPath.audioMetadata(truncated,longArrayOf(-1,-1,-1),result))
+    }
+
+    @Test
     fun stitchedTiledFragmentUsesNativeWorkerAndGenerationFencedLease() {
         verifyFrameRateArithmetic()
         val assets = InstrumentationRegistry.getInstrumentation().context.assets

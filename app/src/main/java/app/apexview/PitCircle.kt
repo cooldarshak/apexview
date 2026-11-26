@@ -98,7 +98,7 @@ internal fun rememberPitBasis(app: AppState, timing: SessionTiming, now: Long): 
     // The reference lap: the average of the leader's last few green laps, as MultiViewer has it.
     val green = leaderLaps?.lapWindows(now).orEmpty().filter { (start, end) ->
         leaderLaps!!.pitStops.none { (inUtc, outUtc) -> inUtc < end && outUtc > start } &&
-            timing.flags.at((start + end) / 2).track == TrackCondition.CLEAR
+            timing.flags.at((start + end) / 2, app.settings.nativeRustStitching).track == TrackCondition.CLEAR
     }.takeLast(PitWindow.REFERENCE_LAPS)
     // Joined live part-way, no lap has been timed here yet: the leader's last lap, as F1 gives it.
     val referenceMs = green.takeIf { it.isNotEmpty() }?.map { (start, end) -> end - start }?.average()?.toLong()
@@ -150,7 +150,7 @@ internal class PitCircleData(val referenceMs: Long, val ring: List<OnCircle>, va
 internal fun pitCircleData(app: AppState, timing: SessionTiming, now: Long, basis: PitBasis,
     positionedCars: List<Car>? = null,
 ): PitCircleData? {
-    val flags = timing.flags.at(now)
+    val flags = timing.flags.at(now, app.settings.nativeRustStitching)
     val leader = basis.leader
     val leaderLaps = leader?.let { timing.laps[it] }
     val green = basis.green

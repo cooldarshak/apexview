@@ -135,6 +135,60 @@ pub fn interpolate_motion(points:&[f32],steps:f32)->Option<(f32,f32)>{
     Some((smooth(0),smooth(1)))
 }
 
+/// Packed event histories: status(time,code), sectors(time,id,level),
+/// safety-car-in(time), red intervals(start,end), resumptions(announced,at).
+/// The caller owns the immutable histories; scratch is bounded by sector count.
+pub fn flag_picture(
+    status: &[i64], sectors: &[i64], safety: &[i64], red: &[i64],
+    resumptions: &[i64], now: i64, out: &mut [i64],
+) -> Option<()> {
+    if !status.len().is_multiple_of(2) || !sectors.len().is_multiple_of(3) || !red.len().is_multiple_of(2) ||
+        !resumptions.len().is_multiple_of(2) || out.len()!=67 { return None; }
+    out.fill(0);
+    let mut code=1;
+    let mut since=0;
+    for event in status.chunks_exact(2) {
+        if event[0]>now {break;}
+        if event[1]!=code {since=event[0];}
+        code=event[1];
+    }
+    out[0]=if red.chunks_exact(2).any(|e| now>=e[0] && now<e[1]) {5} else {
+        match code {
+            4 if safety.iter().any(|&t| t>=since && t<=now)=>8,
+            4..=7=>code,
+            _=>1,
+        }
+    };
+    for event in sectors.chunks_exact(3) {
+        if event[0]>now {break;}
+        let id=usize::try_from(event[1]).ok()?;
+        if id>64 || !(0..=2).contains(&event[2]) {return None;}
+        if id==0 {out[3..].fill(0);} else {out[2+id]=event[2];}
+    }
+    out[1]=-1;
+    for (i,event) in resumptions.chunks_exact(2).enumerate().rev() {
+        if event[0]<=now && now<event[1] && now.checked_sub(event[0])?<3_600_000 {
+            out[1]=i as i64;break;
+        }
+    }
+    Some(())
+}
+
+/// Admission is transactional for a fetched commentary batch. The platform
+/// owner keeps the actual media bytes; no payload crosses JNI for validation.
+pub fn audio_admit(pts_sizes: &[i64], last: i64, remaining: i64, slots: usize) -> Option<i64> {
+    if !pts_sizes.len().is_multiple_of(2) || pts_sizes.len()/2>slots || remaining<0 {return None;}
+    let mut previous=last;
+    let mut bytes=0i64;
+    for sample in pts_sizes.chunks_exact(2) {
+        if sample[0]<0 || sample[0]<=previous || sample[1]<=0 {return None;}
+        bytes=bytes.checked_add(sample[1])?;
+        if bytes>remaining {return None;}
+        previous=sample[0];
+    }
+    Some(bytes)
+}
+
 /// MPEG-4 AAC-LC ADTS header, same supported rates/channels as existing Cast.
 pub fn adts_header(payload_len: usize, sample_rate: i32, channels: i32) -> Option<[u8; 7]> {
     let rates = [96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350];

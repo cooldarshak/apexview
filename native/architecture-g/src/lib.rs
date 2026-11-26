@@ -24,6 +24,7 @@ pub mod clear_cmaf;
 pub mod clear_slice;
 pub mod engine;
 pub mod hot_path;
+pub mod audio_metadata;
 pub mod overlay_geometry;
 pub use annex_b::{convert_length_prefixed, convert_fixed_batch};
 use std::sync::atomic::{AtomicUsize, Ordering};

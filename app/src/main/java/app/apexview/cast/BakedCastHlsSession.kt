@@ -5,13 +5,14 @@ import java.util.Locale
 
 /** Rolling HLS publication for the clear, baked-view encoder. Runs on its producer thread. */
 internal class BakedCastHlsSession(address: String, peer: InetAddress?,
-    tls: app.apexview.cast.local.PitwallTls.Session? = null) : AutoCloseable {
+    tls: app.apexview.cast.local.PitwallTls.Session? = null,
+    nativeRequested: () -> Boolean = { false }) : AutoCloseable {
     private data class Segment(val sequence: Long, val durationUs: Long, val bytes: ByteArray) {
         val name get() = "view-$sequence.ts"
     }
 
     private val relay = ComposedCmafRelay(address, peer, liveHls = true, tls = tls)
-    private val muxer = BakedCastTransportStream()
+    private val muxer = BakedCastTransportStream(nativeRequested)
     private val window = ArrayDeque<Segment>()
     private var nextSequence = 0L
     private var ended = false

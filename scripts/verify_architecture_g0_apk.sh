@@ -56,7 +56,7 @@ for abi in armeabi-v7a arm64-v8a x86 x86_64; do
     for symbol in nativeAbi nativeOpen nativeBridge nativeSubmit nativeSubmitClearAtlas nativeAcquire nativeCopy nativeRelease nativeSeek nativeClose nativeProtectedHeader nativeProtectedPlan nativeFragmentAllocate nativeFragmentView nativeFragmentRelease nativeFragmentTrim nativeOpenAtlas nativeSubmitAtlasParts nativeSubmitAtlasOwnedParts nativeAdoptAtlasFragment nativeReadAtlasArray nativeFragmentAllocateBounded; do
         grep -Eq "[[:space:]]Java_app_apexview_tiled_NativeStitchingEngine_$symbol$" "$report/$abi-symbols.txt"
     done
-    for symbol in nativeSamplePositions nativeFloorIndices nativeRowOrder nativeAdts nativeScaleUs nativePrepareGeometry nativeProjectGeometry nativeInterpolateMotion nativePointAt; do
+    for symbol in nativeSamplePositions nativeFloorIndices nativeRowOrder nativeAdts nativeScaleUs nativePrepareGeometry nativeProjectGeometry nativeInterpolateMotion nativePointAt nativeFlags nativeAudioAdmit nativeAudioMetadata; do
         grep -Eq "[[:space:]]Java_app_apexview_tiled_NativeHotPath_$symbol$" "$report/$abi-symbols.txt"
     done
     address="$(awk '$3=="Java_app_apexview_tiled_ArchitectureG0Probe_nativeConvert"{print $1}' "$report/$abi-symbols.txt")"

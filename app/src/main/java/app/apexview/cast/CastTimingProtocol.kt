@@ -178,8 +178,10 @@ internal object CastTimingProtocol {
                     .put(speed ?: JSONObject.NULL).put(gear ?: JSONObject.NULL))
             }
     }
-    fun stoppedDrivers(timing: SessionTiming, now: Long): JSONArray = JSONArray().apply {
-        timing.laps.forEach { (number, laps) ->
+    fun stoppedDrivers(timing: SessionTiming, now: Long, sampled: TowerSample? = null): JSONArray = JSONArray().apply {
+        if (sampled != null) {
+            sampled.rows.forEach { (number, state) -> if (state.stopped) put(number) }
+        } else timing.laps.forEach { (number, laps) ->
             if (laps.at(now)?.stopped == true) put(number)
         }
     }
@@ -204,12 +206,13 @@ internal object CastTimingProtocol {
     fun encodeFrame(geometryId: String, positionMs: Long, now: Long, density: Float, fontScale: Float,
         app: AppState, timing: SessionTiming?, table: JSONArray, circle: PitCircleData?, stop: PitStopNow?,
         cars: List<Car>, predictionSteps: Int = V1_SEND_PREDICTION_STEPS,
-        stopped: JSONArray = timing?.let { stoppedDrivers(it, now) } ?: JSONArray()): JSONObject {
+        stopped: JSONArray = timing?.let { stoppedDrivers(it, now) } ?: JSONArray(),
+        prediction: NativeCastPrediction? = null): JSONObject {
         require(predictionSteps == V1_SEND_PREDICTION_STEPS || predictionSteps == MAX_PREDICTION_STEPS) {
             "Unsupported Cast prediction horizon"
         }
-        val flags = timing?.flags?.at(now) ?: FlagPicture(TrackCondition.CLEAR, emptyMap())
-        val header = timing?.let { towerSessionHeader(it, now) } ?: TowerSessionHeaderData("TIMING", "", Color.White, "", emptyList())
+        val flags = timing?.flags?.at(now, app.settings.nativeRustStitching) ?: FlagPicture(TrackCondition.CLEAR, emptyMap())
+        val header = timing?.let { towerSessionHeader(it, now, app.settings.nativeRustStitching) } ?: TowerSessionHeaderData("TIMING", "", Color.White, "", emptyList())
         val panel = app.activeMapPanel
         val tower = app.towerSpot
         val mapPanel = if (app.mapMode.inWindow && panel.placed) Panel(panel.x, panel.y, panel.w, panel.h) else null
@@ -226,7 +229,7 @@ internal object CastTimingProtocol {
             .put("onTop", app.tiles.firstOrNull { it.id == app.bigTileIdForUi }?.channel?.racingNumber?.toString() ?: JSONObject.NULL)
             .put("leader", timing?.let { leaderAt(it, now) } ?: JSONObject.NULL)
             .put("cars", JSONArray().apply { cars.take(MAX_DRIVERS).forEach { car ->
-                put(encodeCarMotion(car, timing!!.tracks[car.number], now, predictionSteps))
+                put(encodeCarMotion(car, timing!!.tracks[car.number], now, predictionSteps, prediction))
             } }).put("condition", flags.track.ordinal).put("yellow", JSONArray().apply { flags.yellow.entries.take(64).forEach { put(JSONArray(listOf(it.key, it.value))) } })
             .put("resumption", flags.resumption?.let { JSONArray(listOf(it.announcedUtc, it.atUtc, it.what.safe())) } ?: JSONObject.NULL)
             .put("stop", stop?.let { JSONArray(listOf(it.number, it.carProgress, it.ghostProgress, it.outBehind?.first ?: JSONObject.NULL, it.outBehind?.second ?: 0)) } ?: JSONObject.NULL)
@@ -240,8 +243,19 @@ internal object CastTimingProtocol {
      * A missing/gapped track holds its last measured value, never extrapolates.
      */
     internal fun encodeCarMotion(car: Car, track: DriverTrack?, now: Long,
-        predictionSteps: Int = V1_SEND_PREDICTION_STEPS): JSONArray {
+        predictionSteps: Int = V1_SEND_PREDICTION_STEPS, prediction: NativeCastPrediction? = null): JSONArray {
         require(predictionSteps == V1_SEND_PREDICTION_STEPS || predictionSteps == MAX_PREDICTION_STEPS)
+        if (prediction != null) {
+            var x = prediction.x(car.number, 1, car.x)
+            var y = prediction.y(car.number, 1, car.y)
+            return JSONArray().put(car.number).put(car.x).put(car.y).put(x).put(y).put(car.state.ordinal).apply {
+                    for (step in 2..predictionSteps) {
+                        x = prediction.x(car.number, step, x)
+                        y = prediction.y(car.number, step, y)
+                    put(x); put(y)
+                }
+            }
+        }
         var next = track?.atOrFirst(now + POSITION_STEP_MS) ?: (car.x to car.y)
         return JSONArray(listOf(car.number, car.x, car.y, next.first, next.second, car.state.ordinal)).apply {
             for (step in 2..predictionSteps) {

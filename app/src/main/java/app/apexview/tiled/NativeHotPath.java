@@ -74,6 +74,24 @@ public final class NativeHotPath {
         try { return nativePointAt(packet,fraction,output)==1; }
         catch (LinkageError | RuntimeException failed) { return false; }
     }
+    public static boolean flags(ByteBuffer histories,long now,long[] out) {
+        if (!available()) return false;
+        try { return nativeFlags(histories,now,out)==1; }
+        catch (LinkageError | RuntimeException failed) { return false; }
+    }
+    private static native int nativeFlags(ByteBuffer histories,long now,long[] out);
+    public static Long audioAdmit(long[] metadata,int count,long last,long remaining,int slots) {
+        if (!available()) return null;
+        try { return nativeAudioAdmit(metadata,count,last,remaining,slots); }
+        catch (LinkageError | RuntimeException failed) { return null; }
+    }
+    private static native long nativeAudioAdmit(long[] metadata,int count,long last,long remaining,int slots);
+    public static boolean audioMetadata(byte[][] parts,long[] defaults,long[] out) {
+        if (!available()) return false;
+        try { return nativeAudioMetadata(parts,defaults,out)==1; }
+        catch (LinkageError | RuntimeException failed) { return false; }
+    }
+    private static native int nativeAudioMetadata(byte[][] parts,long[] defaults,long[] out);
     private static native int nativePointAt(ByteBuffer packet,float fraction,float[] output);
     private static native int nativePrepareGeometry(float[] outline,ByteBuffer packet);
     private static native int nativeProjectGeometry(ByteBuffer packet,float[] xy,int count,float[] fractions,int[] order);

@@ -131,7 +131,71 @@ class TrackFlags(
     /** Red flags from race control, start to green (UTC ms): track status doesn't always mark them. */
     val redFlags: List<Pair<Long, Long>> = emptyList(),
 ) {
-    fun at(t: Long): FlagPicture {
+    // Compact immutable flag history, shared by map/tower owners. Created
+    // only when Rust is requested; no copying of per-car race histories.
+    private val nativeHistory: java.nio.ByteBuffer? by lazy {
+        val lengths = longArrayOf(status.size * 2L, sectors.size * 3L, safetyCarIn.size.toLong(),
+            redFlags.size * 2L, resumptions.size * 2L)
+        if (lengths.any { it > 8192L }) null else try {
+            val buffer = java.nio.ByteBuffer.allocateDirect(((5 + lengths.sum()) * 8).toInt())
+                .order(java.nio.ByteOrder.nativeOrder())
+            lengths.forEach { buffer.putLong(it) }
+            status.forEach { (utc, code) -> buffer.putLong(utc).putLong(code.toLong()) }
+            sectors.forEach { buffer.putLong(it.utc).putLong(it.sector.toLong()).putLong(it.level.toLong()) }
+            safetyCarIn.forEach { buffer.putLong(it) }
+            redFlags.forEach { (from, to) -> buffer.putLong(from).putLong(to) }
+            resumptions.forEach { buffer.putLong(it.announcedUtc).putLong(it.atUtc) }
+            buffer.asReadOnlyBuffer()
+        } catch (_: OutOfMemoryError) { null }
+    }
+    // One bounded output buffer, guarded because local tower and map may
+    // sample on different threads. No mutable result leaves the lock.
+    private val nativeResult by lazy { LongArray(67) }
+    private var nativeFailed = false
+    private var nativeReported = false
+    private var lastNativePicture: FlagPicture? = null
+    @Synchronized private fun nativeAt(t: Long): FlagPicture? {
+        if (nativeFailed) return null
+        val history = nativeHistory
+        if (history == null || !app.apexview.tiled.NativeHotPath.flags(history, t, nativeResult)) {
+            nativeFailed = true
+            android.util.Log.i("PitwallNativeHotPath", "FLAG_ENGINE requested=RUST actual=JVM reason=NATIVE_FLAG_LIMIT_OR_UNAVAILABLE")
+            return null
+        }
+        if (!nativeReported) {
+            nativeReported = true
+            android.util.Log.i("PitwallNativeHotPath", "FLAG_ENGINE requested=RUST actual=RUST reason=FLAGS_SAMPLED")
+        }
+        val track = when (nativeResult[0].toInt()) {
+            4 -> TrackCondition.SAFETY_CAR
+            5 -> TrackCondition.RED
+            6 -> TrackCondition.VSC
+            7 -> TrackCondition.VSC_ENDING
+            8 -> TrackCondition.SAFETY_CAR_ENDING
+            else -> TrackCondition.CLEAR
+        }
+        val resume = resumptions.getOrNull(nativeResult[1].toInt())
+        val previous = lastNativePicture
+        var count = 0
+        var same = previous != null && previous.track == track && previous.resumption === resume
+        for (id in 1..64) {
+            val level = nativeResult[id + 2].toInt()
+            if (level != 0) {
+                count++
+                if (previous?.yellow?.get(id) != level) same = false
+            }
+        }
+        if (same && previous!!.yellow.size == count) return previous
+        val yellow = HashMap<Int, Int>(count)
+        for (id in 1..64) {
+            val level = nativeResult[id + 2].toInt()
+            if (level != 0) yellow[id] = level
+        }
+        return FlagPicture(track, yellow, resume).also { lastNativePicture = it }
+    }
+
+    fun at(t: Long, nativeRequested: Boolean = false): FlagPicture {
+        if (nativeRequested) nativeAt(t)?.let { return it }
         var code = 1
         var since = 0L
         for ((utc, c) in status) {
@@ -471,7 +535,8 @@ class WeatherReading(
     val raining: Boolean?,
 )
 
-class WeatherLog(private val times: LongArray, private val readings: List<WeatherReading>) {
+class WeatherLog(internal val times: LongArray, private val readings: List<WeatherReading>) {
+    internal fun atSnapshot(index: Int): WeatherReading? = readings.getOrNull(index)
     fun at(utcMs: Long): WeatherReading? {
         if (readings.isEmpty() || utcMs < times.first()) return null
         val index = times.floorIndex(utcMs)

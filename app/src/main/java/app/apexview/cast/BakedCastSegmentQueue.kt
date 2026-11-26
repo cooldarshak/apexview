@@ -6,6 +6,7 @@ internal class BakedCastSegmentQueue(
     private val maxVideo: Int = 349,
     private val maxAudio: Int = 2048,
     private val maxBytes: Long = 48L * 1024 * 1024,
+    private val nativeRequested: () -> Boolean = { false },
 ) {
     data class Ready(val video: List<BakedCastTransportStream.Sample>,
                      val audio: List<BakedCastTransportStream.Sample>, val durationUs: Long) {
@@ -43,19 +44,50 @@ internal class BakedCastSegmentQueue(
         recordMemory()
     }
 
+    private var audioMetadata = LongArray(0)
+    private var audioNative: Boolean? = null
     fun offerAudio(samples: List<BakedCastTransportStream.Sample>) {
-        for (sample in samples) {
-            require(!sample.video && sample.ptsUs >= 0 && sample.ptsUs > latestAudioUs) {
-                "Baked Cast commentary timestamps are not increasing"
+        if (samples.isEmpty()) return
+        // Validate the entire batch before mutation. Invalid samples must not
+        // leave a half-enqueued batch or unaccounted retained buffers.
+        require(samples.size <= maxAudio - audio.size && samples.none { it.video })
+        val requested = nativeRequested()
+        val result = if (requested && audioNative != false && samples.size <= 2048) {
+            if (audioMetadata.size < samples.size * 2) audioMetadata = LongArray(samples.size * 2)
+            samples.forEachIndexed { i, sample ->
+                audioMetadata[i * 2] = sample.ptsUs
+                audioMetadata[i * 2 + 1] = sample.bytes.size.toLong()
             }
-            require(audio.size < maxAudio && sample.bytes.size.toLong() <= remainingBytes()) {
-                "Baked Cast commentary publication backlog exhausted"
+            app.apexview.tiled.NativeHotPath.audioAdmit(audioMetadata, samples.size,
+                latestAudioUs, remainingBytes(), maxAudio - audio.size)
+        } else null
+        if (requested && audioNative != (result != null)) {
+            audioNative = result != null
+            android.util.Log.i("PitwallNativeHotPath", "AUDIO_QUEUE_ENGINE requested=RUST actual=" +
+                if (result != null) "RUST reason=BATCH_VALIDATED" else "JVM reason=NATIVE_UNAVAILABLE")
+        } else if (!requested) { audioNative = null; audioMetadata = LongArray(0) }
+        val accepted = if (result != null) {
+            require(result >= 0L) { "Baked Cast commentary admission rejected" }
+            result
+        } else {
+            var last = latestAudioUs
+            var total = 0L
+            for (sample in samples) {
+                require(sample.ptsUs >= 0 && sample.ptsUs > last && sample.bytes.isNotEmpty()) {
+                    "Baked Cast commentary timestamps are not increasing or sample is empty"
+                }
+                total = Math.addExact(total, sample.bytes.size.toLong())
+                require(total <= remainingBytes()) { "Baked Cast commentary publication backlog exhausted" }
+                last = sample.ptsUs
             }
-            audio.addLast(sample)
-            pendingBytes += sample.bytes.size
-            latestAudioUs = sample.ptsUs
-            recordMemory()
+            total
         }
+        for (sample in samples) {
+            audio.addLast(sample)
+            latestAudioUs = sample.ptsUs
+        }
+        pendingBytes += accepted
+        recordMemory()
     }
 
     private fun remove(queue: ArrayDeque<BakedCastTransportStream.Sample>) =
@@ -91,6 +123,7 @@ internal class BakedCastSegmentQueue(
 
     fun clear() {
         video.clear(); audio.clear(); pendingBytes = 0L
+        audioMetadata = LongArray(0)
         recordMemory()
     }
 }
