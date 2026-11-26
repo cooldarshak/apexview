@@ -117,7 +117,7 @@ internal class BakedCastCaptureWorker(
         }
         recordGraphicsOwner()
         encoder = ReplayClipEncoder(context, display, contextGl, config, width, height,
-            castSample = session::videoSample)
+            castSample = session::videoSample, nativeRequested = session::nativeProcessingRequested)
         try {
             directCapture = BakedCastGpuCapture(gl, width, height, overlay, drawVideo, detachVideo)
         } catch (error: Exception) { useWindowCapture(error) }
