@@ -63,12 +63,16 @@ internal object ProcessMemoryDiagnostic {
     // A null snapshot means the library was not loaded or the query failed;
     // zero is reserved for a successfully measured empty native arena.
     fun fragmentFields(values: LongArray?): String {
-        if (values == null || (values.size != 5 && values.size != 9) || values.any { it < 0L } ||
-            values[2] > values[1] || values[1] > values[0]) return "nativeFragmentArena=UNAVAILABLE"
+        if (values == null || (values.size != 5 && values.size != 9 && values.size != 15) || values.any { it < 0L } ||
+            values[2] > values[1] || values[1] > values[0] ||
+            (values.size == 15 && (values[10] > values[9] || values[10] > values[0] - values[1]))) return "nativeFragmentArena=UNAVAILABLE"
         return "nativeFragmentCapacityBytes=${values[0]} nativeFragmentLiveCapacityBytes=${values[1]} " +
             "nativeFragmentLivePayloadBytes=${values[2]} nativeFragmentFreeCapacityBytes=${values[0] - values[1]} " +
             "nativeFragmentBackings=${values[3]} nativeFragmentAllocations=${values[4]}" +
-            (if (values.size == 9) " nativeOwnedOutputAllocations=${values[5]} nativeOwnedOutputReuses=${values[6]} " +
-                "nativeAdoptedFragments=${values[7]} nativeAdoptedBytes=${values[8]}" else "")
+            (if (values.size >= 9) " nativeOwnedOutputAllocations=${values[5]} nativeOwnedOutputReuses=${values[6]} " +
+                "nativeAdoptedFragments=${values[7]} nativeAdoptedBytes=${values[8]}" else "") +
+            (if (values.size == 15) " nativeAtlasIdleLimitBytes=${values[9]} nativeAtlasIdleBytes=${values[10]}" +
+                " nativeOwnedMissEmpty=${values[11]} nativeOwnedMissFit=${values[12]}" +
+                " nativeOwnedMissCeiling=${values[13]} nativeOwnedAllocFailures=${values[14]}" else "")
     }
 }

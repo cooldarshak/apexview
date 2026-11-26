@@ -37,6 +37,13 @@ struct Arena {
     adopted: u64,
     adopted_bytes: u64,
     free: Vec<Vec<u8>>,
+    // Clear atlas output only. Never expose this cache to generic allocations.
+    atlas_idle: Option<Vec<u8>>,
+    atlas_idle_limit: usize,
+    owned_miss_empty: u64,
+    owned_miss_fit: u64,
+    owned_miss_ceiling: u64,
+    owned_alloc_failures: u64,
     charged: usize,
     allocations: u64,
 }
@@ -84,6 +91,20 @@ impl Arena {
     // OUT of this arena before writing, so it is charged only to the worker.
     fn take_output(&mut self,size:usize,ceiling:usize)->Option<Vec<u8>> {
         if size==0 || size>ceiling || ceiling>crate::bmff::MAX_ATLAS_BYTES {return None;}
+        if let Some(mut b)=self.atlas_idle.take() {
+            self.charged-=b.capacity();
+            if b.capacity()>ceiling {
+                self.owned_miss_ceiling=self.owned_miss_ceiling.saturating_add(1);
+            } else if !reusable_capacity(size,b.capacity()) {
+                self.owned_miss_fit=self.owned_miss_fit.saturating_add(1);
+            } else {
+                b.resize(size,0);
+                self.owned_reuses=self.owned_reuses.saturating_add(1);
+                return Some(b);
+            }
+        } else if self.best_free(size).is_none() {
+            self.owned_miss_empty=self.owned_miss_empty.saturating_add(1);
+        }
         if let Some(i)=self.best_free(size).filter(|&i|self.free[i].capacity()<=ceiling) {
             let mut b=self.free.swap_remove(i);
             self.charged-=b.capacity();
@@ -93,7 +114,10 @@ impl Arena {
         } else {
             self.trim();
             let mut b=Vec::new();
-            b.try_reserve_exact(size).ok()?;
+            if b.try_reserve_exact(size).is_err() {
+                self.owned_alloc_failures=self.owned_alloc_failures.saturating_add(1);
+                return None;
+            }
             b.resize(size,0);
             self.owned_allocations=self.owned_allocations.saturating_add(1);
             Some(b)
@@ -142,8 +166,10 @@ impl Arena {
     fn release(&mut self, id: i64) -> bool {
         let Some(mut bytes) = self.live.remove(&id) else { return false; };
         self.viewed.remove(&id);
-        self.ranges.remove(&id);
+        let atlas=self.ranges.remove(&id).is_some();
         // Final Java owner has retired every view before calling release.
+        // Wipe spare capacity as well, before any reuse across outputs.
+        if atlas {bytes.resize(bytes.capacity(),0);}
         bytes.fill(0);
         // No idle native arena survives the final history/reader lease.
         if self.live.is_empty() {
@@ -156,6 +182,21 @@ impl Arena {
         // use the normal bounded cache; active readers remain untouched.
         if id <= self.discard_through {
             self.charged -= bytes.capacity();
+            return true;
+        }
+        if atlas {
+            // Keep at most one idle atlas backing, within the latest sampled
+            // incremental allowance. No idle pool when there are no readers.
+            if bytes.capacity()<=self.atlas_idle_limit {
+                self.trim();
+                self.atlas_idle=Some(bytes);
+            } else {
+                self.charged-=bytes.capacity();
+            }
+            return true;
+        }
+        if self.atlas_idle.is_some() {
+            self.charged-=bytes.capacity();
             return true;
         }
         // Prefer recent size observations over a stale backing that survived
@@ -181,11 +222,21 @@ impl Arena {
          self.live.iter().map(|(id,b)|self.ranges.get(id).map_or(b.len(),|r|r.len())).sum::<usize>() as u64,
          self.live.len() as u64, self.allocations]
     }
+    fn set_atlas_idle_limit(&mut self,limit:usize) {
+        self.atlas_idle_limit=limit.min(crate::bmff::MAX_ATLAS_BYTES);
+        if self.atlas_idle_limit==0 {
+            self.trim_pressure();
+        } else if self.atlas_idle.as_ref().is_some_and(|b|b.capacity()>self.atlas_idle_limit) {
+            if let Some(b)=self.atlas_idle.take(){self.charged-=b.capacity();}
+        }
+    }
     fn trim(&mut self) {
         for bytes in self.free.drain(..) { self.charged -= bytes.capacity(); }
+        if let Some(bytes)=self.atlas_idle.take(){self.charged-=bytes.capacity();}
     }
     fn trim_pressure(&mut self) {
         self.discard_through = self.serial;
+        self.atlas_idle_limit=0;
         self.trim();
     }
 }
@@ -211,15 +262,19 @@ pub fn release(id: i64) -> bool { arena().lock().is_ok_and(|mut a| a.release(id)
 #[cfg(target_os = "android")]
 pub fn trim() { if let Ok(mut a) = arena().lock() { a.trim_pressure(); } }
 #[cfg(target_os = "android")]
-pub fn snapshot() -> Option<[u64; 9]> {
+pub fn snapshot() -> Option<[u64; 15]> {
     let a=arena().lock().ok()?;
     let [capacity,live,payload,count,allocations]=a.snapshot();
-    Some([capacity,live,payload,count,allocations,a.owned_allocations,a.owned_reuses,a.adopted,a.adopted_bytes])
+    Some([capacity,live,payload,count,allocations,a.owned_allocations,a.owned_reuses,a.adopted,a.adopted_bytes,
+          a.atlas_idle_limit as u64,a.atlas_idle.as_ref().map_or(0,|b|b.capacity()) as u64,
+          a.owned_miss_empty,a.owned_miss_fit,a.owned_miss_ceiling,a.owned_alloc_failures])
 }
 #[cfg(target_os = "android")]
 pub(crate) fn adopt(capacity:usize,packet_len:usize,offset:usize,size:usize,
-                    incremental:usize,take:impl FnOnce()->Option<Vec<u8>>)->Option<i64> {
-    arena().lock().ok()?.adopt(capacity,packet_len,offset,size,incremental,take)
+                    incremental:usize,cache_allowed:bool,take:impl FnOnce()->Option<Vec<u8>>)->Option<i64> {
+    let mut a=arena().lock().ok()?;
+    a.set_atlas_idle_limit(if cache_allowed {incremental} else {0});
+    a.adopt(capacity,packet_len,offset,size,incremental,take)
 }
 pub(crate) fn output_buffer(size:usize,ceiling:usize)->Option<Vec<u8>> {
     if size==0 || size>ceiling {return None;}
@@ -333,6 +388,7 @@ mod tests {
     #[test]
     fn owned_output_adoption_keeps_same_pointer_and_charges_once() {
         let mut arena=Arena::default();
+        arena.set_atlas_idle_limit(2048);
         let keep=arena.allocate(1).unwrap();
         let mut output=arena.take_output(1024,2048).unwrap();
         output[16..].fill(7);
@@ -380,12 +436,63 @@ mod tests {
     }
 
     #[test]
+    fn observed_large_atlas_backing_reuses_and_retires() {
+        let mut a=Arena::default();
+        let mib=1024*1024;
+        a.set_atlas_idle_limit(10*mib);
+        let keep=a.allocate(1).unwrap();
+        let packet=9*mib;
+        let b=a.take_output(packet,10*mib).unwrap();
+        let cap=b.capacity();
+        let ptr=b.as_ptr();
+        let id=a.adopt(cap,packet,16,packet-16,MAX_BYTES,||Some(b)).unwrap();
+        assert!(a.release(id));
+        assert_eq!(a.snapshot()[0],(1+cap) as u64);
+        assert_eq!(a.atlas_idle.as_ref().unwrap().as_ptr(),ptr);
+        let mut next=a.take_output(packet-256*1024,10*mib).unwrap();
+        assert_eq!(next.as_ptr(),ptr);
+        assert!(next.iter().all(|&v|v==0));
+        next[16]=0x61;
+        let len=next.len();
+        let cap=next.capacity();
+        let id=a.adopt(cap,len,16,len-16,MAX_BYTES,||Some(next)).unwrap();
+        assert!(a.mark_viewed(id));
+        a.trim_pressure();
+        assert_eq!(a.live[&id][16],0x61);
+        a.set_atlas_idle_limit(10*mib);
+        assert!(a.release(id));
+        assert!(a.atlas_idle.is_none());
+        assert!(a.release(keep));
+        assert_eq!(a.charged,0);
+        assert_eq!(a.owned_allocations,1);
+        assert_eq!(a.owned_reuses,1);
+    }
+    #[test]
+    fn atlas_reuse_1000_serial_adoptions_and_exact_accounting() {
+        let mut a=Arena::default();
+        a.set_atlas_idle_limit(4096);
+        let keep=a.allocate(1).unwrap();
+        for _ in 0..1000 {
+            let b=a.take_output(2048,4096).unwrap();
+            let cap=b.capacity();
+            let id=a.adopt(cap,2048,16,2032,MAX_BYTES,||Some(b)).unwrap();
+            assert_eq!(a.charged,1+cap);
+            assert!(a.release(id));
+            assert_eq!(a.charged,1+cap);
+        }
+        assert_eq!(a.owned_allocations,1);
+        assert_eq!(a.owned_reuses,999);
+        assert!(a.release(keep));
+        assert_eq!(a.charged,0);
+    }
+    #[test]
     fn build_886_fragment_sizes_replay_with_bounded_capacity() {
         let sizes=[7895615,6988629,6861401,6582662,6434449,6215677,6932098,6932098,
             6577768,7313173,6215467,7076904,7895615,6988629,6861401,6582662,6434449,
             6857997,6665906,6415811,6056382,6601462,6640173,6951403,6837369,6357568,
             6380200,6424259,6613333,7439555,6507094,7220002,6436775,7137153];
         let mut a=Arena::default();
+        a.set_atlas_idle_limit(16*1024*1024);
         let mut cached=std::collections::VecDeque::new();
         let mut peak=0;
         for size in sizes {

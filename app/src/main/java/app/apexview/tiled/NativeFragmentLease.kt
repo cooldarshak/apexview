@@ -105,8 +105,16 @@ internal class NativeFragmentLease private constructor(private val shared: Share
                 val h = context?.let { NativeStitchingDeviceBudget.sample(it) }
                 val incremental = if (context == null) 192L * 1024 * 1024
                     else if (h == null || h.lowMemory || h.available <= h.threshold) 0L
-                    else (h.available - h.threshold) / 8
-                engine.adoptFragment(token, offset, size, incremental)
+                    else if (engine.budget.foregroundRecovery && !h.lowRam) {
+                        // Reuse the same recovery tier admitted for this atlas,
+                        // after independently reserving its Java staging. Native
+                        // adoption still subtracts outstanding engine commitment.
+                        val staging = engine.budget.inputBytes + 2L * engine.budget.outputBytes + 8L * 1024 * 1024
+                        if (h.jvmHeadroom < staging) 0L
+                        else ((h.available - h.threshold) / 4 - staging).coerceAtLeast(0L)
+                    } else (h.available - h.threshold) / 8
+                engine.adoptFragment(token, offset, size, incremental,
+                    h != null && !h.lowRam && !h.lowMemory && incremental > 0)
             }
             if (adopted > 0) {
                 var transferred = false

@@ -297,7 +297,7 @@ fn submit_atlas_parts(env:&mut JNIEnv<'_>,handle:jlong,generation:jlong,parts:jn
 }
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeAdoptAtlasFragment(
-    _env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong,token:jlong,offset:jint,length:jint,incremental:jlong)->jlong {
+    _env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong,token:jlong,offset:jint,length:jint,incremental:jlong,cache_allowed:jboolean)->jlong {
     guarded(|| {
         let (Ok(offset),Ok(size),Ok(incremental))=(usize::try_from(offset),usize::try_from(length),usize::try_from(incremental))
             else {return i64::from(INVALID);};
@@ -308,7 +308,7 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeAdopt
             let spare=incremental.saturating_sub(s.engine.future_commitment(bridge));
             // Moving the buffer adds no resident allocation NOW, but reserve
             // enough incremental headroom for the next bounded output job.
-            crate::fragment_storage::adopt(capacity,packet_len,offset,size,spare,
+            crate::fragment_storage::adopt(capacity,packet_len,offset,size,spare,cache_allowed!=0,
                 ||s.engine.take_owned_output(token,capacity,packet_len)).unwrap_or(BACKPRESSURE)
         })
     })
@@ -359,7 +359,11 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeAlloc
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeSeek(
     _env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong)->jlong {
-    guarded(||engine_call(handle,Engine::seek))
+    guarded(||engine_call(handle,|e|{
+        let result=e.seek();
+        if result>0 {crate::fragment_storage::trim();}
+        result
+    }))
 }
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeClose(
@@ -372,6 +376,7 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeClose
         let mut session=r.active.take().expect("active engine");
         let joined=session.engine.close();
         drop(session);
+        crate::fragment_storage::trim();
         if joined{1}else{i64::from(PANIC)}
     })
 }

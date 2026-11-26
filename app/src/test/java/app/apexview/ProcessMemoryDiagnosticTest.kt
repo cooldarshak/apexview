@@ -27,6 +27,15 @@ class ProcessMemoryDiagnosticTest {
         assertTrue(result.contains("nativeFragmentLivePayloadBytes=70"))
         assertTrue(result.contains("nativeFragmentFreeCapacityBytes=20"))
     }
+    @Test fun atlasIdleIsAlreadyIncludedInFreeCapacity() {
+        val v=longArrayOf(100,80,70,2,0,3,4,7,400,32,20,1,2,3,0)
+        val result=ProcessMemoryDiagnostic.fragmentFields(v)
+        assertTrue(result.contains("nativeAtlasIdleBytes=20"))
+        assertTrue(result.contains("nativeOwnedMissFit=2"))
+        assertTrue(result.contains("nativeFragmentFreeCapacityBytes=20"))
+        v[10]=21
+        assertEquals("nativeFragmentArena=UNAVAILABLE",ProcessMemoryDiagnostic.fragmentFields(v))
+    }
     @Test fun ownedTransferCountersAndRunningLowerBoundAreExplicit() {
         val fragment = ProcessMemoryDiagnostic.fragmentFields(longArrayOf(100, 80, 70, 2, 0, 3, 4, 7, 400))
         assertTrue(fragment.contains("nativeOwnedOutputAllocations=3"))

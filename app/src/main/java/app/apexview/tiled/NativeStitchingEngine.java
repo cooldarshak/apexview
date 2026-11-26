@@ -18,13 +18,17 @@ public final class NativeStitchingEngine implements AutoCloseable {
     public static final class Budget {
         public final int slots, inputBytes, outputBytes;
         public final long ceilingBytes, reservedBytes;
-        public final boolean compactAtlas;
+        public final boolean compactAtlas, foregroundRecovery;
         private Budget(int slots,int input,int output,long ceiling) {
             this(slots,input,output,ceiling,false);
         }
         private Budget(int slots,int input,int output,long ceiling,boolean compactAtlas) {
+            this(slots,input,output,ceiling,compactAtlas,false);
+        }
+        private Budget(int slots,int input,int output,long ceiling,boolean compactAtlas,boolean foregroundRecovery) {
             this.slots=slots;inputBytes=input;outputBytes=output;ceilingBytes=ceiling;
             this.compactAtlas=compactAtlas;
+            this.foregroundRecovery=foregroundRecovery;
             reservedBytes=(slots+(compactAtlas?0L:1L))*(input+(long)output)+RESERVE;
         }
     }
@@ -97,7 +101,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
         long required=2L*(input+(long)output)+RESERVE+atlasWorkspaceBytes(input,output);
         if (javaTransient>jvmHeadroom || javaTransient>=allowance ||
             required>MAX_ATLAS_BUDGET || required>allowance-javaTransient) return null;
-        return new Budget(2,input,output,required,true);
+        return new Budget(2,input,output,required,true,true);
     }
     public static long atlasWorkspaceBytes(int input,int output) {
         return 4L*input+output+8*MIB;
@@ -188,7 +192,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
                                                        boolean foreground,long slackMs);
     private static native long nativeSubmitAtlasOwnedParts(long handle,long generation,byte[][] parts,int length,
                                                             boolean foreground,long slackMs);
-    private static native long nativeAdoptAtlasFragment(long handle,long token,int offset,int length,long incremental);
+    private static native long nativeAdoptAtlasFragment(long handle,long token,int offset,int length,long incremental,boolean cacheAllowed);
     private static native long nativeReadAtlasFragment(long handle,long token,int sourceOffset,long id,int length);
     private static native long nativeReadAtlasArray(long handle,long token,int sourceOffset,byte[] target,
                                                      int targetOffset,int length);
@@ -292,9 +296,12 @@ public final class NativeStitchingEngine implements AutoCloseable {
     }
     public synchronized long acquire(long token){return handle==0?CLOSED:nativeAcquire(handle,token);}
     synchronized long adoptFragment(long token,int offset,int length,long incremental) {
+        return adoptFragment(token,offset,length,incremental,false);
+    }
+    synchronized long adoptFragment(long token,int offset,int length,long incremental,boolean cacheAllowed) {
         if(handle==0)return CLOSED;
         if(!budget.compactAtlas || offset<0 || length<=0 || length>budget.outputBytes || incremental<0)return INVALID;
-        return nativeAdoptAtlasFragment(handle,token,offset,length,incremental);
+        return nativeAdoptAtlasFragment(handle,token,offset,length,incremental,cacheAllowed);
     }
     synchronized long readToFragment(long token,int sourceOffset,long id,int length) {
         if(handle==0)return CLOSED;
