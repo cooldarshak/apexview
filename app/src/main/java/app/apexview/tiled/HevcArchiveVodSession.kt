@@ -269,6 +269,19 @@ internal class HevcArchiveVodSession(
             })
     }
 
+    /** A single catch-up group after the cold proof, before disturbing a working
+     * decoder. Retain the verified geometry and first fragment, never restart
+     * manifests or native proof for ordinary forward clock movement. The caller
+     * chooses the final handoff clock once; this must not chase it in a loop. */
+    internal fun prepareHandoffAt(positionMs: Long) {
+        val target = segmentAt(ArchiveTimelineSearch.msToUs(positionMs))
+        val cached = synchronized(cacheLock) { checkOpen(); cache.contains(target) }
+        val started = System.nanoTime()
+        if (!cached) delivery.obtainLease(target).close()
+        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_HANDOFF_PREPARE segment=$target cached=$cached " +
+            "waitMs=${(System.nanoTime()-started)/1_000_000L} proof=REUSED")
+    }
+
     fun dataSourceFactory(): DataSource.Factory = DataSource.Factory { ResourceDataSource(this) }
 
     fun segmentAt(positionUs: Long): Int = ArchiveTimelineSearch.floorIndex(groups.size, positionUs) { groups[it].startUs }
