@@ -67,6 +67,21 @@ class PlaybackTimingWorkCoordinatorTest {
         assertFalse(cancelled.isCompleted)
     }
 
+    @Test fun rapidQualityChoicesUseOnlyTheLatestCallbackAndStopCancelsPending() = runBlocking {
+        val work = PlaybackWorkCoordinator(this)
+        val committed = mutableListOf<Int>()
+        val result = CompletableDeferred<Unit>()
+        work.coalesceQualityRestart(this) { committed += 1080 }
+        work.coalesceQualityRestart(this) { committed += 540 }
+        work.coalesceQualityRestart(this) { committed += 720; result.complete(Unit) }
+        withTimeout(1500) { result.await() }
+        assertEquals(listOf(720), committed)
+        work.coalesceQualityRestart(this) { committed += 360 }
+        work.cancelQualityRestart()
+        kotlinx.coroutines.delay(200)
+        assertEquals(listOf(720), committed)
+    }
+
     @Test fun captureIsRetiredOnlyAfterItsOldWorkerStopsAndReplacementWaits() = runBlocking {
         val work = PlaybackWorkCoordinator(this)
         val firstStarted = CompletableDeferred<Unit>()

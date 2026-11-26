@@ -30,6 +30,7 @@ internal class PlaybackWorkCoordinator(
     val capture: CmafCaptureLifecycle? get() = currentCapture?.source
     private var retryJob: Job? = null
     private var seekJob: Job? = null
+    private var qualityRestartJob: Job? = null
     private var offerJob: Job? = null
     val offerMutex = Mutex()
     var castRestartJob: Job? = null
@@ -111,6 +112,31 @@ internal class PlaybackWorkCoordinator(
             seekJob = null
             if (latest != null) commit(latest)
         }
+    }
+
+    /** One pending quality replacement on the main looper. The first request
+     * establishes the short bounded window; subsequent choices replace its
+     * callback without opening another capture or decoder. */
+    private var pendingQualityRestart: (() -> Unit)? = null
+
+    fun coalesceQualityRestart(scope: CoroutineScope, restart: () -> Unit) {
+        pendingQualityRestart = restart
+        if (qualityRestartJob?.isActive == true) return
+        qualityRestartJob = scope.launch(start = CoroutineStart.LAZY) {
+            delay(150L)
+            val latest = pendingQualityRestart
+            pendingQualityRestart = null
+            qualityRestartJob = null
+            latest?.invoke()
+        }
+        qualityRestartJob?.start()
+    }
+
+    fun cancelQualityRestart() {
+        val old = qualityRestartJob
+        qualityRestartJob = null
+        pendingQualityRestart = null
+        old?.cancel()
     }
 
     fun scheduleCastRestart(scope: CoroutineScope, restart: () -> Unit) {

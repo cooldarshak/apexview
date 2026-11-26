@@ -165,6 +165,7 @@ class AppState(
     var decoderMode by mutableStateOf(settings.decoderMode)
         private set
     private var archiveCompositionStarting by mutableStateOf(false)
+    private var qualityRestartPending by mutableStateOf(false)
     /** True during genuine multi-feed archive preflight, never inferred from a timer.
      * The viewer must not show one playable camera as a partially ready four-window scene. */
     val sceneActivationPreparing: Boolean
@@ -637,6 +638,7 @@ class AppState(
         castResources.confirmRendering()
         if (castPlaybackHandedOff || !castingActive) return
         if (!localChosen) remoteCastClock.update(castFramePositionMs, playing, playbackSpeed, castRelay!!.session.durationUs / 1000)
+        cancelQualityRestart()
         castPlaybackHandedOff = true
         ProtectedHevcLiveComposition.updateLocalNativeHeaderPreference(false)
         sendCaptionPreferenceToReceiver()
@@ -2876,6 +2878,7 @@ class AppState(
 
     /** Replay composition is a finite on-demand source, not a moving live capture window. */
     private fun startArchiveSingleDecoderComposition(contentId: Long, attempt: Int = 0) {
+        cancelQualityRestart()
         if (castPlaybackHandedOff) { applyVideoBudget(); return }
         playbackWork.cancelRetry()
         if (protectedCompositionHost != null && !singleDecoderSceneActive) stopProtectedCompositionPresentation()
@@ -3617,6 +3620,7 @@ class AppState(
     }
 
     private fun startRealF1DashCapture(contentId: Long, labels: List<String>) {
+        cancelQualityRestart()
         val byLabel = tiles.filter { it.contentId == contentId }.associateBy {
             it.channel.channelId?.let { id -> "channel-$id" } ?: "default-channel"
         }
@@ -3798,6 +3802,7 @@ class AppState(
 
     /** Stop protected capture and restore the original tile arrangement and feed player. */
     fun stopProtectedCompositionPresentation(restorePlayer: Boolean = true, keepSourceVideoDisabled: Boolean = false) {
+        cancelQualityRestart()
         // Revoke the publisher BEFORE cancelling; a late catch/finally must never
         // expose a historical CANCELLED result after native playback resumes.
         invalidateCompositionDiagnostic()
@@ -6664,7 +6669,7 @@ class AppState(
         return tiles.firstOrNull { it.feed.sourceStream.profileLabel == label }?.feed?.sourceQualityNotice
     }
 
-    internal val sourceQualityPreparing: Boolean get() = archiveCompositionStarting
+    internal val sourceQualityPreparing: Boolean get() = archiveCompositionStarting || qualityRestartPending
 
     private fun recordProtectedRenditions(
         labels: List<String>, geometry: app.apexview.tiled.ProtectedHevcLiveComposition.SourceGeometry?
@@ -6721,6 +6726,29 @@ class AppState(
         return height
     }
 
+    private fun cancelQualityRestart() {
+        playbackWork.cancelQualityRestart()
+        qualityRestartPending = false
+    }
+
+    private fun scheduleQualityRestart(contentId: Long) {
+        // An already-running preparation must be superseded immediately: it
+        // could otherwise publish obsolete quality during the debounce window.
+        if (archiveCompositionStarting) {
+            startArchiveSingleDecoderComposition(contentId)
+            return
+        }
+        val selection = tiles.map { it.id to it.feed }
+        qualityRestartPending = true
+        playbackWork.coalesceQualityRestart(scope) {
+            qualityRestartPending = false
+            if (!castPlaybackHandedOff && settings.decoderMode == DecoderMode.SINGLE &&
+                tiles.size > 1 && tiles.all { it.contentId == contentId } &&
+                tiles.map { it.id to it.feed } == selection)
+                startArchiveSingleDecoderComposition(contentId)
+        }
+    }
+
     /** A choice belongs to the F1 feed, not its current on-screen size or tile position. */
     fun chooseFeedVideoQuality(tileId: Int, choice: VideoQuality?) {
         val tile = tiles.firstOrNull { it.id == tileId } ?: return
@@ -6739,7 +6767,7 @@ class AppState(
         tiles.filter { it.feed.sourceStream.profileLabel == label }.forEach {
             it.feed.setVideoQuality(qualityFor(it))
         }
-        if (composed && !castPlaybackHandedOff) startArchiveSingleDecoderComposition(tile.contentId)
+        if (composed && !castPlaybackHandedOff) scheduleQualityRestart(tile.contentId)
         showChrome()
     }
 
@@ -6751,7 +6779,7 @@ class AppState(
         val contentId = changed.firstOrNull()?.contentId
         if (contentId != null && settings.decoderMode == DecoderMode.SINGLE &&
             tiles.size > 1 && tiles.all { it.contentId == contentId } && !castPlaybackHandedOff)
-            startArchiveSingleDecoderComposition(contentId)
+            scheduleQualityRestart(contentId)
         qualitySheetOpen = false
         showChrome()
     }
