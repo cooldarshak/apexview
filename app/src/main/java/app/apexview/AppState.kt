@@ -203,6 +203,8 @@ class AppState(
     private val castCoordinator = app.apexview.cast.CastSessionCoordinator()
     private val castPreparationGeneration get() = castCoordinator.preparation
     private var castRetryAfter = 0L
+    private var castQualityRestartJob: Job? = null
+    private var castQualityRestartPending by mutableStateOf(false)
     val castingActive: Boolean get() = castResources.active
     var tvCastingMenuOpen by mutableStateOf(false)
     var castPickerOpen by mutableStateOf(false)
@@ -753,7 +755,7 @@ class AppState(
     }
     fun startFullSceneCast() = prepareFullSceneCast(false)
     fun retryFullSceneCast() = prepareFullSceneCast(castingActive)
-    private fun prepareFullSceneCast(replace: Boolean) {
+    private fun prepareFullSceneCast(replace: Boolean, qualityReplacement: Boolean = false) {
         if ((castingActive && !replace) || castBusy) return
         if (castResources.hasRetiredMedia) {
             castStatus = "Wait for the current TV transition or stop and reconnect."
@@ -777,7 +779,7 @@ class AppState(
         val requestedHeights = castTiles.map { it.feed.sourceStream.profileLabel }
             .zip(selectedQualities.map { it.targetHeight }).toMap()
         val castQuality = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities)
-        val verifiedClear = singleDecoderSceneActive &&
+        val verifiedClear = !(qualityReplacement && castRelay != null) && singleDecoderSceneActive &&
             singleDecoderScenePlayer?.archiveSceneSession?.sourceLabels?.toSet() ==
                 castTiles.map { it.feed.sourceStream.profileLabel }.toSet()
         val overlayRoute = app.apexview.cast.CastOverlayDeliveryPolicy.choose(
@@ -1178,6 +1180,7 @@ class AppState(
         message = reason
     }
     private fun releaseCastRelay(resumeLocal: Boolean = true) {
+        cancelCastQualityRestart()
         castCoordinator.beginPreparation()
         castCoordinator.endLoad()
         remoteCaptionTracks = emptyList()
@@ -6760,6 +6763,7 @@ class AppState(
         }
 
     internal val sourceQualityPreparing: Boolean get() = archiveCompositionStarting || qualityRestartPending ||
+        castQualityRestartPending || (castBusy && castPreparationJob != null) ||
         (directCast != null && localDirectQualitySupported && tiles.singleOrNull()?.let {
             remoteDirectRequested != qualityFor(it).targetHeight
         } == true)
@@ -6853,6 +6857,61 @@ class AppState(
         }
     }
 
+    private fun cancelCastQualityRestart() {
+        val old = castQualityRestartJob
+        castQualityRestartJob = null
+        castQualityRestartPending = false
+        old?.cancel()
+    }
+
+    /** Receiver-owned composition changes are not local decoder restarts.
+     * Coalesce choices and wait for the existing preparation/retired owner to
+     * drain, preserving the one-replacement budget and receiver connection. */
+    private fun requestComposedCastQuality(): Boolean {
+        val applicable = castRelay != null || nativeComposedCast != null ||
+            (castPreparationJob?.isActive == true && bakedCastSession == null &&
+                directCast == null && !singleDecoderSceneActive)
+        if (!applicable) return false
+        cancelCastQualityRestart()
+        val selection = tiles.map { it.id to it.feed }
+        val connection = localConnection
+        val client = googleCastRemoteClient
+        val local = localChosen
+        castQualityRestartPending = true
+        val job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            try {
+                fun sameOwner(): Boolean = tiles.map { it.id to it.feed } == selection &&
+                    localChosen == local && (if (local) localReady && connection != null &&
+                        localConnection === connection else client != null && googleCastRemoteClient === client)
+                kotlinx.coroutines.delay(150L)
+                val ready = kotlinx.coroutines.withTimeoutOrNull(65_000L) {
+                    while (sameOwner() && (castBusy || castResources.hasRetiredMedia))
+                        kotlinx.coroutines.delay(100L)
+                    sameOwner()
+                }
+                if (ready == null && sameOwner()) {
+                    message = "The TV quality transition has not finished. Retry Cast to apply the selected quality."
+                    return@launch
+                }
+                if (ready != true || !sameOwner()) return@launch
+                when {
+                    nativeComposedCast != null -> prepareNativeComposedCast(tiles.toList())
+                    directCast != null -> tiles.singleOrNull()?.let { requestDirectCastQuality(it) }
+                    bakedCastSession != null -> tiles.firstOrNull()?.let { scheduleQualityRestart(it.contentId) }
+                    else -> prepareFullSceneCast(castingActive, qualityReplacement = true)
+                }
+            } finally {
+                if (castQualityRestartJob === coroutineContext[Job]) {
+                    castQualityRestartJob = null
+                    castQualityRestartPending = false
+                }
+            }
+        }
+        castQualityRestartJob = job
+        job.start()
+        return true
+    }
+
     private fun requestDirectCastQuality(tile: Tile): Boolean {
         if (directCast?.tileId != tile.id) return false
         if (!localDirectQualitySupported) {
@@ -6882,7 +6941,8 @@ class AppState(
         tiles.filter { it.feed.sourceStream.profileLabel == label }.forEach {
             it.feed.setVideoQuality(qualityFor(it))
         }
-        if (!requestDirectCastQuality(tile) && composed && !castPlaybackHandedOff) scheduleQualityRestart(tile.contentId)
+        if (!requestDirectCastQuality(tile) && !requestComposedCastQuality() && composed && !castPlaybackHandedOff)
+            scheduleQualityRestart(tile.contentId)
         showChrome()
     }
 
@@ -6895,7 +6955,7 @@ class AppState(
             requestDirectCastQuality(it)
         }
         val contentId = changed.firstOrNull()?.contentId
-        if (contentId != null && settings.decoderMode == DecoderMode.SINGLE &&
+        if (contentId != null && !requestComposedCastQuality() && settings.decoderMode == DecoderMode.SINGLE &&
             tiles.size > 1 && tiles.all { it.contentId == contentId } && !castPlaybackHandedOff)
             scheduleQualityRestart(contentId)
         qualitySheetOpen = false
