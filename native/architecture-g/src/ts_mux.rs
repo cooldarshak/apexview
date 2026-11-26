@@ -189,6 +189,29 @@ mod tests{
     }
 
     #[test]
+    fn timestamp_wrap_preserves_monotonic_order_and_rejects_backwards_pts() {
+        // PTS is offset by 9000 ticks. A 40ms step straddles the 33-bit wrap.
+        let before=((MASK-9000-1800)*100/9) as i64;
+        let after=before+40_000;
+        let audio=[0xff,0xf1,0x4c,0x80,1,0x1f,0xfc,0];
+        for (first,second,valid) in [(before,after,true),(after,before,false)] {
+            let mut out=[0u8;188*6];
+            let initial=[15;4];
+            let mut w=Writer::new(&mut out,initial).unwrap();
+            w.tables().unwrap();
+            for (pts,key) in [(first,true),(second,false)] {
+                w.sample(pts,8,true,key,|_,dst|{dst.fill(0x77);Some(())}).unwrap();
+                w.sample(pts,audio.len(),false,false,|at,dst|{
+                    dst.copy_from_slice(audio.get(at..at+dst.len())?);Some(())
+                }).unwrap();
+            }
+            let final_counters=w.finish().unwrap();
+            assert_eq!(final_counters,[0,0,1,1]);
+            assert_eq!(verify_packets(&out,initial),if valid{Some(final_counters)}else{None});
+        }
+    }
+
+    #[test]
     fn complete_adts_extent_is_required(){
         let good=[0xff,0xf1,0x4c,0x80,1,0x1f,0xfc,0];
         assert!(valid_adts(&good,8));
