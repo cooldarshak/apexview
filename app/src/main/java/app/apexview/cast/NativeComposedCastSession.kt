@@ -171,12 +171,33 @@ internal class NativeComposedCastSession(
         snapshot
       }
     }
-    override fun close() {
+    @Synchronized override fun close() {
         if (closed) return
-        closed = true; relay.close()
-        cleanup.launch {
-            try { gate.withLock { capture.reset(); audioTracks.values.forEach { it.close() }; audioTracks.clear(); textTracks.values.forEach { it.close() }; textTracks.clear(); ProtectedHevcLiveComposition.clearSelection(group, discardInitialization = true) } }
-            finally { cleanup.cancel() }
+        closed = true
+        fun release(owner: String, action: () -> Unit) {
+            try { action() }
+            catch (error: RuntimeException) {
+                android.util.Log.w("PitwallCast", "NATIVE_CAST_RELEASE_FAILED owner=$owner", error)
+            }
+        }
+        try { release("relay") { relay.close() } }
+        finally {
+            cleanup.launch {
+                try {
+                    gate.withLock {
+                        release("capture") { capture.reset() }
+                        val audio = audioTracks.values.toList()
+                        audioTracks.clear()
+                        val text = textTracks.values.toList()
+                        textTracks.clear()
+                        audio.forEach { release("audio-track") { it.close() } }
+                        text.forEach { release("text-track") { it.close() } }
+                        release("composition") {
+                            ProtectedHevcLiveComposition.clearSelection(group, discardInitialization = true)
+                        }
+                    }
+                } finally { cleanup.cancel() }
+            }
         }
     }
 }
