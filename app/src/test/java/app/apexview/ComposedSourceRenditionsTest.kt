@@ -120,3 +120,40 @@ class QualityFeedNameTest {
             DriverInfo("1", "RUS", 0, "George", "Russell")))
     }
 }
+
+class CastCompositionQualityReuseTest {
+    private val offers = mapOf(
+        "MAIN" to listOf(640 to 360, 1280 to 720, 1920 to 1080),
+        "ONBOARD" to listOf(640 to 360, 960 to 540, 1280 to 720))
+    private val actual = mapOf("MAIN" to (1920 to 1080), "ONBOARD" to (960 to 540))
+
+    @Test fun exactMixedRungsCanBeReusedButPreviouslyLowerOrHigherRungsCannot() {
+        val request = mapOf("MAIN" to 1080, "ONBOARD" to 540)
+        assertTrue(QualityDisclosurePolicy.canReuseCastComposition(request, actual, offers, true))
+        assertFalse(QualityDisclosurePolicy.canReuseCastComposition(request,
+            actual + ("MAIN" to (1280 to 720)), offers, true))
+        assertFalse(QualityDisclosurePolicy.canReuseCastComposition(request,
+            actual + ("ONBOARD" to (1280 to 720)), offers, true))
+        assertFalse(QualityDisclosurePolicy.canReuseCastComposition(request,
+            actual + ("ONBOARD" to (640 to 360)), offers, true))
+    }
+
+    @Test fun unavailableManualRungRequiresBestKnownLowerOffer() {
+        val request = mapOf("MAIN" to 1080, "ONBOARD" to 480)
+        assertTrue(QualityDisclosurePolicy.canReuseCastComposition(request,
+            actual + ("ONBOARD" to (640 to 360)), offers, true))
+        assertFalse(QualityDisclosurePolicy.canReuseCastComposition(request,
+            actual + ("ONBOARD" to (640 to 360)), emptyMap(), true))
+        assertFalse(QualityDisclosurePolicy.canReuseCastComposition(request, actual, offers, true))
+    }
+
+    @Test fun autoReplacementReevaluatesSourceAndRejectsMissingOrInvalidGeometry() {
+        val request = mapOf("MAIN" to 0, "ONBOARD" to 540)
+        assertTrue(QualityDisclosurePolicy.canReuseCastComposition(request, actual, offers, false))
+        assertFalse(QualityDisclosurePolicy.canReuseCastComposition(request, actual, offers, true))
+        assertFalse(QualityDisclosurePolicy.canReuseCastComposition(request,
+            actual - "ONBOARD", offers, false))
+        assertFalse(QualityDisclosurePolicy.canReuseCastComposition(request,
+            actual + ("ONBOARD" to (0 to 540)), offers, false))
+    }
+}
