@@ -92,6 +92,10 @@ internal class PitBasis(
 
 @Composable
 internal fun rememberPitBasis(app: AppState, timing: SessionTiming, now: Long): PitBasis {
+    val projection = remember(timing.geometry, app.settings.nativeRustStitching) {
+        if (app.settings.nativeRustStitching) NativeCircuitProjection(timing.geometry) else null
+    }
+    fun progress(x: Float, y: Float) = projection?.progress(x, y) ?: timing.geometry.progress(x, y)
     val leader = leaderAt(timing, now)
     val leaderLaps = leader?.let { timing.laps[it] }
 
@@ -106,19 +110,19 @@ internal fun rememberPitBasis(app: AppState, timing: SessionTiming, now: Long): 
         ?: leaderLaps?.at(now)?.lastLap?.time?.let(PitWindow::lapTimeMs)
     // Laid out in time from the leader's latest green lap; distance stands in until there is one.
     val profileLap = green.lastOrNull()
-    val profile = remember(timing.circuitKey, leader, profileLap) {
+    val profile = remember(timing.geometry, leader?.let { timing.tracks[it] }, profileLap, projection) {
         val track = leader?.let { timing.tracks[it] }
         if (track == null || profileLap == null) null
         else LapProfile.from(
             (profileLap.first..profileLap.second step SAMPLE_MS).mapNotNull { t ->
-                track.at(t)?.let { (x, y) -> (t - profileLap.first) to timing.geometry.progress(x, y) }
+                track.at(t)?.let { (x, y) -> (t - profileLap.first) to progress(x, y) }
             },
             profileLap.second - profileLap.first,
         )
     } ?: LapProfile.EVEN
 
     // What a stop costs: this session's stops, else the last measured here, else a typical stop.
-    val lane = remember(timing) { PitWindow.pitLane(timing) }
+    val lane = remember(timing, projection) { PitWindow.pitLane(timing, ::progress) }
     LaunchedEffect(lane?.lossMs, timing.circuitKey) { lane?.let { app.rememberPitLoss(timing.circuitKey, it.lossMs) } }
     val saved = remember(timing.circuitKey) { app.savedPitLoss(timing.circuitKey) }
     val lossMs = lane?.lossMs ?: saved ?: PitWindow.TYPICAL_LOSS_MS
@@ -149,6 +153,7 @@ internal class PitCircleData(val referenceMs: Long, val ring: List<OnCircle>, va
 
 internal fun pitCircleData(app: AppState, timing: SessionTiming, now: Long, basis: PitBasis,
     positionedCars: List<Car>? = null,
+    projection: NativeCircuitProjection? = null,
 ): PitCircleData? {
     val flags = timing.flags.at(now, app.settings.nativeRustStitching)
     val leader = basis.leader
@@ -166,14 +171,16 @@ internal fun pitCircleData(app: AppState, timing: SessionTiming, now: Long, basi
     val inLane = mutableMapOf<String, Float>()
     val ring = mutableListOf<OnCircle>()
     val placed = positionedCars ?: carsAt(timing, now)
-    placed.forEach { car ->
+    val projected = projection?.project(placed) == true
+    placed.forEachIndexed { index, car ->
         val laps = timing.laps[car.number]
         val since = laps?.inPitSince(now)
         if (since != null && lane != null) {
             if (now - since <= lane.laneMs * 2) inLane[car.number] = ((now - since).toFloat() / lane.laneMs).coerceIn(0f, 1f)
-            return@forEach
+            return@forEachIndexed
         }
-        val at = profile.timeFraction(timing.geometry.progress(car.x, car.y))
+        val fraction = if (projected) requireNotNull(projection).fractions[index] else timing.geometry.progress(car.x, car.y)
+        val at = profile.timeFraction(fraction)
         val crossed = laps?.lastCrossing(now)?.let { (now - it).toFloat() / referenceMs }
         ring += OnCircle(car, at, PitWindow.raceDistance(laps?.lapAt(now) ?: 0, at, crossed))
     }
@@ -215,7 +222,7 @@ internal fun pitCircleData(app: AppState, timing: SessionTiming, now: Long, basi
     return PitCircleData(referenceMs, ring, inLane, gaps, chosen?.car?.number, ghost, near?.ahead,
         turn, lane?.let { profile.timeFraction(it.entry) },
         lane?.let { (profile.timeFraction(it.exit) - profile.timeFraction(it.entry)).mod(1f) },
-        timing.corners.map { it.number to profile.timeFraction(timing.geometry.progress(it.x, it.y)) },
+        timing.corners.map { it.number to profile.timeFraction(projection?.progress(it.x, it.y) ?: timing.geometry.progress(it.x, it.y)) },
         leaderLaps?.lapAt(now), green.size, lossMs, lane?.stops, saved != null, app.pitGapsToLeader, flags.track)
 }
 
@@ -229,7 +236,10 @@ private fun PitCircle(app: AppState, timing: SessionTiming, width: Float, height
         OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-pit-circle-position"), app.settings.nativeRustStitching)
     }
     val positionedCars = remember(timing, now, sampler) { sampler.sample(now) }
-    val data = pitCircleData(app, timing, now, rememberPitBasis(app, timing, now), positionedCars)
+    val projection = remember(timing.geometry, app.settings.nativeRustStitching) {
+        if (app.settings.nativeRustStitching) NativeCircuitProjection(timing.geometry) else null
+    }
+    val data = pitCircleData(app, timing, now, rememberPitBasis(app, timing, now), positionedCars, projection)
     val (centre, radius) = pitCircleFrame(app, with(LocalDensity.current) { LABEL_ROOM.toPx() })
     PitCircleDrawing(timing, data, width, height, centre, radius, app.mapOpacity) { targets ->
         CarTargets(app, targets, onTap = { number -> app.pitDriver = if (app.pitDriver == number) null else number })

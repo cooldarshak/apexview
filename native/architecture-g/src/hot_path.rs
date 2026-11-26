@@ -46,6 +46,25 @@ pub fn floor_index_hint(n: usize, now: i64, hint: i32, mut time: impl FnMut(usiz
     floor_index(n, now, time)
 }
 
+/// Cache adjacent timestamps on the stack for one driver and one sample.
+pub fn adjacent_times(
+    count: usize,
+    mut read: impl FnMut(usize, &mut [i64]) -> Option<()>,
+) -> impl FnMut(usize) -> Option<i64> {
+    let mut values = [0; 3];
+    let mut range = 0..0;
+    move |at| {
+        if at >= count { return None; }
+        if !range.contains(&at) {
+            let start = at.saturating_sub(1);
+            let len = (count - start).min(values.len());
+            read(start, &mut values[..len])?;
+            range = start..start + len;
+        }
+        Some(values[at - range.start])
+    }
+}
+
 /// Read at most two adjacent coordinates at once from an external history.
 /// The position kernel asks for lower then upper; a one-point stack cache avoids
 /// two additional JNI array-region calls on each interpolated driver.
@@ -385,5 +404,28 @@ mod tests {
         assert_eq!(scale_us(-1_234_567,90_000),Some(-111_111));
         assert_eq!(scale_us(i64::MAX,1_000_000),Some(i64::MAX));
         assert_eq!(scale_us(i64::MAX,i64::MAX),None);
+    }
+}
+
+#[cfg(test)]
+mod timestamp_window_tests {
+    use super::*;
+
+    #[test]
+    fn neighbours_share_one_read_and_seek_revalidates_the_window() {
+        let values = [1, 2, 2, 7, 9, 14, 20];
+        let mut reads = 0;
+        {
+            let mut read = adjacent_times(values.len(), |start, out| {
+                reads += 1;
+                out.copy_from_slice(&values[start..start + out.len()]);
+                Some(())
+            });
+            assert_eq!(floor_index_hint(values.len(), 2, 2, &mut read), Some(2));
+            assert_eq!(read(1), Some(2));
+            assert_eq!(read(6), Some(20));
+            assert_eq!(read(7), None);
+        }
+        assert_eq!(reads, 2);
     }
 }

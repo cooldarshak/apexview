@@ -208,7 +208,12 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
     // Session-scoped worker owns the immutable display snapshots. Keep heavy
     // sampling off main, and do not publish unchanged frames to Compose.
     val nativeRequested = app.settings.nativeRustStitching
-    var sample by remember(timing) { mutableStateOf<TowerSample?>(null) }
+    // Keep the rows on screen while an independent position/geometry revision
+    // replaces the archive wrapper. A new race or coverage loss clears them.
+    val sessionOwner = if (timing.live || timing.radioBase.isEmpty()) timing else timing.radioBase
+    var sample by remember(sessionOwner, timing.startUtcMs, timing.laps.isEmpty()) {
+        mutableStateOf<TowerSample?>(null)
+    }
     LaunchedEffect(app, timing, nativeRequested) {
         val sampler = OverlayTowerSampler(timing, OverlayPerformanceProbe("phone-tv-tower-sample"), nativeRequested)
         while (true) {

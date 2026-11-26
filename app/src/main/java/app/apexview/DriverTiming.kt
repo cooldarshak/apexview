@@ -277,6 +277,18 @@ object DriverTimingParser {
     private const val LATE_SECTOR_MS = 3_000L
     private const val MAX_MINI_SECTORS = 64
 
+    /** Parser-owned primitive storage. Published histories receive exact-length snapshots. */
+    private class Timestamps {
+        private var values = LongArray(32)
+        private var size = 0
+        fun lastOrNull(): Long? = if (size == 0) null else values[size - 1]
+        operator fun plusAssign(time: Long) {
+            if (size == values.size) values = values.copyOf(size * 2)
+            values[size++] = time
+        }
+        fun toLongArray(): LongArray = values.copyOf(size)
+    }
+
     private class Live {
         var position: Int? = null
         val sector = arrayOfNulls<SectorCell>(3)
@@ -305,10 +317,10 @@ object DriverTimingParser {
         var primaryLapAt = Long.MIN_VALUE
         var stopped = false
         var laps: Int? = null
-        val times = ArrayList<Long>()
+        val times = Timestamps()
         val snaps = ArrayList<DriverLaps.Snapshot>()
-        val crossings = ArrayList<Long>()
-        val lapTimes = ArrayList<Long>()
+        val crossings = Timestamps()
+        val lapTimes = Timestamps()
         val lapCounts = ArrayList<Int>()
 
         private fun sameCell(a: SectorCell?, b: SectorCell?): Boolean =

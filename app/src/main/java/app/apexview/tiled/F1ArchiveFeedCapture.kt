@@ -33,10 +33,11 @@ internal class F1ArchiveFeedCapture(
     suspend fun prepareVod(feeds: List<F1DashFeedCapture.Feed>, positionMs: Long, clockLabel: String,
                            preferredHeight: Int, commentary: String, minimumHeight: Int = 0,
                            preferredHeights: Map<String, Int> = emptyMap(),
-                           autoBandwidthBps: Long? = null): HevcArchiveVodSession {
+                           autoBandwidthBps: Long? = null,
+                           coldNativeProbe: android.content.Context? = null): HevcArchiveVodSession {
         // A cancellation/reset of an older capture cannot zero an in-flight preparation's maps.
         val worker = F1HlsFeedCapture(factory, autoBandwidthBps = autoBandwidthBps)
-        return try { worker.prepareVod(feeds, positionMs, clockLabel, preferredHeight, commentary, minimumHeight, preferredHeights) }
+        return try { worker.prepareVod(feeds, positionMs, clockLabel, preferredHeight, commentary, minimumHeight, preferredHeights, coldNativeProbe) }
         finally { finiteOffers = worker.offeredSourceDimensions; worker.reset() }
     }
 

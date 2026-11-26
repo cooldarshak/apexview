@@ -56,6 +56,32 @@ internal class ReplayStartupPublication {
         }
     }
 
+    /** Only archive primitive arrays visible to this publication owner. Shared arrays
+     * are counted once across the saved window, incoming topics and displayed view. */
+    fun backingFields(published: SessionTiming): String {
+        val generations = java.util.IdentityHashMap<SessionTiming, Boolean>()
+        val arrays = java.util.IdentityHashMap<Any, Boolean>()
+        var logical = 0L
+        var unique = 0L
+        fun add(array: Any, bytes: Long) {
+            logical += bytes
+            if (arrays.put(array, true) == null) unique += bytes
+        }
+        for (owner in listOfNotNull(saved, topics, published)) {
+            if (generations.put(owner, true) != null) continue
+            add(owner.outline, owner.outline.size * 4L)
+            owner.tracks.values.forEach {
+                add(it.t, it.t.size * 8L); add(it.x, it.x.size * 4L); add(it.y, it.y.size * 4L)
+            }
+            owner.laps.values.forEach {
+                add(it.times, it.times.size * 8L); add(it.crossings, it.crossings.size * 8L)
+                add(it.lapTimes, it.lapTimes.size * 8L); add(it.lapCounts, it.lapCounts.size * 4L)
+            }
+            owner.states.values.forEach { add(it.t, it.t.size * 8L) }
+        }
+        return "publicationOwners=${generations.size} primitiveLogicalBytes=$logical primitiveUniqueBytes=$unique"
+    }
+
     private fun clear() {
         saved = null
         topics = null

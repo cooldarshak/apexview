@@ -21,7 +21,8 @@ internal class ReplayCore(
 )
 
 /** Small, disposable cache of completed archives. The original topics remain the source of truth. */
-internal class ReplayCoreCache(directory: File, private val contentId: Long) {
+internal class ReplayCoreCache(directory: File, private val contentId: Long,
+                              private val diagnostic: (String) -> Unit = {}) {
     private val folder = File(directory, "replay-timing")
     private val file = File(folder, "$contentId.bin")
     private val preview = File(File(directory, "replay-previews"), "$contentId.bin")
@@ -36,13 +37,24 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
         readFile(preview, positionMs, checkActive)
 
     private fun readFile(file: File, previewPositionMs: Long?, checkActive: () -> Unit): ReplayCore? {
-        if (file.length() !in 1..MAX_BYTES || System.currentTimeMillis() - file.lastModified() > MAX_AGE_MS) return null
+        val kind = if (previewPositionMs == null) "core" else "preview"
+        fun miss(reason: String): ReplayCore? {
+            diagnostic("Replay $kind cache content=$contentId result=$reason")
+            return null
+        }
+        if (!file.isFile) return miss("absent")
+        val limit = if (previewPositionMs == null) MAX_BYTES else MAX_PREVIEW_BYTES
+        if (file.length() !in 1..limit) return miss("invalid-length")
+        if (System.currentTimeMillis() - file.lastModified() > MAX_AGE_MS) return miss("expired")
         return try {
             DataInputStream(file.inputStream().buffered(BUFFER_SIZE)).use { input ->
-                if (input.readInt() != VERSION || input.readLong() != contentId) return null
+                val version = input.readInt()
+                // Version 2 omitted the stopped bit and cannot represent the original history.
+                if (version != VERSION) return miss("rebuild-version-$version")
+                if (input.readLong() != contentId) return miss("wrong-content")
                 if (previewPositionMs != null &&
                     kotlin.math.abs(input.readLong() - previewPositionMs) > PREVIEW_REUSE_MS
-                ) return null
+                ) return miss("outside-window")
                 val path = input.readUTF()
                 val type = input.readUTF()
                 val startUtc = input.readLong()
@@ -53,7 +65,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
                 }
                 val samples = ByteBuffer.allocate(TRACK_BLOCK_SAMPLES * TRACK_SAMPLE_BYTES)
                 val tracks = input.readByDriver {
-                    val n = count(MAX_SAMPLES)
+                    val n = count(MAX_SAMPLES, TRACK_SAMPLE_BYTES)
                     val t = LongArray(n)
                     val x = FloatArray(n)
                     val y = FloatArray(n)
@@ -76,7 +88,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
                 }
                 val laps = input.readByDriver {
                     val times = readTimes()
-                    val sectors = List(count(MAX_SAMPLES)) { readSector() }
+                    val sectors = List(count(MAX_SAMPLES, 9)) { readSector() }
                     fun cell(): SectorCell? {
                         val index = readInt()
                         return if (index == -1) null else sectors[index]
@@ -110,16 +122,17 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
                     val lapCounts = IntArray(lapTimes.size) { readInt() }
                     DriverLaps(times, snapshots, crossings, lapTimes, lapCounts)
                 }
-                val parts = List(input.count(MAX_SAMPLES)) { input.readLong() to input.readInt() }
+                val parts = List(input.count(MAX_SAMPLES, 12)) { input.readLong() to input.readInt() }
                 if (outline.size < 8 || outline.size % 2 != 0 || drivers.isEmpty() ||
                     tracks.isEmpty() || laps.isEmpty() || input.read() != -1
-                ) return null
+                ) return miss("invalid-payload")
+                diagnostic("Replay $kind cache content=$contentId result=hit bytes=${file.length()}")
                 ReplayCore(path, type, drivers, tracks, states, outline, hasStartFinish, startUtc, laps, parts)
             }
         } catch (_: IOException) {
-            null
+            miss("truncated-or-invalid")
         } catch (_: IndexOutOfBoundsException) {
-            null
+            miss("invalid-reference")
         }
     }
 
@@ -131,8 +144,8 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
         // when the tracks and tower contain actual data at the target UTC.
         // The checks below enforce that, including for archivePartial snapshots.
         if (path == session.radioBase || path.isBlank() || session.live) return false
-        if (session.tracks.values.none { it.at(utcMs) != null } ||
-            session.laps.values.none { it.at(utcMs)?.position != null }
+        if (session.tracks.values.none { it.hasPositionAt(utcMs) } ||
+            session.laps.values.none { it.hasRankAt(utcMs) }
         ) return false
         val from = utcMs - 90_000L
         val until = utcMs + 120_000L
@@ -178,7 +191,21 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
             return false
         }
         try {
-            DataOutputStream(temporary.outputStream().buffered(BUFFER_SIZE)).use { output ->
+            val limit = if (previewPositionMs == null) MAX_BYTES else MAX_PREVIEW_BYTES
+            val bounded = object : java.io.FilterOutputStream(temporary.outputStream()) {
+                var remaining = limit
+                override fun write(bytes: ByteArray, offset: Int, count: Int) {
+                    if (count > remaining) throw IOException("Replay index exceeds disk budget")
+                    out.write(bytes, offset, count)
+                    remaining -= count
+                }
+                override fun write(value: Int) {
+                    if (remaining == 0L) throw IOException("Replay index exceeds disk budget")
+                    out.write(value)
+                    remaining--
+                }
+            }
+            DataOutputStream(bounded.buffered(BUFFER_SIZE)).use { output ->
                 output.writeInt(VERSION)
                 output.writeLong(contentId)
                 if (previewPositionMs != null) output.writeLong(previewPositionMs)
@@ -254,16 +281,18 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
                     output.writeInt(part)
                 }
             }
-            checkActive()
-            if (temporary.length() > MAX_BYTES || !temporary.renameTo(file)) return false
-            val maxFiles = if (previewPositionMs == null) 6 else 12
-            val budget = if (previewPositionMs == null) 192L * 1024 * 1024 else 16L * 1024 * 1024
-            var bytes = file.length()
-            destination.listFiles { entry -> entry != file && entry.extension == "bin" }
-                ?.sortedByDescending { it.lastModified() }?.forEachIndexed { index, entry ->
-                    bytes += entry.length()
-                    if (index >= maxFiles - 1 || bytes > budget) entry.delete()
-                }
+            synchronized(commitLock) {
+                checkActive()
+                if (temporary.length() > limit || !temporary.renameTo(file)) return false
+                val maxFiles = if (previewPositionMs == null) 6 else 12
+                val budget = if (previewPositionMs == null) 192L * 1024 * 1024 else 16L * 1024 * 1024
+                var bytes = file.length()
+                destination.listFiles { entry -> entry != file && entry.extension == "bin" }
+                    ?.sortedByDescending { it.lastModified() }?.forEachIndexed { index, entry ->
+                        bytes += entry.length()
+                        if (index >= maxFiles - 1 || bytes > budget) entry.delete()
+                    }
+            }
             return true
         } catch (_: IOException) {
             return false
@@ -272,11 +301,13 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
         }
     }
 
-    private fun DataInputStream.count(max: Int): Int = readInt().also {
-        if (it !in 0..max) throw IOException("Invalid replay cache count")
+    // This reader is always backed by a finite regular file. Bound allocations
+    // by remaining serialized bytes before trusting a length in a damaged index.
+    private fun DataInputStream.count(max: Int, minBytes: Int = 1): Int = readInt().also {
+        if (it !in 0..max || it > available() / minBytes) throw IOException("Invalid replay cache count")
     }
 
-    private fun DataInputStream.readTimes() = LongArray(count(MAX_SAMPLES)) { readLong() }
+    private fun DataInputStream.readTimes() = LongArray(count(MAX_SAMPLES, Long.SIZE_BYTES)) { readLong() }
 
     private fun DataOutputStream.writeTimes(times: LongArray) {
         writeInt(times.size)
@@ -287,7 +318,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
         time = readUTF(),
         pace = Pace.entries[readUnsignedByte()],
         previousTime = readUTF(),
-        segments = List(count(128)) { readInt() },
+        segments = List(count(128, Int.SIZE_BYTES)) { readInt() },
     )
 
     private fun DataOutputStream.writeSector(cell: SectorCell) {
@@ -308,7 +339,11 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
     private fun <T> DataInputStream.readByDriver(readValue: DataInputStream.() -> T): Map<String, T> {
         val size = count(64)
         val result = LinkedHashMap<String, T>(size)
-        repeat(size) { result[readUTF()] = readValue() }
+        repeat(size) {
+            val number = readUTF()
+            if (result.containsKey(number)) throw IOException("Duplicate driver in replay index")
+            result[number] = readValue()
+        }
         return result
     }
 
@@ -324,6 +359,8 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long) {
     }
 
     private companion object {
+        val commitLock = Any()
+        const val MAX_PREVIEW_BYTES = 16L * 1024 * 1024
         const val VERSION = 3
         const val PREVIEW_REUSE_MS = 45_000L
         const val TRACK_BLOCK_SAMPLES = 4096

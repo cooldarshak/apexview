@@ -8,7 +8,7 @@ import java.util.concurrent.locks.ReentrantLock
 
 /**
  * One finite clear archive owns one optional native engine. The existing JVM
- * probe establishes the representation; the first real native fragment in
+ * probe establishes the representation and can supply the first comparison; the first native fragment in
  * each generation must also match the JVM reference byte for byte. Thereafter
  * Rust produces the published bytes, with independent clear metadata checks.
  *
@@ -123,7 +123,7 @@ internal class NativeClearArchiveBridge(
                 foreground: Boolean, timeoutMs: Long, reference: () -> HevcClearCmafGridComposer.Output): Produced =
         compose(request, expectedInit, foreground, timeoutMs, false, reference)
 
-    fun compose(request: HevcClearCmafGridComposer.Request, expectedInit: ByteArray,
+    fun compose(request: HevcClearCmafGridComposer.Request, priorInitialization: ByteArray?,
                 foreground: Boolean, timeoutMs: Long, retainNativeArchiveMedia: Boolean,
                 reference: () -> HevcClearCmafGridComposer.Output): Produced {
         val selected = state
@@ -185,6 +185,9 @@ internal class NativeClearArchiveBridge(
                 }
                 media to fragments
             }
+            // On the cold local route the mandatory JVM probe is also the exact
+            // same-input differential reference for the first native fragment.
+            val expectedInit = priorInitialization ?: referenceOutput().initializationSegment
             val outputReport = CmafBoxInspector.inspect(expectedInit)
             require(outputReport.errors.isEmpty())
             val track = outputReport.tracks.single()

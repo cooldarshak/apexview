@@ -403,13 +403,15 @@ fun ViewerScreen(app: AppState) {
 
         val videoTransform = if (fixedVideoGeometry) Modifier else Modifier
             .graphicsLayer {
-                val k = 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
-                scaleX = k; scaleY = k; transformOrigin = TransformOrigin(0f, 0.5f)
-            }
-            .graphicsLayer {
-                val scale = if (app.inPip) 1f else 1f - lift * band / height
-                scaleX = scale; scaleY = scale; transformOrigin = TransformOrigin(0.5f, 1f)
-                translationY = -sheetShift
+                val side = 1f - sheetSide * AppState.VOTE_SHEET_WIDTH
+                val liftScale = if (app.inPip) 1f else 1f - lift * band / height
+                // Outer left-centre scale times inner bottom-centre scale and lift.
+                scaleX = side * liftScale
+                scaleY = scaleX
+                transformOrigin = TransformOrigin(0f, 0f)
+                translationX = side * (1f - liftScale) * size.width * 0.5f
+                translationY = (1f - side) * size.height * 0.5f +
+                    side * ((1f - liftScale) * size.height - sheetShift)
             }
         val bakedSession = app.bakedCastSession
         val placement by rememberUpdatedState {

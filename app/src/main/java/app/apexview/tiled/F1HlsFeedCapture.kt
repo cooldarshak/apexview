@@ -80,6 +80,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         commentary: String? = null,
         minimumHeight: Int = 0,
         preferredHeights: Map<String, Int> = emptyMap(),
+        coldNativeProbe: android.content.Context? = null,
     ): HevcArchiveVodSession {
         var acquired: HevcArchiveVodSession? = null
         try { return withContext(Dispatchers.IO) {
@@ -189,6 +190,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 // A seek cancels blocking capture, rather than waiting for
                 // the obsolete probe to fetch and compose an entire group.
                 val preparedSession = requireNotNull(session)
+                coldNativeProbe?.let(preparedSession::enableColdProbe)
                 runInterruptible(Dispatchers.IO) { preparedSession.prepare(positionMs) }
                 coroutineContext.ensureActive()
                 acquired = session

@@ -22,6 +22,8 @@ internal class CastTimingPublisher(private val context: Context, private val app
     private var lane: PitWindow.PitLane? = null
     private var laneAt = Long.MIN_VALUE
     private var laneTiming: SessionTiming? = null
+    private var pitGeometry: TrackGeometry? = null
+    private var pitProjection: NativeCircuitProjection? = null
     private var profileKey: Pair<Long, Long>? = null
     private var profile = LapProfile.EVEN
     private var sequence = 0L
@@ -50,6 +52,11 @@ internal class CastTimingPublisher(private val context: Context, private val app
             lastPlaybackId = playbackId
             // Never mutate an already published geometry envelope for another load.
             sourceTiming = null
+            laneTiming = null
+            laneAt = Long.MIN_VALUE
+            lane = null
+            profileKey = null
+            profile = LapProfile.EVEN
             geometry = null
             rowsText = ""
             lastTableUtc = Long.MIN_VALUE
@@ -65,7 +72,8 @@ internal class CastTimingPublisher(private val context: Context, private val app
         }
         if (resend) lastFullSnapshotAt = elapsed
         val timing = app.timing
-        val timingReplaced = timing !== sourceTiming
+        val oldTiming = sourceTiming
+        val timingReplaced = timing !== oldTiming
         val position = app.castFramePositionMs
         val now = app.mapTimeAt(position) ?: 0L
         val output = mutableListOf<JSONObject>()
@@ -82,10 +90,14 @@ internal class CastTimingPublisher(private val context: Context, private val app
         }
         if (timing != null) {
             // Replay geometry is immutable within a published session snapshot.
-            if (timingReplaced || timing.live && resend) {
+            if (oldTiming == null || geometry == null || timing.live && (timingReplaced || resend) ||
+                oldTiming.outline !== timing.outline || oldTiming.drivers !== timing.drivers ||
+                oldTiming.corners !== timing.corners || oldTiming.marshalSectors !== timing.marshalSectors ||
+                oldTiming.hasStartFinish != timing.hasStartFinish || oldTiming.startLine != timing.startLine ||
+                oldTiming.type != timing.type || oldTiming.name != timing.name) {
                 geometry = CastTimingProtocol.geometry(timing).put("playbackId", playbackId)
-                sourceTiming = timing
             }
+            sourceTiming = timing
             val currentGeometry = requireNotNull(geometry)
             val id = currentGeometry.getString("id")
             if (id != geometryId) {
@@ -130,7 +142,22 @@ internal class CastTimingPublisher(private val context: Context, private val app
             output += JSONObject().put("version", 1).put("kind", "table").put("playbackId", playbackId)
                 .put("id", rowsId).put("rows", rows).put("stoppedDrivers", stoppedDrivers)
         }
-        val basis = if (timing != null && (app.mapMode == MapMode.PIT || app.pitDriver != null)) pitBasis(timing, now) else null
+        val needsPit = timing != null && (app.mapMode == MapMode.PIT || app.pitDriver != null)
+        val geometryOwner = timing?.geometry.takeIf { nativeRequested && needsPit }
+        if (pitGeometry !== geometryOwner) {
+            pitGeometry = geometryOwner
+            pitProjection = geometryOwner?.let(::NativeCircuitProjection)
+        }
+        val basis = if (timing != null && needsPit) {
+            pitBasis(timing, now)
+        } else {
+            laneTiming = null
+            lane = null
+            laneAt = Long.MIN_VALUE
+            profileKey = null
+            profile = LapProfile.EVEN
+            null
+        }
         // Exactly the same per-driver cursor and gap rules as the native track
         // map. This is sender-owned; receiver never shares mutable cursor state.
         val activeMapTiming = timing.takeIf { app.mapMode != MapMode.OFF }
@@ -143,9 +170,15 @@ internal class CastTimingPublisher(private val context: Context, private val app
             }
         }
         val cars = mapSampler?.sample(now).orEmpty()
-        val stop = basis?.let { pitStopNow(it, app.pitDriver, cars.map { car -> car.number to timing!!.geometry.progress(car.x, car.y) }) }
+        val stop = basis?.let {
+            val projected = pitProjection?.project(cars) == true
+            pitStopNow(it, app.pitDriver, cars.mapIndexed { index, car ->
+                car.number to if (projected) requireNotNull(pitProjection).fractions[index]
+                    else requireNotNull(timing).geometry.progress(car.x, car.y)
+            })
+        }
         val circle = if (app.mapMode == MapMode.PIT && timing != null && basis != null)
-            pitCircleData(app, timing, now, basis, cars) else null
+            pitCircleData(app, timing, now, basis, cars, pitProjection) else null
         if (resend) android.util.Log.i("PitwallCast", "TIMING_SAMPLE positionMs=$position utc=$now " +
             "rows=${rows.length()} cars=${cars.size} trackStart=${timing?.firstTrackUtc} trackEnd=${timing?.lastTrackUtc}")
         val message = CastTimingProtocol.encodeFrame(geometryId, position, now,
@@ -167,6 +200,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
         return packets
     }
     private fun pitBasis(timing: SessionTiming, now: Long): PitBasis {
+        fun progress(x: Float, y: Float) = pitProjection?.progress(x, y) ?: timing.geometry.progress(x, y)
         val leader = leaderAt(timing, now)
         val laps = leader?.let { timing.laps[it] }
         val green = laps?.lapWindows(now).orEmpty().filter { (a, b) ->
@@ -179,12 +213,12 @@ internal class CastTimingPublisher(private val context: Context, private val app
             profileKey = key
             profile = if (leader != null && key != null) timing.tracks[leader]?.let { track ->
                 LapProfile.from((key.first..key.second step 200L).mapNotNull { t ->
-                    track.at(t)?.let { (x, y) -> (t - key.first) to timing.geometry.progress(x, y) }
+                    track.at(t)?.let { (x, y) -> (t - key.first) to progress(x, y) }
                 }, key.second - key.first)
             } ?: LapProfile.EVEN else LapProfile.EVEN
         }
         if (laneAt == Long.MIN_VALUE || kotlin.math.abs(now - laneAt) >= 5_000 || timing !== laneTiming && !timing.live) {
-            lane = PitWindow.pitLane(timing); laneAt = now; laneTiming = timing
+            lane = PitWindow.pitLane(timing, ::progress); laneAt = now; laneTiming = timing
         }
         val saved = app.savedPitLoss(timing.circuitKey)
         return PitBasis(leader, green, reference, profile, lane, saved, lane?.lossMs ?: saved ?: PitWindow.TYPICAL_LOSS_MS)

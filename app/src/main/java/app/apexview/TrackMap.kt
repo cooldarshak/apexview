@@ -487,7 +487,7 @@ fun TrackMapFill(app: AppState, timing: SessionTiming) {
 private fun MapControls(app: AppState, timing: SessionTiming, onLockFocus: (Boolean) -> Unit) {
     val panel = app.activeMapPanel
     val density = LocalDensity.current
-    val bounds = remember(timing, panel.w, panel.h, panel.rotation) {
+    val bounds = remember(timing.outline, panel.w, panel.h, panel.rotation, density) {
         MapFit.of(timing.outline, panel.w, panel.h, mapMarginPx(density), panel.rotation)?.bounds(timing.outline)
     } ?: return
     Box(Modifier.fillMaxSize()) {
@@ -651,8 +651,14 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
         OverlayMotionSource(drawClock, drawSampler::sampleForDraw)
     }
     val stop = app.pitDriver?.let { driver ->
-        pitStopNow(rememberPitBasis(app, timing, now), driver,
-            cars.map { it.number to timing.geometry.progress(it.x, it.y) })
+        val projection = remember(timing.geometry, app.settings.nativeRustStitching) {
+            if (app.settings.nativeRustStitching) NativeCircuitProjection(timing.geometry) else null
+        }
+        val projected = projection?.project(cars) == true
+        pitStopNow(rememberPitBasis(app, timing, now), driver, cars.mapIndexed { i, car ->
+            car.number to if (projected) requireNotNull(projection).fractions[i]
+                else timing.geometry.progress(car.x, car.y)
+        })
     }
     TrackDrawingContent(timing, width, height, turn, app.mapOpacity, app.mapDotSizeDp, app.mapLabelSizeSp,
         now, cars, stop, timing.flags.at(now, app.settings.nativeRustStitching), targets = if (app.settings.mapDriverSelection) {
@@ -677,7 +683,8 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
         if (nativeRequested) NativeCircuitProjection(timing.geometry) else null
     }
     fun progress(x: Float, y: Float) = nativeGeometry?.progress(x, y) ?: timing.geometry.progress(x, y)
-    fun geometryPoint(f: Float) = nativeGeometry?.pointAt(f) ?: timing.geometry.pointAt(f)
+    val circuitGeometry = timing.geometry
+    fun geometryPoint(f: Float) = nativeGeometry?.pointAt(f) ?: circuitGeometry.pointAt(f)
     val path = remember(fit) {
         Path().apply {
             val o = timing.outline
@@ -693,7 +700,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
         timing.drivers.mapValues { measurer.label(it.value.tla, labelSizeSp.sp) }
     }
     val turns = remember(timing.corners, measurer) { timing.corners.associate { it.number to measurer.label("${it.number}", 9.sp, bold = false) } }
-    val marks = remember(timing, timing.startLine) { LineMarks(timing) }
+    val marks = remember(timing.geometry, timing.hasStartFinish, timing.startLine) { LineMarks(timing) }
     val finishLabel = remember(marks, measurer) { measurer.label(marks.finishLabel, 8.sp) }
     val startLabel = remember(measurer) { measurer.label("START", 8.sp) }
     fun lapPoint(f: Float) = geometryPoint(f).let { g -> fit.map(g[0], g[1]) }
@@ -728,8 +735,10 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
 
     // Keep the circuit and its labels in their own recorded layer. Moving cars only redraw
     // the foreground, with no offscreen alpha buffer around the entire track map.
-    val circuit: DrawScope.() -> Unit = remember(fit, path, timing.corners, turns, marks.start, nativeGeometry,
-        timing.hasStartFinish, finishLabel, startLabel) {
+    val corners = timing.corners
+    val showFinish = timing.hasStartFinish && timing.outline.size >= 4
+    val circuit: DrawScope.() -> Unit = remember(fit, path, corners, turns, marks.start, nativeGeometry,
+        showFinish, finishLabel, startLabel) {
         {
             drawPath(path, Color.Black.copy(alpha = 0.45f), style = Stroke(7.dp.toPx()))
             drawPath(path, Color.White.copy(alpha = 0.6f), style = Stroke(3.dp.toPx()))
@@ -746,12 +755,12 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
                 val out = outward(p, center) * 20.dp.toPx()
                 drawText(label, topLeft = p + out - Offset(label.size.width / 2f, label.size.height / 2f))
             }
-            if (timing.hasStartFinish && timing.outline.size >= 4) {
+            if (showFinish) {
                 mark(0f, chequered = true, finishLabel)
                 marks.start?.takeIf { !marks.together }?.let { mark(it, chequered = false, startLabel) }
             }
 
-            timing.corners.forEach { corner ->
+            corners.forEach { corner ->
                 val label = turns[corner.number] ?: return@forEach
                 val p = fit.map(corner.x, corner.y)
                 val at = p + outward(p, center) * 14.dp.toPx()
@@ -1104,8 +1113,14 @@ fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, i
         OverlayMotionSource(drawClock, drawSampler::sampleForDraw)
     }
     val stop = app.pitDriver?.let { driver ->
-        pitStopNow(rememberPitBasis(app, timing, now), driver,
-            cars.map { it.number to timing.geometry.progress(it.x, it.y) })
+        val projection = remember(timing.geometry, app.settings.nativeRustStitching) {
+            if (app.settings.nativeRustStitching) NativeCircuitProjection(timing.geometry) else null
+        }
+        val projected = projection?.project(cars) == true
+        pitStopNow(rememberPitBasis(app, timing, now), driver, cars.mapIndexed { i, car ->
+            car.number to if (projected) requireNotNull(projection).fractions[i]
+                else timing.geometry.progress(car.x, car.y)
+        })
     }
     EdgeDrawingContent(timing, width, height, inset, screenCornerRadius, app.mapOpacity, now,
         cars, stop, timing.flags.at(now, app.settings.nativeRustStitching), dotSizeDp = app.mapDotSizeDp, labelSizeSp = app.mapLabelSizeSp,
@@ -1126,7 +1141,7 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     val fallback = with(LocalDensity.current) { 24.dp.toPx() }
     // The screen's own corner radius. Up to 0.15 it was concentric (half the inset smaller),
     // which read as a tighter curve than the glass.
-    val ribbon = remember(width, height, inset, screenCornerRadius, timing) {
+    val ribbon = remember(width, height, inset, screenCornerRadius, fallback, timing.geometry.counterClockwise) {
         Ribbon(
             inset / 2, inset / 2, width - inset / 2, height - inset / 2,
             if (screenCornerRadius > 0f) screenCornerRadius else fallback,
@@ -1142,13 +1157,13 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     val names = remember(timing.drivers, labelSizeSp, measurer) {
         timing.drivers.mapValues { measurer.label(it.value.tla, labelSizeSp.sp) }
     }
-    val turns = remember(timing, measurer, nativeGeometry) {
+    val turns = remember(timing.corners, timing.geometry, measurer, nativeGeometry) {
         timing.corners.map { progress(it.x, it.y) to measurer.label("T${it.number}", 8.sp, bold = false) }
     }
-    val marks = remember(timing, timing.startLine) { LineMarks(timing) }
+    val marks = remember(timing.geometry, timing.hasStartFinish, timing.startLine) { LineMarks(timing) }
     val finishLabel = remember(marks, measurer) { measurer.label(marks.finishLabel, 8.sp) }
     val startLabel = remember(measurer) { measurer.label("START", 8.sp) }
-    val sectors = remember(ribbon, timing, nativeGeometry) { sectorPaths(timing, ::progress, ribbon::point) }
+    val sectors = remember(ribbon, timing.geometry, timing.marshalSectors, nativeGeometry) { sectorPaths(timing, ::progress, ribbon::point) }
     val scLabel = remember(measurer) { measurer.label("SC", 7.sp) }
     val hitProjection = remember(timing.geometry, nativeRequested) { OverlayEdgeProjection(nativeRequested) }
     val cars = remember(timing.geometry, currentCars, hitProjection) {

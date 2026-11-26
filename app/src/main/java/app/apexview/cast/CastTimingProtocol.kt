@@ -117,9 +117,15 @@ internal object CastTimingProtocol {
         val outline = timing.outline
         val points = outline.size / 2
         val step = maxOf(1, (points + MAX_COORDINATES / 2 - 1) / (MAX_COORDINATES / 2))
-        val coordinates = (0 until points step step).flatMap { listOf(outline[it * 2], outline[it * 2 + 1]) }
-        val buffer = ByteBuffer.allocate(coordinates.size * 4).order(ByteOrder.LITTLE_ENDIAN)
-        coordinates.forEach { require(it.isFinite()); buffer.putFloat(it) }
+        val sampled = (points + step - 1) / step
+        val buffer = ByteBuffer.allocate(sampled * 2 * Float.SIZE_BYTES).order(ByteOrder.LITTLE_ENDIAN)
+        for (point in 0 until points step step) {
+            val x = outline[point * 2]
+            val y = outline[point * 2 + 1]
+            require(x.isFinite() && y.isFinite())
+            buffer.putFloat(x)
+            buffer.putFloat(y)
+        }
         val drivers = JSONArray().apply { timing.drivers.entries.take(MAX_DRIVERS).forEach { (n, d) ->
             put(JSONArray(listOf(n.safe(8), d.tla.safe(8), d.color, d.firstName.safe(32), d.lastName.safe(32), d.team.safe(32))))
         } }

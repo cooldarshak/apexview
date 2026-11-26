@@ -963,7 +963,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                         suspend fun publishTracks(snapshot: Map<String, DriverTrack>, outline: FloatArray,
                                                   start: Long, previewEpoch: Long) {
                             withContext(Dispatchers.Main.immediate) {
-                                if (!positionPreviewEpochs.isCurrent(previewEpoch)) {
+                                if (positionsIndexed || !positionPreviewEpochs.isCurrent(previewEpoch)) {
                                     checkpoint("map-position-preview", "discarded stale preview epoch=$previewEpoch")
                                     return@withContext
                                 }
@@ -1254,7 +1254,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             val geometryStarted = android.os.SystemClock.elapsedRealtime()
             progress("Building the track map while timing tower finishes · cars=${tracks.size}")
             val built = withContext(Dispatchers.Default) {
-                traceStage("map-track-arrays") { _ -> tracks.mapValues { it.value.build() } }
+                traceStage("map-track-arrays") { _ -> tracks.mapValues { it.value.finishArchive() } }
             }
             val traced = withContext(Dispatchers.Default) {
                 traceStage("map-outline") { _ -> traceOutline(tracks.values.toList()) }
@@ -1304,10 +1304,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         }
 
         val loadJob = kotlin.coroutines.coroutineContext
-        fun ReplayCore.partial() = SessionTiming(
+        fun ReplayCore.partial(geometry: TrackGeometry = TrackGeometry(outline)) = SessionTiming(
             type = type, drivers = drivers, tracks = tracks, states = states, outline = outline,
             hasStartFinish = hasStartFinish, corners = emptyList(), startUtcMs = startUtc,
-            circuitKey = ref.circuitKey, laps = laps, radioBase = BASE + path,
+            circuitKey = ref.circuitKey, laps = laps, radioBase = BASE + path, geometry = geometry,
         ).apply { archivePartial = true }
         val previewStarted = android.os.SystemClock.elapsedRealtime()
         replayCache?.readPreview(replayPositionMs) { loadJob.ensureActive() }?.let { preview ->
@@ -1331,7 +1331,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         var outline = core.outline
         // Publish the traced map immediately. Optional external circuit lookup may provide a
         // better outline/corner labels, but it must not hold up a usable map or timing tower.
-        publish(core.partial())
+        val coreGeometry = TrackGeometry(core.outline)
+        publish(core.partial(coreGeometry))
 
         if (cached == null && replayCache != null && core.outline.size >= 8 &&
             core.tracks.isNotEmpty() && core.laps.isNotEmpty()
@@ -1361,7 +1362,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         progress("Circuit metadata ${if (circuit == null) "unavailable" else "loaded"} · ${android.os.SystemClock.elapsedRealtime() - circuitStarted}ms")
         val corners = circuit?.corners.orEmpty()
         if (outline.size < 8 && (circuit?.outline?.size ?: 0) >= 8) outline = circuit!!.outline
-        if (circuit != null) {
+        val finalGeometry = if (outline === core.outline) coreGeometry else TrackGeometry(outline)
+        if (circuit != null && (corners.isNotEmpty() || outline !== core.outline)) {
             publish(
                 SessionTiming(
                     type = type,
@@ -1371,6 +1373,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     outline = outline,
                     hasStartFinish = core.hasStartFinish,
                     corners = corners,
+                    geometry = finalGeometry,
                     startUtcMs = streamStart,
                     circuitKey = ref.circuitKey,
                     laps = laps,
@@ -1413,7 +1416,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         android.util.Log.i("ApexviewRadio", "archive radio for $path: ${radio.size} clips")
         val totalLaps = lapCountTask?.await()?.let { runCatching { parseTotalLaps(it) }.getOrNull() }
         val clock = clockTask.await()?.let { runCatching { parseClock(it, streamStart) }.getOrNull() }.orEmpty()
-        val grid = if (isRace && core.hasStartFinish) findGrid(TrackGeometry(outline), built, chequered) else null
+        val grid = if (isRace && core.hasStartFinish) findGrid(finalGeometry, built, chequered) else null
 
         SessionTiming(
             type = type,
@@ -1434,6 +1437,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             marshalSectors = circuit?.sectors.orEmpty(),
             flags = flags,
             totalLaps = totalLaps,
+            geometry = finalGeometry,
             clock = SessionClock(clock, core.parts),
             weather = weather,
         ).also { it.startLine = grid?.startLine }
@@ -2170,6 +2174,17 @@ class TrackBuilder {
     }
 
     fun build() = DriverTrack(t, x, y, size)
+
+    /** Called only after the archive producer has joined. Previously published
+     * prefixes retain their own backing until their last reader releases it. */
+    internal fun finishArchive(): DriverTrack {
+        if (t.size - size >= maxOf(256, size / 8)) {
+            t = t.copyOf(size)
+            x = x.copyOf(size)
+            y = y.copyOf(size)
+        }
+        return build()
+    }
 
     /** As [build], with [earlier]'s samples from before these in front: the archive's part of a live session. */
     fun build(earlier: TrackBuilder?): DriverTrack {

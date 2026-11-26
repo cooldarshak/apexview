@@ -77,6 +77,10 @@ internal class HevcArchiveVodSession(
 
     /** Only the verified local clear multi-feed archive owner enables dispatch.
      * The initial JVM probe has already validated the representation. */
+    internal fun enableColdProbe(context: android.content.Context) {
+        if (inputs.size > 1) nativeClear.enable(context.applicationContext)
+    }
+
     fun configureNativeClear(context: android.content.Context) {
         if (inputs.size < 2) return
         synchronized(cacheLock) {
@@ -499,7 +503,7 @@ internal class HevcArchiveVodSession(
                     val expectedInit = if (nativeClear.candidate) synchronized(cacheLock) {
                         checkOpen(); initialization?.copyOf()
                     } else null
-                    if (expectedInit == null) NativeClearArchiveBridge.Produced(HevcClearCmafGridComposer.compose(request))
+                    if (!nativeClear.candidate) NativeClearArchiveBridge.Produced(HevcClearCmafGridComposer.compose(request))
                     else try {
                         val timeout = ArchiveBufferPolicy.nativeJobTimeoutMs(groups[number].startUs / 1_000L,
                             groups[number].durationUs / 1_000L, nativeDemand, android.os.SystemClock.elapsedRealtime())
@@ -508,7 +512,7 @@ internal class HevcArchiveVodSession(
                             timeoutMs = timeout, retainNativeArchiveMedia = true) {
                             HevcClearCmafGridComposer.compose(request)
                         }
-                    } finally { expectedInit.fill(0) }
+                    } finally { expectedInit?.fill(0) }
                 }
             } finally { ownedInits.close() }
             val composed = produced.output

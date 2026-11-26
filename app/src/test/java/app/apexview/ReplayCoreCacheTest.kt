@@ -81,7 +81,18 @@ class ReplayCoreCacheTest {
         assertNull(cache.readPreview(targetPosition + 46_000L) {})
         assertEquals(track.n, cache.read {}?.tracks?.get("16")?.n)
 
-        temporary.root.resolve("replay-timing/17.bin").outputStream().use { it.write(1) }
+        val file = temporary.root.resolve("replay-timing/17.bin")
+        java.io.RandomAccessFile(file, "rw").use { it.writeInt(2) }
+        val reasons = mutableListOf<String>()
+        assertNull(ReplayCoreCache(temporary.root, 17) { reasons.add(it) }.read {})
+        assertTrue(reasons.single().contains("rebuild-version-2"))
+        assertTrue(cache.write(source) {})
+        try {
+            cache.write(source) { throw java.util.concurrent.CancellationException() }
+            throw AssertionError("Cancellation was swallowed")
+        } catch (_: java.util.concurrent.CancellationException) { }
+        assertEquals(source.path, cache.read {}?.path)
+        file.outputStream().use { it.write(1) }
         assertNull(cache.read {})
     }
 

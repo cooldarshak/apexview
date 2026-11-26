@@ -146,7 +146,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     private fun attachDecoderInput(surface: Surface, epoch: Long) {
-        if (released || input !== surface || inputGeneration != epoch ||
+        if (released || failed || input !== surface || inputGeneration != epoch ||
             !surfaceLifetime.matches(epoch) || !surface.isValid) return
         val owner = player ?: return
         if (attachedCodecPlayer === owner && attachedCodecSurface === surface) return
@@ -369,7 +369,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     // Reuses small native vertex buffers during dragging and layout transitions.
     private val quadBuffers = SceneQuadBufferCache()
     private var cachedQuads: List<Pair<java.nio.FloatBuffer, java.nio.FloatBuffer>> = emptyList()
-    private var failed = false
+    @Volatile private var failed = false
     private var rendered = 0L
     private var lastLogNs = 0L
     private fun pipelineHealthy(): Boolean =
@@ -821,7 +821,12 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             failed = true
             val reason = "Single-decoder scene output: ${error.message ?: error.javaClass.simpleName}".take(200)
             Log.w("ApexviewSingleDecoder", reason)
-            post { if (!released && surfaceLifetime.matches(lifetime)) onFailure(reason) }
+            main.post {
+                if (released || !surfaceLifetime.matches(lifetime)) return@post
+                detachDecoderInput("output-failed")
+                gl.post { if (!released && surfaceLifetime.matches(lifetime) && failed) destroy() }
+                onFailure(reason)
+            }
         }
     }
 

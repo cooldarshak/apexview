@@ -31,14 +31,14 @@ internal object PitWindow {
     /** The pit lane as this session's clean stops measured it: medians of each. */
     class PitLane(val lossMs: Long, val stops: Int, val entry: Float, val exit: Float, val laneMs: Long)
 
-    fun pitLane(timing: SessionTiming): PitLane? {
+    fun pitLane(timing: SessionTiming, progress: (Float, Float) -> Float = timing.geometry::progress): PitLane? {
         class Stop(val loss: Long, val entry: Float, val exit: Float, val laneMs: Long)
         val stops = timing.laps.flatMap { (number, laps) ->
             val track = timing.tracks[number] ?: return@flatMap emptyList()
             laps.pitStops.mapNotNull { (inUtc, outUtc) ->
                 val lapMs = laps.typicalLapMs(inUtc) ?: return@mapNotNull null
-                val entry = track.at(inUtc)?.let { timing.geometry.progress(it.first, it.second) } ?: return@mapNotNull null
-                val exit = track.at(outUtc)?.let { timing.geometry.progress(it.first, it.second) } ?: return@mapNotNull null
+                val entry = track.at(inUtc)?.let { progress(it.first, it.second) } ?: return@mapNotNull null
+                val exit = track.at(outUtc)?.let { progress(it.first, it.second) } ?: return@mapNotNull null
                 lossFromStop(inUtc, outUtc, entry, exit, lapMs)?.let { Stop(it, entry, exit, outUtc - inUtc) }
             }
         }

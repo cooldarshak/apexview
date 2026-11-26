@@ -3065,7 +3065,9 @@ class AppState(
                         val session = try {
                             capture.prepareVod(sourcePlan.feeds, probePositionMs, host.feed.sourceStream.profileLabel,
                                 preferredHeight, settings.commentary, minimumHeight, desired,
-                                autoBandwidthBps = compositionBandwidthBudget(selected.map(::qualityFor)))
+                                autoBandwidthBps = compositionBandwidthBudget(selected.map(::qualityFor)),
+                                coldNativeProbe = context.takeIf { settings.nativeRustStitching &&
+                                    !replacingActiveScene && !castingActive && !castPlaybackHandedOff })
                         } finally {
                             if (playbackWork.capture === capture)
                                 recordQualityOffers(selected, capture.offeredSourceDimensions)
@@ -4290,6 +4292,7 @@ class AppState(
                 val cars = if (session == null || clock == null || session.outline.size < 8) 0 else
                     session.tracks.count { it.value.hasPositionAt(clock) }
                 recordTimingDiagnostic("Replay ${budget}s checkpoint towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs " +
+                    "towerStableSinceMs=$towerStableMs mapStableSinceMs=$mapStableMs " +
                     "clockUtcMs=$clock positionMs=${sample.positionMs} rankedRows=$rows positionedCars=$cars " +
                     "trackFromUtcMs=${session?.firstTrackUtc} trackThroughUtcMs=${session?.lastTrackUtc}")
             }
@@ -4308,7 +4311,9 @@ class AppState(
                 watchedUtc = initial.videoUtcMs,
                 replayPositionMs = initial.positionMs,
                 positionScratchDir = context.cacheDir,
-                replayCache = ReplayCoreCache(context.cacheDir, contentId),
+                replayCache = ReplayCoreCache(context.cacheDir, contentId) { detail ->
+                    android.util.Log.i("ApexviewTiming", "trace=$trace $detail")
+                },
                 timingOffsetMs = initial.offsetMs,
                 playhead = playhead::get,
                 traceId = trace,
@@ -4334,7 +4339,7 @@ class AppState(
                             saveReplayPreview(contentId, playhead.get().positionMs)
                         }
                         recordTimingDiagnostic(
-                            "Partial data: source=${incoming.publicationStage} changed=$changed drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
+                            "Partial data: source=${incoming.publicationStage} changed=$changed ${publication.backingFields(partial)} drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
                                 "cars=${partial.tracks.size}, outlinePoints=${partial.outline.size / 2} " +
                                 "trackFromUtcMs=${partial.firstTrackUtc} trackThroughUtcMs=${partial.lastTrackUtc}"
                         )
@@ -4353,7 +4358,7 @@ class AppState(
             archiveComplete = true
             inspectPlayback()
             recordTimingDiagnostic(
-                "Archive complete: drivers=${loaded.drivers.size}, laps=${loaded.laps.size}, " +
+                "Archive complete: ${publication.backingFields(loaded)} drivers=${loaded.drivers.size}, laps=${loaded.laps.size}, " +
                     "cars=${loaded.tracks.size}, outlinePoints=${loaded.outline.size / 2} " +
                     "towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs"
             )

@@ -46,6 +46,8 @@ internal class ReplayClipEncoder(
     private var egl = EGL14.EGL_NO_SURFACE
     private var track = -1
     private var codecHeaders = ByteArray(0)
+    private var textureAllocated = false
+    private val bufferInfo = MediaCodec.BufferInfo()
     private var texture = 0
     private var program = 0
     private var firstNs = -1L
@@ -113,7 +115,12 @@ internal class ReplayClipEncoder(
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, pixels, 0)
+        if (textureAllocated) {
+            GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, pixels)
+        } else {
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, pixels, 0)
+            textureAllocated = true
+        }
         GLES20.glUseProgram(program)
         GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "overlay"), 0)
         val p = GLES20.glGetAttribLocation(program, "p")
@@ -139,7 +146,7 @@ internal class ReplayClipEncoder(
 
     private fun drain(end: Boolean) {
         val encoder = checkNotNull(codec)
-        val info = MediaCodec.BufferInfo()
+        val info = bufferInfo
         val deadline = System.nanoTime() + 3_000_000_000L
         while (true) {
             when (val index = encoder.dequeueOutputBuffer(info, if (end) 10_000L else 0L)) {

@@ -525,12 +525,6 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragm
 use jni::objects::{JFloatArray,JIntArray,JLongArray,JObjectArray,JByteArray};
 use crate::hot_path::{self,PositionCursor,MAX_DRIVERS,MAX_HISTORY};
 
-fn history_time(env:&JNIEnv<'_>, array:&JLongArray<'_>, at:usize)->Option<i64>{
-    let mut v=[0i64;1];
-    env.get_long_array_region(array,i32::try_from(at).ok()?,&mut v).ok()?;
-    Some(v[0])
-}
-
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeSamplePositions(
     mut env:JNIEnv<'_>,_class:JClass<'_>,times:JObjectArray<'_>,
@@ -563,7 +557,9 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeSamplePositio
             let mut cursor=PositionCursor{lower:i32::try_from(cursors[3*i]).ok()?,
                 previous:cursors[3*i+1],seeks:cursors[3*i+2]};
             let sample=hot_path::position_at(count,now,&mut cursor,
-                |at|history_time(&env,&ts,at),
+                hot_path::adjacent_times(count, |start, out| {
+                    env.get_long_array_region(&ts, start as i32, out).ok()
+                }),
                 hot_path::adjacent_points(count, |at,xx,yy|{
                     env.get_float_array_region(&x,at as i32,xx).ok()?;
                     env.get_float_array_region(&y,at as i32,yy).ok()?;
@@ -604,7 +600,9 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeFloorIndices(
             let count=usize::try_from(sizes[i]).ok()?;
             let ts=JLongArray::from(env.get_object_array_element(&times,i as i32).ok()?);
             if ts.is_null()||(env.get_array_length(&ts).ok()? as usize)<count{return None;}
-            out[i]=hot_path::floor_index_hint(count,now,out[i],|at|history_time(&env,&ts,at))?;
+            out[i]=hot_path::floor_index_hint(count,now,out[i],hot_path::adjacent_times(count, |start, out| {
+                    env.get_long_array_region(&ts, start as i32, out).ok()
+                }))?;
             env.delete_local_ref(ts).ok()?;
         }
         env.set_int_array_region(&indices,0,&out[..n]).ok()?;Some(())
