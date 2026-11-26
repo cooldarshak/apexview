@@ -158,6 +158,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     // Surface lifetime is not the same as encoded-atlas generation. A quality
     // change must not discard an otherwise valid pending codec attachment.
     private val surfaceLifetime = SceneSurfaceLifetime()
+    private val graphicsOwnerId = SceneGraphicsOwners.process.newId()
+    private var graphicsLifetime = -1L
+    private var graphicsAtlasWidth = 0
+    private var graphicsAtlasHeight = 0
     private var firstFrameReported = false
     // GL-owned epoch; never read the latest UI generation after an in-flight swap.
     private var renderEpoch = -1L
@@ -305,8 +309,13 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             }
             if (speedChanged) cadenceGate.reset()
             if (firstBinding || atlasChanged) {
-                decoderTexture?.setDefaultBufferSize(nextScene.atlasWidth, nextScene.atlasHeight)
+                decoderTexture?.let {
+                    it.setDefaultBufferSize(nextScene.atlasWidth, nextScene.atlasHeight)
+                    graphicsAtlasWidth = nextScene.atlasWidth
+                    graphicsAtlasHeight = nextScene.atlasHeight
+                }
             }
+            recordGraphicsOwner()
             frameRateOutput?.let(::updateFrameRateHint)
             scheduleVideoFrame()
             } }
@@ -330,7 +339,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     }
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         outputWidth = width; outputHeight = height; onOutputSize(width, height)
-        gl.post { guarded { scheduleVideoFrame() } }
+        gl.post { guarded { recordGraphicsOwner(); scheduleVideoFrame() } }
     }
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         surfaceLifetime.advance()
@@ -362,6 +371,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
 
     private fun initialize(output: Surface, readinessEpoch: Long, lifetime: Long) {
         destroy()
+        graphicsLifetime = lifetime
         renderEpoch = readinessEpoch
         frameRateOutput = output
         display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
@@ -438,7 +448,11 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
         val frames = SurfaceTexture(texture)
         decoderTexture = frames
-        scene?.let { frames.setDefaultBufferSize(it.atlasWidth, it.atlasHeight) }
+        scene?.let {
+            frames.setDefaultBufferSize(it.atlasWidth, it.atlasHeight)
+            graphicsAtlasWidth = it.atlasWidth
+            graphicsAtlasHeight = it.atlasHeight
+        }
         frames.setOnFrameAvailableListener({
             guarded(lifetime) {
                 if (decoderTexture === frames && !released) {
@@ -476,6 +490,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         // Never relabel an input created for an obsolete Android surface
         // with the newer UI epoch, even if EGL initialization was slow.
         inputGeneration = lifetime
+        recordGraphicsOwner()
         post { attachDecoderInput(surface, lifetime) }
     }
 
@@ -640,12 +655,22 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             swapEndedNs - swapStartedNs)
     }
 
+    private fun recordGraphicsOwner() {
+        SceneGraphicsOwners.process.record(graphicsOwnerId, SceneGraphicsOwners.Owner(
+            if (protectedOutput) "SecureSurfaceView" else "SurfaceView", graphicsLifetime, renderEpoch,
+            if (contextGl != EGL14.EGL_NO_CONTEXT) 1 else 0,
+            if (window != EGL14.EGL_NO_SURFACE) 1 else 0,
+            if (decoderTexture != null) 1 else 0,
+            graphicsAtlasWidth, graphicsAtlasHeight, outputWidth.coerceAtLeast(0), outputHeight.coerceAtLeast(0)))
+    }
+
     private fun guarded(lifetime: Long = surfaceLifetime.generation(), action: () -> Unit) {
         if (released || failed || !surfaceLifetime.matches(lifetime)) return
         try { action() } catch (error: Exception) {
             // A late failure from a destroyed output is not a failure of the
             // replacement scene. Its queued teardown still owns its resources.
             if (released || !surfaceLifetime.matches(lifetime)) return
+            recordGraphicsOwner()
             failed = true
             val reason = "${if (protectedOutput) "Protected" else "Clear SurfaceView"} scene output: " +
                 (error.message ?: error.javaClass.simpleName).take(200)
@@ -703,5 +728,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         frameRateOutput = null
         imageUniform = -1; textureMatrixUniform = -1
         positionAttribute = -1; texcoordAttribute = -1
+        graphicsLifetime = -1L
+        graphicsAtlasWidth = 0; graphicsAtlasHeight = 0
+        SceneGraphicsOwners.process.remove(graphicsOwnerId)
     }
 }

@@ -45,7 +45,7 @@ internal object ProcessMemoryDiagnostic {
                 " foregroundForecastBytes=$current foregroundPeakForecastBytes=$peak"
             } + Media3MemoryOwners.snapshot().let { (owners, bytes) ->
                 " media3AllocatorOwners=$owners media3InUseBytes=$bytes"
-            } + Media3MemoryOwners.ownerFields() + MediaMemoryAccounting.process.snapshot().entries.joinToString("") { (kind, usage) ->
+            } + Media3MemoryOwners.ownerFields() + app.apexview.scene.SceneGraphicsOwners.process.fields() + MediaMemoryAccounting.process.snapshot().entries.joinToString("") { (kind, usage) ->
                 " ${kind.name}OwnedBytes=${usage.owned} ${kind.name}PinnedBytes=${usage.pinned}"
             }
     }

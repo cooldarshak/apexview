@@ -167,6 +167,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     // Surface lifetime is not the same as encoded-atlas generation. A quality
     // change must not discard an otherwise valid pending codec attachment.
     private val surfaceLifetime = SceneSurfaceLifetime()
+    private val graphicsOwnerId = SceneGraphicsOwners.process.newId()
+    private var graphicsLifetime = -1L
+    private var graphicsAtlasWidth = 0
+    private var graphicsAtlasHeight = 0
     private var firstFrameReported = false
     // GL-owned epoch; never read the latest UI generation after an in-flight swap.
     private var renderEpoch = -1L
@@ -240,6 +244,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                     castVideoSurface = EGL14.eglCreateWindowSurface(display, selected, target.surface,
                         intArrayOf(EGL14.EGL_NONE), 0)
                     castVideoTarget = target
+                    recordGraphicsOwner()
                 }
                 val output = castVideoSurface
                 check(output != EGL14.EGL_NO_SURFACE && EGL14.eglMakeCurrent(display, output, output, contextGl)) {
@@ -273,6 +278,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         if (castVideoSurface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, castVideoSurface)
         castVideoTarget = null
         castVideoSurface = EGL14.EGL_NO_SURFACE
+        recordGraphicsOwner()
     }
 
     fun startReplayClip(source: Window, bounds: Rect, result: (String) -> Unit) {
@@ -502,8 +508,13 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 }
                 if (speedChanged) cadenceGate.reset()
                 if (firstBinding || atlasChanged) {
-                    decoderTexture?.setDefaultBufferSize(nextScene.atlasWidth, nextScene.atlasHeight)
+                    decoderTexture?.let {
+                        it.setDefaultBufferSize(nextScene.atlasWidth, nextScene.atlasHeight)
+                        graphicsAtlasWidth = nextScene.atlasWidth
+                        graphicsAtlasHeight = nextScene.atlasHeight
+                    }
                 }
+                recordGraphicsOwner()
                 applyOutputFrameRateHint()
                 scheduleDisplayFrame()
             } }
@@ -527,7 +538,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
         outputWidth = width; outputHeight = height
         onOutputSize(width, height)
-        gl.post { guarded { scheduleDisplayFrame() } }
+        gl.post { guarded { recordGraphicsOwner(); scheduleDisplayFrame() } }
     }
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
@@ -567,6 +578,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
 
     private fun initialize(output: SurfaceTexture, readinessEpoch: Long, lifetime: Long) {
         destroy()
+        graphicsLifetime = lifetime
         renderEpoch = readinessEpoch
         display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         check(EGL14.eglInitialize(display, IntArray(2), 0, IntArray(2), 1)) { "EGL initialization failed" }
@@ -623,7 +635,11 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
         val frames = SurfaceTexture(texture)
         decoderTexture = frames
-        scene?.let { frames.setDefaultBufferSize(it.atlasWidth, it.atlasHeight) }
+        scene?.let {
+            frames.setDefaultBufferSize(it.atlasWidth, it.atlasHeight)
+            graphicsAtlasWidth = it.atlasWidth
+            graphicsAtlasHeight = it.atlasHeight
+        }
         frames.setOnFrameAvailableListener({
             guarded(lifetime) {
                 if (decoderTexture === frames && !released) {
@@ -667,6 +683,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         // Never relabel an input created for an obsolete Android surface
         // with the newer UI epoch, even if EGL initialization was slow.
         inputGeneration = lifetime
+        recordGraphicsOwner()
         post { attachDecoderInput(surface, lifetime) }
     }
 
@@ -785,12 +802,22 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
     }
 
+    private fun recordGraphicsOwner() {
+        SceneGraphicsOwners.process.record(graphicsOwnerId, SceneGraphicsOwners.Owner(
+            "TextureView", graphicsLifetime, renderEpoch,
+            if (contextGl != EGL14.EGL_NO_CONTEXT) 1 else 0,
+            (if (window != EGL14.EGL_NO_SURFACE) 1 else 0) + (if (castVideoSurface != EGL14.EGL_NO_SURFACE) 1 else 0),
+            if (decoderTexture != null) 1 else 0,
+            graphicsAtlasWidth, graphicsAtlasHeight, outputWidth.coerceAtLeast(0), outputHeight.coerceAtLeast(0)))
+    }
+
     private fun guarded(lifetime: Long = surfaceLifetime.generation(), action: () -> Unit) {
         if (released || failed || !surfaceLifetime.matches(lifetime)) return
         try { action() } catch (error: Exception) {
             // A late failure from a destroyed output is not a failure of the
             // replacement scene. Its queued teardown still owns its resources.
             if (released || !surfaceLifetime.matches(lifetime)) return
+            recordGraphicsOwner()
             failed = true
             val reason = "Single-decoder scene output: ${error.message ?: error.javaClass.simpleName}".take(200)
             Log.w("ApexviewSingleDecoder", reason)
@@ -846,5 +873,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         display = EGL14.EGL_NO_DISPLAY; contextGl = EGL14.EGL_NO_CONTEXT; window = EGL14.EGL_NO_SURFACE
         texture = 0; program = 0
         imageUniform = -1; transformUniform = -1; positionAttribute = -1; uvAttribute = -1
+        graphicsLifetime = -1L
+        graphicsAtlasWidth = 0; graphicsAtlasHeight = 0
+        SceneGraphicsOwners.process.remove(graphicsOwnerId)
     }
 }
