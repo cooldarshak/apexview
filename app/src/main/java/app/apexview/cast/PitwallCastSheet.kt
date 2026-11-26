@@ -5,15 +5,21 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import app.apexview.AppState
+import app.apexview.cast.local.PitwallPairingCode
 import app.apexview.Ink
 import app.apexview.PrimaryButton
 import app.apexview.SecondaryButton
@@ -22,6 +28,8 @@ import app.apexview.Type
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun PitwallCastSheet(app: AppState) {
+    var televisionCode by remember { mutableStateOf("") }
+    val enteredCode = PitwallPairingCode.normalizeTelevisionIdentity(televisionCode)
     DisposableEffect(app) {
         app.startLocalDiscovery()
         onDispose { app.stopLocalDiscovery() }
@@ -32,7 +40,18 @@ internal fun PitwallCastSheet(app: AppState) {
             Text("Pitwall TV · same video layout", style = Type.headline)
             Text("On the TV, open TV casting → Receive from phone. Both devices need this Pitwall version and the same Wi-Fi or Ethernet network.", style = Type.footnote)
             Text(app.localCastDiscoveryStatus, style = Type.subhead)
-            app.localCastDevices.forEach { device -> PrimaryButton(device.name, enabled = !app.castBusy) { app.connectLocalCast(device) } }
+            Text("New TV: enter the identity code shown on the TV, then select it. Approve only on the TV. Leave blank for a remembered TV or an older receiver.", style = Type.footnote)
+            OutlinedTextField(value = televisionCode,
+                onValueChange = { televisionCode = it.take(40) },
+                label = { Text("TV identity code") },
+                singleLine = true,
+                isError = televisionCode.isNotBlank() && enteredCode == null,
+                modifier = Modifier.fillMaxWidth())
+            app.localCastDevices.forEach { device ->
+                PrimaryButton(device.name, enabled = !app.castBusy && (televisionCode.isBlank() || enteredCode != null)) {
+                    app.connectLocalCast(device, enteredCode)
+                }
+            }
             SecondaryButton("Search again") { app.startLocalDiscovery() }
             SecondaryButton("Forget paired TVs") { app.forgetLocalCastPeers() }
             SecondaryButton("Receive on this device") { app.castPickerOpen = false; app.openTvReceiver() }
@@ -73,4 +92,20 @@ internal fun PitwallPairingDialog(code: String, onDecision: (Boolean) -> Unit, r
         },
         confirmButton = { TextButton(onClick = { onDecision(true) }) { Text("Match") } },
         dismissButton = { TextButton(onClick = { onDecision(false) }) { Text("Cancel") } })
+}
+
+/** Phone already authenticated the receiver through physical TV identity selection.
+ * There is deliberately no positive confirmation button on this screen. */
+@Composable
+internal fun PitwallAwaitingTvApprovalDialog(code: String, onCancel: () -> Unit) {
+    AlertDialog(onDismissRequest = onCancel,
+        title = { Text("Approve on your TV") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Compare this code with the one on the TV, then approve there.")
+                Text(code, style = Type.headline)
+                Text("Do not approve if any group differs.", style = Type.footnote)
+            }
+        },
+        confirmButton = { TextButton(onClick = onCancel) { Text("Cancel connection") } })
 }
