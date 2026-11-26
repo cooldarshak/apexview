@@ -658,3 +658,102 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeScaleUs(
     }));
     match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
 }
+
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativePrepareGeometry(
+    mut env:JNIEnv<'_>,_class:JClass<'_>,outline:JFloatArray<'_>,output:JByteBuffer<'_>,
+)->jint{
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        let n=usize::try_from(env.get_array_length(&outline).ok()?).ok()?;
+        if !n.is_multiple_of(2){return None;}
+        let length=crate::overlay_geometry::packet_size(n/2)?;
+        if env.get_direct_buffer_capacity(&output).ok()?!=length||
+            env.call_method(&output,"isReadOnly","()Z",&[]).ok()?.z().ok()?{return None;}
+        let ptr=env.get_direct_buffer_address(&output).ok()?;
+        if ptr.is_null(){return None;}
+        let mut points=Vec::new();points.try_reserve_exact(n).ok()?;points.resize(n,0f32);
+        env.get_float_array_region(&outline,0,&mut points).ok()?;
+        // SAFETY: private output buffer, exact checked capacity, synchronous
+        // preparation before any immutable packet view becomes visible.
+        let bytes=unsafe{slice::from_raw_parts_mut(ptr,length)};
+        crate::overlay_geometry::prepare(&points,bytes)
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeProjectGeometry(
+    env:JNIEnv<'_>,_class:JClass<'_>,packet:JByteBuffer<'_>,xy:JFloatArray<'_>,count:jint,
+    fractions:JFloatArray<'_>,order:JIntArray<'_>,
+)->jint{
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        let n=usize::try_from(count).ok()?;
+        if n>MAX_DRIVERS||(env.get_array_length(&xy).ok()? as usize)<2*n||
+            (env.get_array_length(&fractions).ok()? as usize)<n||
+            (env.get_array_length(&order).ok()? as usize)<n{return None;}
+        let length=env.get_direct_buffer_capacity(&packet).ok()?;
+        if length>crate::overlay_geometry::packet_size(crate::overlay_geometry::MAX_VERTICES)?{return None;}
+        let ptr=env.get_direct_buffer_address(&packet).ok()?;
+        if ptr.is_null()||length==0{return None;}
+        // SAFETY: the caller retains a private, prepared immutable direct
+        // packet. No pointer or reference survives this call.
+        let bytes=unsafe{slice::from_raw_parts(ptr.cast_const(),length)};
+        let geometry=crate::overlay_geometry::Geometry::new(bytes)?;
+        let mut coords=[0f32;2*MAX_DRIVERS];let mut out=[0f32;MAX_DRIVERS];
+        let mut indices=[0i32;MAX_DRIVERS];
+        env.get_float_array_region(&xy,0,&mut coords[..2*n]).ok()?;
+        for i in 0..n{out[i]=geometry.progress(coords[2*i],coords[2*i+1])?;indices[i]=i as i32;}
+        for i in 1..n{
+            let id=indices[i];let mut j=i;
+            while j>0&&out[indices[j-1] as usize]>out[id as usize]{indices[j]=indices[j-1];j-=1;}
+            indices[j]=id;
+        }
+        env.set_float_array_region(&fractions,0,&out[..n]).ok()?;
+        env.set_int_array_region(&order,0,&indices[..n]).ok()?;Some(())
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeInterpolateMotion(
+    env:JNIEnv<'_>,_class:JClass<'_>,points:JFloatArray<'_>,counts:JIntArray<'_>,
+    steps:jni::sys::jfloat,xy:JFloatArray<'_>,
+)->jint{
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        let n=usize::try_from(env.get_array_length(&counts).ok()?).ok()?;
+        if n>MAX_DRIVERS||env.get_array_length(&points).ok()? as usize!=14*n||
+            env.get_array_length(&xy).ok()? as usize!=2*n{return None;}
+        let mut input=[0f32;14*MAX_DRIVERS];let mut sizes=[0i32;MAX_DRIVERS];
+        let mut out=[0f32;2*MAX_DRIVERS];
+        env.get_float_array_region(&points,0,&mut input[..14*n]).ok()?;
+        env.get_int_array_region(&counts,0,&mut sizes[..n]).ok()?;
+        for i in 0..n{
+            let count=usize::try_from(sizes[i]).ok()?;
+            if !(2..=7).contains(&count){return None;}
+            let (x,y)=hot_path::interpolate_motion(&input[14*i..14*i+2*count],steps)?;
+            out[2*i]=x;out[2*i+1]=y;
+        }
+        env.set_float_array_region(&xy,0,&out[..2*n]).ok()?;Some(())
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}
+
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativePointAt(
+    env:JNIEnv<'_>,_class:JClass<'_>,packet:JByteBuffer<'_>,f:jni::sys::jfloat,out:JFloatArray<'_>,
+)->jint{
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        if env.get_array_length(&out).ok()?!=4{return None;}
+        let len=env.get_direct_buffer_capacity(&packet).ok()?;
+        if len==0||len>crate::overlay_geometry::packet_size(crate::overlay_geometry::MAX_VERTICES)?{return None;}
+        let ptr=env.get_direct_buffer_address(&packet).ok()?;
+        if ptr.is_null(){return None;}
+        // SAFETY: caller owns the immutable packet for this synchronous call.
+        let bytes=unsafe{slice::from_raw_parts(ptr.cast_const(),len)};
+        let result=crate::overlay_geometry::Geometry::new(bytes)?.point_at(f)?;
+        env.set_float_array_region(&out,0,&result).ok()?;Some(())
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}

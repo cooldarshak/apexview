@@ -18,7 +18,7 @@ internal class BakedCastArchiveAudio(
     private val reader: CmafHttpReader,
     private val playlistUri: Uri,
     private val startPositionUs: Long,
-    private val nativeRequested: Boolean = false,
+    private val nativeRequested: () -> Boolean = { false },
 ) : AutoCloseable {
     private var init = ByteArray(0)
     private var initKey = ""
@@ -26,9 +26,24 @@ internal class BakedCastArchiveAudio(
     private var lastLoadedSegmentStartUs = Long.MIN_VALUE
     private var closed = false
     private var completedPlaylist: HlsMediaPlaylist? = null
-    private val sampleBuffer = if (nativeRequested) ByteBuffer.allocateDirect(32 * 1024)
-        else ByteBuffer.allocate(32 * 1024)
+    private var sampleBuffer: ByteBuffer? = null
+    private var requestedBefore: Boolean? = null
     private var actualNative: Boolean? = null
+    private fun wipe(buffer: ByteBuffer) {
+        buffer.clear()
+        while (buffer.hasRemaining()) buffer.put(0.toByte())
+        buffer.clear()
+    }
+    private fun bufferFor(requested: Boolean): ByteBuffer {
+        if (requestedBefore != requested || sampleBuffer == null) {
+            sampleBuffer?.let(::wipe)
+            sampleBuffer = if (requested) ByteBuffer.allocateDirect(32 * 1024)
+                else ByteBuffer.allocate(32 * 1024)
+            requestedBefore = requested
+            actualNative = null
+        }
+        return requireNotNull(sampleBuffer)
+    }
 
     /** Fetch on IO, not the GL/PixelCopy thread. PTS shares the live scene's zero-based clock. */
     fun readUntil(positionUs: Long): List<BakedCastTransportStream.Sample> {
@@ -103,7 +118,8 @@ internal class BakedCastArchiveAudio(
             val rate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
             val channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
             extractor.selectTrack(index)
-            val buffer = sampleBuffer
+            val requested = nativeRequested()
+            val buffer = bufferFor(requested)
             var firstSampleTimeUs = -1L
             while (true) {
                 buffer.clear()
@@ -113,11 +129,11 @@ internal class BakedCastArchiveAudio(
                 if (firstSampleTimeUs < 0L) firstSampleTimeUs = timestamp
                 val absoluteUs = segmentStartUs + (timestamp - firstSampleTimeUs)
                 if (absoluteUs >= nextAudioUs && absoluteUs >= startPositionUs) {
-                    val packet = BakedAacAdts.wrap(buffer, size, rate, channels, nativeRequested && actualNative != false) { native ->
-                        if (nativeRequested && actualNative != native) {
+                    val packet = BakedAacAdts.wrap(buffer, size, rate, channels, requested && actualNative != false) { native ->
+                        if (actualNative != native) {
                             actualNative = native
-                            android.util.Log.i("PitwallNativeHotPath", "AUDIO_FRAMING_ENGINE requested=RUST actual=" +
-                                if (native) "RUST reason=ADTS_WRITTEN" else "JVM reason=NATIVE_BATCH_UNAVAILABLE")
+                            android.util.Log.i("PitwallNativeHotPath", "AUDIO_FRAMING_ENGINE requested=" + (if (requested) "RUST" else "JVM") +
+                                " actual=" + (if (native) "RUST reason=ADTS_WRITTEN" else if (requested) "JVM reason=NATIVE_BATCH_UNAVAILABLE" else "JVM reason=USER_DISABLED"))
                         }
                     }
                     samples += BakedCastTransportStream.Sample(absoluteUs - startPositionUs, packet, video = false)
@@ -133,9 +149,8 @@ internal class BakedCastArchiveAudio(
         closed = true
         init.fill(0); init = ByteArray(0)
         completedPlaylist = null
-        sampleBuffer.clear()
-        while (sampleBuffer.hasRemaining()) sampleBuffer.put(0.toByte())
-        sampleBuffer.clear()
+        sampleBuffer?.let(::wipe)
+        sampleBuffer = null
     }
 }
 

@@ -111,6 +111,30 @@ pub fn row_order(positions: &[i32], out: &mut [i32]) -> Option<()> {
     Some(())
 }
 
+/// Monotone cubic interpolation through measured Cast endpoints. Never
+/// extrapolate or overshoot the two surrounding samples.
+pub fn interpolate_motion(points:&[f32],steps:f32)->Option<(f32,f32)>{
+    if !steps.is_finite()||!points.len().is_multiple_of(2)||
+        !(4..=14).contains(&points.len())||points.iter().any(|v|!v.is_finite()){return None;}
+    let last=points.len()/2-1;
+    let progress=steps.clamp(0.0,last as f32);
+    let i=(progress as usize).min(last-1);
+    let fraction=progress-i as f32;
+    let tangent=|before:f32,after:f32|if before==0.0||after==0.0||before*after<=0.0{0.0}else{2.0*before*after/(before+after)};
+    let smooth=|axis:usize|{
+        let a=points[2*i+axis];let b=points[2*(i+1)+axis];
+        let p=points[2*i.saturating_sub(1)+axis];
+        let q=points[2*(i+2).min(last)+axis];
+        let slope=b-a;
+        let m0=if i==0{slope}else{tangent(a-p,slope)};
+        let m1=if i+1==last{slope}else{tangent(slope,q-b)};
+        let t2=fraction*fraction;let t3=t2*fraction;
+        ((2.0*t3-3.0*t2+1.0)*a+(t3-2.0*t2+fraction)*m0+
+            (-2.0*t3+3.0*t2)*b+(t3-t2)*m1).clamp(a.min(b),a.max(b))
+    };
+    Some((smooth(0),smooth(1)))
+}
+
 /// MPEG-4 AAC-LC ADTS header, same supported rates/channels as existing Cast.
 pub fn adts_header(payload_len: usize, sample_rate: i32, channels: i32) -> Option<[u8; 7]> {
     let rates = [96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350];

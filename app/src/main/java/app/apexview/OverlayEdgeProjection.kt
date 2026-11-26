@@ -6,7 +6,17 @@ package app.apexview
  * Stable insertion sort preserves the original sortedBy(progress) tie order,
  * which matters for overlapping driver labels and 44dp focus targets.
  */
-internal class OverlayEdgeProjection {
+internal class OverlayEdgeProjection(private val nativeRequested: Boolean = false) {
+    private var geometryOwner: TrackGeometry? = null
+    private var nativeGeometry: NativeCircuitProjection? = null
+    private fun projection(geometry: TrackGeometry): NativeCircuitProjection? {
+        if (!nativeRequested) return null
+        if (geometryOwner !== geometry) {
+            geometryOwner = geometry
+            nativeGeometry = NativeCircuitProjection(geometry)
+        }
+        return nativeGeometry
+    }
     private var drivers = arrayOfNulls<Car>(24)
     private var drawDrivers = arrayOfNulls<OverlayMotionCar>(24)
     private var positions = FloatArray(24)
@@ -21,6 +31,17 @@ internal class OverlayEdgeProjection {
             positions = positions.copyOf(capacity)
         }
         size = 0
+        val native = projection(geometry)
+        if (native?.project(cars) == true) {
+            size = cars.size
+            for (i in 0 until size) {
+                val id = native.order[i]
+                drivers[i] = cars[id]
+                positions[i] = native.fractions[id]
+            }
+            for (i in size until drivers.size) drivers[i] = null
+            return size
+        }
         for (car in cars) {
             val fraction = geometry.progress(car.x, car.y)
             var insertion = size
@@ -47,6 +68,17 @@ internal class OverlayEdgeProjection {
             positions = positions.copyOf(capacity)
         }
         size = 0
+        val native = projection(geometry)
+        if (native?.project(cars) == true) {
+            size = cars.size
+            for (i in 0 until size) {
+                val id = native.order[i]
+                drawDrivers[i] = cars[id]
+                positions[i] = native.fractions[id]
+            }
+            for (i in size until drawDrivers.size) drawDrivers[i] = null
+            return size
+        }
         for (car in cars) {
             val fraction = geometry.progress(car.x, car.y)
             var insertion = size

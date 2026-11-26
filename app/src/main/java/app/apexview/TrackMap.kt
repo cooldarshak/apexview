@@ -657,7 +657,7 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
     TrackDrawingContent(timing, width, height, turn, app.mapOpacity, app.mapDotSizeDp, app.mapLabelSizeSp,
         now, cars, stop, timing.flags.at(now), targets = if (app.settings.mapDriverSelection) {
             { targets -> CarTargets(app, targets) }
-        } else null, motion = motion)
+        } else null, motion = motion, nativeRequested = app.settings.nativeRustStitching)
 }
 
 /** Pure current-state rendering, shared with the LAN receiver without replay-history parsing. */
@@ -666,12 +666,18 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
     opacity: Float, dotSizeDp: Float, labelSizeSp: Float, now: Long, currentCars: List<Car>,
     stop: PitStopNow?, flags: FlagPicture, leader: String? = null,
     motion: OverlayMotionSource? = null,
+    nativeRequested: Boolean = false,
     targets: (@Composable (List<Pair<String, Offset>>) -> Unit)? = null,
 ) {
     val density = LocalDensity.current
     val fit = remember(timing.outline, width, height, turn, density) {
         MapFit.of(timing.outline, width, height, margin = mapMarginPx(density), turn = turn)
     } ?: return
+    val nativeGeometry = remember(timing.geometry, nativeRequested) {
+        if (nativeRequested) NativeCircuitProjection(timing.geometry) else null
+    }
+    fun progress(x: Float, y: Float) = nativeGeometry?.progress(x, y) ?: timing.geometry.progress(x, y)
+    fun geometryPoint(f: Float) = nativeGeometry?.pointAt(f) ?: timing.geometry.pointAt(f)
     val path = remember(fit) {
         Path().apply {
             val o = timing.outline
@@ -690,8 +696,8 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
     val marks = remember(timing, timing.startLine) { LineMarks(timing) }
     val finishLabel = remember(marks) { measurer.label(marks.finishLabel, 8.sp) }
     val startLabel = remember { measurer.label("START", 8.sp) }
-    fun lapPoint(f: Float) = timing.geometry.pointAt(f).let { g -> fit.map(g[0], g[1]) }
-    val sectors = remember(fit, timing.marshalSectors) { sectorPaths(timing, ::lapPoint) }
+    fun lapPoint(f: Float) = geometryPoint(f).let { g -> fit.map(g[0], g[1]) }
+    val sectors = remember(fit, timing.marshalSectors, nativeGeometry) { sectorPaths(timing, ::lapPoint) }
     val scLabel = remember { measurer.label("SC", 8.sp) }
     val staticProbe = remember(fit) { OverlayPerformanceProbe("track-static-displaylist") }
     val dynamicProbe = remember(fit) { OverlayPerformanceProbe("track-car-flag-draw") }
@@ -712,7 +718,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
     }
     val safetyCar = if (!flags.track.safetyCar) null else currentSafetyLeader
         ?.let { leader -> cars.firstOrNull { it.first.number == leader }?.first }
-        ?.let { lapPoint(timing.geometry.progress(it.x, it.y) + SAFETY_CAR_AHEAD) }
+        ?.let { lapPoint(progress(it.x, it.y) + SAFETY_CAR_AHEAD) }
     // Only a changed event/flag/pit marker re-records this middle layer.
     val eventKey = remember(fit, flags.track, flags.yellow,
         flags.resumption?.announcedUtc, flags.resumption?.atUtc, flags.resumption?.what,
@@ -834,7 +840,7 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
                 if (flags.track.safetyCar) {
                     val safetyLeader = currentSafetyLeader
                     movingCars.firstOrNull { it.number == safetyLeader }?.let { car ->
-                        val point = lapPoint(timing.geometry.progress(car.x, car.y) + SAFETY_CAR_AHEAD)
+                        val point = lapPoint(progress(car.x, car.y) + SAFETY_CAR_AHEAD)
                         drawSafetyCar(point, 10.dp.toPx(), scLabel)
                     }
                 }
@@ -1105,7 +1111,7 @@ fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, i
         cars, stop, timing.flags.at(now), dotSizeDp = app.mapDotSizeDp, labelSizeSp = app.mapLabelSizeSp,
         targets = if (app.settings.mapDriverSelection) {
             { targets -> CarTargets(app, targets) }
-        } else null, motion = motion)
+        } else null, motion = motion, nativeRequested = app.settings.nativeRustStitching)
 }
 
 @Composable
@@ -1114,6 +1120,7 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     stop: PitStopNow?, flags: FlagPicture, leader: String? = null,
     dotSizeDp: Float, labelSizeSp: Float,
     motion: OverlayMotionSource? = null,
+    nativeRequested: Boolean = false,
     targets: (@Composable (List<Pair<String, Offset>>) -> Unit)? = null,
 ) {
     val fallback = with(LocalDensity.current) { 24.dp.toPx() }
@@ -1168,7 +1175,7 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
     val staticValidity = remember(staticLayer) { OverlayRecordingValidity() }
     val eventLayer = rememberGraphicsLayer()
     val eventValidity = remember(eventLayer) { OverlayRecordingValidity() }
-    val movingProjection = remember(ribbon) { OverlayEdgeProjection() }
+    val movingProjection = remember(ribbon, nativeRequested) { OverlayEdgeProjection(nativeRequested) }
     val reusedCollisionRows = remember(ribbon) { FloatArray(3) }
     // Track outline, turn glyphs and start/finish marks are independent of the moving cars.
     // Give them a separate retained Compose draw layer, as the regular map already does.

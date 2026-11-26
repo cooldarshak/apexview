@@ -32,7 +32,7 @@ internal object CastTimingProtocol {
         val number: String, val x: Float, val y: Float, val nextX: Float, val nextY: Float, val state: LapState,
         val later: List<Pair<Float, Float>> = emptyList(),
     ) {
-        fun at(steps: Float): Car {
+        private fun coordinateAt(steps: Float, horizontal: Boolean): Float {
             val last = later.size + 1
             val progress = steps.coerceIn(0f, last.toFloat())
             val i = progress.toInt().coerceAtMost(last - 1)
@@ -46,7 +46,7 @@ internal object CastTimingProtocol {
                 1 -> if (horizontal) nextX else nextY
                 else -> if (horizontal) later[index - 2].first else later[index - 2].second
             }
-            fun smooth(horizontal: Boolean): Float {
+            fun smooth(): Float {
                 val a = coordinate(i, horizontal)
                 val b = coordinate(i + 1, horizontal)
                 val p = coordinate((i - 1).coerceAtLeast(0), horizontal)
@@ -66,7 +66,16 @@ internal object CastTimingProtocol {
                     (t3 - t2) * m1
                 return interpolated.coerceIn(minOf(a, b), maxOf(a, b))
             }
-            return Car(number, smooth(true), smooth(false), state)
+            return smooth()
+        }
+
+        fun at(steps: Float): Car = Car(number, coordinateAt(steps,true), coordinateAt(steps,false), state)
+
+        /** Only the receiver draw owner mutates this marker; published packets stay immutable. */
+        fun writeAt(steps: Float, target: OverlayDrawCar) {
+            target.x = coordinateAt(steps,true)
+            target.y = coordinateAt(steps,false)
+            target.state = state
         }
     }
     class Geometry(val id: String, val timing: SessionTiming)
@@ -78,7 +87,8 @@ internal object CastTimingProtocol {
         val towerOpacity: Float, val towerFontScale: Float, val towerHeaderPx: Float, val tvLayout: Boolean,
         val speedUnit: String, val onTop: String?, val leader: String?, val cars: List<CarMotion>,
         val flags: FlagPicture, val stop: PitStopNow?, val circle: PitCircleData?, val table: Table,
-        val header: TowerSessionHeaderData, val message: String?) {
+        val header: TowerSessionHeaderData, val message: String?,
+        val nativeOverlayRequested: Boolean? = null) {
         fun carsAt(position: Long): List<Car> {
             // Hold the last measured endpoint between packets. Seeks invalidate frames at the receiver.
             val steps = (position - positionMs).toFloat() / POSITION_STEP_MS
@@ -207,6 +217,7 @@ internal object CastTimingProtocol {
             ?: if (tower.x >= 0 && tower.w > 0 && tower.h > 0) Panel(tower.x, tower.y, tower.w, tower.h) else null
         return JSONObject().put("version", VERSION).put("kind", "frame").put("geometry", geometryId)
             .put("position", positionMs).put("utc", now).put("density", density).put("fontScale", fontScale)
+            .put("nativeOverlayRequested", app.settings.nativeRustStitching)
             .put("mapMode", app.mapMode.name).put("map", encodePanel(mapPanel)).put("tower", encodePanel(towerPanel))
             .put("rotation", panel.rotation).put("mapOpacity", app.mapOpacity).put("dot", app.mapDotSizeDp).put("label", app.mapLabelSizeSp)
             .put("towerOpacity", app.towerOpacity).put("towerFont", app.towerFontScale)
@@ -263,7 +274,9 @@ internal object CastTimingProtocol {
             j.f("towerOpacity", 0f, 1f), j.f("towerFont", .25f, 5f), j.f("towerHeader", 0f, 10000f), j.getBoolean("tv"),
             j.getString("speedUnit").also { require(it == Settings.MPH || it == Settings.KMH) }, if (j.isNull("onTop")) null else j.getString("onTop").safe(8),
             if (j.isNull("leader")) null else j.getString("leader").safe(8), cars, FlagPicture(TrackCondition.entries[j.getInt("condition")], yellow, resumption),
-            stop, decodeCircle(j.optJSONObject("circle")), table, header, if (j.isNull("message")) null else j.getString("message").safe(220))
+            stop, decodeCircle(j.optJSONObject("circle")), table, header, if (j.isNull("message")) null else j.getString("message").safe(220),
+            if (j.has("nativeOverlayRequested") && !j.isNull("nativeOverlayRequested"))
+                j.getBoolean("nativeOverlayRequested") else null)
     }
     private fun encodeCircle(c: PitCircleData?): Any = c?.let {
         JSONObject().put("reference", it.referenceMs).put("ring", JSONArray().apply { it.ring.take(MAX_DRIVERS).forEach { r -> put(JSONArray(listOf(r.car.number, r.car.state.ordinal, r.at, r.distance))) } })

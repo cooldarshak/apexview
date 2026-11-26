@@ -54,6 +54,30 @@ public final class NativeHotPath {
         try { return nativeScaleUs(us,timescale,result)==1; }
         catch (LinkageError | RuntimeException failed) { return false; }
     }
+    public static boolean prepareGeometry(float[] outline, ByteBuffer packet) {
+        if (!available()) return false;
+        try { return nativePrepareGeometry(outline,packet)==1; }
+        catch (LinkageError | RuntimeException failed) { return false; }
+    }
+    public static boolean projectGeometry(ByteBuffer packet,float[] xy,int count,float[] fractions,int[] order) {
+        if (!available()) return false;
+        try { return nativeProjectGeometry(packet,xy,count,fractions,order)==1; }
+        catch (LinkageError | RuntimeException failed) { return false; }
+    }
+    public static boolean interpolateMotion(float[] points,int[] counts,float steps,float[] xy) {
+        if (!available()) return false;
+        try { return nativeInterpolateMotion(points,counts,steps,xy)==1; }
+        catch (LinkageError | RuntimeException failed) { return false; }
+    }
+    public static boolean pointAt(ByteBuffer packet,float fraction,float[] output) {
+        if (!available()) return false;
+        try { return nativePointAt(packet,fraction,output)==1; }
+        catch (LinkageError | RuntimeException failed) { return false; }
+    }
+    private static native int nativePointAt(ByteBuffer packet,float fraction,float[] output);
+    private static native int nativePrepareGeometry(float[] outline,ByteBuffer packet);
+    private static native int nativeProjectGeometry(ByteBuffer packet,float[] xy,int count,float[] fractions,int[] order);
+    private static native int nativeInterpolateMotion(float[] points,int[] counts,float steps,float[] xy);
     private static native int nativeSamplePositions(long[][] times,float[][] x,float[][] y,int[] counts,
                                                     long now,long[] state,float[] xy,int[] active);
     private static native int nativeFloorIndices(long[][] times,int[] counts,long now,int[] indices);

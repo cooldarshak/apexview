@@ -475,8 +475,8 @@ fun SettingsScreen(app: AppState) {
                     s.nativeRustStitching, app::setNativeStitchingPreference)
                 Text(
                     if (s.nativeRustStitching)
-                        "Requested: Rust. Eligible local clear multifeed archives verify the first native fragment against JVM. See playback diagnostics for actual engine and fallback reason. Protected and unsupported routes remain JVM."
-                    else "OFF uses the existing JVM stitching engine. Rust remains experimental.",
+                        "Requested: Rust for supported stitching, commentary processing and timing overlays. Existing Android decoding and DRM remain unchanged. Playback diagnostics report actual engines and fallback reasons."
+                    else "OFF uses JVM processing for stitching, commentary and timing overlays. Shared rendering improvements remain active.",
                     style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
                 Text("Stream type", style = Type.footnote, modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 2.dp))

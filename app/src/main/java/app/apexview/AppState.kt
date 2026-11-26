@@ -1544,6 +1544,7 @@ class AppState(
         // A baked scene retains its existing clear archive producer.
         nativeComposedCast?.setNativePreference(value)
         preparingNativeCast?.setNativePreference(value)
+        bakedCastSession?.setNativePreference(value)
         val castArchive = castRelay?.session ?: if (bakedCastSession != null) session else null
         if (castArchive != null && value) castArchive.configureNativeClear(context)
         else castArchive?.disableNativeClear("USER_DISABLED", false)

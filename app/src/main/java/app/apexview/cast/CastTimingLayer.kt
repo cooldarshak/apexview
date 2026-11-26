@@ -24,7 +24,8 @@ import kotlin.math.roundToInt
 /** Native UI overlays share the source window canvas and the receiver's playback clock. */
 @Composable
 internal fun CastTimingLayer(state: CastTimingReceiver, canvasWidth: Float, canvasHeight: Float, positionMs: () -> Long,
-                             onDriver: (String, Boolean) -> Unit, onDrawn: (Int, Int) -> Unit) {
+                             onDriver: (String, Boolean) -> Unit, onDrawn: (Int, Int) -> Unit,
+                             nativeRequested: Boolean = false) {
     // Counts are read in draw, not composition. Pitwall Cast's packet/UI contract
     // is unchanged; this records receiver-specific render costs every five seconds.
     val drawProbe = remember(state) {
@@ -56,7 +57,7 @@ internal fun CastTimingLayer(state: CastTimingReceiver, canvasWidth: Float, canv
             onDrawn(rows, cars)
         }) {
             ReceiverTower(state, scale, onDriver)
-            ReceiverTrack(state, canvasWidth, canvasHeight, scale, positionMs, onDriver)
+            ReceiverTrack(state, canvasWidth, canvasHeight, scale, positionMs, onDriver, nativeRequested)
         }
     }
 }
@@ -103,7 +104,8 @@ private fun ReceiverTower(state: CastTimingReceiver, scale: Float, onDriver: (St
 
 @Composable
 private fun BoxScope.ReceiverTrack(state: CastTimingReceiver, canvasWidth: Float, canvasHeight: Float,
-                                   scale: Float, positionMs: () -> Long, onDriver: (String, Boolean) -> Unit) {
+                                   scale: Float, positionMs: () -> Long, onDriver: (String, Boolean) -> Unit,
+                                   nativeRequested: Boolean) {
     val frame = state.frame ?: return
     val timing = state.geometry?.takeIf { it.id == frame.geometryId }?.timing
     if (timing == null) {
@@ -113,7 +115,8 @@ private fun BoxScope.ReceiverTrack(state: CastTimingReceiver, canvasWidth: Float
     if (frame.mapMode != MapMode.OFF) {
         val density = Density(frame.density * scale, frame.fontScale)
         CompositionLocalProvider(LocalDensity provides density) {
-            ReceiverMap(timing, frame, canvasWidth, canvasHeight, scale, density, positionMs, onDriver)
+            ReceiverMap(timing, frame, canvasWidth, canvasHeight, scale, density, positionMs, onDriver,
+                frame.nativeOverlayRequested ?: nativeRequested)
         }
     }
 }
@@ -121,7 +124,7 @@ private fun BoxScope.ReceiverTrack(state: CastTimingReceiver, canvasWidth: Float
 @Composable
 private fun ReceiverMap(timing: SessionTiming, frame: CastTimingProtocol.Frame, canvasWidth: Float,
                         canvasHeight: Float, scale: Float, density: Density, positionMs: () -> Long,
-                        onDriver: (String, Boolean) -> Unit) {
+                        onDriver: (String, Boolean) -> Unit, nativeRequested: Boolean) {
     // The last validated packet supplies static hit-target locations. The 60Hz
     // draw-only clock below animates actual car markers using receiver video time.
     // Previously rememberTvMapTime(positionMs) recomposed the entire Map subtree
@@ -130,8 +133,10 @@ private fun ReceiverMap(timing: SessionTiming, frame: CastTimingProtocol.Frame, 
     val cars = frame.carsAt(position)
     // Keep map state changes on Cast packets and position-only motion in drawing.
     val drawClock = rememberOverlayDrawClock(timing, positionMs, "pitwall-cast-map-motion-clock")
-    val motion = remember(frame, drawClock) {
-        OverlayMotionSource(drawClock, frame::carsAt)
+    val diagnostics = remember { ReceiverMotionDiagnostics() }
+    val sampler = remember(frame, nativeRequested) { ReceiverMotionSampler(frame, nativeRequested, diagnostics) }
+    val motion = remember(sampler, drawClock) {
+        OverlayMotionSource(drawClock, sampler::sample)
     }
     fun panel(p: CastTimingProtocol.Panel) = Modifier
         .offset { IntOffset((p.x * scale).roundToInt(), (p.y * scale).roundToInt()) }
@@ -140,7 +145,7 @@ private fun ReceiverMap(timing: SessionTiming, frame: CastTimingProtocol.Frame, 
         EdgeDrawingContent(timing, canvasWidth * scale, canvasHeight * scale,
             with(density) { 30.dp.toPx() }, 0f, frame.mapOpacity, frame.utcMs + position - frame.positionMs,
             cars, frame.stop, frame.flags, frame.leader, frame.dotSize, frame.labelSize,
-            motion = motion) {
+            motion = motion, nativeRequested = nativeRequested) {
             targets -> DriverTargets(targets) { onDriver(it, false) }
         }
     }
@@ -157,7 +162,7 @@ private fun ReceiverMap(timing: SessionTiming, frame: CastTimingProtocol.Frame, 
             } else TrackDrawingContent(timing, p.width * scale, p.height * scale, frame.mapRotation,
                 frame.mapOpacity, frame.dotSize, frame.labelSize, frame.utcMs + position - frame.positionMs,
                 cars, frame.stop, frame.flags, frame.leader,
-                motion = motion) { targets -> DriverTargets(targets) { onDriver(it, false) } }
+                motion = motion, nativeRequested = nativeRequested) { targets -> DriverTargets(targets) { onDriver(it, false) } }
             if (cars.isEmpty() && frame.message != null) {
                 Text(frame.message, style = Type.footnote, modifier = Modifier.align(Alignment.BottomCenter))
             }

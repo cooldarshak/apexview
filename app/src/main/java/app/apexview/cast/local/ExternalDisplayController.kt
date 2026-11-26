@@ -157,7 +157,7 @@ private fun ExternalCanvas(activity: FragmentActivity, app: AppState) {
                 }
                 CastTimingLayer(state, width, height, { app.castFramePositionMs }, { number, pit ->
                     if (pit) app.pitDriver = if (app.pitDriver == number) null else number else app.showOnboard(number)
-                }, { _, _ -> })
+                }, { _, _ -> }, nativeRequested = app.settings.nativeRustStitching)
             }
         }
     }

@@ -68,6 +68,45 @@ class ArchitectureGBAndroidTest {
     }
 
     @Test
+    fun nativeCircuitAndReceiverInterpolationMatchKotlin() {
+        assertTrue(NativeHotPath.available())
+        val outline = floatArrayOf(0f,0f,100f,0f,120f,50f,100f,100f,0f,100f)
+        val geometry = app.apexview.TrackGeometry(outline)
+        val storage = ByteBuffer.allocateDirect(8 + 8 * outline.size)
+        assertTrue(NativeHotPath.prepareGeometry(outline, storage))
+        val packet = storage.asReadOnlyBuffer()
+        val xy = floatArrayOf(0f,0f,50f,-2f,100f,50f,0f,80f,40f,100f,50f,50f)
+        val fractions = FloatArray(xy.size / 2)
+        val order = IntArray(fractions.size)
+        assertTrue(NativeHotPath.projectGeometry(packet,xy,fractions.size,fractions,order))
+        for (i in fractions.indices)
+            assertEquals(geometry.progress(xy[2*i],xy[2*i+1]),fractions[i],0.00001f)
+        val referenceOrder = fractions.indices.sortedBy { geometry.progress(xy[it*2],xy[it*2+1]) }.toIntArray()
+        assertArrayEquals(referenceOrder,order)
+        val point = FloatArray(4)
+        for (i in -100..200) {
+            val f = i / 100f
+            assertTrue(NativeHotPath.pointAt(packet,f,point))
+            assertArrayEquals(geometry.pointAt(f),point,0.0001f)
+        }
+        assertFalse(NativeHotPath.prepareGeometry(outline,ByteBuffer.allocateDirect(4)))
+        assertFalse(NativeHotPath.projectGeometry(packet,xy,65,fractions,order))
+        val moving = app.apexview.cast.CastTimingProtocol.CarMotion("1",0f,0f,10f,20f,
+            app.apexview.LapState.UNKNOWN,listOf(5f to 30f, 50f to 10f))
+        val points = FloatArray(14)
+        floatArrayOf(0f,0f,10f,20f,5f,30f,50f,10f).copyInto(points)
+        val coords = FloatArray(2)
+        for (i in -10..50) {
+            val steps = i/10f
+            val reference = moving.at(steps)
+            assertTrue(NativeHotPath.interpolateMotion(points,intArrayOf(4),steps,coords))
+            assertEquals(reference.x,coords[0],0.00001f)
+            assertEquals(reference.y,coords[1],0.00001f)
+        }
+        assertFalse(NativeHotPath.interpolateMotion(points,intArrayOf(8),1f,coords))
+    }
+
+    @Test
     fun stitchedTiledFragmentUsesNativeWorkerAndGenerationFencedLease() {
         verifyFrameRateArithmetic()
         val assets = InstrumentationRegistry.getInstrumentation().context.assets

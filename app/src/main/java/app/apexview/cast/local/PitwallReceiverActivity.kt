@@ -883,7 +883,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                                         Log.i("PitwallReceiver", "TIMING_UI_DRAWN rows=$rows cars=$cars")
                                     }
                                 }
-                            })
+                            }, nativeRequested = captionSettings.nativeRustStitching)
                             }
                         }
                     } else AndroidView(factory = { PlayerView(it).apply { standardView = this; player = current; useController = true } },
