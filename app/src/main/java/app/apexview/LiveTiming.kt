@@ -492,8 +492,12 @@ class SessionTiming(
     val live: Boolean = false,
     /** Session weather sampled from F1's WeatherData topic/archive. */
     val weather: WeatherLog = WeatherLog.NONE,
+    val geometry: TrackGeometry = TrackGeometry(outline),
 ) {
-    val geometry = TrackGeometry(outline)
+    internal var publicationStage = ReplayTimingStage.CORE
+    internal var towerThroughUtc = Long.MAX_VALUE
+    internal var towerIndexed = false
+    internal var positionsIndexed = false
     val firstTrackUtc: Long? = tracks.values.minOfOrNull { it.startMs }
     val lastTrackUtc: Long? = tracks.values.maxOfOrNull { it.endMs }
     var archivePartial = false
@@ -773,6 +777,9 @@ private data class TimingPreviewSnapshot(
     val states: Map<String, StateLog>,
     val laps: Map<String, DriverLaps>,
     val startUtcMs: Long,
+    val towerThroughUtc: Long,
+    val towerIndexed: Boolean,
+    val positionsIndexed: Boolean,
 )
 
 class LiveTimingArchive(private val token: String, private val userAgent: String,
@@ -860,6 +867,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             val heartbeatTask = async { parseStreamStart(fetchStage(path + "Heartbeat.jsonStream")) }
             val positionClock = CompletableDeferred<Long?>()
             var partialClock: Long? = null
+            var towerThroughUtc = Long.MIN_VALUE
+            var towerIndexed = false
+            var positionsIndexed = false
             var partialTracks: Map<String, DriverTrack> = emptyMap()
             var partialOutline = FloatArray(0)
             var partialHistory = DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
@@ -914,6 +924,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                         states = partialHistory.states.states,
                         laps = partialHistory.laps,
                         startUtcMs = partialClock ?: initialStart,
+                        towerThroughUtc = towerThroughUtc,
+                        towerIndexed = towerIndexed,
+                        positionsIndexed = positionsIndexed,
                     )
                 }
                 checkpoint("publish-overlays",
@@ -924,7 +937,13 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                         states = snapshot.states, outline = snapshot.outline,
                         hasStartFinish = false, corners = emptyList(), startUtcMs = snapshot.startUtcMs,
                         circuitKey = ref.circuitKey, laps = snapshot.laps, radioBase = BASE + path,
-                    ).apply { archivePartial = true }
+                    ).apply {
+                        archivePartial = true
+                        publicationStage = ReplayTimingStage.TOPICS
+                        this.towerThroughUtc = snapshot.towerThroughUtc
+                        this.towerIndexed = snapshot.towerIndexed
+                        this.positionsIndexed = snapshot.positionsIndexed
+                    }
                 }
                 withContext(Dispatchers.Main.immediate) {
                     if (previewEpochs.isCurrent(snapshot.epoch)) {
@@ -1123,6 +1142,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                 checkpoint("tower-preview", "drivers=${preview.history.laps.size} throughUtcMs=${preview.throughUtcMs} elapsedMs=$elapsed")
                                 withContext(Dispatchers.Main) {
                                     partialClock = initialStart
+                                    towerThroughUtc = preview.throughUtcMs
                                     partialHistory = preview.history
                                     publishTopics()
                                 }
@@ -1178,6 +1198,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                             val snapshot = DriverTimingParse(laps, accumulator.finish())
                                             launch(Dispatchers.Main) {
                                                 partialClock = initialStart
+                                                if (towerIndexed || through < towerThroughUtc) return@launch
+                                                towerThroughUtc = through
                                                 partialHistory = snapshot
                                                 publishTopics()
                                             }
@@ -1200,10 +1222,15 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 }
                 withContext(Dispatchers.Main) {
                     partialClock = initialStart
+                    towerIndexed = history.laps.isNotEmpty()
+                    if (towerIndexed) towerThroughUtc = Long.MAX_VALUE
                     partialHistory = history
                     publishTopics()
                 }
-                Triple(timingStream, history, initialStart)
+                val parts = if (type.contains("Qualifying", ignoreCase = true)) {
+                    traceStage("session-parts") { _ -> parseParts(timingStream.orEmpty(), initialStart) }
+                } else emptyList()
+                Triple(parts, history, initialStart)
             }
             val drivers = driverTask.await()
             val initialStart = heartbeatTask.await()
@@ -1233,13 +1260,14 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 traceStage("map-outline") { _ -> traceOutline(tracks.values.toList()) }
             }
             withContext(Dispatchers.Main) {
+                positionsIndexed = positionReport.decodedRecords > 0
                 partialTracks = built
                 if (traced.isNotEmpty()) partialOutline = traced
                 publishTopics()
             }
             progress(if (tracks.isEmpty()) "Track positions unavailable; loading timing history…" else "Track map available · loading timing history…")
 
-            val (timingStream, initialHistory, historyStart) = historyTask.await()
+            val (sessionParts, initialHistory, historyStart) = historyTask.await()
             // Heartbeat anchors the stream clock. Some sessions have bad offsets; the cars' own
             // timestamps win when they disagree with it by more than a minute.
             val streamStart = positionReport.streamStart?.takeIf { abs(it - initialStart) > STREAM_START_SLACK_MS } ?: initialStart
@@ -1271,9 +1299,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             ReplayCore(
                 path, type, drivers, built, history.states.states,
                 outline, line != null, streamStart, history.laps,
-                if (type.contains("Qualifying", ignoreCase = true)) {
-                    traceStage("session-parts") { _ -> parseParts(timingStream.orEmpty(), streamStart) }
-                } else emptyList(),
+                if (clockShift == 0L) sessionParts else sessionParts.map { (time, part) -> time + clockShift to part },
             )
         }
 
@@ -1285,7 +1311,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         ).apply { archivePartial = true }
         val previewStarted = android.os.SystemClock.elapsedRealtime()
         replayCache?.readPreview(replayPositionMs) { loadJob.ensureActive() }?.let { preview ->
-            publish(preview.partial())
+            publish(preview.partial().apply { publicationStage = ReplayTimingStage.SAVED_WINDOW })
             progress("Replay startup snapshot hit · ${android.os.SystemClock.elapsedRealtime() - previewStarted}ms")
         }
         val cacheStarted = android.os.SystemClock.elapsedRealtime()

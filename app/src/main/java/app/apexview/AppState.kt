@@ -2721,8 +2721,8 @@ class AppState(
         val playhead = replayPlayhead(contentId, positionMs)
         val videoUtc = playhead.videoUtcMs ?: return
         val targetUtc = videoUtc + playhead.offsetMs
-        if (archive.tracks.values.none { it.at(targetUtc) != null } ||
-            archive.laps.values.none { it.at(targetUtc)?.position != null }) return
+        if (archive.tracks.values.none { it.hasPositionAt(targetUtc) } ||
+            archive.laps.values.none { it.hasRankAt(targetUtc) }) return
         if (replayPreviewContent == contentId &&
             replayPreviewPosition?.let { abs(positionMs - it) < 25_000L } == true
         ) return
@@ -4229,6 +4229,9 @@ class AppState(
             "Archive lookup: videoClock=${initial.videoUtcMs ?: "unavailable"} positionMs=${initial.positionMs} " +
                 "catalogStart=${ref.sessionStartUtcMs ?: "unavailable"} attempt=$attempt"
         )
+        val publication = ReplayStartupPublication()
+        var towerStableMs: Long? = null
+        var mapStableMs: Long? = null
         var towerReadyMs: Long? = null
         var mapReadyMs: Long? = null
         var lastClockBase: Long? = null
@@ -4253,23 +4256,26 @@ class AppState(
                 recordTimingDiagnostic("Replay clock source=$clockSource " +
                     "baseUtcMs=$base positionMs=${sample.positionMs} offsetMs=${sample.offsetMs}")
             }
+            timing?.let { last ->
+                publication.at(sample.utcAt(last.startUtcMs))?.let { visible ->
+                    if (visible !== last) showTiming(visible)
+                }
+            }
             val session = timing
             val elapsed = android.os.SystemClock.elapsedRealtime() - trace
             val clock = session?.let { sample.utcAt(it.startUtcMs) }
             if (session != null && clock != null && leaderTile()?.contentId == contentId) {
-                if (towerReadyMs == null) {
-                    val rows = session.laps.count { it.value.at(clock)?.position != null }
-                    if (rows > 0) {
-                        towerReadyMs = elapsed
-                        recordTimingDiagnostic("Replay tower ready utcMs=$clock rankedRows=$rows")
-                    }
+                val rows = session.laps.count { it.value.hasRankAt(clock) }
+                val cars = if (session.outline.size < 8) 0 else session.tracks.count { it.value.hasPositionAt(clock) }
+                if ((rows > 0) != (towerStableMs != null)) {
+                    towerStableMs = elapsed.takeIf { rows > 0 }
+                    if (towerReadyMs == null) towerReadyMs = towerStableMs
+                    recordTimingDiagnostic("Replay tower readiness utcMs=$clock rankedRows=$rows stableSinceMs=$towerStableMs")
                 }
-                if (mapReadyMs == null && session.outline.size >= 8) {
-                    val cars = session.tracks.count { it.value.hasPositionAt(clock) }
-                    if (cars > 0) {
-                        mapReadyMs = elapsed
-                        recordTimingDiagnostic("Replay map ready utcMs=$clock positionedCars=$cars")
-                    }
+                if ((cars > 0) != (mapStableMs != null)) {
+                    mapStableMs = elapsed.takeIf { cars > 0 }
+                    if (mapReadyMs == null) mapReadyMs = mapStableMs
+                    recordTimingDiagnostic("Replay map readiness utcMs=$clock positionedCars=$cars stableSinceMs=$mapStableMs")
                 }
             }
             val budget = when {
@@ -4280,7 +4286,7 @@ class AppState(
             if (budget != null) {
                 if (budget == 1) oneSecondReported = true else budgetReported = true
                 val rows = if (session == null || clock == null) 0 else
-                    session.laps.count { it.value.at(clock)?.position != null }
+                    session.laps.count { it.value.hasRankAt(clock) }
                 val cars = if (session == null || clock == null || session.outline.size < 8) 0 else
                     session.tracks.count { it.value.hasPositionAt(clock) }
                 recordTimingDiagnostic("Replay ${budget}s checkpoint towerReadyMs=$towerReadyMs mapReadyMs=$mapReadyMs " +
@@ -4312,9 +4318,13 @@ class AppState(
                         recordTimingDiagnostic(status)
                     }
                 },
-                onPartial = { partial ->
+                onPartial = { incoming ->
                     if (timingWork.owns(timingOwner)) {
-                        showTiming(partial)
+                        val sample = replayPlayhead(contentId, savedPosition)
+                        playhead.set(sample)
+                        val partial = publication.offer(incoming, sample.utcAt(incoming.startUtcMs))
+                        val changed = timing !== partial
+                        if (changed) showTiming(partial)
                         inspectPlayback()
                         // Cache the actual replay window once the independently
                         // parsed map and timing tower both have usable data.
@@ -4324,7 +4334,7 @@ class AppState(
                             saveReplayPreview(contentId, playhead.get().positionMs)
                         }
                         recordTimingDiagnostic(
-                            "Partial data: drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
+                            "Partial data: source=${incoming.publicationStage} changed=$changed drivers=${partial.drivers.size}, laps=${partial.laps.size}, " +
                                 "cars=${partial.tracks.size}, outlinePoints=${partial.outline.size / 2} " +
                                 "trackFromUtcMs=${partial.firstTrackUtc} trackThroughUtcMs=${partial.lastTrackUtc}"
                         )
@@ -4337,6 +4347,7 @@ class AppState(
                 },
             )
             if (!timingWork.owns(timingOwner)) return@coroutineScope
+            publication.offer(loaded, playhead.get().utcAt(loaded.startUtcMs))
             showTiming(loaded)
             saveReplayPreview(contentId, castFramePositionMs)
             archiveComplete = true

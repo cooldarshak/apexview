@@ -176,6 +176,9 @@ class DriverLaps(
             .map { crossings[it - 1] to crossings[it] }
             .filter { (start, end) -> end - start in MIN_LAP_MS..MAX_LAP_MS }
 
+    internal fun hasRankAt(utcMs: Long): Boolean =
+        states.getOrNull(times.floorIndex(utcMs))?.position != null
+
     /** Whether the driver was out of the race at [utcMs]. */
     fun retiredAt(utcMs: Long): Boolean = times.floorIndex(utcMs).let { it >= 0 && states[it].retired }
 
