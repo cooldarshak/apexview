@@ -526,7 +526,7 @@ object DriverTimingParser {
         return parseArchiveLines(
             stream.lineSequence(), timingF1.lineSequence(), streamStart,
             timingStreamIsChronological(stream, checkActive) && timingStreamIsChronological(timingF1, checkActive),
-            stateHistory, nativeRequested, checkpoint, checkActive, onProgress,
+            stateHistory, nativeRequested, checkpoint, checkActive, onProgress = onProgress,
         )
     }
 
@@ -539,6 +539,7 @@ object DriverTimingParser {
         nativeRequested: Boolean,
         checkpoint: ((String) -> Unit)? = null,
         checkActive: () -> Unit = {},
+        progressWindow: ((Long) -> LongRange)? = null,
         onProgress: ((Long, () -> Map<String, DriverLaps>) -> Unit)? = null,
     ): Map<String, DriverLaps> {
         val statusPolicy = RetirementStatusPolicy(nativeRequested)
@@ -562,7 +563,11 @@ object DriverTimingParser {
                 apply(live, d, event.time, statusPolicy, event.source)
                 live.snap(event.time)
             }
-            if (records % 1024 == 0) onProgress?.invoke(event.time) { materialize(drivers, copySnapshots = true) }
+            if (records % 1024 == 0) onProgress?.invoke(event.time) {
+                val window = progressWindow?.invoke(event.time)
+                if (window == null) materialize(drivers, copySnapshots = true)
+                else materializePreview(drivers, window.first, window.last)
+            }
         }
 
         if (chronological) {
