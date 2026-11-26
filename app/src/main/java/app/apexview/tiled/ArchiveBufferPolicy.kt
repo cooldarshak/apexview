@@ -404,6 +404,16 @@ internal object ArchiveBufferPolicy {
     fun preflightClockMoved(beforeMs: Long, afterMs: Long): Boolean =
         afterMs - beforeMs > 2_000L || beforeMs - afterMs > 2_000L
 
+    fun preflightClockInvalidated(beforeMs: Long, afterMs: Long, elapsedMs: Long,
+                                  speed: Float, wasPlaying: Boolean): Boolean {
+        if (!wasPlaying || !speed.isFinite() || speed <= 0f) return preflightClockMoved(beforeMs, afterMs)
+        val forward = afterMs - beforeMs
+        // An ordinary playing clock may advance throughout a slow capture.
+        // Coverage is independently checked against the observed clock.
+        val allowance = (elapsedMs.coerceIn(0, 60_000) * speed.toDouble()).toLong() + 2_000
+        return forward < -2_000 || forward > allowance
+    }
+
     fun restartPreflightOnSeek(
         starting: Boolean, captureActive: Boolean, hasComposedHost: Boolean,
         isSingleDecoder: Boolean,

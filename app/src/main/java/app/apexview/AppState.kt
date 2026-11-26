@@ -166,6 +166,9 @@ class AppState(
         private set
     private var archiveCompositionStarting by mutableStateOf(false)
     private var qualityRestartPending by mutableStateOf(false)
+    // Only the short decoder handoff needs immediate supersession. Network
+    // preflight can coalesce repeated choices without opening multiple probes.
+    private var compositionHandoffOwner: Any? = null
     /** True during genuine multi-feed archive preflight, never inferred from a timer.
      * The viewer must not show one playable camera as a partially ready four-window scene. */
     val sceneActivationPreparing: Boolean
@@ -3075,7 +3078,16 @@ class AppState(
         val diagnosticGeneration = compositionDiagnosticOwner.begin()
         singleDecoderDiagnostic = null
         playbackWork.prepareCapture(capture)
-        val startup = ArchiveCompositionStartup()
+        val startup = ArchiveCompositionStartup(stage = { stage, elapsed ->
+            android.util.Log.i("ApexviewSingleDecoder", "F1_STARTUP_STAGE path=CLEAR content=$contentId generation=$diagnosticGeneration stage=$stage elapsedMs=$elapsed")
+        })
+        val sourceIdentity = selected.map { it.id to it.feed }
+        fun validateSelection() {
+            if (playbackWork.capture !== capture || qualityRestartPending ||
+                tiles.map { it.id to it.feed } != sourceIdentity ||
+                selected.associate { it.feed.sourceStream.profileLabel to qualityFor(it).targetHeight } != desired)
+                throw kotlinx.coroutines.CancellationException("Archive selection superseded")
+        }
         var transferred = false
         var released = 0
         var prepared: app.apexview.tiled.HevcArchiveVodSession? = null
@@ -3190,8 +3202,8 @@ class AppState(
                         // Capture/encoder and audio are tied to the old archive. Keep
                         // them alive through validation, then retire before replacing
                         // the one decoder. The waiting quality job owns reconnection.
-                        if (playbackWork.capture !== capture)
-                            throw kotlinx.coroutines.CancellationException("Obsolete archive decoder handoff")
+                        validateSelection()
+                        compositionHandoffOwner = capture
                         if (bakedQualityReplacement && bakedCastSession != null)
                             releaseCastRelay(preserveQualityRestart = true)
                         val before = selected.sumOf { it.feed.activeVideoDecoderCount }
@@ -3236,7 +3248,9 @@ class AppState(
                     },
                     restoreSources = { restore() },
                     dispose = { if (!transferred) it.close() },
+                    validatePrepared = ::validateSelection,
                 )
+                if (compositionHandoffOwner === capture) compositionHandoffOwner = null
                 var previousLog = ""
                 var lastEvidenceAt = 0L
                 var readySince: Long? = null
@@ -3320,6 +3334,7 @@ class AppState(
                 android.util.Log.w("ApexviewSingleDecoder", "ARCHIVE_VOD_FAILED stage=$failedAt " +
                     "retryable=$retryableFailure fallback=${singleDecoderFallbackTileId != null} reason=$failure")
             } finally {
+                if (compositionHandoffOwner === capture) compositionHandoffOwner = null
                 if (playbackWork.capture === capture) {
                     archiveCompositionStarting = false
                     if (!transferred && !useExistingBackend && settings.decoderMode == DecoderMode.MULTIPLE)
@@ -3408,7 +3423,16 @@ class AppState(
         ProtectedHevcLiveComposition.selectFeeds(group, labels, fullPictures = mixedRequested,
             localNativeHeader = true, nativeHeaderRequested = settings.nativeRustStitching && !castingActive,
             nativeContext = context)
-        val startup = ArchiveCompositionStartup()
+        val startup = ArchiveCompositionStartup(stage = { stage, elapsed ->
+            android.util.Log.i("ApexviewSingleDecoder", "F1_STARTUP_STAGE path=ROLLING content=$contentId generation=$diagnosticGeneration stage=$stage elapsedMs=$elapsed")
+        })
+        val sourceIdentity = selectedTiles.map { it.id to it.feed }
+        fun validateSelection() {
+            if (playbackWork.capture !== capture || qualityRestartPending ||
+                tiles.map { it.id to it.feed } != sourceIdentity ||
+                selectedTiles.map(::qualityFor) != selectedQualities)
+                throw kotlinx.coroutines.CancellationException("Rolling selection superseded")
+        }
         var lastSnapshot: F1DashFeedCapture.Snapshot? = null
         var releasedCount = 0
         var playback = "PREFLIGHT"
@@ -3477,13 +3501,18 @@ class AppState(
                         var prepared: ProtectedHevcLiveComposition.OutputWindow? = null
                         while (prepared == null) {
                             val captureClockMs = audioMaster.feed.player.currentPosition.coerceAtLeast(0L)
+                            val captureStarted = android.os.SystemClock.elapsedRealtime()
+                            val clockWasPlaying = audioMaster.feed.player.isPlaying
                             val snapshot = capture.captureAtPosition(group, feeds, captureClockMs)
+                            validateSelection()
                             if (playbackWork.capture === capture)
                                 recordQualityOffers(selectedTiles, capture.offeredSourceDimensions)
                             // A resumed archive/remote seek can update Media3 directly.
                             // Never keep following the old HLS segment sequence for 30s.
                             val observedClockMs = audioMaster.feed.player.currentPosition.coerceAtLeast(0L)
-                            if (ArchiveBufferPolicy.preflightClockMoved(captureClockMs, observedClockMs)) {
+                            if (ArchiveBufferPolicy.preflightClockInvalidated(captureClockMs, observedClockMs,
+                                    android.os.SystemClock.elapsedRealtime() - captureStarted,
+                                    playbackSpeed, clockWasPlaying)) {
                                 android.util.Log.i("ApexviewSingleDecoder",
                                     "F1_PREFLIGHT_SEEK_INVALIDATED phase=CAPTURE clockBeforeMs=" +
                                         captureClockMs + " clockAfterMs=" + observedClockMs)
@@ -3561,6 +3590,8 @@ class AppState(
                         }
                     },
                     releaseSources = {
+                        validateSelection()
+                        compositionHandoffOwner = capture
                         val decodersBefore = selectedTiles.sumOf { it.feed.activeVideoDecoderCount }
                         selectedTiles.forEach { tile ->
                             tile.feed.setProtectedCompositionVideoRole(false,
@@ -3635,7 +3666,9 @@ class AppState(
                     },
                     restoreSources = ::restore,
                     dispose = { it.zero() },
+                    validatePrepared = ::validateSelection,
                 )
+                if (compositionHandoffOwner === capture) compositionHandoffOwner = null
                 var waitingSince: Long? = null
                 var lastStage = ""
                 var lastEvidenceAt = 0L
@@ -3748,6 +3781,7 @@ class AppState(
                 android.util.Log.w("ApexviewSingleDecoder", "F1_COMPOSITION_FAILED $evidence activeVideoDecoders=$observedActiveVideoDecoders reason=${DiagnosticRedaction.redact(terminalReason.orEmpty())}")
                 message = "Single decoder failed: $terminalReason. Use Retry or select Multiple decoders in Settings."
             } finally {
+                if (compositionHandoffOwner === capture) compositionHandoffOwner = null
                 if (playbackWork.capture === capture) {
                     archiveCompositionStarting = false
                     if (!startup.sourceDecodersTouched && settings.decoderMode == DecoderMode.MULTIPLE)
@@ -7001,9 +7035,11 @@ class AppState(
     }
 
     private fun scheduleQualityRestart(contentId: Long) {
-        // An already-running preparation must be superseded immediately: it
-        // could otherwise publish obsolete quality during the debounce window.
-        if (archiveCompositionStarting) {
+        // The preflight validates selection before releasing any decoder.
+        // During the actual decoder handoff, supersede immediately; otherwise
+        // collapse a burst of quality choices to one expensive preparation.
+        if (archiveCompositionStarting && compositionHandoffOwner != null &&
+            compositionHandoffOwner === playbackWork.capture) {
             startArchiveSingleDecoderComposition(contentId)
             return
         }

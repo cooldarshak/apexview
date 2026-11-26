@@ -353,6 +353,11 @@ class ArchiveBufferPolicyTest {
         assertFalse(ArchiveBufferPolicy.preflightClockMoved(920_734, 922_000))
         assertFalse(ArchiveBufferPolicy.preflightClockMoved(920_734, 922_734))
         assertTrue(ArchiveBufferPolicy.preflightClockMoved(920_734, 922_735))
+        assertFalse(ArchiveBufferPolicy.preflightClockInvalidated(10_000, 25_000, 15_000, 1f, true))
+        assertFalse(ArchiveBufferPolicy.preflightClockInvalidated(10_000, 32_000, 15_000, 1.5f, true))
+        assertTrue(ArchiveBufferPolicy.preflightClockInvalidated(10_000, 25_000, 15_000, 1f, false))
+        assertTrue(ArchiveBufferPolicy.preflightClockInvalidated(10_000, 900_000, 15_000, 1f, true))
+        assertTrue(ArchiveBufferPolicy.preflightClockInvalidated(10_000, 0, 15_000, 1f, true))
     }
 
     @Test fun anExpiredPreflightWindowCannotReplaceThePlayingSources() {

@@ -8,6 +8,36 @@ import org.junit.Test
 import java.io.IOException
 
 class ArchiveCompositionStartupTest {
+    @Test fun supersededSelectionCannotReleaseOrReplaceDecoder() = runBlocking {
+        var disposed = false
+        val events = mutableListOf<String>()
+        try {
+            ArchiveCompositionStartup(stage = { stage, _ -> events += stage }).start(
+                preflight = { Unit }, releaseSources = { fail("Obsolete selection released decoder") },
+                replaceHost = { fail("Obsolete selection replaced decoder") },
+                restoreSources = { fail("Untouched decoder needs no rollback") },
+                dispose = { disposed = true },
+                validatePrepared = { throw CancellationException("New quality") })
+            fail("Expected cancellation")
+        } catch (_: CancellationException) {}
+        assertTrue(disposed)
+        assertEquals(listOf("PREFLIGHT", "VALIDATED", "SUPERSEDED"), events)
+    }
+
+    @Test fun cancellationAfterDecoderReleaseRestoresAndDoesNotInstallStaleHost() = runBlocking {
+        var released = false
+        var restored = false
+        try {
+            ArchiveCompositionStartup().start(preflight = { Unit },
+                releaseSources = { released = true },
+                replaceHost = { fail("Stale host") },
+                restoreSources = { assertFalse(it); restored = true }, dispose = {},
+                validatePrepared = { if (released) throw CancellationException("Superseded") })
+            fail("Expected cancellation")
+        } catch (_: CancellationException) {}
+        assertTrue(restored)
+    }
+
     @Test fun permanentPreflightFailurePreservesPlayingSources() = runBlocking {
         for (reason in listOf("HLS-only offer", "DASH unavailable", "HEVC incompatible", "Fragment alignment failure", "DRM incompatible")) {
             var playingSources = 3

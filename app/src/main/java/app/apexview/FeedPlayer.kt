@@ -274,14 +274,18 @@ class FeedPlayer(
     private val playbackAllocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
     private var parkedForArchive = false
     private var activeAudioDecoders = 0
+    private val memoryLoads = Media3LoadLedger()
+    private var memoryOwnerRetired = false
     private fun updateMemoryOwner() {
+        if (memoryOwnerRetired) return
         val role = when {
             parkedForArchive && player.mediaItemCount == 0 -> "ARCHIVE_PARKED"
-            archiveVodSession != null || protectedLiveDashSource != null -> "COMPOSED"
             remotePlaybackSuspended -> "REMOTE"
+            archiveVodSession != null || protectedLiveDashSource != null -> "COMPOSED"
             else -> "SOURCE"
         }
-        Media3MemoryOwners.update(playbackAllocator, role, activeVideoDecoderCount, activeAudioDecoders, player.mediaItemCount)
+        Media3MemoryOwners.update(playbackAllocator, role, activeVideoDecoderCount, activeAudioDecoders,
+            player.mediaItemCount, player.totalBufferedDuration.coerceAtLeast(0), -1, memoryLoads.snapshot())
     }
     private var loggedClock = false
     private var firstFrameLogged = false
@@ -612,7 +616,10 @@ class FeedPlayer(
                     else -> "Stopped"
                 }
                 buffering = playbackState == Player.STATE_BUFFERING
-                if (playbackState == Player.STATE_IDLE && parkedForArchive) playbackAllocator.trim()
+                if (playbackState == Player.STATE_IDLE && parkedForArchive) {
+                    memoryLoads.clearPending()
+                    playbackAllocator.trim()
+                }
                 updateMemoryOwner()
                 playbackEvent("state", "state=$playbackState positionMs=${player.currentPosition} bufferedMs=${player.bufferedPosition}")
                 if (playbackState == Player.STATE_READY && !started) {
@@ -800,6 +807,9 @@ class FeedPlayer(
                 loadEventInfo: LoadEventInfo,
                 mediaLoadData: MediaLoadData,
             ) {
+                if (!memoryOwnerRetired && !(parkedForArchive && player.mediaItemCount == 0) &&
+                    mediaLoadData.dataType == C.DATA_TYPE_MEDIA)
+                    memoryLoads.start(loadEventInfo.loadTaskId, mediaLoadData.trackType)
                 if (!DiagnosticLogs.recording) { observedLoads.clear(); return }
                 // Include steady playback, but keep the diagnostic map bounded.
                 if (observedLoads.size >= 128) {
@@ -829,6 +839,7 @@ class FeedPlayer(
                 loadEventInfo: LoadEventInfo,
                 mediaLoadData: MediaLoadData,
             ) {
+                memoryLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
                 val seek = observedLoads.remove(loadEventInfo.loadTaskId) ?: return
                 logLoad("load-cancel", loadEventInfo, mediaLoadData, seek)
             }
@@ -840,6 +851,7 @@ class FeedPlayer(
                 error: java.io.IOException,
                 wasCanceled: Boolean,
             ) {
+                if (wasCanceled) memoryLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
                 val seek = observedLoads[loadEventInfo.loadTaskId] ?: return
                 // Media3's wrapper alone hid the distinction between a timeout and an HTTP
                 // rejection in device logs. Emit only exception types / status, never URLs.
@@ -858,6 +870,7 @@ class FeedPlayer(
                 loadEventInfo: LoadEventInfo,
                 mediaLoadData: MediaLoadData,
             ) {
+                memoryLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
                 observedLoads.remove(loadEventInfo.loadTaskId)?.let {
                     logLoad("load-end", loadEventInfo, mediaLoadData, it)
                 }
@@ -1211,6 +1224,7 @@ class FeedPlayer(
         parkedForArchive = true
         player.stop()
         player.clearMediaItems()
+        memoryLoads.clearPending()
         playbackAllocator.trim()
         updateMemoryOwner()
         playbackEvent("archive-parked", "items=${player.mediaItemCount} allocatorBytes=${playbackAllocator.totalBytesAllocated}")
@@ -1476,6 +1490,8 @@ class FeedPlayer(
         // The owner is terminal; repeated stop/remove/dispose must not release
         // Media3 (and its DRM session manager) a second time.
         if (!releaseGate.beginRelease()) return
+        memoryOwnerRetired = true
+        memoryLoads.clearPending()
         outputCadence.composedSingle = false
         outputDisplayOwner = null
         outputCadence.activeDisplayId = -1
