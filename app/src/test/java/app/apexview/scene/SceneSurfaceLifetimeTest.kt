@@ -18,6 +18,21 @@ class SceneSurfaceLifetimeTest {
         assertFalse(lifetime.matches(next))
     }
 
+    @Test fun delayedInitializationMustUseTheEpochCapturedBeforeEglWork() {
+        val lifetime = SceneSurfaceLifetime()
+        val readiness = SceneOutputReadiness()
+        val original = lifetime.advance()
+        val originalReady = readiness.invalidate()
+        // UI replaces the surface while EGL setup is still executing.
+        val replacement = lifetime.advance()
+        val replacementReady = readiness.invalidate()
+        assertFalse(lifetime.matches(original))
+        assertFalse(readiness.matches(originalReady))
+        assertFalse(readiness.acknowledgeSubmittedFrame(originalReady))
+        assertTrue(lifetime.matches(replacement))
+        assertTrue(readiness.acknowledgeSubmittedFrame(replacementReady))
+    }
+
     @Test fun codedAtlasChangeDoesNotChangeSurfaceLifetime() {
         val lifetime = SceneSurfaceLifetime()
         val output = lifetime.advance()

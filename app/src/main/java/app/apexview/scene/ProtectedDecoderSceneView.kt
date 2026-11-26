@@ -290,7 +290,11 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             player = nextPlayer
             input?.let { attachDecoderInput(it, inputGeneration) }
         }
-        if (changed || speedChanged || bindingChanged) gl.post { guarded {
+        if (changed || speedChanged || bindingChanged) {
+            val lifetime = surfaceLifetime.generation()
+            val bindingEpoch = outputReadiness.generation()
+            gl.post { guarded(lifetime) {
+            if (!outputReadiness.matches(bindingEpoch)) return@guarded
             if (invalidatedEpoch != null) {
                 renderEpoch = invalidatedEpoch
                 cadenceGate.reset()
@@ -305,7 +309,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             }
             frameRateOutput?.let(::updateFrameRateHint)
             scheduleVideoFrame()
-        } }
+            } }
+        }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -319,7 +324,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             // reaches the GL looper. Never initialize an old or invalid output.
             if (!released && surfaceLifetime.matches(lifetime) && surface.isValid) {
                 failed = false // Only a genuinely new valid EGL surface can recover output.
-                guarded { initialize(surface, readinessEpoch); scheduleVideoFrame() }
+                guarded(lifetime) { initialize(surface, readinessEpoch, lifetime); scheduleVideoFrame() }
             }
         }
     }
@@ -355,7 +360,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         player = null; gl.removeCallbacks(glQueueProbe); thread.quitSafely()
     }
 
-    private fun initialize(output: Surface, readinessEpoch: Long) {
+    private fun initialize(output: Surface, readinessEpoch: Long, lifetime: Long) {
         destroy()
         renderEpoch = readinessEpoch
         frameRateOutput = output
@@ -435,7 +440,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         decoderTexture = frames
         scene?.let { frames.setDefaultBufferSize(it.atlasWidth, it.atlasHeight) }
         frames.setOnFrameAvailableListener({
-            guarded {
+            guarded(lifetime) {
                 if (decoderTexture === frames && !released) {
                     val callbackStartedNs = System.nanoTime()
                     // Texture latching and drawing use the SAME protected EGL context.
@@ -468,7 +473,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             }
         }, gl)
         val surface = Surface(frames); input = surface
-        val lifetime = surfaceLifetime.generation()
+        // Never relabel an input created for an obsolete Android surface
+        // with the newer UI epoch, even if EGL initialization was slow.
         inputGeneration = lifetime
         post { attachDecoderInput(surface, lifetime) }
     }
@@ -634,14 +640,17 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             swapEndedNs - swapStartedNs)
     }
 
-    private fun guarded(action: () -> Unit) {
-        if (released || failed) return
+    private fun guarded(lifetime: Long = surfaceLifetime.generation(), action: () -> Unit) {
+        if (released || failed || !surfaceLifetime.matches(lifetime)) return
         try { action() } catch (error: Exception) {
+            // A late failure from a destroyed output is not a failure of the
+            // replacement scene. Its queued teardown still owns its resources.
+            if (released || !surfaceLifetime.matches(lifetime)) return
             failed = true
             val reason = "${if (protectedOutput) "Protected" else "Clear SurfaceView"} scene output: " +
                 (error.message ?: error.javaClass.simpleName).take(200)
             Log.w("ApexviewSingleDecoder", reason)
-            post { if (!released) onFailure(reason) }
+            post { if (!released && surfaceLifetime.matches(lifetime)) onFailure(reason) }
         }
     }
 

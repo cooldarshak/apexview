@@ -489,7 +489,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
         if (changed || speedChanged || bindingChanged) {
             main.post { if (!released) logDisplayMode(if (speedChanged) "speed-changed" else "source-changed") }
-            gl.post { guarded {
+            val lifetime = surfaceLifetime.generation()
+            val bindingEpoch = outputReadiness.generation()
+            gl.post { guarded(lifetime) {
+                if (!outputReadiness.matches(bindingEpoch)) return@guarded
                 if (invalidatedEpoch != null) {
                     renderEpoch = invalidatedEpoch
                     hasFrame = false
@@ -517,7 +520,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         gl.post {
             if (!released && surfaceLifetime.matches(lifetime)) {
                 failed = false // New valid EGL output may recover a transient loss.
-                guarded { initialize(output, readinessEpoch); scheduleDisplayFrame() }
+                guarded(lifetime) { initialize(output, readinessEpoch, lifetime); scheduleDisplayFrame() }
             }
         }
     }
@@ -562,7 +565,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
     }
 
-    private fun initialize(output: SurfaceTexture, readinessEpoch: Long) {
+    private fun initialize(output: SurfaceTexture, readinessEpoch: Long, lifetime: Long) {
         destroy()
         renderEpoch = readinessEpoch
         display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
@@ -622,7 +625,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         decoderTexture = frames
         scene?.let { frames.setDefaultBufferSize(it.atlasWidth, it.atlasHeight) }
         frames.setOnFrameAvailableListener({
-            guarded {
+            guarded(lifetime) {
                 if (decoderTexture === frames && !released) {
                     val callbackStarted = System.nanoTime()
                     Trace.beginSection("PitwallDecoderFrameCallback")
@@ -661,7 +664,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             }
         }, gl)
         val surface = Surface(frames); input = surface
-        val lifetime = surfaceLifetime.generation()
+        // Never relabel an input created for an obsolete Android surface
+        // with the newer UI epoch, even if EGL initialization was slow.
         inputGeneration = lifetime
         post { attachDecoderInput(surface, lifetime) }
     }
@@ -781,13 +785,16 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
     }
 
-    private fun guarded(action: () -> Unit) {
-        if (released || failed) return
+    private fun guarded(lifetime: Long = surfaceLifetime.generation(), action: () -> Unit) {
+        if (released || failed || !surfaceLifetime.matches(lifetime)) return
         try { action() } catch (error: Exception) {
+            // A late failure from a destroyed output is not a failure of the
+            // replacement scene. Its queued teardown still owns its resources.
+            if (released || !surfaceLifetime.matches(lifetime)) return
             failed = true
             val reason = "Single-decoder scene output: ${error.message ?: error.javaClass.simpleName}".take(200)
             Log.w("ApexviewSingleDecoder", reason)
-            post { if (!released) onFailure(reason) }
+            post { if (!released && surfaceLifetime.matches(lifetime)) onFailure(reason) }
         }
     }
 
