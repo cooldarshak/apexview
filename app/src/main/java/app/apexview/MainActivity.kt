@@ -66,7 +66,7 @@ class MainActivity : FragmentActivity() {
         override fun onSessionStartFailed(session: CastSession, error: Int) =
             app.onGoogleCastStartFailed("Google Cast could not start (error $error). Check the receiver connection and try again.")
         override fun onSessionEnding(session: CastSession) = Unit
-        override fun onSessionEnded(session: CastSession, error: Int) = app.onGoogleCastSessionEnded()
+        override fun onSessionEnded(session: CastSession, error: Int) = app.onGoogleCastSessionEnded(session)
         override fun onSessionResuming(session: CastSession, sessionId: String) = Unit
         override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) =
             app.onGoogleCastSessionAvailable(session)
