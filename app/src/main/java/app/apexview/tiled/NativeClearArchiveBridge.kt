@@ -143,9 +143,14 @@ internal class NativeClearArchiveBridge(
     fun compose(request: HevcClearCmafGridComposer.Request, priorInitialization: ByteArray?,
                 foreground: Boolean, timeoutMs: Long, retainNativeArchiveMedia: Boolean,
                 reference: () -> HevcClearCmafGridComposer.Output): Produced {
-        val selected = state
-        if (selected.context == null) return Produced(reference())
         work.lockInterruptibly()
+        // Re-read after acquiring the producer lock: another request may have
+        // deferred admission while this one was waiting on the same archive.
+        val selected = state
+        if (selected.context == null) {
+            work.unlock()
+            return Produced(reference())
+        }
         var baseline: HevcClearCmafGridComposer.Output? = null
         var computingReference = false
         var nativeOutput: NativeClearArchiveJob.WindowOutput? = null
@@ -192,6 +197,7 @@ internal class NativeClearArchiveBridge(
             selected.retryAdmission?.let { retry ->
                 if (android.os.SystemClock.elapsedRealtime() < retry.nextCheckMs) {
                     val result = referenceOutput()
+                    checkCurrent(selected.epoch)
                     baseline = null
                     return Produced(result)
                 }
@@ -202,6 +208,7 @@ internal class NativeClearArchiveBridge(
                 if (!admitted) {
                     deferAdmission(retry.input, retry.output)
                     val result = referenceOutput()
+                    checkCurrent(selected.epoch)
                     baseline = null
                     return Produced(result)
                 }
@@ -383,6 +390,7 @@ internal class NativeClearArchiveBridge(
             catch (_: LinkageError) { Log.w("ApexviewSingleDecoder", "GB_CLEAR_NATIVE_CLOSE_FAILED") }
             logDecision()
             val result = referenceOutput()
+            checkCurrent(selected.epoch)
             baseline = null
             return Produced(result)
         } catch (error: RuntimeException) {
