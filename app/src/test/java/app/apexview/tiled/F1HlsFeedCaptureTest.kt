@@ -642,19 +642,49 @@ seg.m4s
     }
 
     @Test fun castRelayServesOnlyCapabilityScopedVideoResources() = runBlocking {
-        val network = network(2)
+        val files = network(2).files.toMutableMap()
+        val primary = "https://media.test/f0/master.m3u8"
+        files[primary] = files.getValue(primary).toString(Charsets.UTF_8).replace("#EXTM3U\n", "#EXTM3U\n" +
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"English\",LANGUAGE=\"en\",URI=\"en.m3u8\"\n")
+            .replace("BANDWIDTH=1000000,", "BANDWIDTH=1000000,AUDIO=\"audio\",").toByteArray()
+        files["https://media.test/f0/en.m3u8"] = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\na0.aac\n#EXTINF:1,\na1.aac\n#EXT-X-ENDLIST\n".toByteArray()
+        val audio = app.apexview.cast.BakedAacAdts.wrap(byteArrayOf(1, 2, 3), 48_000, 2)
+        files["https://media.test/f0/a0.aac"] = audio
+        files["https://media.test/f0/a1.aac"] = audio
+        val network = Network(files)
         val capture = F1HlsFeedCapture(network.factory)
-        val session = capture.prepareVod(feeds(2), 0, "channel-0")
+        val session = capture.prepareVod(feeds(2), 0, "channel-0", commentary = "en")
         val relay = app.apexview.cast.SceneCastRelay(session, CmafHttpReader(network.factory), "127.0.0.1")
         try {
             val base = relay.googleCastMediaUrl.substringBeforeLast('/') + "/"
             assertEquals(404, relayRequest(base.replace(Regex("/s/[^/]+/"), "/s/guessed/") + "init.mp4").first)
+            // Even a valid capability is not published until the selected audio
+            // has passed validation, exactly as in the production Cast startup.
+            assertEquals(404, relayRequest(base + "video.m3u8").first)
+            assertEquals(404, relayRequest(base + "init.mp4").first)
+            assertEquals(404, relayRequest(relay.googleCastMediaUrl).first)
+            session.awaitProgramme("channel-0")
+            relay.validateAudio()
+            assertEquals(200, relayRequest(relay.googleCastMediaUrl).first)
             val manifest = relayRequest(base + "video.m3u8")
             assertEquals(200, manifest.first)
             assertFalse(manifest.second.toString(Charsets.UTF_8).contains("media.test"))
             val init = relayRequest(base + "init.mp4")
             assertEquals(200, init.first)
             assertArrayEquals(session.initialization(), init.second)
+            val audioManifest = relayRequest(base + "audio.m3u8")
+            assertEquals(200, audioManifest.first)
+            val rewritten = audioManifest.second.toString(Charsets.UTF_8)
+            assertFalse(rewritten.contains("media.test"))
+            val audioNames = rewritten.lineSequence().filter { it.isNotBlank() && !it.startsWith("#") }.toList()
+            assertEquals(2, audioNames.size)
+            for (name in audioNames) {
+                assertTrue(name.matches(Regex("a-[0-9a-f]{24}")))
+                val response = relayRequest(base + name)
+                assertEquals(200, response.first)
+                assertArrayEquals(audio, response.second)
+            }
+            assertEquals(404, relayRequest(base.replace(Regex("/s/[^/]+/"), "/s/guessed/") + "init.mp4").first)
             assertEquals(404, relayRequest(base + "http://unlisted.test/token").first)
         } finally { relay.close(); session.close(); capture.reset() }
     }

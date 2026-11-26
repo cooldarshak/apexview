@@ -68,13 +68,37 @@ class BakedCastHlsSessionTest {
             val output = directory.resolve("segment.ts")
             ffmpeg("-f", "lavfi", "-i", "testsrc2=size=128x72:rate=25", "-frames:v", "1",
                 "-c:v", "libx264", "-f", "h264", video.path)
-            ffmpeg("-f", "lavfi", "-i", "sine=frequency=600:sample_rate=48000", "-frames:a", "1",
+            ffmpeg("-f", "lavfi", "-i", "sine=frequency=600:sample_rate=48000", "-frames:a", "8",
                 "-c:a", "aac", "-f", "adts", audio.path)
+            // FFmpeg may flush more than one ADTS frame, even with -frames:a 1.
+            // Each mux sample is one access unit, never the whole ADTS file.
+            val audioBytes = audio.readBytes()
+            val audioSamples = mutableListOf<BakedCastTransportStream.Sample>()
+            var at = 0
+            while (at < audioBytes.size) {
+                assertTrue(audioBytes.size - at >= 7)
+                assertEquals(255, audioBytes[at].toInt() and 255)
+                assertEquals(240, audioBytes[at + 1].toInt() and 246)
+                assertEquals(3, (audioBytes[at + 2].toInt() ushr 2) and 15) // 48 kHz
+                assertEquals(0, audioBytes[at + 6].toInt() and 3) // one raw data block
+                val size = ((audioBytes[at + 3].toInt() and 3) shl 11) or
+                    ((audioBytes[at + 4].toInt() and 255) shl 3) or
+                    ((audioBytes[at + 5].toInt() and 255) ushr 5)
+                val header = if (audioBytes[at + 1].toInt() and 1 != 0) 7 else 9
+                assertTrue(size > header && size <= audioBytes.size - at)
+                audioSamples += BakedCastTransportStream.Sample(
+                    audioSamples.size * 1024L * 1_000_000L / 48_000L,
+                    audioBytes.copyOfRange(at, at + size), video = false)
+                at += size
+            }
+            assertEquals(audioBytes.size, at)
+            assertTrue(audioSamples.size >= 8)
             val muxer = BakedCastTransportStream()
-            output.writeBytes(muxer.segment((0..3).flatMap { i ->
-                listOf(BakedCastTransportStream.Sample(i * 40_000L, video.readBytes(), video = true, keyFrame = true),
-                    BakedCastTransportStream.Sample(i * 40_000L, audio.readBytes(), video = false))
-            }))
+            val videoBytes = video.readBytes()
+            val videoSamples = (0..3).map { i ->
+                BakedCastTransportStream.Sample(i * 40_000L, videoBytes, video = true, keyFrame = true)
+            }
+            output.writeBytes(muxer.segment(videoSamples + audioSamples))
             ffmpeg("-xerror", "-f", "mpegts", "-i", output.path, "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-")
         } finally { directory.deleteRecursively() }
     }
