@@ -52,3 +52,18 @@ class CastSceneTransitionPolicyTest {
         assertFalse(CastSceneTransitionPolicy.valid(original, next, true))
     }
 }
+
+class BakedQualityTransitionPolicyTest {
+    @Test fun waitsForReplacementArchiveAndItsOwnReadyDecoder() {
+        val previous = Any()
+        val installed = Any()
+        assertFalse(BakedQualityTransitionPolicy.canRestart(previous, previous, false, true, 1, true))
+        assertFalse(BakedQualityTransitionPolicy.canRestart(previous, null, false, true, 1, true))
+        assertFalse(BakedQualityTransitionPolicy.canRestart(previous, installed, true, true, 1, true))
+        assertFalse(BakedQualityTransitionPolicy.canRestart(previous, installed, false, false, 1, true))
+        assertFalse(BakedQualityTransitionPolicy.canRestart(previous, installed, false, true, 0, true))
+        assertFalse(BakedQualityTransitionPolicy.canRestart(previous, installed, false, true, 2, true))
+        assertFalse(BakedQualityTransitionPolicy.canRestart(previous, installed, false, true, 1, false))
+        assertTrue(BakedQualityTransitionPolicy.canRestart(previous, installed, false, true, 1, true))
+    }
+}
