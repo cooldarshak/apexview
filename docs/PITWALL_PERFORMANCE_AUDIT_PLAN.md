@@ -4485,3 +4485,8 @@ The log's sequential Media3 deliveries around segments 774–783 include full ~1
 ### 892 continuation: Rust position-read locality and stable Android output scratch (CI deferred)
 
 P1-E: Rust position sampling now reads at most two neighbouring coordinates per axis in one bounded JNI region, reusing the second point on the interpolation call. No extra history copy, heap buffer, interpolation change, or JNI ABI change. Host regression checks reads, bounds, reverse access and interpolated result. Android tower presentation updates existing scratch map entries rather than clearing and reallocating nodes for each poll; removed source/seek keys are retired, immutable published snapshots remain isolated. Regression covers source removal, backward seek and restoration. Numeric lookup/order/normalization remain Rust when requested; no new Kotlin processing path. These changes target allocation and JNI churn, not a demonstrated PSS reduction. CI still deferred; no completion claim.
+
+
+### 892 continuation: exact-source static regression correction (CI deferred)
+
+The Python suite on checkpoint 0653153 exposed a stale string assertion for ResourceDataSource.close after the delivery-proof change. Preserve and strengthen the production wiring gate: verify that the exact local lease is captured, only complete delivery can certify it, and proof is evaluated before unconditional finally-based detachment and release. This is a test correction for the new ownership contract, not removal of the existing cleanup invariant. No production code or CI gate bypass; rerun exact-source Python suite before final dispatch.

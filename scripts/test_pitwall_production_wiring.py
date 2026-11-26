@@ -312,7 +312,18 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("cache.readLease(number)", delivery)
         self.assertIn("session.segmentLease(number)", session)
         self.assertIn("body.readInto(buffer, offset, cursor, count)", session)
-        self.assertIn("resource?.close()", session)
+        # Complete-delivery proof is evaluated while the exact read lease is
+        # still pinned; cleanup must remain unconditional even if proof fails.
+        close = session.split("private class ResourceDataSource", 1)[1].split(
+            "override fun close()", 1)[1].split("companion object", 1)[0]
+        self.assertIn("val body = resource", close)
+        self.assertIn("delivered == body.size.toLong() && cursor == end && end == body.size", close)
+        self.assertIn("session.completeLocalDelivery(number, body, epoch)", close)
+        self.assertLess(close.index("session.completeLocalDelivery("), close.index("} finally {"))
+        cleanup = close.split("} finally {", 1)[1]
+        self.assertIn("resource = null", cleanup)
+        self.assertIn("body?.close()", cleanup)
+        self.assertNotIn("resource?.close()", cleanup)
         self.assertIn("ArrayBlockingQueue<Runnable>", session)
         self.assertIn("admission.run(ArchiveFetchDeadline.remainingNs(", session)
         self.assertIn("composeAndPublishAdmitted(number, requestedAt)", session)
