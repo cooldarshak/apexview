@@ -194,7 +194,7 @@ object DiagnosticLogs {
         }
     }
 
-    private fun writeSafe(text: String, size: Int = text.toByteArray(Charsets.UTF_8).size) {
+    private fun writeSafe(text: String, size: Int = diagnosticUtf8Size(text)) {
         writer?.write(text)
         bytes += size
         dirty = true
@@ -216,7 +216,7 @@ object DiagnosticLogs {
 
     private fun writeLocked(context: Context, text: String) {
         val safe = DiagnosticRedaction.redact(text.take(64 * 1024))
-        val encodedSize = safe.toByteArray(Charsets.UTF_8).size
+        val encodedSize = diagnosticUtf8Size(safe)
         if (bytes > 0 && bytes + encodedSize > MAX_BYTES) {
             writer?.close(); writer = null
             openFile(context, rotate = true)
@@ -263,6 +263,32 @@ object DiagnosticLogs {
         publishStatus("Logging is off", stoppedToken)
     }
 
+}
+
+/** Match String.toByteArray(UTF_8).size without allocating a second full
+ * encoded copy before the existing UTF-8 writer encodes the same string.
+ * The Java UTF-8 encoder replaces malformed UTF-16 code units with one byte.
+ * Diagnostic callers cap each input at 64 Ki UTF-16 units.
+ */
+internal fun diagnosticUtf8Size(text: String): Int {
+    var bytes = 0
+    var index = 0
+    while (index < text.length) {
+        val c = text[index++]
+        bytes += when {
+            c.code <= 0x7f -> 1
+            c.code <= 0x7ff -> 2
+            Character.isHighSurrogate(c) -> {
+                if (index < text.length && Character.isLowSurrogate(text[index])) {
+                    index++
+                    4
+                } else 1
+            }
+            Character.isLowSurrogate(c) -> 1
+            else -> 3
+        }
+    }
+    return bytes
 }
 
 /** Remove common credentials and signed addresses before writing public Downloads files. */

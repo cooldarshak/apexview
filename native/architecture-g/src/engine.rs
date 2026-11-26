@@ -159,14 +159,13 @@ impl Engine {
     fn new_reserved(budget:Budget,reserved_bytes:usize,compact_atlas:bool)->Option<Self> {
         let mut slots=Vec::new();
         slots.try_reserve_exact(budget.slots).ok()?;
-        // The serialized production bridge normally uses one slot. Reserve
-        // every logical slot in the admission ceiling, but materialize the
-        // spare compact atlas payload pair only for genuine overlap.
-        for index in 0..budget.slots {
-            let buffers=if !compact_atlas || index==0 {Some(Buffers::new(budget)?)} else {None};
+        // Reserve all logical slots, but leave every compact slot unmaterialized
+        // until actual work is admitted. Owned jobs never need a fixed output.
+        for _ in 0..budget.slots {
+            let buffers=if compact_atlas {None} else {Some(Buffers::new(budget)?)};
             slots.push(Slot{buffers,stage:Stage::Free,work:None,result:0,running_bytes:0});
         }
-        let initial_pairs=if compact_atlas {1} else {budget.slots};
+        let initial_pairs=if compact_atlas {0} else {budget.slots};
         let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false,compact_atlas,
             payload_allocations:initial_pairs as u64,peak_pairs:initial_pairs,copied_input:0,copied_output:0}),Condvar::new()));
         let cloned=Arc::clone(&shared);
@@ -292,7 +291,7 @@ impl Engine {
         // worker. No active slot can be selected or evicted here.
         if s.slots[index].buffers.is_none() {
             let Some(buffers)=(if owned {
-                buffer(self.budget.input).map(|input|Buffers{input,output:Vec::new()})
+                buffer(len).map(|input|Buffers{input,output:Vec::new()})
             } else {Buffers::new(self.budget)}) else {return BACKPRESSURE;};
             s.slots[index].buffers=Some(buffers);
             s.payload_allocations=s.payload_allocations.saturating_add(1);
@@ -310,7 +309,20 @@ impl Engine {
             // Owned writer reserves exact packet capacity only after validation.
             // Do not retain a fixed output slot beside the final fragment.
             buffers.output=Vec::new();
-        } else if buffers.output.len()!=self.budget.output {
+        }
+        // Compact owned jobs materialize only the actual submitted input, not
+        // the entire admission ceiling. Retain warm capacity for smaller jobs;
+        // replace insufficient backing before allocation so two input buffers
+        // never coexist. Fixed-output commands retain their existing contract.
+        let required_input=if owned {len} else {self.budget.input};
+        if buffers.input.capacity()<required_input {
+            buffers.input=Vec::new();
+            let Some(input)=buffer(required_input) else {return BACKPRESSURE;};
+            buffers.input=input;
+        } else {
+            buffers.input.resize(required_input,0);
+        }
+        if !owned && buffers.output.len()!=self.budget.output {
             let Some(out)=buffer(self.budget.output) else {return BACKPRESSURE;};
             buffers.output=out;
         }
@@ -516,7 +528,7 @@ mod tests {
         let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
         let engine=Engine::new_atlas(b).unwrap();
         let pair=b.input+b.output;
-        assert_eq!(engine.trim_idle_payload(),pair);
+        assert_eq!(engine.trim_idle_payload(),0);
         assert_eq!(engine.allocated_payload_bytes(),0);
         let token=engine.submit(engine.generation(),&[2,2,1],1,1,true,5000);
         assert_eq!(wait(&engine,token),6);
@@ -527,7 +539,7 @@ mod tests {
         assert_eq!(engine.release(token),1);
         assert_eq!(engine.trim_idle_payload(),pair);
         assert_eq!(engine.allocated_payload_bytes(),0);
-        assert_eq!(engine.payload_stats()[0],2);
+        assert_eq!(engine.payload_stats()[0],1);
     }
     #[test]
     fn compact_spare_slot_is_lazy_and_preserves_foreground_admission() {
@@ -537,8 +549,8 @@ mod tests {
         assert_eq!(engine.reserved(),b.reserved_atlas().unwrap());
         {
             let s=engine.shared.0.lock().unwrap();
-            assert!(s.slots[0].buffers.is_some());
-            assert!(s.slots[1].buffers.is_none());
+            assert!(s.slots.iter().all(|slot|slot.buffers.is_none()));
+            assert_eq!(s.payload_allocations,0);
         }
         // A malformed atlas is safely rejected, but its failed result still
         // occupies the slot until release, just like a ready/read lease.
@@ -565,11 +577,46 @@ mod tests {
     }
 
     #[test]
+    fn compact_owned_input_materializes_only_submitted_bytes_and_reuses_capacity() {
+        let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
+        let engine=Engine::new_atlas(b).unwrap();
+        let g=engine.generation();
+        assert_eq!(engine.allocated_payload_bytes(),0);
+        assert_eq!(engine.payload_stats()[0],0);
+        for len in [64usize,32,128,96] {
+            let token=engine.submit_clear_atlas_owned_with(g,len,true,5000,|dst| {
+                assert_eq!(dst.len(),len);
+                dst.fill(0);
+                true
+            });
+            assert!(token>0);
+            // Malformed input must never reach a successful read lease.
+            assert_eq!(wait(&engine,token),INVALID);
+            let capacity=engine.allocated_payload_bytes();
+            assert!(capacity>=len && capacity<=128);
+            assert_eq!(engine.release(token),1);
+            assert_eq!(engine.allocated_payload_bytes(),capacity);
+        }
+        assert_eq!(engine.allocated_payload_bytes(),128);
+        assert_eq!(engine.payload_stats()[0],1);
+        // A fixed-output command following the compact owned path must still
+        // materialize its original input and output limits.
+        let token=engine.submit(g,&[2,2,1],1,1,true,5000);
+        assert_eq!(wait(&engine,token),6);
+        let mut out=[0;6];
+        assert_eq!(engine.copy(token,0,&mut out),6);
+        assert_eq!(out,[0,0,0,1,2,1]);
+        assert_eq!(engine.release(token),1);
+        assert_eq!(engine.allocated_payload_bytes(),b.input+b.output);
+        assert_eq!(engine.trim_idle_payload(),b.input+b.output);
+        assert_eq!(engine.allocated_payload_bytes(),0);
+    }
+    #[test]
     fn compact_seek_trims_free_spares_but_not_active_slots() {
         let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
         let mut engine=Engine::new_atlas(b).unwrap();
         let pair=b.input+b.output;
-        assert_eq!(engine.allocated_payload_bytes(),pair);
+        assert_eq!(engine.allocated_payload_bytes(),0);
         let g=engine.generation();
         let one=engine.submit(g,&[2,2,1],1,1,true,5000);
         assert!(one>0);
