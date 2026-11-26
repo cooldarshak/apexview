@@ -238,6 +238,8 @@ class AppState(
     internal var castPairingCode by mutableStateOf<String?>(null)
         private set
     private var castPairingDecision: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+    internal var castAwaitingTvApprovalCode by mutableStateOf<String?>(null)
+        private set
     internal fun confirmCastPairing(matches: Boolean) { castPairingDecision?.complete(matches) }
     private val localConnectionGeneration get() = castCoordinator.connection
     private var localReady = false
@@ -401,13 +403,13 @@ class AppState(
         googleCastSelected = true
         castPickerOpen = false
     }
-    internal fun connectLocalCast(device: app.apexview.cast.local.PitwallDevice) {
+    internal fun connectLocalCast(device: app.apexview.cast.local.PitwallDevice, televisionCode: String? = null) {
         stopFullSceneCast()
-        connectLocalCastAttempt(device, null, true)
+        connectLocalCastAttempt(device, null, true, televisionCode)
     }
 
     private fun connectLocalCastAttempt(device: app.apexview.cast.local.PitwallDevice,
-                                        reconnectKey: String?, retryAllowed: Boolean) {
+                                        reconnectKey: String?, retryAllowed: Boolean, televisionCode: String? = null) {
         val attempt = castCoordinator.beginConnection()
         localChosen = true; localReady = false; castDeviceName = device.name
         castPickerOpen = false; castBusy = true
@@ -430,7 +432,21 @@ class AppState(
                 val remembered = app.apexview.cast.local.PitwallRememberedPeers.contains(context, secured.session.trustKey)
                 if (reconnectKey != null && (!remembered || secured.session.trustKey != reconnectKey))
                     throw IOException("Remembered TV identity changed")
-                if (!remembered) {
+                // A code entered from the physical screen is an independent
+                // authentication of the actual TLS peer, not of its mDNS name.
+                val selectedByCode = televisionCode != null
+                if (selectedByCode && !app.apexview.cast.local.PitwallPairingCode.matchesTelevisionIdentity(
+                        requireNotNull(televisionCode), secured.session.peerSelectionIdentity)) {
+                    castStatus = "TV identity code does not match. Check the code on the TV."
+                    message = castStatus
+                    castBusy = false
+                    return@launch
+                }
+                if (!remembered && selectedByCode) {
+                    castAwaitingTvApprovalCode = secured.session.code
+                    castStatus = "Compare the code and approve on your TV."
+                    message = castStatus
+                } else if (!remembered) {
                     castPairingDecision = decision
                     castPairingCode = secured.session.code
                     val accepted = kotlinx.coroutines.withTimeoutOrNull(90_000) { decision.await() } == true
@@ -451,6 +467,7 @@ class AppState(
                             retryAllowed, localReady, localChosen, reason,
                             app.apexview.cast.local.PitwallRememberedPeers.contains(context, secured.session.trustKey))
                         localConnection = null; localReady = false
+                        castAwaitingTvApprovalCode = null
                         localConnectionJob?.cancel(); localConnectionJob = null
                         castPreparationJob?.cancel(); castPreparationJob = null
                         releaseCastRelay(); castBusy = false
@@ -480,7 +497,10 @@ class AppState(
                     castBusy = false; castStatus = "Unable to connect to the TV: ${error.javaClass.simpleName}"; message = castStatus
                 }
             } finally {
-                if (!assigned) runCatching { provisional?.socket?.close() }
+                if (!assigned) {
+                    runCatching { provisional?.socket?.close() }
+                    if (attempt == localConnectionGeneration) castAwaitingTvApprovalCode = null
+                }
                 if (castPairingDecision === decision) { castPairingDecision = null; castPairingCode = null }
                 // A socket-close callback can install a delayed retry before
                 // this cancelled attempt finishes. Never clear its job/service.
@@ -525,6 +545,7 @@ class AppState(
                                 app.apexview.cast.local.PitwallRememberedPeers.remember(context, it.trustKey)
                             }
                         }
+                        castAwaitingTvApprovalCode = null
                         localReady = true; castBusy = false
                         castStatus = "Connected securely to $castDeviceName."
                         message = castStatus
@@ -1315,6 +1336,7 @@ class AppState(
         googleVideoOnlyConsent = false
         castCoordinator.beginConnection()
         castPairingDecision?.complete(false); castPairingDecision = null; castPairingCode = null
+        castAwaitingTvApprovalCode = null
         castPreparationJob?.cancel(); castPreparationJob = null
         if (localChosen) localConnection?.send(app.apexview.cast.local.FcastProtocol.STOP)
         else runCatching { googleCastRemoteClient?.stop() }
