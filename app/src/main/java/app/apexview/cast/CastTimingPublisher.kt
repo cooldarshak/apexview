@@ -31,6 +31,10 @@ internal class CastTimingPublisher(private val context: Context, private val app
     private var lastFrameAt = Long.MIN_VALUE
     private var mapSamplerOwner: SessionTiming? = null
     private var mapSampler: OverlayPositionSampler? = null
+    private var mapSamplerNative = false
+    private var towerSamplerOwner: SessionTiming? = null
+    private var towerSampler: OverlayTowerSampler? = null
+    private var towerSamplerNative = false
 
     fun messages(playbackId: String,
         receiverPredictionSteps: Int = CastTimingProtocol.V1_SEND_PREDICTION_STEPS
@@ -48,6 +52,8 @@ internal class CastTimingPublisher(private val context: Context, private val app
             sentTables = 0L
             mapSamplerOwner = null
             mapSampler = null
+            towerSamplerOwner = null
+            towerSampler = null
         }
         if (resend) lastFullSnapshotAt = elapsed
         val timing = app.timing
@@ -56,6 +62,16 @@ internal class CastTimingPublisher(private val context: Context, private val app
         val now = app.mapTimeAt(position) ?: 0L
         val output = mutableListOf<JSONObject>()
         var tableSampled = false
+        val nativeRequested = app.settings.nativeRustStitching
+        val activeTowerTiming = timing.takeIf { app.towerOpen }
+        val towerOwnerChanged = activeTowerTiming !== towerSamplerOwner || nativeRequested != towerSamplerNative
+        if (towerOwnerChanged) {
+            towerSamplerOwner = activeTowerTiming
+            towerSamplerNative = nativeRequested
+            towerSampler = activeTowerTiming?.let {
+                OverlayTowerSampler(it, OverlayPerformanceProbe("pitwall-cast-tower-sample"), nativeRequested)
+            }
+        }
         if (timing != null) {
             // Replay geometry is immutable within a published session snapshot.
             if (timingReplaced || timing.live && resend) {
@@ -76,8 +92,8 @@ internal class CastTimingPublisher(private val context: Context, private val app
                     lastTableElapsed == Long.MIN_VALUE ||
                     elapsed < lastTableElapsed ||
                     elapsed - lastTableElapsed >= 500L ||
-                    timingReplaced) {
-                    rows = CastTimingProtocol.table(timing, now)
+                    timingReplaced || towerOwnerChanged) {
+                    rows = CastTimingProtocol.table(timing, now, requireNotNull(towerSampler).sample(now))
                     stoppedDrivers = CastTimingProtocol.stoppedDrivers(timing, now)
                     tableSampled = true
                     lastTableUtc = now
@@ -106,14 +122,15 @@ internal class CastTimingPublisher(private val context: Context, private val app
         val basis = if (timing != null && (app.mapMode == MapMode.PIT || app.pitDriver != null)) pitBasis(timing, now) else null
         // Exactly the same per-driver cursor and gap rules as the native track
         // map. This is sender-owned; receiver never shares mutable cursor state.
-        if (timing !== mapSamplerOwner) {
-            mapSamplerOwner = timing
-            mapSampler = timing?.let {
-                OverlayPositionSampler(it, OverlayPerformanceProbe("pitwall-cast-sender-position"))
+        val activeMapTiming = timing.takeIf { app.mapMode != MapMode.OFF }
+        if (activeMapTiming !== mapSamplerOwner || nativeRequested != mapSamplerNative) {
+            mapSamplerOwner = activeMapTiming
+            mapSamplerNative = nativeRequested
+            mapSampler = activeMapTiming?.let {
+                OverlayPositionSampler(it, OverlayPerformanceProbe("pitwall-cast-sender-position"), nativeRequested)
             }
         }
-        val cars = if (app.mapMode != MapMode.OFF && timing != null)
-            requireNotNull(mapSampler).sample(now) else emptyList()
+        val cars = mapSampler?.sample(now).orEmpty()
         val stop = basis?.let { pitStopNow(it, app.pitDriver, cars.map { car -> car.number to timing!!.geometry.progress(car.x, car.y) }) }
         val circle = if (app.mapMode == MapMode.PIT && timing != null && basis != null)
             pitCircleData(app, timing, now, basis, cars) else null

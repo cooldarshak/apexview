@@ -19,6 +19,7 @@ internal class BakedCastLiveSession(
     address: String, peer: InetAddress?, reader: CmafHttpReader, audioUri: Uri,
     val programmeLabel: String, val feeds: Int, scope: CoroutineScope,
     tls: app.apexview.cast.local.PitwallTls.Session? = null,
+    private val nativeAudioRequested: Boolean = false,
     private val onFailure: (String) -> Unit,
 ) : AutoCloseable {
     private val hls = BakedCastHlsSession(address, peer, tls)
@@ -117,7 +118,7 @@ internal class BakedCastLiveSession(
         val sourceStartUs = Math.multiplyExact(playbackPositionMs, 1_000L)
         width = w; height = h
         sourceStartMs = playbackPositionMs
-        audio = BakedCastArchiveAudio(audioReader, audioSource, sourceStartUs)
+        audio = BakedCastArchiveAudio(audioReader, audioSource, sourceStartUs, nativeAudioRequested)
         Log.i("PitwallCast", "BAKED_CAST_SOURCE_CLOCK startMs=$sourceStartMs encoderPicture=${width}x$height")
     }
 

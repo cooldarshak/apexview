@@ -7,6 +7,27 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class BakedCastCodecFramingTest {
+    @Test fun joinedAudioReadsBothExtentsWithoutMaterializingTheWholeStream() {
+        val init = byteArrayOf(1,2,3)
+        val media = byteArrayOf(4,5,6,7)
+        val joined = init + media
+        for (position in -1L..8L) for (requested in 0..8) {
+            val target = ByteArray(12) { 99 }
+            val expected = if (position < 0 || position >= joined.size) -1
+                else minOf(requested, joined.size-position.toInt())
+            assertEquals(expected,readJoinedAudio(init,media,position,target,2,requested))
+            if (expected >= 0) {
+                assertArrayEquals(joined.copyOfRange(position.toInt(),position.toInt()+expected),
+                    target.copyOfRange(2,2+expected))
+            }
+            assertEquals(99,target[0].toInt())
+            assertEquals(99,target[11].toInt())
+        }
+        val source=java.nio.ByteBuffer.wrap(media)
+        assertArrayEquals(BakedAacAdts.wrap(media,48_000,2),
+            BakedAacAdts.wrap(source,media.size,48_000,2,false) { assertEquals(false,it) })
+    }
+
     @Test fun avccAccessUnitsBecomeAnnexBWithoutLosingTheNalUnits() {
         val avcc = byteArrayOf(0, 0, 0, 2, 0x65, 0x12, 0, 0, 0, 3, 0x41, 0x34, 0x56)
         assertArrayEquals(byteArrayOf(0, 0, 0, 1, 0x65, 0x12, 0, 0, 0, 1, 0x41, 0x34, 0x56),

@@ -325,8 +325,18 @@ class SpeedLog(
         return if (utcMs - times[lo] > STALE_MS) -1 else lo
     }
 
+    internal val speedTimes: LongArray get() = t
+    internal val speedCount: Int get() = n
+    internal val gearTimeSeries: LongArray get() = gearTimes ?: t
+    internal val validGearCount: Int get() = if (gearTimes == null) minOf(n, gears.size) else gearCount
+    internal fun kmhAtSnapshot(index: Int, now: Long): Int? =
+        if (index !in 0 until n || now - t[index] > STALE_MS) null else v[index].toInt()
+    internal fun gearAtSnapshot(index: Int, now: Long): Int? =
+        if (index !in 0 until validGearCount || now - gearTimeSeries[index] > STALE_MS ||
+            gears[index].toInt() < 0) null else gears[index].toInt()
+
     /** The latest speed at [utcMs], null before the first reading or when it goes stale. */
-    fun kmhAt(utcMs: Long): Int? = indexAt(utcMs, t, n).takeIf { it >= 0 }?.let { v[it].toInt() }
+    fun kmhAt(utcMs: Long): Int? = kmhAtSnapshot(indexAt(utcMs, t, n), utcMs)
 
     /** F1 car-data channel 3: 0 is neutral, 1–8 are gears. */
     fun gearAt(utcMs: Long): Int? {

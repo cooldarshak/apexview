@@ -41,7 +41,7 @@ internal class NativeComposedCastSession(
     private val audioReader = CmafHttpReader(factory)
     private val sidecars = RelayMediaBudget()
     private val textTracks = linkedMapOf<Int, CmafCastText>()
-    private val audioTracks = linkedMapOf(initialAudioIndex to CmafCastAudio(audioReader, language, initialAudioIndex, sidecars))
+    private val audioTracks = linkedMapOf(initialAudioIndex to CmafCastAudio(audioReader, language, initialAudioIndex, sidecars, { nativeRequested }))
     private val audio get() = audioTracks.getValue(initialAudioIndex)
     @Volatile var audioLabel: String = audioLabel
         private set
@@ -112,7 +112,7 @@ internal class NativeComposedCastSession(
                 for (index in feeds.indices) {
                     if (index == initialAudioIndex) continue
                     coroutineContext.ensureActive()
-                    val alternate = audioTracks[index] ?: CmafCastAudio(audioReader, language, index, sidecars)
+                    val alternate = audioTracks[index] ?: CmafCastAudio(audioReader, language, index, sidecars, { nativeRequested })
                     try {
                         alternate.capture(feeds[index].manifestUrl, sourceUs, live, programmes[feeds[index].label])
                         if (alternate.compatibleWith(audio)) audioTracks[index] = alternate

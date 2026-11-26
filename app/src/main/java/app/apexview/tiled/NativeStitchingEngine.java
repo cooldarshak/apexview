@@ -97,7 +97,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
     }
 
     private static volatile boolean libraryReady;
-    private static synchronized void ensureLibraryLoaded() {
+    static synchronized void ensureLibraryLoaded() {
         if (libraryReady) return;
         System.loadLibrary("pitwall_g0");
         libraryReady = nativeAbi() == 2;

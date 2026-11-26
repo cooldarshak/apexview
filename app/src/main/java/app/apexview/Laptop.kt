@@ -206,9 +206,10 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
     LaunchedEffect(timing) { app.loadSpeeds(timing) }
     // Session-scoped worker owns the immutable display snapshots. Keep heavy
     // sampling off main, and do not publish unchanged frames to Compose.
+    val nativeRequested = app.settings.nativeRustStitching
     var sample by remember(timing) { mutableStateOf<TowerSample?>(null) }
-    LaunchedEffect(app, timing) {
-        val sampler = OverlayTowerSampler(timing, OverlayPerformanceProbe("phone-tv-tower-sample"))
+    LaunchedEffect(app, timing, nativeRequested) {
+        val sampler = OverlayTowerSampler(timing, OverlayPerformanceProbe("phone-tv-tower-sample"), nativeRequested)
         while (true) {
             val now = app.mapTimeMs() ?: 0L
             // Capture mutable Compose state on main before entering the worker.

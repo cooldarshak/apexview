@@ -517,3 +517,144 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragm
         crate::protected_plan::clear_configuration_cache();
     }));
 }
+
+
+// G-C audio and telemetry. JNI references are scoped to one call; the
+// bounded primitive arrays carry cursor state and results without mirroring
+// the complete session histories. A failure never publishes partial data.
+use jni::objects::{JFloatArray,JIntArray,JLongArray,JObjectArray,JByteArray};
+use crate::hot_path::{self,PositionCursor,MAX_DRIVERS,MAX_HISTORY};
+
+fn history_time(env:&JNIEnv<'_>, array:&JLongArray<'_>, at:usize)->Option<i64>{
+    let mut v=[0i64;1];
+    env.get_long_array_region(array,i32::try_from(at).ok()?,&mut v).ok()?;
+    Some(v[0])
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeSamplePositions(
+    mut env:JNIEnv<'_>,_class:JClass<'_>,times:JObjectArray<'_>,
+    xs:JObjectArray<'_>,ys:JObjectArray<'_>,counts:JIntArray<'_>,
+    now:jlong,state:JLongArray<'_>,xy:JFloatArray<'_>,active:JIntArray<'_>,
+)->jint{
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        let n=usize::try_from(env.get_array_length(&counts).ok()?).ok()?;
+        if n>MAX_DRIVERS || env.get_array_length(&times).ok()? as usize!=n ||
+            env.get_array_length(&xs).ok()? as usize!=n || env.get_array_length(&ys).ok()? as usize!=n ||
+            env.get_array_length(&state).ok()? as usize!=3*n ||
+            env.get_array_length(&xy).ok()? as usize!=2*n ||
+            env.get_array_length(&active).ok()? as usize!=n{return None;}
+        let mut sizes=[0i32;MAX_DRIVERS];
+        let mut cursors=[0i64;3*MAX_DRIVERS];
+        let mut coords=[0f32;2*MAX_DRIVERS];
+        let mut visible=[0i32;MAX_DRIVERS];
+        env.get_int_array_region(&counts,0,&mut sizes[..n]).ok()?;
+        env.get_long_array_region(&state,0,&mut cursors[..3*n]).ok()?;
+        for i in 0..n{
+            let count=usize::try_from(sizes[i]).ok()?;
+            if count>MAX_HISTORY{return None;}
+            let ts=JLongArray::from(env.get_object_array_element(&times,i as i32).ok()?);
+            let x=JFloatArray::from(env.get_object_array_element(&xs,i as i32).ok()?);
+            let y=JFloatArray::from(env.get_object_array_element(&ys,i as i32).ok()?);
+            if ts.is_null() || x.is_null() || y.is_null() ||
+                (env.get_array_length(&ts).ok()? as usize)<count ||
+                (env.get_array_length(&x).ok()? as usize)<count ||
+                (env.get_array_length(&y).ok()? as usize)<count{return None;}
+            let mut cursor=PositionCursor{lower:i32::try_from(cursors[3*i]).ok()?,
+                previous:cursors[3*i+1],seeks:cursors[3*i+2]};
+            let sample=hot_path::position_at(count,now,&mut cursor,
+                |at|history_time(&env,&ts,at),
+                |at|{
+                    let mut xx=[0f32;1];let mut yy=[0f32;1];
+                    env.get_float_array_region(&x,at as i32,&mut xx).ok()?;
+                    env.get_float_array_region(&y,at as i32,&mut yy).ok()?;
+                    Some((xx[0],yy[0]))
+                })?;
+            if let Some((xx,yy))=sample{
+                if !xx.is_finite()||!yy.is_finite(){return None;}
+                visible[i]=1;coords[2*i]=xx;coords[2*i+1]=yy;
+            }
+            cursors[3*i]=cursor.lower as i64;cursors[3*i+1]=cursor.previous;cursors[3*i+2]=cursor.seeks;
+            env.delete_local_ref(ts).ok()?;
+            env.delete_local_ref(x).ok()?;
+            env.delete_local_ref(y).ok()?;
+        }
+        env.set_long_array_region(&state,0,&cursors[..3*n]).ok()?;
+        env.set_float_array_region(&xy,0,&coords[..2*n]).ok()?;
+        env.set_int_array_region(&active,0,&visible[..n]).ok()?;
+        Some(())
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeFloorIndices(
+    mut env:JNIEnv<'_>,_class:JClass<'_>,times:JObjectArray<'_>,
+    counts:JIntArray<'_>,now:jlong,indices:JIntArray<'_>,
+)->jint{
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        let n=usize::try_from(env.get_array_length(&counts).ok()?).ok()?;
+        if n>MAX_DRIVERS||env.get_array_length(&times).ok()? as usize!=n||
+            env.get_array_length(&indices).ok()? as usize!=n{return None;}
+        let mut sizes=[0i32;MAX_DRIVERS];let mut out=[-1i32;MAX_DRIVERS];
+        env.get_int_array_region(&counts,0,&mut sizes[..n]).ok()?;
+        for i in 0..n{
+            let count=usize::try_from(sizes[i]).ok()?;
+            let ts=JLongArray::from(env.get_object_array_element(&times,i as i32).ok()?);
+            if ts.is_null()||(env.get_array_length(&ts).ok()? as usize)<count{return None;}
+            out[i]=hot_path::floor_index(count,now,|at|history_time(&env,&ts,at))?;
+            env.delete_local_ref(ts).ok()?;
+        }
+        env.set_int_array_region(&indices,0,&out[..n]).ok()?;Some(())
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeRowOrder(
+    env:JNIEnv<'_>,_class:JClass<'_>,positions:JIntArray<'_>,count:jint,order:JIntArray<'_>,
+)->jint{
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        let n=usize::try_from(count).ok()?;
+        if n>MAX_DRIVERS||(env.get_array_length(&positions).ok()? as usize)<n||
+            (env.get_array_length(&order).ok()? as usize)<n{return None;}
+        let mut input=[0i32;MAX_DRIVERS];let mut out=[0i32;MAX_DRIVERS];
+        env.get_int_array_region(&positions,0,&mut input[..n]).ok()?;
+        hot_path::row_order(&input[..n],&mut out[..n])?;
+        env.set_int_array_region(&order,0,&out[..n]).ok()?;Some(())
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeAdts(
+    env:JNIEnv<'_>,_class:JClass<'_>,input:JByteBuffer<'_>,len:jint,
+    rate:jint,channels:jint,output:JByteArray<'_>,
+)->jint{
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        let size=usize::try_from(len).ok()?;
+        let header=hot_path::adts_header(size,rate,channels)?;
+        if env.get_direct_buffer_capacity(&input).ok()?<size||
+            env.get_array_length(&output).ok()? as usize!=size+7{return None;}
+        let ptr=env.get_direct_buffer_address(&input).ok()?;
+        if ptr.is_null(){return None;}
+        // SAFETY: synchronous private caller retains the direct buffer and
+        // does not mutate it during this call. Only checked bytes are read.
+        let source=unsafe{slice::from_raw_parts(ptr.cast::<i8>(),size)};
+        let header=header.map(|b|b as i8);
+        env.set_byte_array_region(&output,0,&header).ok()?;
+        env.set_byte_array_region(&output,7,source).ok()?;Some(())
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeScaleUs(
+    env:JNIEnv<'_>,_class:JClass<'_>,us:jlong,timescale:jlong,out:JLongArray<'_>,
+)->jint{
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        if env.get_array_length(&out).ok()?!=1{return None;}
+        env.set_long_array_region(&out,0,&[hot_path::scale_us(us,timescale)?]).ok()?;Some(())
+    }));
+    match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
+}

@@ -992,7 +992,8 @@ class AppState(
                         "ascendontoken" to api.ascendon.orEmpty(), "entitlementtoken" to api.entitlement.orEmpty()))
                 val next = app.apexview.cast.BakedCastLiveSession(address, peer,
                     app.apexview.tiled.CmafHttpReader(factory), audioUri, audible, castTiles.size, scope,
-                    tls = if (localChosen) requireNotNull(originalConnection?.secureSession) else null) { reason ->
+                    tls = if (localChosen) requireNotNull(originalConnection?.secureSession) else null,
+                    nativeAudioRequested = settings.nativeRustStitching) { reason ->
                     scope.launch {
                         if (bakedCastSession === session && generation == castPreparationGeneration) {
                             castStatus = reason.take(220); message = castStatus

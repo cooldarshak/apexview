@@ -23,6 +23,7 @@ pub mod feasibility;
 pub mod clear_cmaf;
 pub mod clear_slice;
 pub mod engine;
+pub mod hot_path;
 pub use annex_b::{convert_length_prefixed, convert_fixed_batch};
 use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT_ARENA_ID: AtomicUsize = AtomicUsize::new(1);

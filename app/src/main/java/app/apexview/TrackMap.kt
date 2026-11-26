@@ -633,13 +633,13 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
     val now = rememberMapRenderTime(app)
     // Hit targets and 60 Hz drawing use separate chronological cursors.
     // Alternating their clocks in one cursor caused unnecessary seek resets.
-    val hitSampler = remember(timing) {
-        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-track-position"))
+    val hitSampler = remember(timing, app.settings.nativeRustStitching) {
+        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-track-position"), app.settings.nativeRustStitching)
     }
-    val drawSampler = remember(timing) {
-        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-track-draw-position"))
+    val drawSampler = remember(timing, app.settings.nativeRustStitching) {
+        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-track-draw-position"), app.settings.nativeRustStitching)
     }
-    val cars = remember(timing, now) {
+    val cars = remember(timing, now, hitSampler) {
         android.os.Trace.beginSection("PitwallMapCars")
         try { hitSampler.sample(now) } finally { android.os.Trace.endSection() }
     }
@@ -1082,13 +1082,13 @@ internal class Ribbon(
 @Composable
 fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, inset: Float, screenCornerRadius: Float) {
     val now = rememberMapRenderTime(app)
-    val hitSampler = remember(timing) {
-        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-edge-position"))
+    val hitSampler = remember(timing, app.settings.nativeRustStitching) {
+        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-edge-position"), app.settings.nativeRustStitching)
     }
-    val drawSampler = remember(timing) {
-        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-edge-draw-position"))
+    val drawSampler = remember(timing, app.settings.nativeRustStitching) {
+        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-edge-draw-position"), app.settings.nativeRustStitching)
     }
-    val cars = remember(timing, now) {
+    val cars = remember(timing, now, hitSampler) {
         android.os.Trace.beginSection("PitwallEdgeCars")
         try { hitSampler.sample(now) } finally { android.os.Trace.endSection() }
     }

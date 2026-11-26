@@ -17,6 +17,7 @@ import kotlin.math.abs
 internal class CmafCastAudio(
     private val reader: CmafHttpReader, private val language: String, val trackIndex: Int,
     private val budget: RelayMediaBudget,
+    private val nativeRequested: () -> Boolean = { false },
 ) : AutoCloseable {
     init { require(trackIndex in 0..5) }
     private val namespace = "audio-$trackIndex"
@@ -203,8 +204,20 @@ internal class CmafCastAudio(
         segments.forEach { publication.addResource(it.name, it.bytes) }
         publication.addAdaptationSet(audio)
     }
-    private fun scale(us: Long): Long = java.math.BigInteger.valueOf(us).multiply(java.math.BigInteger.valueOf(timescale))
-        .divide(java.math.BigInteger.valueOf(1_000_000)).longValueExact()
+    private val scaledTime = LongArray(1)
+    private var lastTimeEngine: Boolean? = null
+    private fun scale(us: Long): Long {
+        val requested = nativeRequested()
+        val native = requested && NativeHotPath.scaleUs(us, timescale, scaledTime)
+        if (requested && lastTimeEngine != native) {
+            lastTimeEngine = native
+            android.util.Log.i("PitwallNativeHotPath", "AUDIO_TIMELINE_ENGINE requested=RUST actual=" +
+                if (native) "RUST reason=TIME_SCALED" else "JVM reason=NATIVE_BATCH_UNAVAILABLE")
+        } else if (!requested) lastTimeEngine = null
+        if (native) return scaledTime[0]
+        return java.math.BigInteger.valueOf(us).multiply(java.math.BigInteger.valueOf(timescale))
+            .divide(java.math.BigInteger.valueOf(1_000_000)).longValueExact()
+    }
     override fun close() {
         init?.close()
         init = null

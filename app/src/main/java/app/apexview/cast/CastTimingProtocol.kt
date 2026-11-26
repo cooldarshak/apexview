@@ -152,16 +152,20 @@ internal object CastTimingProtocol {
         return SectorCell(a.getString(0).safe(32), Pace.entries[a.getInt(1)],
             (0 until segments.count(64)).map { segments.getInt(it).also { s -> require(s in 0..4096) } }, a.getString(3).safe(32))
     }
-    fun table(timing: SessionTiming, now: Long): JSONArray = JSONArray().apply {
-        timing.laps.entries.mapNotNull { (n, laps) -> laps.at(now, includeRunningTime = false)?.let { n to it } }.sortedBy { it.second.position ?: 99 }
-            .take(MAX_DRIVERS).forEach { (n, s) ->
-                val tyre = timing.tyres[n]?.at(now)
+    fun table(timing: SessionTiming, now: Long, sampled: TowerSample? = null): JSONArray = JSONArray().apply {
+        val ordered = sampled?.rows ?: timing.laps.entries.mapNotNull { (n, laps) ->
+            laps.at(now, includeRunningTime = false)?.let { n to it }
+        }.sortedBy { it.second.position ?: 99 }
+        ordered.take(MAX_DRIVERS).forEach { (n, s) ->
+                val tyre = if (sampled != null) sampled.tyres[n] else timing.tyres[n]?.at(now)
+                val speed = if (sampled != null) sampled.speeds[n]?.first else timing.speeds[n]?.kmhAt(now)
+                val gear = if (sampled != null) sampled.speeds[n]?.second else timing.speeds[n]?.gearAt(now)
                 put(JSONArray().put(n).put(s.position ?: JSONObject.NULL).put(s.inPit).put(s.retired)
                     .put(s.positionChange ?: JSONObject.NULL).put(sector(s.lastLap)).put(sector(s.bestLap))
                     .put(JSONArray().apply { repeat(3) { put(sector(s.towerSector(it))) } })
                     .put(s.gap?.safe() ?: JSONObject.NULL).put(s.toLeader?.safe() ?: JSONObject.NULL).put(s.ahead?.safe() ?: JSONObject.NULL)
                     .put(tyre?.compound?.safe(24) ?: JSONObject.NULL).put(tyre?.laps ?: 0)
-                    .put(timing.speeds[n]?.kmhAt(now) ?: JSONObject.NULL).put(timing.speeds[n]?.gearAt(now) ?: JSONObject.NULL))
+                    .put(speed ?: JSONObject.NULL).put(gear ?: JSONObject.NULL))
             }
     }
     fun stoppedDrivers(timing: SessionTiming, now: Long): JSONArray = JSONArray().apply {

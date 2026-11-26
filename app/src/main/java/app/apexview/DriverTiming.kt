@@ -143,8 +143,11 @@ class DriverLaps(
     fun lastCrossing(utcMs: Long): Long? = crossings.getOrNull(crossings.floorIndex(utcMs))
 
     fun at(utcMs: Long, includeRunningTime: Boolean = true): CardState? {
-        val i = times.floorIndex(utcMs)
-        if (i < 0) return null
+        return atSnapshot(times.floorIndex(utcMs), utcMs, includeRunningTime)
+    }
+
+    internal fun atSnapshot(i: Int, utcMs: Long, includeRunningTime: Boolean = false): CardState? {
+        if (i !in states.indices || i !in times.indices) return null
         val s = states[i]
         val lapStart = if (includeRunningTime && !s.inPit) lastCrossing(utcMs) else null
         return CardState(
@@ -532,11 +535,9 @@ object DriverTimingParser {
 class Tyre(val compound: String, val laps: Int)
 
 /** One driver's tyres through the session. */
-class TyreLog(private val times: LongArray, private val tyres: List<Tyre>) {
-    fun at(utcMs: Long): Tyre? {
-        val i = times.floorIndex(utcMs)
-        return if (i < 0) null else tyres[i]
-    }
+class TyreLog(internal val times: LongArray, private val tyres: List<Tyre>) {
+    fun at(utcMs: Long): Tyre? = atSnapshot(times.floorIndex(utcMs))
+    internal fun atSnapshot(index: Int): Tyre? = tyres.getOrNull(index)
 }
 
 /**

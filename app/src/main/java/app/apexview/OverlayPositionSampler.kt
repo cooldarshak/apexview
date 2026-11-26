@@ -1,6 +1,7 @@
 package app.apexview
 
 import kotlin.math.max
+import app.apexview.tiled.NativeHotPath
 
 /**
  * Session-scoped, single-owner timing cursors. Shared by map, edge map and
@@ -88,10 +89,49 @@ internal class OverlayDrawCar(override val number: String) : OverlayMotionCar {
         internal set
 }
 
+/** One owner and one batched JNI call per position sample. JVM retains the
+ * existing immutable source arrays; native reads only the required samples.
+ * The reusable cursor/result storage is never published to another thread.
+ */
+private class NativePositionBatch(tracks: Collection<DriverTrack>) {
+    private val times = tracks.map { it.t }.toTypedArray()
+    private val xs = tracks.map { it.x }.toTypedArray()
+    private val ys = tracks.map { it.y }.toTypedArray()
+    private val counts = tracks.map { it.n }.toIntArray()
+    private val cursors = LongArray(counts.size * 3) { when (it % 3) {
+        0 -> -1L
+        1 -> Long.MIN_VALUE
+        else -> 0L
+    } }
+    val xy = FloatArray(counts.size * 2)
+    val active = IntArray(counts.size)
+    private var failed = false
+    private var reported = false
+    fun sample(now: Long): Boolean {
+        if (failed) return false
+        if (!NativeHotPath.samplePositions(times, xs, ys, counts, now, cursors, xy, active)) {
+            failed = true
+            android.util.Log.i("PitwallNativeHotPath", "MAP_ENGINE requested=RUST actual=JVM reason=NATIVE_BATCH_UNAVAILABLE")
+            return false
+        }
+        if (!reported) {
+            reported = true
+            android.util.Log.i("PitwallNativeHotPath", "MAP_ENGINE requested=RUST actual=RUST reason=BATCH_SAMPLED")
+        }
+        return true
+    }
+    fun seekCount(): Long {
+        var result = 0L
+        for (i in counts.indices) result += cursors[3 * i + 2]
+        return result
+    }
+}
+
 /** Do not share between threads. Give local map, edge map and Cast separate owners. */
 internal class OverlayPositionSampler(
     private val timing: SessionTiming,
     private val probe: OverlayPerformanceProbe? = null,
+    nativeRequested: Boolean = false,
 ) {
     private class Entry(val id: String, val cursor: OverlayPositionCursor) {
         var previousCar: Car? = null
@@ -100,6 +140,7 @@ internal class OverlayPositionSampler(
     private val entries = timing.tracks.map { (id, track) ->
         Entry(id, OverlayPositionCursor(track))
     }
+    private val native = if (nativeRequested) NativePositionBatch(timing.tracks.values) else null
     private var lastMs = Long.MIN_VALUE
     private var lastBeforePositions = false
     private var previous: List<Car> = emptyList()
@@ -122,12 +163,16 @@ internal class OverlayPositionSampler(
         lastDrawBeforePositions = before
         drawCars.clear()
         if (before) return drawCars
-        for (entry in entries) {
+        val sampledNative = native?.sample(atMs) == true
+        for (index in entries.indices) {
+            val entry = entries[index]
             if (timing.laps[entry.id]?.retiredAt(atMs) == true) continue
-            if (!entry.cursor.sample(atMs)) continue
+            if (sampledNative) {
+                if (native!!.active[index] == 0) continue
+            } else if (!entry.cursor.sample(atMs)) continue
             val car = entry.drawCar
-            car.x = entry.cursor.x
-            car.y = entry.cursor.y
+            car.x = if (sampledNative) native!!.xy[2 * index] else entry.cursor.x
+            car.y = if (sampledNative) native!!.xy[2 * index + 1] else entry.cursor.y
             car.state = timing.states[entry.id]?.at(atMs) ?: LapState.UNKNOWN
             drawCars.add(car)
         }
@@ -150,22 +195,28 @@ internal class OverlayPositionSampler(
         // Channel order remains identical to SessionTiming.tracks iteration order.
         // Reuse unchanged Car objects so a stationary dot is not invalidated.
         var changed = 0
-        for (entry in entries) {
+        val sampledNative = native?.sample(atMs) == true
+        for (index in entries.indices) {
+            val entry = entries[index]
             if (timing.laps[entry.id]?.retiredAt(atMs) == true) continue
-            if (!entry.cursor.sample(atMs)) continue
+            if (sampledNative) {
+                if (native!!.active[index] == 0) continue
+            } else if (!entry.cursor.sample(atMs)) continue
+            val x = if (sampledNative) native!!.xy[2 * index] else entry.cursor.x
+            val y = if (sampledNative) native!!.xy[2 * index + 1] else entry.cursor.y
             val state = timing.states[entry.id]?.at(atMs) ?: LapState.UNKNOWN
             // The published list is compacted when earlier drivers retire or
             // leave position history, so its indices cannot key source drivers.
             val old = entry.previousCar
-            val car = if (old != null && old.x == entry.cursor.x && old.y == entry.cursor.y && old.state == state)
+            val car = if (old != null && old.x == x && old.y == y && old.state == state)
                 old else {
                     changed++
-                    Car(entry.id, entry.cursor.x, entry.cursor.y, state)
+                    Car(entry.id, x, y, state)
                 }
             entry.previousCar = car
             next.add(car)
         }
-        val currentSeeks = entries.sumOf { it.cursor.seekCount }
+        val currentSeeks = if (sampledNative) native!!.seekCount() else entries.sumOf { it.cursor.seekCount }
         probe?.record(System.nanoTime() - started, next.size, changed,
             max(0L, currentSeeks - seeks))
         seeks = currentSeeks

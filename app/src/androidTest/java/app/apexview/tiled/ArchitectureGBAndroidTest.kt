@@ -19,6 +19,55 @@ import org.junit.runner.RunWith
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class ArchitectureGBAndroidTest {
     @Test
+    fun nativeOverlayAndAudioKernelsMatchKotlinReferences() {
+        assertTrue(NativeHotPath.available())
+        val times = longArrayOf(1000, 1200, 1400, 6600, 6900, 7200)
+        val xs = floatArrayOf(0f, 10f, 20f, 30f, 50f, 80f)
+        val ys = floatArrayOf(0f, 4f, 8f, 12f, 20f, 32f)
+        val track = app.apexview.DriverTrack(times, xs, ys, times.size)
+        val reference = app.apexview.OverlayPositionCursor(track)
+        val histories = arrayOf(times)
+        val x = arrayOf(xs); val y = arrayOf(ys)
+        val counts = intArrayOf(times.size)
+        val cursor = longArrayOf(-1L, Long.MIN_VALUE, 0L)
+        val xy = FloatArray(2); val active = IntArray(1)
+        val moments = (800L..7400L step 20L).toList() + listOf(1000L, 7000L, 1200L, 6600L)
+        for (now in moments) {
+            assertTrue(NativeHotPath.samplePositions(histories,x,y,counts,now,cursor,xy,active))
+            val present = reference.sample(now)
+            assertEquals(present, active[0] == 1)
+            if (present) {
+                assertEquals(reference.x,xy[0],0.00001f)
+                assertEquals(reference.y,xy[1],0.00001f)
+            }
+            assertEquals(reference.seekCount,cursor[2])
+        }
+        assertFalse(NativeHotPath.samplePositions(histories,x,y,intArrayOf(times.size+1),
+            1000,cursor,xy,active))
+        val out = IntArray(2)
+        assertTrue(NativeHotPath.floorIndices(arrayOf(longArrayOf(10,10,30), longArrayOf()),
+            intArrayOf(3,0),10,out))
+        assertArrayEquals(intArrayOf(1,-1),out)
+        val order = IntArray(5)
+        assertTrue(NativeHotPath.rowOrder(intArrayOf(3,1,99,1,2),5,order))
+        assertArrayEquals(intArrayOf(1,3,4,0,2),order)
+        val source = byteArrayOf(1,2,3,4,5)
+        val direct = ByteBuffer.allocateDirect(source.size).put(source)
+        val framed = ByteArray(source.size+7)
+        assertTrue(NativeHotPath.adts(direct,source.size,48000,2,framed))
+        assertArrayEquals(app.apexview.cast.BakedAacAdts.wrap(source,48000,2),framed)
+        assertFalse(NativeHotPath.adts(direct,source.size,12345,2,framed))
+        val scaled = LongArray(1)
+        for (us in longArrayOf(-1234567,0,1234567,Long.MAX_VALUE)) {
+            val expected = java.math.BigInteger.valueOf(us).multiply(java.math.BigInteger.valueOf(90_000))
+                .divide(java.math.BigInteger.valueOf(1_000_000)).longValueExact()
+            assertTrue(NativeHotPath.scaleUs(us,90_000,scaled))
+            assertEquals(expected,scaled[0])
+        }
+        assertFalse(NativeHotPath.scaleUs(Long.MAX_VALUE,Long.MAX_VALUE,scaled))
+    }
+
+    @Test
     fun stitchedTiledFragmentUsesNativeWorkerAndGenerationFencedLease() {
         verifyFrameRateArithmetic()
         val assets = InstrumentationRegistry.getInstrumentation().context.assets

@@ -10,6 +10,7 @@ import androidx.media3.exoplayer.hls.playlist.HlsMultivariantPlaylist
 import androidx.media3.exoplayer.hls.playlist.HlsPlaylistParser
 import app.apexview.tiled.CmafBoxInspector
 import app.apexview.tiled.CmafHttpReader
+import app.apexview.tiled.NativeHotPath
 import java.nio.ByteBuffer
 
 /** Selects the already-authorized, CLEAR archive commentary; never captures microphone audio. */
@@ -17,6 +18,7 @@ internal class BakedCastArchiveAudio(
     private val reader: CmafHttpReader,
     private val playlistUri: Uri,
     private val startPositionUs: Long,
+    private val nativeRequested: Boolean = false,
 ) : AutoCloseable {
     private var init = ByteArray(0)
     private var initKey = ""
@@ -24,6 +26,9 @@ internal class BakedCastArchiveAudio(
     private var lastLoadedSegmentStartUs = Long.MIN_VALUE
     private var closed = false
     private var completedPlaylist: HlsMediaPlaylist? = null
+    private val sampleBuffer = if (nativeRequested) ByteBuffer.allocateDirect(32 * 1024)
+        else ByteBuffer.allocate(32 * 1024)
+    private var actualNative: Boolean? = null
 
     /** Fetch on IO, not the GL/PixelCopy thread. PTS shares the live scene's zero-based clock. */
     fun readUntil(positionUs: Long): List<BakedCastTransportStream.Sample> {
@@ -42,21 +47,22 @@ internal class BakedCastArchiveAudio(
                 require(initKey.isEmpty()) { "Commentary codec changed; reconnect Cast" }
                 val bytes = reader.read(UriUtil.resolveToUri(media.baseUri, map.url), 2 * 1024 * 1024,
                     map.byteRangeOffset, map.byteRangeLength).bytes
+                var transferred = false
                 try {
                     val report = CmafBoxInspector.inspect(bytes)
                     require(report.errors.isEmpty() && report.tracks.size == 1 &&
                         report.tracks.single().handler == "soun" && !report.tracks.single().encrypted) {
                         "Only unencrypted, single-track AAC commentary may be cast"
                     }
-                    init = bytes.copyOf(); initKey = key
-                } finally { bytes.fill(0) }
+                    init = bytes; initKey = key; transferred = true
+                } finally { if (!transferred) bytes.fill(0) }
             }
             val bytes = reader.read(UriUtil.resolveToUri(media.baseUri, segment.url), 8 * 1024 * 1024,
                 segment.byteRangeOffset, segment.byteRangeLength).bytes
             try {
                 // Queue this whole CMAF fragment. Avoid downloading the same six-second
                 // fragment every time the live encoder asks for another few frames.
-                output += decodeSamples(init + bytes, start)
+                output += decodeSamples(init, bytes, start)
                 lastLoadedSegmentStartUs = start
             }
             finally { bytes.fill(0) }
@@ -80,18 +86,14 @@ internal class BakedCastArchiveAudio(
         } finally { response.bytes.fill(0) }
     }
 
-    private fun decodeSamples(bytes: ByteArray, segmentStartUs: Long): List<BakedCastTransportStream.Sample> {
+    private fun decodeSamples(initialization: ByteArray, bytes: ByteArray, segmentStartUs: Long): List<BakedCastTransportStream.Sample> {
         val extractor = MediaExtractor()
         val samples = mutableListOf<BakedCastTransportStream.Sample>()
         try {
             extractor.setDataSource(object : MediaDataSource() {
-                override fun getSize() = bytes.size.toLong()
-                override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
-                    if (position < 0 || position >= bytes.size) return -1
-                    val count = minOf(size, bytes.size - position.toInt())
-                    System.arraycopy(bytes, position.toInt(), buffer, offset, count)
-                    return count
-                }
+                override fun getSize() = initialization.size.toLong() + bytes.size
+                override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int =
+                    readJoinedAudio(initialization, bytes, position, buffer, offset, size)
                 override fun close() = Unit
             })
             val index = (0 until extractor.trackCount).singleOrNull {
@@ -101,7 +103,7 @@ internal class BakedCastArchiveAudio(
             val rate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
             val channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
             extractor.selectTrack(index)
-            val buffer = ByteBuffer.allocate(32 * 1024)
+            val buffer = sampleBuffer
             var firstSampleTimeUs = -1L
             while (true) {
                 buffer.clear()
@@ -111,15 +113,19 @@ internal class BakedCastArchiveAudio(
                 if (firstSampleTimeUs < 0L) firstSampleTimeUs = timestamp
                 val absoluteUs = segmentStartUs + (timestamp - firstSampleTimeUs)
                 if (absoluteUs >= nextAudioUs && absoluteUs >= startPositionUs) {
-                    val aac = ByteArray(size)
-                    buffer.position(0); buffer.get(aac)
-                    samples += BakedCastTransportStream.Sample(absoluteUs - startPositionUs,
-                        BakedAacAdts.wrap(aac, rate, channels), video = false)
+                    val packet = BakedAacAdts.wrap(buffer, size, rate, channels, nativeRequested && actualNative != false) { native ->
+                        if (nativeRequested && actualNative != native) {
+                            actualNative = native
+                            android.util.Log.i("PitwallNativeHotPath", "AUDIO_FRAMING_ENGINE requested=RUST actual=" +
+                                if (native) "RUST reason=ADTS_WRITTEN" else "JVM reason=NATIVE_BATCH_UNAVAILABLE")
+                        }
+                    }
+                    samples += BakedCastTransportStream.Sample(absoluteUs - startPositionUs, packet, video = false)
                 }
                 if (!extractor.advance()) break
             }
             samples.lastOrNull()?.let { nextAudioUs = it.ptsUs + startPositionUs + 1 }
-        } finally { extractor.release(); bytes.fill(0) }
+        } finally { extractor.release() }
         return samples
     }
 
@@ -127,23 +133,75 @@ internal class BakedCastArchiveAudio(
         closed = true
         init.fill(0); init = ByteArray(0)
         completedPlaylist = null
+        sampleBuffer.clear()
+        while (sampleBuffer.hasRemaining()) sampleBuffer.put(0.toByte())
+        sampleBuffer.clear()
     }
+}
+
+/** Expose the two immutable CMAF extents as one virtual extractor stream;
+ * do not concatenate the initialization and media fragment for each read.
+ */
+internal fun readJoinedAudio(init: ByteArray, media: ByteArray, position: Long,
+    target: ByteArray, offset: Int, size: Int): Int {
+    val total = init.size.toLong() + media.size
+    if (position < 0 || position >= total) return -1
+    require(offset >= 0 && size >= 0 && offset <= target.size && size <= target.size - offset)
+    val count = minOf(size.toLong(), total - position).toInt()
+    val first = if (position < init.size) minOf(count, init.size - position.toInt()) else 0
+    if (first > 0) System.arraycopy(init, position.toInt(), target, offset, first)
+    val second = count - first
+    if (second > 0) System.arraycopy(media, (position + first - init.size).toInt(),
+        target, offset + first, second)
+    return count
 }
 
 internal object BakedAacAdts {
     private val rates = intArrayOf(96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
         16000, 12000, 11025, 8000, 7350)
 
-    fun wrap(rawAac: ByteArray, sampleRate: Int, channels: Int): ByteArray {
+    private fun validate(size: Int, sampleRate: Int, channels: Int): Int {
         val rate = rates.indexOf(sampleRate)
-        require(rate >= 0 && channels in 1..7 && rawAac.size in 1..8184) {
+        require(rate >= 0 && channels in 1..7 && size in 1..8184) {
             "Unsupported AAC format for Cast"
         }
-        val length = rawAac.size + 7
-        val header = byteArrayOf(0xff.toByte(), 0xf1.toByte(),
-            (((2 - 1) shl 6) or (rate shl 2) or (channels ushr 2)).toByte(),
-            (((channels and 3) shl 6) or (length ushr 11)).toByte(),
-            ((length ushr 3) and 255).toByte(), (((length and 7) shl 5) or 31).toByte(), 0xfc.toByte())
-        return header + rawAac
+        return rate
+    }
+
+    private fun writeHeader(out: ByteArray, rate: Int, channels: Int) {
+        val length = out.size
+        out[0] = 0xff.toByte(); out[1] = 0xf1.toByte()
+        out[2] = (((2 - 1) shl 6) or (rate shl 2) or (channels ushr 2)).toByte()
+        out[3] = (((channels and 3) shl 6) or (length ushr 11)).toByte()
+        out[4] = ((length ushr 3) and 255).toByte()
+        out[5] = (((length and 7) shl 5) or 31).toByte()
+        out[6] = 0xfc.toByte()
+    }
+
+    fun wrap(rawAac: ByteArray, sampleRate: Int, channels: Int): ByteArray {
+        val rate = validate(rawAac.size, sampleRate, channels)
+        return ByteArray(rawAac.size + 7).also { out ->
+            writeHeader(out, rate, channels)
+            rawAac.copyInto(out, 7)
+        }
+    }
+
+    /** One final owned sample allocation in either engine. Native writes the
+     * header and payload directly to it; no raw intermediate ByteArray.
+     */
+    fun wrap(buffer: ByteBuffer, size: Int, sampleRate: Int, channels: Int,
+        nativeRequested: Boolean, report: (Boolean) -> Unit): ByteArray {
+        val rate = validate(size, sampleRate, channels)
+        require(size <= buffer.capacity())
+        val out = ByteArray(size + 7)
+        val native = nativeRequested && buffer.isDirect &&
+            NativeHotPath.adts(buffer, size, sampleRate, channels, out)
+        if (!native) {
+            writeHeader(out, rate, channels)
+            buffer.position(0)
+            buffer.get(out, 7, size)
+        }
+        report(native)
+        return out
     }
 }
