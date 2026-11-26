@@ -482,7 +482,10 @@ class AppState(
             } finally {
                 if (!assigned) runCatching { provisional?.socket?.close() }
                 if (castPairingDecision === decision) { castPairingDecision = null; castPairingCode = null }
-                if (attempt == localConnectionGeneration) {
+                // A socket-close callback can install a delayed retry before
+                // this cancelled attempt finishes. Never clear its job/service.
+                if (attempt == localConnectionGeneration &&
+                    localConnectionJob === kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]) {
                     localConnectionJob = null
                     if (localConnection == null) app.apexview.cast.local.CastConnectionService.stop(context)
                 }
