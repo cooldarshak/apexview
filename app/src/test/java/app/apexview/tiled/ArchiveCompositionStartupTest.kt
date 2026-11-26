@@ -142,4 +142,18 @@ class ArchiveCompositionStartupTest {
         }
         assertEquals(listOf("released", "restored", "disposed"), events)
     }
+    @Test fun archiveRetirementAttemptsAllOwnersAndPreservesFirstFailure() {
+        val first = IllegalStateException("native release")
+        val second = IllegalArgumentException("cache release")
+        val called = mutableListOf<Int>()
+        val steps = ArchiveRetirementSteps()
+        steps.run { called += 1; throw first }
+        steps.run { called += 2 }
+        steps.run { called += 3; throw second }
+        steps.run { called += 4 }
+        val failure = runCatching { steps.finish() }.exceptionOrNull()
+        assertEquals(listOf(1, 2, 3, 4), called)
+        assertTrue(failure === first)
+        assertEquals(listOf(second), first.suppressed.toList())
+    }
 }
