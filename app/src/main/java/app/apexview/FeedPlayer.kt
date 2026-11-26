@@ -808,8 +808,11 @@ class FeedPlayer(
                 loadEventInfo: LoadEventInfo,
                 mediaLoadData: MediaLoadData,
             ) {
-                if (!memoryOwnerRetired && !(parkedForArchive && player.mediaItemCount == 0) &&
-                    mediaLoadData.dataType == C.DATA_TYPE_MEDIA)
+                if (memoryOwnerRetired || (parkedForArchive && player.mediaItemCount == 0)) {
+                    observedLoads.clear()
+                    return
+                }
+                if (mediaLoadData.dataType == C.DATA_TYPE_MEDIA)
                     memoryLoads.start(loadEventInfo.loadTaskId, mediaLoadData.trackType)
                 if (!DiagnosticLogs.recording) { observedLoads.clear(); return }
                 // Include steady playback, but keep the diagnostic map bounded.
