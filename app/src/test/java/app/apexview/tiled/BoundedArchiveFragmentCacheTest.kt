@@ -96,4 +96,32 @@ class BoundedArchiveFragmentCacheTest {
         requireNotNull(cache.readLease(2)).close()
         cache.clear()
     }
+
+    @Test fun sharedInitializationSurvivesSessionRetirementWithoutCopy() {
+        val bytes = byteArrayOf(1, 2, 3, 4, 5, 6)
+        val published = HeapFragmentLease.take(bytes)
+        val first = ArchiveFragmentLease.shared(published)
+        val second = ArchiveFragmentLease.shared(published)
+        assertSame(first.storageIdentity, second.storageIdentity)
+        assertSame(published.storageIdentity, first.storageIdentity)
+        assertTrue(published.matches(byteArrayOf(1, 2, 3, 4, 5, 6)))
+        assertFalse(published.matches(byteArrayOf(1, 2, 3, 4, 5, 7)))
+        val legacyCopy = published.copyBytes()
+        legacyCopy.fill(0)
+        published.close()
+        assertThrows(IllegalStateException::class.java) { ArchiveFragmentLease.shared(published) }
+        first.close()
+        first.close()
+        val range = ByteArray(4)
+        second.readInto(range, 0, 1, 4)
+        assertArrayEquals(byteArrayOf(2, 3, 4, 5), range)
+        val output = java.io.ByteArrayOutputStream()
+        second.writeTo(output, 2, 3)
+        assertArrayEquals(byteArrayOf(3, 4, 5), output.toByteArray())
+        assertThrows(IllegalArgumentException::class.java) { second.readInto(range, 0, 5, 2) }
+        second.close()
+        assertArrayEquals(ByteArray(6), bytes)
+        assertThrows(IllegalStateException::class.java) { second.readInto(range, 0, 0, 1) }
+    }
+
 }
