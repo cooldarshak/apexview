@@ -74,7 +74,13 @@ class ReplayCoreCacheTest {
         // it must be restart-cacheable without waiting minutes for full history.
         timing.archivePartial = true
         timing.towerThroughUtc = targetUtc - 1L
-        assertTrue(!cache.writePreview(timing, targetPosition, targetUtc) {})
+        // Stale rank coverage must not block the valid position checkpoint,
+        // nor may it be persisted as an apparently ready tower.
+        assertTrue(cache.writePreview(timing, targetPosition, targetUtc) {})
+        val mapOnly = requireNotNull(cache.readPreview(targetPosition) {})
+        assertTrue(mapOnly.laps.isEmpty())
+        assertEquals(track.at(targetUtc), mapOnly.tracks.getValue("16").at(targetUtc))
+        assertEquals(Long.MIN_VALUE, mapOnly.previewTowerThroughUtc)
         timing.towerThroughUtc = targetUtc + 30_000L
         assertTrue(cache.writePreview(timing, targetPosition, targetUtc) {})
         val preview = requireNotNull(cache.readPreview(targetPosition + 20_000L) {})
@@ -111,6 +117,30 @@ class ReplayCoreCacheTest {
         } catch (_: java.util.concurrent.CancellationException) { }
         assertEquals(source.path, cache.read {}?.path)
         file.outputStream().use { it.write(1) }
+        assertNull(cache.read {})
+    }
+
+    @Test
+    fun towerOnlyCheckpointDoesNotWaitForCircuitGeometryOrPositions() {
+        val cache = ReplayCoreCache(temporary.root, 28)
+        val snapshot = DriverLaps.Snapshot(4, List(3) { null }, List(3) { null },
+            null, null, false, null, null)
+        val timing = SessionTiming("Race", mapOf("16" to DriverInfo("16","LEC",42)),
+            emptyMap(), emptyMap(), FloatArray(0), false, emptyList(), 1000L,
+            laps = mapOf("16" to DriverLaps(longArrayOf(1000), listOf(snapshot), longArrayOf())),
+            radioBase = LiveTimingArchive.BASE + "2026/Race/")
+        timing.archivePartial = true
+        timing.previewTowerFromUtc = 1000L
+        timing.towerThroughUtc = 3000L
+        assertEquals(ReplayPreviewCoverage.TOWER, ReplayPreviewCoverage.at(timing, 2000L))
+        assertEquals(0, ReplayPreviewCoverage.at(timing, 4000L))
+        assertTrue(cache.writePreview(timing, 1000L, 2000L) {})
+        val restored = requireNotNull(cache.readPreview(1000L) {})
+        assertTrue(restored.tracks.isEmpty())
+        assertTrue(restored.outline.isEmpty())
+        assertEquals(4, restored.laps.getValue("16").at(2000L)?.position)
+        assertEquals(1000L, restored.previewTowerFromUtc)
+        assertEquals(3000L, restored.previewTowerThroughUtc)
         assertNull(cache.read {})
     }
 
