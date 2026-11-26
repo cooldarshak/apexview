@@ -211,31 +211,43 @@ internal class BakedCastCaptureWorker(
         stopped = true
         val reason = (error.message ?: error.javaClass.simpleName).take(200)
         Log.w("PitwallCast", "BAKED_CAST_WORKER_FAILURE $reason")
-        session.captureFailed(reason)
-        cleanup()
+        try { session.captureFailed(reason) } finally { cleanup() }
     }
 
     private fun cleanup() {
         if (cleaned || !captureLifetime.stop()) return
         cleaned = true
+        val steps = SceneReleaseSteps { step, error ->
+            Log.w("PitwallCast", "BAKED_CAST_WORKER_CLEANUP step=$step", error)
+        }
+        val oldCapture = directCapture
+        val oldEncoder = encoder
+        directCapture = null
+        encoder = null
+        directFrameReady = false
         try {
-            if (display != EGL14.EGL_NO_DISPLAY && contextGl != EGL14.EGL_NO_CONTEXT &&
-                pbuffer != EGL14.EGL_NO_SURFACE) {
-                EGL14.eglMakeCurrent(display, pbuffer, pbuffer, contextGl)
+            steps.run("egl-bind") {
+                if (display != EGL14.EGL_NO_DISPLAY && contextGl != EGL14.EGL_NO_CONTEXT &&
+                    pbuffer != EGL14.EGL_NO_SURFACE) {
+                    check(EGL14.eglMakeCurrent(display, pbuffer, pbuffer, contextGl))
+                }
             }
-            try { directCapture?.close() } finally { encoder?.stopCast() }
-        } catch (error: Exception) {
-            Log.w("PitwallCast", "BAKED_CAST_WORKER_CLEANUP ${error.javaClass.simpleName}")
-        } finally {
-            directCapture = null
-            encoder = null
+            steps.run("capture") { oldCapture?.close() }
+            steps.run("encoder") { oldEncoder?.stopCast() }
             if (display != EGL14.EGL_NO_DISPLAY) {
-                EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
-                    EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-                if (pbuffer != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, pbuffer)
-                if (contextGl != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, contextGl)
-                EGL14.eglTerminate(display)
+                steps.run("egl-unbind") {
+                    check(EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
+                        EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT))
+                }
+                steps.run("egl-pbuffer") {
+                    if (pbuffer != EGL14.EGL_NO_SURFACE) check(EGL14.eglDestroySurface(display, pbuffer))
+                }
+                steps.run("egl-context") {
+                    if (contextGl != EGL14.EGL_NO_CONTEXT) check(EGL14.eglDestroyContext(display, contextGl))
+                }
+                steps.run("egl-display") { check(EGL14.eglTerminate(display)) }
             }
+        } finally {
             pbuffer = EGL14.EGL_NO_SURFACE
             contextGl = EGL14.EGL_NO_CONTEXT
             display = EGL14.EGL_NO_DISPLAY
