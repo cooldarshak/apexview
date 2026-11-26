@@ -3186,6 +3186,17 @@ class AppState(
                             "coded=${session.codedWidth}x${session.codedHeight} fps=${session.frameRate}")
                         try {
                             host.feed.requireArchiveHardwareSupport(session.codedWidth, session.codedHeight, session.frameRate * playbackSpeed)
+                            validateSelection()
+                            if (!replacingActiveScene && !castingActive && !castPlaybackHandedOff) {
+                                // Ordinary clock drift does not invalidate the verified
+                                // finite session. Prepare the currently needed group
+                                // once while the old source is still visible.
+                                val currentPosition = host.feed.player.currentPosition.coerceAtLeast(0)
+                                kotlinx.coroutines.runInterruptible(kotlinx.coroutines.Dispatchers.IO) {
+                                    session.prepareHandoffAt(currentPosition)
+                                }
+                                validateSelection()
+                            }
                             if (bakedQualityReplacement) {
                                 val programme = selected.firstOrNull { it.audible }?.feed?.sourceStream?.profileLabel
                                     ?: session.clockLabel
