@@ -296,6 +296,10 @@ object DriverTimingParser {
         var retired = false
         var retirementAssertedAt = Long.MIN_VALUE
         var retirementCorrectionPending = false
+        var primaryRetiredAt = Long.MIN_VALUE
+        var primaryStoppedAt = Long.MIN_VALUE
+        var primaryPitAt = Long.MIN_VALUE
+        var primaryLapAt = Long.MIN_VALUE
         var stopped = false
         var laps: Int? = null
         val times = ArrayList<Long>()
@@ -443,7 +447,7 @@ object DriverTimingParser {
             lines.keys().forEach { number ->
                 val d = lines.optJSONObject(number) ?: return@forEach
                 val live = drivers.getOrPut(number) { Live() }
-                apply(live, d, event.time, statusPolicy)
+                apply(live, d, event.time, statusPolicy, event.source)
                 live.snap(event.time)
             }
             if (records % 1024 == 0) onProgress?.invoke(event.time) { materialize(drivers, copySnapshots = true) }
@@ -482,13 +486,28 @@ object DriverTimingParser {
         return materialize(drivers, copySnapshots = false)
     }
 
-    private fun apply(l: Live, d: JSONObject, t: Long, statusPolicy: RetirementStatusPolicy) {
+    private fun apply(l: Live, d: JSONObject, t: Long, statusPolicy: RetirementStatusPolicy, source: Int = 0) {
         d.optString("Position").toIntOrNull()?.let { l.position = it }
-        if (d.has("InPit")) l.inPit = d.optBoolean("InPit")
-        if (d.optBoolean("PitOut")) l.inPit = false
-        // Sparse deltas do not reset status. Temporary stopping is not retirement.
-        if (d.has("Stopped")) l.stopped = d.optBoolean("Stopped")
-        val asserted = d.optBoolean("Retired")
+        val rawCompleted = d.optInt("NumberOfLaps", -1).takeIf { it >= 0 }
+        val previousLaps = l.laps
+        val staleLap = rawCompleted != null && previousLaps != null && rawCompleted < previousLaps
+        val primary = source == 0
+        val lapAllowed = primary || l.primaryLapAt != t
+        if (primary && rawCompleted != null) l.primaryLapAt = t
+        val completed = rawCompleted.takeIf { lapAllowed }
+        val pitAllowed = !staleLap && (primary || l.primaryPitAt != t)
+        val stoppedAllowed = !staleLap && (primary || l.primaryStoppedAt != t)
+        val retiredAllowed = !staleLap && (primary || l.primaryRetiredAt != t)
+        if (primary && (d.has("InPit") || d.has("PitOut"))) l.primaryPitAt = t
+        if (primary && d.has("Stopped")) l.primaryStoppedAt = t
+        if (primary && d.has("Retired")) l.primaryRetiredAt = t
+        if (pitAllowed && d.has("InPit")) l.inPit = d.optBoolean("InPit")
+        val pitExit = pitAllowed && d.optBoolean("PitOut")
+        if (pitExit) l.inPit = false
+        // Same-timestamp supplemental deltas may supply missing fields, never
+        // contradict explicit primary lifecycle evidence for that timestamp.
+        if (stoppedAllowed && d.has("Stopped")) l.stopped = d.optBoolean("Stopped")
+        val asserted = retiredAllowed && d.optBoolean("Retired")
         if (asserted) l.retirementAssertedAt = t
         // Qualifying gives the gap to the fastest; races the interval to the car ahead.
         d.optString("TimeDiffToFastest").takeIf { d.has("TimeDiffToFastest") }?.let { l.gap = it.ifEmpty { null } }
@@ -503,16 +522,13 @@ object DriverTimingParser {
         d.optJSONObject("IntervalToPositionAhead")?.let { o -> if (o.has("Value")) l.ahead = o.optString("Value").ifEmpty { null } }
         if (d.has("TimeDiffToPositionAhead")) l.ahead = d.optString("TimeDiffToPositionAhead").ifEmpty { null }
 
-        val completed = d.optInt("NumberOfLaps", -1).takeIf { it >= 0 }
-        val previousLaps = l.laps
-        val staleLap = completed != null && previousLaps != null && completed < previousLaps
         val crossing = completed != null && previousLaps != null && completed > previousLaps
-        val pitExit = !staleLap && d.optBoolean("PitOut")
-        if ((crossing || pitExit) && !d.optBoolean("Stopped")) l.stopped = false
+        if ((crossing || pitExit) && !d.optBoolean("Stopped") &&
+            (primary || l.primaryStoppedAt != t)) l.stopped = false
         val sectors = d.opt("Sectors")
         if (asserted || l.retired) {
             val fresh = !staleLap && t > l.retirementAssertedAt
-            val corrected = fresh && d.has("Retired") && !d.isNull("Retired") &&
+            val corrected = fresh && retiredAllowed && d.has("Retired") && !d.isNull("Retired") &&
                 d.optString("Retired").equals("false", ignoreCase = true)
             var sectorProgress = false
             if (fresh && (corrected || l.retirementCorrectionPending) &&
@@ -521,8 +537,10 @@ object DriverTimingParser {
                 // Repeated values, late S3 and unrelated gap changes are insufficient.
                 forEachSector(sectors) { i, sector ->
                     val seconds = sector.optString("Value").toDoubleOrNull()
-                    if (i < 2 && l.sectorValue[i].isEmpty() && seconds != null &&
-                        seconds.isFinite() && seconds > 0) sectorProgress = true
+                    if (i < 2 && l.sectorValue[i].isEmpty() &&
+                        ((seconds != null && seconds.isFinite() && seconds > 0) ||
+                            hasFreshMiniProgress(l.sectorSegments[i], sector.opt("Segments"))))
+                        sectorProgress = true
                 }
             }
             // Sparse non-events do not cross JNI, including every normal racing row.
@@ -641,6 +659,26 @@ object DriverTimingParser {
         l.sector[i] = if (l.sectorValue[i].isNotEmpty() || segments.isNotEmpty()) {
             SectorCell(l.sectorValue[i], if (l.sectorValue[i].isEmpty()) Pace.NONE else pace(l.sectorFlags[i]), segments, l.sectorPrevious[i])
         } else null
+    }
+
+    /** Only an explicit previously uncompleted slot becoming a measured
+     * green/yellow/purple mini-sector beyond the last completed slot counts.
+     * Unknown, pit, empty, recoloured or duplicate values are not proof. */
+    private fun hasFreshMiniProgress(previous: List<Int>, raw: Any?): Boolean {
+        if (previous.isEmpty()) return false
+        fun completed(status: Int) = status == 2048 || status == 2049 || status == 2051
+        val last = previous.indexOfLast(::completed)
+        if (last < 0) return false
+        fun fresh(index: Int, value: JSONObject?): Boolean =
+            index in (last + 1) until previous.size && previous[index] == 0 &&
+                completed(value?.optInt("Status", -1) ?: -1)
+        return when (raw) {
+            is JSONArray -> (0 until minOf(raw.length(), MAX_MINI_SECTORS)).any { fresh(it, raw.optJSONObject(it)) }
+            is JSONObject -> raw.keys().asSequence().any { key ->
+                key.toIntOrNull()?.let { fresh(it, raw.optJSONObject(key)) } == true
+            }
+            else -> false
+        }
     }
 
     private fun mergeSegments(previous: List<Int>, raw: Any?, keepCleared: Boolean = true): List<Int> {

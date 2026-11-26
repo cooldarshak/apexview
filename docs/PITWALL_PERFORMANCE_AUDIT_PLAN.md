@@ -4490,3 +4490,8 @@ P1-E: Rust position sampling now reads at most two neighbouring coordinates per 
 ### 892 continuation: exact-source static regression correction (CI deferred)
 
 The Python suite on checkpoint 0653153 exposed a stale string assertion for ResourceDataSource.close after the delivery-proof change. Preserve and strengthen the production wiring gate: verify that the exact local lease is captured, only complete delivery can certify it, and proof is evaluated before unconditional finally-based detachment and release. This is a test correction for the new ownership contract, not removal of the existing cleanup invariant. No production code or CI gate bypass; rerun exact-source Python suite before final dispatch.
+
+
+### 892 continuation: primary timing lifecycle precedence and mini-sector corroboration (CI deferred)
+
+- P0-B: TimingData explicit retirement/stop/pit/lap fields take precedence over conflicting TimingDataF1 fields at the same timestamp; sparse supplemental fields remain usable. Lower stale lap counts cannot reassert retirement or change stop/pit lifecycle. A previously uncompleted known mini-sector beyond the last completed slot, changing to recognized measured 2048/2049/2051 status within an unfinished current S1/S2, may corroborate an explicit retirement correction. Duplicate, pit/unknown/late S3 values do not qualify. The normalized evidence still passes through the selected Rust retirement decision kernel, with the existing JVM reference fallback only; no competing status history. Added chronological regression for primary/supplement conflict, stale assertions, genuine mini-sector progression and historical seek. No exact Lawson raw-event proof, no telemetry-only un-retirement, no CI yet.

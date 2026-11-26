@@ -133,6 +133,45 @@ class DriverTimingTest {
     }
 
     @Test
+    fun primaryStatusWinsSameTimestampAndStaleLapsCannotReassertRetirement() {
+        val primary = listOf(
+            """00:00:01.000{"Lines":{"4":{"NumberOfLaps":3,"Retired":true}}}""",
+            """00:00:02.000{"Lines":{"4":{"Retired":false,"NumberOfLaps":4}}}""",
+            """00:00:04.000{"Lines":{"4":{"Retired":true,"NumberOfLaps":4}}}"""
+        ).joinToString("\n")
+        val supplement = listOf(
+            """00:00:02.000{"Lines":{"4":{"Retired":true,"NumberOfLaps":3}}}""",
+            """00:00:03.000{"Lines":{"4":{"Retired":true,"NumberOfLaps":2}}}""",
+            """00:00:04.000{"Lines":{"4":{"Retired":false,"NumberOfLaps":5}}}"""
+        ).joinToString("\n")
+        val laps = DriverTimingParser.parse(primary, t0, supplement).getValue("4")
+        assertTrue(laps.retiredAt(t0 + 1_500))
+        assertTrue(!laps.retiredAt(t0 + 2_500))
+        assertTrue(!laps.retiredAt(t0 + 3_500))
+        assertTrue(laps.retiredAt(t0 + 4_500))
+    }
+
+    @Test
+    fun correctionRequiresNewMiniSectorProgressNotDuplicateOrPitMarkers() {
+        val primary = listOf(
+            """00:00:01.000{"Lines":{"4":{"NumberOfLaps":3,"Sectors":{"0":{"Segments":[{"Status":2048},{"Status":0},{"Status":0}]}}}}}""",
+            """00:00:02.000{"Lines":{"4":{"Retired":true}}}""",
+            """00:00:03.000{"Lines":{"4":{"Retired":false}}}""",
+            """00:00:07.000{"Lines":{"4":{"Retired":true}}}"""
+        ).joinToString("\n")
+        val supplement = listOf(
+            """00:00:04.000{"Lines":{"4":{"Sectors":{"0":{"Segments":{"0":{"Status":2048}}}}}}}""",
+            """00:00:05.000{"Lines":{"4":{"Sectors":{"0":{"Segments":{"2":{"Status":2064}}}}}}}""",
+            """00:00:06.000{"Lines":{"4":{"Sectors":{"0":{"Segments":{"1":{"Status":2049}}}}}}}"""
+        ).joinToString("\n")
+        val laps = DriverTimingParser.parse(primary, t0, supplement).getValue("4")
+        assertTrue(laps.retiredAt(t0 + 5_500))
+        assertTrue(!laps.retiredAt(t0 + 6_500))
+        assertTrue(laps.retiredAt(t0 + 7_500))
+        assertTrue(laps.retiredAt(t0 + 3_500))
+    }
+
+    @Test
     fun aLateFinalSectorStillCountsForTheLapItFinished() {
         val late = listOf(
             "00:00:01.000{\"Lines\":{\"4\":{\"NumberOfLaps\":3}}}",
