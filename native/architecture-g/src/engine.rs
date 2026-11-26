@@ -102,8 +102,25 @@ struct Slot {
     work:Option<Work>,
     result:i64,
     running_bytes:usize,
+    small_owned_jobs:u8,
 }
 impl Slot {
+    /// The completed worker no longer reads its input. Retire a sustained
+    /// oversized allocation without copying it, touching the output, or
+    /// changing the admitted job limits. Do not react to one small segment.
+    fn observe_owned_input(&mut self, used:usize, successful:bool) {
+        let buffers=self.buffers.as_mut().expect("completed buffers");
+        let capacity=buffers.input.capacity();
+        if successful && capacity>=1024*1024 && used<=capacity/2 {
+            self.small_owned_jobs=self.small_owned_jobs.saturating_add(1);
+            if self.small_owned_jobs>=8 {
+                buffers.input=Vec::new();
+                self.small_owned_jobs=0;
+            }
+        } else {
+            self.small_owned_jobs=0;
+        }
+    }
     fn recycle(&mut self) {
         debug_assert!(self.buffers.is_some());
         if self.work.is_some_and(|w|matches!(w.command,Command::ClearAtlasOwned)) {
@@ -163,7 +180,7 @@ impl Engine {
         // until actual work is admitted. Owned jobs never need a fixed output.
         for _ in 0..budget.slots {
             let buffers=if compact_atlas {None} else {Some(Buffers::new(budget)?)};
-            slots.push(Slot{buffers,stage:Stage::Free,work:None,result:0,running_bytes:0});
+            slots.push(Slot{buffers,stage:Stage::Free,work:None,result:0,running_bytes:0,small_owned_jobs:0});
         }
         let initial_pairs=if compact_atlas {0} else {budget.slots};
         let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false,compact_atlas,
@@ -218,6 +235,7 @@ impl Engine {
         for slot in &mut s.slots {
             if slot.stage==Stage::Free {
                 if let Some(b)=slot.buffers.take() {bytes+=b.input.capacity()+b.output.capacity();}
+                slot.small_owned_jobs=0;
             }
         }
         bytes
@@ -228,7 +246,7 @@ impl Engine {
         let mut warm=false;
         for slot in &mut state.slots {
             if slot.stage==Stage::Free && slot.buffers.is_some() {
-                if warm {slot.buffers=None;} else {warm=true;}
+                if warm {slot.buffers=None;slot.small_owned_jobs=0;} else {warm=true;}
             }
         }
     }
@@ -474,10 +492,15 @@ fn run_worker(shared:Shared,output_ceiling:usize) {
         let slot=&mut s.slots[index];
         slot.running_bytes=0;
         slot.buffers=Some(buffers);
-        if obsolete {slot.recycle();Engine::trim_free_spares(&mut s);continue;}
+        if obsolete {slot.small_owned_jobs=0;slot.recycle();Engine::trim_free_spares(&mut s);continue;}
         slot.result=if Instant::now()>=work.deadline {DEADLINE} else {
             match result {Ok(Ok(n))=>n as i64,Ok(Err(code))=>code,Err(_)=>PANIC}
         };
+        if matches!(work.command,Command::ClearAtlasOwned) {
+            slot.observe_owned_input(work.len,slot.result>0);
+        } else {
+            slot.small_owned_jobs=0;
+        }
         slot.stage=if slot.result>0 {Stage::Ready} else {Stage::Failed};
     }
 }
@@ -612,6 +635,26 @@ mod tests {
         assert_eq!(engine.allocated_payload_bytes(),0);
     }
     #[test]
+    fn sustained_small_owned_jobs_retire_input_without_touching_output() {
+        let mut slot=Slot {
+            buffers:Some(Buffers{input:buffer(2*1024*1024).unwrap(),output:vec![7,8,9]}),
+            stage:Stage::Ready,work:None,result:3,running_bytes:0,small_owned_jobs:0,
+        };
+        for _ in 0..7 {slot.observe_owned_input(256*1024,true);}
+        assert!(slot.buffers.as_ref().unwrap().input.capacity()>=2*1024*1024);
+        // A failed or larger job breaks the sustained-size evidence.
+        slot.observe_owned_input(256*1024,false);
+        for _ in 0..7 {slot.observe_owned_input(256*1024,true);}
+        slot.observe_owned_input(2*1024*1024,true);
+        assert_eq!(slot.small_owned_jobs,0);
+        for _ in 0..8 {slot.observe_owned_input(256*1024,true);}
+        let b=slot.buffers.as_ref().unwrap();
+        assert_eq!(b.input.capacity(),0);
+        assert_eq!(b.output,[7,8,9]);
+        assert_eq!(slot.stage,Stage::Ready);
+        assert_eq!(slot.result,3);
+    }
+    #[test]
     fn compact_seek_trims_free_spares_but_not_active_slots() {
         let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
         let mut engine=Engine::new_atlas(b).unwrap();
@@ -713,7 +756,7 @@ mod tests {
         let now=Instant::now();
         let mk=|token,foreground,ms|Slot{buffers:None,stage:Stage::Queued,
             work:Some(Work{token,generation:1,len:3,command:Command::Convert{prefix:1,count:1},foreground,
-                deadline:now+Duration::from_millis(ms)}),result:0,running_bytes:0};
+                deadline:now+Duration::from_millis(ms)}),result:0,running_bytes:0,small_owned_jobs:0};
         let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false,compact_atlas:false,payload_allocations:0,peak_pairs:0,copied_input:0,copied_output:0};
         assert_eq!(s.next(),Some(2));s.slots[2].stage=Stage::Running;
         assert_eq!(s.next(),Some(3));s.slots[3].stage=Stage::Running;
