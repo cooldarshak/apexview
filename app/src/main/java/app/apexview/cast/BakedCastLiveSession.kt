@@ -25,6 +25,7 @@ internal class BakedCastLiveSession(
 ) : AutoCloseable {
     @Volatile private var nativeAudioPreference = nativeAudioRequested
     private val hls = BakedCastHlsSession(address, peer, tls, { nativeAudioPreference }, nativeContext)
+    internal fun nativeProcessingRequested(): Boolean = nativeAudioPreference
     fun setNativePreference(value: Boolean) { nativeAudioPreference = value }
     private val audioReader = reader
     private val audioSource = audioUri
