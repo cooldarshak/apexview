@@ -128,7 +128,7 @@ internal class ArchiveWarmupCancelledException : IOException("Archive prefetch c
  */
 internal class ArchiveFragmentLease(
     private val bytes: ByteArray?,
-    private val native: NativeFragmentLease?,
+    private val native: FragmentReadLease?,
     private val release: () -> Unit,
 ) : AutoCloseable {
     constructor(bytes: ByteArray, release: () -> Unit) : this(bytes, null, release)
@@ -159,7 +159,12 @@ internal class ArchiveFragmentLease(
     }
 
     companion object {
-        /** Small standalone resources (manifest/init) retain their existing zero-on-close contract. */
+        /** Retain the exact published initialization; caller owns the new read handle. */
+        fun shared(backing: HeapFragmentLease): ArchiveFragmentLease {
+            val retained = backing.retain()
+            return ArchiveFragmentLease(null, retained) { retained.close() }
+        }
+        /** Small standalone resources retain their existing zero-on-close contract. */
         fun owned(bytes: ByteArray) = ArchiveFragmentLease(bytes) { bytes.fill(0) }
     }
 }
