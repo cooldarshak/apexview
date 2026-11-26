@@ -112,6 +112,22 @@ internal fun LongArray.floorIndex(utcMs: Long): Int {
     return low - 1
 }
 
+/** Exact predecessor plus the covered interval. No speculative samples are
+ * manufactured for drivers whose first recorded event is after the window. */
+internal fun historyWindowRange(size: Int, from: Long, until: Long, at: (Int) -> Long): IntRange? {
+    if (size == 0 || from > until || at(0) > until) return null
+    fun floor(time: Long): Int {
+        var low = 0
+        var high = size
+        while (low < high) {
+            val middle = (low + high) ushr 1
+            if (at(middle) <= time) low = middle + 1 else high = middle
+        }
+        return low - 1
+    }
+    return floor(from).coerceAtLeast(0)..floor(until)
+}
+
 class DriverLaps(
     internal val times: LongArray,
     internal val states: List<Snapshot>,
@@ -119,10 +135,30 @@ class DriverLaps(
     /** When the driver's completed-lap count changed, and to what (F1's NumberOfLaps). */
     internal val lapTimes: LongArray = LongArray(0),
     internal val lapCounts: IntArray = IntArray(0),
+    internal val initialPosition: Int? = states.firstOrNull()?.position,
 ) {
     internal fun shiftedBy(offsetMs: Long) = DriverLaps(
-        times.shiftedBy(offsetMs), states, crossings.shiftedBy(offsetMs), lapTimes.shiftedBy(offsetMs), lapCounts,
+        times.shiftedBy(offsetMs), states, crossings.shiftedBy(offsetMs), lapTimes.shiftedBy(offsetMs), lapCounts, initialPosition,
     )
+
+    /** A bounded immutable UI/cache window. Preserve original rank baseline,
+     * lap counter, previous crossings and the actual beginning of an ongoing pit spell. */
+    internal fun previewWindow(from: Long, until: Long): DriverLaps? {
+        val range = historyWindowRange(times.size, from, until) { times[it] } ?: return null
+        var first = range.first
+        if (states[first].inPit) while (first > 0 && states[first - 1].inPit) first--
+        val end = range.last + 1
+        val crossingRange = historyWindowRange(crossings.size, from, until) { crossings[it] }
+        val lapRange = historyWindowRange(lapTimes.size, from, until) { lapTimes[it] }
+        return DriverLaps(times.copyOfRange(first, end), states.subList(first, end).toList(),
+            crossingRange?.let { crossings.copyOfRange((it.first - 8).coerceAtLeast(0), it.last + 1) } ?: LongArray(0),
+            lapRange?.let { lapTimes.copyOfRange(it.first, it.last + 1) } ?: LongArray(0),
+            lapRange?.let { lapCounts.copyOfRange(it.first, it.last + 1) } ?: IntArray(0),
+            initialPosition)
+    }
+
+    internal fun withInitialPosition(position: Int?): DriverLaps =
+        DriverLaps(times, states, crossings, lapTimes, lapCounts, position)
 
     class Snapshot(
         val position: Int?,
@@ -214,7 +250,7 @@ class DriverLaps(
             bestLap = s.bestLap,
             retired = s.retired,
             stopped = s.stopped,
-            positionChange = states.firstOrNull()?.position?.let { first -> s.position?.let { first - it } },
+            positionChange = initialPosition?.let { first -> s.position?.let { first - it } },
         )
     }
 
@@ -287,6 +323,8 @@ object DriverTimingParser {
             values[size++] = time
         }
         fun toLongArray(): LongArray = values.copyOf(size)
+        fun window(from: Long, until: Long): IntRange? = historyWindowRange(size, from, until) { values[it] }
+        fun copyRange(first: Int, end: Int): LongArray = values.copyOfRange(first, end)
     }
 
     private class Live {
@@ -371,6 +409,23 @@ object DriverTimingParser {
                 driver.crossings.toLongArray(), driver.lapTimes.toLongArray(), driver.lapCounts.toIntArray())
         }
 
+    /** Copy only the requested preview range, not the entire growing race prefix.
+     * Mutable parser-owned storage never crosses the publication boundary. */
+    private fun materializePreview(drivers: Map<String, Live>, from: Long, until: Long): Map<String, DriverLaps> =
+        drivers.mapNotNull { (number, driver) ->
+            val range = driver.times.window(from, until) ?: return@mapNotNull null
+            var first = range.first
+            if (driver.snaps[first].inPit) while (first > 0 && driver.snaps[first - 1].inPit) first--
+            val end = range.last + 1
+            val crossings = driver.crossings.window(from, until)
+            val laps = driver.lapTimes.window(from, until)
+            number to DriverLaps(driver.times.copyRange(first, end), driver.snaps.subList(first, end).toList(),
+                crossings?.let { driver.crossings.copyRange((it.first - 8).coerceAtLeast(0), it.last + 1) } ?: LongArray(0),
+                laps?.let { driver.lapTimes.copyRange(it.first, it.last + 1) } ?: LongArray(0),
+                laps?.let { driver.lapCounts.subList(it.first, it.last + 1).toIntArray() } ?: IntArray(0),
+                driver.snaps.firstOrNull()?.position)
+        }.toMap()
+
     /** Publish the playhead's prefix, then keep following it while the archive is loading. */
     internal fun previews(
         lines: Iterator<String>,
@@ -397,12 +452,15 @@ object DriverTimingParser {
         nativeRequested: Boolean,
         checkActive: () -> Unit,
         onComplete: (build: () -> DriverTimingParse) -> Unit,
+        windowBackMs: Long? = null,
     ): Sequence<DriverTimingPreview> = sequence {
+        require(windowBackMs == null || windowBackMs in 1L..600_000L)
         val statusPolicy = RetirementStatusPolicy(nativeRequested)
         val drivers = mutableMapOf<String, Live>()
         val states = StateHistoryAccumulator()
         var through = Long.MIN_VALUE
         var publishedThrough: Long? = null
+        var publishedFrom = Long.MIN_VALUE
         while (lines.hasNext()) {
             checkActive()
             val line = lines.next()
@@ -423,11 +481,16 @@ object DriverTimingParser {
             val target = targetUtc()
             val last = publishedThrough
             // Never knowingly leave the current playback clock outside the published prefix.
-            val needsPreview = last == null || target > last ||
+            val needsPreview = last == null || target > last || target < publishedFrom ||
                 last - target < TOWER_PREVIEW_LOOKAHEAD_MS && time - last >= TOWER_PREVIEW_LOOKAHEAD_MS
             if (time >= target && needsPreview && drivers.values.any { it.position != null }) {
-                publishedThrough = time
-                yield(DriverTimingPreview(time, DriverTimingParse(materialize(drivers, copySnapshots = true), states.finish())))
+                val from = windowBackMs?.let { target - it } ?: Long.MIN_VALUE
+                val until = if (windowBackMs == null) time else minOf(time, target + 2 * TOWER_PREVIEW_LOOKAHEAD_MS)
+                publishedThrough = until
+                publishedFrom = from
+                val history = if (windowBackMs == null) DriverTimingParse(materialize(drivers, copySnapshots = true), states.finish())
+                    else DriverTimingParse(materializePreview(drivers, from, until), states.finishWindow(from, until))
+                yield(DriverTimingPreview(until, history, from.takeIf { windowBackMs != null }))
             }
         }
         checkActive()
