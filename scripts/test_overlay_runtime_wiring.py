@@ -34,7 +34,11 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertEqual(track.count("it.carsAt(it.positionMs.value)"), 2)
         motion = source("OverlayRetainedDrawing.kt")
         self.assertIn("val carsAt: (Long) -> List<OverlayMotionCar>", motion)
-        self.assertIn("frame::carsAt", source("cast/CastTimingLayer.kt"))
+        self.assertIn("sampler::sample", source("cast/CastTimingLayer.kt"))
+        receiver = source("cast/ReceiverMotionSampler.kt")
+        self.assertIn("NativeHotPath.interpolateMotion", receiver)
+        self.assertIn("source.writeAt(steps,target)", receiver)
+        self.assertIn("return cars", receiver)
         self.assertIn("internal interface OverlayMotionCar", track)
         sampler = source("OverlayPositionSampler.kt")
         self.assertIn("fun sampleForDraw(atMs: Long)", sampler)
@@ -91,7 +95,9 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("OverlayPositionSampler(timing", track)
         self.assertIn("OverlayPositionSampler(it, OverlayPerformanceProbe", sender)
         self.assertIn("OverlayVertexIndex(outline)", geometry)
-        self.assertIn("OverlayEdgeProjection()", track)
+        self.assertIn("OverlayEdgeProjection(nativeRequested)", track)
+        self.assertIn("NativeCircuitProjection(timing.geometry)", track)
+        self.assertIn("app.settings.nativeRustStitching", sender)
 
     def test_cast_routing_does_not_silently_claim_google_timing_overlays(self):
         app = source("AppState.kt")
