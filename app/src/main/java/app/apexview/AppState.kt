@@ -194,7 +194,7 @@ class AppState(
     private var castSceneJob: Job?
         get() = castResources.sceneJob
         set(value) { castResources.sceneJob = value }
-    private var castSceneConfirmed = false
+    private var castSceneConfirmed by mutableStateOf(false)
     private val usesLayoutCastReceiver get() = BuildConfig.CAST_RECEIVER_APP_ID.isNotEmpty()
     private var googleCastLoadedUrl: String? = null
     private var castPreparationJob: Job?
@@ -205,6 +205,7 @@ class AppState(
     private var castRetryAfter = 0L
     private var castQualityRestartJob: Job? = null
     private var castQualityRestartPending by mutableStateOf(false)
+    private var bakedQualityRestartPending = false
     val castingActive: Boolean get() = castResources.active
     var tvCastingMenuOpen by mutableStateOf(false)
     var castPickerOpen by mutableStateOf(false)
@@ -1179,8 +1180,8 @@ class AppState(
         castStatus = reason
         message = reason
     }
-    private fun releaseCastRelay(resumeLocal: Boolean = true) {
-        cancelCastQualityRestart()
+    private fun releaseCastRelay(resumeLocal: Boolean = true, preserveQualityRestart: Boolean = false) {
+        if (!preserveQualityRestart) cancelCastQualityRestart()
         castCoordinator.beginPreparation()
         castCoordinator.endLoad()
         remoteCaptionTracks = emptyList()
@@ -2921,7 +2922,9 @@ class AppState(
     }
 
     /** Replay composition is a finite on-demand source, not a moving live capture window. */
-    private fun startArchiveSingleDecoderComposition(contentId: Long, attempt: Int = 0) {
+    private fun startArchiveSingleDecoderComposition(
+        contentId: Long, attempt: Int = 0, bakedQualityReplacement: Boolean = false,
+    ) {
         cancelQualityRestart()
         if (castPlaybackHandedOff) { applyVideoBudget(); return }
         playbackWork.cancelRetry()
@@ -2943,6 +2946,11 @@ class AppState(
         // Check the same-channel authorized HLS alternative before handing a replay to
         // the DASH/CBCS backend. Only its actual CMAF initialization may establish clear.
         if (!sourcePlan.mayContainClearArchive) {
+            if (bakedQualityReplacement) {
+                singleDecoderFailure = "The selected quality has no authorized clear archive for baked Cast."
+                message = singleDecoderFailure
+                return
+            }
             android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_SOURCE_ROUTE=PROTECTED_CMAF " +
                 "reason=NO_AUTHORIZED_HLS_CANDIDATE feeds=${selected.size}")
             startRollingArchiveSingleDecoderComposition(contentId, attempt)
@@ -3051,12 +3059,27 @@ class AppState(
                             "coded=${session.codedWidth}x${session.codedHeight} fps=${session.frameRate}")
                         try {
                             host.feed.requireArchiveHardwareSupport(session.codedWidth, session.codedHeight, session.frameRate * playbackSpeed)
+                            if (bakedQualityReplacement) {
+                                val programme = selected.firstOrNull { it.audible }?.feed?.sourceStream?.profileLabel
+                                    ?: session.clockLabel
+                                require(session.audioUris[programme] != null ||
+                                    programme == session.clockLabel && session.audioUri != null) {
+                                    "Selected commentary is unavailable at the new baked Cast quality."
+                                }
+                                if (selected.associate { it.feed.sourceStream.profileLabel to qualityFor(it).targetHeight } != desired)
+                                    throw kotlinx.coroutines.CancellationException("Baked source quality superseded")
+                            }
                             prepared = session
                             diagnostic()
                             session
                         } catch (error: Throwable) { session.close(); throw error }
                     },
                     releaseSources = {
+                        // Capture/encoder and audio are tied to the old archive. Keep
+                        // them alive through validation, then retire before replacing
+                        // the one decoder. The waiting quality job owns reconnection.
+                        if (bakedQualityReplacement && bakedCastSession != null)
+                            releaseCastRelay(preserveQualityRestart = true)
                         val before = selected.sumOf { it.feed.activeVideoDecoderCount }
                         selected.forEach { tile -> tile.feed.setProtectedCompositionVideoRole(false,
                             tile.w.toInt().coerceAtLeast(1), tile.h.toInt().coerceAtLeast(1)) }
@@ -3087,7 +3110,9 @@ class AppState(
                         if (settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff)
                             session.configureNativeClear(context)
                         else session.disableNativeClear("PREFERENCE_OR_CAST_ROUTE", settings.nativeRustStitching)
-                        host.feed.startArchiveVodPlayback(session, handoffPositionMs, playing)
+                        val programme = selected.firstOrNull { it.audible }?.feed?.sourceStream?.profileLabel
+                            ?.takeIf { it in session.audioUris } ?: session.clockLabel
+                        host.feed.startArchiveVodPlayback(session, handoffPositionMs, playing, programme)
                         singleDecoderFallbackTileId = null
                         transferred = true
                         archiveCompositionStarting = false
@@ -3137,7 +3162,10 @@ class AppState(
                     kotlinx.coroutines.delay(500L)
                 }
             } catch (backend: app.apexview.tiled.ArchiveVodBackendRequired) {
-                useExistingBackend = true
+                if (bakedQualityReplacement) {
+                    singleDecoderFailure = "The selected quality cannot use the authorized clear baked Cast route."
+                    message = singleDecoderFailure
+                } else useExistingBackend = true
                 android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_BACKEND_HANDOFF reason=${backend.message ?: "DASH_OR_PROTECTED"} " +
                     "requested=${PerFeedQualityPolicy.description(selected.map { it.feed.sourceStream.profileLabel }, selected.map(::qualityFor))} " +
                     "sourceDecodersTouched=${startup.sourceDecodersTouched}")
@@ -6764,6 +6792,7 @@ class AppState(
 
     internal val sourceQualityPreparing: Boolean get() = archiveCompositionStarting || qualityRestartPending ||
         castQualityRestartPending || (castBusy && castPreparationJob != null) ||
+        (castingActive && !castSceneConfirmed) ||
         (directCast != null && localDirectQualitySupported && tiles.singleOrNull()?.let {
             remoteDirectRequested != qualityFor(it).targetHeight
         } == true)
@@ -6861,6 +6890,7 @@ class AppState(
         val old = castQualityRestartJob
         castQualityRestartJob = null
         castQualityRestartPending = false
+        bakedQualityRestartPending = false
         old?.cancel()
     }
 
@@ -6868,11 +6898,12 @@ class AppState(
      * Coalesce choices and wait for the existing preparation/retired owner to
      * drain, preserving the one-replacement budget and receiver connection. */
     private fun requestComposedCastQuality(): Boolean {
-        val applicable = castRelay != null || nativeComposedCast != null ||
-            (castPreparationJob?.isActive == true && bakedCastSession == null &&
-                directCast == null && !singleDecoderSceneActive)
+        val bakedReplacement = bakedCastSession != null || bakedQualityRestartPending
+        val applicable = bakedReplacement || castRelay != null || nativeComposedCast != null ||
+            (castPreparationJob?.isActive == true && directCast == null)
         if (!applicable) return false
         cancelCastQualityRestart()
+        bakedQualityRestartPending = bakedReplacement
         val selection = tiles.map { it.id to it.feed }
         val connection = localConnection
         val client = googleCastRemoteClient
@@ -6897,13 +6928,39 @@ class AppState(
                 when {
                     nativeComposedCast != null -> prepareNativeComposedCast(tiles.toList())
                     directCast != null -> tiles.singleOrNull()?.let { requestDirectCastQuality(it) }
-                    bakedCastSession != null -> tiles.firstOrNull()?.let { scheduleQualityRestart(it.contentId) }
+                    bakedReplacement || bakedCastSession != null -> {
+                        bakedQualityRestartPending = true
+                        val host = singleDecoderScenePlayer ?: return@launch
+                        val before = host.archiveSceneSession ?: return@launch
+                        val contentId = tiles.firstOrNull()?.contentId ?: return@launch
+                        startArchiveSingleDecoderComposition(contentId, bakedQualityReplacement = true)
+                        val capture = playbackWork.capture
+                        val installed = kotlinx.coroutines.withTimeoutOrNull(65_000L) {
+                            while (sameOwner() && playbackWork.capture === capture &&
+                                singleDecoderFailure == null) {
+                                val current = singleDecoderScenePlayer
+                                if (!archiveCompositionStarting && current?.archiveSceneSession != null &&
+                                    current.archiveSceneSession !== before &&
+                                    current.hasRenderedFirstFrame && current.activeVideoDecoderCount == 1 &&
+                                    playing) return@withTimeoutOrNull true
+                                kotlinx.coroutines.delay(100L)
+                            }
+                            false
+                        }
+                        if (installed == true && sameOwner() && !castingActive)
+                            prepareFullSceneCast(false)
+                        else if (sameOwner()) {
+                            message = singleDecoderFailure ?:
+                                "The new baked Cast quality is not ready. Retry Cast after the phone picture resumes."
+                        }
+                    }
                     else -> prepareFullSceneCast(castingActive, qualityReplacement = true)
                 }
             } finally {
                 if (castQualityRestartJob === coroutineContext[Job]) {
                     castQualityRestartJob = null
                     castQualityRestartPending = false
+                    bakedQualityRestartPending = false
                 }
             }
         }
