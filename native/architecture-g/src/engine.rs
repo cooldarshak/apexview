@@ -103,6 +103,7 @@ struct Slot {
     result:i64,
     running_bytes:usize,
     small_owned_jobs:u8,
+    retire_on_recycle:bool,
 }
 impl Slot {
     /// The completed worker no longer reads its input. Retire a sustained
@@ -125,6 +126,11 @@ impl Slot {
         debug_assert!(self.buffers.is_some());
         if self.work.is_some_and(|w|matches!(w.command,Command::ClearAtlasOwned)) {
             self.buffers.as_mut().expect("owned buffers").output=Vec::new();
+        }
+        if self.retire_on_recycle {
+            self.buffers=None;
+            self.small_owned_jobs=0;
+            self.retire_on_recycle=false;
         }
         self.stage=Stage::Free;
         self.work=None;
@@ -183,7 +189,7 @@ impl Engine {
         // until actual work is admitted. Owned jobs never need a fixed output.
         for _ in 0..budget.slots {
             let buffers=if compact_atlas {None} else {Some(Buffers::new(budget)?)};
-            slots.push(Slot{buffers,stage:Stage::Free,work:None,result:0,running_bytes:0,small_owned_jobs:0});
+            slots.push(Slot{buffers,stage:Stage::Free,work:None,result:0,running_bytes:0,small_owned_jobs:0,retire_on_recycle:false});
         }
         let initial_pairs=if compact_atlas {0} else {budget.slots};
         let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false,compact_atlas,trim_workspace:false,
@@ -229,8 +235,8 @@ impl Engine {
         [s.payload_allocations,(s.peak_pairs*(self.budget.input+self.budget.output)) as u64,
             s.copied_input,s.copied_output]
     }
-    /// Pressure or pause may retire every idle compact pair. In-flight slots
-    /// remain untouched; the next admitted request allocates lazily.
+    /// Pressure or pause retires every idle compact pair. In-flight slots
+    /// keep their bytes until recycled, then retire rather than stay warm.
     pub fn trim_idle_payload(&self)->usize {
         let mut s=self.shared.0.lock().expect("engine mutex");
         if !s.compact_atlas { return 0; }
@@ -239,6 +245,8 @@ impl Engine {
             if slot.stage==Stage::Free {
                 if let Some(b)=slot.buffers.take() {bytes+=b.input.capacity()+b.output.capacity();}
                 slot.small_owned_jobs=0;
+            } else {
+                slot.retire_on_recycle=true;
             }
         }
         // Wake a sleeping worker too. The returned byte count remains
@@ -571,10 +579,31 @@ mod tests {
         assert_eq!(engine.copy(token,0,&mut bytes),6);
         assert_eq!(bytes,[0,0,0,1,2,1]);
         assert_eq!(engine.release(token),1);
-        assert_eq!(engine.trim_idle_payload(),pair);
         assert_eq!(engine.allocated_payload_bytes(),0);
-        assert_eq!(engine.payload_stats()[0],1);
+        assert_eq!(engine.trim_idle_payload(),0);
+        let next=engine.submit(engine.generation(),&[2,2,1],1,1,true,5000);
+        assert_eq!(wait(&engine,next),6);
+        assert_eq!(engine.copy(next,0,&mut bytes),6);
+        assert_eq!(bytes,[0,0,0,1,2,1]);
+        assert_eq!(engine.release(next),1);
+        assert_eq!(engine.allocated_payload_bytes(),pair);
+        assert_eq!(engine.payload_stats()[0],2);
     }
+    #[test]
+    fn pressure_during_pending_work_preserves_output_until_release() {
+        let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
+        let engine=Engine::new_atlas(b).unwrap();
+        let token=engine.submit(engine.generation(),&[2,2,1],1,1,true,5000);
+        assert!(token>0);
+        assert_eq!(engine.trim_idle_payload(),0);
+        assert_eq!(wait(&engine,token),6);
+        let mut out=[0;6];
+        assert_eq!(engine.copy(token,0,&mut out),6);
+        assert_eq!(out,[0,0,0,1,2,1]);
+        assert_eq!(engine.release(token),1);
+        assert_eq!(engine.allocated_payload_bytes(),0);
+    }
+
     #[test]
     fn idle_workspace_trim_wakes_worker_without_changing_generation() {
         let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
@@ -670,7 +699,7 @@ mod tests {
     fn sustained_small_owned_jobs_retire_input_without_touching_output() {
         let mut slot=Slot {
             buffers:Some(Buffers{input:buffer(2*1024*1024).unwrap(),output:vec![7,8,9]}),
-            stage:Stage::Ready,work:None,result:3,running_bytes:0,small_owned_jobs:0,
+            stage:Stage::Ready,work:None,result:3,running_bytes:0,small_owned_jobs:0,retire_on_recycle:false,
         };
         for _ in 0..7 {slot.observe_owned_input(256*1024,true);}
         assert!(slot.buffers.as_ref().unwrap().input.capacity()>=2*1024*1024);
@@ -788,7 +817,7 @@ mod tests {
         let now=Instant::now();
         let mk=|token,foreground,ms|Slot{buffers:None,stage:Stage::Queued,
             work:Some(Work{token,generation:1,len:3,command:Command::Convert{prefix:1,count:1},foreground,
-                deadline:now+Duration::from_millis(ms)}),result:0,running_bytes:0,small_owned_jobs:0};
+                deadline:now+Duration::from_millis(ms)}),result:0,running_bytes:0,small_owned_jobs:0,retire_on_recycle:false};
         let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false,compact_atlas:false,trim_workspace:false,payload_allocations:0,peak_pairs:0,copied_input:0,copied_output:0};
         assert_eq!(s.next(),Some(2));s.slots[2].stage=Stage::Running;
         assert_eq!(s.next(),Some(3));s.slots[3].stage=Stage::Running;
