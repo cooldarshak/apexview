@@ -89,6 +89,24 @@ class ArchitectureGBAndroidTest {
         val order = IntArray(5)
         assertTrue(NativeHotPath.rowOrder(intArrayOf(3,1,99,1,2),5,order))
         assertArrayEquals(intArrayOf(1,3,4,0,2),order)
+        val avcc = byteArrayOf(0,0,0,2,0x65,0x11,0,0,0,2,0x06,0x12)
+        val prefix = byteArrayOf(0,0,0,1,0x67,0x11)
+        val padded = ByteBuffer.allocateDirect(avcc.size + 9)
+        padded.position(5); padded.put(avcc); padded.position(1)
+        val expectedAvc = prefix + app.apexview.scene.BakedAvcAccessUnit.annexB(avcc)
+        var actualNative = false
+        val actualAvc = app.apexview.scene.BakedAvcAccessUnit.copyAnnexB(
+            padded,5,avcc.size,prefix,true) { actualNative = it }
+        assertTrue(actualNative)
+        assertArrayEquals(expectedAvc, actualAvc)
+        assertEquals(1,padded.position())
+        assertArrayEquals(expectedAvc, app.apexview.scene.BakedAvcAccessUnit.copyAnnexB(
+            padded,5,avcc.size,prefix,false))
+        val badAvc = ByteBuffer.allocateDirect(5).put(byteArrayOf(0,0,0,2,0x65))
+        val untouched = ByteArray(5) { 9 }
+        assertFalse(NativeHotPath.avcAnnexB(badAvc,0,5,untouched,0))
+        assertArrayEquals(ByteArray(5) { 9 },untouched)
+        assertFalse(NativeHotPath.avcAnnexB(padded,Int.MAX_VALUE,avcc.size,actualAvc,prefix.size))
         val source = byteArrayOf(1,2,3,4,5)
         val direct = ByteBuffer.allocateDirect(source.size).put(source)
         val framed = ByteArray(source.size+7)
