@@ -2102,11 +2102,13 @@ private fun VideoQualitySheet(app: AppState) {
                                 "${actual.first} × ${actual.second}px"
                         },
                             style = Type.footnote, modifier = Modifier.padding(top = 6.dp))
-                        if (app.settings.decoderMode == DecoderMode.MULTIPLE || active.size == 1) {
-                            tile.feed.sourceQualityNotice?.let { warning ->
-                                Text(warning, style = Type.footnote.copy(color = Ink.live),
-                                    modifier = Modifier.padding(top = 6.dp))
-                            }
+                        if (app.sourceQualityPreparing) {
+                            Text("Preparing replacement source. Observed dimensions may describe the previous source.",
+                                style = Type.footnote, modifier = Modifier.padding(top = 6.dp))
+                        }
+                        app.sourceQualityOfferNotice(label)?.let { warning ->
+                            Text(warning, style = Type.footnote.copy(color = Ink.live),
+                                modifier = Modifier.padding(top = 6.dp))
                         }
                         VideoQualityAdvisory.tileNotice(actual, tile.w, tile.h)?.let { evidence ->
                             Text(evidence, style = Type.footnote,

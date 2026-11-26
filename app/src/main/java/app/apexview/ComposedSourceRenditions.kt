@@ -37,12 +37,14 @@ internal object QualityDisclosurePolicy {
     /** Real track-group availability only. Do not fabricate a lower CDN rung. */
     fun unavailableManualCap(requested: VideoQuality, offered: List<Pair<Int, Int>>): String? {
         if (requested.targetHeight <= 0 || offered.isEmpty()) return null
-        val availableBelowCap = offered.any { (w, h) ->
-            w > 0 && h > 0 && h <= requested.targetHeight
-        }
-        return if (availableBelowCap) null else
+        val heights = offered.filter { (w, h) -> w > 0 && h > 0 }.map { it.second }.distinct().sorted()
+        if (heights.isEmpty() || requested.targetHeight in heights) return null
+        val list = heights.joinToString(", ") { "${it}p" }
+        return if (heights.none { it <= requested.targetHeight })
             "F1 currently offers no video at or below ${requested.label}. " +
-            "Choose a higher quality ceiling or Auto to restore the picture."
+                "Available: $list. Choose a higher quality ceiling or Auto to restore the picture."
+        else "F1 does not advertise ${requested.label} for this feed. Available: $list. " +
+            "A lower compatible source may be used; your preference is unchanged."
     }
 
     fun notice(requested: VideoQuality, actualHeight: Int): String? {

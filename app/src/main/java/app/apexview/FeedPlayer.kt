@@ -390,7 +390,7 @@ class FeedPlayer(
         private set
 
     private fun refreshMissingQualityNotice() {
-        val next = if (archiveVodSession != null) null
+        val next = if (archiveVodSession != null || protectedLiveDashSource != null) null
             else QualityDisclosurePolicy.unavailableManualCap(
                 selectedVideoQuality, offeredSourceVideoSizes)
         if (sourceQualityNotice != next) sourceQualityNotice = next
@@ -990,6 +990,7 @@ class FeedPlayer(
             videoSuppressedByProtectedComposition = false
             videoOn = !remotePlaybackSuspended
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
                 .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, remotePlaybackSuspended)
                 .build()
             if (startPositionMs == null) player.setMediaSource(mediaSource)
@@ -1355,6 +1356,9 @@ class FeedPlayer(
         selectedVideoQuality = value
         refreshMissingQualityNotice()
         fit.qualityHeight = if (externalQualityFloor) maxOf(720, value.targetHeight) else value.targetHeight
+        // The manual preference describes a source feed, not the composed atlas.
+        // Remember it for source restoration without constraining the active atlas.
+        if (archiveVodSession != null || protectedLiveDashSource != null) return
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setMaxVideoSize(if (externalQualityFloor) maxOf(1280, qualityWidth(value)) else qualityWidth(value), if (externalQualityFloor) maxOf(720, qualityHeight(value)) else qualityHeight(value))
             .build()

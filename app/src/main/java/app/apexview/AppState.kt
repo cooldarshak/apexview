@@ -6655,6 +6655,17 @@ class AppState(
         return tiles.firstOrNull { it.feed.sourceStream.profileLabel == label }?.feed?.nativeSourceRendition
     }
 
+    internal fun sourceQualityOfferNotice(label: String): String? {
+        val session = singleDecoderScenePlayer?.archiveSceneSession
+        if (session != null)
+            return QualityDisclosurePolicy.unavailableManualCap(settings.videoQualityForFeed(label),
+                session.offeredSourceDimensions[label].orEmpty())
+        if (protectedRollingScene != null || archiveCompositionStarting) return null
+        return tiles.firstOrNull { it.feed.sourceStream.profileLabel == label }?.feed?.sourceQualityNotice
+    }
+
+    internal val sourceQualityPreparing: Boolean get() = archiveCompositionStarting
+
     private fun recordProtectedRenditions(
         labels: List<String>, geometry: app.apexview.tiled.ProtectedHevcLiveComposition.SourceGeometry?
     ) {
@@ -6726,18 +6737,21 @@ class AppState(
         val composed = selected.size > 1 && settings.decoderMode == DecoderMode.SINGLE
         singleDecoderFailure = null
         tiles.filter { it.feed.sourceStream.profileLabel == label }.forEach {
-            if (!it.feed.isArchiveVodPlayback) it.feed.setVideoQuality(qualityFor(it))
+            it.feed.setVideoQuality(qualityFor(it))
         }
         if (composed && !castPlaybackHandedOff) startArchiveSingleDecoderComposition(tile.contentId)
         showChrome()
     }
 
     fun chooseVideoQuality(value: VideoQuality) {
-        val rebuildArchive = settings.videoQuality != value && nativeArchiveTiles.isNotEmpty() && !castPlaybackHandedOff
-        val contentId = if (rebuildArchive) protectedCompositionHost?.contentId else null
+        val before = tiles.associate { it.id to qualityFor(it) }
         settings.updateVideoQuality(value)
-        tiles.forEach { if (!it.feed.isArchiveVodPlayback) it.feed.setVideoQuality(qualityFor(it)) }
-        if (contentId != null) startArchiveSingleDecoderComposition(contentId)
+        val changed = tiles.filter { before[it.id] != qualityFor(it) }
+        changed.forEach { it.feed.setVideoQuality(qualityFor(it)) }
+        val contentId = changed.firstOrNull()?.contentId
+        if (contentId != null && settings.decoderMode == DecoderMode.SINGLE &&
+            tiles.size > 1 && tiles.all { it.contentId == contentId } && !castPlaybackHandedOff)
+            startArchiveSingleDecoderComposition(contentId)
         qualitySheetOpen = false
         showChrome()
     }

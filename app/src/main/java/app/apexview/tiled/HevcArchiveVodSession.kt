@@ -41,6 +41,7 @@ internal class HevcArchiveVodSession(
     val audioUris: Map<String, Uri> = emptyMap(),
     val stableAudioUris: Set<Uri> = emptySet(),
     val captionSources: Map<String, ArchiveCaptionSource> = emptyMap(),
+    val offeredSourceDimensions: Map<String, List<Pair<Int, Int>>> = emptyMap(),
 ) : AutoCloseable {
     class Input(val label: String, val playlist: HlsMediaPlaylist, val format: Format?,
                 val initialization: ByteArray, val report: CmafBoxInspector.Report,

@@ -182,7 +182,12 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             try {
                 session = HevcArchiveVodSession(reader, owned, clockLabel, maximumOutputWidth = maximumOutputWidth,
                     audioUri = audio, audioUris = selectableAudioUris, stableAudioUris = stableAudioUris,
-                    captionSources = captionSources)
+                    captionSources = captionSources,
+                    offeredSourceDimensions = perFeed.associate { variants ->
+                        variants.first().feed.label to variants.mapNotNull { offer ->
+                            offer.format?.let { it.width to it.height }
+                        }.distinct()
+                    })
                 // A seek cancels blocking capture, rather than waiting for
                 // the obsolete probe to fetch and compose an entire group.
                 val preparedSession = requireNotNull(session)

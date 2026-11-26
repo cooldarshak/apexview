@@ -48,6 +48,10 @@ class ManualQualityOfferDisclosureTest {
             VideoQuality.P720, offered))
         org.junit.Assert.assertNull(QualityDisclosurePolicy.unavailableManualCap(
             VideoQuality.P540, emptyList()))
+        val lower = QualityDisclosurePolicy.unavailableManualCap(VideoQuality.P1080, listOf(960 to 540, 1280 to 720))
+        org.junit.Assert.assertTrue(lower?.contains("does not advertise 1080p") == true)
+        org.junit.Assert.assertTrue(lower?.contains("Available: 540p, 720p") == true)
+        org.junit.Assert.assertNull(QualityDisclosurePolicy.unavailableManualCap(VideoQuality.P540, listOf(0 to 0)))
     }
 }
 
