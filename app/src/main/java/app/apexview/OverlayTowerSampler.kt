@@ -147,51 +147,58 @@ internal class OverlayTowerSampler(
  * published source changes; no complete timing-history copy or per-row JNI.
  */
 private class NativeTowerLookup(private val laps: List<DriverLaps>, tyres: List<TyreLog>, private val weatherLog: WeatherLog) {
-    private val headerTimes = (laps.map { it.lapTimes } + listOf(weatherLog.times)).toTypedArray()
-    private val headerCounts = headerTimes.map { it.size }.toIntArray()
-    private val headerIndices = IntArray(headerTimes.size)
-    fun currentLap(): Int? {
-        var lap: Int? = null
-        for (i in laps.indices) {
-            val value = laps[i].lapCounts.getOrNull(headerIndices[i])?.plus(1) ?: continue
-            lap = maxOf(lap ?: value, value)
-        }
-        return lap
-    }
-    fun weather(): WeatherReading? = weatherLog.atSnapshot(headerIndices.last())
     private val lapCount = laps.size
-    private val times = (laps.map { it.times } + tyres.map { it.times }).toTypedArray()
-    private val counts = times.map { it.size }.toIntArray()
-    private val indices = IntArray(times.size)
+    private val headerOffset = lapCount + tyres.size
+    private val baseTimes = (laps.map { it.times } + tyres.map { it.times } +
+        laps.map { it.lapTimes } + listOf(weatherLog.times)).toTypedArray()
+    private val baseCounts = IntArray(baseTimes.size) { baseTimes[it].size }
+    private val speedOffset = baseTimes.size
+    private var times = baseTimes
+    private var counts = baseCounts
+    private var indices = IntArray(baseTimes.size) { -1 }
     private val positions = IntArray(lapCount)
     private val order = IntArray(lapCount)
     private var speedSource: Map<String, SpeedLog>? = null
     var speedEntries: List<Map.Entry<String, SpeedLog>> = emptyList()
         private set
-    private var speedTimes: Array<LongArray> = emptyArray()
-    private var speedCounts = IntArray(0)
-    private var speedIndices = IntArray(0)
     private var failed = false
     private var reported: Boolean? = null
+
+    fun currentLap(): Int? {
+        var lap: Int? = null
+        for (i in laps.indices) {
+            val value = laps[i].lapCounts.getOrNull(indices[headerOffset + i])?.plus(1) ?: continue
+            lap = maxOf(lap ?: value, value)
+        }
+        return lap
+    }
+    fun weather(): WeatherReading? = weatherLog.atSnapshot(indices[speedOffset - 1])
 
     fun sample(now: Long, source: Map<String, SpeedLog>): Boolean {
         if (failed) return false
         if (source !== speedSource) {
             speedSource = source
             speedEntries = source.entries.toList()
-            speedTimes = Array(speedEntries.size * 2) { index ->
-                val log = speedEntries[index / 2].value
-                if (index % 2 == 0) log.speedTimes else log.gearTimeSeries
+            val total = speedOffset + speedEntries.size * 2
+            val prior = indices
+            times = Array(total) { index ->
+                if (index < speedOffset) baseTimes[index] else {
+                    val slot = index - speedOffset
+                    val log = speedEntries[slot / 2].value
+                    if (slot % 2 == 0) log.speedTimes else log.gearTimeSeries
+                }
             }
-            speedCounts = IntArray(speedTimes.size) { index ->
-                val log = speedEntries[index / 2].value
-                if (index % 2 == 0) log.speedCount else log.validGearCount
+            counts = IntArray(total) { index ->
+                if (index < speedOffset) baseCounts[index] else {
+                    val slot = index - speedOffset
+                    val log = speedEntries[slot / 2].value
+                    if (slot % 2 == 0) log.speedCount else log.validGearCount
+                }
             }
-            speedIndices = IntArray(speedTimes.size)
+            // Only unchanged histories keep their prior search hints.
+            indices = IntArray(total) { if (it < speedOffset) prior[it] else -1 }
         }
-        if (!NativeHotPath.floorIndices(times, counts, now, indices) ||
-            !NativeHotPath.floorIndices(speedTimes, speedCounts, now, speedIndices) ||
-            !NativeHotPath.floorIndices(headerTimes, headerCounts, now, headerIndices)) {
+        if (!NativeHotPath.floorIndices(times, counts, now, indices)) {
             failed = true
             return false
         }
@@ -199,8 +206,8 @@ private class NativeTowerLookup(private val laps: List<DriverLaps>, tyres: List<
     }
     fun lapIndex(i: Int) = indices[i]
     fun tyreIndex(i: Int) = indices[lapCount + i]
-    fun speedIndex(i: Int) = speedIndices[2 * i]
-    fun gearIndex(i: Int) = speedIndices[2 * i + 1]
+    fun speedIndex(i: Int) = indices[speedOffset + 2 * i]
+    fun gearIndex(i: Int) = indices[speedOffset + 2 * i + 1]
     fun order(rows: List<Pair<String, CardState>>): Boolean {
         if (failed) return false
         for (i in rows.indices) positions[i] = rows[i].second.position ?: 99
