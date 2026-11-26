@@ -227,8 +227,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
 
     private fun stopBakedCastOnGl() {
         lastPreviewRequestNs = 0L
-        castWorker?.stop(); castWorker = null; castSession = null
-        releaseBakedCastVideoSurface()
+        val worker = castWorker
+        castWorker = null; castSession = null
+        try { worker?.stop() } finally { releaseBakedCastVideoSurface() }
     }
 
     private fun drawBakedCastVideo(target: BakedCastGpuCapture.VideoTarget) {
@@ -275,10 +276,14 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     private fun releaseBakedCastVideoSurface() {
-        if (castVideoSurface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, castVideoSurface)
+        val old = castVideoSurface
         castVideoTarget = null
         castVideoSurface = EGL14.EGL_NO_SURFACE
-        recordGraphicsOwner()
+        try {
+            if (old != EGL14.EGL_NO_SURFACE && !EGL14.eglDestroySurface(display, old)) {
+                Log.w("ApexviewSingleDecoder", "SCENE_RELEASE_FAILED owner=$graphicsOwnerId epoch=$graphicsLifetime step=cast-window")
+            }
+        } finally { recordGraphicsOwner() }
     }
 
     fun startReplayClip(source: Window, bounds: Rect, result: (String) -> Unit) {
@@ -346,11 +351,11 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     private fun stopClip(message: String) {
-        clip?.close()
+        val encoder = clip
         clip = null
         val result = clipResult
         clipResult = null
-        main.post { result?.invoke(message) }
+        try { encoder?.close() } finally { main.post { result?.invoke(message) } }
     }
 
     private var decoderTexture: SurfaceTexture? = null
@@ -548,7 +553,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         detachDecoderInput("output-destroyed")
         // GL owns the Surface reference until queued destruction releases it. Clearing it
         // here lost that reference before destroy() and leaked a codec output surface.
-        if (!gl.post { destroy(); surface.release() }) {
+        if (!gl.post { try { destroy() } finally { surface.release() } }) {
             // TextureView returns false: the app owns SurfaceTexture release
             // even when the GL loop has already quit on a late lifecycle event.
             surface.release()
@@ -568,9 +573,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         player = null
         surfaceTextureListener = null
         codecCorrelation = null
-        val output = surfaceTexture
-        if (!gl.post { destroy(); output?.release(); thread.quitSafely() }) {
-            output?.release()
+        // The framework still owns the attached SurfaceTexture when the
+        // listener is removed. Only onSurfaceTextureDestroyed returning false
+        // transfers that particular texture to our queued release.
+        if (!gl.post { try { destroy() } finally { thread.quitSafely() } }) {
             thread.quitSafely()
             Log.w("ApexviewSingleDecoder", "SCENE_GL_RELEASE_QUEUE_CLOSED")
         }
@@ -831,49 +837,67 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     private fun destroy() {
-        input?.let { codecCorrelation?.detach(it) }
-        displayClock?.removeFrameCallback(displayFrame)
+        val steps = SceneReleaseSteps { step, error ->
+            Log.w("ApexviewSingleDecoder", "SCENE_RELEASE_FAILED owner=$graphicsOwnerId epoch=$graphicsLifetime step=$step", error)
+        }
+        steps.run("codec-correlation") { input?.let { codecCorrelation?.detach(it) } }
+        steps.run("display-clock") { displayClock?.removeFrameCallback(displayFrame) }
+        displayClock = null
         frameDemand.reset()
         cadenceGate.reset()
         pacing.reset()
         lastLogNs = 0L
         val endedCapture = castSession
-        stopBakedCastOnGl()
-        endedCapture?.captureFailed("The viewer video output was replaced")
-        saveClip()
+        steps.run("baked-cast") { stopBakedCastOnGl() }
+        steps.run("capture-notification") { endedCapture?.captureFailed("The viewer video output was replaced") }
+        steps.run("recording") { saveClip() }
         config = null
-        decoderTexture?.setOnFrameAvailableListener(null)
+        steps.run("decoder-listener") { decoderTexture?.setOnFrameAvailableListener(null) }
         input?.let { Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_RELEASE " +
             "renderer=TextureView surfaceId=${System.identityHashCode(it)} " +
             "outputEpoch=${surfaceLifetime.generation()} thread=GL") }
         inputGeneration = -1L
-        input?.release(); input = null
-        decoderTexture?.release(); decoderTexture = null; hasFrame = false
+        val oldInput = input
+        val oldTexture = decoderTexture
+        input = null; decoderTexture = null; hasFrame = false
+        steps.run("decoder-surface") { oldInput?.release() }
+        steps.run("decoder-texture") { oldTexture?.release() }
         firstFrameReported = false
         renderEpoch = -1L
         if (display != EGL14.EGL_NO_DISPLAY) {
             // Android can have unbound this GL looper after a rotation, stop or
             // SurfaceFlinger output handoff. GL deletion requires this exact
             // context to be current on the owning GL thread.
-            val canDeleteGlObjects = contextGl != EGL14.EGL_NO_CONTEXT &&
-                window != EGL14.EGL_NO_SURFACE &&
-                EGL14.eglMakeCurrent(display, window, window, contextGl)
+            var canDeleteGlObjects = false
+            steps.run("egl-bind-for-retirement") {
+                canDeleteGlObjects = contextGl != EGL14.EGL_NO_CONTEXT &&
+                    window != EGL14.EGL_NO_SURFACE &&
+                    EGL14.eglMakeCurrent(display, window, window, contextGl)
+            }
             if (canDeleteGlObjects) {
-                if (program != 0) GLES20.glDeleteProgram(program)
-                if (texture != 0) GLES20.glDeleteTextures(1, intArrayOf(texture), 0)
+                steps.run("gl-program") { if (program != 0) GLES20.glDeleteProgram(program) }
+                steps.run("gl-texture") { if (texture != 0) GLES20.glDeleteTextures(1, intArrayOf(texture), 0) }
             } else if (program != 0 || texture != 0) {
                 // EGL context destruction reclaims its owned GPU objects.
                 // Do not issue GLES commands against a stale/foreign context.
                 Log.w("ApexviewSingleDecoder",
                     "SCENE_GL_CLEANUP_CONTEXT_UNAVAILABLE release=EGL_CONTEXT_TEARDOWN")
             }
-            EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
-                EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-            if (window != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, window)
-            if (contextGl != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, contextGl)
-            EGL14.eglTerminate(display)
+            steps.run("egl-unbind") {
+                check(EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
+                    EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT))
+            }
+            steps.run("egl-window") {
+                if (window != EGL14.EGL_NO_SURFACE) check(EGL14.eglDestroySurface(display, window))
+            }
+            steps.run("egl-context") {
+                if (contextGl != EGL14.EGL_NO_CONTEXT) check(EGL14.eglDestroyContext(display, contextGl))
+            }
+            steps.run("egl-display") { check(EGL14.eglTerminate(display)) }
         }
-        outputSurface?.release(); outputSurface = null
+        val oldOutput = outputSurface
+        outputSurface = null
+        steps.run("output-surface") { oldOutput?.release() }
         hintedFrameRate = -1f
         display = EGL14.EGL_NO_DISPLAY; contextGl = EGL14.EGL_NO_CONTEXT; window = EGL14.EGL_NO_SURFACE
         texture = 0; program = 0
