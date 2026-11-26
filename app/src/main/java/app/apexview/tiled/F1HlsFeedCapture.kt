@@ -87,7 +87,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             require(feeds.size in 1..app.apexview.AppState.MAX_SINGLE_DECODER_FEEDS && feeds.map { it.label }.distinct().size == feeds.size)
             val prepareStartedMs = android.os.SystemClock.elapsedRealtime()
             val perFeed = mapArchiveFeedsBounded(feeds) { feed ->
-                runInterruptible { offers.getOrPut(feed.label) { loadOffers(feed) } }
+                runInterruptible { authorizedOffers(feed) }
             }
             val offersReadyMs = android.os.SystemClock.elapsedRealtime()
             val (selected, playlists, inits) = loadFittingVod(perFeed, preferredHeight, minimumHeight,
@@ -313,7 +313,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             require(feeds.size in 2..8 && feeds.map { it.label }.distinct().size == feeds.size)
             // Keep network lanes bounded and independent of the single GL video thread.
             val perFeed = mapArchiveFeedsBounded(feeds) { feed ->
-                runInterruptible { offers.getOrPut(feed.label) { loadOffers(feed) } }
+                runInterruptible { authorizedOffers(feed) }
             }
             stage = "per-feed-hevc-rendition"
             // Protected HLS is not DASH. Its old chooseCommon() discarded the user's
@@ -691,6 +691,14 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             return (if (master == null) HlsPlaylistParser() else HlsPlaylistParser(master, null))
                 .parse(response.uri, ByteArrayInputStream(response.bytes))
         } finally { response.bytes.fill(0) }
+    }
+
+    /** A channel label is a UI identity, not an authorized manifest identity.
+     * Reuse a parsed ladder only for the exact still-selected offer URL. */
+    private fun authorizedOffers(feed: F1DashFeedCapture.Feed): List<Offer> {
+        val cached = offers[feed.label]
+        if (cached?.firstOrNull()?.feed?.manifestUrl == feed.manifestUrl) return cached
+        return loadOffers(feed).also { offers[feed.label] = it }
     }
 
     private fun loadOffers(feed: F1DashFeedCapture.Feed): List<Offer> {
