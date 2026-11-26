@@ -17,6 +17,29 @@ impl Default for PositionCursor {
     }
 }
 
+/// Copy a clear AVC encoder access unit to its final Annex-B destination.
+/// Four-byte AVCC lengths and four-byte start codes occupy the same space.
+/// Preserve the previous Annex-B pass-through rule, including 3-byte prefixes.
+pub fn visit_avc_annex_b(input: &[u8], mut write: impl FnMut(usize, &[u8]) -> Option<()>) -> Option<()> {
+    if input.is_empty() || input.len() > 48 * 1024 * 1024 { return None; }
+    if input.len() >= 4 && input[0] == 0 && input[1] == 0 &&
+        (input[2] == 1 || (input[2] == 0 && input[3] == 1)) {
+        return write(0, input);
+    }
+    let mut at: usize = 0;
+    while at < input.len() {
+        let header_end = at.checked_add(4)?;
+        let len = u32::from_be_bytes(input.get(at..header_end)?.try_into().ok()?) as usize;
+        if len == 0 { return None; }
+        let end = header_end.checked_add(len)?;
+        let payload = input.get(header_end..end)?;
+        write(at, &[0, 0, 0, 1])?;
+        write(header_end, payload)?;
+        at = end;
+    }
+    Some(())
+}
+
 /// Last timestamp <= now, including duplicate timestamp runs.
 pub fn floor_index(n: usize, now: i64, mut time: impl FnMut(usize) -> Option<i64>) -> Option<i32> {
     if n > MAX_HISTORY { return None; }
@@ -427,5 +450,24 @@ mod timestamp_window_tests {
             assert_eq!(read(7), None);
         }
         assert_eq!(reads, 2);
+    }
+}
+
+#[cfg(test)]
+mod avc_access_unit_tests {
+    use super::*;
+    #[test]
+    fn framing_preserves_size_and_validates_all_nals() {
+        let avcc = [0,0,0,2,0x65,0x11,0,0,0,2,0x06,0x12];
+        let mut out = [0;12];
+        assert_eq!(visit_avc_annex_b(&avcc, |at, bytes| {
+            out[at..at+bytes.len()].copy_from_slice(bytes); Some(())
+        }), Some(()));
+        assert_eq!(out, [0,0,0,1,0x65,0x11,0,0,0,1,0x06,0x12]);
+        assert_eq!(visit_avc_annex_b(&out, |_,_| Some(())), Some(()));
+        for bad in [&[0,0,0,0][..], &[0,0,0,2,0x65][..], &[0,0][..],
+            &[0,0,0,2,0x65,0x11,0][..], &[][..]] {
+            assert_eq!(visit_avc_annex_b(bad, |_,_| Some(())), None);
+        }
     }
 }
