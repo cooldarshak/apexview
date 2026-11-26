@@ -98,6 +98,7 @@ internal class CastTimingReceiver(private val nowMs: () -> Long = SystemClock::e
         if (epochAwareTables) {
             currentTable = null
             tableEpoch = null
+            lastTableReceivedMs = -1L
         }
     }
 
@@ -165,7 +166,7 @@ internal class CastTimingReceiver(private val nowMs: () -> Long = SystemClock::e
                 val geometryName = j.getString("geometry")
                 val validGeometry = geometryName.isEmpty() || geometryName == geometry?.id
                 val epoch = incomingEpoch(j)
-                val validEpoch = acceptsEpoch(epoch)
+                val validEpoch = (!epochAwareTables || epoch != null) && acceptsEpoch(epoch)
                 val table = tableForFrame(epoch)
                 if (j.getLong("sequence") > lastSequence && canUseTable &&
                     validGeometry && validEpoch && table != null) {
@@ -222,9 +223,9 @@ internal class CastTimingReceiver(private val nowMs: () -> Long = SystemClock::e
                     rejectedFrames++; rejectedSequence++; return
                 }
                 val incomingTableId = j.getLong("tableId")
-                // New marker positions should survive a pending tower table
-                // packet, but only one generation ahead and only when a
-                // previous validated tower table already exists.
+                // New marker positions can survive a pending tower table
+                // one generation ahead. After an epoch-aware seek, motion
+                // can use an empty table until fresh ranks arrive.
                 val oneAhead = canRecoverAheadTable(incomingTableId)
                 if (incomingTableId < 0L || (incomingTableId != tableId && !oneAhead)) {
                     rejectedFrames++; rejectedTableVersion++; return
@@ -267,6 +268,7 @@ internal class CastTimingReceiver(private val nowMs: () -> Long = SystemClock::e
                 if (epochAwareTables && tableEpoch != epoch) {
                     currentTable = null
                     tableEpoch = null
+                    lastTableReceivedMs = -1L
                 }
                 frame = next
                 if (oneAhead) aheadTableFramesRecovered++
