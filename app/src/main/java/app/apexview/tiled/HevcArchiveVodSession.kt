@@ -897,33 +897,27 @@ internal class HevcArchiveVodSession(
         closed = true
         // Cancel before clearing the immutable session's authorized offer
         // owner. No optional network completion can publish into a closed session.
-        var failure: Throwable? = null
-        fun retire(action: () -> Unit) {
-            try { action() } catch (error: Throwable) {
-                val first = failure
-                if (first == null) failure = error else if (first !== error) first.addSuppressed(error)
-            }
-        }
-        retire { sidecars.close() }
+        val retirement = ArchiveRetirementSteps()
+        retirement.run { sidecars.close() }
         // Wake foreground waiters even if native cleanup failed.
-        retire { production.close() }
-        retire { foregroundAdmission.close() }
-        retire { prefetchAdmission.close() }
-        retire { synchronized(warmLock) { warmTask?.cancel(true) } }
-        retire { warmer.shutdownNow() }
-        retire { fetchers.shutdownNow() }
-        retire { prefetchFetchers.shutdownNow() }
-        retire { nativeClear.close() }
+        retirement.run { production.close() }
+        retirement.run { foregroundAdmission.close() }
+        retirement.run { prefetchAdmission.close() }
+        retirement.run { synchronized(warmLock) { warmTask?.cancel(true) } }
+        retirement.run { warmer.shutdownNow() }
+        retirement.run { fetchers.shutdownNow() }
+        retirement.run { prefetchFetchers.shutdownNow() }
+        retirement.run { nativeClear.close() }
         synchronized(cacheLock) {
             val initOwner = initialization
             initialization = null
-            retire { initOwner?.close() }
-            retire { cache.clear() }
-            retire { sourceInitialization.close() }
+            retirement.run { initOwner?.close() }
+            retirement.run { cache.clear() }
+            retirement.run { sourceInitialization.close() }
         }
-        retire { compatibleMaps.clear() }
+        retirement.run { compatibleMaps.clear() }
         nativeBudgetContext = null
-        failure?.let { throw it }
+        retirement.finish()
     }
 
     private fun checkOpen() { if (closed || Thread.currentThread().isInterrupted) throw IOException("Archive VOD session closed") }
