@@ -26,6 +26,9 @@ pub(crate) fn reusable_capacity(size:usize, capacity:usize)->bool {
 #[derive(Default)]
 struct Arena {
     serial: i64,
+    // Explicit pressure trims also retire backing from existing leases once
+    // their last reader closes. A monotone watermark needs no per-fragment set.
+    discard_through: i64,
     live: BTreeMap<i64, Vec<u8>>,
     viewed: BTreeSet<i64>,
     ranges: BTreeMap<i64, std::ops::Range<usize>>,
@@ -148,6 +151,13 @@ impl Arena {
             self.trim();
             return true;
         }
+        // A lease active at an explicit pressure trim must not recreate
+        // the idle backing that trim just reclaimed. New leases may still
+        // use the normal bounded cache; active readers remain untouched.
+        if id <= self.discard_through {
+            self.charged -= bytes.capacity();
+            return true;
+        }
         // Prefer recent size observations over a stale backing that survived
         // several incompatible fragments. Keep the same total free cap.
         while self.free.len()>=MAX_FREE || bytes.capacity()>MAX_FREE_BYTES.saturating_sub(
@@ -174,6 +184,10 @@ impl Arena {
     fn trim(&mut self) {
         for bytes in self.free.drain(..) { self.charged -= bytes.capacity(); }
     }
+    fn trim_pressure(&mut self) {
+        self.discard_through = self.serial;
+        self.trim();
+    }
 }
 #[cfg(target_os = "android")]
 static ARENA: OnceLock<Mutex<Arena>> = OnceLock::new();
@@ -195,7 +209,7 @@ pub fn write_unpublished(id:i64, size:usize, write:impl FnOnce(&mut [u8])->i64)-
 #[cfg(target_os = "android")]
 pub fn release(id: i64) -> bool { arena().lock().is_ok_and(|mut a| a.release(id)) }
 #[cfg(target_os = "android")]
-pub fn trim() { if let Ok(mut a) = arena().lock() { a.trim(); } }
+pub fn trim() { if let Ok(mut a) = arena().lock() { a.trim_pressure(); } }
 #[cfg(target_os = "android")]
 pub fn snapshot() -> Option<[u64; 9]> {
     let a=arena().lock().ok()?;
@@ -340,6 +354,29 @@ mod tests {
         assert_eq!(arena.owned_reuses,1);
         assert!(arena.release(keep));
         assert_eq!(arena.snapshot()[0],0);
+    }
+
+    #[test]
+    fn explicit_pressure_trim_retires_existing_backing_only_after_last_lease() {
+        let mut a=Arena::default();
+        let sentinel=a.allocate(1).unwrap();
+        let old=a.allocate(1024).unwrap();
+        a.live.get_mut(&old).unwrap().fill(0x5a);
+        assert!(a.mark_viewed(old));
+        let idle=a.allocate(64).unwrap();
+        assert!(a.release(idle));
+        assert_eq!(a.snapshot()[0],1089);
+        a.trim_pressure();
+        assert_eq!(a.snapshot()[0],1025);
+        assert_eq!(a.live[&old].as_slice(), &[0x5a;1024]);
+        let fresh=a.allocate(512).unwrap();
+        assert!(a.release(old));
+        assert_eq!(a.snapshot()[0],513);
+        assert!(a.free.is_empty());
+        assert!(a.release(fresh));
+        assert_eq!(a.free.len(),1);
+        assert!(a.release(sentinel));
+        assert_eq!(a.snapshot()[0],0);
     }
 
     #[test]
