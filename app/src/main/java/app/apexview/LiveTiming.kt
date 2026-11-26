@@ -496,6 +496,7 @@ class SessionTiming(
 ) {
     internal var publicationStage = ReplayTimingStage.CORE
     internal var towerThroughUtc = Long.MAX_VALUE
+    internal var previewTowerFromUtc: Long? = null
     internal var towerIndexed = false
     internal var positionsIndexed = false
     val firstTrackUtc: Long? = tracks.values.minOfOrNull { it.startMs }
@@ -1378,7 +1379,11 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         ).apply { archivePartial = true }
         val previewStarted = android.os.SystemClock.elapsedRealtime()
         replayCache?.readPreview(replayPositionMs) { loadJob.ensureActive() }?.let { preview ->
-            publish(preview.partial().apply { publicationStage = ReplayTimingStage.SAVED_WINDOW })
+            publish(preview.partial().apply {
+                publicationStage = ReplayTimingStage.SAVED_WINDOW
+                previewTowerFromUtc = preview.previewTowerFromUtc ?: firstTrackUtc
+                towerThroughUtc = preview.previewTowerThroughUtc ?: lastTrackUtc ?: Long.MIN_VALUE
+            })
             progress("Replay startup snapshot hit · ${android.os.SystemClock.elapsedRealtime() - previewStarted}ms")
         }
         val cacheStarted = android.os.SystemClock.elapsedRealtime()
