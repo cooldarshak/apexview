@@ -6,6 +6,24 @@ Complete every unconditional coding requirement in the agreed scope (including t
 
 
 
+
+## Architecture G memory ownership research revision — Build 896 (26 November 2026)
+
+The existing [Architecture G master plan, authoritative G-C memory ownership revision](handovers/PITWALL_TV_ARCHITECTURE_G_RUST_HANDOVER.md#authoritative-g-c-memory-ownership-revision--build-896-and-industry-research-26-november-2026) now incorporates the supplied Deep Research report and controls the next consolidated implementation batch. Use [Build 896 engineering handover](handovers/PITWALL_TV_BUILD_896_MEMORY_ENGINEERING_HANDOVER_2026-11-26.md) as the exact physical/build evidence and script reference. No separate Architecture H, native plan or reset of existing scope. G.0/G-B sign-offs and G-A foundation verification preserved; G-C memory and G-D physical acceptance open. All original P0–P2 gates, G.1–G.24, R1–R8, M1–M13 and prior follow-ups remain.
+
+Build 896 green at 75577ebf25ab006871d6d034ff3eb57a0795e2d8, run 45818263209. Matched 895/896 Rust windows (one different onboard): 652.0/637.0 MiB median PSS, 678.5/654.1 MiB sampled peak; 896 longer 645.5 median/676.0 peak. 896 graphics 252.1 MiB, Java heap PSS 182.7, native heap PSS 76.4, active Media3 allocator 77.5, arena capacity 24.3 and workspace 7.87; these are overlapping views, not additive. 54 output allocations and zero reuse (41 payloads >8 MiB). No proven runaway leak; one stop recovered near 191 MiB. No matched Kotlin denominator or full-race acceptance yet.
+
+| Research-derived scope | Release ledger effect |
+|---|---|
+| G-C1–2: unique ownership telemetry and bounded final-reader Rust output reuse | P0.1/P0.2/P2.2/P2.6: capacity-aware one-idle policy, device headroom, pressure/seek/close, representative 7.64–9.39 MiB and 1,000+ cycle tests. Churn improvement is not a PSS guarantee. |
+| G-C3–5: JNI and media delivery copy audit, active Media3 attribution, managed retained-root audit | P0.1/P0.2/P0.4/P2.2/P2.9: remove demonstrated duplication; preserve retries/ranges, prefetch safety, captions, cache, playback clock and warm overlay readiness. Do not cut active buffer safety or infer parked-player allocator bytes. |
+| G-C6–7: graphics/codec/EGL/BufferQueue ownership and controlled clear SurfaceView experiment | P0.3/P1.1/P1.2/P2.1/P2.5: keep exact decoder count, atlas/layout, secure paths and overlay fidelity; remove only demonstrated redundant owners; device-dependent renderer promotion requires measured parity. |
+| G-C8: conditional allocator experiment | P0.2/P2.6: M12 remains closed unless actual device allocator retention is demonstrated after owner retirement; no unconditional dependency or allocator swap. |
+
+Acceptance: same-signed-build, fresh-process matched Rust ON/OFF actual engine, identical renderer, feed IDs/rungs, settings and conditions, alternate order, at least three paired steady windows when practical. Preserve the <=80% matched Kotlin median PSS target, lower sampled peak, full-race >=2h stable memory and post-stop recovery; report absolute improvement versus Build 896 as a separate metric (shared optimizations must not artificially degrade Kotlin). Retain >=30% stitching CPU and >=90% avoidable overlay allocation reduction targets, actual physical frame cadence and complete phone/TV/Cast, clear/authorized protected, decoder modes and feature parity. No lower quality or weakened buffering, DRM or features for memory credit. If target remains unmet, document measured residual floor and seek user decision, not automatic waiver. Separate coding, signed CI, physical and user sign-off.
+
+Implement all unconditional G-C1–6 scope and feasible G-C7 experiment instrumentation, plus applicable inherited work, in one consolidated batch, with only proven corrections and conditional experiments gated by evidence. No repeated premature builds; CI-suppressed checkpoints permitted. Use existing logs/captures to start, request only specific missing causal evidence. Planning update only, no new APK or production change.
+
 ## Build 887 CI correction (26 November 2026)
 
 Build 887 (8f9d37798ac0bda63da54fe8d4a27f4beeae5811) failed at the first Android
