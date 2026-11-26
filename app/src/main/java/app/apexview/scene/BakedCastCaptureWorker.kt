@@ -40,6 +40,12 @@ internal class BakedCastCaptureWorker(
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var stopped = false
     private var cleaned = false
+    private val graphicsOwnerId = SceneGraphicsOwners.process.newId()
+    private fun recordGraphicsOwner() {
+        SceneGraphicsOwners.process.record(graphicsOwnerId, SceneGraphicsOwners.Owner(
+            "BakedCastWorker", 0, 0, if (contextGl != EGL14.EGL_NO_CONTEXT) 1 else 0,
+            0, 0, 0, 0, 0, 0, pbuffers = if (pbuffer != EGL14.EGL_NO_SURFACE) 1 else 0))
+    }
     private val captureLifetime = CaptureRequestLifetime()
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var displayLease: DisplayLeaseRegistry.Lease<EGLDisplay>? = null
@@ -102,12 +108,14 @@ internal class BakedCastCaptureWorker(
         contextGl = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT,
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
         check(contextGl != EGL14.EGL_NO_CONTEXT) { "Cannot create Cast EGL context" }
+        recordGraphicsOwner()
         pbuffer = EGL14.eglCreatePbufferSurface(display, config,
             intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE), 0)
         check(pbuffer != EGL14.EGL_NO_SURFACE &&
             EGL14.eglMakeCurrent(display, pbuffer, pbuffer, contextGl)) {
             "Cannot bind Cast GL worker"
         }
+        recordGraphicsOwner()
         encoder = ReplayClipEncoder(context, display, contextGl, config, width, height,
             castSample = session::videoSample)
         try {
@@ -199,8 +207,9 @@ internal class BakedCastCaptureWorker(
 
     private fun useWindowCapture(error: Exception) {
         directFrameReady = false
-        directCapture?.close()
+        val old = directCapture
         directCapture = null
+        old?.close()
         val detail = app.apexview.DiagnosticRedaction.redact(error.message.orEmpty()).take(160)
         Log.w("PitwallCast", "BAKED_CAST_CAPTURE_PATH source=WINDOW_PIXEL_COPY cause=${error.javaClass.simpleName} detail=$detail")
     }
@@ -253,6 +262,7 @@ internal class BakedCastCaptureWorker(
             pbuffer = EGL14.EGL_NO_SURFACE
             contextGl = EGL14.EGL_NO_CONTEXT
             display = EGL14.EGL_NO_DISPLAY
+            SceneGraphicsOwners.process.remove(graphicsOwnerId)
             thread.quitSafely()
         }
     }
