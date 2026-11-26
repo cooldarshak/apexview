@@ -73,6 +73,19 @@ class ArchitectureGBAndroidTest {
         assertTrue(NativeHotPath.floorIndices(arrayOf(longArrayOf(10,10,30), longArrayOf()),
             intArrayOf(3,0),10,out))
         assertArrayEquals(intArrayOf(1,-1),out)
+        // A full tower contributes five histories per driver plus weather.
+        // Exercise beyond the previous 64-driver bound, including stale hints.
+        val allTopics = Array(321) { i -> longArrayOf(i.toLong(), i + 10L, i + 10L, i + 30L) }
+        val topicCounts = IntArray(allTopics.size) { 4 }
+        val topicIndices = IntArray(allTopics.size) { Int.MAX_VALUE }
+        for (now in longArrayOf(0, 200, 500, 15, -1)) {
+            assertTrue(NativeHotPath.floorIndices(allTopics, topicCounts, now, topicIndices))
+            for (i in allTopics.indices) {
+                assertEquals(allTopics[i].indexOfLast { it <= now }, topicIndices[i])
+            }
+        }
+        assertFalse(NativeHotPath.floorIndices(Array(322) { longArrayOf() },
+            IntArray(322), 0, IntArray(322)))
         val order = IntArray(5)
         assertTrue(NativeHotPath.rowOrder(intArrayOf(3,1,99,1,2),5,order))
         assertArrayEquals(intArrayOf(1,3,4,0,2),order)
