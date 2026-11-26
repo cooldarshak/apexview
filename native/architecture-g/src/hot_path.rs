@@ -165,7 +165,7 @@ pub fn flag_picture(
         if id>64 || !(0..=2).contains(&event[2]) {return None;}
         if id==0 {out[3..].fill(0);} else {out[2+id]=event[2];}
     }
-    out[1]=-1;
+    out[1] = -1;
     for (i,event) in resumptions.chunks_exact(2).enumerate().rev() {
         if event[0]<=now && now<event[1] && now.checked_sub(event[0])?<3_600_000 {
             out[1]=i as i64;break;
