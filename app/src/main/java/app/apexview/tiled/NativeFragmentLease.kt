@@ -104,15 +104,7 @@ internal class NativeFragmentLease private constructor(private val shared: Share
             val adopted = NativeStitchingDeviceBudget.admit {
                 val h = context?.let { NativeStitchingDeviceBudget.sample(it) }
                 val incremental = if (context == null) 192L * 1024 * 1024
-                    else if (h == null || h.lowMemory || h.available <= h.threshold) 0L
-                    else if (engine.budget.foregroundRecovery && !h.lowRam) {
-                        // Reuse the same recovery tier admitted for this atlas,
-                        // after independently reserving its Java staging. Native
-                        // adoption still subtracts outstanding engine commitment.
-                        val staging = engine.budget.inputBytes + 2L * engine.budget.outputBytes + 8L * 1024 * 1024
-                        if (h.jvmHeadroom < staging) 0L
-                        else ((h.available - h.threshold) / 4 - staging).coerceAtLeast(0L)
-                    } else (h.available - h.threshold) / 8
+                    else NativeStitchingDeviceBudget.fragmentHeadroom(h, engine.budget)
                 engine.adoptFragment(token, offset, size, incremental,
                     h != null && !h.lowRam && !h.lowMemory && incremental > 0)
             }
@@ -129,12 +121,13 @@ internal class NativeFragmentLease private constructor(private val shared: Share
                     return lease
                 } finally { if (!transferred) NativeStitchingEngine.releaseFragment(adopted) }
             }
-            return buildOwned(size, context, beforeView = { id ->
+            return buildOwned(size, context, budget = engine.budget, beforeView = { id ->
                 check(engine.readToFragment(token, offset, id, size) == size.toLong())
             }) { _, buffer -> buffer.position(size) }
         }
 
         private fun buildOwned(size: Int, context: android.content.Context?,
+                               budget: NativeStitchingEngine.Budget? = null,
                                beforeView: ((Long) -> Unit)? = null,
                                writer: (Long, ByteBuffer) -> Unit): NativeFragmentLease? {
             if (size <= 0) return null
@@ -144,9 +137,9 @@ internal class NativeFragmentLease private constructor(private val shared: Share
                     if (context == null) NativeStitchingEngine.allocateFragment(size)
                     else {
                         val h = NativeStitchingDeviceBudget.sample(context)
-                        if (h == null || h.lowMemory || h.available <= h.threshold) NativeStitchingEngine.BACKPRESSURE
-                        else NativeStitchingEngine.allocateFragmentHeadroom(size,
-                            (h.available - h.threshold) / 8)
+                        val incremental = NativeStitchingDeviceBudget.fragmentHeadroom(h, budget)
+                        if (incremental <= 0L) NativeStitchingEngine.BACKPRESSURE
+                        else NativeStitchingEngine.allocateFragmentHeadroom(size, incremental)
                     }
                 }
             }
