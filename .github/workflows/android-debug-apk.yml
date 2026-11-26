@@ -194,6 +194,14 @@ jobs:
       - name: Verify the encoded full-scene HEVC sample
         run: python3 tools/validate_hevc_full_scene.py --output "$RUNNER_TEMP/pitwall-full-scene.mp4"
 
+      - name: Verify real Rust baked AVC AAC transport and reference fixture
+        if: github.ref == 'refs/heads/feature/architecture-g-rust-stitching'
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/pitwall-g0/baked-ts"
+          python3 tools/validate_baked_rust_ts.py --output-dir "$fixture" --writer native/architecture-g/target/release/baked_ts_fixture
+          echo "PITWALL_BAKED_TS_FIXTURE_DIR=$fixture" >> "$GITHUB_ENV"
+
       - name: Validate physical FrameTimeline comparison tool
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
