@@ -1125,7 +1125,7 @@ internal fun PlaybackVideoCanvas(
     // Window PixelCopy is used for baked Cast and replay. Independently
     // composited clear SurfaceView is A/B-only and must not silently break
     // that existing capture path or the selected SINGLE decoder preference.
-    val windowCaptureRequired = app.bakedCastSession != null || app.castingActive ||
+    val windowCaptureRequired = app.bakedCastSession != null || app.bakedQualityTransitionActive || app.castingActive ||
         app.replayClipRequested || app.replayClipRunning || app.externalDisplayActive
     val clearOutputMode = selectClearSceneOutput(
         app.settings.clearSceneSurfaceExperiment,
