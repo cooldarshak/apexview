@@ -285,7 +285,8 @@ class FeedPlayer(
             else -> "SOURCE"
         }
         Media3MemoryOwners.update(playbackAllocator, role, activeVideoDecoderCount, activeAudioDecoders,
-            player.mediaItemCount, player.totalBufferedDuration.coerceAtLeast(0), -1, memoryLoads.snapshot())
+            player.mediaItemCount, if (player.currentTracks.groups.any { it.isSelected })
+                player.totalBufferedDuration.coerceAtLeast(0) else -1L, -1, memoryLoads.snapshot())
     }
     private var loggedClock = false
     private var firstFrameLogged = false
@@ -839,6 +840,7 @@ class FeedPlayer(
                 loadEventInfo: LoadEventInfo,
                 mediaLoadData: MediaLoadData,
             ) {
+                if (memoryOwnerRetired || parkedForArchive && player.mediaItemCount == 0) return
                 memoryLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
                 val seek = observedLoads.remove(loadEventInfo.loadTaskId) ?: return
                 logLoad("load-cancel", loadEventInfo, mediaLoadData, seek)
@@ -851,6 +853,7 @@ class FeedPlayer(
                 error: java.io.IOException,
                 wasCanceled: Boolean,
             ) {
+                if (memoryOwnerRetired || parkedForArchive && player.mediaItemCount == 0) return
                 if (wasCanceled) memoryLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
                 val seek = observedLoads[loadEventInfo.loadTaskId] ?: return
                 // Media3's wrapper alone hid the distinction between a timeout and an HTTP
@@ -870,6 +873,7 @@ class FeedPlayer(
                 loadEventInfo: LoadEventInfo,
                 mediaLoadData: MediaLoadData,
             ) {
+                if (memoryOwnerRetired || parkedForArchive && player.mediaItemCount == 0) return
                 memoryLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
                 observedLoads.remove(loadEventInfo.loadTaskId)?.let {
                     logLoad("load-end", loadEventInfo, mediaLoadData, it)
