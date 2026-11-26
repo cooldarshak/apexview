@@ -25,6 +25,7 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
     @Volatile private var activeUs = 0L
     val advertisedDurationUs get() = activeUs
     val url get() = relay.url
+    internal val diagnosticRelayId get() = relay.diagnosticRelayId
 
     @Synchronized fun append(samples: List<BakedCastTransportStream.Sample>, durationUs: Long) {
         check(!ended)
