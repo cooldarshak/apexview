@@ -283,7 +283,8 @@ class AppState(
         private set
     private val remoteCastClock = app.apexview.cast.local.RemotePlaybackClock { android.os.SystemClock.elapsedRealtime() }
     private var castRemoteBuffering = false
-    private var googleHasPlayed = false
+    private var googleHasPlayed by mutableStateOf(false)
+    private var googleLoadId = ""
     private var googleLoading = false
     private var googleCastSelected = true
     private val googleRemoteCallback = object : com.google.android.gms.cast.framework.media.RemoteMediaClient.Callback() {
@@ -291,13 +292,15 @@ class AppState(
             if (localChosen || googleLoading) return
             val remote = googleCastRemoteClient ?: return
             bakedCastSession?.let { baked ->
-                if (remote.isPlaying && !baked.receiverRendering) {
+                val matches = googleCastLoadedUrl == baked.url && remote.mediaInfo?.contentId == baked.url
+                if (remote.isPlaying && matches && !baked.receiverRendering) {
                     baked.receiverRendering = true
                     singleDecoderScenePlayer?.player?.volume = 0f
                     googleHasPlayed = true
                     castSceneConfirmed = true
                     castResources.confirmRendering()
                 }
+                if (!matches && !googleHasPlayed) return
                 if (castRemoteBuffering != remote.isBuffering) {
                     castRemoteBuffering = remote.isBuffering
                     android.util.Log.i("PitwallCast", "BAKED_RECEIVER_BUFFER buffering=$castRemoteBuffering positionMs=${remote.approximateStreamPosition} ${baked.health()}")
@@ -309,8 +312,15 @@ class AppState(
                 }
                 return
             }
-            if (!castPlaybackHandedOff) return
-            if (remote.isPlaying || remote.isPaused) googleHasPlayed = true
+            val relay = castRelay ?: return
+            val matches = googleCastLoadedUrl == relay.googleCastMediaUrl &&
+                remote.mediaInfo?.contentId == relay.googleCastMediaUrl
+            if (matches && (remote.isPlaying || remote.isPaused) && !googleHasPlayed) {
+                googleHasPlayed = true
+                handOffCastPlayback()
+                if (!usesLayoutCastReceiver) castSceneConfirmed = true
+            }
+            if (!castPlaybackHandedOff || (!matches && !googleHasPlayed)) return
             if (googleHasPlayed && remote.mediaStatus?.playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
                 remoteCastClock.update(remote.approximateStreamPosition, false, playbackSpeed, remote.streamDuration)
                 if (remote.mediaStatus?.idleReason == com.google.android.gms.cast.MediaStatus.IDLE_REASON_FINISHED) playing = false
@@ -721,6 +731,11 @@ class AppState(
                 val event = runCatching { JSONObject(text) }.getOrNull() ?: return@setMessageReceivedCallbacks
                 when (event.optString("type")) {
                     "rendering" -> {
+                        // New receivers echo a per-load identity. Unscoped legacy
+                        // acknowledgements cannot confirm a replacement picture.
+                        if (googleLoadId.isEmpty() || event.optString("playbackId") != googleLoadId ||
+                            googleCastRemoteClient?.mediaInfo?.contentId != googleCastLoadedUrl)
+                            return@setMessageReceivedCallbacks
                         castSceneConfirmed = true
                         castStatus = "TV receiver is rendering the phone video layout."
                         android.util.Log.i("PitwallCast", "SCENE_RENDERING_CONFIRMED sources=${event.optInt("sources")}")
@@ -854,7 +869,7 @@ class AppState(
                 val activeComposition = (singleDecoderScenePlayer?.archiveSessionForCast() ?: castRelay?.session)
                     ?.takeIf { it.sourceLabels.toSet() == expectedLabels && it.sourceLabels.size == expectedLabels.size &&
                         QualityDisclosurePolicy.canReuseCastComposition(requestedHeights,
-                            it.actualSourceDimensions, it.offeredSourceDimensions, replace) }
+                            it.actualSourceDimensions, it.offeredSourceDimensions, qualityReplacement) }
                 val session = activeComposition ?: run {
                     val capture = F1ArchiveFeedCapture(userAgent, api.ascendon.orEmpty(), api.entitlement.orEmpty())
                     try {
@@ -907,6 +922,8 @@ class AppState(
                     relay!!.validateAudio()
                 }
                 val layout = if (usingLocalReceiver || usesLayoutCastReceiver) awaitCastLayout { castVideoScene(session) } else null
+                if (!usingLocalReceiver && usesLayoutCastReceiver && session.sourceDisplayHeight < 720)
+                    throw IOException("This Google layout receiver requires a source of at least 720p. Choose a compatible quality or use Pitwall Cast.")
                 val stillConnected = if (usingLocalReceiver) {
                     localChosen && localReady && originalConnection != null && localConnection === originalConnection
                 } else {
@@ -1097,26 +1114,23 @@ class AppState(
             putString(com.google.android.gms.cast.MediaMetadata.KEY_TITLE, "Pitwall TV live scene")
             putString(com.google.android.gms.cast.MediaMetadata.KEY_SUBTITLE, "${session.feeds} feeds, map, tower and commentary")
         }
+        googleLoadId = java.util.UUID.randomUUID().toString()
         val media = com.google.android.gms.cast.MediaInfo.Builder(session.url)
             .setContentType("application/x-mpegURL")
             .setStreamType(com.google.android.gms.cast.MediaInfo.STREAM_TYPE_LIVE)
-            .setMetadata(metadata).setCustomData(JSONObject().put("pitwallBaked", true)).build()
+            .setMetadata(metadata).setCustomData(JSONObject().put("pitwallBaked", true)
+                .put("pitwallScene", bakedCastScene(session)).put("playbackId", googleLoadId)).build()
         googleCastLoadedUrl = session.url
-        googleLoading = true
+        castSceneConfirmed = false
+        googleLoading = true; googleHasPlayed = false
         client.load(media, true, 0L).setResultCallback { result ->
             if (bakedCastSession !== session) return@setResultCallback
             googleLoading = false
             if (result.status.isSuccess) {
                 client.setStreamMute(mutedAll)
                 if (playbackSpeed != 1f) client.setPlaybackRate(playbackSpeed.toDouble())
-                // LOAD acknowledgement alone does not establish rendered playback.
-                if (client.isPlaying) {
-                    session.receiverRendering = true
-                    singleDecoderScenePlayer?.player?.volume = 0f
-                    googleHasPlayed = true
-                    castSceneConfirmed = true
-                    castResources.confirmRendering()
-                }
+                // Only status for this load can retire the previous media.
+                googleRemoteCallback.onStatusUpdated()
                 castStatus = "Google Cast accepted the baked picture and commentary."
                 message = castStatus
                 android.util.Log.i("PitwallCast", "BAKED_GOOGLE_CAST_LOADED picture=${session.width}x${session.height} feeds=${session.feeds}")
@@ -1140,15 +1154,18 @@ class AppState(
             putString(com.google.android.gms.cast.MediaMetadata.KEY_TITLE, "ApexView MultiView")
             putString(com.google.android.gms.cast.MediaMetadata.KEY_SUBTITLE, "${relay.session.sourceLabels.size} F1 feeds · one HEVC stream")
         }
+        googleLoadId = java.util.UUID.randomUUID().toString()
         val media = com.google.android.gms.cast.MediaInfo.Builder(url)
             .setContentType("application/x-mpegURL")
             .setStreamType(com.google.android.gms.cast.MediaInfo.STREAM_TYPE_BUFFERED)
             .setMetadata(metadata)
             .setCustomData(JSONObject().apply {
                 if (layoutScene != null) put("pitwallScene", layoutScene)
+                put("playbackId", googleLoadId)
             })
             .build()
         googleCastLoadedUrl = url
+        castSceneConfirmed = false
         googleLoading = true; googleHasPlayed = false
         val startPosition = castFramePositionMs.coerceAtLeast(0L)
         remoteCastClock.update(startPosition, playing, playbackSpeed, relay.session.durationUs / 1000)
@@ -1157,10 +1174,9 @@ class AppState(
                 if (castRelay !== relay) return@setResultCallback
                 googleLoading = false
                 if (result.status.isSuccess) {
-                    handOffCastPlayback()
                     if (playbackSpeed != 1f) client.setPlaybackRate(playbackSpeed.toDouble())
                     client.setStreamMute(mutedAll)
-                    if (!usesLayoutCastReceiver) castSceneConfirmed = true
+                    googleRemoteCallback.onStatusUpdated()
                     startCastSceneUpdates(relay)
                     castStatus = if (usesLayoutCastReceiver) "TV accepted the stream; waiting for layout rendering confirmation…"
                         else "Google Cast is playing ${relay.session.sourceLabels.size} feeds with ${relay.session.sourceDisplayHeight}p sources. The standard receiver shows the encoded grid."
@@ -1193,6 +1209,7 @@ class AppState(
         castRemoteBuffering = false
         castSceneConfirmed = false
         googleCastLoadedUrl = null
+        googleLoadId = ""
         if (localConnection == null) app.apexview.cast.local.CastConnectionService.stop(context)
         if (resumeLocal) {
             returnCastPlayback()
@@ -1504,7 +1521,8 @@ class AppState(
                         runCatching {
                             if (localChosen && castSceneConfirmed) sendLocalCastScene(scene)
                             else if (usesLayoutCastReceiver) googleCastSession?.sendMessage(app.apexview.cast.CastSceneProtocol.NAMESPACE,
-                                JSONObject().put("type", "scene").put("scene", scene).toString())
+                                JSONObject().put("type", "scene").put("scene", scene)
+                                    .put("playbackId", googleLoadId).toString())
                         }.onFailure { android.util.Log.w("PitwallCast", "Scene send failed: ${it.javaClass.simpleName}") }
                         if (!localChosen || castSceneConfirmed) last = text
                     }
@@ -6744,7 +6762,9 @@ class AppState(
     internal fun actualSourceRendition(label: String): Pair<Int, Int>? {
         if (castPlaybackHandedOff) {
             directCast?.takeIf { it.label == label }?.let { return remoteDirectActual.takeIf { castSceneConfirmed } }
-            castRelay?.session?.let { return it.actualSourceDimensions[label].takeIf { castSceneConfirmed } }
+            castRelay?.session?.let { return it.actualSourceDimensions[label].takeIf {
+                castSceneConfirmed || !localChosen && googleHasPlayed
+            } }
             nativeComposedCast?.let { session ->
                 val shape = session.geometry ?: return null
                 if (!castSceneConfirmed || label !in session.sourceLabels) return null
@@ -6792,7 +6812,7 @@ class AppState(
 
     internal val sourceQualityPreparing: Boolean get() = archiveCompositionStarting || qualityRestartPending ||
         castQualityRestartPending || (castBusy && castPreparationJob != null) ||
-        (castingActive && !castSceneConfirmed) ||
+        (castingActive && !castSceneConfirmed && (localChosen || !googleHasPlayed)) ||
         (directCast != null && localDirectQualitySupported && tiles.singleOrNull()?.let {
             remoteDirectRequested != qualityFor(it).targetHeight
         } == true)
@@ -6934,7 +6954,7 @@ class AppState(
                         val before = host.archiveSceneSession ?: return@launch
                         val contentId = tiles.firstOrNull()?.contentId ?: return@launch
                         startArchiveSingleDecoderComposition(contentId, bakedQualityReplacement = true)
-                        val capture = playbackWork.capture
+                        val capture = playbackWork.capture ?: return@launch
                         val installed = kotlinx.coroutines.withTimeoutOrNull(65_000L) {
                             while (sameOwner() && playbackWork.capture === capture &&
                                 singleDecoderFailure == null) {
