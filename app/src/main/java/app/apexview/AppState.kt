@@ -6959,10 +6959,11 @@ class AppState(
                             while (sameOwner() && playbackWork.capture === capture &&
                                 singleDecoderFailure == null) {
                                 val current = singleDecoderScenePlayer
-                                if (!archiveCompositionStarting && current?.archiveSceneSession != null &&
-                                    current.archiveSceneSession !== before &&
-                                    current.hasRenderedFirstFrame && current.activeVideoDecoderCount == 1 &&
-                                    playing) return@withTimeoutOrNull true
+                                if (app.apexview.cast.BakedQualityTransitionPolicy.canRestart(
+                                        before, current?.archiveSceneSession, archiveCompositionStarting,
+                                        current?.hasRenderedFirstFrame == true,
+                                        current?.activeVideoDecoderCount ?: 0, playing))
+                                    return@withTimeoutOrNull true
                                 kotlinx.coroutines.delay(100L)
                             }
                             false
@@ -7128,7 +7129,8 @@ class AppState(
     }
 
     private fun seekToNow(targetMs: Long) {
-        val pendingBakedRestart = playbackWork.castRestartJob?.isActive == true
+        val pendingBakedRestart = playbackWork.castRestartJob?.isActive == true || bakedQualityRestartPending
+        cancelCastQualityRestart()
         playbackWork.cancelCastRestart()
         nativeComposedCast?.let { session ->
             val target = if (session.durationMs > 0) targetMs.coerceIn(0, session.durationMs) else targetMs.coerceAtLeast(0)
