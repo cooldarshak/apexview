@@ -240,6 +240,10 @@ class AppState(
     private var localCaptionOwnerControl = false
     private var localMapPredictionSteps = app.apexview.cast.CastTimingProtocol.V1_SEND_PREDICTION_STEPS
     private var localDirectSupported = false
+    private var localDirectQualitySupported = false
+    private var remoteDirectQualityOffers by mutableStateOf<List<Pair<Int, Int>>>(emptyList())
+    private var remoteDirectActual by mutableStateOf<Pair<Int, Int>?>(null)
+    private var remoteDirectRequested by mutableStateOf<Int?>(null)
     private var directCast: app.apexview.cast.DirectCastRoute?
         get() = castResources.direct
         set(value) { castResources.direct = value }
@@ -265,6 +269,9 @@ class AppState(
         set(value) {
             castCoordinator.beginLoad(value)
             remoteCaptionTracks = emptyList()
+            remoteDirectQualityOffers = emptyList()
+            remoteDirectActual = null
+            remoteDirectRequested = null
         }
     private var localChosen = false
     var castDeviceName by mutableStateOf("TV")
@@ -452,6 +459,7 @@ class AppState(
                         localTimingSupported = body?.optInt("pitwallOverlays") == 1
                         localWidevineSupported = body?.optInt("pitwallWidevine") == 1
                         localDirectSupported = body?.optInt("pitwallDirect") == 1
+                        localDirectQualitySupported = body?.optInt("pitwallDirectQuality") == 1
                         localCaptionsSupported = body?.optInt("pitwallCaptions") == 1
                         localCaptionOwnerControl = body?.optInt("pitwallCaptionOwnerControl") == 1
                         remoteCaptionTracks = emptyList()
@@ -584,6 +592,16 @@ class AppState(
                     val duration = body.optDouble("duration", 0.0)
                     val speed = body.optDouble("speed", playbackSpeed.toDouble())
                     require(time.isFinite() && duration.isFinite() && time in 0.0..604800.0 && duration in 0.0..604800.0 && speed.isFinite() && speed in 0.25..4.0)
+                    if (directCast != null && localDirectQualitySupported && packetId == localLoadId) {
+                        body.optJSONArray("directQualityOffers")?.let { offered ->
+                            val sizes = app.apexview.cast.local.DirectQualityProtocol.decodeOffers(offered)
+                            if (remoteDirectQualityOffers != sizes) remoteDirectQualityOffers = sizes
+                        }
+                        remoteDirectRequested = body.optInt("directQualityRequested", -1).takeIf { it >= 0 }
+                        remoteDirectActual = body.optJSONArray("directQualityActual")?.let {
+                            app.apexview.cast.local.DirectQualityProtocol.decodeOffers(org.json.JSONArray().put(it)).singleOrNull()
+                        }
+                    }
                     if (localCaptionsSupported) {
                         body.optJSONArray("captionTracks")?.let { offered ->
                             remoteCaptionTracks = app.apexview.cast.local.CaptionTrackProtocol.decode(offered)
@@ -1161,6 +1179,7 @@ class AppState(
         castCoordinator.beginPreparation()
         castCoordinator.endLoad()
         remoteCaptionTracks = emptyList()
+        remoteDirectQualityOffers = emptyList(); remoteDirectActual = null; remoteDirectRequested = null
         googleLoading = false; googleHasPlayed = false
         castBusy = false
         bakedCastSession?.receiverRendering = false
@@ -1195,7 +1214,8 @@ class AppState(
         else runCatching { googleCastRemoteClient?.stop() }
         castResources.closeConnection()
         localReady = false; localTimingSupported = false; localWidevineSupported = false
-        localDirectSupported = false; localCaptionsSupported = false; localCaptionOwnerControl = false
+        localDirectSupported = false; localDirectQualitySupported = false
+        localCaptionsSupported = false; localCaptionOwnerControl = false
         remoteCaptionTracks = emptyList()
         localMapPredictionSteps = app.apexview.cast.CastTimingProtocol.V1_SEND_PREDICTION_STEPS
         localChosen = false; googleCastSelected = false
@@ -1218,6 +1238,7 @@ class AppState(
         remoteCastClock.update(target, playing, playbackSpeed, durationMs)
         val custom = JSONObject().put("pitwallDirect", true).put("pitwallScene", scene).put("playbackId", localLoadId)
             .put("pitwallLicense", app.apexview.cast.local.ReceiverLicenseRequest(tile.contentId, listOf(channel), channel).encode())
+            .apply { if (localDirectQualitySupported) put("pitwallQualityHeight", qualityFor(tile).targetHeight) }
         localConnection?.send(app.apexview.cast.local.FcastProtocol.PLAY, JSONObject().put("container", "application/dash+xml")
             .put("time", target / 1000.0).put("speed", playbackSpeed).put("volume", if (mutedAll) 0 else 1)
             .put("metadata", JSONObject().put("type", 0).put("title", "Pitwall TV").put("custom", custom)))
@@ -6684,6 +6705,17 @@ class AppState(
     private var protectedReportedGeometry: app.apexview.tiled.ProtectedHevcLiveComposition.SourceGeometry? = null
     private var protectedReportedLabels: List<String> = emptyList()
     internal fun actualSourceRendition(label: String): Pair<Int, Int>? {
+        if (castPlaybackHandedOff) {
+            directCast?.takeIf { it.label == label }?.let { return remoteDirectActual.takeIf { castSceneConfirmed } }
+            castRelay?.session?.let { return it.actualSourceDimensions[label].takeIf { castSceneConfirmed } }
+            nativeComposedCast?.let { session ->
+                val shape = session.geometry ?: return null
+                if (!castSceneConfirmed || label !in session.sourceLabels) return null
+                return ComposedSourceRenditions.fromSourceRects(session.sourceLabels,
+                    shape.displayWidth to shape.displayHeight,
+                    shape.mixedSourceRects.map { it.width to it.height })[label]
+            }
+        }
         singleDecoderScenePlayer?.archiveSceneSession?.let { return it.actualSourceDimensions[label] }
         if (protectedRollingScene != null) return protectedActualRenditions[label]
         // Native input format is source evidence only when no composed atlas is active.
@@ -6700,6 +6732,7 @@ class AppState(
     internal fun sourceQualityOffers(tile: Tile): List<Pair<Int, Int>> {
         val label = tile.feed.sourceStream.profileLabel
         if (castingActive || castPlaybackHandedOff) {
+            directCast?.takeIf { it.label == label }?.let { return remoteDirectQualityOffers }
             castRelay?.session?.offeredSourceDimensions?.get(label)?.let { return it }
             if (nativeComposedCast != null) return tile.feed.capturedSourceVideoSizes.orEmpty()
         }
@@ -6720,7 +6753,10 @@ class AppState(
             QualityDisclosurePolicy.unavailableManualCap(settings.videoQualityForFeed(label), sourceQualityOffers(it))
         }
 
-    internal val sourceQualityPreparing: Boolean get() = archiveCompositionStarting || qualityRestartPending
+    internal val sourceQualityPreparing: Boolean get() = archiveCompositionStarting || qualityRestartPending ||
+        (directCast != null && localDirectQualitySupported && tiles.singleOrNull()?.let {
+            remoteDirectRequested != qualityFor(it).targetHeight
+        } == true)
 
     internal val composedSourceAwaitingFrame: Boolean get() =
         (singleDecoderScenePlayer ?: protectedRollingScenePlayer)?.let { !it.hasRenderedFirstFrame } == true
@@ -6811,6 +6847,17 @@ class AppState(
         }
     }
 
+    private fun requestDirectCastQuality(tile: Tile): Boolean {
+        if (directCast?.tileId != tile.id) return false
+        if (!localDirectQualitySupported) {
+            message = "Update Pitwall TV on the receiver to change direct source quality."
+        } else {
+            localConnection?.send(app.apexview.cast.local.FcastProtocol.UI_CONTROL,
+                app.apexview.cast.local.DirectQualityProtocol.command(localLoadId, qualityFor(tile)))
+        }
+        return true
+    }
+
     /** A choice belongs to the F1 feed, not its current on-screen size or tile position. */
     fun chooseFeedVideoQuality(tileId: Int, choice: VideoQuality?) {
         val tile = tiles.firstOrNull { it.id == tileId } ?: return
@@ -6829,7 +6876,7 @@ class AppState(
         tiles.filter { it.feed.sourceStream.profileLabel == label }.forEach {
             it.feed.setVideoQuality(qualityFor(it))
         }
-        if (composed && !castPlaybackHandedOff) scheduleQualityRestart(tile.contentId)
+        if (!requestDirectCastQuality(tile) && composed && !castPlaybackHandedOff) scheduleQualityRestart(tile.contentId)
         showChrome()
     }
 
@@ -6837,7 +6884,10 @@ class AppState(
         val before = tiles.associate { it.id to qualityFor(it) }
         settings.updateVideoQuality(value)
         val changed = tiles.filter { before[it.id] != qualityFor(it) }
-        changed.forEach { it.feed.setVideoQuality(qualityFor(it)) }
+        changed.forEach {
+            it.feed.setVideoQuality(qualityFor(it))
+            requestDirectCastQuality(it)
+        }
         val contentId = changed.firstOrNull()?.contentId
         if (contentId != null && settings.decoderMode == DecoderMode.SINGLE &&
             tiles.size > 1 && tiles.all { it.contentId == contentId } && !castPlaybackHandedOff)

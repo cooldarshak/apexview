@@ -88,6 +88,9 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var confirmedNativeAudio: Int? = null
     private var nativeProgrammeAudio = false
     private var receiverCaptionReady by mutableStateOf(false)
+    private var directQuality = VideoQuality.AUTO
+    private var directQualityOffers = org.json.JSONArray()
+    private var directActualInput: Pair<Int, Int>? = null
 
     private fun isBakedPlayback() = playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optBoolean("pitwallBaked") == true
 
@@ -352,7 +355,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                         .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1).put("pitwallOverlays", 1)
                         .put("pitwallWidevine", 1).put("pitwallDirect", 1).put("pitwallCaptions", 1).put("pitwallCaptionOwnerControl", 1)
                         .put("pitwallMapPredictionSteps", CastTimingProtocol.MAX_PREDICTION_STEPS)
-                        .put("pitwallCaptionTrackMetadata", 1))
+                        .put("pitwallCaptionTrackMetadata", 1).put("pitwallDirectQuality", 1))
                 }
                 FcastProtocol.PING -> connection?.send(FcastProtocol.PONG)
                 FcastProtocol.PONG -> Unit
@@ -391,6 +394,14 @@ class PitwallReceiverActivity : ComponentActivity() {
                                     captionSettings.saveCaptionAppearance()
                                 }
                                 setReceiverCaptions(requested.enabled, requested.language)
+                            }
+                            "directQuality" -> {
+                                if (!isDirectPlayback()) return
+                                val requested = DirectQualityProtocol.decode(requireNotNull(body), playbackId()) ?: return
+                                if (requested != directQuality) {
+                                    directQuality = requested
+                                    player?.let { applyDirectQuality(it, it.currentTracks) }
+                                }
                             }
                             "nativeAudio" -> {
                                 val index = NativeAudioControl.decode(requireNotNull(body), playbackId()) ?: return
@@ -460,6 +471,11 @@ class PitwallReceiverActivity : ComponentActivity() {
             require(pitwallPeer) { "Pitwall layout support was not negotiated" }
             CastSceneProtocol.decode(it)
         }
+        val custom = body.optJSONObject("metadata")?.optJSONObject("custom")
+        if (custom?.has("pitwallQualityHeight") == true) {
+            require(custom.optBoolean("pitwallDirect")) { "Quality metadata is for direct playback only" }
+            DirectQualityProtocol.parseHeight(custom.get("pitwallQualityHeight"))
+        }
         if (body.has("time")) number(body, "time", 0.0, 604800.0)
         if (body.has("speed")) number(body, "speed", 0.25, 4.0)
         if (body.has("volume")) number(body, "volume", 0.0, 1.0)
@@ -470,6 +486,9 @@ class PitwallReceiverActivity : ComponentActivity() {
         stopPlayback()
         val epoch = loadEpoch
         playData = body; loadingRequested = true
+        directQuality = body.optJSONObject("metadata")?.optJSONObject("custom")?.let {
+            if (it.has("pitwallQualityHeight")) DirectQualityProtocol.parseHeight(it.get("pitwallQualityHeight")) else null
+        } ?: VideoQuality.AUTO
         desiredPlaying = true; desiredSpeed = body.optDouble("speed", 1.0).toFloat(); desiredVolume = body.optDouble("volume", 1.0).toFloat()
         val license = body.optJSONObject("metadata")?.optJSONObject("custom")?.optJSONObject("pitwallLicense")
         if (license == null) { startPlayer(body); return }
@@ -517,6 +536,42 @@ class PitwallReceiverActivity : ComponentActivity() {
     }
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    private fun applyDirectQuality(current: ExoPlayer, tracks: androidx.media3.common.Tracks) {
+        if (!isDirectPlayback() || player !== current) return
+        val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO }
+        val offers = groups.flatMap { group ->
+            (0 until group.length).filter { group.isTrackSupported(it) }.mapNotNull { index ->
+                group.getTrackFormat(index).let { format ->
+                    (format.width to format.height).takeIf { format.width > 0 && format.height > 0 }
+                }
+            }
+        }.distinct()
+        directQualityOffers = DirectQualityProtocol.encodeOffers(offers)
+        val wanted = DirectQualityProtocol.manualHeight(directQuality, offers)
+        val choice = if (wanted == null) null else groups.mapNotNull { group ->
+            val indices = (0 until group.length).filter { index ->
+                val format = group.getTrackFormat(index)
+                group.isTrackSupported(index) && format.height == wanted &&
+                    format.width in 1..directQuality.maxWidth
+            }
+            if (indices.isEmpty()) null else group to indices
+        }.maxByOrNull { (group, indices) ->
+            indices.maxOf { group.getTrackFormat(it).bitrate }
+        }
+        val params = current.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+            .setMaxVideoSize(if (directQuality == VideoQuality.AUTO) 1920 else directQuality.maxWidth,
+                if (directQuality == VideoQuality.AUTO) 1080 else directQuality.maxHeight)
+            .setExceedVideoConstraintsIfNecessary(false)
+            .apply {
+                choice?.let { (group, indices) ->
+                    setOverrideForType(androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, indices))
+                }
+            }.build()
+        if (params != current.trackSelectionParameters) current.trackSelectionParameters = params
+    }
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun startPlayer(body: JSONObject) {
         val custom = body.optJSONObject("metadata")?.optJSONObject("custom")
         val direct = custom?.optBoolean("pitwallDirect") == true
@@ -553,7 +608,9 @@ class PitwallReceiverActivity : ComponentActivity() {
             .setMediaCodecSelector(ReceiverCodecSelector())
         val selector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this)
         if (direct) selector.parameters = selector.buildUponParameters()
-            .setMaxVideoSize(1920, 1080).setExceedVideoConstraintsIfNecessary(false)
+            .setMaxVideoSize(if (directQuality == VideoQuality.AUTO) 1920 else directQuality.maxWidth,
+                if (directQuality == VideoQuality.AUTO) 1080 else directQuality.maxHeight)
+            .setExceedVideoConstraintsIfNecessary(false)
             .apply {
                 if (isTclG09()) {
                     setPreferredVideoMimeTypes(MimeTypes.VIDEO_H264)
@@ -602,6 +659,9 @@ class PitwallReceiverActivity : ComponentActivity() {
                 decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
             ) {
                 if (player !== next) return
+                if (direct) directActualInput = (format.width to format.height).takeIf {
+                    format.width > 0 && format.height > 0
+                }
                 @Suppress("DEPRECATION")
                 val displayHz = windowManager.defaultDisplay.refreshRate
                 Log.i("PitwallReceiver", "VIDEO_FORMAT size=${format.width}x${format.height} " +
@@ -633,6 +693,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         next.addListener(object : Player.Listener {
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
                 if (player !== next) return
+                if (direct) applyDirectQuality(next, tracks)
                 selectNativeAudio(next, tracks)
                 updateReceiverCaptions(next, tracks)
                 Log.i("PitwallReceiver", "CC_TRACKS count=$receiverCaptionTrackCount")
@@ -749,6 +810,11 @@ class PitwallReceiverActivity : ComponentActivity() {
                 streamMetadata()?.takeIf { it.has("wallClockBaseMs") }?.let {
                     put("wallClockMs", Math.addExact(it.getLong("wallClockBaseMs"), controllerPosition()))
                 }
+                if (isDirectPlayback()) {
+                    put("directQualityOffers", directQualityOffers)
+                    put("directQualityRequested", directQuality.targetHeight)
+                    directActualInput?.let { (w, h) -> put("directQualityActual", org.json.JSONArray().put(w).put(h)) }
+                }
                 if (isDirectPlayback() && current != null && !current.currentTimeline.isEmpty) {
                     val start = current.currentTimeline.getWindow(current.currentMediaItemIndex, Timeline.Window()).windowStartTimeMs
                     if (start != C.TIME_UNSET) put("wallClockMs", start + current.currentPosition)
@@ -765,6 +831,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         active = false
         timingState.clear(); timingReported = false; lastTimingHealthAtMs = -1L
         receiverCaptionTracks = emptyList(); receiverCaptionTrackCount = 0
+        directQuality = VideoQuality.AUTO; directQualityOffers = org.json.JSONArray(); directActualInput = null
         pendingNativeAudio = null; submittedNativeAudio = null
         sceneView?.release(); sceneView = null
         protectedSceneView?.release(); protectedSceneView = null
