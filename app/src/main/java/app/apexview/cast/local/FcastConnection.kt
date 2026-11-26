@@ -113,7 +113,10 @@ internal class FcastConnection(
         runCatching { android.util.Log.i("PitwallCast", "CAST_CONTROL_CLOSE id=$connectionId reason=$reason " +
             "handshake=$handshakeDone elapsedMs=${(System.nanoTime()-startedNs)/1_000_000} " +
             "sent=${sent.get()} received=${received.get()} lastRead=$lastRead lastWrite=$lastWrite timingDropped=${timingDropped.get()}") }
-        outgoing.close()
+        // Terminal connections must not retain queued JSON/control/timing payloads.
+        // close() drains queued items; cancel() discards them when both I/O jobs retire.
+        outgoing.cancel()
+        timingPending.set(false)
         runCatching { socket.close() }
         reader?.cancel(); writer?.cancel()
         scope.launch { onClosed(reason) }
