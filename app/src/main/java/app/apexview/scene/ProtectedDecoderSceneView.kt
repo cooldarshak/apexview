@@ -685,22 +685,28 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     }
 
     private fun destroy() {
-        input?.let { codecCorrelation?.detach(it) }
-        displayClock?.removeFrameCallback(displayFrame)
+        val steps = SceneReleaseSteps { step, error ->
+            Log.w("ApexviewSingleDecoder", "SCENE_RELEASE_FAILED owner=$graphicsOwnerId epoch=$graphicsLifetime step=$step", error)
+        }
+        steps.run("codec-correlation") { input?.let { codecCorrelation?.detach(it) } }
+        steps.run("display-clock") { displayClock?.removeFrameCallback(displayFrame) }
         displayClock = null
         frameDemand.reset()
         cadenceGate.reset()
         pacing.reset()
         lastLogNs = 0L
         nextGlProbeExpectedNs = 0L
-        decoderTexture?.setOnFrameAvailableListener(null)
+        steps.run("decoder-listener") { decoderTexture?.setOnFrameAvailableListener(null) }
         input?.let { Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_RELEASE " +
             "renderer=SurfaceView protected=$protectedOutput " +
             "surfaceId=${System.identityHashCode(it)} " +
             "outputEpoch=${surfaceLifetime.generation()} thread=GL") }
         inputGeneration = -1L
-        input?.release(); input = null
-        decoderTexture?.release(); decoderTexture = null; hasFrame = false
+        val oldInput = input
+        val oldTexture = decoderTexture
+        input = null; decoderTexture = null; hasFrame = false
+        steps.run("decoder-surface") { oldInput?.release() }
+        steps.run("decoder-texture") { oldTexture?.release() }
         firstFrameReported = false
         renderEpoch = -1L
         lastPresentedAtNs = 0L
@@ -709,23 +715,32 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             // Android can have unbound this GL looper after a rotation, stop or
             // SurfaceFlinger output handoff. GL deletion requires this exact
             // context to be current on the owning GL thread.
-            val canDeleteGlObjects = contextGl != EGL14.EGL_NO_CONTEXT &&
-                window != EGL14.EGL_NO_SURFACE &&
-                EGL14.eglMakeCurrent(display, window, window, contextGl)
+            var canDeleteGlObjects = false
+            steps.run("egl-bind-for-retirement") {
+                canDeleteGlObjects = contextGl != EGL14.EGL_NO_CONTEXT &&
+                    window != EGL14.EGL_NO_SURFACE &&
+                    EGL14.eglMakeCurrent(display, window, window, contextGl)
+            }
             if (canDeleteGlObjects) {
-                if (program != 0) GLES20.glDeleteProgram(program)
-                if (texture != 0) GLES20.glDeleteTextures(1, intArrayOf(texture), 0)
+                steps.run("gl-program") { if (program != 0) GLES20.glDeleteProgram(program) }
+                steps.run("gl-texture") { if (texture != 0) GLES20.glDeleteTextures(1, intArrayOf(texture), 0) }
             } else if (program != 0 || texture != 0) {
                 // EGL context destruction reclaims its owned GPU objects.
                 // Do not issue GLES commands against a stale/foreign context.
                 Log.w("ApexviewSingleDecoder",
                     "SCENE_GL_CLEANUP_CONTEXT_UNAVAILABLE release=EGL_CONTEXT_TEARDOWN")
             }
-            EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
-                EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-            if (window != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, window)
-            if (contextGl != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, contextGl)
-            EGL14.eglTerminate(display)
+            steps.run("egl-unbind") {
+                check(EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
+                    EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT))
+            }
+            steps.run("egl-window") {
+                if (window != EGL14.EGL_NO_SURFACE) check(EGL14.eglDestroySurface(display, window))
+            }
+            steps.run("egl-context") {
+                if (contextGl != EGL14.EGL_NO_CONTEXT) check(EGL14.eglDestroyContext(display, contextGl))
+            }
+            steps.run("egl-display") { check(EGL14.eglTerminate(display)) }
         }
         display = EGL14.EGL_NO_DISPLAY; contextGl = EGL14.EGL_NO_CONTEXT; window = EGL14.EGL_NO_SURFACE
         texture = 0; program = 0
