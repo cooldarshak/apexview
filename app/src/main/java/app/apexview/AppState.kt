@@ -205,7 +205,8 @@ class AppState(
     private var castRetryAfter = 0L
     private var castQualityRestartJob: Job? = null
     private var castQualityRestartPending by mutableStateOf(false)
-    private var bakedQualityRestartPending = false
+    private var bakedQualityRestartPending by mutableStateOf(false)
+    internal val bakedQualityTransitionActive get() = bakedQualityRestartPending
     val castingActive: Boolean get() = castResources.active
     var tvCastingMenuOpen by mutableStateOf(false)
     var castPickerOpen by mutableStateOf(false)
@@ -1051,7 +1052,8 @@ class AppState(
                 bakedCastSession = next // PlaybackVideoCanvas binds the clear renderer and live viewer overlays.
                 kotlinx.coroutines.withTimeout(25_000) { next.awaitPlayable() }
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                check(generation == castPreparationGeneration && bakedCastSession === next) { "Cast source changed" }
+                check(generation == castPreparationGeneration && bakedCastSession === next &&
+                    host.archiveSceneSession === archive) { "Cast source changed" }
                 check(castTiles.map { it.id to it.feed.sourceStream.profileLabel } == selected) {
                     "Feeds changed before Cast was ready"
                 }
@@ -3096,6 +3098,8 @@ class AppState(
                         // Capture/encoder and audio are tied to the old archive. Keep
                         // them alive through validation, then retire before replacing
                         // the one decoder. The waiting quality job owns reconnection.
+                        if (playbackWork.capture !== capture)
+                            throw kotlinx.coroutines.CancellationException("Obsolete archive decoder handoff")
                         if (bakedQualityReplacement && bakedCastSession != null)
                             releaseCastRelay(preserveQualityRestart = true)
                         val before = selected.sumOf { it.feed.activeVideoDecoderCount }
@@ -6715,7 +6719,9 @@ class AppState(
             if (castPlaybackHandedOff) { showChrome(); return }
         }
         if (archiveCompositionStarting) {
-            tiles.firstOrNull { it.id == singleDecoderFallbackTileId }?.feed?.player?.playWhenReady = playing
+            val active = singleDecoderScenePlayer ?:
+                tiles.firstOrNull { it.id == singleDecoderFallbackTileId }?.feed
+            active?.player?.playWhenReady = playing
             showChrome()
             return
         }
@@ -6724,7 +6730,7 @@ class AppState(
         tiles.filter { !singleDecoderSceneActive || it === protectedCompositionHost }.forEach {
             it.feed.player.playWhenReady = playing && (singleDecoderSceneActive || !inPip || it === shown || it.audible)
         }
-        if (bakedWasPlaying && playing) {
+        if (bakedWasPlaying && playing && !bakedQualityRestartPending) {
             // Restart the live stream at the new viewer clock after pause, without a stale
             // source timeline continuing to drive the commentator ahead of the picture.
             releaseCastRelay()
@@ -7185,6 +7191,7 @@ class AppState(
     }
 
     fun goLive() {
+        cancelCastQualityRestart()
         cancelControlSeek()
         if (nativeComposedCast != null) { prepareNativeComposedCast(tiles.toList(), liveEdge = true); return }
         tiles.forEach { it.feed.player.seekToDefaultPosition() }
