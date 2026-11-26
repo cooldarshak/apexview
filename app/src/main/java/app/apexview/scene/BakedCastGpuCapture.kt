@@ -21,9 +21,11 @@ internal class BakedCastGpuCapture(
     private val detachVideo: (VideoTarget) -> Unit,
 ) : AutoCloseable {
     internal class VideoTarget(val surface: Surface, val width: Int, val height: Int, val fail: (Exception) -> Unit) {
-        @Volatile var closed = false
-            private set
-        fun close() { closed = true }
+        private val retirement = ProducerRetirement()
+        val closed get() = retirement.closed
+        fun attachProducer() = retirement.attach()
+        fun producerDetached() = retirement.detach()
+        fun retire(release: () -> Unit) = retirement.retire(release)
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -129,17 +131,25 @@ internal class BakedCastGpuCapture(
                 android.util.Log.w("PitwallCast", "BAKED_GPU_RELEASE_FAILED owner=$label", error)
             }
         }
-        release("video-target") { target?.let { it.close(); detachVideo(it) } }
+        // Stop listener delivery on this GL context. Actual queue abandonment
+        // follows producer retirement, without waiting on either producer.
+        videoInput?.let { input ->
+            release("video-gl") { input.retireGl() }
+            release("video-target") {
+                if (target == null) input.releaseQueue()
+                else {
+                    target.retire { release("video-queue") { input.releaseQueue() } }
+                    detachVideo(target)
+                }
+            }
+        }
         overlayInput?.let { input ->
-            // The producer Surface belongs to the Main draw callback. Release it after
-            // any outstanding Canvas lock ends, even if its GL queue is abandoned first.
-            release("overlay-surface") {
-                if (!main.post { input.surface.release() })
+            release("overlay-gl") { input.retireGl() }
+            release("overlay-queue") {
+                if (!main.post { release("overlay-queue") { input.releaseQueue() } })
                     android.util.Log.w("PitwallCast", "BAKED_GPU_OVERLAY_OWNER_STOPPED")
             }
-            release("overlay-texture") { input.releaseTexture() }
         }
-        release("video-input") { videoInput?.close() }
         release("shader") { shader.close() }
     }
 
@@ -149,7 +159,8 @@ internal class BakedCastGpuCapture(
         val matrix = FloatArray(16)
         private val frames: SurfaceTexture
         val surface: Surface
-        private var textureReleased = false
+        private var glRetired = false
+        private val queueReleased = java.util.concurrent.atomic.AtomicBoolean()
 
         init {
             var created: SurfaceTexture? = null
@@ -179,19 +190,22 @@ internal class BakedCastGpuCapture(
             if (EGL14.eglGetCurrentContext() == ownerContext) GLES20.glDeleteTextures(1, intArrayOf(id), 0)
         }
 
-        fun releaseTexture() {
-            if (textureReleased) return
-            textureReleased = true
+        fun retireGl() {
+            if (glRetired) return
+            glRetired = true
             try { frames.setOnFrameAvailableListener(null) }
-            finally {
-                try { frames.release() }
-                finally { deleteTextureOnOwner() }
-            }
+            finally { deleteTextureOnOwner() }
+        }
+
+        // SurfaceTexture.release is allowed off the GL thread. No GLES
+        // commands here, and the producer window or Canvas lock is retired.
+        fun releaseQueue() {
+            if (!queueReleased.compareAndSet(false, true)) return
+            try { surface.release() } finally { frames.release() }
         }
 
         override fun close() {
-            try { surface.release() }
-            finally { releaseTexture() }
+            try { retireGl() } finally { releaseQueue() }
         }
     }
 }
