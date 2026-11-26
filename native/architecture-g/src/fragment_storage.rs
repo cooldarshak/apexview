@@ -73,8 +73,12 @@ impl Arena {
             bytes.resize(size, 0);
             bytes
         } else {
-            // Unsuitable old backing is not a second reserve beside new backing.
-            self.trim();
+            // Generic churn must not evict the independently admitted atlas
+            // idle buffer if the new generic owner still fits the total cap.
+            // Reclaim generic backing first; revoke atlas backing only when
+            // the real combined byte limit requires it.
+            self.trim_generic();
+            if size > limit.saturating_sub(self.charged) { self.trim(); }
             if size > limit.saturating_sub(self.charged) { return None; }
             let mut bytes = Vec::new();
             bytes.try_reserve_exact(size).ok()?;
@@ -187,7 +191,7 @@ impl Arena {
         let atlas=self.ranges.remove(&id).is_some();
         // Final Java owner has retired every view before calling release.
         // Wipe spare capacity as well, before any reuse across outputs.
-        if atlas {bytes.resize(bytes.capacity(),0);}
+        bytes.resize(bytes.capacity(),0);
         bytes.fill(0);
         // A lease active at an explicit pressure trim must not recreate
         // the idle backing that trim just reclaimed. New leases may still
@@ -247,8 +251,11 @@ impl Arena {
             if let Some(b)=self.atlas_idle.take(){self.charged-=b.capacity();}
         }
     }
-    fn trim(&mut self) {
+    fn trim_generic(&mut self) {
         for bytes in self.free.drain(..) { self.charged -= bytes.capacity(); }
+    }
+    fn trim(&mut self) {
+        self.trim_generic();
         if let Some(bytes)=self.atlas_idle.take(){self.charged-=bytes.capacity();}
     }
     fn trim_pressure(&mut self) {
@@ -530,6 +537,38 @@ mod tests {
         assert_eq!(a.charged,0);
         assert_eq!(a.atlas_idle_limit,0);
     }
+    #[test]
+    fn generic_churn_does_not_evict_admitted_atlas_until_pressure() {
+        let mut a=Arena::default();
+        let packet=8*1024*1024;
+        a.set_atlas_idle_limit(10*1024*1024);
+        let b=a.take_output(packet,10*1024*1024).unwrap();
+        let ptr=b.as_ptr();
+        let cap=b.capacity();
+        let id=a.adopt(cap,packet,16,packet-16,MAX_BYTES,||Some(b)).unwrap();
+        assert!(a.release(id));
+        // Audio/init/other delivery fragment allocations must not destroy
+        // separately admitted atlas reuse while both owners fit the cap.
+        for size in [4096,8192,65536,32768] {
+            let other=a.allocate_headroom(size,size).unwrap();
+            assert_eq!(a.atlas_idle.as_ref().unwrap().as_ptr(),ptr);
+            assert!(a.charged<=cap+size);
+            assert!(a.release(other));
+            assert_eq!(a.charged,cap);
+        }
+        let reused=a.take_output(packet,10*1024*1024).unwrap();
+        assert_eq!(reused.as_ptr(),ptr);
+        let id=a.adopt(cap,packet,16,packet-16,MAX_BYTES,||Some(reused)).unwrap();
+        assert!(a.release(id));
+        // A real tighter combined bound must still reclaim idle atlas storage.
+        let other=a.allocate_bounded(4096,4096).unwrap();
+        assert!(a.atlas_idle.is_none());
+        assert_eq!(a.charged,4096);
+        assert!(a.release(other));
+        assert_eq!(a.charged,0);
+        assert_eq!(a.owned_reuses,1);
+    }
+
     #[test]
     fn build_886_fragment_sizes_replay_with_bounded_capacity() {
         let sizes=[7895615,6988629,6861401,6582662,6434449,6215677,6932098,6932098,
