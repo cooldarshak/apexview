@@ -45,14 +45,15 @@ internal class ReplayStartupPublication {
             it.positionsIndexed || it.tracks.values.any { track -> track.hasPositionAt(utc) }
         } == true
         val currentTower = indexed != null && indexed.startUtcMs == start &&
-            (indexed.towerIndexed || utc <= indexed.towerThroughUtc && indexed.laps.values.any { it.hasRankAt(utc) })
+            (indexed.towerIndexed || utc >= (indexed.previewTowerFromUtc ?: Long.MIN_VALUE) &&
+                utc <= indexed.towerThroughUtc && indexed.laps.values.any { it.hasRankAt(utc) })
         val map = if (currentMap) indexed else window.takeIf { windowMap }
         val tower = if (currentTower) indexed else window.takeIf { windowTower }
         val tracks = map?.tracks.orEmpty()
         val laps = tower?.laps.orEmpty()
         val states = tower?.states.orEmpty()
         val geometry = shape ?: current.geometry
-        val towerFrom = if (tower === window) window?.previewTowerFromUtc ?: window?.firstTrackUtc else null
+        val towerFrom = if (tower === window) window?.previewTowerFromUtc ?: window?.firstTrackUtc else tower?.previewTowerFromUtc
         val towerThrough = when {
             tower == null -> Long.MIN_VALUE
             tower === window && tower.previewTowerFromUtc == null -> tower.lastTrackUtc ?: Long.MIN_VALUE
