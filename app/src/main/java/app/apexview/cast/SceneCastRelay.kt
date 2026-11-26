@@ -39,6 +39,7 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
     private val publicationLock = Any()
     private val relayStartedNs = System.nanoTime()
     private val relayId = java.util.UUID.randomUUID().toString()
+    internal val diagnosticRelayId get() = relayId
     private val firstResponses = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private fun recordFirst(kind: String, bytes: Int, startedNs: Long) {
         if (firstResponses.add(kind)) android.util.Log.i("PitwallCast", "CAST_RELAY_FIRST_RESPONSE id=$relayId route=ARCHIVE kind=$kind bytes=$bytes elapsedMs=${(System.nanoTime()-relayStartedNs)/1_000_000L} requestMs=${(System.nanoTime()-startedNs)/1_000_000L}")
