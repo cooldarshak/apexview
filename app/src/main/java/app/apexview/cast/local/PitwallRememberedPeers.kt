@@ -10,6 +10,7 @@ import java.security.MessageDigest
 internal object PitwallRememberedPeers {
     private const val STORE = "pitwall_tls_remembered_v1"
     private const val KEY = "certificate_pairs"
+    private const val MANUAL = "manual_reconnect_required"
     private const val MAX_PEERS = 32
     fun key(local: ByteArray, peer: ByteArray): String {
         val md=MessageDigest.getInstance("SHA-256")
@@ -29,9 +30,29 @@ internal object PitwallRememberedPeers {
         key in (prefs(context).getStringSet(KEY, emptySet()) ?: emptySet())
     @Synchronized fun remember(context: Context, key: String) {
         val p=prefs(context)
-        p.edit().putStringSet(KEY,add(p.getStringSet(KEY,emptySet()) ?: emptySet(),key)).apply()
+        val peers = add(p.getStringSet(KEY,emptySet()) ?: emptySet(),key)
+        val blocked = p.getStringSet(MANUAL,emptySet()).orEmpty().intersect(peers)
+        p.edit().putStringSet(KEY,peers).putStringSet(MANUAL,blocked).apply()
     }
+    @Synchronized fun requiresManualReconnect(context: Context, key: String): Boolean =
+        contains(context, key) && key in prefs(context).getStringSet(MANUAL,emptySet()).orEmpty()
+
+    /** Persist only an existing certificate-pair restriction, never trust.
+     * Update the in-process preference snapshot before ending the link so a lost close message/activity restart
+     * cannot immediately restore the revoked automatic session. */
+    @Synchronized fun requireManualReconnect(context: Context, key: String) {
+        if (!contains(context,key)) return
+        val p = prefs(context)
+        p.edit().putStringSet(MANUAL,add(p.getStringSet(MANUAL,emptySet()).orEmpty(),key)).apply()
+    }
+
+    @Synchronized fun allowManualReconnect(context: Context, key: String) {
+        val p = prefs(context)
+        val old = p.getStringSet(MANUAL,emptySet()).orEmpty()
+        if (key in old) p.edit().putStringSet(MANUAL,old - key).apply()
+    }
+
     @Synchronized fun forgetAll(context: Context) {
-        prefs(context).edit().remove(KEY).apply()
+        prefs(context).edit().remove(KEY).remove(MANUAL).apply()
     }
 }
