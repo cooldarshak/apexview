@@ -42,6 +42,7 @@ internal class HeapFragmentLease private constructor(private val shared: Shared)
         check(!closed)
         return CmafBoxInspector.inspect(shared.bytes, init)
     }
+    @Synchronized fun matches(bytes: ByteArray): Boolean { check(!closed); return shared.bytes.contentEquals(bytes) }
     @Synchronized fun copyBytes(): ByteArray { check(!closed); return shared.bytes.copyOf() }
     @Synchronized override fun close() {
         if (closed) return
