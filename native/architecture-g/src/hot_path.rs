@@ -189,6 +189,23 @@ pub fn audio_admit(pts_sizes: &[i64], last: i64, remaining: i64, slots: usize) -
     Some(bytes)
 }
 
+/// Chronological retirement reconciliation on already-normalized sparse
+/// timing evidence. Packed scalar flags avoid array/object allocation and
+/// never copy a driver's timing history across JNI.
+/// Input: retired=1, correction pending=2, assertion=4, correction=8,
+/// fresh current-lap event=16, crossing/pit exit=32, fresh sector=64.
+/// Output: retired and pending correction, using the same low two bits.
+pub fn retirement_state(flags:i32)->Option<i32> {
+    if flags<0 || flags&!127!=0 {return None;}
+    if flags&4!=0 {return Some(1);}
+    if flags&1==0 {return Some(0);}
+    let pending=flags&2!=0;
+    if flags&16==0 {return Some(if pending {3} else {1});}
+    let corrected=pending || flags&8!=0;
+    if flags&32!=0 || corrected && flags&64!=0 {return Some(0);}
+    Some(if corrected {3} else {1})
+}
+
 /// Three independent strips, each with at most 64 integer mini-sectors.
 pub fn normalize_sectors(input:&[i32],counts:&[i32],out:&mut[i32])->Option<()> {
     if input.len()!=192||out.len()!=192||counts.len()!=6{return None;}
@@ -223,6 +240,19 @@ pub fn scale_us(us: i64, timescale: i64) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retirement_needs_chronological_progress_and_respects_assertions() {
+        assert_eq!(retirement_state(4|16|32),Some(1));
+        assert_eq!(retirement_state(1|8|16),Some(3));
+        assert_eq!(retirement_state(3|64),Some(3));
+        assert_eq!(retirement_state(1|16|64),Some(1));
+        assert_eq!(retirement_state(3|16|64),Some(0));
+        assert_eq!(retirement_state(1|16|32),Some(0));
+        assert_eq!(retirement_state(3|4|16|64),Some(1));
+        assert_eq!(retirement_state(0),Some(0));
+        assert_eq!(retirement_state(-1),None);
+        assert_eq!(retirement_state(128),None);
+    }
     #[test]
     fn floor_preserves_duplicates_and_limits() {
         let t = [10, 10, 30, 30, 90];

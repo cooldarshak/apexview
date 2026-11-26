@@ -772,7 +772,8 @@ private data class TimingPreviewSnapshot(
     val startUtcMs: Long,
 )
 
-class LiveTimingArchive(private val token: String, private val userAgent: String) {
+class LiveTimingArchive(private val token: String, private val userAgent: String,
+                        private val nativeRequested: () -> Boolean = { false }) {
 
     /** [watchedUtc]: when the video on screen was broadcast, if known; finds the session by time. */
     internal suspend fun load(
@@ -1114,7 +1115,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                 ) return Long.MAX_VALUE
                                 return targetUtc(start)
                             }
-                            for (preview in DriverTimingParser.previews(lines, start, ::previewTarget, { job.ensureActive() })) {
+                            for (preview in DriverTimingParser.previews(lines, start, ::previewTarget, nativeRequested(), { job.ensureActive() })) {
                                 val elapsed = android.os.SystemClock.elapsedRealtime() - started
                                 checkpoint("tower-preview", "drivers=${preview.history.laps.size} throughUtcMs=${preview.throughUtcMs} elapsedMs=$elapsed")
                                 withContext(Dispatchers.Main) {
@@ -1164,7 +1165,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                             val priority = android.os.Process.getThreadPriority(threadId)
                             try {
                                 android.os.Process.setThreadPriority(threadId, android.os.Process.THREAD_PRIORITY_BACKGROUND)
-                                DriverTimingParser.parse(timingStream, initialStart, timingF1Stream, accumulator, report,
+                                DriverTimingParser.parseWithEngine(timingStream, initialStart, timingF1Stream, accumulator, nativeRequested(), report,
                                     checkActive = { job.ensureActive() }) { through, buildLaps ->
                                     val target = targetUtc(initialStart)
                                     if (through >= target && publishedTarget?.let { abs(target - it) < 30_000L } != true) {

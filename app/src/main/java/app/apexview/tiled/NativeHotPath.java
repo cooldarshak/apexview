@@ -98,6 +98,13 @@ public final class NativeHotPath {
         catch (LinkageError | RuntimeException failed) { return false; }
     }
     private static native int nativeTransport(byte[][] parts,long[] metadata,int[] continuity,ByteBuffer output);
+    /** Low two bits are reconciled status; negative means unavailable/invalid. */
+    public static int retirementState(int flags) {
+        if (!available()) return -1;
+        try { return nativeRetirementState(flags); }
+        catch (LinkageError | RuntimeException failed) { return -1; }
+    }
+    private static native int nativeRetirementState(int flags);
     public static boolean normalizeSectors(int[] input,int[] counts,int[] output) {
         if (!available()) return false;
         try { return nativeNormalizeSectors(input,counts,output)==1; }

@@ -4183,7 +4183,7 @@ class AppState(
                 !budgetReported || !videoClockObserved)
         }
         try {
-            val loaded = LiveTimingArchive(token, userAgent).load(
+            val loaded = LiveTimingArchive(token, userAgent) { settings.nativeRustStitching }.load(
                 ref = ref,
                 watchedUtc = initial.videoUtcMs,
                 replayPositionMs = initial.positionMs,
@@ -4316,7 +4316,7 @@ class AppState(
     private suspend fun followLive(contentId: Long, ref: SessionRef, token: String, timingOwner: TimingWorkCoordinator.Session) {
         val key = ref.circuitKey
         val known = key?.let { readOutline(it) }
-        val feed = LiveTimingFeed(context, token, userAgent, ref, known)
+        val feed = LiveTimingFeed(context, token, userAgent, ref, known) { settings.nativeRustStitching }
         var kept = known != null
         try {
             feed.run(

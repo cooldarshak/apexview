@@ -19,6 +19,31 @@ import org.junit.runner.RunWith
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class ArchitectureGBAndroidTest {
     @Test
+    fun nativeRetirementStatusMatchesReferenceAndHistoricalParser() {
+        assertTrue(NativeHotPath.available())
+        for (flags in 0..127) {
+            assertEquals(app.apexview.RetirementStatusPolicy.reference(flags),
+                NativeHotPath.retirementState(flags))
+        }
+        assertEquals(-1, NativeHotPath.retirementState(128))
+        val data = listOf(
+            """00:00:01.000{"Lines":{"4":{"NumberOfLaps":3}}}""",
+            """00:00:02.000{"Lines":{"4":{"Retired":true}}}""",
+            """00:00:03.000{"Lines":{"4":{"Retired":false}}}""",
+            """00:00:04.000{"Lines":{"4":{"Sectors":{"0":{"Value":"29.100"}}}}}""",
+            """00:00:05.000{"Lines":{"4":{"Retired":true}}}"""
+        ).joinToString("\n")
+        val reference = app.apexview.DriverTimingParser.parse(data, 0).getValue("4")
+        val native = app.apexview.DriverTimingParser.parse(data, 0, nativeRequested = true).getValue("4")
+        for (t in listOf(2500L, 3500L, 4500L, 5500L, 2500L)) {
+            assertEquals(reference.at(t), native.at(t))
+        }
+        assertTrue(native.retiredAt(3500))
+        assertFalse(native.retiredAt(4500))
+        assertTrue(native.retiredAt(5500))
+    }
+
+    @Test
     fun nativeOverlayAndAudioKernelsMatchKotlinReferences() {
         assertTrue(NativeHotPath.available())
         val times = longArrayOf(1000, 1200, 1400, 6600, 6900, 7200)

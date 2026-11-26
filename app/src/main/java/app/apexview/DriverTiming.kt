@@ -230,6 +230,46 @@ internal fun LongArray.shiftedBy(offsetMs: Long) = LongArray(size) { this[it] + 
  * come as a list in the snapshot and as an index-keyed object in updates; a sector's Value goes
  * empty when a new lap starts.
  */
+/** Single scalar decision, shared by the archive and rolling live parser.
+ * Rust mode owns the decision; the JVM only extracts normalized JSON evidence
+ * and preserves timestamped Android domain objects. No per-frame JNI calls. */
+internal class RetirementStatusPolicy(private val nativeRequested: Boolean) {
+    private var reported: Boolean? = null
+
+    fun decide(flags: Int): Int {
+        if (!nativeRequested) return reference(flags)
+        val value = app.apexview.tiled.NativeHotPath.retirementState(flags)
+        val native = value in 0..3
+        if (reported != native) {
+            reported = native
+            android.util.Log.i("PitwallNativeHotPath", "DRIVER_STATUS_ENGINE requested=RUST actual=" +
+                if (native) "RUST reason=RETIREMENT_RECONCILED" else "JVM reason=NATIVE_UNAVAILABLE")
+        }
+        return if (native) value else reference(flags)
+    }
+
+    companion object {
+        const val RETIRED = 1
+        const val PENDING = 2
+        const val ASSERT = 4
+        const val CORRECT = 8
+        const val FRESH = 16
+        const val LAP_OR_PIT = 32
+        const val SECTOR = 64
+
+        fun reference(flags: Int): Int {
+            if (flags !in 0..127) return -1
+            if ((flags and ASSERT) != 0) return RETIRED
+            if ((flags and RETIRED) == 0) return 0
+            val pending = (flags and PENDING) != 0
+            if ((flags and FRESH) == 0) return if (pending) RETIRED or PENDING else RETIRED
+            val corrected = pending || (flags and CORRECT) != 0
+            if ((flags and LAP_OR_PIT) != 0 || corrected && (flags and SECTOR) != 0) return 0
+            return if (corrected) RETIRED or PENDING else RETIRED
+        }
+    }
+}
+
 object DriverTimingParser {
     private const val LATE_SECTOR_MS = 3_000L
     private const val MAX_MINI_SECTORS = 64
@@ -255,7 +295,7 @@ object DriverTimingParser {
         var inPit = false
         var retired = false
         var retirementAssertedAt = Long.MIN_VALUE
-        var retirementCorrectionAt: Long? = null
+        var retirementCorrectionPending = false
         var stopped = false
         var laps: Int? = null
         val times = ArrayList<Long>()
@@ -318,7 +358,16 @@ object DriverTimingParser {
         streamStart: Long,
         targetUtc: () -> Long,
         checkActive: () -> Unit,
+    ): Sequence<DriverTimingPreview> = previews(lines, streamStart, targetUtc, false, checkActive)
+
+    internal fun previews(
+        lines: Iterator<String>,
+        streamStart: Long,
+        targetUtc: () -> Long,
+        nativeRequested: Boolean,
+        checkActive: () -> Unit,
     ): Sequence<DriverTimingPreview> = sequence {
+        val statusPolicy = RetirementStatusPolicy(nativeRequested)
         val drivers = mutableMapOf<String, Live>()
         val states = StateHistoryAccumulator()
         var through = Long.MIN_VALUE
@@ -337,7 +386,7 @@ object DriverTimingParser {
             rows.keys().forEach { number ->
                 val row = rows.optJSONObject(number) ?: return@forEach
                 val driver = drivers.getOrPut(number) { Live() }
-                apply(driver, row, time)
+                apply(driver, row, time, statusPolicy)
                 driver.snap(time)
             }
             val target = targetUtc()
@@ -351,8 +400,9 @@ object DriverTimingParser {
         }
     }
 
-    fun parse(stream: String, streamStart: Long, timingF1: String = ""): Map<String, DriverLaps> =
-        parse(stream, streamStart, timingF1, null)
+    fun parse(stream: String, streamStart: Long, timingF1: String = "",
+              nativeRequested: Boolean = false): Map<String, DriverLaps> =
+        parseWithEngine(stream, streamStart, timingF1, null, nativeRequested)
 
     internal fun parse(
         stream: String,
@@ -362,7 +412,20 @@ object DriverTimingParser {
         checkpoint: ((String) -> Unit)? = null,
         checkActive: () -> Unit = {},
         onProgress: ((Long, () -> Map<String, DriverLaps>) -> Unit)? = null,
+    ): Map<String, DriverLaps> = parseWithEngine(stream, streamStart, timingF1, stateHistory,
+        false, checkpoint, checkActive, onProgress)
+
+    internal fun parseWithEngine(
+        stream: String,
+        streamStart: Long,
+        timingF1: String,
+        stateHistory: StateHistoryAccumulator?,
+        nativeRequested: Boolean,
+        checkpoint: ((String) -> Unit)? = null,
+        checkActive: () -> Unit = {},
+        onProgress: ((Long, () -> Map<String, DriverLaps>) -> Unit)? = null,
     ): Map<String, DriverLaps> {
+        val statusPolicy = RetirementStatusPolicy(nativeRequested)
         val drivers = mutableMapOf<String, Live>()
 
         var records = 0
@@ -380,7 +443,7 @@ object DriverTimingParser {
             lines.keys().forEach { number ->
                 val d = lines.optJSONObject(number) ?: return@forEach
                 val live = drivers.getOrPut(number) { Live() }
-                apply(live, d, event.time)
+                apply(live, d, event.time, statusPolicy)
                 live.snap(event.time)
             }
             if (records % 1024 == 0) onProgress?.invoke(event.time) { materialize(drivers, copySnapshots = true) }
@@ -419,17 +482,14 @@ object DriverTimingParser {
         return materialize(drivers, copySnapshots = false)
     }
 
-    private fun apply(l: Live, d: JSONObject, t: Long) {
+    private fun apply(l: Live, d: JSONObject, t: Long, statusPolicy: RetirementStatusPolicy) {
         d.optString("Position").toIntOrNull()?.let { l.position = it }
         if (d.has("InPit")) l.inPit = d.optBoolean("InPit")
         if (d.optBoolean("PitOut")) l.inPit = false
         // Sparse deltas do not reset status. Temporary stopping is not retirement.
         if (d.has("Stopped")) l.stopped = d.optBoolean("Stopped")
-        if (d.optBoolean("Retired")) {
-            l.retired = true
-            l.retirementAssertedAt = t
-            l.retirementCorrectionAt = null
-        }
+        val asserted = d.optBoolean("Retired")
+        if (asserted) l.retirementAssertedAt = t
         // Qualifying gives the gap to the fastest; races the interval to the car ahead.
         d.optString("TimeDiffToFastest").takeIf { d.has("TimeDiffToFastest") }?.let { l.gap = it.ifEmpty { null } }
         d.optJSONObject("IntervalToPositionAhead")?.let { o ->
@@ -447,32 +507,37 @@ object DriverTimingParser {
         val previousLaps = l.laps
         val staleLap = completed != null && previousLaps != null && completed < previousLaps
         val crossing = completed != null && previousLaps != null && completed > previousLaps
-        // A false retirement flag alone is not reliable: require subsequent
-        // positive progress, and never use a stale lap or a same-time assertion.
-        if (l.retired && !staleLap && t > l.retirementAssertedAt &&
-            d.has("Retired") && !d.isNull("Retired") && d.optString("Retired").equals("false", ignoreCase = true)) {
-            l.retirementCorrectionAt = t
-        }
-        if (crossing || (!staleLap && d.optBoolean("PitOut"))) {
-            if (!d.optBoolean("Retired") && t > l.retirementAssertedAt) {
-                l.retired = false
-                l.retirementCorrectionAt = null
-            }
-            if (!d.optBoolean("Stopped")) l.stopped = false
-        }
+        val pitExit = !staleLap && d.optBoolean("PitOut")
+        if ((crossing || pitExit) && !d.optBoolean("Stopped")) l.stopped = false
         val sectors = d.opt("Sectors")
-        val correction = l.retirementCorrectionAt
-        if (l.retired && correction != null && t >= correction && t > l.retirementAssertedAt &&
-            !staleLap && !crossing && previousLaps != null && !l.inPit && !l.stopped) {
-            // Only a newly completed first/second split of the current lap is
-            // corroboration. An old split, a late S3 or flags alone are not.
-            forEachSector(sectors) { i, sector ->
-                val seconds = sector.optString("Value").toDoubleOrNull()
-                if (i < 2 && l.sectorValue[i].isEmpty() && seconds != null &&
-                    seconds.isFinite() && seconds > 0) {
-                    l.retired = false
-                    l.retirementCorrectionAt = null
+        if (asserted || l.retired) {
+            val fresh = !staleLap && t > l.retirementAssertedAt
+            val corrected = fresh && d.has("Retired") && !d.isNull("Retired") &&
+                d.optString("Retired").equals("false", ignoreCase = true)
+            var sectorProgress = false
+            if (fresh && (corrected || l.retirementCorrectionPending) &&
+                !crossing && previousLaps != null && !l.inPit && !l.stopped) {
+                // A genuinely new S1/S2 split corroborates an explicit correction.
+                // Repeated values, late S3 and unrelated gap changes are insufficient.
+                forEachSector(sectors) { i, sector ->
+                    val seconds = sector.optString("Value").toDoubleOrNull()
+                    if (i < 2 && l.sectorValue[i].isEmpty() && seconds != null &&
+                        seconds.isFinite() && seconds > 0) sectorProgress = true
                 }
+            }
+            // Sparse non-events do not cross JNI, including every normal racing row.
+            if (asserted || corrected || fresh && (crossing || pitExit || sectorProgress)) {
+                var flags = 0
+                if (l.retired) flags = flags or RetirementStatusPolicy.RETIRED
+                if (l.retirementCorrectionPending) flags = flags or RetirementStatusPolicy.PENDING
+                if (asserted) flags = flags or RetirementStatusPolicy.ASSERT
+                if (corrected) flags = flags or RetirementStatusPolicy.CORRECT
+                if (fresh) flags = flags or RetirementStatusPolicy.FRESH
+                if (crossing || pitExit) flags = flags or RetirementStatusPolicy.LAP_OR_PIT
+                if (sectorProgress) flags = flags or RetirementStatusPolicy.SECTOR
+                val next = statusPolicy.decide(flags)
+                l.retired = (next and RetirementStatusPolicy.RETIRED) != 0
+                l.retirementCorrectionPending = (next and RetirementStatusPolicy.PENDING) != 0
             }
         }
         if (!staleLap) forEachSector(sectors) { i, sector ->

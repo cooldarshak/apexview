@@ -53,6 +53,7 @@ class LiveTimingFeed(
     private val userAgent: String,
     private val ref: SessionRef,
     private val saved: SavedOutline?,
+    private val nativeRequested: () -> Boolean = { false },
 ) {
     private val archive = LiveTimingArchive(token, userAgent)
 
@@ -279,7 +280,7 @@ class LiveTimingFeed(
             parsedAt = now
             val text = timingLines.toString()
             states = runCatching { archive.parseStates(text, start) }.getOrDefault(states)
-            laps = runCatching { DriverTimingParser.parse(text, start, timingF1Lines.toString()) }.getOrDefault(laps)
+            laps = runCatching { DriverTimingParser.parse(text, start, timingF1Lines.toString(), nativeRequested()) }.getOrDefault(laps)
             tyres = runCatching { TyreParser.parse(tyreLines.toString(), start) }.getOrDefault(tyres)
             weather = runCatching { WeatherParser.parse(weatherLines.toString(), start) }.getOrDefault(weather)
             parts = runCatching { archive.parseParts(text, start) }.getOrDefault(parts)
