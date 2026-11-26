@@ -126,16 +126,21 @@ internal class RelayResourceStore(
                 }
             }
         } catch (failure: Throwable) {
-            acquired.forEach { it.release() }
+            acquired.forEach { owner ->
+                try { owner.release() } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+            }
             throw failure
         }
         val retained = replacement.values.toSet()
         val previous = current
         retained.forEach { it.current = true }
+        // Commit point: the caller's new leases are now owned by this store.
+        // Do not report a failed publication after this point, otherwise a
+        // caller's rollback could close a lease that a socket has acquired.
         current = replacement
-        previous.values.filterNot { it in retained }.forEach(::retire)
-        redundantNative.forEach { it.close() }
-        recordMemory()
+        previous.values.filterNot { it in retained }.forEach { releaseStep("retired-resource") { retire(it) } }
+        redundantNative.forEach { releaseStep("redundant-token") { it.close() } }
+        releaseStep("accounting") { recordMemory() }
     }
 
     @Synchronized fun acquire(name: String): Lease? {
@@ -152,11 +157,18 @@ internal class RelayResourceStore(
                 if (--entry.readers == 0) {
                     pinned.remove(entry)
                     pinnedBytes -= entry.size
-                    if (!entry.current) entry.release()
+                    if (!entry.current) releaseStep("final-reader") { entry.release() }
                 }
                 recordMemory()
             }
         }, entry.native)
+    }
+
+    private fun releaseStep(owner: String, action: () -> Unit) {
+        try { action() }
+        catch (failure: Exception) {
+            android.util.Log.e("PitwallCast", "RELAY_OWNER_RELEASE_FAILED owner=$owner type=${failure.javaClass.simpleName}")
+        }
     }
 
     private fun retire(entry: Entry) {
@@ -171,7 +183,7 @@ internal class RelayResourceStore(
         closed = true
         val previous = current
         current = emptyMap()
-        previous.values.forEach(::retire)
-        recordMemory()
+        previous.values.forEach { releaseStep("close-resource") { retire(it) } }
+        releaseStep("accounting") { recordMemory() }
     }
 }
