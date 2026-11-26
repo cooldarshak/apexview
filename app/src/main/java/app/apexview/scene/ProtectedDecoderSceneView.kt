@@ -167,6 +167,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     private var renderEpoch = -1L
     var onOutputSize: (Int, Int) -> Unit = { _, _ -> }
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
+    private var displayLease: DisplayLeaseRegistry.Lease<EGLDisplay>? = null
     private var contextGl: EGLContext = EGL14.EGL_NO_CONTEXT
     private var window: EGLSurface = EGL14.EGL_NO_SURFACE
     private var decoderTexture: SurfaceTexture? = null
@@ -374,8 +375,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         graphicsLifetime = lifetime
         renderEpoch = readinessEpoch
         frameRateOutput = output
-        display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
-        check(EGL14.eglInitialize(display, IntArray(2), 0, IntArray(2), 1)) { "EGL initialization failed" }
+        val acquired = SceneEglDisplays.acquire()
+        displayLease = acquired
+        display = acquired.display
         if (protectedOutput) check(EGL14.eglQueryString(display, EGL14.EGL_EXTENSIONS)
             ?.split(' ')?.contains("EGL_EXT_protected_content") == true) {
             "This device does not support protected GPU layout rendering at its active Widevine level"
@@ -740,7 +742,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             steps.run("egl-context") {
                 if (contextGl != EGL14.EGL_NO_CONTEXT) check(EGL14.eglDestroyContext(display, contextGl))
             }
-            steps.run("egl-display") { check(EGL14.eglTerminate(display)) }
+            steps.run("egl-display") {
+                    val lease = displayLease.also { displayLease = null }
+                    lease?.close()
+                }
         }
         display = EGL14.EGL_NO_DISPLAY; contextGl = EGL14.EGL_NO_CONTEXT; window = EGL14.EGL_NO_SURFACE
         texture = 0; program = 0
