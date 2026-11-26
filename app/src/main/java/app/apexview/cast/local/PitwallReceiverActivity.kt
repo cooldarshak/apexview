@@ -172,6 +172,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     }
     private var widevine: ReceiverWidevine? = null
     private var activeReceiverAllocator: DefaultAllocator? = null
+    private var receiverMemorySnapshot: (() -> Unit)? = null
     private var secureOutput by mutableStateOf(false)
     private var loadingJob: kotlinx.coroutines.Job? = null
     private var loadEpoch = 0L
@@ -670,12 +671,40 @@ class PitwallReceiverActivity : ComponentActivity() {
         receiverTrackSelector = selector
         scene = nextScene; player = next; active = true; generation++; renderingReported = false; decoderCount = 0
         var receiverAudioDecoders = 0
+        val receiverLoads = app.apexview.Media3LoadLedger()
         fun updateReceiverMemoryOwner() {
             if (player !== next) return
             app.apexview.Media3MemoryOwners.update(receiverAllocator, "RECEIVER", decoderCount,
-                receiverAudioDecoders, next.mediaItemCount)
+                receiverAudioDecoders, next.mediaItemCount,
+                if (next.currentTracks.groups.any { it.isSelected })
+                    next.totalBufferedDuration.coerceAtLeast(0) else -1L,
+                -1L, receiverLoads.snapshot())
         }
+        receiverMemorySnapshot = ::updateReceiverMemoryOwner
         next.addAnalyticsListener(object : AnalyticsListener {
+            override fun onLoadStarted(eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData) {
+                if (player === next && mediaLoadData.dataType == C.DATA_TYPE_MEDIA)
+                    receiverLoads.start(loadEventInfo.loadTaskId, mediaLoadData.trackType)
+            }
+            override fun onLoadCompleted(eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData) {
+                if (player === next) receiverLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
+            }
+            override fun onLoadCanceled(eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData) {
+                if (player === next) receiverLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
+            }
+            override fun onLoadError(eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+                error: java.io.IOException, wasCanceled: Boolean) {
+                if (player === next && wasCanceled)
+                    receiverLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
+            }
             override fun onAudioDecoderInitialized(eventTime: AnalyticsListener.EventTime, decoderName: String,
                 initializedTimestampMs: Long, initializationDurationMs: Long) {
                 if (player !== next) return
@@ -729,6 +758,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                 if (direct) applyDirectQuality(next, tracks)
                 selectNativeAudio(next, tracks)
                 updateReceiverCaptions(next, tracks)
+                updateReceiverMemoryOwner()
                 Log.i("PitwallReceiver", "CC_TRACKS count=$receiverCaptionTrackCount")
             }
 
@@ -829,6 +859,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     }
     private fun sendPlayback() {
         if (!approved) return
+        receiverMemorySnapshot?.invoke()
         val current = player
         connection?.send(FcastProtocol.PLAYBACK_UPDATE, JSONObject().put("generationTime", System.currentTimeMillis())
             .put("playbackId", playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId").orEmpty())
@@ -875,6 +906,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         receiverDisplayOwner = null
         standardView?.player = null; standardView = null
         val previous = player; player = null
+        receiverMemorySnapshot = null
         receiverTrackSelector = null
         val previousAuthorization = widevine; widevine = null
         val previousAllocator = activeReceiverAllocator; activeReceiverAllocator = null
