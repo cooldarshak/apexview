@@ -189,6 +189,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var pairingCode by mutableStateOf<String?>(null)
     private var televisionSelectionCode by mutableStateOf<String?>(null)
     private var pairingTimeout: kotlinx.coroutines.Job? = null
+    private var pendingManualInitial: JSONObject? = null
     private val timingState = CastTimingReceiver()
     private var timingPeer = false
     private var timingReported = false
@@ -311,6 +312,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             socket.close(); return
         }
         approved = false; versionReceived = false; pitwallPeer = false; captionOwnerControl = false; timingPeer = false; senderName = "Phone"
+        pendingManualInitial = null
         lateinit var next: FcastConnection
         next = FcastConnection(lifecycleScope, socket, { packet ->
             if (connection === next) handle(packet)
@@ -318,6 +320,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             if (connection === next) {
                 connection = null; pending = null; approved = false; versionReceived = false
                 pairingCode = null; pairingTimeout?.cancel(); pairingTimeout = null
+                pendingManualInitial = null
                 stopPlayback()
                 status = "Phone disconnected. Ready for another connection."
                 Log.i("PitwallReceiver", "CONNECTION_CLOSED reason=$reason")
@@ -330,7 +333,11 @@ class PitwallReceiverActivity : ComponentActivity() {
             status = "Remembered phone. Code: ${secured.session.code}"
             return
         }
-        pairingCode = secured.session.code
+        requestPairingConfirmation(next, secured.session.code)
+    }
+
+    private fun requestPairingConfirmation(next: FcastConnection, code: String) {
+        pairingCode = code
         status = "Compare the pairing code on your phone."
         pairingTimeout?.cancel()
         pairingTimeout = lifecycleScope.launch {
@@ -342,16 +349,10 @@ class PitwallReceiverActivity : ComponentActivity() {
         }
     }
 
-    // Main-looper-only revocation of automatic retries. A new deliberate
-    // selection may reconnect, but a lost disconnect notice cannot restart media.
-    private val manualReconnectRequired = LinkedHashSet<String>()
+    // Persist deliberate disconnect across receiver activity recreation.
     private fun disconnectPhone() {
         val owner = connection ?: return
-        owner.secureSession?.trustKey?.takeIf { PitwallRememberedPeers.contains(this, it) }?.let { key ->
-            manualReconnectRequired.add(key)
-            if (manualReconnectRequired.size > 32)
-                manualReconnectRequired.remove(manualReconnectRequired.first())
-        }
+        owner.secureSession?.trustKey?.let { PitwallRememberedPeers.requireManualReconnect(this, it) }
         if (!approved) { owner.close(); return }
         approved = false
         stopPlayback()
@@ -369,8 +370,18 @@ class PitwallReceiverActivity : ComponentActivity() {
         if (pairingCode == null) return
         pairingCode = null
         pairingTimeout?.cancel(); pairingTimeout = null
+        val initial = pendingManualInitial
+        pendingManualInitial = null
         if (!matches) { next.close(); return }
-        startApprovedConnection(next)
+        if (initial != null) {
+            // A legacy remembered sender has no authenticated retry marker.
+            // Physical confirmation is required after a deliberate disconnect,
+            // before advertising receiver readiness or accepting any playback.
+            PitwallRememberedPeers.allowManualReconnect(this, requireNotNull(next.secureSession).trustKey)
+            approved = true
+            acceptInitial(next, initial)
+            sendReceiverInitial(next)
+        } else startApprovedConnection(next)
     }
 
     private fun startApprovedConnection(next: FcastConnection) {
@@ -378,6 +389,27 @@ class PitwallReceiverActivity : ComponentActivity() {
         approved = true
         next.start(handshakeTimeoutMs = 100_000)
         next.send(FcastProtocol.VERSION, JSONObject().put("version", 3))
+        status = "Paired securely. Waiting for playback request…"
+    }
+
+    private fun sendReceiverInitial(owner: FcastConnection) {
+        owner.send(FcastProtocol.INITIAL, JSONObject().put("displayName", receiverName)
+            .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1).put("pitwallOverlays", 1)
+            .put("pitwallWidevine", 1).put("pitwallDirect", 1).put("pitwallCaptions", 1).put("pitwallCaptionOwnerControl", 1)
+            .put("pitwallMapPredictionSteps", CastTimingProtocol.MAX_PREDICTION_STEPS)
+            .put("pitwallCaptionTrackMetadata", 1).put("pitwallDirectQuality", 1).put("pitwallRememberedPeers", 1))
+    }
+
+    private fun acceptInitial(owner: FcastConnection, body: JSONObject) {
+        check(connection === owner && approved && versionReceived && !pitwallPeer)
+        owner.handshakeComplete()
+        senderName = body.optString("displayName").take(80).ifBlank { "Phone" }
+        pitwallPeer = body.optInt("pitwallScene") == 1
+        timingPeer = body.optInt("pitwallOverlays") == 1
+        captionOwnerControl = body.optInt("pitwallCaptionOwnerControl") == 1
+        if (body.optInt("pitwallRememberedPeers") == 1) {
+            owner.secureSession?.let { PitwallRememberedPeers.remember(this, it.trustKey) }
+        }
         status = "Paired securely. Waiting for playback request…"
     }
 
@@ -389,11 +421,9 @@ class PitwallReceiverActivity : ComponentActivity() {
                     require(!versionReceived) { "Duplicate FCast handshake" }
                     require(body != null && body.getInt("version") >= 2) { "FCast version 2 or 3 is required" }
                     versionReceived = true
-                    connection?.send(FcastProtocol.INITIAL, JSONObject().put("displayName", receiverName)
-                        .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1).put("pitwallOverlays", 1)
-                        .put("pitwallWidevine", 1).put("pitwallDirect", 1).put("pitwallCaptions", 1).put("pitwallCaptionOwnerControl", 1)
-                        .put("pitwallMapPredictionSteps", CastTimingProtocol.MAX_PREDICTION_STEPS)
-                        .put("pitwallCaptionTrackMetadata", 1).put("pitwallDirectQuality", 1).put("pitwallRememberedPeers", 1))
+                    val owner = requireNotNull(connection)
+                    if (!PitwallRememberedPeers.requiresManualReconnect(this, requireNotNull(owner.secureSession).trustKey))
+                        sendReceiverInitial(owner)
                 }
                 FcastProtocol.PING -> connection?.send(FcastProtocol.PONG)
                 FcastProtocol.PONG -> Unit
@@ -401,23 +431,26 @@ class PitwallReceiverActivity : ComponentActivity() {
                     require(approved && versionReceived && !pitwallPeer && body?.optInt("pitwallScene") == 1)
                     val owner = requireNotNull(connection)
                     val peer = requireNotNull(owner.secureSession).trustKey
-                    if (peer in manualReconnectRequired) {
-                        if (body?.has("pitwallAutomaticRetry") != true || body.optBoolean("pitwallAutomaticRetry")) {
-                            approved = false
-                            owner.close()
-                            return
+                    val initial = requireNotNull(body)
+                    val blocked = PitwallRememberedPeers.requiresManualReconnect(this, peer)
+                    if (blocked) {
+                        when (initial.opt("pitwallAutomaticRetry")) {
+                            true -> {
+                                approved = false
+                                owner.close()
+                                return
+                            }
+                            false -> PitwallRememberedPeers.allowManualReconnect(this, peer)
+                            else -> {
+                                approved = false
+                                pendingManualInitial = initial
+                                requestPairingConfirmation(owner, requireNotNull(owner.secureSession).code)
+                                return
+                            }
                         }
-                        manualReconnectRequired.remove(peer)
                     }
-                    owner.handshakeComplete()
-                    senderName = body?.optString("displayName")?.take(80)?.ifBlank { "Phone" } ?: "Phone"
-                    pitwallPeer = body?.optInt("pitwallScene") == 1
-                    timingPeer = body?.optInt("pitwallOverlays") == 1
-                    captionOwnerControl = body?.optInt("pitwallCaptionOwnerControl") == 1
-                    if (body?.optInt("pitwallRememberedPeers") == 1) {
-                        connection?.secureSession?.let { PitwallRememberedPeers.remember(this, it.trustKey) }
-                    }
-                    status = "Paired securely. Waiting for playback request…"
+                    acceptInitial(owner, initial)
+                    if (blocked) sendReceiverInitial(owner)
                 }
                 FcastProtocol.PLAY -> {
                     require(approved && versionReceived && pitwallPeer && body != null)
@@ -1160,6 +1193,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         listeningJob?.cancel(); listeningJob = null
         val previous = connection; connection = null; previous?.close()
         pending = null; approved = false; versionReceived = false
+        pendingManualInitial = null
         pairingCode = null; pairingTimeout?.cancel(); pairingTimeout = null
         stopPlayback()
         super.onStop()
