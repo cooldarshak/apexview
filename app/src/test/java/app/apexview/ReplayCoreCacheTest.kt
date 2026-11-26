@@ -73,8 +73,13 @@ class ReplayCoreCacheTest {
         // An initial progressive archive already has genuine map/tower samples;
         // it must be restart-cacheable without waiting minutes for full history.
         timing.archivePartial = true
+        timing.towerThroughUtc = targetUtc - 1L
+        assertTrue(!cache.writePreview(timing, targetPosition, targetUtc) {})
+        timing.towerThroughUtc = targetUtc + 30_000L
         assertTrue(cache.writePreview(timing, targetPosition, targetUtc) {})
         val preview = requireNotNull(cache.readPreview(targetPosition + 20_000L) {})
+        assertEquals(targetUtc - 90_000L, preview.previewTowerFromUtc)
+        assertEquals(targetUtc + 30_000L, preview.previewTowerThroughUtc)
         assertEquals(track.at(targetUtc), preview.tracks.getValue("16").at(targetUtc))
         assertEquals(4, preview.laps.getValue("16").at(targetUtc)?.position)
         assertTrue(preview.tracks.getValue("16").n < track.n)
@@ -82,6 +87,12 @@ class ReplayCoreCacheTest {
         assertEquals(laps.lastCrossing(targetUtc),preview.laps.getValue("16").lastCrossing(targetUtc))
         assertNull(cache.readPreview(targetPosition + 46_000L) {})
         assertEquals(track.n, cache.read {}?.tracks?.get("16")?.n)
+        // Full V3 cache remains readable; V2 is still rejected below.
+        assertNull(cache.read {}?.previewTowerThroughUtc)
+        // Old V3 previews remain readable and use conservative legacy coverage.
+        val previewFile = temporary.root.resolve("replay-previews/17.bin")
+        java.io.RandomAccessFile(previewFile, "rw").use { it.writeInt(3); it.setLength(it.length() - 16L) }
+        assertNull(requireNotNull(cache.readPreview(targetPosition) {}).previewTowerThroughUtc)
 
         val file = temporary.root.resolve("replay-timing/17.bin")
         java.io.RandomAccessFile(file, "rw").use { it.writeInt(2) }
