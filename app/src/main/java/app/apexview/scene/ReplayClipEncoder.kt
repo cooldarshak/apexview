@@ -30,6 +30,16 @@ internal class ReplayClipEncoder(
     private val height: Int,
     private val castSample: ((BakedCastTransportStream.Sample) -> Unit)? = null,
 ) {
+    private val graphicsOwnerId = SceneGraphicsOwners.process.newId()
+    private fun recordGraphicsOwner() {
+        SceneGraphicsOwners.process.record(graphicsOwnerId, SceneGraphicsOwners.Owner(
+            if (castSample == null) "ReplayClipEncoder" else "BakedCastEncoder",
+            0, 0, 0, if (egl != EGL14.EGL_NO_SURFACE) 1 else 0, 0,
+            0, 0, 0, 0, encoderInputs = if (input != null) 1 else 0,
+            captureTextures = if (texture != 0) 1 else 0,
+            captureWidth = width, captureHeight = height))
+    }
+
     private val resolver = context.contentResolver
     private val name = "Pitwall-replay-${System.currentTimeMillis()}.mp4"
     private var destination: android.net.Uri? = null
@@ -72,6 +82,7 @@ internal class ReplayClipEncoder(
             codec = encoder
             encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             input = encoder.createInputSurface()
+            recordGraphicsOwner()
             encoder.start()
             if (castSample == null) {
                 val uri = checkNotNull(resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
@@ -87,37 +98,53 @@ internal class ReplayClipEncoder(
             }
             egl = EGL14.eglCreateWindowSurface(display, config, input, intArrayOf(EGL14.EGL_NONE), 0)
             check(egl != EGL14.EGL_NO_SURFACE) { "Could not create the encoder surface" }
-            program = GLES20.glCreateProgram()
-            fun attach(type: Int, source: String) {
-                val shader = GLES20.glCreateShader(type)
-                GLES20.glShaderSource(shader, source)
-                GLES20.glCompileShader(shader)
-                GLES20.glAttachShader(program, shader)
-                GLES20.glDeleteShader(shader)
-            }
-            attach(GLES20.GL_VERTEX_SHADER, "attribute vec2 p;attribute vec2 uv;varying mediump vec2 t;void main(){gl_Position=vec4(p,0.,1.);t=uv;}")
-            attach(GLES20.GL_FRAGMENT_SHADER, "precision mediump float;uniform sampler2D overlay;varying mediump vec2 t;void main(){gl_FragColor=texture2D(overlay,t);}")
-            GLES20.glLinkProgram(program)
-            val linked = IntArray(1)
-            GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linked, 0)
-            check(linked[0] != 0) { "Could not link replay overlay shader" }
-            overlayUniform = GLES20.glGetUniformLocation(program, "overlay")
-            positionAttribute = GLES20.glGetAttribLocation(program, "p")
-            uvAttribute = GLES20.glGetAttribLocation(program, "uv")
-            check(overlayUniform >= 0 && positionAttribute >= 0 && uvAttribute >= 0) {
-                "Replay encoder shader inputs are unavailable"
-            }
-            val textures = IntArray(1)
-            GLES20.glGenTextures(1, textures, 0)
-            texture = textures[0]
+            recordGraphicsOwner()
         } catch (error: Exception) {
             close()
             throw error
         }
     }
 
+    // The direct GPU Cast route supplies its own compositor. Allocate the
+    // PixelCopy-only shader and texture lazily on the first bitmap frame.
+    private fun prepareBitmapRenderer() {
+        if (program != 0 && texture != 0) return
+        check(EGL14.eglGetCurrentContext() == glContext)
+        program = GLES20.glCreateProgram()
+        fun attach(type: Int, source: String) {
+            val shader = GLES20.glCreateShader(type)
+            try {
+                check(shader != 0)
+                GLES20.glShaderSource(shader, source)
+                GLES20.glCompileShader(shader)
+                val compiled = IntArray(1)
+                GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
+                check(compiled[0] != 0) { "Could not compile replay overlay shader" }
+                GLES20.glAttachShader(program, shader)
+            } finally { if (shader != 0) GLES20.glDeleteShader(shader) }
+        }
+        attach(GLES20.GL_VERTEX_SHADER, "attribute vec2 p;attribute vec2 uv;varying mediump vec2 t;void main(){gl_Position=vec4(p,0.,1.);t=uv;}")
+        attach(GLES20.GL_FRAGMENT_SHADER, "precision mediump float;uniform sampler2D overlay;varying mediump vec2 t;void main(){gl_FragColor=texture2D(overlay,t);}")
+        GLES20.glLinkProgram(program)
+        val linked = IntArray(1)
+        GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linked, 0)
+        check(linked[0] != 0) { "Could not link replay overlay shader" }
+        overlayUniform = GLES20.glGetUniformLocation(program, "overlay")
+        positionAttribute = GLES20.glGetAttribLocation(program, "p")
+        uvAttribute = GLES20.glGetAttribLocation(program, "uv")
+        check(overlayUniform >= 0 && positionAttribute >= 0 && uvAttribute >= 0) {
+            "Replay encoder shader inputs are unavailable"
+        }
+        val textures = IntArray(1)
+        GLES20.glGenTextures(1, textures, 0)
+        texture = textures[0]
+        check(texture != 0)
+        recordGraphicsOwner()
+    }
+
     /** Returns true after submitting the last frame. The display is rebound by the caller. */
     fun frame(timestampNs: Long) = frame(timestampNs) {
+        prepareBitmapRenderer()
         GLES20.glViewport(0, 0, width, height)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
@@ -271,6 +298,7 @@ internal class ReplayClipEncoder(
         steps.run("pending-file") {
             if (!published) oldDestination?.let { resolver.delete(it, null, null) }
         }
+        SceneGraphicsOwners.process.remove(graphicsOwnerId)
     }
 
     /** Live sessions never publish a MediaStore file; stop without finalizing an MP4. */
