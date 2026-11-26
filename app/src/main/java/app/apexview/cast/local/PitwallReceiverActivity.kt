@@ -897,35 +897,38 @@ class PitwallReceiverActivity : ComponentActivity() {
         receiverCaptionTracks = emptyList(); receiverCaptionTrackCount = 0
         directQuality = VideoQuality.AUTO; directQualityOffers = org.json.JSONArray(); directActualInput = null
         pendingNativeAudio = null; submittedNativeAudio = null
-        sceneView?.release(); sceneView = null
-        protectedSceneView?.release(); protectedSceneView = null
-        sceneCodecCorrelation?.shutdown()
-        sceneCodecCorrelation = null
+        val clearScene = sceneView.also { sceneView = null }
+        val protectedScene = protectedSceneView.also { protectedSceneView = null }
+        val correlation = sceneCodecCorrelation.also { sceneCodecCorrelation = null }
+        val standard = standardView.also { standardView = null }
+        val previous = player.also { player = null }
+        receiverMemorySnapshot = null
+        receiverTrackSelector = null
+        val previousAuthorization = widevine.also { widevine = null }
+        val previousAllocator = activeReceiverAllocator.also { activeReceiverAllocator = null }
+        fun retire(owner: String, release: () -> Unit) {
+            try { release() }
+            catch (error: Exception) {
+                Log.e("PitwallReceiver", "RECEIVER_RELEASE_FAILED owner=$owner type=${error.javaClass.simpleName}")
+            }
+        }
+        // Scene release detaches the codec producer on this application looper.
+        // A failed scene retirement must not retain the player or its DRM owner.
+        retire("clear-scene") { clearScene?.release() }
+        retire("protected-scene") { protectedScene?.release() }
+        retire("correlation") { correlation?.shutdown() }
         receiverCadence?.activeDisplayId = -1
         receiverCadence = null
         receiverDisplayOwner = null
-        standardView?.player = null; standardView = null
-        val previous = player; player = null
-        receiverMemorySnapshot = null
-        receiverTrackSelector = null
-        val previousAuthorization = widevine; widevine = null
-        val previousAllocator = activeReceiverAllocator; activeReceiverAllocator = null
-        try {
-            previous?.release()
-        } catch (error: Exception) {
-            Log.e("PitwallReceiver", "PLAYER_RELEASE_FAILED type=${error.javaClass.simpleName}")
-        } finally {
-            previousAllocator?.let { app.apexview.Media3MemoryOwners.unregister(it); it.trim() }
-            try { previousAuthorization?.close() }
-            catch (error: Exception) {
-                Log.e("PitwallReceiver", "DRM_RELEASE_FAILED type=${error.javaClass.simpleName}")
-            } finally {
-                secureOutput = false
-                window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-                scene = null; playData = null; renderingReported = false
-                status = "Ready. Choose this TV from Cast on your phone."
-            }
-        }
+        retire("standard-view") { standard?.player = null }
+        retire("player") { previous?.release() }
+        retire("allocator-registration") { previousAllocator?.let { app.apexview.Media3MemoryOwners.unregister(it) } }
+        retire("allocator-trim") { previousAllocator?.trim() }
+        retire("DRM") { previousAuthorization?.close() }
+        secureOutput = false
+        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        scene = null; playData = null; renderingReported = false
+        status = "Ready. Choose this TV from Cast on your phone."
     }
     private fun fail(reason: String, loadId: String = playbackId()) {
         val safe = DiagnosticRedaction.redact(reason).take(200)
