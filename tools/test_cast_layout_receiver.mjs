@@ -38,7 +38,9 @@ custom({data:{type:'scene',playbackId:'load1',scene:moved}});
 assert.equal(accepted,scene);
 custom({data:{type:'scene',playbackId:'load2',scene:moved}});
 assert.equal(accepted,moved);
-mediaInfo={contentId:'replacement'};
+mediaInfo={contentId:'replacement',customData:{playbackId:'load1'}};
+assert.equal(channel.rendered(4),false); // same URL, previous generation
+mediaInfo={contentId:'replacement',customData:{playbackId:'load2'}};
 assert.equal(channel.rendered(4),true);
 assert.equal(messages.at(-1).playbackId,'load2');
 const baked={version:1,width:960,height:540,atlasWidth:960,atlasHeight:540,sources:1,
@@ -49,9 +51,10 @@ assert.equal(load(bakedRequest),bakedRequest);
 assert.equal(accepted,baked);
 assert.equal(load({media:{customData:{pitwallBaked:true,pitwallScene:scene}}}),null);
 assert.match(errors.at(-1),/one full picture/);
+assert.equal(messages.at(-1).playbackId,''); // rejected legacy LOAD cannot claim active load
 custom({data:{type:'scene',playbackId:'baked3',scene:moved}});
 assert.equal(accepted,baked);
-mediaInfo={contentId:'baked'};
+mediaInfo={contentId:'baked',customData:{playbackId:'baked3'}};
 assert.equal(channel.rendered(1),true);
 assert.equal(messages.at(-1).playbackId,'baked3');
 console.log('CAST_LAYOUT_RECEIVER_PASS: CAF load, main+three, source order, live geometry, quality floor, baked picture and load identity');
