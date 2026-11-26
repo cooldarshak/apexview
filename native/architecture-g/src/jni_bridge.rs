@@ -487,11 +487,13 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeEngin
 ) -> jni::sys::jlongArray {
     catch_unwind(AssertUnwindSafe(|| {
         let r = registry().lock().expect("engine registry");
-        let values = r.active.as_ref().map_or([0; 10], |s| {
+        let values = r.active.as_ref().map_or([0,0,0,0,0,0,0,0,0,0,0,1], |s| {
             let bridge=s.input.as_ref().map_or(0,BridgeBuffer::capacity)+s.output.as_ref().map_or(0,BridgeBuffer::capacity);
-            let stats=s.engine.payload_stats().map(|v|i64::try_from(v).unwrap_or(i64::MAX));
-            [s.id,s.engine.reserved() as i64,s.engine.allocated_payload_bytes() as i64,bridge as i64,
-                stats[0],stats[1],stats[2],stats[3],s.engine.future_commitment(bridge) as i64,s.engine.owned_running() as i64]
+            let snapshot=s.engine.memory_snapshot(bridge).map(|v|i64::try_from(v).unwrap_or(i64::MAX));
+            let mut values=[0;12];
+            values[0]=s.id;
+            values[1..].copy_from_slice(&snapshot);
+            values
         });
         let Ok(array) = env.new_long_array(values.len() as jint) else { return std::ptr::null_mut(); };
         if env.set_long_array_region(&array, 0, &values).is_err() { return std::ptr::null_mut(); }
