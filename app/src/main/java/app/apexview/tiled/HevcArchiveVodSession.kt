@@ -47,22 +47,47 @@ internal class HevcArchiveVodSession(
                 val initialization: ByteArray, val report: CmafBoxInspector.Report,
                 val initializationMap: HlsMediaPlaylist.Segment)
     private data class Group(val startUs: Long, val durationUs: Long, val indexes: List<Int>)
-    @Volatile var stableAudioUris: Set<Uri> = stableAudioUris
-        private set
-    @Volatile var captionSources: Map<String, ArchiveCaptionSource> = captionSources
-        private set
+    internal data class TrackOffers(val stableAudioUris: Set<Uri>, val captions: Map<String, ArchiveCaptionSource>)
+    internal data class ProgrammeOffer(val stableAudio: Uri?, val captions: ArchiveCaptionSource?)
+    @Volatile private var preparedTracks = TrackOffers(stableAudioUris.toSet(), captionSources.toMap())
+    val stableAudioUris: Set<Uri> get() = preparedTracks.stableAudioUris
+    val captionSources: Map<String, ArchiveCaptionSource> get() = preparedTracks.captions
+    internal fun trackOffersSnapshot(): TrackOffers = preparedTracks
 
-    /** Install validated audio/text offers before exposing the prepared session.
-     * The finite video proof does not depend on separate sidecar playlists. */
+    private val sidecars = ArchiveSidecarDiscovery<ProgrammeOffer>(failure = { _, error ->
+        android.util.Log.w("ApexviewPlaybackOffer", "ARCHIVE_OPTIONAL_SIDECAR_FAILED type=${error.javaClass.simpleName}")
+    })
+
+    /** Primary/selected programme validation is required before handoff.
+     * The video-only proof does not depend on separate sidecar playlists. */
     internal fun installPreparedTracks(audio: Set<Uri>, captions: Map<String, ArchiveCaptionSource>) {
         synchronized(cacheLock) {
             checkOpen()
             require(audio.all { it in audioUris.values })
             require(captions.keys.all { it in audioUris })
-            stableAudioUris = audio.toSet()
-            captionSources = captions.toMap()
+            preparedTracks = TrackOffers(audio.toSet(), captions.toMap())
         }
     }
+
+    /** Alternate programmes are discovered after the primary is validated.
+     * Their exact authorized offer and metadata are captured by the loader.
+     * A consumer can wait for its requested programme, never the entire list. */
+    internal fun discoverOptionalTracks(labels: List<String>, load: suspend (String) -> ProgrammeOffer) {
+        require(labels.all { it in audioUris })
+        sidecars.start(labels, load) { label, offer ->
+            synchronized(cacheLock) {
+                checkOpen()
+                require(offer.stableAudio == null || audioUris[label] == offer.stableAudio)
+                val current = preparedTracks
+                preparedTracks = TrackOffers(
+                    current.stableAudioUris + listOfNotNull(offer.stableAudio),
+                    if (offer.captions == null) current.captions else current.captions + (label to offer.captions))
+            }
+        }
+    }
+
+    internal fun programmePending(label: String): Boolean = sidecars.isPending(label)
+    internal suspend fun awaitProgramme(label: String) = sidecars.await(label)
 
     private val groups = align(inputs, clockLabel)
     // Re-parse each exact owned initialization ONCE, not once per 5.76-second segment.
@@ -863,6 +888,9 @@ internal class HevcArchiveVodSession(
 
     private fun shutdown() {
         closed = true
+        // Cancel before clearing the immutable session's authorized offer
+        // owner. No optional network completion can publish into a closed session.
+        sidecars.close()
         nativeClear.close()
         // Wake foreground waiters before shutting down speculative networking.
         // A waiter must never spend a stale 25s fetch timeout on an owned,
