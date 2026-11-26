@@ -970,6 +970,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     traceStage("map-position-stream") { report ->
                         report("opening HTTP stream")
                         val topic = path + "Position.z.jsonStream"
+                        // Do not retain a backlog of obsolete preview roots when
+                        // the UI looper or decoder is under load. The parser
+                        // can publish again after the current handoff completes.
+                        val positionPreviewPending = java.util.concurrent.atomic.AtomicBoolean(false)
                         suspend fun publishTracks(snapshot: Map<String, DriverTrack>, outline: FloatArray,
                                                   start: Long, previewEpoch: Long) {
                             withContext(Dispatchers.Main.immediate) {
@@ -1004,7 +1008,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                     return parsePositionLines(lines, { job.ensureActive() }, report) { builders ->
                                         val now = android.os.SystemClock.elapsedRealtime()
                                         val target = targetUtc(initialStart)
-                                        if (now - lastPreviewAt < 400 || publishedThrough?.let {
+                                        if (positionPreviewPending.get() || now - lastPreviewAt < 400 || publishedThrough?.let {
                                             target >= it - 120_000 && target <= it - 10_000
                                         } == true) {
                                             return@parsePositionLines
@@ -1028,7 +1032,12 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                         val outline = previewOutline
                                         report("position preview targetUtcMs=$target cars=${covering.size} throughUtcMs=$publishedThrough")
                                         val previewEpoch = positionPreviewEpochs.next()
-                                        launch { publishTracks(snapshot, outline, initialStart, previewEpoch) }
+                                        if (positionPreviewPending.compareAndSet(false, true)) {
+                                            launch {
+                                                try { publishTracks(snapshot, outline, initialStart, previewEpoch) }
+                                                finally { positionPreviewPending.set(false) }
+                                            }
+                                        }
                                     }
                                 } finally {
                                     android.os.Process.setThreadPriority(thread, previousPriority)
@@ -1087,7 +1096,12 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                                     previewSent = true
                                                     report("position window ready before lookahead targetUtcMs=$currentUtc cars=$positioned")
                                                     val previewEpoch = positionPreviewEpochs.next()
-                                                    launch { publishTracks(snapshot, shape, initialStart, previewEpoch) }
+                                                    if (positionPreviewPending.compareAndSet(false, true)) {
+                                                        launch {
+                                                            try { publishTracks(snapshot, shape, initialStart, previewEpoch) }
+                                                            finally { positionPreviewPending.set(false) }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -1213,6 +1227,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                         val laps = traceStage("tower-history") { report ->
                             val job = kotlin.coroutines.coroutineContext
                             var publishedTarget: Long? = null
+                            val towerPreviewPending = java.util.concurrent.atomic.AtomicBoolean(false)
                             val threadId = android.os.Process.myTid()
                             val priority = android.os.Process.getThreadPriority(threadId)
                             try {
@@ -1223,17 +1238,22 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                     DriverTimingParser.parseArchiveLines(lines, timingF1Stream.lineSequence(), initialStart,
                                         ordered, accumulator, nativeRequested(), report, checkActive = { job.ensureActive() }) { through, buildLaps ->
                                         val target = targetUtc(initialStart)
-                                        if (through >= target && publishedTarget?.let { abs(target - it) < 30_000L } != true) {
+                                        if (!towerPreviewPending.get() && through >= target &&
+                                            publishedTarget?.let { abs(target - it) < 30_000L } != true) {
                                             val laps = buildLaps()
                                             if (laps.values.any { it.hasRankAt(target) }) {
-                                                publishedTarget = target
-                                                val snapshot = DriverTimingParse(laps, accumulator.finish())
-                                                launch(Dispatchers.Main) {
-                                                    partialClock = initialStart
-                                                    if (towerIndexed || through < towerThroughUtc) return@launch
-                                                    towerThroughUtc = through
-                                                    partialHistory = snapshot
-                                                    publishTopics()
+                                                if (towerPreviewPending.compareAndSet(false, true)) {
+                                                    publishedTarget = target
+                                                    val snapshot = DriverTimingParse(laps, accumulator.finish())
+                                                    launch(Dispatchers.Main) {
+                                                        try {
+                                                            if (towerIndexed || through < towerThroughUtc) return@launch
+                                                            partialClock = initialStart
+                                                            towerThroughUtc = through
+                                                            partialHistory = snapshot
+                                                            publishTopics()
+                                                        } finally { towerPreviewPending.set(false) }
+                                                    }
                                                 }
                                             }
                                         }
