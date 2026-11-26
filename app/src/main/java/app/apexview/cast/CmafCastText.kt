@@ -1,5 +1,7 @@
 package app.apexview.cast
 
+import app.apexview.tiled.longValueExactCompat
+
 import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.exoplayer.dash.manifest.DashManifestParser
@@ -32,7 +34,7 @@ internal class CmafCastText(
     private val tracks = linkedMapOf<String, Track>()
     private var discovered = false
     private fun ticks(us: Long, scale: Long) = java.math.BigInteger.valueOf(us)
-        .multiply(java.math.BigInteger.valueOf(scale)).divide(java.math.BigInteger.valueOf(1_000_000)).longValueExact()
+        .multiply(java.math.BigInteger.valueOf(scale)).divide(java.math.BigInteger.valueOf(1_000_000)).longValueExactCompat()
     private fun codec(rep: Representation): String? = rep.format.codecs?.let {
         when {
             it == "wvtt" -> it

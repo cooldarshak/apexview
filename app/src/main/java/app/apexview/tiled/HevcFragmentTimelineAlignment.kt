@@ -284,7 +284,7 @@ internal object HevcFragmentTimelineAlignment {
             division[0]
         }
         val signed = if (sign < 0) rounded.negate() else rounded
-        return runCatching { signed.longValueExact() }.getOrNull()
+        return runCatching { signed.longValueExactCompat() }.getOrNull()
     }
 
     private const val MINIMUM_FRAGMENT_WINDOW = 2

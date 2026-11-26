@@ -191,7 +191,7 @@ internal object ProtectedHevcComposedDashPackageBuilder {
             .multiply(BigDecimal.valueOf(8L))
             .multiply(BigDecimal.valueOf(timescale))
             .divide(BigDecimal.valueOf(windowDuration), 0, RoundingMode.CEILING)
-            .longValueExact()
+            .longValueExactCompat()
             .coerceAtLeast(1L)
         val windowSeconds = isoDuration(windowDuration, timescale)
         val delayTicks = durations.last()
@@ -625,7 +625,7 @@ internal class ProtectedHevcLiveDashSource(private val clearOutput: Boolean = fa
                 val elapsedMs = BigDecimal.valueOf(relativeEnd)
                     .multiply(BigDecimal.valueOf(1_000L))
                     .divide(BigDecimal.valueOf(timescale), 0, RoundingMode.HALF_UP)
-                    .longValueExact()
+                    .longValueExactCompat()
                 availabilityStartTimeMs = System.currentTimeMillis() - elapsedMs
             }
             val next = ProtectedHevcComposedDashPackageBuilder.build(

@@ -58,12 +58,28 @@ class ArchitectureGBAndroidTest {
         assertArrayEquals(app.apexview.cast.BakedAacAdts.wrap(source,48000,2),framed)
         assertFalse(NativeHotPath.adts(direct,source.size,12345,2,framed))
         val scaled = LongArray(1)
-        for (us in longArrayOf(-1234567,0,1234567,Long.MAX_VALUE)) {
-            val expected = java.math.BigInteger.valueOf(us).multiply(java.math.BigInteger.valueOf(90_000))
-                .divide(java.math.BigInteger.valueOf(1_000_000)).longValueExact()
-            assertTrue(NativeHotPath.scaleUs(us,90_000,scaled))
-            assertEquals(expected,scaled[0])
+        // Independent fixed reference values, not an API-31-only BigInteger method.
+        val inputs = longArrayOf(-1234567L, 0L, 1234567L, Long.MAX_VALUE, Long.MIN_VALUE)
+        val expectedTicks = longArrayOf(-111111L, 0L, 111111L, 830103483316929822L, -830103483316929822L)
+        for (i in inputs.indices) {
+            val reference = java.math.BigInteger.valueOf(inputs[i])
+                .multiply(java.math.BigInteger.valueOf(90_000))
+                .divide(java.math.BigInteger.valueOf(1_000_000)).longValueExactCompat()
+            assertEquals(expectedTicks[i], reference)
+            assertTrue(NativeHotPath.scaleUs(inputs[i],90_000,scaled))
+            assertEquals(expectedTicks[i],scaled[0])
         }
+        val min = java.math.BigInteger.valueOf(Long.MIN_VALUE)
+        val max = java.math.BigInteger.valueOf(Long.MAX_VALUE)
+        val one = java.math.BigInteger.ONE
+        assertEquals(Long.MIN_VALUE, min.longValueExactCompat())
+        assertEquals(Long.MAX_VALUE, max.longValueExactCompat())
+        assertTrue(runCatching { min.subtract(one).longValueExactCompat() }.exceptionOrNull() is ArithmeticException)
+        assertTrue(runCatching { max.add(one).longValueExactCompat() }.exceptionOrNull() is ArithmeticException)
+        assertEquals(Long.MIN_VALUE, java.math.BigDecimal(min).longValueExactCompat())
+        assertEquals(Long.MAX_VALUE, java.math.BigDecimal(max).longValueExactCompat())
+        assertTrue(runCatching { java.math.BigDecimal("1.5").longValueExactCompat() }.exceptionOrNull() is ArithmeticException)
+        assertTrue(runCatching { java.math.BigDecimal(max.add(one)).longValueExactCompat() }.exceptionOrNull() is ArithmeticException)
         assertFalse(NativeHotPath.scaleUs(Long.MAX_VALUE,Long.MAX_VALUE,scaled))
     }
 

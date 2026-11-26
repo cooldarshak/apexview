@@ -1,5 +1,7 @@
 package app.apexview.cast
 
+import app.apexview.tiled.longValueExactCompat
+
 import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.common.Format
@@ -232,7 +234,7 @@ internal class CmafCastAudio(
         } else if (!requested) lastTimeEngine = null
         if (native) return scaledTime[0]
         return java.math.BigInteger.valueOf(us).multiply(java.math.BigInteger.valueOf(timescale))
-            .divide(java.math.BigInteger.valueOf(1_000_000)).longValueExact()
+            .divide(java.math.BigInteger.valueOf(1_000_000)).longValueExactCompat()
     }
     override fun close() {
         init?.close()

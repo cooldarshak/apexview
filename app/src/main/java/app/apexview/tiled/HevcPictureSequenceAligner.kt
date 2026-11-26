@@ -507,7 +507,7 @@ internal object HevcPictureSequenceAligner {
             division[0].add(BigInteger.ONE)
         } else division[0]
         val signed = if (sign < 0) rounded.negate() else rounded
-        return runCatching { signed.longValueExact() }.getOrNull()
+        return runCatching { signed.longValueExactCompat() }.getOrNull()
     }
 
     private fun rejected(

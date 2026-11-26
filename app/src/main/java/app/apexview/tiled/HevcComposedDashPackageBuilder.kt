@@ -131,7 +131,7 @@ internal object HevcComposedDashPackageBuilder {
             .multiply(BigDecimal.valueOf(8L))
             .multiply(BigDecimal.valueOf(timescale))
             .divide(BigDecimal.valueOf(presentationDuration), 0, RoundingMode.CEILING)
-            .longValueExact()
+            .longValueExactCompat()
             .coerceAtLeast(1L)
         val startsWithSap = segmentTimings.first().firstSampleFlags
             ?.let { (it and NON_SYNC_SAMPLE_FLAG) == 0L } ?: false

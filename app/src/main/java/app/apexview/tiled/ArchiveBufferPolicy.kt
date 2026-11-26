@@ -87,7 +87,7 @@ internal data class CmafWindowTiming(val startUs: Long, val endUs: Long) {
 
     companion object {
         fun ticksToUs(ticks: Long, timescale: Long): Long = java.math.BigInteger.valueOf(ticks)
-            .multiply(java.math.BigInteger.valueOf(1_000_000)).divide(java.math.BigInteger.valueOf(timescale)).longValueExact()
+            .multiply(java.math.BigInteger.valueOf(1_000_000)).divide(java.math.BigInteger.valueOf(timescale)).longValueExactCompat()
 
         fun from(fragments: List<ProtectedHevcLiveComposition.OutputFragment>): CmafWindowTiming? {
             val first = fragments.firstOrNull() ?: return null
