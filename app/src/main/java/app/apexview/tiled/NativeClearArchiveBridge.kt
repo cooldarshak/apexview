@@ -181,10 +181,10 @@ internal class NativeClearArchiveBridge(
             baseline = null
             return Produced(result)
         }
-        fun deferAdmission(input: Int, output: Int) {
+        fun deferAdmission(input: Int, output: Int, reason: String = "NATIVE_CLEAR_MEMORY_ADMISSION_DEFERRED") {
             synchronized(control) {
                 checkCurrent(selected.epoch)
-                state = state.copy(published = false, reason = "NATIVE_CLEAR_MEMORY_ADMISSION_DEFERRED",
+                state = state.copy(published = false, reason = reason,
                     retryAdmission = RetryAdmission(input, output,
                         android.os.SystemClock.elapsedRealtime() + ADMISSION_RECHECK_MS))
             }
@@ -382,6 +382,17 @@ internal class NativeClearArchiveBridge(
         } catch (cancelled: InterruptedIOException) {
             clearProof()
             throw cancelled
+        } catch (error: NativeClearArchiveJob.BackpressureException) {
+            if (computingReference) throw error
+            deferAdmission(error.input, error.output, "NATIVE_CLEAR_WORKER_BACKPRESSURE_DEFERRED")
+            try { closeOwned() }
+            catch (_: RuntimeException) { Log.w("ApexviewSingleDecoder", "GB_CLEAR_NATIVE_CLOSE_FAILED") }
+            catch (_: LinkageError) { Log.w("ApexviewSingleDecoder", "GB_CLEAR_NATIVE_CLOSE_FAILED") }
+            logDecision()
+            val result = referenceOutput()
+            checkCurrent(selected.epoch)
+            baseline = null
+            return Produced(result)
         } catch (error: MemoryAdmissionException) {
             if (computingReference) throw error
             deferAdmission(error.input, error.output)
