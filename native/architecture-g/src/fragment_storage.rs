@@ -2,25 +2,42 @@
 //! The JVM private owner serializes access to each view and retires the
 //! final view before release. Direct native writes are allowed only before
 //! the first view is exposed; no native code modifies a published view.
+#[cfg(any(target_os = "android", test))]
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(target_os = "android")]
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(any(target_os = "android", test))]
 const MAX_FRAGMENT: usize = 64 * 1024 * 1024;
+#[cfg(any(target_os = "android", test))]
 const MAX_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(any(target_os = "android", test))]
 const MAX_LIVE: usize = 12;
+#[cfg(any(target_os = "android", test))]
 const MAX_FREE: usize = 2;
+#[cfg(any(target_os = "android", test))]
 const MAX_FREE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REUSE_SLACK: usize = 1024 * 1024;
+pub(crate) fn reusable_capacity(size:usize, capacity:usize)->bool {
+    size <= capacity && capacity <= size.saturating_add((size / 8).min(MAX_REUSE_SLACK))
+}
 
+#[cfg(any(target_os = "android", test))]
 #[derive(Default)]
 struct Arena {
     serial: i64,
     live: BTreeMap<i64, Vec<u8>>,
     viewed: BTreeSet<i64>,
+    ranges: BTreeMap<i64, std::ops::Range<usize>>,
+    owned_allocations: u64,
+    owned_reuses: u64,
+    adopted: u64,
+    adopted_bytes: u64,
     free: Vec<Vec<u8>>,
     charged: usize,
     allocations: u64,
 }
+#[cfg(any(target_os = "android", test))]
 impl Arena {
     fn allocate(&mut self, size: usize) -> Option<i64> { self.allocate_bounded(size, MAX_BYTES) }
     fn allocate_bounded(&mut self, size: usize, limit: usize) -> Option<i64> {
@@ -34,19 +51,15 @@ impl Arena {
         // Fragment sizes vary slightly even at fixed video quality. Reuse the
         // smallest suitable free backing, with strictly bounded slack.
         // Expose only the requested length; charge the entire capacity.
-        let max_capacity = size + (size / 8).min(64 * 1024);
-        let reusable = self.free.iter().enumerate()
-            .filter(|(_, b)| (size..=max_capacity).contains(&b.capacity()))
-            .min_by_key(|(_, b)| b.capacity()).map(|(i, _)| i);
+        let reusable = self.best_free(size);
         let bytes = if let Some(i) = reusable {
             let mut bytes = self.free.swap_remove(i);
             bytes.resize(size, 0);
             bytes
         } else {
-            while size > limit.saturating_sub(self.charged) {
-                let old = self.free.pop()?;
-                self.charged -= old.capacity();
-            }
+            // Unsuitable old backing is not a second reserve beside new backing.
+            self.trim();
+            if size > limit.saturating_sub(self.charged) { return None; }
             let mut bytes = Vec::new();
             bytes.try_reserve_exact(size).ok()?;
             let charged = self.charged.checked_add(bytes.capacity())?;
@@ -60,6 +73,52 @@ impl Arena {
         self.live.insert(serial, bytes);
         Some(serial)
     }
+    fn best_free(&self,size:usize)->Option<usize> {
+        self.free.iter().enumerate().filter(|(_,b)|reusable_capacity(size,b.capacity()))
+            .min_by_key(|(_,b)|b.capacity()).map(|(i,_)|i)
+    }
+    // The worker already has a bounded slot commitment. Move free backing
+    // OUT of this arena before writing, so it is charged only to the worker.
+    fn take_output(&mut self,size:usize,ceiling:usize)->Option<Vec<u8>> {
+        if size==0 || size>ceiling || ceiling>crate::bmff::MAX_ATLAS_BYTES {return None;}
+        if let Some(i)=self.best_free(size).filter(|&i|self.free[i].capacity()<=ceiling) {
+            let mut b=self.free.swap_remove(i);
+            self.charged-=b.capacity();
+            b.resize(size,0);
+            self.owned_reuses=self.owned_reuses.saturating_add(1);
+            Some(b)
+        } else {
+            self.trim();
+            let mut b=Vec::new();
+            b.try_reserve_exact(size).ok()?;
+            b.resize(size,0);
+            self.owned_allocations=self.owned_allocations.saturating_add(1);
+            Some(b)
+        }
+    }
+    // Reserve arena capacity before destructively taking an engine output.
+    // Capacity includes the small packet prefix and any reused backing slack.
+    fn adopt(&mut self,capacity:usize,packet_len:usize,offset:usize,size:usize,
+             incremental:usize,take:impl FnOnce()->Option<Vec<u8>>)->Option<i64> {
+        if size==0 || offset.checked_add(size)?!=packet_len || packet_len>capacity ||
+            capacity>MAX_BYTES || capacity>incremental || self.live.len()>=MAX_LIVE ||
+            !reusable_capacity(packet_len,capacity) {return None;}
+        let serial=self.serial.checked_add(1)?;
+        if capacity>MAX_BYTES.saturating_sub(self.charged) {self.trim();}
+        if capacity>MAX_BYTES.saturating_sub(self.charged) {return None;}
+        let bytes=take()?;
+        // The engine validates these exact immutable slot dimensions while
+        // taking the Vec. A mismatch is a programming error, not a fallback.
+        assert_eq!(bytes.capacity(),capacity);
+        assert_eq!(bytes.len(),packet_len);
+        self.charged+=capacity;
+        self.serial=serial;
+        self.live.insert(serial,bytes);
+        self.ranges.insert(serial,offset..packet_len);
+        self.adopted=self.adopted.saturating_add(1);
+        self.adopted_bytes=self.adopted_bytes.saturating_add(size as u64);
+        Some(serial)
+    }
     fn allocate_headroom(&mut self, size:usize, incremental:usize)->Option<i64> {
         // Resident backing is already reflected in the OS headroom sample.
         // Charge new capacity, while retaining the original hard arena cap.
@@ -67,7 +126,7 @@ impl Arena {
         self.allocate_bounded(size,ceiling)
     }
     fn write_unpublished(&mut self, id:i64, size:usize, write:impl FnOnce(&mut [u8])->i64)->Option<i64> {
-        if self.viewed.contains(&id) {return None;}
+        if self.viewed.contains(&id) || self.ranges.contains_key(&id) {return None;}
         let dst=self.live.get_mut(&id)?;
         if dst.len()!=size {return None;}
         Some(write(dst))
@@ -80,6 +139,7 @@ impl Arena {
     fn release(&mut self, id: i64) -> bool {
         let Some(mut bytes) = self.live.remove(&id) else { return false; };
         self.viewed.remove(&id);
+        self.ranges.remove(&id);
         // Final Java owner has retired every view before calling release.
         bytes.fill(0);
         // No idle native arena survives the final history/reader lease.
@@ -87,6 +147,14 @@ impl Arena {
             self.charged -= bytes.capacity();
             self.trim();
             return true;
+        }
+        // Prefer recent size observations over a stale backing that survived
+        // several incompatible fragments. Keep the same total free cap.
+        while self.free.len()>=MAX_FREE || bytes.capacity()>MAX_FREE_BYTES.saturating_sub(
+            self.free.iter().map(Vec::capacity).sum::<usize>()) {
+            if self.free.is_empty() || bytes.capacity()>MAX_FREE_BYTES {break;}
+            let old=self.free.remove(0);
+            self.charged-=old.capacity();
         }
         let cached = self.free.iter().map(Vec::capacity).sum::<usize>();
         if self.free.len() < MAX_FREE && bytes.capacity() <= MAX_FREE_BYTES.saturating_sub(cached) {
@@ -100,7 +168,7 @@ impl Arena {
     fn snapshot(&self) -> [u64; 5] {
         [self.charged as u64,
          self.live.values().map(Vec::capacity).sum::<usize>() as u64,
-         self.live.values().map(Vec::len).sum::<usize>() as u64,
+         self.live.iter().map(|(id,b)|self.ranges.get(id).map_or(b.len(),|r|r.len())).sum::<usize>() as u64,
          self.live.len() as u64, self.allocations]
     }
     fn trim(&mut self) {
@@ -129,7 +197,23 @@ pub fn release(id: i64) -> bool { arena().lock().is_ok_and(|mut a| a.release(id)
 #[cfg(target_os = "android")]
 pub fn trim() { if let Ok(mut a) = arena().lock() { a.trim(); } }
 #[cfg(target_os = "android")]
-pub fn snapshot() -> Option<[u64; 5]> { Some(arena().lock().ok()?.snapshot()) }
+pub fn snapshot() -> Option<[u64; 9]> {
+    let a=arena().lock().ok()?;
+    let [capacity,live,payload,count,allocations]=a.snapshot();
+    Some([capacity,live,payload,count,allocations,a.owned_allocations,a.owned_reuses,a.adopted,a.adopted_bytes])
+}
+#[cfg(target_os = "android")]
+pub(crate) fn adopt(capacity:usize,packet_len:usize,offset:usize,size:usize,
+                    incremental:usize,take:impl FnOnce()->Option<Vec<u8>>)->Option<i64> {
+    arena().lock().ok()?.adopt(capacity,packet_len,offset,size,incremental,take)
+}
+pub(crate) fn output_buffer(size:usize,ceiling:usize)->Option<Vec<u8>> {
+    if size==0 || size>ceiling {return None;}
+    #[cfg(target_os = "android")]
+    { arena().lock().ok()?.take_output(size,ceiling) }
+    #[cfg(not(target_os = "android"))]
+    { let mut b=Vec::new();b.try_reserve_exact(size).ok()?;b.resize(size,0);Some(b) }
+}
 
 /// Used only for the private JNI view. Its caller must keep the allocation
 /// alive until all Java views have been retired; no raw pointer is retained
@@ -138,8 +222,10 @@ pub fn snapshot() -> Option<[u64; 5]> { Some(arena().lock().ok()?.snapshot()) }
 pub fn view(id: i64) -> Option<(*mut u8, usize)> {
     let mut a = arena().lock().ok()?;
     if !a.mark_viewed(id) {return None;}
+    let range=a.ranges.get(&id).cloned();
     let bytes = a.live.get_mut(&id)?;
-    Some((bytes.as_mut_ptr(), bytes.len()))
+    let view=match range { Some(r)=>bytes.get_mut(r)?,None=>bytes.as_mut_slice() };
+    Some((view.as_mut_ptr(), view.len()))
 }
 
 #[cfg(test)]
@@ -229,5 +315,56 @@ mod tests {
         for id in ids { assert!(a.release(id)); }
         a.trim();
         assert_eq!(a.charged, 0);
+    }
+    #[test]
+    fn owned_output_adoption_keeps_same_pointer_and_charges_once() {
+        let mut arena=Arena::default();
+        let keep=arena.allocate(1).unwrap();
+        let mut output=arena.take_output(1024,2048).unwrap();
+        output[16..].fill(7);
+        let ptr=output.as_ptr();
+        let capacity=output.capacity();
+        assert!(arena.adopt(capacity,1024,16,1008,capacity-1,||panic!("rejected transfer consumed output")).is_none());
+        let id=arena.adopt(capacity,1024,16,1008,capacity,||Some(output)).unwrap();
+        assert_eq!(arena.live[&id].as_ptr(),ptr);
+        assert_eq!(arena.ranges[&id],16..1024);
+        assert_eq!(arena.snapshot()[2],1009);
+        assert_eq!(arena.adopted,1);
+        assert_eq!(arena.adopted_bytes,1008);
+        assert!(arena.write_unpublished(id,1008,|_|panic!("adopted bytes are immutable")).is_none());
+        assert!(arena.release(id));
+        let reused=arena.take_output(960,2048).unwrap();
+        assert_eq!(reused.as_ptr(),ptr);
+        assert!(reused.iter().all(|&b|b==0));
+        assert_eq!(arena.owned_allocations,1);
+        assert_eq!(arena.owned_reuses,1);
+        assert!(arena.release(keep));
+        assert_eq!(arena.snapshot()[0],0);
+    }
+
+    #[test]
+    fn build_886_fragment_sizes_replay_with_bounded_capacity() {
+        let sizes=[7895615,6988629,6861401,6582662,6434449,6215677,6932098,6932098,
+            6577768,7313173,6215467,7076904,7895615,6988629,6861401,6582662,6434449,
+            6857997,6665906,6415811,6056382,6601462,6640173,6951403,6837369,6357568,
+            6380200,6424259,6613333,7439555,6507094,7220002,6436775,7137153];
+        let mut a=Arena::default();
+        let mut cached=std::collections::VecDeque::new();
+        let mut peak=0;
+        for size in sizes {
+            let packet_len=size+1024;
+            let output=a.take_output(packet_len,16*1024*1024).unwrap();
+            let capacity=output.capacity();
+            peak=peak.max(a.charged+capacity);
+            let id=a.adopt(capacity,packet_len,1024,size,MAX_BYTES,||Some(output)).unwrap();
+            cached.push_back(id);
+            if cached.len()>3 {assert!(a.release(cached.pop_front().unwrap()));}
+            assert!(a.charged<=MAX_BYTES);
+        }
+        assert!(a.owned_allocations<=20);
+        assert!(peak<=30*1024*1024);
+        assert_eq!(a.adopted,34);
+        for id in cached {assert!(a.release(id));}
+        assert_eq!(a.charged,0);
     }
 }

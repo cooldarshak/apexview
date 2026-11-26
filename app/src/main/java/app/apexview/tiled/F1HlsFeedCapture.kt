@@ -18,6 +18,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import java.util.concurrent.Executors
@@ -81,7 +82,9 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         var acquired: HevcArchiveVodSession? = null
         try { return withContext(Dispatchers.IO) {
             require(feeds.size in 1..app.apexview.AppState.MAX_SINGLE_DECODER_FEEDS && feeds.map { it.label }.distinct().size == feeds.size)
-            val perFeed = mapArchiveFeedsBounded(feeds) { feed -> offers.getOrPut(feed.label) { loadOffers(feed) } }
+            val perFeed = mapArchiveFeedsBounded(feeds) { feed ->
+                runInterruptible { offers.getOrPut(feed.label) { loadOffers(feed) } }
+            }
             val (selected, playlists, inits) = loadFittingVod(perFeed, preferredHeight, minimumHeight,
                 positionMs, clockLabel, preferredHeights)
             val probeIndexes = probeSegmentIndexes(selected, playlists, positionMs, clockLabel)
@@ -115,7 +118,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 if (separate != null) {
                     val mandatory = commentary != null && offer.feed.label == clockLabel
                     val audioPlaylist = try {
-                        parse(separate, offer.master) as? HlsMediaPlaylist
+                        runInterruptible { parse(separate, offer.master) } as? HlsMediaPlaylist
                             ?: throw PermanentCaptureException("Archive audio rendition is not a media playlist")
                     } catch (cancelled: CancellationException) {
                         throw cancelled
@@ -180,7 +183,10 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 session = HevcArchiveVodSession(reader, owned, clockLabel, maximumOutputWidth = maximumOutputWidth,
                     audioUri = audio, audioUris = selectableAudioUris, stableAudioUris = stableAudioUris,
                     captionSources = captionSources)
-                session.prepare(positionMs)
+                // A seek cancels blocking capture, rather than waiting for
+                // the obsolete probe to fetch and compose an entire group.
+                val preparedSession = requireNotNull(session)
+                runInterruptible(Dispatchers.IO) { preparedSession.prepare(positionMs) }
                 coroutineContext.ensureActive()
                 acquired = session
                 session
@@ -205,7 +211,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         while (true) {
             val selected = if (independent) chooseIndividual(offers, preferredHeights, preferredHeight, minimumHeight)
                 else chooseCommon(offers, preferredHeight, perFeed.size, minimumHeight)
-            val playlists = mapArchiveFeedsBounded(selected, block = ::loadMedia)
+            val playlists = mapArchiveFeedsBounded(selected) { offer -> runInterruptible { loadMedia(offer) } }
             require(playlists.all { it.hasEndTag && it.segments.isNotEmpty() }) {
                 "Archive VOD requires complete HLS replay playlists"
             }
@@ -216,7 +222,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             }
             val probes = probeSegmentIndexes(selected, playlists, positionMs, clockLabel)
             val inits = mapArchiveFeedsBounded(selected.indices.toList()) { i ->
-                loadInit(selected[i], playlists[i], playlists[i].segments[probes[i]])
+                runInterruptible { loadInit(selected[i], playlists[i], playlists[i].segments[probes[i]]) }
             }
             val tracks = inits.map { it.report.tracks.singleOrNull { track -> track.handler == "vide" }
                 ?: throw PermanentCaptureException("HLS archive must contain one video track") }

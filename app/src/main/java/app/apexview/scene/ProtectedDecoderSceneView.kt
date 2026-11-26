@@ -220,7 +220,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
                 frameTimeNanos, scene?.sourceFrameRate ?: 0.0, refreshHz,
                 playbackSpeed, thermalForOutput(), pipelineHealthy(),
-                pendingAgeNs = frameDemand.pendingAgeNs(callbackStartNs))) {
+                pendingAgeNs = frameDemand.pendingAgeNs(callbackStartNs),
+                coalescedPending = frameDemand.hasCoalescedPendingVideo())) {
                 pacing.onPacingDeferred()
                 displayClock?.postFrameCallback(this)
                 return@guarded
@@ -614,6 +615,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "codecCallbackToLatchP95UpperMs=${correlation?.callbackToLatch?.percentileUpperMs(95) ?: 0} " +
                 "latchToSwapP95UpperMs=${correlation?.latchToSwap?.percentileUpperMs(95) ?: 0} " +
                 "decoderInputSurfaceId=${input?.let { System.identityHashCode(it) } ?: 0} " +
+                "outputSurfaceId=${frameRateOutput?.let { System.identityHashCode(it) } ?: 0} outputSize=${outputWidth}x${outputHeight} " +
                 "decoderAtlas=${scene?.atlasWidth ?: 0}x${scene?.atlasHeight ?: 0} " +
                 SceneBufferQueueEvidence.cadenceFields(metrics.latched, metrics.presented,
                     if (lastLogNs > 0L) now - lastLogNs else 0L, selectedDisplayHz, expectedFps) + " " +

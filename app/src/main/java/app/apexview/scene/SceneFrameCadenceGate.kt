@@ -15,10 +15,13 @@ internal class SceneFrameCadenceGate {
 
     fun shouldDefer(frameTimeNs: Long, sourceFps: Double, displayHz: Float,
                     playbackSpeed: Float = 1f, thermalStatus: Int = Int.MAX_VALUE,
-                    pipelineHealthy: Boolean = true, pendingAgeNs: Long = 0L): Boolean {
+                    pipelineHealthy: Boolean = true, pendingAgeNs: Long = 0L,
+                    coalescedPending: Boolean = false): Boolean {
         // Match the submitted cadence, NOT the unthinned media clock.
         // The current FrameThinner keeps accelerated 50fps footage near 50 output
         // frames/s. Never defer decoder SurfaceTexture.updateTexImage().
+        // Once a newer image has replaced a pending one, do not prolong that backlog.
+        if (coalescedPending) { consecutiveDeferrals = 0; return false }
         val outputFps = SceneFrameRatePolicy.composedOutputHint(
             sourceFps, playbackSpeed, displayHz, thermalStatus, pipelineHealthy)
         if ((outputFps !in 49f..51f && outputFps !in 74f..76f) || displayHz !in 90f..165f ||

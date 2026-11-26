@@ -682,6 +682,9 @@ class FeedPlayer(
                     format.width > 0 && format.height > 0) format.width to format.height else null
                 playbackEvent("video-input-rendition", "requestedCap=${selectedVideoQuality.label} " +
                     "inputPixels=${format.width}x${format.height} composed=${archiveVodSession != null || protectedLiveDashSource != null}")
+                playbackEvent("codec-owner-format", "decoder=$decoder count=$activeVideoDecoderCount " +
+                    "coded=${format.width}x${format.height} fps=${format.frameRate} " +
+                    "declaredMaxInputBytes=${format.maxInputSize} actualCodecBytes=NOT_MEASURED")
                 captureVideoProfile(format, C.TRACK_TYPE_VIDEO, "video-input")
             }
 
@@ -714,6 +717,7 @@ class FeedPlayer(
                 decoder = decoderName
                 if (archiveVodSession != null) firstFrameRendered = false
                 activeVideoDecoderCount++
+                playbackEvent("codec-owner-init", "decoder=$decoderName count=$activeVideoDecoderCount actualCodecBytes=NOT_MEASURED")
                 updateMemoryOwner()
                 if (stream.allowHevcProfileProbe) {
                     HevcFeedProfileCapture.updateVideoDecoder(
@@ -726,6 +730,7 @@ class FeedPlayer(
             override fun onVideoDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
                 sceneCodecCorrelation.reset()
                 activeVideoDecoderCount = (activeVideoDecoderCount - 1).coerceAtLeast(0)
+                playbackEvent("codec-owner-release", "decoder=$decoderName count=$activeVideoDecoderCount actualCodecBytes=NOT_MEASURED")
                 if (activeVideoDecoderCount == 0) { decoder = ""; nativeSourceRendition = null }
                 updateMemoryOwner()
                 refresh()

@@ -129,7 +129,9 @@ internal object NativeClearArchiveJob {
                       foreground: Boolean, timeoutMs: Long, nativeContext: android.content.Context? = null,
                       checkCurrent: () -> Unit): WindowOutput =
         executeSubmitted(engine, count, timeoutMs, checkCurrent, nativeContext) {
-            if (engine.budget.compactAtlas)
+            if (engine.budget.compactAtlas && count == 1 && nativeContext != null)
+                engine.submitClearAtlasOwnedParts(engine.generation(), packet.arrays, packet.size, foreground, timeoutMs)
+            else if (engine.budget.compactAtlas)
                 engine.submitClearAtlasParts(engine.generation(), packet.arrays, packet.size, foreground, timeoutMs)
             else {
                 // Keep the diagnostic G-A bridge compatible with injected test engines.

@@ -131,6 +131,22 @@ class ArchitectureGBAndroidTest {
                     assertArrayEquals(expectedMedia.copyOfRange(0, minOf(32, mediaSize)), range.toByteArray())
                 }
             } finally { cache.clear(); native.close() }
+
+            val ownedToken = engine.submitClearAtlasOwnedParts(engine.generation(), parts, input.size, true, 5000)
+            assertTrue(ownedToken > 0)
+            assertEquals(expected.size.toLong(), await(engine, ownedToken))
+            val ownedBefore = engine.copyStats()
+            val owned = requireNotNull(NativeFragmentLease.fromEngine(mediaSize, null, engine, ownedToken, 8 + initSize))
+            try {
+                assertTrue(owned.matches(expectedMedia))
+                assertEquals(ownedBefore.nativeOutputBytes, engine.copyStats().nativeOutputBytes)
+                assertEquals(ownedBefore.javaOutputBytes, engine.copyStats().javaOutputBytes)
+                assertEquals(1L, engine.release(ownedToken))
+                engine.seek()
+                assertTrue(owned.matches(expectedMedia))
+                engine.close()
+                assertTrue(owned.matches(expectedMedia))
+            } finally { owned.close() }
         }
         Log.i("PitwallGC", "Compact direct slot transfer, exact parity and stale lease rejection PASS")
     }

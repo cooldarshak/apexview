@@ -90,4 +90,17 @@ class SceneFrameDemandTest {
         assertTrue(demand.videoArrived())
         assertTrue(demand.beginFrame())
     }
+    @Test fun unavailableDrawPreservesOldestAgeAndCoalescedBacklog() {
+        val demand = SceneFrameDemand()
+        assertTrue(demand.videoArrived(100L))
+        assertFalse(demand.videoArrived(200L))
+        assertTrue(demand.hasCoalescedPendingVideo())
+        assertTrue(demand.beginFrame())
+        demand.onDrawUnavailable(true)
+        assertTrue(demand.requestDraw())
+        assertEquals(300L, demand.pendingAgeNs(400L))
+        assertTrue(demand.hasCoalescedPendingVideo())
+        assertTrue(demand.beginFrame())
+        assertFalse(demand.hasCoalescedPendingVideo())
+    }
 }

@@ -106,14 +106,15 @@ internal object HevcClearCmafGridComposer {
     )
 
     /** A single clear source needs no stitching. Keep its bytes, after the same protection/syntax checks. */
-    fun passThrough(feed: Feed): Output {
+    fun passThrough(feed: Feed, transferMediaOwnership: Boolean = false): Output {
         val parsed = parseFeed(feed, 0, retainSpans = false)
         try {
             val sps = parsed.config.sps.single()
             require(parsed.firstVclType?.let { it in 16..21 } == true) {
                 "A standalone replay segment must begin with an IRAP picture"
             }
-            return Output(feed.initializationSegment.copyOf(), feed.mediaFragments.map { it.copyOf() },
+            return Output(feed.initializationSegment.copyOf(),
+                if (transferMediaOwnership) feed.mediaFragments.toList() else feed.mediaFragments.map { it.copyOf() },
                 sps.width, sps.height, sps.displayWidth, sps.displayHeight,
                 parsed.fragments.sumOf { it.samples.size }, parsed.fragments.size, emptyList(),
                 sourceNalCopyBytesAvoided = parsed.validatedNalBytes)

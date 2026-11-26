@@ -97,10 +97,34 @@ internal class NativeFragmentLease private constructor(private val shared: Share
             buildOwned(size, context) { _, buffer -> writer(buffer) }
 
         fun fromEngine(size: Int, context: android.content.Context?, engine: NativeStitchingEngine,
-                       token: Long, offset: Int): NativeFragmentLease? =
-            buildOwned(size, context, beforeView = { id ->
+                       token: Long, offset: Int): NativeFragmentLease? {
+            // Exact-size owned jobs can move the final Rust Vec into the
+            // fragment arena. Legacy jobs and admission refusal keep the
+            // existing bounded copy path; no change to decoder or quality.
+            val adopted = NativeStitchingDeviceBudget.admit {
+                val h = context?.let { NativeStitchingDeviceBudget.sample(it) }
+                val incremental = if (context == null) 192L * 1024 * 1024
+                    else if (h == null || h.lowMemory || h.available <= h.threshold) 0L
+                    else (h.available - h.threshold) / 8
+                engine.adoptFragment(token, offset, size, incremental)
+            }
+            if (adopted > 0) {
+                var transferred = false
+                try {
+                    // Adoption consumed the output. A view failure must
+                    // propagate, never attempt a copy from the old slot.
+                    val b = requireNotNull(NativeStitchingEngine.fragmentView(adopted))
+                    require(b.isDirect && b.capacity() == size)
+                    b.clear()
+                    val lease = NativeFragmentLease(Shared(adopted, b.asReadOnlyBuffer(), size))
+                    transferred = true
+                    return lease
+                } finally { if (!transferred) NativeStitchingEngine.releaseFragment(adopted) }
+            }
+            return buildOwned(size, context, beforeView = { id ->
                 check(engine.readToFragment(token, offset, id, size) == size.toLong())
             }) { _, buffer -> buffer.position(size) }
+        }
 
         private fun buildOwned(size: Int, context: android.content.Context?,
                                beforeView: ((Long) -> Unit)? = null,

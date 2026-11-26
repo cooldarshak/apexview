@@ -7,30 +7,38 @@ the device-shell permissions that previously allowed `perfetto` and `logcat`.
 If the device rejects a Perfetto data source, report the error; do not turn
 off Android security protections or downgrade the trace silently.
 
-## Native allocation-site capture (Build 884 follow-up)
+## Native allocation-site capture (Build 886 follow-up)
 
-The two 26 November system traces contained no native heap profile packets.
-They establish timing, not allocation stacks. Use this separate 60-second
-configuration on the S22 Ultra; do not repeat a standard system trace for
-this question. Keep diagnostic logging on. Use the same four feeds (1080p +
-3 x 480p), same archive segment and speed, and temperature/refresh settings.
-Fully close and relaunch Pitwall before each engine selection measurement;
-record the actual thermal status and use matched conditions. Do not turn
-off Android thermal protections. The new app thermal setting may stay ON
-for the controlled comparison, or use the same setting in both runs.
+The supplied traces have no native heap allocation stacks. Start this dedicated
+90-second capture **before opening the replay**, since heapprofd observes
+allocations while profiling is active, not allocations made earlier. Use a
+fresh app process at the browse screen, enable diagnostics, select the desired
+engine and keep identical quality (1080p + 3 x 480p), layout, tower/map, speed,
+temperature and refresh settings for both runs. Keep Android protections intact.
 
-Download the configuration from the exact tested commit (replace COMMIT
-with its full SHA), then run while steady playback continues:
+Save [capture-memory.sh](capture-memory.sh) from the exact tested commit to
+`/sdcard/Download/capture-memory.sh`. With Pitwall at the browse screen, paste:
 
 ```sh
-curl -fL -o /sdcard/Download/pitwall-memory.cfg https://raw.githubusercontent.com/cooldarshak/apexview/COMMIT/docs/perfetto/pitwall-memory.cfg
-cat /sdcard/Download/pitwall-memory.cfg | perfetto --txt -c - -o - > /sdcard/Download/pitwall-rust-memory.perfetto-trace
+sh /sdcard/Download/capture-memory.sh start rust
 ```
 
-Use a separate filename for Kotlin. If curl cannot access the private
-repository, save the config directly from the repository using the browser.
-If a producer is unavailable or permission is denied, send the exact error.
-Export the matching in-app log and both traces. No root or security bypass.
+Return to Pitwall immediately and open the replay. After 90 seconds, while
+playback is still active, return to aShell and paste:
+
+```sh
+sh /sdcard/Download/capture-memory.sh collect rust
+```
+
+Export the matching app log and the three named Download files. Repeat from a
+fresh process with `kotlin` in both commands. If startup fails, share the
+exact shell error and producer report; do not replace the capture with a
+general system trace. The script embeds the versioned config, tests heapprofd
+producer availability and collects package-scoped meminfo/layer names. A
+producer being listed does not establish successful profiling of the target.
+SurfaceFlinger/GPU data are optional device-dependent evidence; a missing
+producer or counter is not zero usage. The capture is diagnostic, not a
+controlled unprofiled PSS acceptance run.
 
 The analyst must first run
 `python scripts/check_pitwall_memory_trace.py TRACE --require-heap`.

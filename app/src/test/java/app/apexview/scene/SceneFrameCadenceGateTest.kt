@@ -90,4 +90,10 @@ class SceneFrameCadenceGateTest {
         gate.onVideoDraw(3_000_000_000L)
         assertFalse(gate.shouldDefer(2_000_000_000L, 50.0, 120f))
     }
+    @Test fun coalescedBacklogDoesNotWaitAnotherVsync() {
+        val gate = SceneFrameCadenceGate()
+        gate.onVideoDraw(1_000_000_000L)
+        assertTrue(gate.shouldDefer(1_008_333_333L, 50.0, 120f))
+        assertFalse(gate.shouldDefer(1_008_333_333L, 50.0, 120f, coalescedPending = true))
+    }
 }

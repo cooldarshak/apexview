@@ -253,12 +253,24 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeCopy(
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeSubmitAtlasParts(
     mut env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong,generation:jlong,
     parts:jni::objects::JObjectArray<'_>,length:jint,foreground:jboolean,slack:jlong)->jlong {
+    submit_atlas_parts(&mut env,handle,generation,parts,length,foreground,slack,false)
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeSubmitAtlasOwnedParts(
+    mut env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong,generation:jlong,
+    parts:jni::objects::JObjectArray<'_>,length:jint,foreground:jboolean,slack:jlong)->jlong {
+    submit_atlas_parts(&mut env,handle,generation,parts,length,foreground,slack,true)
+}
+#[allow(clippy::too_many_arguments)]
+fn submit_atlas_parts(env:&mut JNIEnv<'_>,handle:jlong,generation:jlong,parts:jni::objects::JObjectArray<'_>,
+                      length:jint,foreground:jboolean,slack:jlong,owned:bool)->jlong {
     guarded(||{
         let (Ok(len),Ok(ms))=(usize::try_from(length),u64::try_from(slack)) else {return i64::from(INVALID);};
         if len==0 || len>crate::bmff::MAX_ATLAS_BYTES{return i64::from(INVALID);}
         let Ok(count)=env.get_array_length(&parts) else {return i64::from(INVALID);};
         if !(1..=256).contains(&count){return i64::from(INVALID);}
-        engine_call(handle,|engine|engine.submit_clear_atlas_with(generation,len,foreground!=0,ms,|dst|{
+        engine_call(handle,|engine|{
+            let fill=|dst:&mut [u8]|{
             let mut offset=0usize;
             for index in 0..count {
                 let Ok(obj)=env.get_object_array_element(&parts,index) else {return false;};
@@ -277,7 +289,28 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeSubmi
                 offset=end;
             }
             offset==dst.len()
-        }))
+            };
+            if owned {engine.submit_clear_atlas_owned_with(generation,len,foreground!=0,ms,fill)}
+            else {engine.submit_clear_atlas_with(generation,len,foreground!=0,ms,fill)}
+        })
+    })
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeAdoptAtlasFragment(
+    _env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong,token:jlong,offset:jint,length:jint,incremental:jlong)->jlong {
+    guarded(|| {
+        let (Ok(offset),Ok(size),Ok(incremental))=(usize::try_from(offset),usize::try_from(length),usize::try_from(incremental))
+            else {return INVALID;};
+        session_call(handle,|s|{
+            let Some((capacity,packet_len))=s.engine.owned_output_dimensions(token,offset,size)
+                else {return BACKPRESSURE;};
+            let bridge=s.input.as_ref().map_or(0,BridgeBuffer::capacity)+s.output.as_ref().map_or(0,BridgeBuffer::capacity);
+            let spare=incremental.saturating_sub(s.engine.future_commitment(bridge));
+            // Moving the buffer adds no resident allocation NOW, but reserve
+            // enough incremental headroom for the next bounded output job.
+            crate::fragment_storage::adopt(capacity,packet_len,offset,size,spare,
+                ||s.engine.take_owned_output(token,capacity,packet_len)).unwrap_or(BACKPRESSURE)
+        })
     })
 }
 #[no_mangle]
@@ -449,11 +482,11 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeEngin
 ) -> jni::sys::jlongArray {
     catch_unwind(AssertUnwindSafe(|| {
         let r = registry().lock().expect("engine registry");
-        let values = r.active.as_ref().map_or([0; 9], |s| {
+        let values = r.active.as_ref().map_or([0; 10], |s| {
             let bridge=s.input.as_ref().map_or(0,BridgeBuffer::capacity)+s.output.as_ref().map_or(0,BridgeBuffer::capacity);
             let stats=s.engine.payload_stats().map(|v|i64::try_from(v).unwrap_or(i64::MAX));
             [s.id,s.engine.reserved() as i64,s.engine.allocated_payload_bytes() as i64,bridge as i64,
-                stats[0],stats[1],stats[2],stats[3],s.engine.future_commitment(bridge) as i64]
+                stats[0],stats[1],stats[2],stats[3],s.engine.future_commitment(bridge) as i64,s.engine.owned_running() as i64]
         });
         let Ok(array) = env.new_long_array(values.len() as jint) else { return std::ptr::null_mut(); };
         if env.set_long_array_region(&array, 0, &values).is_err() { return std::ptr::null_mut(); }

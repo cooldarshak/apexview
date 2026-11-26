@@ -6,6 +6,65 @@ When the user instructs completion of an agreed scope (including M1–M13), impl
 
 
 
+## Build 886 follow-up — owned-output publication and measured bottleneck investigation (26 November 2026)
+
+Baseline: Build 886 GREEN (dd4e2b45008b6c330fb8645fa0f66a39ef30ebcf).
+The latest supplied log contains Build 884 and 886 captures; use version/PID
+boundaries. Build 886 PID 30798, app 1.0.1772: 34 successful native-backed
+outputs, 25.3 KiB cumulative Java output copies, one hardware decoder, no
+persistent media backing after shutdown. Median PSS 646.3 MiB versus prior
+Kotlin 605.0 MiB (uncontrolled cross-session comparison); agreed target
+remains <=484 MiB against that baseline. Native heap 84.5 MiB and graphics
+267.1 MiB are not independent additive categories. Native allocation-site
+stacks are missing from the supplied trace. Latch ~49.9, GL submission ~48.75
+fps; not proof of scanout. No vendor buffer-count or allocator tuning based
+on these aggregate metrics.
+
+Consolidated scope:
+- M4/M6/M8: best-fit reuse, cap slack at min(12.5%, 1 MiB), discard unsuitable
+  idle backing before new allocation, replace stale free backing on release.
+  Existing 64 MiB total, 12 live, two free/8 MiB idle caps unchanged. Replay
+  the 34 measured media sizes with a simple FIFO three-entry model (no pinned
+  readers, seek effects, allocator overhead or OS RSS): old 33 allocations
+  / 34.46 MiB peak; revised 16 / 27.86 MiB. Regression replays sizes plus a
+  small packet prefix and bounds peak and allocations.
+- M3/M6: single-fragment clear compact worker calculates final size after
+  validation and writes directly into exact-sized owned output (or bounded
+  best-fit reused backing). JNI moves the Vec, not its contents, into immutable
+  fragment arena; adoption must pass generation, exclusive reading lease,
+  range, capacity and headroom checks before consuming output. Only media
+  slice is visible to private JVM lease; header/init still copied separately.
+  Retain old bounded native-copy/heap fallbacks, fixed multi-fragment window,
+  all existing clear/protected/Cast/decoder paths. No codec/DRM or video
+  quality change. Count adoption, owned-output allocations and reuses.
+  During owned running jobs native payload is a known lower bound, with
+  remaining commitment still charged; peak-pair counter is a conservative
+  bound. Explicitly distinguish these from actual resident memory.
+- M2/M3: interruptible finite HLS archive preparation; dispose cancelled
+  preflight before decoder handoff, wipe unneeded input payload as soon as
+  composed output ownership is resolved; explicit one-feed clear pass-through
+  ownership transfer avoids redundant full-media copy. No rolling/protected
+  cancellation contract or player buffering thresholds changed.
+- Pacing: do not further defer an already coalesced pending picture; preserve
+  its age/backlog across unavailable draw until explicit valid output.
+  Both renderers use same guard; no new decoder, queue, blocking or surface.
+  Log codec lifecycle, declared format sizes, input/output surface identity
+  and output geometry. Declared format/graphics categories are not vendor
+  buffer allocation sizes.
+- M1/M12/M13 blocker: dedicated 90s pre-playback heapprofd configuration and
+  phone-only start/collect script, explicit layer dump mode, producer check,
+  package-scoped memory and layer snapshots, exact build symbols. Native
+  heap allocation site attribution, graphics/vendor codec byte attribution,
+  actual PSS target and pacing improvements still require device evidence.
+  No speculative allocator replacement or arbitrary codec surface changes.
+- Verification: full Python suite 110/110, shell syntax checked; host Rust
+  byte parity and native transfer fixture, bounded arena replay/immutable
+  ownership tests, Android ownership/seek/close regression, Kotlin
+  cancellation/pacing/diagnostic tests, and expanded JNI ABI verification
+  staged. Rust/Android compilers unavailable in remote staging environment:
+  CI and physical acceptance remain separate and pending. All unconditional
+  coding above consolidated before one commit, no interim builds.
+
 ## Build 885 CI correction (26 November 2026)
 
 Build 885 (967297cf82c440269bb2fa1bb12cfc65cc11d8a7) failed the Python packaging contract: the Build 855 regression still required a JVM-only media array and its size expression. Native host tests passed 59/59, including sanitizer execution; Android compilation and publication were not reached. Restore the strict single heap fragment invariant and explicitly reject simultaneous native and heap media ownership. Extend the original regression to require exactly one output size derived from either backing, both publication routes preceding budget accounting, and unpublished native cleanup. Run the entire CI Python discovery suite before committing: 110/110 PASS. All Build 885 engineering changes and mandatory CI gates remain intact. Physical attribution and PSS acceptance still pending.

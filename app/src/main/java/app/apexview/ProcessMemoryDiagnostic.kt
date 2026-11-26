@@ -51,21 +51,24 @@ internal object ProcessMemoryDiagnostic {
     }
 
     fun engineFields(values: LongArray?): String {
-        if (values == null || values.size != 9 || values.any { it < 0L } ||
+        if (values == null || (values.size != 9 && values.size != 10) || values.any { it < 0L } ||
             values[2] > values[1] || values[3] > values[1] - values[2] || values[5] < values[2] || values[5] > values[1]) return "nativeEngineArena=UNAVAILABLE"
         return "nativeEngineId=${values[0]} nativeEngineReservedBytes=${values[1]} " +
             "nativeEnginePayloadBytes=${values[2]} nativeEngineBridgeBytes=${values[3]} " +
             "nativeEnginePayloadAllocations=${values[4]} nativeEnginePeakPayloadBytes=${values[5]} " +
-            "nativeEngineInputCopyBytes=${values[6]} nativeEngineOutputCopyBytes=${values[7]} nativeEngineFutureCommitmentBytes=${values[8]}"
+            "nativeEngineInputCopyBytes=${values[6]} nativeEngineOutputCopyBytes=${values[7]} nativeEngineFutureCommitmentBytes=${values[8]}" +
+            (if (values.size == 10) " nativeEngineOwnedRunning=${values[9]} nativeEnginePayloadLowerBound=${values[9] > 0}" else "")
     }
 
     // A null snapshot means the library was not loaded or the query failed;
     // zero is reserved for a successfully measured empty native arena.
     fun fragmentFields(values: LongArray?): String {
-        if (values == null || values.size != 5 || values.any { it < 0L } ||
+        if (values == null || (values.size != 5 && values.size != 9) || values.any { it < 0L } ||
             values[2] > values[1] || values[1] > values[0]) return "nativeFragmentArena=UNAVAILABLE"
         return "nativeFragmentCapacityBytes=${values[0]} nativeFragmentLiveCapacityBytes=${values[1]} " +
             "nativeFragmentLivePayloadBytes=${values[2]} nativeFragmentFreeCapacityBytes=${values[0] - values[1]} " +
-            "nativeFragmentBackings=${values[3]} nativeFragmentAllocations=${values[4]}"
+            "nativeFragmentBackings=${values[3]} nativeFragmentAllocations=${values[4]}" +
+            (if (values.size == 9) " nativeOwnedOutputAllocations=${values[5]} nativeOwnedOutputReuses=${values[6]} " +
+                "nativeAdoptedFragments=${values[7]} nativeAdoptedBytes=${values[8]}" else "")
     }
 }

@@ -5,7 +5,7 @@
 //! request; Rust verifies every output seam and every selected slice.
 //! Each source block carries a bounded window beginning at random access.
 use crate::bmff::{Error, Reader, MAX_ATLAS_BYTES};
-use crate::clear_atlas::{Atlas, Cell, FragmentBoundary, Grid, MAX_FEEDS};
+use crate::clear_atlas::{Atlas, Cell, FragmentBoundary, FragmentOutput, Grid, MAX_FEEDS};
 use crate::hevc_poc::Tracker;
 
 const MAGIC: &[u8; 4] = b"GBC1";
@@ -21,6 +21,12 @@ pub(crate) fn workspace_reserve(input_capacity: usize, output_capacity: usize) -
         .checked_mul(4)?
         .checked_add(output_capacity)?
         .checked_add(8 * 1024 * 1024)
+}
+
+enum PacketOutput<'a> { Fixed(&'a mut [u8]), Owned(&'a mut Vec<u8>,usize) }
+impl PacketOutput<'_> {
+    fn limit(&self)->usize {match self {Self::Fixed(b)=>b.len(),Self::Owned(_,limit)=>*limit}}
+    fn bytes(&mut self)->&mut [u8] {match self {Self::Fixed(b)=>b,Self::Owned(b,_)=>b.as_mut_slice()}}
 }
 
 #[derive(Default)]
@@ -58,10 +64,19 @@ impl Dispatcher {
         input: &[u8],
         output: &mut [u8],
     ) -> Result<usize, Error> {
-        if input.len() > MAX_ATLAS_BYTES || output.len() > MAX_ATLAS_BYTES {
+        self.run_impl(generation,input,PacketOutput::Fixed(output))
+    }
+
+    pub(crate) fn run_owned_single(&mut self,generation:i64,input:&[u8],output:&mut Vec<u8>,
+                                   ceiling:usize)->Result<usize,Error> {
+        self.run_impl(generation,input,PacketOutput::Owned(output,ceiling))
+    }
+
+    fn run_impl(&mut self,generation:i64,input:&[u8],mut output:PacketOutput<'_>)->Result<usize,Error> {
+        if input.len() > MAX_ATLAS_BYTES || output.limit() > MAX_ATLAS_BYTES {
             return Err(Error::Limit);
         }
-        if output.len() <= OUTPUT_HEADER { return Err(Error::Capacity); }
+        if output.limit() <= OUTPUT_HEADER { return Err(Error::Capacity); }
         let mut reader = Reader::new(input);
         let magic = reader.take(4)?;
         let filter = magic == FILTER_MAGIC;
@@ -82,6 +97,7 @@ impl Dispatcher {
         let field = usize::from(reader.u16()?);
         let window = magic == WINDOW_MAGIC || filter && field > 1;
         let count = if window { field } else { 1 };
+        if count!=1 && matches!(&output,PacketOutput::Owned(..)) {return Err(Error::Unsupported);}
         if !(2..=MAX_FEEDS).contains(&feeds)
             || !(1..=20).contains(&column_count)
             || !(1..=22).contains(&row_count)
@@ -168,7 +184,7 @@ impl Dispatcher {
         let atlas = &self.cached.as_ref().ok_or(Error::Metadata)?.atlas;
         let init = atlas.initialization();
         let media_offset = OUTPUT_HEADER + init.len();
-        if media_offset > output.len() { return Err(Error::Capacity); }
+        if media_offset > output.limit() { return Err(Error::Capacity); }
         let mut cursor = media_offset;
         let mut max_headers = 0;
         let mut trackers = [Tracker::default(); MAX_FEEDS];
@@ -177,24 +193,28 @@ impl Dispatcher {
         for (index, row) in media[..count].iter().enumerate() {
             let number = sequence.checked_add(index as u32).ok_or(Error::Limit)?;
             let start = cursor.checked_add(if window { 4 } else { 0 }).ok_or(Error::Limit)?;
-            let destination = output.get_mut(start..).ok_or(Error::Capacity)?;
-            let (size, end, gate) = atlas.write_window_fragment(
+            let destination=match &mut output {
+                PacketOutput::Fixed(b)=>FragmentOutput::Fixed(b.get_mut(start..).ok_or(Error::Capacity)?),
+                PacketOutput::Owned(b,limit)=>FragmentOutput::Owned{packet:b,start,ceiling:*limit},
+            };
+            let (size, end, gate) = atlas.write_window_fragment_to(
                 &row[..feeds], number, destination, &mut trackers,
                 FragmentBoundary { previous_end, standalone: count == 1 }, &mut self.header_slab,
             )?;
             max_headers = max_headers.max(self.header_slab.len());
             can_gate_filter &= gate;
             if window {
-                output[cursor..start].copy_from_slice(&(size as u32).to_be_bytes());
+                output.bytes()[cursor..start].copy_from_slice(&(size as u32).to_be_bytes());
             }
             cursor = start.checked_add(size).ok_or(Error::Limit)?;
             previous_end = Some(end);
         }
         if filter != can_gate_filter { return Err(Error::Metadata); }
         let size = cursor - media_offset;
-        output[..4].copy_from_slice(&(init.len() as u32).to_be_bytes());
-        output[4..OUTPUT_HEADER].copy_from_slice(&(size as u32).to_be_bytes());
-        output[OUTPUT_HEADER..media_offset].copy_from_slice(init);
+        let bytes=output.bytes();
+        bytes[..4].copy_from_slice(&(init.len() as u32).to_be_bytes());
+        bytes[4..OUTPUT_HEADER].copy_from_slice(&(size as u32).to_be_bytes());
+        bytes[OUTPUT_HEADER..media_offset].copy_from_slice(init);
         // No header descriptor survives the validated job boundary.
         self.header_slab.clear();
         if self.header_slab.capacity() > 64 * 1024 && max_headers <= self.header_slab.capacity() / 4 {

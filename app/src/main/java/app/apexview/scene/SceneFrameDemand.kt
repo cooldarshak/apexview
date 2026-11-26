@@ -8,12 +8,15 @@ internal class SceneFrameDemand {
     private var callbackScheduled = false
     private var videoPending = false
     private var pendingSinceNs = 0L
+    private var coalescedPending = false
+    private var consumedSinceNs = 0L
+    private var consumedCoalesced = false
     // Multiple latched images can collapse into one display submission. This
     // measures coalescing, not codec drops or physical SurfaceFlinger loss.
     private var coalescedVideoArrivals = 0L
 
     fun videoArrived(nowNs: Long = 0L): Boolean {
-        if (videoPending) coalescedVideoArrivals++ else pendingSinceNs = nowNs
+        if (videoPending) { coalescedVideoArrivals++; coalescedPending = true } else pendingSinceNs = nowNs
         videoPending = true
         return requestDraw()
     }
@@ -28,6 +31,8 @@ internal class SceneFrameDemand {
     /** Leave both flags unchanged when the vsync pacing gate postpones a draw. */
     fun hasPendingVideo(): Boolean = callbackScheduled && videoPending
 
+    fun hasCoalescedPendingVideo(): Boolean = videoPending && coalescedPending
+
     fun pendingAgeNs(nowNs: Long): Long =
         if (videoPending && pendingSinceNs > 0L && nowNs >= pendingSinceNs) nowNs - pendingSinceNs else 0L
 
@@ -35,7 +40,9 @@ internal class SceneFrameDemand {
     fun beginFrame(): Boolean {
         check(callbackScheduled) { "Scene frame was not requested" }
         callbackScheduled = false
-        return videoPending.also { videoPending = false; pendingSinceNs = 0L }
+        consumedSinceNs = pendingSinceNs
+        consumedCoalesced = coalescedPending
+        return videoPending.also { discardPendingVideo() }
     }
 
     /**
@@ -46,11 +53,15 @@ internal class SceneFrameDemand {
      */
     fun onDrawUnavailable(hadNewVideo: Boolean) {
         check(!callbackScheduled) { "Unavailable draw must follow beginFrame()" }
-        videoPending = videoPending || hadNewVideo
+        if (hadNewVideo) {
+            videoPending = true
+            pendingSinceNs = consumedSinceNs
+            coalescedPending = consumedCoalesced
+        }
     }
 
     /** Old input pixels cannot satisfy a new atlas epoch; preserve the posted callback. */
-    fun discardPendingVideo() { videoPending = false; pendingSinceNs = 0L }
+    fun discardPendingVideo() { videoPending = false; pendingSinceNs = 0L; coalescedPending = false }
 
     fun takeCoalescedVideoArrivals(): Long = coalescedVideoArrivals.also { coalescedVideoArrivals = 0L }
 
@@ -58,6 +69,8 @@ internal class SceneFrameDemand {
         callbackScheduled = false
         videoPending = false
         coalescedVideoArrivals = 0L
-        pendingSinceNs = 0L
+        discardPendingVideo()
+        consumedSinceNs = 0L
+        consumedCoalesced = false
     }
 }

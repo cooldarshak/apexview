@@ -849,6 +849,29 @@ fn verify_native_lease_mode(packet: &[u8], expected: &[u8], compact: bool) {
         assert_eq!(after[3]-before[3], 12*expected.len() as u64);
         println!("GC_WARM_ATLAS repetitions=12 payloadBytes={pair} reservedBytes={} payloadAllocations={} peakPayloadBytes={} inputCopyBytes={} outputCopyBytes={} byteParity=true", engine.reserved(),after[0],after[1],after[2]-before[2],after[3]-before[3]);
     }
+    if compact && (&packet[..4] == b"GBC1" || (&packet[..4] == b"GBC3" && u16::from_be_bytes([packet[34],packet[35]])==1)) {
+        let generation=engine.generation();
+        let before=engine.payload_stats()[3];
+        let token=engine.submit_clear_atlas_owned_with(generation,packet.len(),true,5000,|dst| {
+            dst.copy_from_slice(packet);true
+        });
+        assert!(token>0);
+        assert_eq!(await_result(&engine,token),expected.len() as i64);
+        let init_len=u32::from_be_bytes(expected[..4].try_into().unwrap()) as usize;
+        let offset=8+init_len;
+        let media_len=expected.len()-offset;
+        let (capacity,len)=engine.owned_output_dimensions(token,offset,media_len).unwrap();
+        assert!(capacity>=len);
+        let owned=engine.take_owned_output(token,capacity,len).unwrap();
+        assert_eq!(owned,expected);
+        assert_eq!(engine.payload_stats()[3],before);
+        assert_eq!(engine.allocated_payload_bytes(),packet.len());
+        assert!(engine.take_owned_output(token,capacity,len).is_none());
+        assert_eq!(engine.release(token),1);
+        assert_eq!(engine.seek(),generation+1);
+        assert_eq!(owned,expected);
+        println!("GC_OWNED_ATLAS byteParity=true mediaCopies=0 ownershipTransfer=true");
+    }
     let invalid =
         engine.submit_clear_atlas(engine.generation(), &packet[..packet.len() - 1], true, 5000);
     assert!(invalid > 0);

@@ -16,13 +16,17 @@ internal class ArchiveCompositionStartup {
     ) {
         val prepared = preflight() // Failure here must never change a playing source.
         try {
+            kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]?.let { job ->
+                if (!job.isActive) throw kotlinx.coroutines.CancellationException("Archive preflight cancelled")
+            }
             sourceDecodersTouched = true
             releaseSources()
             // Replacement can fail after setMediaSource. Roll it back in that case too.
             hostReplaced = true
             replaceHost(prepared)
         } catch (error: Throwable) {
-            try { restoreSources(hostReplaced) } catch (restoreError: Throwable) { error.addSuppressed(restoreError) }
+            if (sourceDecodersTouched) try { restoreSources(hostReplaced) }
+            catch (restoreError: Throwable) { error.addSuppressed(restoreError) }
             throw error
         } finally {
             dispose(prepared)

@@ -27,4 +27,13 @@ class ProcessMemoryDiagnosticTest {
         assertTrue(result.contains("nativeFragmentLivePayloadBytes=70"))
         assertTrue(result.contains("nativeFragmentFreeCapacityBytes=20"))
     }
+    @Test fun ownedTransferCountersAndRunningLowerBoundAreExplicit() {
+        val fragment = ProcessMemoryDiagnostic.fragmentFields(longArrayOf(100, 80, 70, 2, 0, 3, 4, 7, 400))
+        assertTrue(fragment.contains("nativeOwnedOutputAllocations=3"))
+        assertTrue(fragment.contains("nativeOwnedOutputReuses=4"))
+        assertTrue(fragment.contains("nativeAdoptedFragments=7"))
+        assertTrue(fragment.contains("nativeAdoptedBytes=400"))
+        val engine = ProcessMemoryDiagnostic.engineFields(longArrayOf(1, 100, 40, 0, 2, 60, 15, 25, 60, 1))
+        assertTrue(engine.contains("nativeEnginePayloadLowerBound=true"))
+    }
 }

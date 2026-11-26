@@ -2,6 +2,7 @@ package app.apexview.tiled
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.IOException
@@ -66,5 +67,25 @@ class ArchiveCompositionStartupTest {
             fail("Expected cancellation")
         } catch (_: CancellationException) {}
         assertTrue(restored)
+    }
+    @Test fun cancelledPreflightResultIsDisposedBeforeDecoderHandoff() = runBlocking {
+        var disposed = false
+        val startup = ArchiveCompositionStartup()
+        val task = launch {
+            startup.start(
+                preflight = {
+                    kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]!!.cancel()
+                    byteArrayOf(1)
+                },
+                releaseSources = { fail("Cancelled preflight must not release source decoders") },
+                replaceHost = { fail("Cancelled preflight must not replace host") },
+                restoreSources = { fail("Untouched decoders need no rollback") },
+                dispose = { it.fill(0); disposed = true },
+            )
+        }
+        task.join()
+        assertTrue(disposed)
+        assertFalse(startup.sourceDecodersTouched)
+        assertFalse(startup.hostReplaced)
     }
 }

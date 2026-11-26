@@ -464,6 +464,7 @@ internal class HevcArchiveVodSession(
                 checkOpen()
                 OwnedArchiveInitializations.snapshot(inputs.map { it.initialization })
             }
+            val sourceInputBytes=batches.sumOf { batch -> batch.sumOf { it.size.toLong() } }
             val compositionStarted = System.nanoTime()
             val produced = try {
                 // Every pre-composition exception, including feed setup and seek/close
@@ -472,7 +473,7 @@ internal class HevcArchiveVodSession(
                     ownedInits.copies[i], batches.map { it[i] }, input.label, validatedInitializations[i], listOf(inspectedMedia[i])) }
                 checkOpen()
                 if (inputs.size == 1) NativeClearArchiveBridge.Produced(
-                    HevcClearCmafGridComposer.passThrough(composingFeeds.single()))
+                    HevcClearCmafGridComposer.passThrough(composingFeeds.single(), transferMediaOwnership = true))
                 else {
                     val request = HevcClearCmafGridComposer.Request(
                         composingFeeds,
@@ -499,6 +500,13 @@ internal class HevcArchiveVodSession(
             val nativeFragment = produced.nativeMedia
             var publishedNative = false
             try {
+                // Validation/composition has finished borrowing the source.
+                // The single-source pass-through transferred its source
+                // backing; every other fetched array can now be wiped.
+                batches.forEach { batch -> batch.forEach { source ->
+                    if (composed.mediaFragments.none { it === source }) source.fill(0)
+                } }
+                batches.clear()
                 checkOpen()
                 val compositionMs = (System.nanoTime() - compositionStarted) / 1_000_000L
                 val verificationStarted = System.nanoTime()
@@ -593,7 +601,6 @@ internal class HevcArchiveVodSession(
                     android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
                         ?.let { (it - first).coerceAtLeast(0L) }
                 }
-                val sourceInputBytes=batches.sumOf { batch -> batch.sumOf { it.size.toLong() } }
                 // Reuse the exact verified fragment already in scope, not a
                 // second local with the same name or a new payload allocation.
                 if(nativeBudgetObservation.observe(sourceInputBytes,outputSize.toLong())) {

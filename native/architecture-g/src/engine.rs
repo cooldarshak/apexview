@@ -89,6 +89,7 @@ enum Stage { Free,Queued,Running,Ready,Reading,Failed }
 enum Command {
     Convert { prefix: usize, count: usize },
     ClearAtlas,
+    ClearAtlasOwned,
 }
 #[derive(Clone,Copy)]
 struct Work {
@@ -100,10 +101,14 @@ struct Slot {
     stage:Stage,
     work:Option<Work>,
     result:i64,
+    running_bytes:usize,
 }
 impl Slot {
     fn recycle(&mut self) {
         debug_assert!(self.buffers.is_some());
+        if self.work.is_some_and(|w|matches!(w.command,Command::ClearAtlasOwned)) {
+            self.buffers.as_mut().expect("owned buffers").output=Vec::new();
+        }
         self.stage=Stage::Free;
         self.work=None;
         self.result=0;
@@ -159,14 +164,14 @@ impl Engine {
         // spare compact atlas payload pair only for genuine overlap.
         for index in 0..budget.slots {
             let buffers=if !compact_atlas || index==0 {Some(Buffers::new(budget)?)} else {None};
-            slots.push(Slot{buffers,stage:Stage::Free,work:None,result:0});
+            slots.push(Slot{buffers,stage:Stage::Free,work:None,result:0,running_bytes:0});
         }
         let initial_pairs=if compact_atlas {1} else {budget.slots};
         let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false,compact_atlas,
             payload_allocations:initial_pairs as u64,peak_pairs:initial_pairs,copied_input:0,copied_output:0}),Condvar::new()));
         let cloned=Arc::clone(&shared);
         let worker=thread::Builder::new().name("pitwall-native-stitch".into())
-            .stack_size(WORKER_STACK).spawn(move || run_worker(cloned)).ok()?;
+            .stack_size(WORKER_STACK).spawn(move || run_worker(cloned,budget.output)).ok()?;
         Some(Self{shared,worker:Some(worker),budget,reserved_bytes})
     }
     pub fn generation(&self)->i64 {
@@ -174,12 +179,18 @@ impl Engine {
         if state.closed {CLOSED} else {state.generation}
     }
     pub fn reserved(&self)->usize {self.reserved_bytes}
-    /// Actual materialized payload pairs, including worker-owned Running slots.
-    /// Does not include parser scratch, allocator overhead or resident pages.
+    pub fn owned_running(&self)->usize {
+        let s=self.shared.0.lock().expect("engine mutex");
+        s.slots.iter().filter(|slot|slot.stage==Stage::Running &&
+            slot.work.is_some_and(|w|matches!(w.command,Command::ClearAtlasOwned))).count()
+    }
+    /// Materialized payload capacity. During owned Running jobs this is a
+    /// lower bound: dynamic output is counted at Ready, and until then remains
+    /// charged as future commitment. Excludes parser scratch and residency.
     pub fn allocated_payload_bytes(&self)->usize {
         let s=self.shared.0.lock().expect("engine mutex");
-        s.slots.iter().filter(|slot|slot.buffers.is_some() || slot.stage==Stage::Running).count()
-            * (self.budget.input + self.budget.output)
+        s.slots.iter().map(|slot|slot.buffers.as_ref().map_or(slot.running_bytes,
+            |b| b.input.capacity()+b.output.capacity())).sum()
     }
     /// Outstanding ceiling not already materialized in slots or bridge. The
     /// OS headroom sample already reflects resident allocations; reserve only
@@ -204,11 +215,13 @@ impl Engine {
     pub fn trim_idle_payload(&self)->usize {
         let mut s=self.shared.0.lock().expect("engine mutex");
         if !s.compact_atlas { return 0; }
-        let mut count=0;
+        let mut bytes=0;
         for slot in &mut s.slots {
-            if slot.stage==Stage::Free && slot.buffers.take().is_some() { count+=1; }
+            if slot.stage==Stage::Free {
+                if let Some(b)=slot.buffers.take() {bytes+=b.input.capacity()+b.output.capacity();}
+            }
         }
-        count*(self.budget.input+self.budget.output)
+        bytes
     }
     /// Keep one warm free pair; never touch a queued, running or leased slot.
     fn trim_free_spares(state:&mut State) {
@@ -247,6 +260,13 @@ impl Engine {
         }
         self.enqueue_with(generation, len, Command::ClearAtlas, foreground, slack_ms, fill)
     }
+    pub fn submit_clear_atlas_owned_with(&self,generation:i64,len:usize,foreground:bool,
+                                          slack_ms:u64,fill:impl FnOnce(&mut [u8])->bool)->i64 {
+        let remaining=self.budget.ceiling-self.reserved();
+        if atlas_job::workspace_reserve(self.budget.input,self.budget.output)
+            .is_none_or(|additional|additional>remaining) {return BACKPRESSURE;}
+        self.enqueue_with(generation,len,Command::ClearAtlasOwned,foreground,slack_ms,fill)
+    }
     fn enqueue(&self, generation: i64, source: &[u8], command: Command,
                foreground: bool, slack_ms: u64) -> i64 {
         self.enqueue_with(generation,source.len(),command,foreground,slack_ms,|dst|{
@@ -262,6 +282,8 @@ impl Engine {
         let mut s=self.shared.0.lock().expect("engine mutex");
         if s.closed {return CLOSED;}
         if generation!=s.generation {return STALE;}
+        let owned=matches!(command,Command::ClearAtlasOwned);
+        if owned && !s.compact_atlas {return INVALID;}
         let free=s.slots.iter().filter(|slot|slot.stage==Stage::Free).count();
         if free==0 || (!foreground && free<2) {return BACKPRESSURE;}
         let Some(index)=s.slots.iter().position(|slot|slot.stage==Stage::Free && slot.buffers.is_some())
@@ -269,7 +291,9 @@ impl Engine {
         // Free/unallocated is distinct from Running/temporarily owned by the
         // worker. No active slot can be selected or evicted here.
         if s.slots[index].buffers.is_none() {
-            let Some(buffers)=Buffers::new(self.budget) else {return BACKPRESSURE;};
+            let Some(buffers)=(if owned {
+                buffer(self.budget.input).map(|input|Buffers{input,output:Vec::new()})
+            } else {Buffers::new(self.budget)}) else {return BACKPRESSURE;};
             s.slots[index].buffers=Some(buffers);
             s.payload_allocations=s.payload_allocations.saturating_add(1);
             let pairs=s.slots.iter().filter(|slot|slot.buffers.is_some() || slot.stage==Stage::Running).count();
@@ -281,7 +305,16 @@ impl Engine {
             |v|v.checked_add(1).filter(|next|i64::try_from(*next).is_ok())) else {return INVALID;};
         let token=i64::try_from(raw).expect("checked token");
         let slot=&mut s.slots[index];
-        let destination=&mut slot.buffers.as_mut().expect("free buffers").input[..len];
+        let buffers=slot.buffers.as_mut().expect("free buffers");
+        if owned {
+            // Owned writer reserves exact packet capacity only after validation.
+            // Do not retain a fixed output slot beside the final fragment.
+            buffers.output=Vec::new();
+        } else if buffers.output.len()!=self.budget.output {
+            let Some(out)=buffer(self.budget.output) else {return BACKPRESSURE;};
+            buffers.output=out;
+        }
+        let destination=&mut buffers.input[..len];
         if !fill(destination) { destination.fill(0); return INVALID; }
         if Instant::now()>=deadline { destination.fill(0); return DEADLINE; }
         slot.work=Some(Work{token,generation,len,command,foreground,deadline});
@@ -318,10 +351,35 @@ impl Engine {
         if slot.stage!=Stage::Reading || count==0{return INVALID;}
         let len=slot.result as usize;
         if offset>len || count>len-offset{return INVALID;}
-        if read(&slot.buffers.as_ref().expect("read buffers").output[offset..offset+count]) {
+        let Some(bytes)=slot.buffers.as_ref().expect("read buffers").output.get(offset..offset+count)
+            else {return INVALID;};
+        if read(bytes) {
             s.copied_output=s.copied_output.saturating_add(count as u64);
             count as i64
         } else { INVALID }
+    }
+    // Two-phase handoff: while the registry serializes JNI calls, inspect
+    // capacity, reserve the destination arena, then take the same Vec.
+    pub fn owned_output_dimensions(&self,token:i64,offset:usize,size:usize)->Option<(usize,usize)> {
+        let s=self.shared.0.lock().ok()?;
+        let slot=&s.slots[s.index(token)?];
+        let w=slot.work?;
+        if s.closed || w.generation!=s.generation || slot.stage!=Stage::Reading ||
+            !matches!(w.command,Command::ClearAtlasOwned) {return None;}
+        let output=&slot.buffers.as_ref()?.output;
+        let len=usize::try_from(slot.result).ok()?;
+        if size==0 || offset.checked_add(size)?!=len || output.len()!=len {return None;}
+        Some((output.capacity(),len))
+    }
+    pub fn take_owned_output(&self,token:i64,capacity:usize,len:usize)->Option<Vec<u8>> {
+        let mut s=self.shared.0.lock().ok()?;
+        let i=s.index(token)?;
+        let w=s.slots[i].work?;
+        if s.closed || w.generation!=s.generation || s.slots[i].stage!=Stage::Reading ||
+            !matches!(w.command,Command::ClearAtlasOwned) {return None;}
+        let output=&mut s.slots[i].buffers.as_mut()?.output;
+        if output.capacity()!=capacity || output.len()!=len {return None;}
+        Some(std::mem::take(output))
     }
     pub fn release(&self,token:i64)->i64 {
         let mut s=self.shared.0.lock().expect("engine mutex");
@@ -360,7 +418,7 @@ impl Engine {
     }
 }
 impl Drop for Engine {fn drop(&mut self){self.close();}}
-fn run_worker(shared:Shared) {
+fn run_worker(shared:Shared,output_ceiling:usize) {
     let mut atlas = atlas_job::Dispatcher::default();
     loop {
         let (index,work,mut buffers)={
@@ -375,7 +433,12 @@ fn run_worker(shared:Shared) {
                         slot.stage=Stage::Failed;slot.result=DEADLINE;continue;
                     }
                     slot.stage=Stage::Running;
-                    break (index,work,slot.buffers.take().expect("queued buffers"));
+                    let buffers=slot.buffers.take().expect("queued buffers");
+                    // For owned jobs the final output is not allocated yet.
+                    // Count only known resident bytes until completion; the
+                    // remaining slot commitment protects dynamic output admission.
+                    slot.running_bytes=buffers.input.capacity()+buffers.output.capacity();
+                    break (index,work,buffers);
                 }
                 s=shared.1.wait(s).expect("engine condvar");
             }
@@ -385,16 +448,19 @@ fn run_worker(shared:Shared) {
             match work.command {
                 Command::Convert { prefix, count } =>
                     convert_fixed_batch(input, work.len / count, count, prefix, &mut buffers.output).ok_or(INVALID),
-                Command::ClearAtlas => {
+                Command::ClearAtlas | Command::ClearAtlasOwned => {
                     let _trace = NativeTrace::begin(c"PitwallNativeAtlas");
-                    atlas.run(work.generation, input, &mut buffers.output)
-                        .map_err(|error| if error == crate::bmff::Error::Capacity { OUTPUT_CAPACITY } else { INVALID })
+                    let result=if matches!(work.command,Command::ClearAtlasOwned) {
+                        atlas.run_owned_single(work.generation,input,&mut buffers.output,output_ceiling)
+                    } else {atlas.run(work.generation,input,&mut buffers.output)};
+                    result.map_err(|error| if error == crate::bmff::Error::Capacity { OUTPUT_CAPACITY } else { INVALID })
                 },
             }
         }));
         let mut s=shared.0.lock().expect("engine mutex");
         let obsolete=s.closed || work.generation!=s.generation;
         let slot=&mut s.slots[index];
+        slot.running_bytes=0;
         slot.buffers=Some(buffers);
         if obsolete {slot.recycle();Engine::trim_free_spares(&mut s);continue;}
         slot.result=if Instant::now()>=work.deadline {DEADLINE} else {
@@ -600,7 +666,7 @@ mod tests {
         let now=Instant::now();
         let mk=|token,foreground,ms|Slot{buffers:None,stage:Stage::Queued,
             work:Some(Work{token,generation:1,len:3,command:Command::Convert{prefix:1,count:1},foreground,
-                deadline:now+Duration::from_millis(ms)}),result:0};
+                deadline:now+Duration::from_millis(ms)}),result:0,running_bytes:0};
         let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false,compact_atlas:false,payload_allocations:0,peak_pairs:0,copied_input:0,copied_output:0};
         assert_eq!(s.next(),Some(2));s.slots[2].stage=Stage::Running;
         assert_eq!(s.next(),Some(3));s.slots[3].stage=Stage::Running;

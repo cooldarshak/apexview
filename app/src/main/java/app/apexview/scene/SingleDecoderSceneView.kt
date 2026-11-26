@@ -384,7 +384,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
                     frameTimeNs, scene?.sourceFrameRate ?: 0.0, selectedDisplayHz,
                     playbackSpeed, thermalForOutput(), pipelineHealthy(),
-                pendingAgeNs = frameDemand.pendingAgeNs(callbackStarted))) {
+                pendingAgeNs = frameDemand.pendingAgeNs(callbackStarted),
+                coalescedPending = frameDemand.hasCoalescedPendingVideo())) {
                 pacing.onPacingDeferred()
                 Trace.beginSection("PitwallPacingDefer")
                 try { displayClock?.postFrameCallback(this) } finally { Trace.endSection() }
@@ -751,6 +752,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 "codecCallbackToLatchP95UpperMs=${correlation?.callbackToLatch?.percentileUpperMs(95) ?: 0} " +
                 "latchToSwapP95UpperMs=${correlation?.latchToSwap?.percentileUpperMs(95) ?: 0} " +
                 "decoderInputSurfaceId=${input?.let { System.identityHashCode(it) } ?: 0} " +
+                "outputSurfaceId=${outputSurface?.let { System.identityHashCode(it) } ?: 0} outputSize=${outputWidth}x${outputHeight} " +
                 "decoderAtlas=${scene?.atlasWidth ?: 0}x${scene?.atlasHeight ?: 0} " +
                 SceneBufferQueueEvidence.cadenceFields(metrics.latched, metrics.presented,
                     if (lastLogNs > 0L) now - lastLogNs else 0L, selectedDisplayHz, expectedFps) + " " +

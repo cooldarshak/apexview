@@ -71,6 +71,35 @@ pub struct Atlas {
     initialization: Vec<u8>,
 }
 
+pub(crate) enum FragmentOutput<'a> {
+    Fixed(&'a mut [u8]),
+    Owned { packet: &'a mut Vec<u8>, start: usize, ceiling: usize },
+}
+impl FragmentOutput<'_> {
+    fn len(&self)->usize {
+        match self {Self::Fixed(b)=>b.len(),Self::Owned{start,ceiling,..}=>ceiling.saturating_sub(*start)}
+    }
+    fn prepare(&mut self,required:usize)->Result<&mut [u8],Error> {
+        if required>self.len(){return Err(Error::Capacity);}
+        match self {
+            Self::Fixed(b)=>Ok(&mut b[..required]),
+            Self::Owned{packet,start,ceiling}=>{
+                let total=start.checked_add(required).ok_or(Error::Limit)?;
+                // Drop the previous unsuitable capacity before allocating.
+                if packet.capacity()>*ceiling || !crate::fragment_storage::reusable_capacity(total,packet.capacity()) {
+                    **packet=Vec::new();
+                    **packet=crate::fragment_storage::output_buffer(total,*ceiling).ok_or(Error::Capacity)?;
+                } else {packet.resize(total,0);}
+                if packet.capacity()>*ceiling {
+                    **packet=Vec::new();
+                    return Err(Error::Capacity);
+                }
+                Ok(&mut packet[*start..total])
+            }
+        }
+    }
+}
+
 impl Atlas {
     /// Use conservative normalized parameter-set equality so different coding
     /// profiles never enter the compositor on the strength of geometry alone.
@@ -258,6 +287,13 @@ impl Atlas {
         boundary: FragmentBoundary,
         header_slab: &mut Vec<u8>,
     ) -> Result<(usize, i64, bool), Error> {
+        self.write_window_fragment_to(input,sequence,FragmentOutput::Fixed(output),trackers,boundary,header_slab)
+    }
+
+    pub(crate) fn write_window_fragment_to(
+        &self, input: &[&[u8]], sequence: u32, mut output: FragmentOutput<'_>,
+        trackers: &mut [Tracker; MAX_FEEDS], boundary: FragmentBoundary, header_slab: &mut Vec<u8>,
+    ) -> Result<(usize,i64,bool),Error> {
         let FragmentBoundary { previous_end, standalone } = boundary;
         if input.len() != self.sources.len() {
             return Err(Error::Metadata);
@@ -403,6 +439,7 @@ impl Atlas {
         let required = clear_cmaf::slab_nal_parts_size(&samples, header_slab, self.output_nal_prefix).ok_or(Error::Limit)?;
         if required > output.len() { return Err(Error::Capacity); }
         let _write_trace = crate::engine::NativeTrace::begin(c"PitwallNativeMdat");
+        let destination=output.prepare(required)?;
         let size = clear_cmaf::write_slab_nal_parts(
             self.track,
             sequence,
@@ -410,7 +447,7 @@ impl Atlas {
             &samples,
             header_slab,
             self.output_nal_prefix,
-            output,
+            destination,
         )
         .ok_or(Error::Limit)?;
         Ok((size, end, can_gate_filter))
