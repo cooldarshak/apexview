@@ -46,6 +46,7 @@ internal class BakedCastLiveSession(
     var height = 0
         private set
     val url get() = hls.url
+    internal val diagnosticRelayId get() = hls.diagnosticRelayId
     val playable get() = firstSegment.isCompleted && !firstSegment.isCancelled
 
     private val publisherJob: Job = scope.launch(Dispatchers.Default) {
