@@ -247,12 +247,7 @@ internal class CastTimingReceiver(private val nowMs: () -> Long = SystemClock::e
                     // sought. Establish the sender's epoch on the FIRST valid
                     // frame of a new playback only; later frames must match the
                     // receiver's seek-driven epoch and cannot silently rebase.
-                    if (CastTimingEpochPolicy.adoptInitialEpoch(
-                            framePackets, lastSequence, pendingLegacySeek != null, incomingEpoch
-                        ) && incomingEpoch != clockEpoch) {
-                        clockEpoch = incomingEpoch
-                    }
-                    if (incomingEpoch != clockEpoch) {
+                    if (!acceptsEpoch(incomingEpoch)) {
                         rejectedFrames++; rejectedClockEpoch++; return
                     }
                 } else {
@@ -263,6 +258,8 @@ internal class CastTimingReceiver(private val nowMs: () -> Long = SystemClock::e
                     }
                 }
                 val next = decodedFrame ?: CastTimingProtocol.decodeFrame(j, acceptedTable)
+                // Commit initial epoch only after the entire frame is validated.
+                if (epoch != null) clockEpoch = epoch
                 // First-frame epoch adoption may differ from a preceding
                 // table candidate. Never publish that table with this frame.
                 if (epochAwareTables && tableEpoch != epoch) {
