@@ -664,10 +664,21 @@ internal class StateHistoryAccumulator {
         states = times.mapValues { (number, t) -> StateLog(t.toLongArray(), values.getValue(number).toTypedArray()) },
         crossings = crossings.toList(),
     )
+
+    fun finishWindow(from: Long, until: Long) = StateParse(
+        states = times.mapNotNull { (number, t) ->
+            val range = historyWindowRange(t.size, from, until) { t[it] } ?: return@mapNotNull null
+            number to StateLog(LongArray(range.count()) { t[range.first + it] },
+                values.getValue(number).subList(range.first, range.last + 1).toTypedArray())
+        }.toMap(),
+        // The full accumulator retains every crossing for circuit/pace
+        // derivation; transient overlay windows need only the covered events.
+        crossings = crossings.filter { it.second in from..until },
+    )
 }
 
 internal data class DriverTimingParse(val laps: Map<String, DriverLaps>, val states: StateParse)
-internal data class DriverTimingPreview(val throughUtcMs: Long, val history: DriverTimingParse)
+internal data class DriverTimingPreview(val throughUtcMs: Long, val history: DriverTimingParse, val fromUtcMs: Long? = null)
 internal const val TOWER_PREVIEW_LOOKAHEAD_MS = 60_000L
 
 /**
@@ -779,6 +790,7 @@ private data class TimingPreviewSnapshot(
     val laps: Map<String, DriverLaps>,
     val startUtcMs: Long,
     val towerThroughUtc: Long,
+    val towerFromUtc: Long?,
     val towerIndexed: Boolean,
     val positionsIndexed: Boolean,
 )
@@ -884,6 +896,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             val positionClock = CompletableDeferred<Long?>()
             var partialClock: Long? = null
             var towerThroughUtc = Long.MIN_VALUE
+            var towerFromUtc: Long? = null
             var towerIndexed = false
             var positionsIndexed = false
             var partialTracks: Map<String, DriverTrack> = emptyMap()
@@ -941,6 +954,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                         laps = partialHistory.laps,
                         startUtcMs = partialClock ?: initialStart,
                         towerThroughUtc = towerThroughUtc,
+                        towerFromUtc = towerFromUtc,
                         towerIndexed = towerIndexed,
                         positionsIndexed = positionsIndexed,
                     )
@@ -957,6 +971,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                         archivePartial = true
                         publicationStage = ReplayTimingStage.TOPICS
                         this.towerThroughUtc = snapshot.towerThroughUtc
+                        this.previewTowerFromUtc = snapshot.towerFromUtc
                         this.towerIndexed = snapshot.towerIndexed
                         this.positionsIndexed = snapshot.positionsIndexed
                     }
@@ -1193,12 +1208,13 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                 for (preview in DriverTimingParser.previews(lines, start, ::previewTarget, nativeRequested(), { job.ensureActive() },
                                     onComplete = { build ->
                                         if (chronological && supplementUnavailable.get()) completedPrimary = build()
-                                    })) {
+                                    }, windowBackMs = 90_000L)) {
                                     val elapsed = android.os.SystemClock.elapsedRealtime() - started
                                     checkpoint("tower-preview", "drivers=${preview.history.laps.size} throughUtcMs=${preview.throughUtcMs} elapsedMs=$elapsed")
                                     withContext(Dispatchers.Main) {
                                         partialClock = initialStart
                                         towerThroughUtc = preview.throughUtcMs
+                                        towerFromUtc = preview.fromUtcMs
                                         partialHistory = preview.history
                                         publishTopics()
                                     }
@@ -1301,6 +1317,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                                             if (towerIndexed || through < towerThroughUtc) return@launch
                                                             partialClock = initialStart
                                                             towerThroughUtc = through
+                                                            towerFromUtc = null
                                                             partialHistory = snapshot
                                                             publishTopics()
                                                         } finally { towerPreviewPending.set(false) }
@@ -1329,6 +1346,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     partialClock = initialStart
                     towerIndexed = history.laps.isNotEmpty()
                     if (towerIndexed) towerThroughUtc = Long.MAX_VALUE
+                    towerFromUtc = null
                     partialHistory = history
                     publishTopics()
                 }
