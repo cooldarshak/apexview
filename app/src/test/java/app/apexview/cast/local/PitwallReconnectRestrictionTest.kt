@@ -1,6 +1,5 @@
 package app.apexview.cast.local
 
-import android.app.Application
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -10,7 +9,7 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 class PitwallReconnectRestrictionTest {
     @Test fun onlyExplicitSelectionClearsAStoredCertificatePairRestriction() {
-        val context = RuntimeEnvironment.getApplication<Application>()
+        val context = RuntimeEnvironment.getApplication()
         val first = PitwallRememberedPeers.key(byteArrayOf(1),byteArrayOf(2))
         val other = PitwallRememberedPeers.key(byteArrayOf(1),byteArrayOf(3))
         PitwallRememberedPeers.forgetAll(context)
