@@ -385,7 +385,14 @@ class FeedPlayer(
         fastStart = preferFastStart || startMs != C.TIME_UNSET
     }
     private var selectedVideoQuality = videoQuality
-    private var offeredSourceVideoSizes: List<Pair<Int, Int>> = emptyList()
+    internal var offeredSourceVideoSizes by mutableStateOf<List<Pair<Int, Int>>>(emptyList())
+        private set
+    internal var capturedSourceVideoSizes by mutableStateOf<List<Pair<Int, Int>>?>(null)
+        private set
+
+    internal fun recordCapturedSourceOffers(sizes: List<Pair<Int, Int>>) {
+        if (capturedSourceVideoSizes != sizes) capturedSourceVideoSizes = sizes
+    }
     var sourceQualityNotice by mutableStateOf<String?>(null)
         private set
 
@@ -546,15 +553,20 @@ class FeedPlayer(
         player.addListener(object : Player.Listener {
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
                 archiveSelectedAudioUri?.let { applyArchiveAudioTrack(it, tracks) }
-                offeredSourceVideoSizes = tracks.groups.filter {
-                    it.type == C.TRACK_TYPE_VIDEO
-                }.flatMap { group ->
+                // Never replace the original feed ladder with composed atlas dimensions,
+                // or erase it just because its source player is parked.
+                val videoGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO }
+                if (archiveVodSession == null && protectedLiveDashSource == null &&
+                    !parkedForArchive && videoGroups.isNotEmpty()) {
+                    val sizes = videoGroups.flatMap { group ->
                     (0 until group.length).mapNotNull { index ->
                         if (!group.isTrackSupported(index)) null else {
                             val format = group.getTrackFormat(index)
                             (format.width to format.height).takeIf { it.first > 0 && it.second > 0 }
                         }
                     }
+                    }.distinct()
+                    if (offeredSourceVideoSizes != sizes) offeredSourceVideoSizes = sizes
                 }
                 refreshMissingQualityNotice()
                 if (archiveVodSession != null) {

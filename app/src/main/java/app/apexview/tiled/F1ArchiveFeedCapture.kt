@@ -24,6 +24,9 @@ internal class F1ArchiveFeedCapture(
         fullPictures = fullPictures, nativeContext = nativeContext, nativeRequested = nativeRequested,
         autoPreferredHeight = autoPreferredHeight, autoBandwidthBps = autoBandwidthBps)
     private var usingHls = false
+    private var finiteOffers: Map<String, List<Pair<Int, Int>>> = emptyMap()
+    val offeredSourceDimensions: Map<String, List<Pair<Int, Int>>>
+        get() = if (usingHls) hls.offeredSourceDimensions else dash.offeredSourceDimensions.ifEmpty { finiteOffers }
     val clearOutput get() = usingHls && hls.clearOutput == true
     val protection get() = if (usingHls) when (hls.clearOutput) { true -> "CLEAR"; false -> "CBCS"; null -> "UNVERIFIED" } else "CBCS"
 
@@ -34,7 +37,7 @@ internal class F1ArchiveFeedCapture(
         // A cancellation/reset of an older capture cannot zero an in-flight preparation's maps.
         val worker = F1HlsFeedCapture(factory, autoBandwidthBps = autoBandwidthBps)
         return try { worker.prepareVod(feeds, positionMs, clockLabel, preferredHeight, commentary, minimumHeight, preferredHeights) }
-        finally { worker.reset() }
+        finally { finiteOffers = worker.offeredSourceDimensions; worker.reset() }
     }
 
     suspend fun captureNext(group: String, feeds: List<F1DashFeedCapture.Feed>): F1DashFeedCapture.Snapshot {
@@ -92,5 +95,5 @@ internal class F1ArchiveFeedCapture(
         if (usingHls) hls.outputWindow(group, shareNative)
         else ProtectedHevcLiveComposition.outputWindow(group, shareNative)
     fun widevinePssh(): ByteArray? = if (usingHls) hls.widevinePssh() else dash.widevinePssh()
-    override fun reset() { dash.reset(); hls.reset(); usingHls = false }
+    override fun reset() { dash.reset(); hls.reset(); usingHls = false; finiteOffers = emptyMap() }
 }

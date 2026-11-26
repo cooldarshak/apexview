@@ -116,6 +116,8 @@ internal class F1DashFeedCapture(
         }, "PitwallDashHevcComposition").apply { isDaemon = true }
     }.asCoroutineDispatcher()
     private val actualProtocols = java.util.concurrent.ConcurrentHashMap<String, ManifestProtocol>()
+    private val advertised = java.util.concurrent.ConcurrentHashMap<String, List<Pair<Int, Int>>>()
+    val offeredSourceDimensions: Map<String, List<Pair<Int, Int>>> get() = advertised.toMap()
     private val initializationByLabel = java.util.concurrent.ConcurrentHashMap<String, InitState>()
     @Volatile private var latestWidevinePssh: ByteArray? = null
     private var lastCapturedSegmentStartUs: Long? = null
@@ -498,6 +500,7 @@ internal class F1DashFeedCapture(
     override fun reset() {
         initializationByLabel.clear()
         actualProtocols.clear()
+        advertised.clear()
         lastCapturedSegmentStartUs = null
         latestWidevinePssh?.fill(0)
         latestWidevinePssh = null
@@ -529,11 +532,15 @@ internal class F1DashFeedCapture(
                 ?: throw PermanentCaptureException("${feed.label}: archive position precedes the DASH Period")
         }
         val period = manifest.getPeriod(periodIndex)
-        val candidates = period.adaptationSets
+        val declared = period.adaptationSets
             .filter { it.type == C.TRACK_TYPE_VIDEO || it.representations.any(::isHevc) }
             .flatMap { it.representations }
             .filter(::isHevc)
-            .filter { it.format.width > 0 && it.format.height in maxOf(1, minimumVideoHeight)..maximumVideoHeight }
+            .filter { it.format.width > 0 && it.format.height > 0 &&
+                it.index != null && it.initializationUri != null && it.baseUrls.isNotEmpty() }
+        val dimensions = declared.map { it.format.width to it.format.height }.distinct()
+        if (advertised[feed.label] != dimensions) advertised[feed.label] = dimensions
+        val candidates = declared.filter { it.format.height in maxOf(1, minimumVideoHeight)..maximumVideoHeight }
         if (candidates.isEmpty()) {
             throw PermanentCaptureException("${feed.label}: F1 DASH manifest has no supported HEVC video representation")
         }

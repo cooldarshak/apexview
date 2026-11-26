@@ -38,6 +38,20 @@ class ComposedSourceRenditionsTest {
 
 
 class ManualQualityOfferDisclosureTest {
+    @Test fun showsOnlyExactAdvertisedRungsForEveryFeedAndCommonDefault() {
+        val first = listOf(640 to 360, 960 to 540, 1920 to 1080, 1920 to 1080)
+        val second = listOf(854 to 480, 960 to 540, 1280 to 720)
+        assertEquals(listOf(VideoQuality.AUTO, VideoQuality.P360, VideoQuality.P540, VideoQuality.P1080),
+            QualityDisclosurePolicy.availableChoices(first))
+        assertEquals(listOf(VideoQuality.AUTO, VideoQuality.P480, VideoQuality.P540, VideoQuality.P720),
+            QualityDisclosurePolicy.availableChoices(second))
+        assertEquals(listOf(VideoQuality.AUTO, VideoQuality.P540),
+            QualityDisclosurePolicy.commonChoices(listOf(first, second)))
+        assertEquals(listOf(VideoQuality.AUTO), QualityDisclosurePolicy.commonChoices(listOf(first, emptyList())))
+        assertEquals(listOf(VideoQuality.AUTO), QualityDisclosurePolicy.availableChoices(listOf(0 to 480, 854 to 0)))
+        assertEquals(listOf(VideoQuality.AUTO), QualityDisclosurePolicy.commonChoices(emptyList()))
+    }
+
     @org.junit.Test fun aMissingManualRungIsNeverSilentlyRelabelledAsAvailable() {
         val offered = listOf(1920 to 1080, 1280 to 720)
         val message = QualityDisclosurePolicy.unavailableManualCap(VideoQuality.P540, offered)

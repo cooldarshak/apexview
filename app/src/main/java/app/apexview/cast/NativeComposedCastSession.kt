@@ -29,6 +29,7 @@ internal class NativeComposedCastSession(
     autoBandwidthBps: Long? = null,
 ) : AutoCloseable {
     val sourceLabels = feeds.map { it.label }
+    val offeredSourceDimensions: Map<String, List<Pair<Int, Int>>> get() = capture.offeredSourceDimensions
     private val group = "cast-${UUID.randomUUID()}"
     val compositionGroup: String get() = group
     init { require(feeds.size in 2..6 && sourceLabels.distinct().size == feeds.size) }

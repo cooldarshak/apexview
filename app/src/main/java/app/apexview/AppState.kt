@@ -851,7 +851,11 @@ class AppState(
                             it.configureNativeBudget(context)
                             if(settings.nativeRustStitching) it.configureNativeClear(context)
                         }
-                    } finally { capture.reset() }
+                    } finally {
+                        if (generation == castPreparationGeneration)
+                            recordQualityOffers(castTiles, capture.offeredSourceDimensions)
+                        capture.reset()
+                    }
                 }
                 // The receiver consumes the same validated CMAF bytes. Reuse
                 // the active owner rather than create a competing native arena.
@@ -1295,7 +1299,13 @@ class AppState(
                 val next = requireNotNull(owned)
                 preparingNativeCast = next
                 kotlinx.coroutines.withTimeout(60_000) {
-                    while (!next.ready) { next.update(targetMs); if (!next.ready) kotlinx.coroutines.delay(250) }
+                    while (!next.ready) {
+                        try { next.update(targetMs) } finally {
+                            if (generation == castPreparationGeneration)
+                                recordQualityOffers(selected, next.offeredSourceDimensions)
+                        }
+                        if (!next.ready) kotlinx.coroutines.delay(250)
+                    }
                 }
                 val layout = awaitCastLayout { nativeCastScene(next) }
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
@@ -1313,7 +1323,11 @@ class AppState(
                 nativeCastPump = scope.launch {
                     try {
                         while (nativeComposedCast === next) {
-                            if (playing && (castSceneConfirmed || !next.live)) next.update(if (castSceneConfirmed) castFramePositionMs else targetMs)
+                            if (playing && (castSceneConfirmed || !next.live)) {
+                                next.update(if (castSceneConfirmed) castFramePositionMs else targetMs)
+                                if (nativeComposedCast === next)
+                                    recordQualityOffers(selected, next.offeredSourceDimensions)
+                            }
                             kotlinx.coroutines.delay(500)
                         }
                     } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
@@ -2990,9 +3004,14 @@ class AppState(
                         val preferredHeight = quality.targetHeight.takeIf { it > 0 }
                             ?: autoCompositionHeight("FINITE_CLEAR", selected, autoBaseline) ?: autoBaseline
                         val minimumHeight = if (composedQuality == VideoQuality.P1080) 1080 else 0
-                        val session = capture.prepareVod(sourcePlan.feeds, probePositionMs, host.feed.sourceStream.profileLabel,
-                            preferredHeight, settings.commentary, minimumHeight, desired,
-                            autoBandwidthBps = compositionBandwidthBudget(selected.map(::qualityFor)))
+                        val session = try {
+                            capture.prepareVod(sourcePlan.feeds, probePositionMs, host.feed.sourceStream.profileLabel,
+                                preferredHeight, settings.commentary, minimumHeight, desired,
+                                autoBandwidthBps = compositionBandwidthBudget(selected.map(::qualityFor)))
+                        } finally {
+                            if (playbackWork.capture === capture)
+                                recordQualityOffers(selected, capture.offeredSourceDimensions)
+                        }
                         session.configureNativeBudget(context)
                         if (settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff)
                             session.configureNativeClear(context)
@@ -3287,6 +3306,8 @@ class AppState(
                         while (prepared == null) {
                             val captureClockMs = audioMaster.feed.player.currentPosition.coerceAtLeast(0L)
                             val snapshot = capture.captureAtPosition(group, feeds, captureClockMs)
+                            if (playbackWork.capture === capture)
+                                recordQualityOffers(selectedTiles, capture.offeredSourceDimensions)
                             // A resumed archive/remote seek can update Media3 directly.
                             // Never keep following the old HLS segment sequence for 30s.
                             val observedClockMs = audioMaster.feed.player.currentPosition.coerceAtLeast(0L)
@@ -3475,6 +3496,8 @@ class AppState(
                     }
                     if (playback == "ACTIVE" && message == SINGLE_DECODER_ACTIVATING) message = null
                     val snapshot = capture.captureAtPosition(group, feeds, audioMaster.feed.player.currentPosition.coerceAtLeast(0L))
+                    if (playbackWork.capture === capture)
+                        recordQualityOffers(selectedTiles, capture.offeredSourceDimensions)
                     lastSnapshot = snapshot
                     snapshot.failure?.takeUnless { it.retryable }?.let { throw IOException(it.reason) }
                     val updatedWindow = if (snapshot.capturedFeeds > 0)
@@ -3658,6 +3681,8 @@ class AppState(
             val publication = app.apexview.tiled.RollingPublicationVersion()
             while (true) {
                 val snapshot = capture.captureNext(group, feeds)
+                if (playbackWork.capture === capture)
+                    recordQualityOffers(selectedTiles, capture.offeredSourceDimensions)
                 // A waiting-for-next-fragment poll is NOT a new composed output.
                 // Compare the monotonic composed-publication count, never a
                 // timestamp that can repeat after a legitimate CMAF discontinuity.
@@ -6666,14 +6691,34 @@ class AppState(
         return tiles.firstOrNull { it.feed.sourceStream.profileLabel == label }?.feed?.nativeSourceRendition
     }
 
-    internal fun sourceQualityOfferNotice(label: String): String? {
-        val session = singleDecoderScenePlayer?.archiveSceneSession
-        if (session != null)
-            return QualityDisclosurePolicy.unavailableManualCap(settings.videoQualityForFeed(label),
-                session.offeredSourceDimensions[label].orEmpty())
-        if (protectedRollingScene != null || archiveCompositionStarting) return null
-        return tiles.firstOrNull { it.feed.sourceStream.profileLabel == label }?.feed?.sourceQualityNotice
+    private fun recordQualityOffers(selected: List<Tile>, offers: Map<String, List<Pair<Int, Int>>>) {
+        selected.forEach { tile ->
+            if (tile in tiles) offers[tile.feed.sourceStream.profileLabel]?.let(tile.feed::recordCapturedSourceOffers)
+        }
     }
+
+    internal fun sourceQualityOffers(tile: Tile): List<Pair<Int, Int>> {
+        val label = tile.feed.sourceStream.profileLabel
+        if (castingActive || castPlaybackHandedOff) {
+            castRelay?.session?.offeredSourceDimensions?.get(label)?.let { return it }
+            if (nativeComposedCast != null) return tile.feed.capturedSourceVideoSizes.orEmpty()
+        }
+        singleDecoderScenePlayer?.archiveSceneSession?.offeredSourceDimensions?.get(label)?.let { return it }
+        if (settings.decoderMode == DecoderMode.SINGLE && tiles.size > 1)
+            tile.feed.capturedSourceVideoSizes?.let { return it }
+        return tile.feed.offeredSourceVideoSizes
+    }
+
+    internal fun sourceQualityOptions(tile: Tile): List<VideoQuality> =
+        QualityDisclosurePolicy.availableChoices(sourceQualityOffers(tile))
+
+    internal fun commonSourceQualityOptions(): List<VideoQuality> =
+        QualityDisclosurePolicy.commonChoices(tiles.map(::sourceQualityOffers))
+
+    internal fun sourceQualityOfferNotice(label: String): String? =
+        tiles.firstOrNull { it.feed.sourceStream.profileLabel == label }?.let {
+            QualityDisclosurePolicy.unavailableManualCap(settings.videoQualityForFeed(label), sourceQualityOffers(it))
+        }
 
     internal val sourceQualityPreparing: Boolean get() = archiveCompositionStarting || qualityRestartPending
 

@@ -48,6 +48,8 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     private class Init(val uri: Uri, val offset: Long, val length: Long, val bytes: ByteArray, val report: CmafBoxInspector.Report)
     private val reader = CmafHttpReader(factory)
     private val offers = java.util.concurrent.ConcurrentHashMap<String, List<Offer>>()
+    private val advertised = java.util.concurrent.ConcurrentHashMap<String, List<Pair<Int, Int>>>()
+    val offeredSourceDimensions: Map<String, List<Pair<Int, Int>>> get() = advertised.toMap()
     private val vodPlaylists = java.util.concurrent.ConcurrentHashMap<String, HlsMediaPlaylist>()
     private val initializations = java.util.concurrent.ConcurrentHashMap<String, Init>()
     private val actual = java.util.concurrent.ConcurrentHashMap<String, ManifestProtocol>()
@@ -183,11 +185,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 session = HevcArchiveVodSession(reader, owned, clockLabel, maximumOutputWidth = maximumOutputWidth,
                     audioUri = audio, audioUris = selectableAudioUris, stableAudioUris = stableAudioUris,
                     captionSources = captionSources,
-                    offeredSourceDimensions = perFeed.associate { variants ->
-                        variants.first().feed.label to variants.mapNotNull { offer ->
-                            offer.format?.let { it.width to it.height }
-                        }.distinct()
-                    })
+                    offeredSourceDimensions = offeredSourceDimensions)
                 // A seek cancels blocking capture, rather than waiting for
                 // the obsolete probe to fetch and compose an entire group.
                 val preparedSession = requireNotNull(session)
@@ -606,7 +604,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
     fun reset() {
         programmes = emptyMap()
         initializations.values.forEach { it.bytes.fill(0) }; initializations.clear()
-        offers.clear(); vodPlaylists.clear(); actual.clear(); previousStartUs = null; discontinuityGate.reset(); mediaToArchiveOffsetUs = null
+        offers.clear(); advertised.clear(); vodPlaylists.clear(); actual.clear(); previousStartUs = null; discontinuityGate.reset(); mediaToArchiveOffsetUs = null
         pssh?.fill(0); pssh = null; clearOutput = null; clearComposition.reset()
         compositionDispatcher.close()
     }
@@ -678,11 +676,20 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         actual[feed.label] = ManifestProtocol.HLS
         android.util.Log.i("ApexviewPlaybackOffer", "${feed.label}: actualManifest=HLS acquisition=NATIVE_HLS_CMAF")
         return when (playlist) {
-            is HlsMultivariantPlaylist -> playlist.variants.filter {
-                it.format.codecs?.split(',')?.any { codec -> codec.trim().startsWith("hvc1") || codec.trim().startsWith("hev1") } == true &&
-                    it.format.height in 1..maximumHeight
-            }.map { Offer(feed, it.url, it.format, playlist, it.audioGroupId, it.subtitleGroupId) }.ifEmpty { throw PermanentCaptureException("${feed.label}: HLS offers no supported HEVC variant") }
+            is HlsMultivariantPlaylist -> {
+                val variants = playlist.variants.filter {
+                    it.format.codecs?.split(',')?.any { codec -> codec.trim().startsWith("hvc1") || codec.trim().startsWith("hev1") } == true &&
+                        it.format.width > 0 && it.format.height > 0
+                }
+                // Preserve the complete authorized HEVC ladder, before the current
+                // quality cap. Otherwise a 540p selection would hide 1080p forever.
+                advertised[feed.label] = variants.map { it.format.width to it.format.height }.distinct()
+                variants.filter { it.format.height <= maximumHeight }
+                    .map { Offer(feed, it.url, it.format, playlist, it.audioGroupId, it.subtitleGroupId) }
+                    .ifEmpty { throw PermanentCaptureException("${feed.label}: HLS offers no supported HEVC variant") }
+            }
             is HlsMediaPlaylist -> {
+                advertised[feed.label] = emptyList()
                 if (playlist.hasEndTag) vodPlaylists[playlist.baseUri] = playlist
                 listOf(Offer(feed, Uri.parse(playlist.baseUri), null, null))
             }

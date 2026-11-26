@@ -43,6 +43,20 @@ internal fun qualityFeedName(channel: Channel, main: Boolean, info: DriverInfo? 
 
 /** A user quality preference is a maximum, not a promise from the CDN. */
 internal object QualityDisclosurePolicy {
+    /** Only advertised, positive source dimensions; never infer a rung from an atlas,
+     * a previous session, a viewport or a user's requested cap. */
+    fun availableChoices(offered: List<Pair<Int, Int>>): List<VideoQuality> {
+        val heights = offered.asSequence().filter { (w, h) -> w > 0 && h > 0 }.map { it.second }.toSet()
+        return VideoQuality.entries.filter { it == VideoQuality.AUTO || it.targetHeight in heights }
+    }
+
+    /** A common default must be offered by every selected feed. Unknown inventories
+     * deliberately expose only Auto until the actual source is inspected. */
+    fun commonChoices(offers: List<List<Pair<Int, Int>>>): List<VideoQuality> {
+        if (offers.isEmpty()) return listOf(VideoQuality.AUTO)
+        val common = offers.map(::availableChoices).map { it.toSet() }.reduce { a, b -> a intersect b }
+        return VideoQuality.entries.filter { it in common }
+    }
     /** Real track-group availability only. Do not fabricate a lower CDN rung. */
     fun unavailableManualCap(requested: VideoQuality, offered: List<Pair<Int, Int>>): String? {
         if (requested.targetHeight <= 0 || offered.isEmpty()) return null

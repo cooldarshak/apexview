@@ -1860,7 +1860,7 @@ internal fun <T> Segments(
             val on = option == chosen
             Box(
                 Modifier
-                    .then(if (on && focus != null) Modifier.focusRequester(focus) else Modifier)
+                    .then(if (focus != null && (on || chosen !in options && option == options.firstOrNull())) Modifier.focusRequester(focus) else Modifier)
                     .tvFocusRing()
                     .semantics { role = Role.RadioButton; selected = on }
                     .pressable { onPick(option) }
@@ -2052,7 +2052,7 @@ private fun VideoQualitySheet(app: AppState) {
             Text("Video quality", style = Type.title2)
             Text("Default for all feeds", style = Type.subhead, modifier = Modifier.padding(top = 14.dp))
             Segments(
-                options = VideoQuality.values().toList(),
+                options = app.commonSourceQualityOptions(),
                 chosen = app.settings.videoQuality,
                 label = { it.label },
                 modifier = Modifier.padding(top = 12.dp).fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -2062,7 +2062,7 @@ private fun VideoQualitySheet(app: AppState) {
             Text(
                 when (app.settings.videoQuality) {
                     VideoQuality.AUTO -> "Auto selects a rendition using the feed size and available bandwidth."
-                    else -> "Feeds without an override request at most ${app.settings.videoQuality.label}. Actual quality depends on the F1 renditions available."
+                    else -> "Feeds without an override request ${app.settings.videoQuality.label}. Only resolutions advertised by every selected feed are listed above."
                 },
                 style = Type.footnote,
                 modifier = Modifier.padding(top = 12.dp),
@@ -2086,14 +2086,19 @@ private fun VideoQualitySheet(app: AppState) {
                     Column(Modifier.padding(top = 18.dp)) {
                         Text(app.qualityDisplayName(tile),
                             style = Type.subhead)
+                        val choices = app.sourceQualityOptions(tile)
                         Segments(
-                            options = listOf<VideoQuality?>(null) + VideoQuality.entries,
+                            options = listOf<VideoQuality?>(null) + choices,
                             chosen = app.settings.feedVideoQualityOverride(label),
                             label = { it?.label ?: "Default" },
                             modifier = Modifier.padding(top = 8.dp).fillMaxWidth()
                                 .horizontalScroll(rememberScrollState()),
                             onPick = { app.chooseFeedVideoQuality(tile.id, it) },
                         )
+                        if (choices.size == 1) {
+                            Text("Manual resolutions are not available or not yet verified for this source.",
+                                style = Type.footnote, modifier = Modifier.padding(top = 4.dp))
+                        }
                         val actual = app.actualSourceRendition(label)
                         Text(if (actual == null) {
                             "Requested: ${app.settings.videoQualityForFeed(label).label} · Actual rendition not yet observed"
