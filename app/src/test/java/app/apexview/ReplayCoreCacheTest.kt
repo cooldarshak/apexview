@@ -20,7 +20,7 @@ class ReplayCoreCacheTest {
             "+1.3", false, "+9.4", "+1.3", bestLap = sector, stopped = true,
         )
         val next = DriverLaps.Snapshot(
-            4, snapshot.sectors, snapshot.lapSectors, sector,
+            3, snapshot.sectors, snapshot.lapSectors, sector,
             "+1.4", false, "+9.5", "+1.4", bestLap = sector,
         )
         val samples = 4097
@@ -81,7 +81,8 @@ class ReplayCoreCacheTest {
         assertEquals(targetUtc - 90_000L, preview.previewTowerFromUtc)
         assertEquals(targetUtc + 30_000L, preview.previewTowerThroughUtc)
         assertEquals(track.at(targetUtc), preview.tracks.getValue("16").at(targetUtc))
-        assertEquals(4, preview.laps.getValue("16").at(targetUtc)?.position)
+        assertEquals(3, preview.laps.getValue("16").at(targetUtc)?.position)
+        assertEquals(1, preview.laps.getValue("16").at(targetUtc)?.positionChange)
         assertTrue(preview.tracks.getValue("16").n < track.n)
         assertEquals(laps.lapAt(targetUtc),preview.laps.getValue("16").lapAt(targetUtc))
         assertEquals(laps.lastCrossing(targetUtc),preview.laps.getValue("16").lastCrossing(targetUtc))
@@ -89,8 +90,12 @@ class ReplayCoreCacheTest {
         assertEquals(track.n, cache.read {}?.tracks?.get("16")?.n)
         // Full V3 cache remains readable; V2 is still rejected below.
         assertNull(cache.read {}?.previewTowerThroughUtc)
-        // Old V3 previews remain readable and use conservative legacy coverage.
+        // V4 has the same independent coverage but no original rank field.
+        // One rank entry: count(4), modified-UTF length(2), "16"(2), rank(4).
         val previewFile = temporary.root.resolve("replay-previews/17.bin")
+        java.io.RandomAccessFile(previewFile, "rw").use { it.writeInt(4); it.setLength(it.length() - 12L) }
+        assertEquals(targetUtc + 30_000L, requireNotNull(cache.readPreview(targetPosition) {}).previewTowerThroughUtc)
+        // Old V3 previews remain readable and use conservative legacy coverage.
         java.io.RandomAccessFile(previewFile, "rw").use { it.writeInt(3); it.setLength(it.length() - 16L) }
         assertNull(requireNotNull(cache.readPreview(targetPosition) {}).previewTowerThroughUtc)
 
