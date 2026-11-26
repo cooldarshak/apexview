@@ -27,7 +27,12 @@ internal class FcastConnection(
     @Volatile private var lastRead = -1
     @Volatile private var lastWrite = -1
     @Volatile private var handshakeDone = false
-    private val outgoing = Channel<FcastProtocol.Packet>(32)
+    // Timing is optional. At most one complete timing batch can be queued
+    // or in flight; a burst of chunks cannot consume every control slot.
+    private data class Outbound(val packets: List<FcastProtocol.Packet>, val timing: Boolean = false)
+    private val outgoing = Channel<Outbound>(32)
+    private val timingPending = AtomicBoolean(false)
+    private val timingDropped = java.util.concurrent.atomic.AtomicLong()
     // A framed FCast packet is at most 32KB. Buffering an entire packet
     // prevents five tiny TCP writes for its little-endian header/opcode when
     // tcpNoDelay is enabled, without delaying a single message's flush.
@@ -43,10 +48,16 @@ internal class FcastConnection(
         writer = scope.launch(Dispatchers.IO) {
             try {
                 BufferedOutputStream(socket.getOutputStream(), ioBufferBytes).use { output ->
-                    for (packet in outgoing) {
-                        FcastProtocol.write(output, packet)
-                        lastWrite = packet.opcode
-                        sent.incrementAndGet()
+                    for (batch in outgoing) {
+                        try {
+                            for (packet in batch.packets) {
+                                FcastProtocol.write(output, packet)
+                                lastWrite = packet.opcode
+                                sent.incrementAndGet()
+                            }
+                        } finally {
+                            if (batch.timing) timingPending.set(false)
+                        }
                     }
                 }
             } catch (error: Exception) { finish("WRITE_${error.javaClass.simpleName}") }
@@ -78,15 +89,30 @@ internal class FcastConnection(
     }
 
     fun send(opcode: Int, body: JSONObject? = null) {
-        if (!closed.get() && outgoing.trySend(FcastProtocol.Packet(opcode, body)).isFailure) {
+        if (!closed.get() && outgoing.trySend(Outbound(listOf(FcastProtocol.Packet(opcode, body)))).isFailure) {
             finish("CONTROL_QUEUE_FULL")
         }
+    }
+    /** All chunks of a frame/table/geometry batch are accepted together.
+     * The caller must schedule a complete refresh after rejection. */
+    fun sendTimingBatch(messages: List<JSONObject>): Boolean {
+        if (messages.isEmpty()) return true
+        require(messages.size <= 24)
+        if (closed.get() || !timingPending.compareAndSet(false, true)) {
+            timingDropped.incrementAndGet()
+            return false
+        }
+        if (outgoing.trySend(Outbound(messages.map { FcastProtocol.Packet(FcastProtocol.TIMING, it) }, true)).isSuccess)
+            return true
+        timingPending.set(false)
+        timingDropped.incrementAndGet()
+        return false
     }
     private fun finish(reason: String) {
         if (!closed.compareAndSet(false, true)) return
         runCatching { android.util.Log.i("PitwallCast", "CAST_CONTROL_CLOSE id=$connectionId reason=$reason " +
             "handshake=$handshakeDone elapsedMs=${(System.nanoTime()-startedNs)/1_000_000} " +
-            "sent=${sent.get()} received=${received.get()} lastRead=$lastRead lastWrite=$lastWrite") }
+            "sent=${sent.get()} received=${received.get()} lastRead=$lastRead lastWrite=$lastWrite timingDropped=${timingDropped.get()}") }
         outgoing.close()
         runCatching { socket.close() }
         reader?.cancel(); writer?.cancel()

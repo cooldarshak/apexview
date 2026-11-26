@@ -40,6 +40,10 @@ internal class CastTimingPublisher(private val context: Context, private val app
     private var towerSampler: OverlayTowerSampler? = null
     private var towerSamplerNative = false
 
+    // Dropped batches never leave the receiver permanently referencing an
+    // unsent geometry or table. The next permitted sample sends all three.
+    fun requestFullRefresh() { lastFullSnapshotAt = Long.MIN_VALUE }
+
     fun messages(playbackId: String,
         receiverPredictionSteps: Int = CastTimingProtocol.V1_SEND_PREDICTION_STEPS
     ): List<JSONObject> {

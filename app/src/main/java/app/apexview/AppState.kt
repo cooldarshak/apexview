@@ -287,6 +287,7 @@ class AppState(
     private var googleHasPlayed by mutableStateOf(false)
     private var googleLoadId = ""
     private var googleLoading = false
+    private var googleLoadWatchdog: Job? = null
     private var googleCastSelected = true
     private val googleRemoteCallback = object : com.google.android.gms.cast.framework.media.RemoteMediaClient.Callback() {
         override fun onStatusUpdated() {
@@ -295,6 +296,7 @@ class AppState(
             bakedCastSession?.let { baked ->
                 val matches = googleCastLoadedUrl == baked.url && remote.mediaInfo?.contentId == baked.url
                 if (remote.isPlaying && matches && !baked.receiverRendering) {
+                    googleLoadWatchdog?.cancel(); googleLoadWatchdog = null
                     baked.receiverRendering = true
                     singleDecoderScenePlayer?.player?.volume = 0f
                     googleHasPlayed = true
@@ -316,8 +318,10 @@ class AppState(
             val relay = castRelay ?: return
             val matches = googleCastLoadedUrl == relay.googleCastMediaUrl &&
                 remote.mediaInfo?.contentId == relay.googleCastMediaUrl
-            if (matches && (remote.isPlaying || remote.isPaused) && !googleHasPlayed) {
+            if (app.apexview.cast.CastRecoveryPolicy.canHandOffGoogle(matches,
+                    remote.isPlaying || remote.isPaused, usesLayoutCastReceiver, castSceneConfirmed) && !googleHasPlayed) {
                 googleHasPlayed = true
+                googleLoadWatchdog?.cancel(); googleLoadWatchdog = null
                 handOffCastPlayback()
                 if (!usesLayoutCastReceiver) castSceneConfirmed = true
             }
@@ -396,6 +400,11 @@ class AppState(
     }
     internal fun connectLocalCast(device: app.apexview.cast.local.PitwallDevice) {
         stopFullSceneCast()
+        connectLocalCastAttempt(device, null, true)
+    }
+
+    private fun connectLocalCastAttempt(device: app.apexview.cast.local.PitwallDevice,
+                                        reconnectKey: String?, retryAllowed: Boolean) {
         val attempt = castCoordinator.beginConnection()
         localChosen = true; localReady = false; castDeviceName = device.name
         castPickerOpen = false; castBusy = true
@@ -416,6 +425,8 @@ class AppState(
                 val secured = requireNotNull(provisional)
                 val socket = secured.socket
                 val remembered = app.apexview.cast.local.PitwallRememberedPeers.contains(context, secured.session.trustKey)
+                if (reconnectKey != null && (!remembered || secured.session.trustKey != reconnectKey))
+                    throw IOException("Remembered TV identity changed")
                 if (!remembered) {
                     castPairingDecision = decision
                     castPairingCode = secured.session.code
@@ -433,10 +444,24 @@ class AppState(
                     if (localConnection === next) receiveLocalCast(packet)
                 }, { reason ->
                     if (localConnection === next) {
+                        val retry = app.apexview.cast.CastRecoveryPolicy.canRetry(
+                            retryAllowed, localReady, localChosen, reason,
+                            app.apexview.cast.local.PitwallRememberedPeers.contains(context, secured.session.trustKey))
                         localConnection = null; localReady = false
+                        localConnectionJob?.cancel(); localConnectionJob = null
                         castPreparationJob?.cancel(); castPreparationJob = null
                         releaseCastRelay(); castBusy = false
-                        castStatus = "TV disconnected ($reason). Choose the TV again to reconnect."; message = castStatus
+                        if (retry) {
+                            castBusy = true
+                            castStatus = "TV connection interrupted. Reconnecting securely…"; message = castStatus
+                            localConnectionJob = scope.launch {
+                                kotlinx.coroutines.delay(1_500)
+                                if (attempt == localConnectionGeneration && localChosen && localConnection == null)
+                                    connectLocalCastAttempt(device, secured.session.trustKey, false)
+                            }
+                        } else {
+                            castStatus = "TV disconnected ($reason). Choose the TV again to reconnect."; message = castStatus
+                        }
                     }
                 }, secureSession = secured.session)
                 localConnection = next; assigned = true; next.start(handshakeTimeoutMs = 100_000)
@@ -648,6 +673,11 @@ class AppState(
                     }
                 }
                 protocol.ERROR -> {
+                    if (body?.optString("code") == "USER_DISCONNECT") {
+                        stopCasting(true)
+                        castStatus = "The TV ended the connection."; message = castStatus
+                        return
+                    }
                     if (body?.has("playbackId") == true && body.optString("playbackId") != localLoadId) return
                     castPreparationJob?.cancel(); castPreparationJob = null
                     releaseCastRelay(); castBusy = false
@@ -675,7 +705,7 @@ class AppState(
             .put("metadata", JSONObject().put("type", 0).put("title", "Pitwall TV")
                 .put("custom", JSONObject().put("pitwallScene", scene).put("playbackId", localLoadId))))
         if (!playing) link.send(app.apexview.cast.local.FcastProtocol.PAUSE)
-        castStatus = "Allow playback on the TV. Waiting for its first rendered frame…"; message = castStatus
+        castStatus = "Waiting for the TV's first rendered frame…"; message = castStatus
         startCastSceneUpdates(relay)
     }
     private fun handOffCastPlayback() {
@@ -744,6 +774,7 @@ class AppState(
         if (googleCastRemoteClient == null) return
         if (usesLayoutCastReceiver) runCatching {
             session.setMessageReceivedCallbacks(app.apexview.cast.CastSceneProtocol.NAMESPACE) { _, _, text ->
+                if (googleCastSession !== session || localChosen) return@setMessageReceivedCallbacks
                 val event = runCatching { JSONObject(text) }.getOrNull() ?: return@setMessageReceivedCallbacks
                 when (event.optString("type")) {
                     "rendering" -> {
@@ -753,10 +784,13 @@ class AppState(
                             googleCastRemoteClient?.mediaInfo?.contentId != googleCastLoadedUrl)
                             return@setMessageReceivedCallbacks
                         castSceneConfirmed = true
+                        googleRemoteCallback.onStatusUpdated()
                         castStatus = "TV receiver is rendering the phone video layout."
                         android.util.Log.i("PitwallCast", "SCENE_RENDERING_CONFIRMED sources=${event.optInt("sources")}")
                     }
                     "error" -> {
+                        if (event.has("playbackId") && event.optString("playbackId") != googleLoadId)
+                            return@setMessageReceivedCallbacks
                         castStatus = "TV layout receiver: " + event.optString("message").take(180)
                         message = castStatus
                         android.util.Log.w("PitwallCast", DiagnosticRedaction.redact(castStatus.orEmpty()))
@@ -1140,8 +1174,11 @@ class AppState(
         googleCastLoadedUrl = session.url
         castSceneConfirmed = false
         googleLoading = true; googleHasPlayed = false
-        client.load(media, true, 0L).setResultCallback { result ->
-            if (bakedCastSession !== session) return@setResultCallback
+        val loadId = googleLoadId
+        watchGoogleLoad(loadId, "BAKED")
+        runCatching { client.load(media, true, 0L).setResultCallback { result ->
+            if (bakedCastSession !== session || googleCastRemoteClient !== client || googleLoadId != loadId)
+                return@setResultCallback
             googleLoading = false
             if (result.status.isSuccess) {
                 client.setStreamMute(mutedAll)
@@ -1152,7 +1189,7 @@ class AppState(
                 message = castStatus
                 android.util.Log.i("PitwallCast", "BAKED_GOOGLE_CAST_LOADED picture=${session.width}x${session.height} feeds=${session.feeds}")
             } else failGoogleCastLoad("Google Cast rejected the live scene (${result.status.statusCode}).")
-        }
+        } }.onFailure { failGoogleCastLoad("Google Cast live load failed: ${it.javaClass.simpleName}") }
     }
     private fun loadGoogleCastMedia(
         relay: app.apexview.cast.SceneCastRelay,
@@ -1184,11 +1221,14 @@ class AppState(
         googleCastLoadedUrl = url
         castSceneConfirmed = false
         googleLoading = true; googleHasPlayed = false
+        val loadId = googleLoadId
+        watchGoogleLoad(loadId, if (usesLayoutCastReceiver) "CUSTOM_LAYOUT" else "STANDARD_GRID")
         val startPosition = castFramePositionMs.coerceAtLeast(0L)
         remoteCastClock.update(startPosition, playing, playbackSpeed, relay.session.durationUs / 1000)
         runCatching {
             client.load(media, playing, startPosition).setResultCallback { result ->
-                if (castRelay !== relay) return@setResultCallback
+                if (castRelay !== relay || googleCastRemoteClient !== client || googleLoadId != loadId)
+                    return@setResultCallback
                 googleLoading = false
                 if (result.status.isSuccess) {
                     if (playbackSpeed != 1f) client.setPlaybackRate(playbackSpeed.toDouble())
@@ -1206,6 +1246,18 @@ class AppState(
             failGoogleCastLoad("Google Cast load failed: ${DiagnosticRedaction.redact(error.message ?: error.javaClass.simpleName).take(160)}")
         }
     }
+    private fun watchGoogleLoad(loadId: String, route: String) {
+        googleLoadWatchdog?.cancel()
+        android.util.Log.i("PitwallCast", "GOOGLE_LOAD_START id=$loadId route=$route")
+        googleLoadWatchdog = scope.launch {
+            kotlinx.coroutines.delay(45_000)
+            if (googleLoadId == loadId && !googleHasPlayed && !localChosen) {
+                googleLoadWatchdog = null
+                android.util.Log.w("PitwallCast", "GOOGLE_LOAD_TIMEOUT id=$loadId route=$route loading=$googleLoading layout=$castSceneConfirmed")
+                failGoogleCastLoad("The TV did not confirm playback. Playback returned to this device.")
+            }
+        }
+    }
     private fun failGoogleCastLoad(reason: String) {
         runCatching { googleCastRemoteClient?.stop() }
         releaseCastRelay()
@@ -1219,6 +1271,7 @@ class AppState(
         castCoordinator.endLoad()
         remoteCaptionTracks = emptyList()
         remoteDirectQualityOffers = emptyList(); remoteDirectActual = null; remoteDirectRequested = null
+        googleLoadWatchdog?.cancel(); googleLoadWatchdog = null
         googleLoading = false; googleHasPlayed = false
         castBusy = false
         bakedCastSession?.receiverRendering = false
@@ -1487,9 +1540,8 @@ class AppState(
     private fun publishLocalCastTiming(timing: app.apexview.cast.CastTimingPublisher, contentId: Long?) {
         if (!localChosen || !localTimingSupported || !castSceneConfirmed || leaderTile()?.contentId != contentId) return
         runCatching {
-            timing.messages(localLoadId, localMapPredictionSteps).forEach {
-                localConnection?.send(app.apexview.cast.local.FcastProtocol.TIMING, it)
-            }
+            val packets = timing.messages(localLoadId, localMapPredictionSteps)
+            if (localConnection?.sendTimingBatch(packets) != true) timing.requestFullRefresh()
         }.onFailure { android.util.Log.w("PitwallCast", "Timing display update failed: ${it.javaClass.simpleName}") }
     }
 

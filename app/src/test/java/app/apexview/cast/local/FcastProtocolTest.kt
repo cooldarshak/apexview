@@ -66,6 +66,25 @@ class FcastProtocolTest {
         }
     }
 
+    @Test fun timingBatchesAreBoundedAndRemainOrdered() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { server ->
+            Socket(server.inetAddress, server.localPort).use { phone ->
+                val connection = FcastConnection(scope, server.accept(), {}, {})
+                try {
+                    // No writer yet: deterministically exercise backpressure.
+                    assertTrue(connection.sendTimingBatch(listOf(JSONObject().put("part",0),JSONObject().put("part",1))))
+                    assertFalse(connection.sendTimingBatch(listOf(JSONObject().put("part",2))))
+                    connection.send(FcastProtocol.PAUSE)
+                    connection.start()
+                    phone.soTimeout=3000
+                    assertEquals(0,FcastProtocol.read(phone.getInputStream())!!.body!!.getInt("part"))
+                    assertEquals(1,FcastProtocol.read(phone.getInputStream())!!.body!!.getInt("part"))
+                    assertEquals(FcastProtocol.PAUSE,FcastProtocol.read(phone.getInputStream())!!.opcode)
+                } finally { connection.close(); scope.cancel() }
+            }
+        }
+    }
     @Test fun controlsAndLayoutTravelInOrderOverARealSocketAndClosingReleasesReader() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val messages = LinkedBlockingQueue<FcastProtocol.Packet>()
@@ -88,7 +107,7 @@ class FcastProtocolTest {
                     assertEquals(129, ack.opcode)
                     assertEquals("new-stream", ack.body!!.getString("playbackId"))
                     connection.close()
-                    assertNotNull(closed.poll(3, TimeUnit.SECONDS))
+                    assertEquals("LOCAL_CLOSE", closed.poll(3, TimeUnit.SECONDS))
                     assertTrue(tv.isClosed)
                 } finally { connection.close(); scope.cancel() }
             }

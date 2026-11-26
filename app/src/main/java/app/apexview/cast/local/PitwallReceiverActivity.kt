@@ -339,6 +339,18 @@ class PitwallReceiverActivity : ComponentActivity() {
         }
     }
 
+    private fun disconnectPhone() {
+        val owner = connection ?: return
+        if (!approved) { owner.close(); return }
+        // Tell an updated phone not to retry a deliberate local disconnect.
+        owner.send(FcastProtocol.ERROR, JSONObject().put("code", "USER_DISCONNECT")
+            .put("message", "The TV ended the connection."))
+        lifecycleScope.launch {
+            delay(250)
+            if (connection === owner) owner.close()
+        }
+    }
+
     private fun confirmPairing(matches: Boolean) {
         val next = connection ?: return
         if (pairingCode == null) return
@@ -998,10 +1010,10 @@ class PitwallReceiverActivity : ComponentActivity() {
                 Text(status, style = Type.body, color = Ink.secondary)
                 Text("On your phone, choose Cast and select this TV. Keep the receiver open. Protected and live F1 feeds use the authorized F1 TV account signed in here.",
                     style = Type.subhead)
-                if (connection != null) SecondaryButton("Disconnect phone") { connection?.close() }
+                if (connection != null) SecondaryButton("Disconnect phone") { disconnectPhone() }
                 SecondaryButton("Forget paired phones") {
-                    connection?.close()
                     PitwallRememberedPeers.forgetAll(this@PitwallReceiverActivity)
+                    disconnectPhone()
                     status = "Paired phones forgotten. Confirm the code on the next connection."
                 }
                 SecondaryButton("Exit receiver") { finish() }
