@@ -4,6 +4,25 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SceneGraphicsOwnersTest {
+    @Test fun queueSurvivesTextureRetirementAndEncoderIsDistinct() {
+        val owners = SceneGraphicsOwners()
+        val queue = owners.newId()
+        val encoder = owners.newId()
+        val state = SceneGraphicsOwners.Owner("CastInput", 1, 1, 0, 0, 0, 0, 0, 0, 0,
+            captureTextures = 1, captureQueues = 1, captureWidth = 1280, captureHeight = 720)
+        owners.record(queue, state)
+        owners.record(encoder, state.copy(backend = "Encoder", windows = 1,
+            captureTextures = 0, captureQueues = 0, encoderInputs = 1))
+        owners.record(queue, state.copy(captureTextures = 0))
+        assertEquals(2, owners.snapshot().size)
+        assertTrue(owners.fields().contains("sceneCaptureQueues=1"))
+        assertTrue(owners.fields().contains("sceneEncoderInputs=1"))
+        owners.record(queue, state.copy(captureTextures = 0, captureQueues = 0))
+        assertEquals(setOf(encoder), owners.snapshot().keys)
+        owners.remove(encoder)
+        assertTrue(owners.snapshot().isEmpty())
+    }
+
     @Test fun replacedOwnerIsNotCountedTwiceAndRetiredOwnerIsRemoved() {
         val owners = SceneGraphicsOwners()
         val a = owners.newId()
