@@ -48,8 +48,12 @@ internal class ReplayClipEncoder(
     private var lastPresentationUs = 0L
     // PixelCopy may still own the bitmap when a clip is cancelled. Let its callback release
     // the final reference instead of recycling the bitmap while that copy is pending.
+    private val bitmapLock = Any()
     private var bitmap: Bitmap? = null
-    val pixels: Bitmap get() = bitmap ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap = it }
+    val pixels: Bitmap get() = synchronized(bitmapLock) {
+        check(!closed) { "Encoder already retired" }
+        bitmap ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap = it }
+    }
     private var codec: MediaCodec? = null
     private var input: android.view.Surface? = null
     private var muxer: MediaMuxer? = null
@@ -63,7 +67,7 @@ internal class ReplayClipEncoder(
     private var overlayUniform = -1
     private var positionAttribute = -1
     private var uvAttribute = -1
-    private var closed = false
+    @Volatile private var closed = false
     private var firstNs = -1L
     private val quad = ByteBuffer.allocateDirect(16 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
         put(floatArrayOf(-1f,-1f,0f,1f, 1f,-1f,1f,1f, -1f,1f,0f,0f, 1f,1f,1f,0f))
@@ -268,7 +272,7 @@ internal class ReplayClipEncoder(
         codecHeaders = ByteArray(0)
         // PixelCopy's request holds its own bitmap reference. Dropping our
         // reference is safe even when its callback has not run; recycling is not.
-        bitmap = null
+        synchronized(bitmapLock) { bitmap = null }
         steps.run("gl-objects") {
             val current = EGL14.eglGetCurrentContext() == glContext &&
                 EGL14.eglGetCurrentDisplay() == display
