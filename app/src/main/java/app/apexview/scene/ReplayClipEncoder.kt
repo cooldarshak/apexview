@@ -29,6 +29,7 @@ internal class ReplayClipEncoder(
     private val width: Int,
     private val height: Int,
     private val castSample: ((BakedCastTransportStream.Sample) -> Unit)? = null,
+    private val nativeRequested: () -> Boolean = { false },
 ) {
     private val graphicsOwnerId = SceneGraphicsOwners.process.newId()
     private fun recordGraphicsOwner() {
@@ -60,6 +61,15 @@ internal class ReplayClipEncoder(
     private var egl = EGL14.EGL_NO_SURFACE
     private var track = -1
     private var codecHeaders = ByteArray(0)
+    private val emptyPrefix = ByteArray(0)
+    private var nativeFramingActual: Boolean? = null
+    private val reportFraming: (Boolean) -> Unit = { actual ->
+        if (nativeFramingActual != actual) {
+            nativeFramingActual = actual
+            Log.i("PitwallNativeHotPath", "AVC_FRAMING_ENGINE requested=RUST actual=" +
+                if (actual) "RUST reason=DIRECT_CODEC_BUFFER" else "JVM reason=NATIVE_UNAVAILABLE_OR_UNSUPPORTED")
+        }
+    }
     private var textureAllocated = false
     private val bufferInfo = MediaCodec.BufferInfo()
     private var texture = 0
@@ -215,12 +225,13 @@ internal class ReplayClipEncoder(
                                 check(track >= 0)
                                 checkNotNull(muxer).writeSampleData(track, buffer, info)
                             } else {
-                                val bytes = ByteArray(info.size)
-                                buffer.position(info.offset); buffer.limit(info.offset + info.size); buffer.get(bytes)
                                 val key = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
-                                val picture = BakedAvcAccessUnit.annexB(bytes)
+                                val requested = nativeRequested()
+                                if (!requested) nativeFramingActual = null
+                                val picture = BakedAvcAccessUnit.copyAnnexB(buffer, info.offset, info.size,
+                                    if (key) codecHeaders else emptyPrefix, requested, reportFraming)
                                 castSample.invoke(BakedCastTransportStream.Sample(info.presentationTimeUs,
-                                    if (key) codecHeaders + picture else picture, video = true, keyFrame = key))
+                                    picture, video = true, keyFrame = key))
                             }
                             framesWritten++
                             lastPresentationUs = maxOf(lastPresentationUs, info.presentationTimeUs)
