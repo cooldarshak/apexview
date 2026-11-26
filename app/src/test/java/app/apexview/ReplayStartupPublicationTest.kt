@@ -112,4 +112,22 @@ class ReplayStartupPublicationTest {
         assertNotSame(prefix.t, finished.t)
         for (at in 0L until 100) assertEquals(prefix.at(at), finished.at(at))
     }
+
+    @Test fun compactIncomingTowerDoesNotClaimCoverageFromItsOldPredecessor() {
+        val owner = ReplayStartupPublication()
+        val saved = window(ReplayTimingStage.SAVED_WINDOW).apply {
+            previewTowerFromUtc = 1000L
+            towerThroughUtc = 3000L
+        }
+        owner.offer(saved, video(1500L))
+        val newer = window(ReplayTimingStage.TOPICS, laps = rows - "22").apply {
+            previewTowerFromUtc = 2500L
+            towerThroughUtc = 9000L
+        }
+        assertSame(newer.laps, owner.offer(newer, video(2600L)).laps)
+        assertSame(saved.laps, owner.at(video(2000L))!!.laps)
+        assertSame(newer.laps, owner.at(video(6000L))!!.laps)
+        assertTrue(owner.at(video(9001L))!!.laps.isEmpty())
+        assertTrue(owner.at(video(999L))!!.laps.isEmpty())
+    }
 }
