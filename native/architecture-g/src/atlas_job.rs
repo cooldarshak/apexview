@@ -52,10 +52,16 @@ impl Dispatcher {
             .as_ref()
             .is_some_and(|cache| cache.generation != generation)
         {
-            self.cached = None;
-            self.header_slab = Vec::new();
-            self.small_header_jobs = 0;
+            self.trim_workspace();
         }
+    }
+
+    /// Only the worker owns this scratch. Dropping it at a job boundary
+    /// cannot invalidate an immutable fragment or a Media3 read lease.
+    pub(crate) fn trim_workspace(&mut self) {
+        self.cached = None;
+        self.header_slab = Vec::new();
+        self.small_header_jobs = 0;
     }
 
     pub fn run(
@@ -239,6 +245,22 @@ fn copy_bytes(bytes: &[u8]) -> Result<Vec<u8>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pressure_trim_releases_header_backing_even_without_a_cached_atlas() {
+        let mut worker = Dispatcher {
+            header_slab: Vec::with_capacity(128 * 1024),
+            small_header_jobs: 7,
+            ..Dispatcher::default()
+        };
+        worker.header_slab.extend_from_slice(b"scratch");
+        worker.trim_workspace();
+        assert_eq!(worker.header_slab.capacity(), 0);
+        assert_eq!(worker.small_header_jobs, 0);
+        assert!(worker.cached.is_none());
+        worker.header_slab.extend_from_slice(b"new job");
+        assert_eq!(worker.header_slab.as_slice(), b"new job");
+    }
 
     #[test]
     fn truncated_and_foreign_packets_cannot_mutate_output() {

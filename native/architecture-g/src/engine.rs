@@ -136,6 +136,9 @@ struct State {
     generation:i64,
     closed:bool,
     compact_atlas:bool,
+    // Coalesced pressure/pause command. The worker, not the caller,
+    // retires parser state only at a safe job boundary.
+    trim_workspace:bool,
     payload_allocations:u64,
     peak_pairs:usize,
     copied_input:u64,
@@ -183,7 +186,7 @@ impl Engine {
             slots.push(Slot{buffers,stage:Stage::Free,work:None,result:0,running_bytes:0,small_owned_jobs:0});
         }
         let initial_pairs=if compact_atlas {0} else {budget.slots};
-        let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false,compact_atlas,
+        let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false,compact_atlas,trim_workspace:false,
             payload_allocations:initial_pairs as u64,peak_pairs:initial_pairs,copied_input:0,copied_output:0}),Condvar::new()));
         let cloned=Arc::clone(&shared);
         let worker=thread::Builder::new().name("pitwall-native-stitch".into())
@@ -238,6 +241,10 @@ impl Engine {
                 slot.small_owned_jobs=0;
             }
         }
+        // Wake a sleeping worker too. The returned byte count remains
+        // strictly the synchronous slot capacity; workspace is asynchronous.
+        s.trim_workspace=true;
+        self.shared.1.notify_one();
         bytes
     }
     /// Keep one warm free pair; never touch a queued, running or leased slot.
@@ -456,6 +463,10 @@ fn run_worker(shared:Shared,output_ceiling:usize) {
             loop {
                 if s.closed{return;}
                 atlas.invalidate(s.generation);
+                if s.trim_workspace {
+                    atlas.trim_workspace();
+                    s.trim_workspace=false;
+                }
                 if let Some(index)=s.next() {
                     let slot=&mut s.slots[index];
                     let work=slot.work.expect("queued work");
@@ -564,6 +575,27 @@ mod tests {
         assert_eq!(engine.allocated_payload_bytes(),0);
         assert_eq!(engine.payload_stats()[0],1);
     }
+    #[test]
+    fn idle_workspace_trim_wakes_worker_without_changing_generation() {
+        let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
+        let engine=Engine::new_atlas(b).unwrap();
+        let generation=engine.generation();
+        engine.trim_idle_payload();
+        let until=Instant::now()+Duration::from_secs(5);
+        loop {
+            if !engine.shared.0.lock().unwrap().trim_workspace {break;}
+            assert!(Instant::now()<until,"workspace trim not consumed");
+            thread::yield_now();
+        }
+        assert_eq!(engine.generation(),generation);
+        let token=engine.submit(generation,&[2,2,1],1,1,true,5000);
+        assert_eq!(wait(&engine,token),6);
+        let mut bytes=[0;6];
+        assert_eq!(engine.copy(token,0,&mut bytes),6);
+        assert_eq!(bytes,[0,0,0,1,2,1]);
+        assert_eq!(engine.release(token),1);
+    }
+
     #[test]
     fn compact_spare_slot_is_lazy_and_preserves_foreground_admission() {
         let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
@@ -757,7 +789,7 @@ mod tests {
         let mk=|token,foreground,ms|Slot{buffers:None,stage:Stage::Queued,
             work:Some(Work{token,generation:1,len:3,command:Command::Convert{prefix:1,count:1},foreground,
                 deadline:now+Duration::from_millis(ms)}),result:0,running_bytes:0,small_owned_jobs:0};
-        let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false,compact_atlas:false,payload_allocations:0,peak_pairs:0,copied_input:0,copied_output:0};
+        let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false,compact_atlas:false,trim_workspace:false,payload_allocations:0,peak_pairs:0,copied_input:0,copied_output:0};
         assert_eq!(s.next(),Some(2));s.slots[2].stage=Stage::Running;
         assert_eq!(s.next(),Some(3));s.slots[3].stage=Stage::Running;
         assert_eq!(s.next(),Some(1));s.slots[1].stage=Stage::Running;
