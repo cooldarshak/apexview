@@ -278,6 +278,7 @@ class AppState(
         get() = castCoordinator.playbackId
         set(value) {
             castCoordinator.beginLoad(value)
+            watchLocalLoad(value)
             remoteCaptionTracks = emptyList()
             remoteDirectQualityOffers = emptyList()
             remoteDirectActual = null
@@ -294,14 +295,41 @@ class AppState(
     private var googleLoadId = ""
     private var googleLoading = false
     private var googleLoadWatchdog: Job? = null
+    private var localLoadWatchdog: Job? = null
+    private var googleOwnershipWatchdog: Job? = null
+
+    private fun currentGoogleMediaMatches(client: com.google.android.gms.cast.framework.media.RemoteMediaClient): Boolean =
+        app.apexview.cast.CastRecoveryPolicy.matchesGoogleLoad(googleCastLoadedUrl, googleLoadId,
+            client.mediaInfo?.contentId, client.mediaInfo?.customData?.optString("playbackId"))
+
+    private fun checkGoogleOwnership(client: com.google.android.gms.cast.framework.media.RemoteMediaClient) {
+        if (!googleHasPlayed || googleLoading || googleOwnershipWatchdog?.isActive == true) return
+        val owner = googleLoadId
+        // The SDK can transiently clear MediaInfo on an idle callback. Do not
+        // apply a foreign clock or stop another sender's media. Restore local
+        // playback only if the same client still reports lost ownership.
+        googleOwnershipWatchdog = scope.launch {
+            kotlinx.coroutines.delay(2_000L)
+            googleOwnershipWatchdog = null
+            if (!localChosen && googleCastRemoteClient === client && googleLoadId == owner &&
+                googleHasPlayed && !googleLoading && !currentGoogleMediaMatches(client)) {
+                googleCastSelected = false
+                releaseCastRelay()
+                castStatus = "Google Cast media ended or changed. Playback returned to this device."
+                message = castStatus
+            }
+        }
+    }
     private var googleCastSelected = true
     private val googleRemoteCallback = object : com.google.android.gms.cast.framework.media.RemoteMediaClient.Callback() {
         override fun onStatusUpdated() {
             if (localChosen || googleLoading) return
             val remote = googleCastRemoteClient ?: return
             bakedCastSession?.let { baked ->
-                val matches = googleCastLoadedUrl == baked.url && remote.mediaInfo?.contentId == baked.url
-                if (remote.isPlaying && matches && !baked.receiverRendering) {
+                val matches = googleCastLoadedUrl == baked.url && currentGoogleMediaMatches(remote)
+                if (!matches) { checkGoogleOwnership(remote); return }
+                googleOwnershipWatchdog?.cancel(); googleOwnershipWatchdog = null
+                if (remote.isPlaying && !baked.receiverRendering) {
                     googleLoadWatchdog?.cancel(); googleLoadWatchdog = null
                     baked.receiverRendering = true
                     singleDecoderScenePlayer?.player?.volume = 0f
@@ -309,7 +337,6 @@ class AppState(
                     castSceneConfirmed = true
                     castResources.confirmRendering()
                 }
-                if (!matches && !googleHasPlayed) return
                 if (castRemoteBuffering != remote.isBuffering) {
                     castRemoteBuffering = remote.isBuffering
                     android.util.Log.i("PitwallCast", "BAKED_RECEIVER_BUFFER buffering=$castRemoteBuffering positionMs=${remote.approximateStreamPosition} ${baked.health()}")
@@ -322,8 +349,9 @@ class AppState(
                 return
             }
             val relay = castRelay ?: return
-            val matches = googleCastLoadedUrl == relay.googleCastMediaUrl &&
-                remote.mediaInfo?.contentId == relay.googleCastMediaUrl
+            val matches = googleCastLoadedUrl == relay.googleCastMediaUrl && currentGoogleMediaMatches(remote)
+            if (!matches) { checkGoogleOwnership(remote); return }
+            googleOwnershipWatchdog?.cancel(); googleOwnershipWatchdog = null
             if (app.apexview.cast.CastRecoveryPolicy.canHandOffGoogle(matches,
                     remote.isPlaying || remote.isPaused, usesLayoutCastReceiver, castSceneConfirmed) && !googleHasPlayed) {
                 googleHasPlayed = true
@@ -331,7 +359,7 @@ class AppState(
                 handOffCastPlayback()
                 if (!usesLayoutCastReceiver) castSceneConfirmed = true
             }
-            if (!castPlaybackHandedOff || (!matches && !googleHasPlayed)) return
+            if (!castPlaybackHandedOff) return
             if (googleHasPlayed && remote.mediaStatus?.playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
                 remoteCastClock.update(remote.approximateStreamPosition, false, playbackSpeed, remote.streamDuration)
                 if (remote.mediaStatus?.idleReason == com.google.android.gms.cast.MediaStatus.IDLE_REASON_FINISHED) playing = false
@@ -647,7 +675,9 @@ class AppState(
                 protocol.PING -> localConnection?.send(protocol.PONG)
                 protocol.RENDERING -> {
                     if (!castCoordinator.accepts(body?.optString("playbackId").orEmpty()) || !castingActive) return
+                    localLoadWatchdog?.cancel(); localLoadWatchdog = null
                     castSceneConfirmed = true
+                    android.util.Log.i("PitwallCast", "LOCAL_LOAD_RENDERED id=$localLoadId")
                     castResources.confirmRendering()
                     if (bakedCastSession == null) {
                         val alreadyHandedOff = castPlaybackHandedOff
@@ -725,6 +755,7 @@ class AppState(
         val link = localConnection ?: throw IOException("TV disconnected during preparation")
         val time = castFramePositionMs.coerceAtLeast(0L)
         localLoadId = java.util.UUID.randomUUID().toString()
+        android.util.Log.i("PitwallCast", "CAST_RELAY_LOAD id=$localLoadId relay=${relay.diagnosticRelayId} route=PITWALL_ARCHIVE")
         castSceneConfirmed = false
         remoteCastClock.update(time, playing, playbackSpeed, relay.session.durationUs / 1000)
         link.send(app.apexview.cast.local.FcastProtocol.PLAY, JSONObject()
@@ -798,6 +829,9 @@ class AppState(
         if (googleCastSession !== session) {
             googleVideoOnlyConsent = false
             castVideoOnlyOffer = false
+            // A new SDK session cannot inherit the previous receiver's
+            // acknowledged media or suppress a load of the same relay URL.
+            if (googleCastSession != null) releaseCastRelay()
         }
         googleCastSession = session
         googleCastRemoteClient?.unregisterCallback(googleRemoteCallback)
@@ -814,7 +848,7 @@ class AppState(
                         // New receivers echo a per-load identity. Unscoped legacy
                         // acknowledgements cannot confirm a replacement picture.
                         if (googleLoadId.isEmpty() || event.optString("playbackId") != googleLoadId ||
-                            googleCastRemoteClient?.mediaInfo?.contentId != googleCastLoadedUrl)
+                            googleCastRemoteClient?.let(::currentGoogleMediaMatches) != true)
                             return@setMessageReceivedCallbacks
                         castSceneConfirmed = true
                         googleRemoteCallback.onStatusUpdated()
@@ -822,7 +856,7 @@ class AppState(
                         android.util.Log.i("PitwallCast", "SCENE_RENDERING_CONFIRMED sources=${event.optInt("sources")}")
                     }
                     "error" -> {
-                        if (event.has("playbackId") && event.optString("playbackId") != googleLoadId)
+                        if (googleLoadId.isEmpty() || event.optString("playbackId") != googleLoadId)
                             return@setMessageReceivedCallbacks
                         castStatus = "TV layout receiver: " + event.optString("message").take(180)
                         message = castStatus
@@ -836,7 +870,8 @@ class AppState(
         if (baked != null) { if (baked.playable) loadGoogleBakedCast(baked) }
         else if (relay != null) loadGoogleCastMedia(relay) else startFullSceneCast()
     }
-    fun onGoogleCastSessionEnded() {
+    fun onGoogleCastSessionEnded(session: com.google.android.gms.cast.framework.CastSession) {
+        if (googleCastSession !== session) return
         castVideoOnlyOffer = false
         googleVideoOnlyConsent = false
         googleCastRemoteClient?.unregisterCallback(googleRemoteCallback)
@@ -1182,6 +1217,7 @@ class AppState(
     private fun loadLocalBakedCast(session: app.apexview.cast.BakedCastLiveSession) {
         val link = localConnection ?: throw IOException("Pitwall receiver disconnected")
         localLoadId = java.util.UUID.randomUUID().toString()
+        android.util.Log.i("PitwallCast", "CAST_RELAY_LOAD id=$localLoadId relay=${session.diagnosticRelayId} route=PITWALL_BAKED")
         castSceneConfirmed = false
         link.send(app.apexview.cast.local.FcastProtocol.PLAY, JSONObject()
             .put("container", "application/x-mpegURL").put("url", session.url)
@@ -1195,7 +1231,10 @@ class AppState(
 
     private fun loadGoogleBakedCast(session: app.apexview.cast.BakedCastLiveSession) {
         val client = googleCastRemoteClient ?: return
-        if (googleCastLoadedUrl == session.url) return
+        if (googleCastLoadedUrl == session.url && (googleLoading || currentGoogleMediaMatches(client))) {
+            googleRemoteCallback.onStatusUpdated()
+            return
+        }
         val metadata = com.google.android.gms.cast.MediaMetadata(com.google.android.gms.cast.MediaMetadata.MEDIA_TYPE_MOVIE).apply {
             putString(com.google.android.gms.cast.MediaMetadata.KEY_TITLE, "Pitwall TV live scene")
             putString(com.google.android.gms.cast.MediaMetadata.KEY_SUBTITLE, "${session.feeds} feeds, map, tower and commentary")
@@ -1210,6 +1249,7 @@ class AppState(
         castSceneConfirmed = false
         googleLoading = true; googleHasPlayed = false
         val loadId = googleLoadId
+        android.util.Log.i("PitwallCast", "CAST_RELAY_LOAD id=$loadId relay=${session.diagnosticRelayId} route=GOOGLE_BAKED")
         watchGoogleLoad(loadId, "BAKED")
         runCatching { client.load(media, true, 0L).setResultCallback { result ->
             if (bakedCastSession !== session || googleCastRemoteClient !== client || googleLoadId != loadId)
@@ -1232,7 +1272,10 @@ class AppState(
     ) {
         val client = googleCastRemoteClient ?: return
         val url = relay.googleCastMediaUrl
-        if (googleCastLoadedUrl == url) return
+        if (googleCastLoadedUrl == url && (googleLoading || currentGoogleMediaMatches(client))) {
+            googleRemoteCallback.onStatusUpdated()
+            return
+        }
         if (usesLayoutCastReceiver && layoutScene == null) {
             failGoogleCastLoad("The phone video layout is not ready. Keep the player open and reconnect Cast.")
             return
@@ -1257,6 +1300,7 @@ class AppState(
         castSceneConfirmed = false
         googleLoading = true; googleHasPlayed = false
         val loadId = googleLoadId
+        android.util.Log.i("PitwallCast", "CAST_RELAY_LOAD id=$loadId relay=${relay.diagnosticRelayId} route=GOOGLE_ARCHIVE")
         watchGoogleLoad(loadId, if (usesLayoutCastReceiver) "CUSTOM_LAYOUT" else "STANDARD_GRID")
         val startPosition = castFramePositionMs.coerceAtLeast(0L)
         remoteCastClock.update(startPosition, playing, playbackSpeed, relay.session.durationUs / 1000)
@@ -1281,7 +1325,25 @@ class AppState(
             failGoogleCastLoad("Google Cast load failed: ${DiagnosticRedaction.redact(error.message ?: error.javaClass.simpleName).take(160)}")
         }
     }
+    private fun watchLocalLoad(loadId: String) {
+        localLoadWatchdog?.cancel()
+        val connection = localConnection ?: return
+        android.util.Log.i("PitwallCast", "LOCAL_LOAD_START id=$loadId")
+        localLoadWatchdog = scope.launch {
+            kotlinx.coroutines.delay(60_000L)
+            if (app.apexview.cast.CastRecoveryPolicy.localLoadTimedOut(loadId, localLoadId,
+                    localConnection === connection, localChosen, castingActive, castSceneConfirmed)) {
+                localLoadWatchdog = null
+                android.util.Log.w("PitwallCast", "LOCAL_LOAD_TIMEOUT id=$loadId")
+                connection.send(app.apexview.cast.local.FcastProtocol.STOP)
+                releaseCastRelay()
+                castStatus = "The TV did not confirm its first frame. Playback returned to this device."
+                message = castStatus
+            }
+        }
+    }
     private fun watchGoogleLoad(loadId: String, route: String) {
+        googleOwnershipWatchdog?.cancel(); googleOwnershipWatchdog = null
         googleLoadWatchdog?.cancel()
         android.util.Log.i("PitwallCast", "GOOGLE_LOAD_START id=$loadId route=$route")
         googleLoadWatchdog = scope.launch {
@@ -1304,6 +1366,8 @@ class AppState(
         if (!preserveQualityRestart) cancelCastQualityRestart()
         castCoordinator.beginPreparation()
         castCoordinator.endLoad()
+        localLoadWatchdog?.cancel(); localLoadWatchdog = null
+        googleOwnershipWatchdog?.cancel(); googleOwnershipWatchdog = null
         remoteCaptionTracks = emptyList()
         remoteDirectQualityOffers = emptyList(); remoteDirectActual = null; remoteDirectRequested = null
         googleLoadWatchdog?.cancel(); googleLoadWatchdog = null
@@ -1555,6 +1619,7 @@ class AppState(
         val audible = selected.firstOrNull { it.audible } ?: selected.first()
         val license = app.apexview.cast.local.ReceiverLicenseRequest(selected.first().contentId, channels, requireNotNull(audible.channel.channelId))
         localLoadId = java.util.UUID.randomUUID().toString(); castSceneConfirmed = false
+        android.util.Log.i("PitwallCast", "CAST_RELAY_LOAD id=$localLoadId relay=${session.diagnosticRelayId} route=PITWALL_COMPOSED")
         remoteCastClock.update(targetMs, playing, playbackSpeed, session.durationMs)
         val custom = JSONObject().put("pitwallScene", layout).put("playbackId", localLoadId)
             .put("pitwallAudio", session.selectedAudioIndex)
