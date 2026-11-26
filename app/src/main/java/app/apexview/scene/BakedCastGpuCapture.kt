@@ -3,6 +3,7 @@ package app.apexview.scene
 import android.graphics.Color
 import android.graphics.SurfaceTexture
 import android.opengl.GLES11Ext.GL_TEXTURE_EXTERNAL_OES
+import android.opengl.EGL14
 import android.opengl.GLES20
 import android.os.Handler
 import android.os.Looper
@@ -143,31 +144,48 @@ internal class BakedCastGpuCapture(
     }
 
     private class Input(width: Int, height: Int, handler: Handler, frameAvailable: () -> Unit) : AutoCloseable {
+        private val ownerContext = EGL14.eglGetCurrentContext().also { check(it != EGL14.EGL_NO_CONTEXT) }
         val id = IntArray(1).also { GLES20.glGenTextures(1, it, 0) }.single()
         val matrix = FloatArray(16)
         private val frames: SurfaceTexture
         val surface: Surface
+        private var textureReleased = false
 
         init {
+            var created: SurfaceTexture? = null
+            try {
+            check(id != 0)
             GLES20.glBindTexture(GL_TEXTURE_EXTERNAL_OES, id)
             GLES20.glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-            frames = SurfaceTexture(id).apply {
-                setDefaultBufferSize(width, height)
-                setOnFrameAvailableListener({ frameAvailable() }, handler)
+            val actual = SurfaceTexture(id)
+            created = actual
+            actual.setDefaultBufferSize(width, height)
+            actual.setOnFrameAvailableListener({ frameAvailable() }, handler)
+            frames = actual
+            surface = Surface(actual)
+            } catch (error: Exception) {
+                runCatching { created?.release() }
+                deleteTextureOnOwner()
+                throw error
             }
-            surface = Surface(frames)
         }
 
         fun latch() { frames.updateTexImage(); frames.getTransformMatrix(matrix) }
 
+        private fun deleteTextureOnOwner() {
+            if (EGL14.eglGetCurrentContext() == ownerContext) GLES20.glDeleteTextures(1, intArrayOf(id), 0)
+        }
+
         fun releaseTexture() {
+            if (textureReleased) return
+            textureReleased = true
             try { frames.setOnFrameAvailableListener(null) }
             finally {
                 try { frames.release() }
-                finally { GLES20.glDeleteTextures(1, intArrayOf(id), 0) }
+                finally { deleteTextureOnOwner() }
             }
         }
 
@@ -180,6 +198,8 @@ internal class BakedCastGpuCapture(
 
 /** Uses producer matrices for orientation/crop and HWUI's premultiplied alpha for the overlays. */
 internal class BakedCastLayerCompositor(background: Int, private val width: Int, private val height: Int) : AutoCloseable {
+    private val ownerContext = EGL14.eglGetCurrentContext().also { check(it != EGL14.EGL_NO_CONTEXT) }
+    private var closed = false
     private val red = Color.red(background) / 255f
     private val green = Color.green(background) / 255f
     private val blue = Color.blue(background) / 255f
@@ -256,5 +276,11 @@ internal class BakedCastLayerCompositor(background: Int, private val width: Int,
         } finally { GLES20.glDeleteShader(shader) }
     }
 
-    override fun close() { GLES20.glDeleteProgram(program) }
+    override fun close() {
+        if (closed) return
+        closed = true
+        // A failed EGL rebind must never delete a name from another context.
+        // Destruction of the owning context retires its remaining GL objects.
+        if (EGL14.eglGetCurrentContext() == ownerContext) GLES20.glDeleteProgram(program)
+    }
 }
