@@ -239,7 +239,7 @@ internal class HevcArchiveVodSession(
         val released = java.util.concurrent.atomic.AtomicBoolean(false)
         return AutoCloseable { if (released.compareAndSet(false, true)) releaseOwner() }
     }
-    private var initialization: ByteArray? = null
+    private var initialization: HeapFragmentLease? = null
     private var presentationOffsetTicks: Long? = null
     private var timescale: Long = 0
     var width: Int = 0
@@ -562,7 +562,7 @@ internal class HevcArchiveVodSession(
                         firstOutputSequenceNumber = anchor + 1L,
                         frameRateNumerator = frameRateNumerator, frameRateDenominator = frameRateDenominator)
                     val expectedInit = if (nativeClear.candidate) synchronized(cacheLock) {
-                        checkOpen(); initialization?.copyOf()
+                        checkOpen(); initialization?.copyBytes()
                     } else null
                     if (!nativeClear.candidate) NativeClearArchiveBridge.Produced(HevcClearCmafGridComposer.compose(request))
                     else try {
@@ -578,6 +578,7 @@ internal class HevcArchiveVodSession(
             }
             val composed = produced.output
             var publishedFragment: ByteArray? = null
+            var publishedInitialization = false
             val nativeFragment = produced.nativeMedia
             var publishedNative = false
             try {
@@ -626,7 +627,8 @@ internal class HevcArchiveVodSession(
                     if (productionEpoch != epoch) throw ArchiveWarmupCancelledException()
                     nativeClear.publish(produced.nativeEpoch) {
                     if (initialization == null) {
-                        initialization = composed.initializationSegment.copyOf()
+                        initialization = HeapFragmentLease.take(composed.initializationSegment)
+                        publishedInitialization = true
                         timescale = trackScale
                         presentationOffsetTicks = offset
                         width = requireNotNull(outputTrack.width)
@@ -652,7 +654,7 @@ internal class HevcArchiveVodSession(
                             "atlasMinimumAreaProven=${mixedAtlas?.smallestAreaProven ?: (atlas != null)} " +
                             "atlasSearchBudgetLimited=${mixedAtlas?.searchBudgetLimited ?: false}"
                     } else {
-                        require(initialization!!.contentEquals(composed.initializationSegment)) {
+                        require(initialization!!.matches(composed.initializationSegment)) {
                             "Archive representation changed its initialization"
                         }
                         require(abs(requireNotNull(presentationOffsetTicks) - offset) <= 1L) {
@@ -713,7 +715,7 @@ internal class HevcArchiveVodSession(
                     "clock=PLAYER_REQUEST cache=$cacheEntries cachedBytes=$cachedByteCount " +
                     "cacheUniqueBytes=${memory.unique} cachePinnedBytes=${memory.pinned} cacheRetiredPinnedBytes=${memory.retiredPinned}")
             } finally {
-                composed.initializationSegment.fill(0)
+                if (!publishedInitialization) composed.initializationSegment.fill(0)
                 composed.mediaFragments.forEach { if (it !== publishedFragment) it.fill(0) }
                 if (!publishedNative) nativeFragment?.close()
             }
@@ -873,7 +875,11 @@ internal class HevcArchiveVodSession(
         } finally { bytes.fill(0) }
     }
 
-    fun initialization(): ByteArray = synchronized(cacheLock) { checkOpen(); requireNotNull(initialization).copyOf() }
+    fun initialization(): ByteArray = synchronized(cacheLock) { checkOpen(); requireNotNull(initialization).copyBytes() }
+
+    internal fun initializationLease(): ArchiveFragmentLease = synchronized(cacheLock) {
+        checkOpen(); ArchiveFragmentLease.shared(requireNotNull(initialization))
+    }
 
     override fun close() {
         if (baseReleased.compareAndSet(false, true)) releaseOwner()
@@ -902,7 +908,7 @@ internal class HevcArchiveVodSession(
         fetchers.shutdownNow()
         prefetchFetchers.shutdownNow()
         synchronized(cacheLock) {
-            initialization?.fill(0); initialization = null; cache.clear()
+            initialization?.close(); initialization = null; cache.clear()
             sourceInitialization.close()
         }
         compatibleMaps.clear()
@@ -925,7 +931,7 @@ internal class HevcArchiveVodSession(
             close(); uri = spec.uri
             val body = when (val name = spec.uri.lastPathSegment) {
                 "manifest.mpd" -> ArchiveFragmentLease.owned(session.manifest())
-                "init.mp4" -> ArchiveFragmentLease.owned(session.initialization())
+                "init.mp4" -> session.initializationLease()
                 else -> {
                     val number = name?.let { Regex("s-(\\d+)\\.m4s").matchEntire(it)?.groupValues?.get(1)?.toIntOrNull() }
                         ?: throw IOException("Unknown archive resource")
