@@ -57,6 +57,32 @@ internal object QualityDisclosurePolicy {
         val common = offers.map(::availableChoices).map { it.toSet() }.reduce { a, b -> a intersect b }
         return VideoQuality.entries.filter { it in common }
     }
+    /** Reuse only validated per-source dimensions. A known offered manual rung
+     * must match exactly; a missing rung may reuse only the best known lower
+     * offer. Unknown manifests cannot justify reusing a mismatched manual rung.
+     * An explicit replacement re-evaluates Auto rather than retaining a
+     * previously manually pinned source. This is metadata, not media processing. */
+    fun canReuseCastComposition(
+        requested: Map<String, Int>,
+        actual: Map<String, Pair<Int, Int>>,
+        offered: Map<String, List<Pair<Int, Int>>>,
+        replacing: Boolean,
+    ): Boolean {
+        if (requested.isEmpty() || requested.keys != actual.keys) return false
+        return requested.all { (label, height) ->
+            val (width, observed) = actual.getValue(label)
+            if (width <= 0 || observed <= 0) false
+            else if (height <= 0) !replacing
+            else if (observed == height) true
+            else {
+                val best = offered[label].orEmpty().asSequence()
+                    .filter { (w, h) -> w > 0 && h > 0 && h <= height }
+                    .maxOfOrNull { it.second }
+                best != null && observed == best
+            }
+        }
+    }
+
     /** Real track-group availability only. Do not fabricate a lower CDN rung. */
     fun unavailableManualCap(requested: VideoQuality, offered: List<Pair<Int, Int>>): String? {
         if (requested.targetHeight <= 0 || offered.isEmpty()) return null
