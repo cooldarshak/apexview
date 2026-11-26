@@ -87,6 +87,22 @@ class ReplayStartupPublicationTest {
         assertTrue(owner.at(video(16_000L))!!.laps.isEmpty())
     }
 
+    @Test fun independentSavedTowerCoverageSurvivesMapEndButNeverBeyondTowerEnd() {
+        val owner = ReplayStartupPublication()
+        val saved = window(ReplayTimingStage.SAVED_WINDOW).apply {
+            previewTowerFromUtc = 1000L
+            towerThroughUtc = 9000L
+        }
+        val visible = owner.offer(saved, video(6000L))
+        assertTrue(visible.tracks.isEmpty())
+        assertSame(rows, visible.laps)
+        assertEquals(9000L, visible.towerThroughUtc)
+        assertEquals(1000L, visible.previewTowerFromUtc)
+        assertTrue(owner.at(video(9001L))!!.laps.isEmpty())
+        assertTrue(owner.at(video(999L))!!.laps.isEmpty())
+        assertSame(rows, owner.at(video(8000L))!!.laps)
+    }
+
     @Test fun compactArchivePreservesOldReadersAndEverySeekSample() {
         val builder = TrackBuilder()
         repeat(100) { builder.add(it.toLong(), it.toFloat(), 2f * it) }
