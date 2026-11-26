@@ -2,7 +2,8 @@ import {quads,fitScene} from './receiver-model.mjs';
 import {attachCastScene} from './cast-scene-controller.mjs';
 const video=document.querySelector('#video'),canvas=document.querySelector('#scene'),status=document.querySelector('#status');
 const gl=canvas.getContext('webgl',{alpha:false,preserveDrawingBuffer:false});
-let scene=null,geometry=[],reported=false,failed=false,channel=null;
+let scene=null,geometry=[],reported=false,failed=false,channel=null,loadReady=false;
+video.addEventListener('loadeddata',()=>{loadReady=true;});
 const message=text=>{status.textContent=text;status.hidden=!text;};
 function shader(type,code){
   const s=gl.createShader(type);gl.shaderSource(s,code);gl.compileShader(s);
@@ -27,7 +28,7 @@ function initialize(){
 let resources;
 try{resources=initialize();}catch(error){failed=true;message(error.message);}
 function render(){
-  if(!failed&&scene&&video.readyState>=2){
+  if(!failed&&scene&&loadReady&&video.readyState>=2){
     try{
       // Logical phone coordinates stay unchanged; the TV's graphics plane sets raster size.
       const fit=fitScene(scene.width,scene.height,innerWidth,innerHeight);
@@ -44,13 +45,14 @@ function render(){
         gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
       }
       if(gl.getError()!==gl.NO_ERROR)throw Error('The TV could not render this HEVC video texture.');
-      if(!reported){reported=true;message('');channel?.rendered(scene.sources);}
+      if(!reported&&channel?.rendered(scene.sources)){reported=true;message('');}
     }catch(error){failed=true;message(error.message);channel?.failed(error.message);}
   }
   requestAnimationFrame(render);
 }
 const context=cast.framework.CastReceiverContext.getInstance();
-channel=attachCastScene(context,cast.framework,video,next=>{
+channel=attachCastScene(context,cast.framework,video,(next,newLoad)=>{
+  if(newLoad){reported=false;loadReady=false;}
   scene=next;geometry=quads(next).map(q=>({positions:new Float32Array(q.positions),texture:new Float32Array(q.texture)}));
   if(!reported)message('Loading video with the phone layout…');
 },message);
