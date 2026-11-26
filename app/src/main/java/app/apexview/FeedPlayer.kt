@@ -1071,12 +1071,13 @@ class FeedPlayer(
             .createMediaSource(MediaItem.Builder().setUri(HevcArchiveVodSession.MANIFEST_URI).setMimeType(MimeTypes.APPLICATION_MPD).build())
         // Keep native audio AND F1-provided text renditions while replacing only video
         // with the composed HEVC atlas. This does not add any video decoder.
-        val audioChildren = ArchiveAudioSelectionPlan.children(audioUri, session.stableAudioUris)
+        val offers = session.trackOffersSnapshot()
+        val audioChildren = ArchiveAudioSelectionPlan.children(audioUri, offers.stableAudioUris)
         val audioSources = audioChildren.map { uri ->
             FilteringMediaSource(archiveAudioSources.createMediaSource(MediaItem.Builder().setUri(uri)
                 .setMimeType(MimeTypes.APPLICATION_M3U8).build()), setOf(C.TRACK_TYPE_AUDIO))
         }
-        val captionSources = session.captionSources.filterKeys { label ->
+        val captionSources = offers.captions.filterKeys { label ->
             label == programme || session.audioUris[label] in audioChildren
         }
         val captionIndexes = captionSources.keys.withIndex().associate { (index, label) ->
@@ -1191,10 +1192,12 @@ class FeedPlayer(
     internal fun selectArchiveAudio(label: String): Boolean {
         val session = archiveVodSession ?: return false
         val audio = session.audioUris[label] ?: return false
+        if (session.programmePending(label)) return false
+        val captionReady = label !in session.trackOffersSnapshot().captions || label in archiveCaptionChildren
         // Cast handback and repeated selection must not rebuild the same video
         // source, reset its decoder, lose the current CC choice or restart audio.
-        if (archiveProgrammeLabel == label && player.playerError == null) return true
-        if (audio in archiveAudioChildren && player.playerError == null) {
+        if (archiveProgrammeLabel == label && player.playerError == null && captionReady) return true
+        if (audio in archiveAudioChildren && player.playerError == null && captionReady) {
             val prior = archiveSelectedAudioUri
             archiveSelectedAudioUri = audio
             if (audio == prior || applyArchiveAudioTrack(audio, player.currentTracks)) {
