@@ -52,9 +52,10 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
             DataInputStream(file.inputStream().buffered(BUFFER_SIZE)).use { input ->
                 val version = input.readInt()
                 // Version 2 omitted the stopped bit and cannot represent the original history.
-                // V4 is a preview-only extension recording the independent
-                // tower coverage. Full V3 indices (including Stopped) are unchanged.
-                if (version != VERSION && !(previewPositionMs != null && version == PREVIEW_VERSION))
+                // V4 adds independent tower coverage; V5 preserves the
+                // original rank baseline in compact preview histories.
+                // Full V3 indices (including Stopped) are unchanged.
+                if (version != VERSION && !(previewPositionMs != null && version in COVERAGE_PREVIEW_VERSION..PREVIEW_VERSION))
                     return miss("rebuild-version-$version")
                 if (input.readLong() != contentId) return miss("wrong-content")
                 if (previewPositionMs != null &&
@@ -128,14 +129,23 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                     DriverLaps(times, snapshots, crossings, lapTimes, lapCounts)
                 }
                 val parts = List(input.count(MAX_SAMPLES, 12)) { input.readLong() to input.readInt() }
-                val towerFrom = if (version == PREVIEW_VERSION) input.readLong() else null
-                val towerThrough = if (version == PREVIEW_VERSION) input.readLong() else null
+                val towerFrom = if (version >= COVERAGE_PREVIEW_VERSION) input.readLong() else null
+                val towerThrough = if (version >= COVERAGE_PREVIEW_VERSION) input.readLong() else null
+                val withRankBaseline = if (version == PREVIEW_VERSION) {
+                    val originalRanks = input.readByDriver {
+                        val rank = readInt()
+                        if (rank < -1) throw IOException("Invalid preview rank baseline")
+                        rank.takeIf { it >= 0 }
+                    }
+                    if (originalRanks.keys != laps.keys) return miss("invalid-rank-baseline")
+                    laps.mapValues { (number, history) -> history.withInitialPosition(originalRanks.getValue(number)) }
+                } else laps
                 if (towerFrom != null && (towerThrough == null || towerFrom > towerThrough)) return miss("invalid-coverage")
                 if (outline.size < 8 || outline.size % 2 != 0 || drivers.isEmpty() ||
                     tracks.isEmpty() || laps.isEmpty() || input.read() != -1
                 ) return miss("invalid-payload")
                 diagnostic("Replay $kind cache content=$contentId result=hit bytes=${file.length()}")
-                ReplayCore(path, type, drivers, tracks, states, outline, hasStartFinish, startUtc, laps, parts, towerFrom, towerThrough)
+                ReplayCore(path, type, drivers, tracks, states, outline, hasStartFinish, startUtc, withRankBaseline, parts, towerFrom, towerThrough)
             }
         } catch (_: IOException) {
             miss("truncated-or-invalid")
@@ -174,19 +184,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
         }.toMap()
         val laps = session.laps.mapNotNull { (number, history) ->
             checkActive()
-            val range = previewRange(history.times, history.times.size, from, until) ?: return@mapNotNull null
-            val end = range.last + 1
-            val lapRange = previewRange(history.lapTimes, history.lapTimes.size, from, until)
-            val crossingRange = previewRange(history.crossings, history.crossings.size, from, until)
-            // Keep up to eight preceding crossings for recent pace calculations,
-            // not the entire race history in a short-lived restart preview.
-            val crossings = crossingRange?.let {
-                history.crossings.copyOfRange((it.first - 8).coerceAtLeast(0), it.last + 1)
-            } ?: LongArray(0)
-            number to DriverLaps(history.times.copyOfRange(range.first, end),
-                history.states.subList(range.first, end).toList(),
-                crossings, lapRange?.let { history.lapTimes.copyOfRange(it.first, it.last + 1) } ?: LongArray(0),
-                lapRange?.let { history.lapCounts.copyOfRange(it.first, it.last + 1) } ?: IntArray(0))
+            history.previewWindow(from, until)?.let { number to it }
         }.toMap()
         val core = ReplayCore(path, session.type, session.drivers, tracks, states, session.outline,
             session.hasStartFinish, session.startUtcMs, laps, emptyList(), towerFrom, towerThrough)
@@ -304,6 +302,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                 if (previewPositionMs != null) {
                     output.writeLong(requireNotNull(core.previewTowerFromUtc))
                     output.writeLong(requireNotNull(core.previewTowerThroughUtc))
+                    output.writeByDriver(core.laps) { writeInt(it.initialPosition ?: -1) }
                 }
             }
             synchronized(commitLock) {
@@ -395,7 +394,8 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
         val commitLock = Any()
         const val MAX_PREVIEW_BYTES = 16L * 1024 * 1024
         const val VERSION = 3
-        const val PREVIEW_VERSION = 4
+        const val COVERAGE_PREVIEW_VERSION = 4
+        const val PREVIEW_VERSION = 5
         const val PREVIEW_REUSE_MS = 45_000L
         const val TRACK_BLOCK_SAMPLES = 4096
         const val TRACK_SAMPLE_BYTES = Long.SIZE_BYTES + 2 * Int.SIZE_BYTES
