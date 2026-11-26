@@ -56,6 +56,7 @@ internal class NativeComposedCastSession(
     }
     private val relay = ComposedCmafRelay(address, peer, tls = tls)
     val mediaUrl get() = relay.url
+    internal val diagnosticRelayId get() = relay.diagnosticRelayId
     private var sourceStartUs: Long? = null
     private var pto = 0L
     private val ast = System.currentTimeMillis() - 60_000L
