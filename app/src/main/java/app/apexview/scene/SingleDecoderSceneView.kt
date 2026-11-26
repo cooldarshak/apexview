@@ -176,6 +176,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var renderEpoch = -1L
     var onOutputSize: (Int, Int) -> Unit = { _, _ -> }
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
+    private var displayLease: DisplayLeaseRegistry.Lease<EGLDisplay>? = null
     private var contextGl: EGLContext = EGL14.EGL_NO_CONTEXT
     private var window: EGLSurface = EGL14.EGL_NO_SURFACE
     private var outputSurface: Surface? = null
@@ -598,8 +599,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         destroy()
         graphicsLifetime = lifetime
         renderEpoch = readinessEpoch
-        display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
-        check(EGL14.eglInitialize(display, IntArray(2), 0, IntArray(2), 1)) { "EGL initialization failed" }
+        val acquired = SceneEglDisplays.acquire()
+        displayLease = acquired
+        display = acquired.display
         val configs = arrayOfNulls<EGLConfig>(1)
         val count = IntArray(1)
         val attributes = intArrayOf(EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
@@ -905,7 +907,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             steps.run("egl-context") {
                 if (contextGl != EGL14.EGL_NO_CONTEXT) check(EGL14.eglDestroyContext(display, contextGl))
             }
-            steps.run("egl-display") { check(EGL14.eglTerminate(display)) }
+            steps.run("egl-display") {
+                    val lease = displayLease.also { displayLease = null }
+                    lease?.close()
+                }
         }
         val oldOutput = outputSurface
         outputSurface = null
