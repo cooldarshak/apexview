@@ -210,6 +210,13 @@ impl Arena {
         if id <= self.discard_through {
             self.stale_releases=self.stale_releases.saturating_add(1);
             self.charged -= bytes.capacity();
+            // The last live lease can itself predate the pressure watermark.
+            // New generic idle buffers may have accumulated while it was
+            // pinned. Retire those too when no live owner remains, but keep
+            // any separately admitted post-pressure atlas idle backing.
+            if self.live.is_empty() {
+                self.trim_generic();
+            }
             return true;
         }
         if atlas {
@@ -472,6 +479,31 @@ mod tests {
         assert_eq!(a.free.len(),1);
         assert!(a.release(sentinel));
         assert_eq!(a.snapshot()[0],0);
+    }
+
+    #[test]
+    fn pressure_retired_last_lease_preserves_new_atlas_idle_permit() {
+        let mut a=Arena::default();
+        let old=a.allocate(32).unwrap();
+        a.live.get_mut(&old).unwrap().fill(0x5a);
+        assert!(a.mark_viewed(old));
+        a.trim_pressure();
+        a.set_atlas_idle_limit(4096);
+        let b=a.take_output(2048,4096).unwrap();
+        let cap=b.capacity();
+        let ptr=b.as_ptr();
+        let id=a.adopt(cap,2048,16,2032,MAX_BYTES,||Some(b)).unwrap();
+        assert!(a.release(id));
+        assert_eq!(a.live[&old].as_slice(), &[0x5a;32]);
+        assert!(a.release(old));
+        assert!(a.live.is_empty() && a.free.is_empty());
+        assert_eq!(a.charged,cap);
+        let next=a.take_output(2048,4096).unwrap();
+        assert_eq!(next.as_ptr(),ptr);
+        assert_eq!(a.charged,0);
+        assert!(next.iter().all(|&v|v==0));
+        a.trim_pressure();
+        assert_eq!(a.charged,0);
     }
 
     #[test]
