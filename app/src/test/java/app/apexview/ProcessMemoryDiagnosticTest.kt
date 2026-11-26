@@ -36,6 +36,15 @@ class ProcessMemoryDiagnosticTest {
         v[10]=21
         assertEquals("nativeFragmentArena=UNAVAILABLE",ProcessMemoryDiagnostic.fragmentFields(v))
     }
+    @Test fun ownershipMissAndPeakCountersPreserveCapacityAccounting() {
+        val v=longArrayOf(100,80,70,2,0,3,4,7,400,32,20,1,2,3,0,4,2,1,3,2,120)
+        val result=ProcessMemoryDiagnostic.fragmentFields(v)
+        assertTrue(result.contains("nativeOwnedEligible=4"))
+        assertTrue(result.contains("nativeOwnedMissPinned=2"))
+        assertTrue(result.contains("nativeFragmentPeakCapacityBytes=120"))
+        v[20]=99
+        assertEquals("nativeFragmentArena=UNAVAILABLE",ProcessMemoryDiagnostic.fragmentFields(v))
+    }
     @Test fun ownedTransferCountersAndRunningLowerBoundAreExplicit() {
         val fragment = ProcessMemoryDiagnostic.fragmentFields(longArrayOf(100, 80, 70, 2, 0, 3, 4, 7, 400))
         assertTrue(fragment.contains("nativeOwnedOutputAllocations=3"))

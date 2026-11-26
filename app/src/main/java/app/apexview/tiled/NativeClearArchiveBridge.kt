@@ -28,8 +28,17 @@ internal class NativeClearArchiveBridge(
             "arenaBytes=${b?.reservedBytes ?: 0} workspaceBytes=${b?.let { NativeStitchingEngine.atlasWorkspaceBytes(it.inputBytes, it.outputBytes) } ?: 0} " +
             "ceilingBytes=${b?.ceilingBytes ?: 0} " +
             "osSurplusBytes=${(h.available-h.threshold).coerceAtLeast(0)} " +
-            "admissionReason=${if (h.lowMemory) "OS_LOW_MEMORY" else if (b == null) "FORECAST_REJECTED" else if (b.ceilingBytes + b.inputBytes + 2L*b.outputBytes + 8L*1024*1024 > (h.available-h.threshold)/8) "BOUNDED_FOREGROUND_RECOVERY" else "NORMAL"}")
-        NativeStitchingEngine.open(b ?: throw IllegalStateException("Clear atlas memory admission rejected"))
+            "admissionReason=${if (h.lowMemory) "OS_LOW_MEMORY" else if (b == null) NativeStitchingEngine.clearAtlasRejection(h.lowRam,h.available,h.threshold,h.jvmHeadroom,input,output) else if (b.foregroundRecovery) "BOUNDED_FOREGROUND_RECOVERY" else "NORMAL"}")
+        val admitted=b ?: throw IllegalStateException("Clear atlas memory admission rejected")
+        try {
+            NativeStitchingEngine.open(admitted)
+        } catch (failure: LinkageError) {
+            Log.w("ApexviewSingleDecoder", "GB_CLEAR_ENGINE_OPEN rejected=LIBRARY_OR_ABI type=${failure.javaClass.simpleName}")
+            throw failure
+        } catch (failure: RuntimeException) {
+            Log.w("ApexviewSingleDecoder", "GB_CLEAR_ENGINE_OPEN rejected=NATIVE_OPEN type=${failure.javaClass.simpleName}")
+            throw failure
+        }
       }
     },
 ) : AutoCloseable {

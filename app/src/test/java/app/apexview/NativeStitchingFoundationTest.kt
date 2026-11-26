@@ -124,6 +124,14 @@ class NativeStitchingFoundationTest {
             assertNull(NativeStitchingEngine.planClearAtlas(false,v[2],v[3],8*mib,input,output))
         }
     }
+    @Test fun exactAtlasRejectionDistinguishesResourceOwners() {
+        val mib=1024L*1024L
+        assertEquals("PACKET_LIMIT",NativeStitchingEngine.clearAtlasRejection(false,512*mib,128*mib,256*mib,0,1))
+        assertEquals("OS_RESERVE",NativeStitchingEngine.clearAtlasRejection(false,128*mib,128*mib,256*mib,1,1))
+        assertEquals("JVM_RESERVE",NativeStitchingEngine.clearAtlasRejection(false,512*mib,128*mib,1*mib,1,1))
+        assertEquals("OS_FORECAST",NativeStitchingEngine.clearAtlasRejection(true,192*mib,128*mib,256*mib,1024*1024,1024*1024))
+        assertEquals("ADMITTED",NativeStitchingEngine.clearAtlasRejection(false,1024*mib,128*mib,256*mib,1024*1024,1024*1024))
+    }
     @Test fun observedDeviceHeadroomAndHighWaterControlAdmission() {
         val mib=1024L*1024L
         val sizes=app.apexview.tiled.NativeStitchingBudgetObservation()

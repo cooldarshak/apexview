@@ -94,6 +94,19 @@ public final class NativeStitchingEngine implements AutoCloseable {
         if (modest!=null) return modest;
         return exactAtlasBudget(recoveryCeiling,jvmHeadroom,observedInput,observedOutput);
     }
+    /** Explains a rejected exact-size planner without changing its decision. */
+    public static String clearAtlasRejection(boolean lowRam,long available,long threshold,long jvm,
+                                             int input,int output) {
+        if(input<=0||output<=0||input>MAX_ATLAS_PACKET||output>MAX_ATLAS_PACKET)return "PACKET_LIMIT";
+        if(threshold<0||available<=threshold)return "OS_RESERVE";
+        long staging=input+2L*output+8*MIB;
+        if(jvm<staging)return "JVM_RESERVE";
+        long nativeRequired=2L*(input+(long)output)+RESERVE+atlasWorkspaceBytes(input,output);
+        if(nativeRequired>MAX_ATLAS_BUDGET)return "NATIVE_CEILING";
+        long allowance=(available-threshold)/(lowRam?8:4);
+        if(staging>=allowance||nativeRequired>allowance-staging)return "OS_FORECAST";
+        return "ADMITTED";
+    }
     private static Budget exactAtlasBudget(long allowance,long jvmHeadroom,int input,int output) {
         // Same full Java transient allowance as the original planner; no
         // change to independent JVM headroom, native packet or worker bounds.

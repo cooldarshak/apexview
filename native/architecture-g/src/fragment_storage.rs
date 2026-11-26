@@ -44,6 +44,12 @@ struct Arena {
     owned_miss_fit: u64,
     owned_miss_ceiling: u64,
     owned_alloc_failures: u64,
+    owned_eligible: u64,
+    owned_miss_pinned: u64,
+    owned_miss_disabled: u64,
+    adopt_rejected: u64,
+    stale_releases: u64,
+    peak_charged: usize,
     charged: usize,
     allocations: u64,
 }
@@ -76,6 +82,7 @@ impl Arena {
             if charged > limit { return None; }
             bytes.resize(size, 0);
             self.charged = charged;
+            self.peak_charged=self.peak_charged.max(charged);
             self.allocations = self.allocations.saturating_add(1);
             bytes
         };
@@ -91,6 +98,10 @@ impl Arena {
     // OUT of this arena before writing, so it is charged only to the worker.
     fn take_output(&mut self,size:usize,ceiling:usize)->Option<Vec<u8>> {
         if size==0 || size>ceiling || ceiling>crate::bmff::MAX_ATLAS_BYTES {return None;}
+        if self.atlas_idle.as_ref().is_some_and(|b|b.capacity()<=ceiling && reusable_capacity(size,b.capacity())) ||
+            self.best_free(size).is_some_and(|i|self.free[i].capacity()<=ceiling) {
+            self.owned_eligible=self.owned_eligible.saturating_add(1);
+        }
         if let Some(mut b)=self.atlas_idle.take() {
             self.charged-=b.capacity();
             if b.capacity()>ceiling {
@@ -103,7 +114,13 @@ impl Arena {
                 return Some(b);
             }
         } else if self.best_free(size).is_none() {
-            self.owned_miss_empty=self.owned_miss_empty.saturating_add(1);
+            if self.atlas_idle_limit==0 {
+                self.owned_miss_disabled=self.owned_miss_disabled.saturating_add(1);
+            } else if !self.ranges.is_empty() {
+                self.owned_miss_pinned=self.owned_miss_pinned.saturating_add(1);
+            } else {
+                self.owned_miss_empty=self.owned_miss_empty.saturating_add(1);
+            }
         }
         if let Some(i)=self.best_free(size).filter(|&i|self.free[i].capacity()<=ceiling) {
             let mut b=self.free.swap_remove(i);
@@ -114,7 +131,7 @@ impl Arena {
         } else {
             self.trim();
             let mut b=Vec::new();
-            if b.try_reserve_exact(size).is_err() {
+            if b.try_reserve_exact(size).is_err() || b.capacity()>ceiling {
                 self.owned_alloc_failures=self.owned_alloc_failures.saturating_add(1);
                 return None;
             }
@@ -139,6 +156,7 @@ impl Arena {
         assert_eq!(bytes.capacity(),capacity);
         assert_eq!(bytes.len(),packet_len);
         self.charged+=capacity;
+        self.peak_charged=self.peak_charged.max(self.charged);
         self.serial=serial;
         self.live.insert(serial,bytes);
         self.ranges.insert(serial,offset..packet_len);
@@ -171,22 +189,18 @@ impl Arena {
         // Wipe spare capacity as well, before any reuse across outputs.
         if atlas {bytes.resize(bytes.capacity(),0);}
         bytes.fill(0);
-        // No idle native arena survives the final history/reader lease.
-        if self.live.is_empty() {
-            self.charged -= bytes.capacity();
-            self.trim();
-            return true;
-        }
         // A lease active at an explicit pressure trim must not recreate
         // the idle backing that trim just reclaimed. New leases may still
         // use the normal bounded cache; active readers remain untouched.
         if id <= self.discard_through {
+            self.stale_releases=self.stale_releases.saturating_add(1);
             self.charged -= bytes.capacity();
             return true;
         }
         if atlas {
             // Keep at most one idle atlas backing, within the latest sampled
-            // incremental allowance. No idle pool when there are no readers.
+            // incremental allowance. The active engine, not a sentinel
+            // reader, owns the idle permit. Seek/close/pressure revoke it.
             if bytes.capacity()<=self.atlas_idle_limit {
                 self.trim();
                 self.atlas_idle=Some(bytes);
@@ -195,8 +209,11 @@ impl Arena {
             }
             return true;
         }
-        if self.atlas_idle.is_some() {
+        if self.atlas_idle.is_some() || self.live.is_empty() {
             self.charged-=bytes.capacity();
+            // Generic cache has no independent lifetime. Do not destroy
+            // the active clear atlas permit merely because a generic reader ends.
+            for free in self.free.drain(..){self.charged-=free.capacity();}
             return true;
         }
         // Prefer recent size observations over a stale backing that survived
@@ -262,26 +279,30 @@ pub fn release(id: i64) -> bool { arena().lock().is_ok_and(|mut a| a.release(id)
 #[cfg(target_os = "android")]
 pub fn trim() { if let Ok(mut a) = arena().lock() { a.trim_pressure(); } }
 #[cfg(target_os = "android")]
-pub fn snapshot() -> Option<[u64; 15]> {
+pub fn snapshot() -> Option<[u64; 21]> {
     let a=arena().lock().ok()?;
     let [capacity,live,payload,count,allocations]=a.snapshot();
     Some([capacity,live,payload,count,allocations,a.owned_allocations,a.owned_reuses,a.adopted,a.adopted_bytes,
           a.atlas_idle_limit as u64,a.atlas_idle.as_ref().map_or(0,|b|b.capacity()) as u64,
-          a.owned_miss_empty,a.owned_miss_fit,a.owned_miss_ceiling,a.owned_alloc_failures])
+          a.owned_miss_empty,a.owned_miss_fit,a.owned_miss_ceiling,a.owned_alloc_failures,
+          a.owned_eligible,a.owned_miss_pinned,a.owned_miss_disabled,a.adopt_rejected,
+          a.stale_releases,a.peak_charged as u64])
 }
 #[cfg(target_os = "android")]
 pub(crate) fn adopt(capacity:usize,packet_len:usize,offset:usize,size:usize,
                     incremental:usize,cache_allowed:bool,take:impl FnOnce()->Option<Vec<u8>>)->Option<i64> {
     let mut a=arena().lock().ok()?;
     a.set_atlas_idle_limit(if cache_allowed {incremental} else {0});
-    a.adopt(capacity,packet_len,offset,size,incremental,take)
+    let result=a.adopt(capacity,packet_len,offset,size,incremental,take);
+    if result.is_none(){a.adopt_rejected=a.adopt_rejected.saturating_add(1);}
+    result
 }
 pub(crate) fn output_buffer(size:usize,ceiling:usize)->Option<Vec<u8>> {
     if size==0 || size>ceiling {return None;}
     #[cfg(target_os = "android")]
     { arena().lock().ok()?.take_output(size,ceiling) }
     #[cfg(not(target_os = "android"))]
-    { let mut b=Vec::new();b.try_reserve_exact(size).ok()?;b.resize(size,0);Some(b) }
+    { let mut b=Vec::new();b.try_reserve_exact(size).ok()?;if b.capacity()>ceiling{return None;}b.resize(size,0);Some(b) }
 }
 
 /// Used only for the private JNI view. Its caller must keep the allocation
@@ -482,8 +503,32 @@ mod tests {
         }
         assert_eq!(a.owned_allocations,1);
         assert_eq!(a.owned_reuses,999);
+        assert_eq!(a.owned_eligible,999);
         assert!(a.release(keep));
+        assert_eq!(a.charged,2048);
+        a.trim_pressure();
         assert_eq!(a.charged,0);
+    }
+    #[test]
+    fn active_engine_reuses_final_reader_backing_without_sentinel() {
+        let mut a=Arena::default();
+        let mib=1024*1024;
+        a.set_atlas_idle_limit(10*mib);
+        for size in [8_577_000usize,8_011_000,9_846_000,9_400_000] {
+            let packet=size+1024;
+            let b=a.take_output(packet,10*mib).unwrap();
+            let cap=b.capacity();
+            let id=a.adopt(cap,packet,1024,size,MAX_BYTES,||Some(b)).unwrap();
+            assert!(a.release(id));
+            assert_eq!(a.charged,cap);
+            assert!(a.live.is_empty());
+        }
+        assert_eq!(a.owned_reuses,2);
+        assert_eq!(a.owned_eligible,2);
+        assert_eq!(a.owned_allocations,2);
+        a.trim_pressure();
+        assert_eq!(a.charged,0);
+        assert_eq!(a.atlas_idle_limit,0);
     }
     #[test]
     fn build_886_fragment_sizes_replay_with_bounded_capacity() {
@@ -509,6 +554,8 @@ mod tests {
         assert!(peak<=30*1024*1024);
         assert_eq!(a.adopted,34);
         for id in cached {assert!(a.release(id));}
+        assert!(a.charged<=16*1024*1024);
+        a.trim_pressure();
         assert_eq!(a.charged,0);
     }
 }
