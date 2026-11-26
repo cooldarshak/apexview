@@ -21,6 +21,18 @@ internal class FcastConnection(
 ) : AutoCloseable {
     private val closed = AtomicBoolean(false)
     private val connectionId = java.util.UUID.randomUUID().toString()
+    @Volatile private var peerConnectionId = ""
+    private fun diagnosticUuid(value: String): String = if (value.length == 36 && runCatching { java.util.UUID.fromString(value).toString() == value }.getOrDefault(false)) value else ""
+    private fun logMilestone(direction: String, packet: FcastProtocol.Packet) {
+        val body = packet.body ?: return
+        if (packet.opcode == FcastProtocol.VERSION && direction == "RX") peerConnectionId = diagnosticUuid(body.optString("pitwallTraceId"))
+        when (packet.opcode) {
+            FcastProtocol.VERSION, FcastProtocol.INITIAL, FcastProtocol.PLAY, FcastProtocol.RENDERING -> Unit
+            else -> return
+        }
+        val load = diagnosticUuid(if (packet.opcode == FcastProtocol.PLAY) body.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId").orEmpty() else body.optString("playbackId"))
+        runCatching { android.util.Log.i("PitwallCast", "CAST_CONTROL_MILESTONE id=$connectionId peer=$peerConnectionId direction=$direction opcode=${packet.opcode} load=$load elapsedMs=${(System.nanoTime()-startedNs)/1_000_000}") }
+    }
     private val startedNs = System.nanoTime()
     private val received = java.util.concurrent.atomic.AtomicLong()
     private val sent = java.util.concurrent.atomic.AtomicLong()
@@ -54,6 +66,7 @@ internal class FcastConnection(
                                 FcastProtocol.write(output, packet)
                                 lastWrite = packet.opcode
                                 sent.incrementAndGet()
+                                logMilestone("TX", packet)
                             }
                         } finally {
                             if (batch.timing) timingPending.set(false)
@@ -69,6 +82,7 @@ internal class FcastConnection(
                         val packet = FcastProtocol.read(input) ?: break
                         lastRead = packet.opcode
                         received.incrementAndGet()
+                        logMilestone("RX", packet)
                         // The owner still receives ordered packets; async timing
                         // parsing on Default never reorders geometry/table/frame.
                         kotlinx.coroutines.withContext(scope.coroutineContext.minusKey(Job)) {
@@ -89,7 +103,8 @@ internal class FcastConnection(
     }
 
     fun send(opcode: Int, body: JSONObject? = null) {
-        if (!closed.get() && outgoing.trySend(Outbound(listOf(FcastProtocol.Packet(opcode, body)))).isFailure) {
+        val outgoingBody = if (opcode == FcastProtocol.VERSION && body != null) JSONObject(body.toString()).put("pitwallTraceId", connectionId) else body
+        if (!closed.get() && outgoing.trySend(Outbound(listOf(FcastProtocol.Packet(opcode, outgoingBody)))).isFailure) {
             finish("CONTROL_QUEUE_FULL")
         }
     }
@@ -110,7 +125,7 @@ internal class FcastConnection(
     }
     private fun finish(reason: String) {
         if (!closed.compareAndSet(false, true)) return
-        runCatching { android.util.Log.i("PitwallCast", "CAST_CONTROL_CLOSE id=$connectionId reason=$reason " +
+        runCatching { android.util.Log.i("PitwallCast", "CAST_CONTROL_CLOSE id=$connectionId peer=$peerConnectionId reason=$reason " +
             "handshake=$handshakeDone elapsedMs=${(System.nanoTime()-startedNs)/1_000_000} " +
             "sent=${sent.get()} received=${received.get()} lastRead=$lastRead lastWrite=$lastWrite timingDropped=${timingDropped.get()}") }
         // Terminal connections must not retain queued JSON/control/timing payloads.
