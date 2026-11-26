@@ -1193,11 +1193,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                         publishTopics()
                                     }
                                     primaryPreview.complete(Unit)
-                                    val clock = playhead()
-                                    val videoClockReady = clock != null && clock.videoUtcMs != null && !clock.cachedVideoClock
-                                    if ((videoClockReady || elapsed >= 10_000L) &&
-                                        preview.throughUtcMs - targetUtc(start) >= TOWER_PREVIEW_LOOKAHEAD_MS
-                                    ) break
+                                    // Keep the same chronological parser alive until EOF.
+                                    // Stopping at the first lookahead left slow devices with
+                                    // no rank coverage while the remaining raw topic downloaded.
+                                    // The parser itself gates further immutable publications.
                                 }
                                 primaryPreview.complete(Unit)
                                 while (lines.hasNext()) lines.next()
