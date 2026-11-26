@@ -26,3 +26,17 @@ internal object CastSceneTransitionPolicy {
         return !next.sameEncodedAtlasAs(previous)
     }
 }
+
+/** Baked capture is tied to the installed archive, not merely the requested
+ * height. Wait for a different validated source and its one active decoder. */
+internal object BakedQualityTransitionPolicy {
+    fun canRestart(
+        previousArchive: Any,
+        installedArchive: Any?,
+        preparing: Boolean,
+        firstFrame: Boolean,
+        activeDecoders: Int,
+        playing: Boolean,
+    ): Boolean = !preparing && installedArchive != null && installedArchive !== previousArchive &&
+        firstFrame && activeDecoders == 1 && playing
+}
