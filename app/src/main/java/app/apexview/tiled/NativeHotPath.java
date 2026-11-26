@@ -44,6 +44,12 @@ public final class NativeHotPath {
         try { return nativeRowOrder(positions,count,order)==1; }
         catch (LinkageError | RuntimeException failed) { return false; }
     }
+    public static boolean avcAnnexB(ByteBuffer input,int offset,int size,byte[] output,int prefixSize) {
+        if (!available() || !input.isDirect()) return false;
+        try { return nativeAvcAnnexB(input,offset,size,output,prefixSize)==1; }
+        catch (LinkageError | RuntimeException failed) { return false; }
+    }
+    private static native int nativeAvcAnnexB(ByteBuffer input,int offset,int size,byte[] output,int prefixSize);
     public static boolean adts(ByteBuffer input, int size, int rate, int channels, byte[] output) {
         if (!available()) return false;
         try { return nativeAdts(input,size,rate,channels,output)==1; }
