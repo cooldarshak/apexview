@@ -1179,3 +1179,26 @@ The user explicitly authorized a new dedicated branch for Architecture G and a c
 
 **Use the [Build 857 new-chat handover](PITWALL_TV_BUILD_857_ARCHITECTURE_G_HANDOVER_2026-11-25.md) for next execution.** Build 857 is the reference, and only the user can authorize next phase or default switch. Preserve every feature and original plan.
 
+
+
+## 26 November 2026 — expanded G-C implementation checkpoint (not a build candidate)
+
+The user authorized continuation of all unconditional G-C coding before the next build. Intermediate commits are permitted; use [skip ci] until the coding gate is actually closed. GitHub Actions, not a local Android/Rust toolchain, is the compilation and test authority.
+
+| Source commit | Implemented |
+|---|---|
+| 86550aa4 | Lazy compact slots and actual owned-input sizing; no fixed output slot for owned-output jobs; exact UTF-8 diagnostic size accounting without temporary byte arrays |
+| 36ecdc87 | Bounded Rust timestamp/position/row-order/audio kernels, JNI wiring, map and tower sampler integration, Cast audio framing and scaling, joined source without whole-fragment concatenation |
+| 91b8b647 | Native circuit index and projection; Cast receiver interpolation; backward-compatible engine preference; baked audio switch/cleanup and parity tests |
+| de61e2a6 | Four-ABI symbol checks, mandatory Android parity tests and source-wiring regression updates |
+| 1814e78f | Native batch lookup for map lap state and retirement; logarithmic weather lookup; exact-size single-chunk network response ownership transfer and regression |
+
+Available Python source/contract regression suite: 110 passed, including the revised wiring expectations (python -m unittest discover -s scripts -p 'test_*.py'). Rust/Android compile, host/sanitizer, Android instrumentation and signed APK CI have not run on these commits. This does not establish actual engine activation, runtime correctness, memory savings or endurance.
+
+G.21: native AAC framing and timeline scaling, reduced Cast publication copies, preference propagation implemented; complete app-owned audio metadata/selection/queue route audit and applicable remaining native integration not yet closed. MediaExtractor/Media3/MediaCodec/AudioTrack and authorized DRM remain platform boundaries.
+G.22: native position/state sampling, circuit projection and receiver motion integrated with Kotlin UI and explicit fallback; remaining flags/header/edge integration and parity audit not closed.
+G.23: native timing selection and order, cached immutable row snapshots, shared local/Cast sampler implemented; remaining header/flag/sector processing and all-route review not closed.
+G.24: shared allocation and publication reductions implemented; remaining continuous draw allocation/render-resource audit not closed. No speculative replacement of rendering or surface modes.
+M3/M4/M11 received further implementation/regression work. M1/M2/M5–M10/M13 remaining owner, budget, pressure and attribution audits must be reviewed against all applicable paths; no blanket completion assertion. M12 allocator swap remains conditional on evidence of fragmentation; no such proof. Structural M13 decoder/graphics changes remain conditional on attributable evidence. Retain existing quality, authorization, release and physical acceptance gates.
+
+Do not dispatch Build 889 merely for this checkpoint. Build 888 remains the last verified baseline. No user testing needed for this incomplete coding batch; no G-C or G-D sign-off. Complete the residual unconditional scope, then dispatch one consolidated exact-source build and fix genuine failures without weakening gates.
