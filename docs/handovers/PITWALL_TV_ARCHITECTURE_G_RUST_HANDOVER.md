@@ -6,6 +6,10 @@ When the user instructs completion of an agreed scope (including M1–M13), impl
 
 
 
+## Build 885 CI correction (26 November 2026)
+
+Build 885 (967297cf82c440269bb2fa1bb12cfc65cc11d8a7) failed the Python packaging contract: the Build 855 regression still required a JVM-only media array and its size expression. Native host tests passed 59/59, including sanitizer execution; Android compilation and publication were not reached. Restore the strict single heap fragment invariant and explicitly reject simultaneous native and heap media ownership. Extend the original regression to require exactly one output size derived from either backing, both publication routes preceding budget accounting, and unpublished native cleanup. Run the entire CI Python discovery suite before committing: 110/110 PASS. All Build 885 engineering changes and mandatory CI gates remain intact. Physical attribution and PSS acceptance still pending.
+
 ## 26 November 2026: Build 884 physical follow-up, consolidated implementation
 
 Baseline: Build 884, `8793e583fff8dacc44abd3ea057c298e1c0faa46`,

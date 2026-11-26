@@ -114,11 +114,21 @@ class ArchitectureG0PackagingContract(unittest.TestCase):
         producer=source.split("private fun composeAndPublishAdmitted(",1)[1]
         producer=producer.split("private fun ",1)[0]
         self.assertEqual(len(re.findall(r"\bval\s+outputBytes\b",producer)),1)
-        self.assertIn("val outputBytes = composed.mediaFragments.single()",producer)
-        self.assertIn("nativeBudgetObservation.observe(sourceInputBytes,outputBytes.size.toLong())",producer)
-        self.assertIn('"outputBytes=${outputBytes.size} "',producer)
-        self.assertLess(producer.index("cache.put(number, output)"),
-                        producer.index("nativeBudgetObservation.observe("))
+        # Build 885 introduced mutually exclusive native and heap ownership.
+        # Preserve the original single-local and exact-byte accounting invariant
+        # for BOTH routes, including the absence of a second heap media copy.
+        self.assertEqual(len(re.findall(r"\bval\s+outputSize\b",producer)),1)
+        self.assertIn("val outputBytes = if (nativeFragment == null) composed.mediaFragments.single() else {",producer)
+        self.assertIn("check(composed.mediaFragments.isEmpty())",producer)
+        self.assertIn("val outputSize = nativeFragment?.size ?: requireNotNull(outputBytes).size",producer)
+        self.assertIn("nativeBudgetObservation.observe(sourceInputBytes,outputSize.toLong())",producer)
+        self.assertIn('"outputBytes=$outputSize archiveStorage=',producer)
+        for publication in ("cache.put(number, output)", "cache.putNative(number, nativeFragment)"):
+            self.assertLess(producer.index(publication),
+                            producer.index("nativeBudgetObservation.observe("))
+        self.assertIn("if (!publishedNative) nativeFragment?.close()",producer)
+        self.assertIn("composed.mediaFragments.forEach { if (it !== publishedFragment) it.fill(0) }",producer)
+        self.assertNotIn("nativeFragment.copyBytes()",producer)
 
     def test_only_jni_module_can_use_unsafe(self):
         lib=(ROOT/"native/architecture-g/src/lib.rs").read_text()

@@ -506,7 +506,10 @@ internal class HevcArchiveVodSession(
                 val outputTrack = report.tracks.single()
                 // Container sync flags are insufficient proof of random access. The clear
                 // writer emits moof + mdat containing length-prefixed VCL NALs only.
-                val outputBytes = composed.mediaFragments.singleOrNull()
+                val outputBytes = if (nativeFragment == null) composed.mediaFragments.single() else {
+                    check(composed.mediaFragments.isEmpty()) { "Native fragment must not also retain a JVM media copy" }
+                    null
+                }
                 val outputSize = nativeFragment?.size ?: requireNotNull(outputBytes).size
                 fun readHeader(offset: Int, count: Int): ByteArray {
                     require(offset >= 0 && count >= 0 && offset <= outputSize - count)
