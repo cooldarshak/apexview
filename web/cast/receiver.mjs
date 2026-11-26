@@ -3,7 +3,22 @@ import {attachCastScene} from './cast-scene-controller.mjs';
 const video=document.querySelector('#video'),canvas=document.querySelector('#scene'),status=document.querySelector('#status');
 const gl=canvas.getContext('webgl',{alpha:false,preserveDrawingBuffer:false});
 let scene=null,geometry=[],reported=false,failed=false,channel=null,loadReady=false;
-video.addEventListener('loadeddata',()=>{loadReady=true;});
+let loadEpoch=0, frameSerial=0, uploadedFrame=null, videoCallback=null;
+const hasVideoCallback=typeof video.requestVideoFrameCallback==='function';
+function watchVideoFrame(epoch){
+  if(!hasVideoCallback)return;
+  videoCallback=video.requestVideoFrameCallback(()=>{
+    if(epoch!==loadEpoch||failed)return;
+    frameSerial++;watchVideoFrame(epoch);
+  });
+}
+function resetFrameOwner(){
+  loadEpoch++;frameSerial=0;uploadedFrame=null;loadReady=false;
+  if(videoCallback!==null&&typeof video.cancelVideoFrameCallback==='function')
+    video.cancelVideoFrameCallback(videoCallback);
+  watchVideoFrame(loadEpoch);
+}
+video.addEventListener('loadeddata',()=>{loadReady=true;uploadedFrame=null;});
 const message=text=>{status.textContent=text;status.hidden=!text;};
 function shader(type,code){
   const s=gl.createShader(type);gl.shaderSource(s,code);gl.compileShader(s);
@@ -36,7 +51,15 @@ function render(){
       const w=Math.max(1,Math.round(fit.width)),h=Math.max(1,Math.round(fit.height));
       if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
       gl.viewport(0,0,w,h);gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.bindTexture(gl.TEXTURE_2D,resources.texture);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,video);
+      gl.bindTexture(gl.TEXTURE_2D,resources.texture);
+      // Upload at video cadence, not display cadence. Keep drawing the cached
+      // texture for geometry changes, including paused playback.
+      const frame=hasVideoCallback?frameSerial:
+        (video.getVideoPlaybackQuality?.().totalVideoFrames??video.currentTime);
+      if(uploadedFrame!==frame){
+        gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,video);
+        uploadedFrame=frame;
+      }
       for(const q of geometry){
         [q.positions,q.texture].forEach((values,i)=>{
           gl.bindBuffer(gl.ARRAY_BUFFER,resources.buffers[i]);gl.bufferData(gl.ARRAY_BUFFER,values,gl.DYNAMIC_DRAW);
@@ -52,7 +75,7 @@ function render(){
 }
 const context=cast.framework.CastReceiverContext.getInstance();
 channel=attachCastScene(context,cast.framework,video,(next,newLoad)=>{
-  if(newLoad){reported=false;loadReady=false;}
+  if(newLoad){reported=false;resetFrameOwner();}
   scene=next;geometry=quads(next).map(q=>({positions:new Float32Array(q.positions),texture:new Float32Array(q.texture)}));
   if(!reported)message('Loading video with the phone layout…');
 },message);
