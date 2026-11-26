@@ -85,11 +85,14 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         var acquired: HevcArchiveVodSession? = null
         try { return withContext(Dispatchers.IO) {
             require(feeds.size in 1..app.apexview.AppState.MAX_SINGLE_DECODER_FEEDS && feeds.map { it.label }.distinct().size == feeds.size)
+            val prepareStartedMs = android.os.SystemClock.elapsedRealtime()
             val perFeed = mapArchiveFeedsBounded(feeds) { feed ->
                 runInterruptible { offers.getOrPut(feed.label) { loadOffers(feed) } }
             }
+            val offersReadyMs = android.os.SystemClock.elapsedRealtime()
             val (selected, playlists, inits) = loadFittingVod(perFeed, preferredHeight, minimumHeight,
                 positionMs, clockLabel, preferredHeights)
+            val videoReadyMs = android.os.SystemClock.elapsedRealtime()
             val probeIndexes = probeSegmentIndexes(selected, playlists, positionMs, clockLabel)
             playlists.forEachIndexed { index, playlist ->
                 val active = playlist.segments[probeIndexes[index]]
@@ -173,11 +176,13 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 Uri.parse(selected.first { it.feed.label == clockLabel }.feed.manifestUrl)
             }
             val selectableAudioUris = if (audio == null) audioUris else audioUris + (clockLabel to audio)
+            val audioReadyMs = android.os.SystemClock.elapsedRealtime()
             val captionSources = mapArchiveFeedsBounded(selected.indices.toList()) { index ->
                 val offer = selected[index]
                 if (offer.feed.label !in selectableAudioUris) null
                 else archiveCaptionSource(offer, playlists[index], clockPlaylist)?.let { offer.feed.label to it }
             }.filterNotNull().toMap()
+            val captionReadyMs = android.os.SystemClock.elapsedRealtime()
             var session: HevcArchiveVodSession? = null
             val owned = selected.mapIndexed { i, offer -> HevcArchiveVodSession.Input(offer.feed.label, playlists[i], offer.format,
                 inits[i].bytes.copyOf(), inits[i].report,
@@ -193,6 +198,11 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 coldNativeProbe?.let(preparedSession::enableColdProbe)
                 runInterruptible(Dispatchers.IO) { preparedSession.prepare(positionMs) }
                 coroutineContext.ensureActive()
+                val preparedMs = android.os.SystemClock.elapsedRealtime()
+                android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_STARTUP_PHASES feeds=${feeds.size} " +
+                    "offersMs=${offersReadyMs - prepareStartedMs} videoInitMs=${videoReadyMs - offersReadyMs} " +
+                    "audioMs=${audioReadyMs - videoReadyMs} captionsMs=${captionReadyMs - audioReadyMs} " +
+                    "probeMs=${preparedMs - captionReadyMs} totalMs=${preparedMs - prepareStartedMs}")
                 acquired = session
                 session
             } catch (error: Throwable) {
@@ -293,7 +303,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             require(feeds.size in 2..8 && feeds.map { it.label }.distinct().size == feeds.size)
             // Keep network lanes bounded and independent of the single GL video thread.
             val perFeed = mapArchiveFeedsBounded(feeds) { feed ->
-                offers.getOrPut(feed.label) { loadOffers(feed) }
+                runInterruptible { offers.getOrPut(feed.label) { loadOffers(feed) } }
             }
             stage = "per-feed-hevc-rendition"
             // Protected HLS is not DASH. Its old chooseCommon() discarded the user's
@@ -322,7 +332,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
                 android.util.Log.i("ApexviewSingleDecoder", renditionReport)
             }
             stage = "video-playlists"
-            val playlists = coroutineScope { selected.map { offer -> async { loadMedia(offer) } }.awaitAll() }
+            val playlists = mapArchiveFeedsBounded(selected) { offer -> runInterruptible { loadMedia(offer) } }
             if (!live && playlists.any { !it.hasEndTag }) throw PermanentCaptureException("HLS single-decoder archive capture requires complete replay playlists")
             val useProgramTime = playlists.all { it.hasProgramDateTime }
             val masterStartUs = playlists.first().startTimeUs
@@ -358,7 +368,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             // Init metadata is immutable by rendition; the ConcurrentHashMap cache
             // prevents repeated CMAF parsing when the sliding window advances.
             val inits = mapArchiveFeedsBounded(selected.indices.toList()) { i ->
-                loadInit(selected[i], playlists[i], segments[i])
+                runInterruptible { loadInit(selected[i], playlists[i], segments[i]) }
             }
             // In hev1, a valid encrypted HEVC track can carry VPS/SPS/PPS in its
             // media samples rather than in hvcC. Fetch the real selected fragment
@@ -635,7 +645,7 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         val actual = declared.mapNotNull { entry ->
             coroutineContext.ensureActive()
             try {
-                val media = parse(requireNotNull(entry.value.url), master) as? HlsMediaPlaylist
+                val media = runInterruptible { parse(requireNotNull(entry.value.url), master) } as? HlsMediaPlaylist
                 entry.takeIf { media != null && media.hasEndTag && media.segments.isNotEmpty() &&
                     ArchiveCaptionSource.matchesTimeline(media, programmeVideo, clockVideo) &&
                     media.segments.none { segment -> segment.drmInitData != null ||
