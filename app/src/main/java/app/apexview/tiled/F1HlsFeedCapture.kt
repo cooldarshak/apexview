@@ -177,12 +177,6 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             }
             val selectableAudioUris = if (audio == null) audioUris else audioUris + (clockLabel to audio)
             val audioReadyMs = android.os.SystemClock.elapsedRealtime()
-            val captionSources = mapArchiveFeedsBounded(selected.indices.toList()) { index ->
-                val offer = selected[index]
-                if (offer.feed.label !in selectableAudioUris) null
-                else archiveCaptionSource(offer, playlists[index], clockPlaylist)?.let { offer.feed.label to it }
-            }.filterNotNull().toMap()
-            val captionReadyMs = android.os.SystemClock.elapsedRealtime()
             var session: HevcArchiveVodSession? = null
             val owned = selected.mapIndexed { i, offer -> HevcArchiveVodSession.Input(offer.feed.label, playlists[i], offer.format,
                 inits[i].bytes.copyOf(), inits[i].report,
@@ -190,19 +184,35 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
             try {
                 session = HevcArchiveVodSession(reader, owned, clockLabel, maximumOutputWidth = maximumOutputWidth,
                     audioUri = audio, audioUris = selectableAudioUris, stableAudioUris = stableAudioUris,
-                    captionSources = captionSources,
                     offeredSourceDimensions = offeredSourceDimensions)
                 // A seek cancels blocking capture, rather than waiting for
                 // the obsolete probe to fetch and compose an entire group.
                 val preparedSession = requireNotNull(session)
                 coldNativeProbe?.let(preparedSession::enableColdProbe)
-                runInterruptible(Dispatchers.IO) { preparedSession.prepare(positionMs) }
-                coroutineContext.ensureActive()
-                val preparedMs = android.os.SystemClock.elapsedRealtime()
-                android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_STARTUP_PHASES feeds=${feeds.size} " +
-                    "offersMs=${offersReadyMs - prepareStartedMs} videoInitMs=${videoReadyMs - offersReadyMs} " +
-                    "audioMs=${audioReadyMs - videoReadyMs} captionsMs=${captionReadyMs - audioReadyMs} " +
-                    "probeMs=${preparedMs - captionReadyMs} totalMs=${preparedMs - prepareStartedMs}")
+                // Keep optional discovery on one extra I/O lane. The video
+                // proof can proceed independently, but no caption offers are
+                // omitted and the session is not exposed until validation ends.
+                coroutineScope {
+                    val captionTask = async {
+                        val sources = mapArchiveFeedsBounded(selected.indices.toList(), concurrency = 1) { index ->
+                            val offer = selected[index]
+                            if (offer.feed.label !in selectableAudioUris) null
+                            else archiveCaptionSource(offer, playlists[index], clockPlaylist)?.let { offer.feed.label to it }
+                        }.filterNotNull().toMap()
+                        sources to android.os.SystemClock.elapsedRealtime()
+                    }
+                    val probeStartedMs = android.os.SystemClock.elapsedRealtime()
+                    runInterruptible(Dispatchers.IO) { preparedSession.prepare(positionMs) }
+                    val probeReadyMs = android.os.SystemClock.elapsedRealtime()
+                    val (captionSources, captionReadyMs) = captionTask.await()
+                    coroutineContext.ensureActive()
+                    preparedSession.installPreparedCaptionSources(captionSources)
+                    val preparedMs = android.os.SystemClock.elapsedRealtime()
+                    android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_STARTUP_PHASES feeds=${feeds.size} " +
+                        "offersMs=${offersReadyMs - prepareStartedMs} videoInitMs=${videoReadyMs - offersReadyMs} " +
+                        "audioMs=${audioReadyMs - videoReadyMs} captionsMs=${captionReadyMs - audioReadyMs} " +
+                        "probeMs=${probeReadyMs - probeStartedMs} totalMs=${preparedMs - prepareStartedMs} overlap=true")
+                }
                 acquired = session
                 session
             } catch (error: Throwable) {
