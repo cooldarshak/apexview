@@ -35,6 +35,28 @@ class BakedCastSegmentQueueTest {
         assertEquals(0L,queue.bytesInFlight)
     }
 
+    @Test fun retirementErasesPendingButNotPublishingSamples() {
+        val queue = BakedCastSegmentQueue()
+        val discarded = picture(0)
+        val first = picture(100, true)
+        val pending = picture(1_000_100, true)
+        val audio = sound(100)
+        val nextAudio = sound(1_000_100)
+        queue.offerVideo(discarded)
+        assertTrue(discarded.bytes.all { it == 0.toByte() })
+        queue.offerVideo(first); queue.offerVideo(pending)
+        queue.offerAudio(listOf(audio, nextAudio))
+        val ready = requireNotNull(queue.takeReady())
+        queue.clear()
+        assertTrue(pending.bytes.all { it == 0.toByte() })
+        assertTrue(nextAudio.bytes.all { it == 0.toByte() })
+        assertArrayEquals(byteArrayOf(1, 2, 3), first.bytes)
+        assertArrayEquals(byteArrayOf(4, 5), audio.bytes)
+        assertEquals(ready.bytes, queue.bytesInFlight)
+        queue.finish(ready)
+        assertEquals(0L, queue.bytesInFlight)
+    }
+
     @Test fun stalledPublisherCannotAccumulateUnboundedEncodedMedia() {
         val queue = BakedCastSegmentQueue(maxVideo = 2, maxAudio = 2, maxBytes = 8)
         queue.offerVideo(picture(0, true))
