@@ -157,6 +157,14 @@ impl Arena {
     // Capacity includes the small packet prefix and any reused backing slack.
     fn adopt(&mut self,capacity:usize,packet_len:usize,offset:usize,size:usize,
              incremental:usize,take:impl FnOnce()->Option<Vec<u8>>)->Option<i64> {
+        let result=self.adopt_checked(capacity,packet_len,offset,size,incremental,take);
+        if result.is_none() {
+            self.adopt_rejected=self.adopt_rejected.saturating_add(1);
+        }
+        result
+    }
+    fn adopt_checked(&mut self,capacity:usize,packet_len:usize,offset:usize,size:usize,
+                     incremental:usize,take:impl FnOnce()->Option<Vec<u8>>)->Option<i64> {
         if size==0 || offset.checked_add(size)?!=packet_len || packet_len>capacity ||
             capacity>MAX_BYTES || capacity>incremental || self.live.len()>=MAX_LIVE ||
             !reusable_capacity(packet_len,capacity) {return None;}
@@ -318,9 +326,7 @@ pub(crate) fn adopt(capacity:usize,packet_len:usize,offset:usize,size:usize,
                     incremental:usize,cache_allowed:bool,take:impl FnOnce()->Option<Vec<u8>>)->Option<i64> {
     let mut a=arena().lock().ok()?;
     a.set_atlas_idle_limit(if cache_allowed {incremental} else {0});
-    let result=a.adopt(capacity,packet_len,offset,size,incremental,take);
-    if result.is_none(){a.adopt_rejected=a.adopt_rejected.saturating_add(1);}
-    result
+    a.adopt(capacity,packet_len,offset,size,incremental,take)
 }
 pub(crate) fn output_buffer(size:usize,ceiling:usize)->Option<Vec<u8>> {
     if size==0 || size>ceiling {return None;}
@@ -456,6 +462,47 @@ mod tests {
         assert_eq!(arena.owned_reuses,1);
         assert!(arena.release(keep));
         assert_eq!(arena.snapshot()[0],0);
+    }
+
+    #[test]
+    fn adoption_rejections_count_once_and_preserve_live_ownership() {
+        let mut a=Arena::default();
+        let keep=a.allocate(32).unwrap();
+        a.live.get_mut(&keep).unwrap().fill(0x5a);
+        assert!(a.mark_viewed(keep));
+        let mut output=a.take_output(1024,2048).unwrap();
+        output[16..].fill(0x63);
+        let cap=output.capacity();
+        let ptr=output.as_ptr();
+        let before=a.snapshot();
+        // Neither a budget denial nor malformed/overflowing range may
+        // invoke the destructive transfer callback.
+        assert!(a.adopt(cap,1024,16,1008,cap-1,||panic!("budget denial consumed output")).is_none());
+        assert_eq!(a.adopt_rejected,1);
+        assert!(a.adopt(cap,1024,usize::MAX,1008,cap,||panic!("invalid range consumed output")).is_none());
+        assert_eq!(a.adopt_rejected,2);
+        // A stale engine slot can fail after admission; count that once too.
+        assert!(a.adopt(cap,1024,16,1008,cap,||None).is_none());
+        assert_eq!(a.adopt_rejected,3);
+        assert_eq!(a.snapshot(),before);
+        assert_eq!(a.adopted,0);
+        assert_eq!(a.adopted_bytes,0);
+        assert_eq!(a.live[&keep].as_slice(), &[0x5a;32]);
+        let id=a.adopt(cap,1024,16,1008,cap,||Some(output)).unwrap();
+        assert_eq!(a.adopt_rejected,3);
+        assert_eq!(a.adopted,1);
+        assert_eq!(a.adopted_bytes,1008);
+        assert_eq!(a.charged,32+cap);
+        assert_eq!(a.live[&id].as_ptr(),ptr);
+        assert_eq!(&a.live[&id][16..], &[0x63;1008]);
+        assert_eq!(a.live[&keep].as_slice(), &[0x5a;32]);
+        assert!(a.release(id));
+        assert!(a.release(keep));
+        assert_eq!(a.charged,0);
+        // Diagnostic counters must saturate, not wrap at their limit.
+        a.adopt_rejected=u64::MAX;
+        assert!(a.adopt(0,0,0,0,0,||panic!("empty transfer")).is_none());
+        assert_eq!(a.adopt_rejected,u64::MAX);
     }
 
     #[test]
