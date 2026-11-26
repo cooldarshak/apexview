@@ -1003,6 +1003,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                 var previewOutline = FloatArray(0)
                                 var lastTraceAt = -1_000L
                                 var publishedThrough: Long? = null
+                                var lastPreview: Map<String, DriverTrack> = emptyMap()
                                 val thread = android.os.Process.myTid()
                                 val previousPriority = android.os.Process.getThreadPriority(thread)
                                 try {
@@ -1010,7 +1011,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                         val now = android.os.SystemClock.elapsedRealtime()
                                         val target = targetUtc(initialStart)
                                         if (positionPreviewPending.get() || now - lastPreviewAt < 400 || publishedThrough?.let {
-                                            target >= it - 120_000 && target <= it - 10_000
+                                            target >= it - 120_000 && target <= it - 10_000 &&
+                                                lastPreview.values.any { track -> track.hasPositionAt(target) }
                                         } == true) {
                                             return@parsePositionLines
                                         }
@@ -1029,7 +1031,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                             android.os.Process.setThreadPriority(thread, android.os.Process.THREAD_PRIORITY_BACKGROUND)
                                         }
                                         lastPreviewAt = now
-                                        publishedThrough = covering.maxOf { it.endMs }
+                                        publishedThrough = covering.minOf { it.endMs }
+                                        lastPreview = snapshot
                                         val outline = previewOutline
                                         report("position preview targetUtcMs=$target cars=${covering.size} throughUtcMs=$publishedThrough")
                                         val previewEpoch = positionPreviewEpochs.next()
