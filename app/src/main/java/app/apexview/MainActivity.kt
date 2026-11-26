@@ -3,6 +3,7 @@ package app.apexview
 import app.apexview.tiled.NativeFragmentLease
 import app.apexview.cast.PitwallCastSheet
 import app.apexview.cast.PitwallPairingDialog
+import app.apexview.cast.PitwallAwaitingTvApprovalDialog
 import app.apexview.cast.local.ExternalDisplayController
 import app.apexview.cast.local.CastConnectionService
 import android.app.Activity
@@ -288,6 +289,7 @@ private fun Root(app: AppState) {
         if (!app.inPip && app.tvCastingMenuOpen) TvCastingMenu(app)
         if (!app.inPip && app.castPickerOpen) PitwallCastSheet(app)
         if (!app.inPip) app.castPairingCode?.let { PitwallPairingDialog(it, app::confirmCastPairing) }
+        if (!app.inPip) app.castAwaitingTvApprovalCode?.let { PitwallAwaitingTvApprovalDialog(it, app::stopFullSceneCast) }
         if (!app.inPip) app.picker?.let { FeedPickerSheet(app, it) }
         // Offered while browsing, never over a stream being watched.
         if (!app.inPip && !watching) UpdatePrompt(app.updater)
