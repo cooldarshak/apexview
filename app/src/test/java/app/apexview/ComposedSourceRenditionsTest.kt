@@ -97,5 +97,12 @@ class QualityFeedNameTest {
         assertEquals("Video feed", qualityFeedName(Channel("Channel 1016", 1016), false))
         assertEquals("Driver 6 · Onboard", qualityFeedName(Channel("channel-1039", 1039,
             racingNumber = 6), false))
+        val channel = Channel("1 Verstappen", 1009, racingNumber = 1, tla = "VER", driverName = "Verstappen")
+        assertEquals("Max Verstappen · Onboard", qualityFeedName(channel, false,
+            DriverInfo("1", "VER", 0, "Max", "Verstappen")))
+        assertEquals("Verstappen · Onboard", qualityFeedName(channel, false,
+            DriverInfo("63", "RUS", 0, "George", "Russell")))
+        assertEquals("Verstappen · Onboard", qualityFeedName(channel, false,
+            DriverInfo("1", "RUS", 0, "George", "Russell")))
     }
 }

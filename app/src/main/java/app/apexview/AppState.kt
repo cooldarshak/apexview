@@ -3174,7 +3174,6 @@ class AppState(
             return
         }
         val selectedQualities = selectedTiles.map(::qualityFor)
-        protectedActualRenditions.clear()
         val mixedRequested = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) == null
         val composedQuality = PerFeedQualityPolicy.commonDecoderQuality(selectedQualities) ?: VideoQuality.AUTO
         // Do not reject different preference labels without looking at the actual
@@ -3317,7 +3316,6 @@ class AppState(
                         }
                         prepared.also { window ->
                             try {
-                            recordProtectedRenditions(labels, window.sourceGeometry)
                             val licenses = selectedTiles.map { it.feed.sourceStream.licenseUrl }
                             if (!capture.clearOutput && !protectedFeedsShareLicense(licenses)) {
                                 window.zero()
@@ -3436,6 +3434,7 @@ class AppState(
                         // after the host is observable and the player is ready.
                         // This state is the final activation signal, including
                         // after orientation changes and repeated seek/restarts.
+                        recordProtectedRenditions(labels, window.sourceGeometry)
                         protectedRollingScene = ProtectedRollingScene(labels.toList(), scene)
                         android.util.Log.i("ApexviewSingleDecoder",
                             "F1_SCENE_UI_ACTIVATED path=PROTECTED_ARCHIVE sources=${labels.size} atlas=${scene.atlasWidth}x${scene.atlasHeight} " +
@@ -3490,7 +3489,6 @@ class AppState(
                         // refresh only scene metadata, never add another decoder.
                         val nextLayout = app.apexview.tiled.ProtectedHevcSceneGeometry.fromWindow(
                             updated, labels.size, clearOutput = capture.clearOutput)
-                        recordProtectedRenditions(labels, updated.sourceGeometry)
                         if (selectedTiles.size > 6) {
                             val proposed = Triple(nextLayout.atlasWidth, nextLayout.atlasHeight, nextLayout.frameRate)
                             if (proposed != expandedVerifiedGeometry) {
@@ -3502,6 +3500,7 @@ class AppState(
                         val pssh = capture.widevinePssh()
                         handedOff = true
                         host.feed.publishProtectedComposedOutput(updated, pssh)
+                        recordProtectedRenditions(labels, updated.sourceGeometry)
                         if (protectedRollingScene?.layout != nextLayout) {
                             protectedRollingScene = ProtectedRollingScene(labels.toList(), nextLayout)
                             android.util.Log.i("ApexviewSingleDecoder",
@@ -3722,6 +3721,7 @@ class AppState(
                                 check(protectedCompositionHost === host) {
                                     "Live composition host was not registered before atlas activation"
                                 }
+                                recordProtectedRenditions(labels, outputWindow.sourceGeometry)
                                 protectedRollingScene = ProtectedRollingScene(labels.toList(), layout)
                                 android.util.Log.i("ApexviewSingleDecoder",
                                     "F1_SCENE_UI_ACTIVATED path=PROTECTED_LIVE sources=${labels.size} " +
@@ -3735,6 +3735,7 @@ class AppState(
                             host.feed.publishProtectedComposedOutput(outputWindow, pssh)
                             published = true
                             publication.published(requireNotNull(latestOutputVersion))
+                            recordProtectedRenditions(labels, outputWindow.sourceGeometry)
                             if (protectedRollingScene?.layout != layout) {
                                 protectedRollingScene = ProtectedRollingScene(labels.toList(), layout)
                                 android.util.Log.i("ApexviewSingleDecoder",
@@ -3812,6 +3813,9 @@ class AppState(
         playbackWork.cancelCapture()
         val native = nativeArchiveTiles
         protectedRollingScene = null
+        protectedActualRenditions = emptyMap()
+        protectedReportedGeometry = null
+        protectedReportedLabels = emptyList()
         val resumePositionMs = if (native.isNotEmpty()) protectedCompositionHost?.feed?.player?.currentPosition
             else protectedCompositionAudioMaster?.feed?.player?.currentPosition
         if (restorePlayer) {
@@ -6651,7 +6655,9 @@ class AppState(
 
     var qualitySheetOpen by mutableStateOf(false)
     /** Explicit actual protected CMAF source dimensions, also visible on Android TV. */
-    private val protectedActualRenditions = androidx.compose.runtime.mutableStateMapOf<String, Pair<Int, Int>>()
+    private var protectedActualRenditions by mutableStateOf<Map<String, Pair<Int, Int>>>(emptyMap())
+    private var protectedReportedGeometry: app.apexview.tiled.ProtectedHevcLiveComposition.SourceGeometry? = null
+    private var protectedReportedLabels: List<String> = emptyList()
     internal fun actualSourceRendition(label: String): Pair<Int, Int>? {
         singleDecoderScenePlayer?.archiveSceneSession?.let { return it.actualSourceDimensions[label] }
         if (protectedRollingScene != null) return protectedActualRenditions[label]
@@ -6671,16 +6677,27 @@ class AppState(
 
     internal val sourceQualityPreparing: Boolean get() = archiveCompositionStarting || qualityRestartPending
 
+    internal val composedSourceAwaitingFrame: Boolean get() =
+        (singleDecoderScenePlayer ?: protectedRollingScenePlayer)?.let { !it.hasRenderedFirstFrame } == true
+
+    internal fun qualityDisplayName(tile: Tile): String {
+        val info = if (timingContentId == tile.contentId)
+            tile.channel.racingNumber?.let { timing?.drivers?.get(it.toString()) } else null
+        return qualityFeedName(tile.channel, tile.id == bigTileIdForUi, info)
+    }
+
     private fun recordProtectedRenditions(
         labels: List<String>, geometry: app.apexview.tiled.ProtectedHevcLiveComposition.SourceGeometry?
     ) {
-        if (geometry == null) return
-        val dimensions = ComposedSourceRenditions.fromSourceRects(labels,
-            geometry.displayWidth to geometry.displayHeight,
-            geometry.mixedSourceRects.map { it.width to it.height })
-        dimensions.forEach { (label, value) ->
-            if (protectedActualRenditions[label] != value) protectedActualRenditions[label] = value
-        }
+        // Only installed/published windows reach here. Reuse identical geometry
+        // across the rolling window; never retain manifests or media payloads.
+        if (protectedReportedGeometry == geometry && protectedReportedLabels == labels) return
+        protectedActualRenditions = if (geometry == null) emptyMap()
+            else ComposedSourceRenditions.fromSourceRects(labels,
+                geometry.displayWidth to geometry.displayHeight,
+                geometry.mixedSourceRects.map { it.width to it.height })
+        protectedReportedGeometry = geometry
+        protectedReportedLabels = labels.toList()
     }
 
     /** Only codec input measurements actually produced by authorized composition.

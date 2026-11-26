@@ -269,7 +269,7 @@ class FeedPlayer(
         private set
     private var licensed = false
     val hasLoadedDrmKeys: Boolean get() = licensed
-    private var firstFrameRendered = false
+    private var firstFrameRendered by mutableStateOf(false)
     private val diagnosticId = System.identityHashCode(this)
     private val playbackAllocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
     private var parkedForArchive = false

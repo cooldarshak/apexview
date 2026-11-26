@@ -18,7 +18,7 @@ internal object ComposedSourceRenditions {
 }
 
 /** Metadata-only display name; persistent quality overrides still use profileLabel. */
-internal fun qualityFeedName(channel: Channel, main: Boolean): String {
+internal fun qualityFeedName(channel: Channel, main: Boolean, info: DriverInfo? = null): String {
     val title = channel.title.trim().takeUnless {
         it.isEmpty() || it.matches(Regex("(?i)channel[- ]?\\d+"))
     }
@@ -26,7 +26,16 @@ internal fun qualityFeedName(channel: Channel, main: Boolean): String {
     val abbreviation = channel.tla?.trim()?.takeIf { it.isNotEmpty() }
     val onboard = driver != null || channel.racingNumber != null || abbreviation != null
     val name = if (onboard) {
-        val identity = driver ?: title ?: abbreviation ?: channel.racingNumber?.let { "Driver $it" } ?: "Driver"
+        val matched = info?.takeIf { candidate ->
+            channel.racingNumber?.toString() == candidate.number &&
+                (abbreviation.isNullOrBlank() || candidate.tla.equals(abbreviation, ignoreCase = true))
+        }
+        val fullName = matched?.let {
+            val first = it.firstName.trim()
+            val last = it.lastName.trim()
+            if (first.isNotEmpty() && last.isNotEmpty()) "$first $last" else null
+        }
+        val identity = fullName ?: driver ?: title ?: abbreviation ?: channel.racingNumber?.let { "Driver $it" } ?: "Driver"
         "$identity · Onboard"
     } else title ?: if (channel.isDefault) "Broadcast" else "Video feed"
     return if (main) "Main · $name" else name

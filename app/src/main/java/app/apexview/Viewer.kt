@@ -2084,7 +2084,7 @@ private fun VideoQualitySheet(app: AppState) {
                 active.forEach { tile ->
                     val label = tile.feed.sourceStream.profileLabel
                     Column(Modifier.padding(top = 18.dp)) {
-                        Text(qualityFeedName(tile.channel, tile.id == app.bigTileIdForUi),
+                        Text(app.qualityDisplayName(tile),
                             style = Type.subhead)
                         Segments(
                             options = listOf<VideoQuality?>(null) + VideoQuality.entries,
@@ -2102,9 +2102,15 @@ private fun VideoQualitySheet(app: AppState) {
                                 "${actual.first} × ${actual.second}px"
                         },
                             style = Type.footnote, modifier = Modifier.padding(top = 6.dp))
-                        if (app.sourceQualityPreparing) {
-                            Text("Preparing replacement source. Observed dimensions may describe the previous source.",
+                        if (app.sourceQualityPreparing || app.composedSourceAwaitingFrame) {
+                            Text(if (app.sourceQualityPreparing)
+                                "Preparing replacement source. Observed dimensions may describe the previous source."
+                            else "Source installed; waiting for the decoder's first frame.",
                                 style = Type.footnote, modifier = Modifier.padding(top = 6.dp))
+                        }
+                        app.singleDecoderFailure?.let { failure ->
+                            Text(failure, style = Type.footnote.copy(color = Ink.live),
+                                modifier = Modifier.padding(top = 6.dp))
                         }
                         app.sourceQualityOfferNotice(label)?.let { warning ->
                             Text(warning, style = Type.footnote.copy(color = Ink.live),
