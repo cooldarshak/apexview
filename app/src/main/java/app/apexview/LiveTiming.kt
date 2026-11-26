@@ -239,7 +239,10 @@ class TrackGeometry(val outline: FloatArray) {
     private val along = FloatArray(n)
     // Exact nearest-point queries now use a retained balanced spatial index.
     // The result is identical to the prior linear scan, including vertex ties.
-    private val vertexIndex = OverlayVertexIndex(outline)
+    // Do not allocate the JVM fallback index merely because a Rust-owned
+    // session published new geometry. Other consumers still get the exact
+    // retained reference index lazily when they actually request it.
+    private val vertexIndex by lazy { OverlayVertexIndex(outline) }
     val length: Float
 
     /**

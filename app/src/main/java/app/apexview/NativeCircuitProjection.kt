@@ -3,17 +3,33 @@ package app.apexview
 import app.apexview.tiled.NativeHotPath
 import java.nio.ByteBuffer
 
-/** Private, bounded, immutable native circuit index. Owns only compact
- * circuit vertices (not race histories); reused across every draw query.
+/** Shared immutable Rust-prepared geometry for simultaneous map, edge-map
+ * and Cast consumers of the exact same TrackGeometry. Weak keys AND weak
+ * packet references prevent this registry retaining retired timing sessions
+ * or an unused direct allocation after the last projection is released. */
+internal object NativeCircuitPackets {
+    private val packets = java.util.WeakHashMap<TrackGeometry, java.lang.ref.WeakReference<ByteBuffer>>()
+
+    @Synchronized
+    fun acquire(geometry: TrackGeometry): ByteBuffer? {
+        packets[geometry]?.get()?.let { return it }
+        if (geometry.outline.size % 2 != 0 || geometry.outline.size / 2 > 16_384 ||
+            !NativeHotPath.available()) return null
+        return try {
+            val storage = ByteBuffer.allocateDirect(8 + 8 * geometry.outline.size)
+            if (!NativeHotPath.prepareGeometry(geometry.outline, storage)) null
+            else storage.asReadOnlyBuffer().also {
+                packets[geometry] = java.lang.ref.WeakReference(it)
+            }
+        } catch (_: OutOfMemoryError) { null }
+    }
+}
+
+/** Each projection owns only its mutable scratch, not a second circuit packet.
+ * The read-only direct packet is strongly held for every synchronous JNI call.
  */
 internal class NativeCircuitProjection(geometry: TrackGeometry) {
-    private val packet: ByteBuffer? = if (geometry.outline.size % 2 == 0 &&
-        geometry.outline.size / 2 <= 16_384 && NativeHotPath.available()) {
-        try {
-            val storage = ByteBuffer.allocateDirect(8 + 8 * geometry.outline.size)
-            if (NativeHotPath.prepareGeometry(geometry.outline, storage)) storage.asReadOnlyBuffer() else null
-        } catch (_: OutOfMemoryError) { null }
-    } else null
+    private val packet: ByteBuffer? = NativeCircuitPackets.acquire(geometry)
     private val xy = FloatArray(128)
     val fractions = FloatArray(64)
     val order = IntArray(64)
