@@ -35,6 +35,11 @@ internal class NativeClearArchiveBridge(
         } catch (failure: LinkageError) {
             Log.w("ApexviewSingleDecoder", "GB_CLEAR_ENGINE_OPEN rejected=LIBRARY_OR_ABI type=${failure.javaClass.simpleName}")
             throw failure
+        } catch (failure: NativeStitchingEngine.OpenException) {
+            Log.w("ApexviewSingleDecoder", "GB_CLEAR_ENGINE_OPEN rejected=NATIVE_OPEN code=${failure.code}")
+            if (failure.code == NativeStitchingEngine.BACKPRESSURE)
+                throw NativeClearArchiveJob.BackpressureException(input, output)
+            throw failure
         } catch (failure: RuntimeException) {
             Log.w("ApexviewSingleDecoder", "GB_CLEAR_ENGINE_OPEN rejected=NATIVE_OPEN type=${failure.javaClass.simpleName}")
             throw failure
