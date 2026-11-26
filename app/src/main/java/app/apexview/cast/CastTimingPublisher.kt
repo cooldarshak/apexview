@@ -28,6 +28,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
     private var profile = LapProfile.EVEN
     private var sequence = 0L
     private var lastPlaybackId = ""
+    private var lastClockEpoch = -1L
     private var lastFullSnapshotAt = Long.MIN_VALUE
     private var sourceTiming: SessionTiming? = null
     private var geometry: JSONObject? = null
@@ -48,9 +49,16 @@ internal class CastTimingPublisher(private val context: Context, private val app
         receiverPredictionSteps: Int = CastTimingProtocol.V1_SEND_PREDICTION_STEPS
     ): List<JSONObject> {
         val elapsed = android.os.SystemClock.elapsedRealtime()
-        if (lastPlaybackId == playbackId && lastFrameAt != Long.MIN_VALUE && elapsed - lastFrameAt < CastTimingProtocol.POSITION_STEP_MS) return emptyList()
+        val epoch = app.castTimingEpoch
+        val epochChanged = epoch != lastClockEpoch
+        // A seek is a new timing generation, not ordinary 200ms motion.
+        // Publish the newly sampled table with the next matching frame.
+        if (!epochChanged && lastPlaybackId == playbackId && lastFrameAt != Long.MIN_VALUE &&
+            elapsed - lastFrameAt < CastTimingProtocol.POSITION_STEP_MS) return emptyList()
         lastFrameAt = elapsed
-        val resend = lastPlaybackId != playbackId || lastFullSnapshotAt == Long.MIN_VALUE || elapsed - lastFullSnapshotAt >= 5_000
+        val resend = epochChanged || lastPlaybackId != playbackId ||
+            lastFullSnapshotAt == Long.MIN_VALUE || elapsed - lastFullSnapshotAt >= 5_000
+        lastClockEpoch = epoch
         if (lastPlaybackId != playbackId) {
             lastPlaybackId = playbackId
             // Never mutate an already published geometry envelope for another load.
@@ -62,6 +70,8 @@ internal class CastTimingPublisher(private val context: Context, private val app
             profile = LapProfile.EVEN
             geometry = null
             rowsText = ""
+            rows = JSONArray()
+            stoppedDrivers = JSONArray()
             lastTableUtc = Long.MIN_VALUE
             lastTableElapsed = Long.MIN_VALUE
             sentFrames = 0L
@@ -111,7 +121,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
                 // Tower telemetry need not re-serialize up to 24 full rows for every 200ms
                 // car-motion packet. 500ms keeps sector/speed/gear updates responsive while
                 // leaving the receiver's GPU and main thread time to draw smooth 60Hz dots.
-                if (lastTableUtc == Long.MIN_VALUE ||
+                if (epochChanged || lastTableUtc == Long.MIN_VALUE ||
                     lastTableElapsed == Long.MIN_VALUE ||
                     elapsed < lastTableElapsed ||
                     elapsed - lastTableElapsed >= 500L ||
@@ -125,7 +135,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
                     lastTableUtc = now
                     lastTableElapsed = elapsed
                 }
-            } else if (rows.length() > 0) {
+            } else if (rows.length() > 0 || stoppedDrivers.length() > 0) {
                 rows = JSONArray()
                 stoppedDrivers = JSONArray()
                 lastTableUtc = Long.MIN_VALUE
@@ -143,7 +153,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
             rowsText = text
             sentTables++
             output += JSONObject().put("version", 1).put("kind", "table").put("playbackId", playbackId)
-                .put("id", rowsId).put("rows", rows).put("stoppedDrivers", stoppedDrivers)
+                .put("id", rowsId).put("clockEpoch", epoch).put("rows", rows).put("stoppedDrivers", stoppedDrivers)
         }
         val needsPit = timing != null && (app.mapMode == MapMode.PIT || app.pitDriver != null)
         val geometryOwner = timing?.geometry.takeIf { nativeRequested && needsPit }
@@ -190,7 +200,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
             prediction?.sample(now, receiverPredictionSteps))
         message.remove("rows")
         message.remove("stoppedDrivers")
-        output += message.put("playbackId", playbackId).put("tableId", rowsId).put("sequence", ++sequence).put("clockEpoch", app.castTimingEpoch)
+        output += message.put("playbackId", playbackId).put("tableId", rowsId).put("sequence", ++sequence).put("clockEpoch", epoch)
         sentFrames++
         val packets = output.flatMap(TimingMessageChunks::split)
         if (lastHealthAt == Long.MIN_VALUE || elapsed < lastHealthAt ||
