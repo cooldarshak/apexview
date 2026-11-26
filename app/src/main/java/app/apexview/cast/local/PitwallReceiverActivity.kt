@@ -340,9 +340,19 @@ class PitwallReceiverActivity : ComponentActivity() {
         }
     }
 
+    // Main-looper-only revocation of automatic retries. A new deliberate
+    // selection may reconnect, but a lost disconnect notice cannot restart media.
+    private val manualReconnectRequired = LinkedHashSet<String>()
     private fun disconnectPhone() {
         val owner = connection ?: return
+        owner.secureSession?.trustKey?.let { key ->
+            manualReconnectRequired.add(key)
+            if (manualReconnectRequired.size > 32)
+                manualReconnectRequired.remove(manualReconnectRequired.first())
+        }
         if (!approved) { owner.close(); return }
+        approved = false
+        stopPlayback()
         // Tell an updated phone not to retry a deliberate local disconnect.
         owner.send(FcastProtocol.ERROR, JSONObject().put("code", "USER_DISCONNECT")
             .put("message", "The TV ended the connection."))
@@ -387,7 +397,17 @@ class PitwallReceiverActivity : ComponentActivity() {
                 FcastProtocol.PONG -> Unit
                 FcastProtocol.INITIAL -> {
                     require(approved && versionReceived && !pitwallPeer && body?.optInt("pitwallScene") == 1)
-                    connection?.handshakeComplete()
+                    val owner = requireNotNull(connection)
+                    val peer = requireNotNull(owner.secureSession).trustKey
+                    if (peer in manualReconnectRequired) {
+                        if (body?.has("pitwallAutomaticRetry") != true || body.optBoolean("pitwallAutomaticRetry")) {
+                            approved = false
+                            owner.close()
+                            return
+                        }
+                        manualReconnectRequired.remove(peer)
+                    }
+                    owner.handshakeComplete()
                     senderName = body?.optString("displayName")?.take(80)?.ifBlank { "Phone" } ?: "Phone"
                     pitwallPeer = body?.optInt("pitwallScene") == 1
                     timingPeer = body?.optInt("pitwallOverlays") == 1
