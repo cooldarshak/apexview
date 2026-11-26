@@ -22,6 +22,21 @@ internal class ReplayCore(
     val previewTowerThroughUtc: Long? = null,
 )
 
+/** Map and tower readiness are independent, including when one topic is absent. */
+internal object ReplayPreviewCoverage {
+    const val MAP = 1
+    const val TOWER = 2
+
+    fun at(session: SessionTiming, utc: Long): Int {
+        val map = session.outline.size >= 8 && session.outline.size % 2 == 0 &&
+            session.tracks.values.any { it.hasPositionAt(utc) }
+        val tower = utc >= (session.previewTowerFromUtc ?: Long.MIN_VALUE) &&
+            (!session.archivePartial || session.towerIndexed || utc <= session.towerThroughUtc) &&
+            session.laps.values.any { it.hasRankAt(utc) }
+        return (if (map) MAP else 0) or (if (tower) TOWER else 0)
+    }
+}
+
 /** Small, disposable cache of completed archives. The original topics remain the source of truth. */
 internal class ReplayCoreCache(directory: File, private val contentId: Long,
                               private val diagnostic: (String) -> Unit = {}) {
@@ -141,9 +156,12 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                     laps.mapValues { (number, history) -> history.withInitialPosition(originalRanks.getValue(number)) }
                 } else laps
                 if (towerFrom != null && (towerThrough == null || towerFrom > towerThrough)) return miss("invalid-coverage")
-                if (outline.size < 8 || outline.size % 2 != 0 || drivers.isEmpty() ||
-                    tracks.isEmpty() || laps.isEmpty() || input.read() != -1
-                ) return miss("invalid-payload")
+                val validMap = outline.size >= 8 && outline.size % 2 == 0 && tracks.isNotEmpty()
+                val independent = previewPositionMs != null && version == PREVIEW_VERSION
+                val validTopics = if (independent) (validMap || laps.isNotEmpty()) &&
+                    (tracks.isEmpty() || validMap) else validMap && laps.isNotEmpty()
+                if (outline.size % 2 != 0 || drivers.isEmpty() || !validTopics ||
+                    input.read() != -1) return miss("invalid-payload")
                 diagnostic("Replay $kind cache content=$contentId result=hit bytes=${file.length()}")
                 ReplayCore(path, type, drivers, tracks, states, outline, hasStartFinish, startUtc, withRankBaseline, parts, towerFrom, towerThrough)
             }
@@ -158,50 +176,47 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
 
     fun writePreview(session: SessionTiming, positionMs: Long, utcMs: Long, checkActive: () -> Unit): Boolean {
         val path = session.radioBase.removePrefix(LiveTimingArchive.BASE)
-        // A progressive archive snapshot is safe for a bounded restart preview only
-        // when the tracks and tower contain actual data at the target UTC.
-        // The checks below enforce that, including for archivePartial snapshots.
         if (path == session.radioBase || path.isBlank() || session.live) return false
-        if (session.archivePartial && !session.towerIndexed && utcMs > session.towerThroughUtc) return false
-        if (session.tracks.values.none { it.hasPositionAt(utcMs) } ||
-            session.laps.values.none { it.hasRankAt(utcMs) }
-        ) return false
+        val coverage = ReplayPreviewCoverage.at(session, utcMs)
+        if (coverage == 0) return false
+        val hasMap = coverage and ReplayPreviewCoverage.MAP != 0
+        val hasTower = coverage and ReplayPreviewCoverage.TOWER != 0
         val from = utcMs - 90_000L
         val until = utcMs + 120_000L
-        val towerFrom = maxOf(from, session.previewTowerFromUtc ?: Long.MIN_VALUE)
-        val towerThrough = minOf(until, if (!session.archivePartial || session.towerIndexed) Long.MAX_VALUE else session.towerThroughUtc)
-        if (utcMs !in towerFrom..towerThrough) return false
-        val tracks = session.tracks.mapNotNull { (number, track) ->
+        // V5 already carries explicit tower coverage and rank baseline.
+        // No tower is represented by an empty lap map and an empty interval.
+        val towerFrom = if (hasTower) maxOf(from, session.previewTowerFromUtc ?: Long.MIN_VALUE) else Long.MIN_VALUE
+        val towerThrough = if (hasTower) minOf(until,
+            if (!session.archivePartial || session.towerIndexed) Long.MAX_VALUE else session.towerThroughUtc)
+            else Long.MIN_VALUE
+        val tracks = if (!hasMap) emptyMap() else session.tracks.mapNotNull { (number, track) ->
             checkActive()
-            val range = previewRange(track.t, track.n, from, until) ?: return@mapNotNull null
-            val end = range.last + 1
+            if (track.n == 0 || track.endMs < from) return@mapNotNull null
+            val range = historyWindowRange(track.n, from, until) { track.t[it] } ?: return@mapNotNull null
+            // Interpolation at the upper boundary requires the following sample.
+            val end = (range.last + 2).coerceAtMost(track.n)
             number to DriverTrack(track.t.copyOfRange(range.first, end), track.x.copyOfRange(range.first, end),
-                track.y.copyOfRange(range.first, end), range.count())
+                track.y.copyOfRange(range.first, end), end - range.first)
         }.toMap()
-        val states = session.states.mapNotNull { (number, state) ->
-            val range = previewRange(state.t, state.t.size, from, until) ?: return@mapNotNull null
+        val states = if (!hasTower) emptyMap() else session.states.mapNotNull { (number, state) ->
+            val range = historyWindowRange(state.t.size, towerFrom, towerThrough) { state.t[it] } ?: return@mapNotNull null
             number to StateLog(state.t.copyOfRange(range.first, range.last + 1), state.s.copyOfRange(range.first, range.last + 1))
         }.toMap()
-        val laps = session.laps.mapNotNull { (number, history) ->
+        val laps = if (!hasTower) emptyMap() else session.laps.mapNotNull { (number, history) ->
             checkActive()
-            history.previewWindow(from, until)?.let { number to it }
+            history.previewWindow(towerFrom, towerThrough)?.let { number to it }
         }.toMap()
-        val core = ReplayCore(path, session.type, session.drivers, tracks, states, session.outline,
-            session.hasStartFinish, session.startUtcMs, laps, emptyList(), towerFrom, towerThrough)
+        val core = ReplayCore(path, session.type, session.drivers, tracks, states,
+            if (hasMap) session.outline else FloatArray(0),
+            hasMap && session.hasStartFinish, session.startUtcMs, laps, emptyList(), towerFrom, towerThrough)
         return writeFile(preview, core, positionMs, checkActive)
     }
 
-    private fun previewRange(times: LongArray, size: Int, from: Long, until: Long): IntRange? {
-        if (size == 0) return null
-        val left = java.util.Arrays.binarySearch(times, 0, size, from)
-        val right = java.util.Arrays.binarySearch(times, 0, size, until)
-        val first = (if (left < 0) -left - 2 else left).coerceIn(0, size - 1)
-        val last = (if (right < 0) -right - 1 else right).coerceIn(first, size - 1)
-        return first..last
-    }
-
     private fun writeFile(file: File, core: ReplayCore, previewPositionMs: Long?, checkActive: () -> Unit): Boolean {
-        if (core.outline.size < 8 || core.drivers.isEmpty() || core.tracks.isEmpty() || core.laps.isEmpty()) return false
+        val validMap = core.outline.size >= 8 && core.outline.size % 2 == 0 && core.tracks.isNotEmpty()
+        val validTopics = if (previewPositionMs == null) validMap && core.laps.isNotEmpty()
+            else (validMap || core.laps.isNotEmpty()) && (core.tracks.isEmpty() || validMap)
+        if (core.drivers.isEmpty() || !validTopics) return false
         val destination = file.parentFile ?: return false
         destination.mkdirs()
         val temporary = try {
