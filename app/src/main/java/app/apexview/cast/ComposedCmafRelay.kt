@@ -25,6 +25,9 @@ internal class ComposedCmafRelay(address: String, private val peer: InetAddress?
     private val sockets = ConcurrentHashMap.newKeySet<Socket>()
     private val closed = AtomicBoolean(false)
     private val resources = RelayResourceStore()
+    private val relayId = java.util.UUID.randomUUID().toString()
+    private val relayStartedNs = System.nanoTime()
+    private val firstResponses = ConcurrentHashMap.newKeySet<String>()
     internal fun publishResources(
         next: Map<String, ByteArray>,
         shared: Map<String, SharedRelayResource> = emptyMap(),
@@ -42,13 +45,15 @@ internal class ComposedCmafRelay(address: String, private val peer: InetAddress?
     init { accepting.execute {
         while (!closed.get()) {
             val socket = try { server.accept() } catch (_: Exception) { break }
-            if (peer != null && socket.inetAddress != peer || sockets.size >= 9) { socket.close(); continue }
+            if (closed.get() || peer != null && socket.inetAddress != peer || sockets.size >= 9) { socket.close(); continue }
             socket.soTimeout = 8_000; sockets += socket
-            try { workers.execute { socket.use { runCatching { serve(it) }; sockets -= it } } }
-            catch (_: RuntimeException) { sockets -= socket; socket.close() }
+            if (closed.get()) { sockets -= socket; runCatching { socket.close() }; continue }
+            try { workers.execute { try { socket.use { runCatching { serve(it) } } } finally { sockets -= socket } } }
+            catch (_: RuntimeException) { sockets -= socket; runCatching { socket.close() } }
         }
     } }
     private fun serve(socket: Socket) {
+        val requestStartedNs = System.nanoTime()
         val input = BufferedInputStream(socket.getInputStream())
         fun line(): String {
             val bytes = ByteArrayOutputStream()
@@ -68,6 +73,7 @@ internal class ComposedCmafRelay(address: String, private val peer: InetAddress?
         val prefix = "/p/$token/"
         val path = request[1].substringBefore('?')
         val name = if (path.startsWith(prefix)) path.removePrefix(prefix) else ""
+        check(!closed.get())
         val output = socket.getOutputStream()
         val cors = if (liveHls) "Access-Control-Allow-Origin: *\r\n" +
             "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n" +
@@ -100,12 +106,27 @@ internal class ComposedCmafRelay(address: String, private val peer: InetAddress?
                 "Content-Length: $length\r\n${cors}Accept-Ranges: bytes\r\nCache-Control: no-store\r\nConnection: close\r\n$extra\r\n").toByteArray())
             if (request[0] == "GET") body.writeTo(output, start, length)
             output.flush()
+            if (request[0] == "GET") {
+                val kind = when {
+                    name.endsWith(".mpd") || name.endsWith(".m3u8") -> "PLAYLIST"
+                    name.endsWith(".ts") || name.endsWith(".m4s") -> "MEDIA"
+                    else -> "INIT_OR_OTHER"
+                }
+                if (firstResponses.add(kind)) android.util.Log.i("PitwallCast",
+                    "CAST_RELAY_FIRST_RESPONSE id=$relayId route=${if (liveHls) "BAKED" else "COMPOSED"} kind=$kind bytes=$length " +
+                    "elapsedMs=${(System.nanoTime()-relayStartedNs)/1_000_000L} requestMs=${(System.nanoTime()-requestStartedNs)/1_000_000L}")
+            }
         } finally { body.close() }
     }
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        server.close(); sockets.forEach { runCatching { it.close() } }; sockets.clear()
-        accepting.shutdownNow(); workers.shutdownNow()
-        resources.close()
+        val steps = app.apexview.scene.SceneReleaseSteps { step, error ->
+            android.util.Log.w("PitwallCast", "COMPOSED_RELAY_RELEASE_FAILED step=$step type=${error.javaClass.simpleName}")
+        }
+        steps.run("server") { server.close() }
+        sockets.forEach { runCatching { it.close() } }; sockets.clear()
+        steps.run("acceptor") { accepting.shutdownNow() }
+        steps.run("workers") { workers.shutdownNow() }
+        steps.run("media") { resources.close() }
     }
 }
