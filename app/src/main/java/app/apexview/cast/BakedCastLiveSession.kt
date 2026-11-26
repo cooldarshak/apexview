@@ -61,6 +61,10 @@ internal class BakedCastLiveSession(
                     // Never hold the session lock across packing or relay publication.
                     try { hls.append(ready.video + ready.audio, ready.durationUs) }
                     finally {
+                        // Ready owns the encoder and AAC samples, not the newly
+                        // packed immutable TS. No consumer can still read these.
+                        ready.video.forEach { it.bytes.fill(0) }
+                        ready.audio.forEach { it.bytes.fill(0) }
                         synchronized(this@BakedCastLiveSession) { pending.finish(ready) }
                     }
                     val muxMs = (System.nanoTime() - started) / 1_000_000L
@@ -94,8 +98,15 @@ internal class BakedCastLiveSession(
                 // Fetch a short distance ahead of the captured picture, not the entire replay.
                 val samples = request.first.readUntil(request.second)
                 synchronized(this@BakedCastLiveSession) {
-                    if (stopped) return@launch
-                    pending.offerAudio(samples)
+                    if (stopped) {
+                        samples.forEach { it.bytes.fill(0) }
+                        return@launch
+                    }
+                    try { pending.offerAudio(samples) }
+                    catch (failure: Throwable) {
+                        samples.forEach { it.bytes.fill(0) }
+                        throw failure
+                    }
                     publishRequests.trySend(Unit)
                 }
                 delay(800)
@@ -127,8 +138,12 @@ internal class BakedCastLiveSession(
     fun videoSample(sample: BakedCastTransportStream.Sample) {
         try {
             synchronized(this) {
-                if (stopped) return
-                pending.offerVideo(sample)
+                if (stopped) { sample.bytes.fill(0); return }
+                try { pending.offerVideo(sample) }
+                catch (failure: Throwable) {
+                    sample.bytes.fill(0)
+                    throw failure
+                }
                 publishRequests.trySend(Unit)
             }
         } catch (error: Exception) { fail("Scene Cast encoder: ${error.message ?: error.javaClass.simpleName}") }
@@ -147,6 +162,9 @@ internal class BakedCastLiveSession(
             if (!firstSegment.isCompleted) firstSegment.completeExceptionally(IllegalStateException(reason))
         }
         Log.w("PitwallCast", "BAKED_CAST_FAILURE ${reason.take(160)}")
+        // Terminal producer failure cannot retain the relay if the notification
+        // throws or a superseded UI owner discards it.
+        close()
         onFailure(reason)
     }
 
@@ -162,9 +180,11 @@ internal class BakedCastLiveSession(
             publishRequests.close()
         }
         audioJob.cancel()
+        // Cancel first, then close after actual publisher retirement. Calling
+        // synchronized HLS close on Main could wait for the complete mux.
+        publisherJob.invokeOnCompletion {
+            runCatching { hls.close() }
+        }
         publisherJob.cancel()
-        // The HLS object's lock serializes at most the one already-running mux.
-        // No session/GL lock is held while waiting for its retirement.
-        runCatching { hls.end() }; runCatching { hls.close() }
     }
 }
