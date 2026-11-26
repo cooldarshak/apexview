@@ -34,6 +34,7 @@ internal fun PitwallCastSheet(app: AppState) {
             Text(app.localCastDiscoveryStatus, style = Type.subhead)
             app.localCastDevices.forEach { device -> PrimaryButton(device.name, enabled = !app.castBusy) { app.connectLocalCast(device) } }
             SecondaryButton("Search again") { app.startLocalDiscovery() }
+            SecondaryButton("Forget paired TVs") { app.forgetLocalCastPeers() }
             SecondaryButton("Receive on this device") { app.castPickerOpen = false; app.openTvReceiver() }
             if (app.castVideoOnlyOffer) {
                 Text("This Google Cast receiver cannot display the native timing tower or track map.",
@@ -67,7 +68,7 @@ internal fun PitwallPairingDialog(code: String, onDecision: (Boolean) -> Unit, r
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Compare every group with the code on your ${if (receiver) "phone" else "TV"}. Only confirm if they match exactly.")
                 Text(code, style = Type.headline)
-                Text("Also choose Match on your ${if (receiver) "phone" else "TV"}. If the codes differ, cancel on both devices.", style = Type.footnote)
+                Text("For a new connection, confirm on both screens if prompted. No additional playback approval is needed. If the codes differ, cancel.", style = Type.footnote)
             }
         },
         confirmButton = { TextButton(onClick = { onDecision(true) }) { Text("Match") } },

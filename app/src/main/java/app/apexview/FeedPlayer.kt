@@ -954,6 +954,14 @@ class FeedPlayer(
 
     /** Whether this feed is downloading a picture at all. */
     val showingVideo get() = videoOn
+    // READY alone is not proof of an active media clock. A source with no
+    // selected output can repeatedly seek an empty sample queue.
+    internal val participatesInClockSync: Boolean get() =
+        !parkedForArchive && !remotePlaybackSuspended && player.mediaItemCount > 0 &&
+            (videoOn || audioTrackEnabled || player.currentTracks.groups.any { group ->
+                group.type == C.TRACK_TYPE_TEXT &&
+                    (0 until group.mediaTrackGroup.length).any { group.isTrackSelected(it) }
+            })
 
     /** This feed's part of the connection among those showing a picture. */
     fun setBandwidthShare(share: Float) {

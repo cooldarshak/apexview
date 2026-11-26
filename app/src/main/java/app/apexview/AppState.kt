@@ -415,10 +415,17 @@ class AppState(
                 if (attempt != localConnectionGeneration || !localChosen) return@launch
                 val secured = requireNotNull(provisional)
                 val socket = secured.socket
-                castPairingDecision = decision
-                castPairingCode = secured.session.code
-                val accepted = kotlinx.coroutines.withTimeoutOrNull(90_000) { decision.await() } == true
-                if (!accepted) throw IOException("Pairing declined or timed out")
+                val remembered = app.apexview.cast.local.PitwallRememberedPeers.contains(context, secured.session.trustKey)
+                if (!remembered) {
+                    castPairingDecision = decision
+                    castPairingCode = secured.session.code
+                    val accepted = kotlinx.coroutines.withTimeoutOrNull(90_000) { decision.await() } == true
+                    if (!accepted) throw IOException("Pairing declined or timed out")
+                } else {
+                    // A forgotten phone on the TV can still compare the code.
+                    castStatus = "Connecting to remembered TV. Code: ${secured.session.code}"
+                    message = castStatus
+                }
                 if (attempt != localConnectionGeneration || !localChosen) return@launch
                 castPairingCode = null; castPairingDecision = null
                 lateinit var next: app.apexview.cast.local.FcastConnection
@@ -464,7 +471,8 @@ class AppState(
                     localConnection?.send(protocol.INITIAL, JSONObject().put("displayName", android.os.Build.MODEL)
                         .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1)
                         .put("pitwallOverlays", 1).put("pitwallCaptions", 1).put("pitwallCaptionOwnerControl", 1)
-                        .put("pitwallMapPredictionSteps", app.apexview.cast.CastTimingProtocol.MAX_PREDICTION_STEPS))
+                        .put("pitwallMapPredictionSteps", app.apexview.cast.CastTimingProtocol.MAX_PREDICTION_STEPS)
+                        .put("pitwallRememberedPeers", 1))
                 }
                 protocol.INITIAL -> {
                     require(body?.optInt("pitwallScene") == 1) { "This receiver cannot arrange Pitwall video windows" }
@@ -481,7 +489,14 @@ class AppState(
                             body?.optInt("pitwallMapPredictionSteps", 0) ?: 0)
                         android.util.Log.i("PitwallCast", "TIMING_RX_CAPABILITY predictionSteps=$localMapPredictionSteps " +
                             "captions=$localCaptionsSupported nativeDRM=$localWidevineSupported")
+                        if (body?.optInt("pitwallRememberedPeers") == 1) {
+                            localConnection?.secureSession?.let {
+                                app.apexview.cast.local.PitwallRememberedPeers.remember(context, it.trustKey)
+                            }
+                        }
                         localReady = true; castBusy = false
+                        castStatus = "Connected securely to $castDeviceName."
+                        message = castStatus
                         startFullSceneCast()
                     }
                 }
@@ -1223,6 +1238,13 @@ class AppState(
         remoteWallClockBaseMs = null
         castSourceWallClockBaseMs = null
     }
+    internal fun forgetLocalCastPeers() {
+        stopFullSceneCast()
+        app.apexview.cast.local.PitwallRememberedPeers.forgetAll(context)
+        castStatus = "Paired TVs forgotten. Confirm the code on the next connection."
+        message = castStatus
+    }
+
     fun stopFullSceneCast() {
         stopExternalDisplay()
         clearExternalDisplayRequest()
@@ -7261,7 +7283,8 @@ class AppState(
         val leaderClock = leader.wallClockMs()
         tiles.filter { it !== leaderTile && it !== protectedCompositionHost && it !in nativeArchiveTiles }.forEach { tile ->
             val feed = tile.feed
-            if (tile.contentId != leaderTile.contentId || feed.player.playbackState != Player.STATE_READY) {
+            if (!feed.participatesInClockSync || tile.contentId != leaderTile.contentId ||
+                feed.player.playbackState != Player.STATE_READY) {
                 feed.driftMs = null
                 feed.setSpeed(1f)
                 return@forEach

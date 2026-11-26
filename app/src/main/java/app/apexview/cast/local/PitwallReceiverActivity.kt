@@ -321,6 +321,12 @@ class PitwallReceiverActivity : ComponentActivity() {
             }
         }, secureSession = secured.session)
         connection = next
+        if (PitwallRememberedPeers.contains(this, secured.session.trustKey)) {
+            startApprovedConnection(next)
+            // Display the code without prompting, in case the phone forgot us.
+            status = "Remembered phone. Code: ${secured.session.code}"
+            return
+        }
         pairingCode = secured.session.code
         status = "Compare the pairing code on your phone."
         pairingTimeout?.cancel()
@@ -339,6 +345,12 @@ class PitwallReceiverActivity : ComponentActivity() {
         pairingCode = null
         pairingTimeout?.cancel(); pairingTimeout = null
         if (!matches) { next.close(); return }
+        startApprovedConnection(next)
+    }
+
+    private fun startApprovedConnection(next: FcastConnection) {
+        check(connection === next && next.secureSession != null)
+        approved = true
         next.start(handshakeTimeoutMs = 100_000)
         next.send(FcastProtocol.VERSION, JSONObject().put("version", 3))
         status = "Paired securely. Waiting for playback request…"
@@ -356,22 +368,26 @@ class PitwallReceiverActivity : ComponentActivity() {
                         .put("appName", "Pitwall TV").put("appVersion", BuildConfig.VERSION_NAME).put("pitwallScene", 1).put("pitwallOverlays", 1)
                         .put("pitwallWidevine", 1).put("pitwallDirect", 1).put("pitwallCaptions", 1).put("pitwallCaptionOwnerControl", 1)
                         .put("pitwallMapPredictionSteps", CastTimingProtocol.MAX_PREDICTION_STEPS)
-                        .put("pitwallCaptionTrackMetadata", 1).put("pitwallDirectQuality", 1))
+                        .put("pitwallCaptionTrackMetadata", 1).put("pitwallDirectQuality", 1).put("pitwallRememberedPeers", 1))
                 }
                 FcastProtocol.PING -> connection?.send(FcastProtocol.PONG)
                 FcastProtocol.PONG -> Unit
                 FcastProtocol.INITIAL -> {
-                    require(versionReceived && !pitwallPeer && body?.optInt("pitwallScene") == 1)
+                    require(approved && versionReceived && !pitwallPeer && body?.optInt("pitwallScene") == 1)
                     connection?.handshakeComplete()
                     senderName = body?.optString("displayName")?.take(80)?.ifBlank { "Phone" } ?: "Phone"
                     pitwallPeer = body?.optInt("pitwallScene") == 1
                     timingPeer = body?.optInt("pitwallOverlays") == 1
                     captionOwnerControl = body?.optInt("pitwallCaptionOwnerControl") == 1
+                    if (body?.optInt("pitwallRememberedPeers") == 1) {
+                        connection?.secureSession?.let { PitwallRememberedPeers.remember(this, it.trustKey) }
+                    }
+                    status = "Paired securely. Waiting for playback request…"
                 }
                 FcastProtocol.PLAY -> {
-                    require(versionReceived && pitwallPeer && body != null)
+                    require(approved && versionReceived && pitwallPeer && body != null)
                     validatePlay(body)
-                    if (approved) play(body) else { pending = body; status = "Allow $senderName to play on this TV?" }
+                    play(body)
                 }
                 else -> {
                     if (!approved) return
@@ -983,6 +999,11 @@ class PitwallReceiverActivity : ComponentActivity() {
                 Text("On your phone, choose Cast and select this TV. Keep the receiver open. Protected and live F1 feeds use the authorized F1 TV account signed in here.",
                     style = Type.subhead)
                 if (connection != null) SecondaryButton("Disconnect phone") { connection?.close() }
+                SecondaryButton("Forget paired phones") {
+                    connection?.close()
+                    PitwallRememberedPeers.forgetAll(this@PitwallReceiverActivity)
+                    status = "Paired phones forgotten. Confirm the code on the next connection."
+                }
                 SecondaryButton("Exit receiver") { finish() }
             }
             if (active && !renderingReported) Text(status, style = Type.subhead, modifier = Modifier.align(Alignment.BottomCenter).background(Ink.surface).padding(12.dp))
@@ -1027,10 +1048,8 @@ class PitwallReceiverActivity : ComponentActivity() {
             confirmButton = { TextButton(onClick = { closeCaptionSettings() }) { Text("Close") } }
         )
         pairingCode?.let { code -> app.apexview.cast.PitwallPairingDialog(code, ::confirmPairing, receiver = true) }
-        pending?.let { request -> AlertDialog(onDismissRequest = { deny() }, title = { Text("Play from $senderName?") },
-            text = { Text("This phone can control playback until it disconnects. Protected feeds use the F1 TV subscription signed in on this TV.") },
-            confirmButton = { TextButton(onClick = { approved = true; pending = null; try { play(request) } catch (e: Exception) { fail(e.message ?: "Unable to play") } }) { Text("Allow") } },
-            dismissButton = { TextButton(onClick = { deny() }) { Text("Deny") } }) }
+        // A successful physical pairing authorizes playback on this connection.
+        // Protected media still obtains the TV's own F1 entitlement.
     }
     private fun closeCaptionSettings(save: Boolean = true) {
         if (save) saveReceiverCaptionAppearance()

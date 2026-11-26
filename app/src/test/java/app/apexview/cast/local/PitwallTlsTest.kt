@@ -32,6 +32,21 @@ class PitwallTlsTest {
             store.getCertificate(name) as X509Certificate)
     }
 
+    @Test fun rememberedTrustBindsBothInstallationCertificatesAndRole() {
+        val phone=byteArrayOf(1,2,3)
+        val tv=byteArrayOf(4,5,6)
+        val key=PitwallRememberedPeers.key(phone,tv)
+        assertEquals(key,PitwallRememberedPeers.key(phone.copyOf(),tv.copyOf()))
+        assertNotEquals(key,PitwallRememberedPeers.key(tv,phone))
+        assertNotEquals(key,PitwallRememberedPeers.key(phone,byteArrayOf(4,5,7)))
+        assertNotEquals(key,PitwallRememberedPeers.key(byteArrayOf(1,2,4),tv))
+        assertEquals(64,key.length)
+        val keys=(0..40).map { PitwallRememberedPeers.key(phone,byteArrayOf(it.toByte())) }
+        val bounded=keys.fold(emptySet<String>()) { old,next -> PitwallRememberedPeers.add(old,next) }
+        assertEquals(32,bounded.size)
+        assertTrue(keys.last() in bounded)
+    }
+
     @Test fun handshakeDiagnosticsContainTypesNotSecretExceptionText() {
         val failure = javax.net.ssl.SSLHandshakeException("private peer details").apply {
             initCause(java.security.cert.CertificateException("secret certificate"))
