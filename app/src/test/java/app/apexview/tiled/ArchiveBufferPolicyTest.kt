@@ -9,6 +9,42 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class ArchiveBufferPolicyTest {
+    @Test fun localDeliveryRetiresOnlyOlderDeliveredUnpinnedBackingInSameEpoch() {
+        val cache = BoundedArchiveFragmentCache(6, 100)
+        val old = byteArrayOf(1, 2)
+        val pinned = byteArrayOf(3, 4)
+        val unread = byteArrayOf(5, 6)
+        val next = byteArrayOf(7, 8)
+        val future = byteArrayOf(9, 10)
+        cache.put(0, old); cache.put(1, pinned); cache.put(2, unread)
+        cache.put(3, next); cache.put(4, future)
+        val a = requireNotNull(cache.readLease(0))
+        val b = requireNotNull(cache.readLease(1))
+        val c = requireNotNull(cache.readLease(3))
+        assertEquals(0L, cache.completeLocalDelivery(0, a, 7))
+        assertEquals(0L, cache.completeLocalDelivery(1, b, 7))
+        a.close()
+        assertEquals(0L, cache.completeLocalDelivery(3, c, 8))
+        assertEquals(2L, cache.completeLocalDelivery(3, c, 7))
+        assertArrayEquals(byteArrayOf(0, 0), old)
+        assertTrue(cache.contains(1)); assertTrue(cache.contains(2))
+        assertTrue(cache.contains(3)); assertTrue(cache.contains(4))
+        val copy = ByteArray(2); b.readInto(copy, 0, 0, 2)
+        assertArrayEquals(pinned, copy)
+        b.close(); c.close(); cache.clear()
+    }
+
+    @Test fun obsoleteDeliveryCannotRetireReplacementBacking() {
+        val cache = BoundedArchiveFragmentCache(4, 100)
+        cache.put(0, byteArrayOf(1)); cache.put(1, byteArrayOf(2))
+        val a = requireNotNull(cache.readLease(0)); cache.completeLocalDelivery(0, a, 1); a.close()
+        val stale = requireNotNull(cache.readLease(1))
+        cache.put(1, byteArrayOf(3))
+        assertEquals(0L, cache.completeLocalDelivery(1, stale, 1))
+        assertTrue(cache.contains(0)); assertArrayEquals(byteArrayOf(3), cache.readCopy(1))
+        stale.close(); cache.clear()
+    }
+
     @Test fun pressureTrimOnlyRetiresUnpinnedBehindTheRequestedSegment() {
         val cache = BoundedArchiveFragmentCache(5, 100)
         val past = byteArrayOf(1, 2)

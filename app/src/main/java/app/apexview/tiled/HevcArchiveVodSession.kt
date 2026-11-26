@@ -173,8 +173,21 @@ internal class HevcArchiveVodSession(
     @Volatile private var closed = false
     private val owners = java.util.concurrent.atomic.AtomicInteger(1)
     private val baseReleased = java.util.concurrent.atomic.AtomicBoolean(false)
+    // Guarded by cacheLock. Shared relay ownership and seeks invalidate local delivery proof.
+    private var localDeliveryEpoch = 0L
+    private fun captureLocalDeliveryEpoch(): Long? = synchronized(cacheLock) {
+        if (!closed && owners.get() == 1 && !baseReleased.get()) localDeliveryEpoch else null
+    }
+    private fun completeLocalDelivery(number: Int, lease: ArchiveFragmentLease, epoch: Long) {
+        val freed = synchronized(cacheLock) {
+            if (closed || owners.get() != 1 || baseReleased.get() || epoch != localDeliveryEpoch) 0L
+            else cache.completeLocalDelivery(number, lease, epoch)
+        }
+        if (freed > 0L) android.util.Log.i("ApexviewSingleDecoder",
+            "GC_ARCHIVE_DELIVERED_TRIM number=$number retiredLogicalBytes=$freed foregroundUnchanged=true")
+    }
     fun acquireLease(): AutoCloseable {
-        synchronized(cacheLock) { checkOpen(); owners.incrementAndGet() }
+        synchronized(cacheLock) { checkOpen(); owners.incrementAndGet(); localDeliveryEpoch++ }
         val released = java.util.concurrent.atomic.AtomicBoolean(false)
         return AutoCloseable { if (released.compareAndSet(false, true)) releaseOwner() }
     }
@@ -255,7 +268,9 @@ internal class HevcArchiveVodSession(
     fun prioritizeSeek(positionMs: Long) {
         val target = segmentAt(ArchiveTimelineSearch.msToUs(positionMs))
         nativeDemand = null // never use the pre-seek clock for the new target
-        synchronized(cacheLock) { if (!closed) nativeClear.invalidateForSeek() }
+        synchronized(cacheLock) {
+            if (!closed) { localDeliveryEpoch++; nativeClear.invalidateForSeek() }
+        }
         preemptUnrelatedWarmup(target, seek = true)
     }
 
@@ -830,6 +845,8 @@ internal class HevcArchiveVodSession(
         private var cursor = 0
         private var end = 0
         private var delivered = 0L
+        private var deliveryNumber: Int? = null
+        private var deliveryEpoch: Long? = null
         override fun addTransferListener(listener: TransferListener) {}
         override fun getUri(): Uri? = uri
         override fun open(spec: DataSpec): Long {
@@ -840,7 +857,11 @@ internal class HevcArchiveVodSession(
                 else -> {
                     val number = name?.let { Regex("s-(\\d+)\\.m4s").matchEntire(it)?.groupValues?.get(1)?.toIntOrNull() }
                         ?: throw IOException("Unknown archive resource")
-                    session.segmentLease(number)
+                    val epoch = session.captureLocalDeliveryEpoch()
+                    session.segmentLease(number).also {
+                        deliveryNumber = number
+                        deliveryEpoch = epoch
+                    }
                 }
             }
             if (spec.position !in 0..body.size.toLong()) { body.close(); throw IOException("Archive range is out of bounds") }
@@ -871,9 +892,21 @@ internal class HevcArchiveVodSession(
             return count
         }
         override fun close() {
-            if(delivered>0)session.media3DeliveredBytes.addAndGet(delivered)
-            delivered=0
-            resource?.close(); resource = null; uri = null; cursor = 0; end = 0
+            val body = resource
+            val number = deliveryNumber
+            val epoch = deliveryEpoch
+            if (delivered > 0) session.media3DeliveredBytes.addAndGet(delivered)
+            try {
+                if (body != null && number != null && epoch != null &&
+                    delivered == body.size.toLong() && cursor == end && end == body.size) {
+                    session.completeLocalDelivery(number, body, epoch)
+                }
+            } finally {
+                delivered = 0
+                deliveryNumber = null; deliveryEpoch = null
+                resource = null; uri = null; cursor = 0; end = 0
+                body?.close()
+            }
         }
     }
 

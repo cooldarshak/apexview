@@ -135,6 +135,7 @@ internal class ArchiveFragmentLease(
     init { require((bytes == null) != (native == null)) }
     private var closed = false
     val size: Int = bytes?.size ?: requireNotNull(native).size
+    internal val storageIdentity: Any get() = bytes ?: requireNotNull(native).storageIdentity
 
     @Synchronized fun readInto(target: ByteArray, targetOffset: Int, sourceOffset: Int, length: Int) {
         check(!closed) { "Archive fragment lease is closed" }
@@ -183,6 +184,7 @@ internal class BoundedArchiveFragmentCache(
         fun copyBytes() = bytes?.copyOf() ?: requireNotNull(native).copyBytes()
         var cached = true
         var readers = 0
+        var localDeliveryEpoch: Long? = null
     }
     private val entries = LinkedHashMap<Int, Entry>(maxEntries + 1, 0.75f, true)
     private val pinned = mutableSetOf<Entry>()
@@ -226,6 +228,25 @@ internal class BoundedArchiveFragmentCache(
         while (iterator.hasNext()) {
             val entry = iterator.next()
             if (entry.key >= number || entry.value.readers != 0) continue
+            freed += entry.value.size
+            iterator.remove()
+            retire(entry.value)
+        }
+        recordMemory()
+        return freed
+    }
+    /** A complete downstream delivery is not playback completion. Keep the just-delivered
+     * resource for immediate retry; retire only older fully delivered, unpinned backing in
+     * this exact local ownership epoch. Never evict unread warm-ahead or active readers here. */
+    @Synchronized fun completeLocalDelivery(number: Int, lease: ArchiveFragmentLease, epoch: Long): Long {
+        val current = entries[number] ?: return 0L
+        if (current.identity !== lease.storageIdentity) return 0L
+        current.localDeliveryEpoch = epoch
+        var freed = 0L
+        val iterator = entries.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.key >= number || entry.value.readers != 0 || entry.value.localDeliveryEpoch != epoch) continue
             freed += entry.value.size
             iterator.remove()
             retire(entry.value)
