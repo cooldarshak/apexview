@@ -187,6 +187,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var advertisement: PitwallAdvertisement? = null
     private var connection: FcastConnection? = null
     private var pairingCode by mutableStateOf<String?>(null)
+    private var televisionSelectionCode by mutableStateOf<String?>(null)
     private var pairingTimeout: kotlinx.coroutines.Job? = null
     private val timingState = CastTimingReceiver()
     private var timingPeer = false
@@ -279,6 +280,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                 withContext(Dispatchers.Main) {
                     if (destroyed) { listening.close(); return@withContext }
                     server = listening
+                    televisionSelectionCode = PitwallPairingCode.televisionIdentity(identity.certificate.encoded)
                     advertisement = PitwallAdvertisement(this@PitwallReceiverActivity, listening.localPort, receiverName) { name, ok ->
                         if (ok) { receiverName = name; if (!active) status = "Ready. Choose this TV from Cast on your phone." }
                         else status = name
@@ -1065,6 +1067,10 @@ class PitwallReceiverActivity : ComponentActivity() {
                 Text(status, style = Type.body, color = Ink.secondary)
                 Text("On your phone, choose Cast and select this TV. Keep the receiver open. Protected and live F1 feeds use the authorized F1 TV account signed in here.",
                     style = Type.subhead)
+                if (connection == null) televisionSelectionCode?.let { code ->
+                    Text("First connection: enter this TV identity code in the phone's Cast picker.", style = Type.caption)
+                    Text(code, style = Type.headline)
+                }
                 if (connection != null) SecondaryButton("Disconnect phone") { disconnectPhone() }
                 SecondaryButton("Forget paired phones") {
                     PitwallRememberedPeers.forgetAll(this@PitwallReceiverActivity)
@@ -1149,6 +1155,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     }
     override fun onStop() {
         advertisement?.close(); advertisement = null
+        televisionSelectionCode = null
         runCatching { server?.close() }; server = null
         listeningJob?.cancel(); listeningJob = null
         val previous = connection; connection = null; previous?.close()
