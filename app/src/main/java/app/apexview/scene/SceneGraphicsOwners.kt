@@ -10,7 +10,13 @@ internal class SceneGraphicsOwners {
         val backend: String, val surfaceEpoch: Long, val readinessEpoch: Long,
         val contexts: Int, val windows: Int, val decoderTextures: Int,
         val atlasWidth: Int, val atlasHeight: Int, val outputWidth: Int, val outputHeight: Int,
+        val encoderInputs: Int = 0, val captureTextures: Int = 0,
+        val captureQueues: Int = 0, val pbuffers: Int = 0,
+        val captureWidth: Int = 0, val captureHeight: Int = 0,
     ) {
+        val capturePixels: Long get() = captureWidth.toLong() * captureHeight
+        val active: Boolean get() = contexts != 0 || windows != 0 || decoderTextures != 0 ||
+            encoderInputs != 0 || captureTextures != 0 || captureQueues != 0 || pbuffers != 0
         val atlasPixels: Long get() = atlasWidth.toLong() * atlasHeight
         val outputPixels: Long get() = outputWidth.toLong() * outputHeight
     }
@@ -20,7 +26,9 @@ internal class SceneGraphicsOwners {
     @Synchronized fun record(id: Long, owner: Owner) {
         require(owner.contexts in 0..1 && owner.windows >= 0 && owner.decoderTextures in 0..1)
         require(owner.atlasWidth >= 0 && owner.atlasHeight >= 0 && owner.outputWidth >= 0 && owner.outputHeight >= 0)
-        if (owner.contexts == 0 && owner.windows == 0 && owner.decoderTextures == 0) owners.remove(id)
+        require(owner.encoderInputs in 0..1 && owner.captureTextures in 0..1 && owner.captureQueues in 0..1 &&
+            owner.pbuffers in 0..1 && owner.captureWidth >= 0 && owner.captureHeight >= 0)
+        if (!owner.active) owners.remove(id)
         else owners[id] = owner
     }
     @Synchronized fun remove(id: Long) { owners.remove(id) }
@@ -32,10 +40,21 @@ internal class SceneGraphicsOwners {
             " sceneDecoderTextures=${live.values.sumOf { it.decoderTextures }}" +
             " sceneAtlasPixels=${live.values.sumOf { it.atlasPixels }}" +
             " sceneOutputPixels=${live.values.sumOf { it.outputPixels }}" +
+            " sceneEncoderInputs=${live.values.sumOf { it.encoderInputs }}" +
+            " sceneCaptureTextures=${live.values.sumOf { it.captureTextures }}" +
+            " sceneCaptureQueues=${live.values.sumOf { it.captureQueues }}" +
+            " sceneEglPbuffers=${live.values.sumOf { it.pbuffers }}" +
+            " sceneCapturePixels=${live.values.sumOf { it.capturePixels }}" +
             " sceneGraphicsDetail=" + live.entries.joinToString(",") { (id, owner) ->
                 "${id}:${owner.backend}:${owner.surfaceEpoch}:${owner.readinessEpoch}:" +
                     "${owner.contexts}:${owner.windows}:${owner.decoderTextures}:" +
                     "${owner.atlasWidth}x${owner.atlasHeight}:${owner.outputWidth}x${owner.outputHeight}"
+            }.ifEmpty { "NONE" } +
+            " sceneCaptureDetail=" + live.entries.filter { (_, owner) ->
+                owner.encoderInputs != 0 || owner.captureTextures != 0 || owner.captureQueues != 0 || owner.pbuffers != 0
+            }.joinToString(",") { (id, owner) ->
+                "${id}:${owner.backend}:${owner.encoderInputs}:${owner.captureTextures}:" +
+                    "${owner.captureQueues}:${owner.pbuffers}:${owner.captureWidth}x${owner.captureHeight}"
             }.ifEmpty { "NONE" } + " sceneGraphicsBytes=NOT_MEASURED"
     }
     companion object { val process = SceneGraphicsOwners() }
