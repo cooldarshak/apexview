@@ -154,6 +154,10 @@ internal class NativeClearArchiveBridge(
         val selected = state
         if (selected.context == null) {
             work.unlock()
+            // A concurrent disable may have lost its tryLock while this
+            // caller was taking the JVM-only path. Complete retirement
+            // before starting unrelated reference work.
+            retireDisabled()
             return Produced(reference())
         }
         var baseline: HevcClearCmafGridComposer.Output? = null
@@ -416,10 +420,17 @@ internal class NativeClearArchiveBridge(
             if (computingReference) throw error
             return fallback("NATIVE_CLEAR_LIBRARY_UNAVAILABLE")
         } finally {
-            nativeOutput?.wipe()
-            baseline?.let { it.initializationSegment.fill(0); it.mediaFragments.forEach { bytes -> bytes.fill(0) } }
-            work.unlock()
-            retireDisabled()
+            // Failed native release must not strand the producer lock or
+            // prevent retirement of a concurrently disabled engine.
+            try {
+                try { nativeOutput?.wipe() }
+                finally {
+                    baseline?.let { it.initializationSegment.fill(0); it.mediaFragments.forEach { bytes -> bytes.fill(0) } }
+                }
+            } finally {
+                work.unlock()
+                retireDisabled()
+            }
         }
     }
 
