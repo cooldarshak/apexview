@@ -118,4 +118,28 @@ class ArchiveCompositionStartupTest {
         assertFalse(startup.sourceDecodersTouched)
         assertFalse(startup.hostReplaced)
     }
+
+    @Test fun rollbackStillRunsWhenFailureDiagnosticsThrowAndCleanupPreservesCancellation() = runBlocking {
+        val primary = CancellationException("Superseded during host preparation")
+        val diagnostic = IllegalStateException("Diagnostic failure")
+        val restore = IllegalStateException("Restore failure")
+        val disposal = IllegalStateException("Disposal failure")
+        val events = mutableListOf<String>()
+        try {
+            ArchiveCompositionStartup(stage = { stage, _ ->
+                if (stage == "SUPERSEDED") throw diagnostic
+            }).start(
+                preflight = { Unit },
+                releaseSources = { events += "released" },
+                replaceHost = { throw primary },
+                restoreSources = { assertTrue(it); events += "restored"; throw restore },
+                dispose = { events += "disposed"; throw disposal },
+            )
+            fail("Expected cancellation")
+        } catch (error: CancellationException) {
+            assertSame(primary, error)
+            assertEquals(listOf(diagnostic, restore, disposal), error.suppressed.toList())
+        }
+        assertEquals(listOf("released", "restored", "disposed"), events)
+    }
 }
