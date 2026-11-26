@@ -228,13 +228,30 @@ class ArchitectureGBAndroidTest {
             requested = n % 3 != 1
             val base = n * 1_000_000L
             val video = ByteArray(160 + n * 2111) { it.toByte() }
-            val audio = ByteArray(7 + n * 17) { it.toByte() }
-            audio[0] = 0xff.toByte(); audio[1] = 0xf1.toByte()
+            // One complete ADTS access unit, including a nonempty payload
+            // and exact declared frame length, not only the sync marker.
+            val rawAudio = ByteArray(maxOf(1, n * 17)) { it.toByte() }
+            val audio = app.apexview.cast.BakedAacAdts.wrap(rawAudio, 48000, 2)
+            val directAudio = ByteBuffer.allocateDirect(rawAudio.size).put(rawAudio)
+            val nativeAudio = ByteArray(audio.size)
+            assertTrue(NativeHotPath.adts(directAudio, rawAudio.size, 48000, 2, nativeAudio))
+            assertArrayEquals(audio, nativeAudio)
             val samples = listOf(
                 app.apexview.cast.BakedCastTransportStream.Sample(base,video,true,true),
                 app.apexview.cast.BakedCastTransportStream.Sample(base,audio,false),
                 app.apexview.cast.BakedCastTransportStream.Sample(base+20_000,audio,false),
             )
+            // A rejected truncated unit must not advance either muxer's
+            // continuity counters; the next valid segment must still match.
+            val malformed = samples.toMutableList().apply {
+                this[1] = this[1].copy(bytes = audio.copyOf(audio.size - 1))
+            }
+            assertTrue(runCatching { reference.segment(malformed) }.exceptionOrNull() is IllegalArgumentException)
+            if (requested) {
+                assertTrue(runCatching { candidate.nativeSegment(malformed, null) }.exceptionOrNull() is IllegalArgumentException)
+            } else {
+                assertTrue(runCatching { candidate.segment(malformed) }.exceptionOrNull() is IllegalArgumentException)
+            }
             val expected = reference.segment(samples)
             if (requested) {
                 requireNotNull(candidate.nativeSegment(samples,null)).use { assertArrayEquals(expected,it.copyBytes()) }
