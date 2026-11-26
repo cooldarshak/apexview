@@ -897,22 +897,33 @@ internal class HevcArchiveVodSession(
         closed = true
         // Cancel before clearing the immutable session's authorized offer
         // owner. No optional network completion can publish into a closed session.
-        sidecars.close()
-        nativeClear.close()
-        // Wake foreground waiters before shutting down speculative networking.
-        // A waiter must never spend a stale 25s fetch timeout on an owned,
-        // explicitly closed session.
-        production.close()
-        foregroundAdmission.close(); prefetchAdmission.close()
-        synchronized(warmLock) { warmTask?.cancel(true); warmer.shutdownNow() }
-        fetchers.shutdownNow()
-        prefetchFetchers.shutdownNow()
-        synchronized(cacheLock) {
-            initialization?.close(); initialization = null; cache.clear()
-            sourceInitialization.close()
+        var failure: Throwable? = null
+        fun retire(action: () -> Unit) {
+            try { action() } catch (error: Throwable) {
+                val first = failure
+                if (first == null) failure = error else if (first !== error) first.addSuppressed(error)
+            }
         }
-        compatibleMaps.clear()
+        retire { sidecars.close() }
+        // Wake foreground waiters even if native cleanup failed.
+        retire { production.close() }
+        retire { foregroundAdmission.close() }
+        retire { prefetchAdmission.close() }
+        retire { synchronized(warmLock) { warmTask?.cancel(true) } }
+        retire { warmer.shutdownNow() }
+        retire { fetchers.shutdownNow() }
+        retire { prefetchFetchers.shutdownNow() }
+        retire { nativeClear.close() }
+        synchronized(cacheLock) {
+            val initOwner = initialization
+            initialization = null
+            retire { initOwner?.close() }
+            retire { cache.clear() }
+            retire { sourceInitialization.close() }
+        }
+        retire { compatibleMaps.clear() }
         nativeBudgetContext = null
+        failure?.let { throw it }
     }
 
     private fun checkOpen() { if (closed || Thread.currentThread().isInterrupted) throw IOException("Archive VOD session closed") }
