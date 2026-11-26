@@ -106,33 +106,42 @@ impl Arena {
             self.best_free(size).is_some_and(|i|self.free[i].capacity()<=ceiling) {
             self.owned_eligible=self.owned_eligible.saturating_add(1);
         }
+        let mut miss_ceiling=false;
+        let mut miss_fit=false;
         if let Some(mut b)=self.atlas_idle.take() {
             self.charged-=b.capacity();
             if b.capacity()>ceiling {
-                self.owned_miss_ceiling=self.owned_miss_ceiling.saturating_add(1);
+                miss_ceiling=true;
             } else if !reusable_capacity(size,b.capacity()) {
-                self.owned_miss_fit=self.owned_miss_fit.saturating_add(1);
+                miss_fit=true;
             } else {
                 b.resize(size,0);
                 self.owned_reuses=self.owned_reuses.saturating_add(1);
                 return Some(b);
             }
-        } else if self.best_free(size).is_none() {
-            if self.atlas_idle_limit==0 {
-                self.owned_miss_disabled=self.owned_miss_disabled.saturating_add(1);
-            } else if !self.ranges.is_empty() {
-                self.owned_miss_pinned=self.owned_miss_pinned.saturating_add(1);
-            } else {
-                self.owned_miss_empty=self.owned_miss_empty.saturating_add(1);
-            }
         }
-        if let Some(i)=self.best_free(size).filter(|&i|self.free[i].capacity()<=ceiling) {
+        let generic=self.best_free(size);
+        if let Some(i)=generic.filter(|&i|self.free[i].capacity()<=ceiling) {
             let mut b=self.free.swap_remove(i);
             self.charged-=b.capacity();
             b.resize(size,0);
             self.owned_reuses=self.owned_reuses.saturating_add(1);
             Some(b)
         } else {
+            // Classify one actual reuse miss, not each inspected candidate.
+            // A generic backing may fit the requested bytes but exceed the
+            // worker ceiling; this used to be an unclassified allocation.
+            if miss_ceiling || generic.is_some() {
+                self.owned_miss_ceiling=self.owned_miss_ceiling.saturating_add(1);
+            } else if miss_fit || !self.free.is_empty() {
+                self.owned_miss_fit=self.owned_miss_fit.saturating_add(1);
+            } else if self.atlas_idle_limit==0 {
+                self.owned_miss_disabled=self.owned_miss_disabled.saturating_add(1);
+            } else if !self.ranges.is_empty() {
+                self.owned_miss_pinned=self.owned_miss_pinned.saturating_add(1);
+            } else {
+                self.owned_miss_empty=self.owned_miss_empty.saturating_add(1);
+            }
             self.trim();
             let mut b=Vec::new();
             if b.try_reserve_exact(size).is_err() || b.capacity()>ceiling {
@@ -496,6 +505,29 @@ mod tests {
         assert_eq!(a.charged,0);
         assert_eq!(a.owned_allocations,1);
         assert_eq!(a.owned_reuses,1);
+    }
+    #[test]
+    fn reuse_miss_counters_classify_generic_fit_and_worker_ceiling_once() {
+        for (requested,ceiling,expected_fit,expected_ceiling) in [
+            (3900,4000,0,1),(2048,4096,1,0)
+        ] {
+            let mut a=Arena::default();
+            a.set_atlas_idle_limit(8192);
+            let sentinel=a.allocate(1).unwrap();
+            let cached=a.allocate(4096).unwrap();
+            assert!(a.release(cached));
+            assert_eq!(a.free.len(),1);
+            let output=a.take_output(requested,ceiling).unwrap();
+            assert_eq!(output.len(),requested);
+            assert_eq!(a.owned_allocations,1);
+            assert_eq!(a.owned_eligible,0);
+            assert_eq!(a.owned_reuses,0);
+            assert_eq!(a.owned_miss_fit,expected_fit);
+            assert_eq!(a.owned_miss_ceiling,expected_ceiling);
+            assert_eq!(a.owned_miss_empty+a.owned_miss_pinned+a.owned_miss_disabled,0);
+            assert!(a.release(sentinel));
+            assert_eq!(a.charged,0);
+        }
     }
     #[test]
     fn atlas_reuse_1000_serial_adoptions_and_exact_accounting() {
