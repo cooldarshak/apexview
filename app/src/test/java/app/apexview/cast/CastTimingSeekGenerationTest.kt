@@ -97,4 +97,17 @@ class CastTimingSeekGenerationTest {
         receiver.accept(frame(3, 3, null, 50000), playback)
         assertEquals("44", receiver.frame!!.table.rows.single().first)
     }
+    @Test fun invalidInitialFrameCannotCommitClockEpoch() {
+        val receiver = CastTimingReceiver { 1000L }
+        receiver.accept(table(3, 4), playback)
+        assertThrows(IllegalArgumentException::class.java) {
+            receiver.accept(frame(1, 3, 5, -1), playback)
+        }
+        assertEquals(0L, receiver.clockEpoch)
+        assertEquals(0L, receiver.health().framesAccepted)
+        assertNull(receiver.frame)
+        receiver.accept(frame(1, 3, 4, 1000), playback)
+        assertEquals(4L, receiver.clockEpoch)
+        assertEquals("1", receiver.frame!!.table.rows.single().first)
+    }
 }
