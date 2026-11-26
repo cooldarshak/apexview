@@ -37,6 +37,13 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
         java.util.concurrent.ArrayBlockingQueue(8))
     private val accepting = Executors.newSingleThreadExecutor()
     private val stopped = AtomicBoolean(false)
+    private val publicationLock = Any()
+    private val relayStartedNs = System.nanoTime()
+    private val relayId = java.util.UUID.randomUUID().toString()
+    private val firstResponses = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private fun recordFirst(kind: String, bytes: Int, startedNs: Long) {
+        if (firstResponses.add(kind)) android.util.Log.i("PitwallCast", "CAST_RELAY_FIRST_RESPONSE id=$relayId route=ARCHIVE kind=$kind bytes=$bytes elapsedMs=${(System.nanoTime()-relayStartedNs)/1_000_000L} requestMs=${(System.nanoTime()-startedNs)/1_000_000L}")
+    }
     private val resources = ConcurrentHashMap<String, Uri>()
     private val audioManifests = ConcurrentHashMap<String, ByteArray>()
     private val activeSockets = ConcurrentHashMap.newKeySet<Socket>()
@@ -49,14 +56,16 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
         while (!stopped.get()) {
             val socket = try { server.accept() } catch (_: IOException) { break }
             socket.soTimeout = 8_000
-            if ((peer != null && socket.inetAddress != peer) || activeSockets.size >= 12) { socket.close(); continue }
+            if (stopped.get() || (peer != null && socket.inetAddress != peer) || activeSockets.size >= 12) { socket.close(); continue }
             activeSockets += socket
-            try { workers.execute { socket.use { runCatching { serve(it) }; activeSockets -= it } } }
-            catch (_: RuntimeException) { socket.close(); activeSockets -= socket }
+            if (stopped.get()) { activeSockets -= socket; runCatching { socket.close() }; continue }
+            try { workers.execute { try { socket.use { runCatching { serve(it) } } } finally { activeSockets -= socket } } }
+            catch (_: RuntimeException) { activeSockets -= socket; runCatching { socket.close() } }
         }
     } }
 
     private fun serve(socket: Socket) {
+        val requestStartedNs = System.nanoTime()
         val input = BufferedInputStream(socket.getInputStream())
         fun line(): String {
             val out = ByteArrayOutputStream()
@@ -84,6 +93,7 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
         var responseStarted = false
         fun replyHeaders(status: Int, mime: String, length: Int, extra: String = ""): java.io.OutputStream {
             val phrase = when (status) { 200 -> "OK"; 204 -> "No Content"; 206 -> "Partial Content"; 416 -> "Range Not Satisfiable"; 403 -> "Forbidden"; 404 -> "Not Found"; 429 -> "Too Many Requests"; else -> "Bad Request" }
+            check(!stopped.get())
             val output = socket.getOutputStream()
             responseStarted = true
             output.write(("HTTP/1.1 $status $phrase\r\nContent-Type: $mime\r\nContent-Length: $length\r\n" +
@@ -98,6 +108,7 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
             val output = replyHeaders(status, mime, body.size, extra)
             if (request[0] != "HEAD") output.write(body)
             output.flush()
+            if (status == 200 && request[0] == "GET" && mime == HLS) recordFirst("PLAYLIST", body.size, requestStartedNs)
         }
         fun replyVideo(body: app.apexview.tiled.ArchiveFragmentLease) {
             body.use { lease ->
@@ -112,6 +123,7 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
                 val output = replyHeaders(if (range == null) 200 else 206, "video/mp4", selected.length, extra)
                 if (request[0] == "GET") lease.writeTo(output, selected.start, selected.length)
                 output.flush()
+                if (request[0] == "GET") recordFirst(if (request[1].substringBefore('?').endsWith("init.mp4")) "INIT" else "VIDEO", selected.length, requestStartedNs)
             }
         }
         val path = request[1].substringBefore('?')
@@ -216,13 +228,18 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
                 android.util.Log.w("PitwallCast", "CLEAR_CAPTION_RENDITION_UNAVAILABLE type=${error.javaClass.simpleName}")
             }
         }
-        check(!stopped.get())
-        captions = verified.toList()
+        synchronized(publicationLock) {
+            check(!stopped.get())
+            captions = verified.toList()
+        }
         android.util.Log.i("PitwallCast", "CLEAR_CAPTION_RELAY verified=${verified.size} declared=${offers.size}")
     }
     private fun audioManifest(): ByteArray {
         val uri = requireNotNull(selectedAudio) { "No native audio rendition" }
-        return audioManifests.getOrPut(uri.toString()) {
+        val key = uri.toString()
+        audioManifests[key]?.let { return it }
+        val preparedResources = linkedMapOf<String, Uri>()
+        val prepared = run {
             val response = reader.read(uri, 2 * 1024 * 1024)
             try {
                 val text = response.bytes.toString(Charsets.UTF_8)
@@ -241,7 +258,7 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
                 fun local(value: String): String {
                     val resolved = androidx.media3.common.util.UriUtil.resolveToUri(response.uri.toString(), value)
                     val id = "a-" + MessageDigest.getInstance("SHA-256").digest(resolved.toString().toByteArray()).take(12).joinToString("") { "%02x".format(it) }
-                    resources[id] = resolved
+                    preparedResources[id] = resolved
                     return id
                 }
                 val safeTags = listOf("#EXTM3U", "#EXT-X-VERSION:", "#EXT-X-TARGETDURATION:", "#EXT-X-MEDIA-SEQUENCE:",
@@ -253,14 +270,33 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
                 }.toByteArray()
             } finally { response.bytes.fill(0) }
         }
+        synchronized(publicationLock) {
+            if (stopped.get()) {
+                prepared.fill(0)
+                throw IOException("Archive relay closed")
+            }
+            audioManifests[key]?.let { prepared.fill(0); return it }
+            resources.putAll(preparedResources)
+            audioManifests[key] = prepared
+            return prepared
+        }
     }
 
     override fun close() {
         if (!stopped.compareAndSet(false, true)) return
-        server.close(); activeSockets.forEach { runCatching { it.close() } }
-        accepting.shutdownNow(); workers.shutdownNow(); lease.close()
-        audioManifests.values.forEach { it.fill(0) }; audioManifests.clear(); resources.clear()
-        captions = emptyList()
+        val steps = app.apexview.scene.SceneReleaseSteps { step, error ->
+            android.util.Log.w("PitwallCast", "ARCHIVE_RELAY_RELEASE_FAILED step=$step type=${error.javaClass.simpleName}")
+        }
+        steps.run("server") { server.close() }
+        activeSockets.forEach { runCatching { it.close() } }
+        activeSockets.clear()
+        steps.run("acceptor") { accepting.shutdownNow() }
+        steps.run("workers") { workers.shutdownNow() }
+        steps.run("archive-lease") { lease.close() }
+        synchronized(publicationLock) {
+            audioManifests.values.forEach { it.fill(0) }; audioManifests.clear(); resources.clear()
+            captions = emptyList()
+        }
     }
     companion object {
         private const val HLS = "application/vnd.apple.mpegurl"
