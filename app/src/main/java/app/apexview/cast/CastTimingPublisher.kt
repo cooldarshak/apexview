@@ -10,6 +10,7 @@ import org.json.JSONObject
 internal class CastTimingPublisher(private val context: Context, private val app: AppState) {
     private var geometryId = ""
     private var rowsText = ""
+    private val tableFingerprint = CastTableFingerprint()
     private var rowsId = 0L
     private var rows = JSONArray()
     private var stoppedDrivers = JSONArray()
@@ -47,6 +48,9 @@ internal class CastTimingPublisher(private val context: Context, private val app
         val resend = lastPlaybackId != playbackId || lastFullSnapshotAt == Long.MIN_VALUE || elapsed - lastFullSnapshotAt >= 5_000
         if (lastPlaybackId != playbackId) {
             lastPlaybackId = playbackId
+            // Never mutate an already published geometry envelope for another load.
+            sourceTiming = null
+            geometry = null
             rowsText = ""
             lastTableUtc = Long.MIN_VALUE
             lastTableElapsed = Long.MIN_VALUE
@@ -65,7 +69,6 @@ internal class CastTimingPublisher(private val context: Context, private val app
         val position = app.castFramePositionMs
         val now = app.mapTimeAt(position) ?: 0L
         val output = mutableListOf<JSONObject>()
-        var tableSampled = false
         val nativeRequested = app.settings.nativeRustStitching
         val activeTowerTiming = timing.takeIf { app.towerOpen }
         val towerOwnerChanged = activeTowerTiming !== towerSamplerOwner || nativeRequested != towerSamplerNative
@@ -80,15 +83,15 @@ internal class CastTimingPublisher(private val context: Context, private val app
         if (timing != null) {
             // Replay geometry is immutable within a published session snapshot.
             if (timingReplaced || timing.live && resend) {
-                geometry = CastTimingProtocol.geometry(timing)
+                geometry = CastTimingProtocol.geometry(timing).put("playbackId", playbackId)
                 sourceTiming = timing
             }
             val currentGeometry = requireNotNull(geometry)
             val id = currentGeometry.getString("id")
             if (id != geometryId) {
                 geometryId = id; rowsText = ""; lastTableUtc = Long.MIN_VALUE
-                output += JSONObject(currentGeometry.toString()).put("playbackId", playbackId)
-            } else if (resend) output += JSONObject(currentGeometry.toString()).put("playbackId", playbackId)
+                output += currentGeometry
+            } else if (resend) output += currentGeometry
             if (app.towerOpen) {
                 // Tower telemetry need not re-serialize up to 24 full rows for every 200ms
                 // car-motion packet. 500ms keeps sector/speed/gear updates responsive while
@@ -104,23 +107,22 @@ internal class CastTimingPublisher(private val context: Context, private val app
                         stoppedDrivers = CastTimingProtocol.stoppedDrivers(timing, now, sample)
                         lastTowerSample = sample
                     }
-                    tableSampled = true
                     lastTableUtc = now
                     lastTableElapsed = elapsed
                 }
             } else if (rows.length() > 0) {
                 rows = JSONArray()
                 stoppedDrivers = JSONArray()
-                tableSampled = true
                 lastTableUtc = Long.MIN_VALUE
                 lastTableElapsed = Long.MIN_VALUE
             }
         } else {
-            tableSampled = rows.length() > 0 || rowsText.isEmpty()
-            if (tableSampled) { rows = JSONArray(); stoppedDrivers = JSONArray() }
+            if (rows.length() > 0 || stoppedDrivers.length() > 0) {
+                rows = JSONArray(); stoppedDrivers = JSONArray()
+            }
             geometryId = ""; geometry = null; sourceTiming = null
         }
-        val text = if (tableSampled) rows.toString() + stoppedDrivers.toString() else rowsText
+        val text = tableFingerprint.text(rows, stoppedDrivers)
         if (text != rowsText || rowsId == 0L || resend) {
             if (text != rowsText || rowsId == 0L) rowsId++
             rowsText = text
@@ -186,5 +188,22 @@ internal class CastTimingPublisher(private val context: Context, private val app
         }
         val saved = app.savedPitLoss(timing.circuitKey)
         return PitBasis(leader, green, reference, profile, lane, saved, lane?.lossMs ?: saved ?: PitWindow.TYPICAL_LOSS_MS)
+    }
+}
+
+/** The table arrays are immutable after publication by CastTimingPublisher.
+ * Fingerprint their content once per replacement, not on every unchanged
+ * tower sample or resend. Retain only the current pair and its string. */
+internal class CastTableFingerprint {
+    private var rows: JSONArray? = null
+    private var stops: JSONArray? = null
+    private var value = ""
+    fun text(nextRows: JSONArray, nextStops: JSONArray): String {
+        if (rows !== nextRows || stops !== nextStops) {
+            value = nextRows.toString() + nextStops.toString()
+            rows = nextRows
+            stops = nextStops
+        }
+        return value
     }
 }
