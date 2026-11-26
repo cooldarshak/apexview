@@ -3073,8 +3073,11 @@ class AppState(
                                 recordQualityOffers(selected, capture.offeredSourceDimensions)
                         }
                         session.configureNativeBudget(context)
-                        if (settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff)
+                        if (settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff) {
                             session.configureNativeClear(context)
+                        } else if (session.nativeStitchingDecision.requested) {
+                            session.disableNativeClear("PREFLIGHT_ROUTE_CHANGED", settings.nativeRustStitching)
+                        }
                         android.util.Log.i("ApexviewSingleDecoder", "F1_COMPOSITION_QUALITY content=$contentId " +
                             "feeds=${selected.size} requested=${PerFeedQualityPolicy.description(desired.keys.toList(), selected.map(::qualityFor))} " +
                             "source=${session.sourceDisplayWidth}x${session.sourceDisplayHeight} mixed=${session.mixedSourceRects.isNotEmpty()} " +
@@ -4259,7 +4262,7 @@ class AppState(
                     "baseUtcMs=$base positionMs=${sample.positionMs} offsetMs=${sample.offsetMs}")
             }
             timing?.let { last ->
-                publication.at(sample.utcAt(last.startUtcMs))?.let { visible ->
+                publication.at(sample)?.let { visible ->
                     if (visible !== last) showTiming(visible)
                 }
             }
@@ -4327,7 +4330,7 @@ class AppState(
                     if (timingWork.owns(timingOwner)) {
                         val sample = replayPlayhead(contentId, savedPosition)
                         playhead.set(sample)
-                        val partial = publication.offer(incoming, sample.utcAt(incoming.startUtcMs))
+                        val partial = publication.offer(incoming, sample)
                         val changed = timing !== partial
                         if (changed) showTiming(partial)
                         inspectPlayback()
@@ -4352,7 +4355,7 @@ class AppState(
                 },
             )
             if (!timingWork.owns(timingOwner)) return@coroutineScope
-            publication.offer(loaded, playhead.get().utcAt(loaded.startUtcMs))
+            publication.offer(loaded, playhead.get())
             showTiming(loaded)
             saveReplayPreview(contentId, castFramePositionMs)
             archiveComplete = true

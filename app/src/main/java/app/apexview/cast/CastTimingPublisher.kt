@@ -37,7 +37,6 @@ internal class CastTimingPublisher(private val context: Context, private val app
     private var mapSamplerNative = false
     private var prediction: NativeCastPrediction? = null
     private var lastTowerSample: TowerSample? = null
-    private var towerSamplerOwner: SessionTiming? = null
     private var towerSampler: OverlayTowerSampler? = null
     private var towerSamplerNative = false
 
@@ -67,7 +66,6 @@ internal class CastTimingPublisher(private val context: Context, private val app
             mapSampler = null
             prediction = null
             lastTowerSample = null
-            towerSamplerOwner = null
             towerSampler = null
         }
         if (resend) lastFullSnapshotAt = elapsed
@@ -79,10 +77,10 @@ internal class CastTimingPublisher(private val context: Context, private val app
         val output = mutableListOf<JSONObject>()
         val nativeRequested = app.settings.nativeRustStitching
         val activeTowerTiming = timing.takeIf { app.towerOpen }
-        val towerOwnerChanged = activeTowerTiming !== towerSamplerOwner || nativeRequested != towerSamplerNative
+        val towerOwnerChanged = if (activeTowerTiming == null) towerSampler != null else
+            nativeRequested != towerSamplerNative || towerSampler?.updateSource(activeTowerTiming) != true
         if (towerOwnerChanged) {
             lastTowerSample = null
-            towerSamplerOwner = activeTowerTiming
             towerSamplerNative = nativeRequested
             towerSampler = activeTowerTiming?.let {
                 OverlayTowerSampler(it, OverlayPerformanceProbe("pitwall-cast-tower-sample"), nativeRequested)
@@ -105,6 +103,7 @@ internal class CastTimingPublisher(private val context: Context, private val app
                 output += currentGeometry
             } else if (resend) output += currentGeometry
             if (app.towerOpen) {
+                val driverLabelsChanged = oldTiming?.drivers !== timing.drivers
                 // Tower telemetry need not re-serialize up to 24 full rows for every 200ms
                 // car-motion packet. 500ms keeps sector/speed/gear updates responsive while
                 // leaving the receiver's GPU and main thread time to draw smooth 60Hz dots.
@@ -112,9 +111,9 @@ internal class CastTimingPublisher(private val context: Context, private val app
                     lastTableElapsed == Long.MIN_VALUE ||
                     elapsed < lastTableElapsed ||
                     elapsed - lastTableElapsed >= 500L ||
-                    timingReplaced || towerOwnerChanged) {
+                    driverLabelsChanged || towerOwnerChanged) {
                     val sample = requireNotNull(towerSampler).sample(now)
-                    if (sample !== lastTowerSample || timingReplaced || towerOwnerChanged) {
+                    if (sample !== lastTowerSample || driverLabelsChanged || towerOwnerChanged) {
                         rows = CastTimingProtocol.table(timing, now, sample)
                         stoppedDrivers = CastTimingProtocol.stoppedDrivers(timing, now, sample)
                         lastTowerSample = sample

@@ -9,12 +9,12 @@ internal class ReplayStartupPublication {
     private var visible: SessionTiming? = null
     private var shape: TrackGeometry? = null
     private var shapeHasLine = false
-    private var lastChoice = -1
 
-    fun offer(next: SessionTiming, utc: Long): SessionTiming {
-        val old = visible
-        if (old != null && (old.radioBase != next.radioBase || old.startUtcMs != next.startUtcMs ||
-                old.circuitKey != next.circuitKey)) clear()
+    fun offer(next: SessionTiming, playhead: ReplayPlayhead): SessionTiming {
+        val old = topics ?: saved
+        if (old != null && (old.radioBase != next.radioBase || old.type != next.type ||
+                old.circuitKey != next.circuitKey ||
+                old.radioBase.isEmpty() && old.startUtcMs != next.startUtcMs)) clear()
         if (next.publicationStage == ReplayTimingStage.CORE) {
             clear()
             return next
@@ -24,32 +24,37 @@ internal class ReplayStartupPublication {
             shape = next.geometry
             shapeHasLine = next.hasStartFinish
         }
-        lastChoice = -1
-        return requireNotNull(at(utc))
+        return requireNotNull(at(playhead))
     }
 
-    fun at(utc: Long): SessionTiming? {
-        val current = topics ?: saved ?: return null
+    fun at(playhead: ReplayPlayhead): SessionTiming? {
+        val indexed = topics
         val window = saved
-        // The persisted window contains bracketing observations. Never extend its last
-        // tower row indefinitely across a seek or manifest-clock correction.
-        val windowCovers = window != null && window.tracks.values.any { it.hasPositionAt(utc) }
-        val currentMap = topics?.let { it.positionsIndexed || it.tracks.values.any { t -> t.hasPositionAt(utc) } } == true
-        val currentTower = topics?.let { it.towerIndexed || utc <= it.towerThroughUtc && it.laps.isNotEmpty() } == true
-        val map = if (currentMap) topics else window.takeIf { windowCovers }
-        val tower = if (currentTower) topics else window.takeIf { windowCovers }
-        val choice = (if (currentMap) 1 else 0) + (if (currentTower) 2 else 0) + (if (windowCovers) 4 else 0)
-        if (lastChoice == choice) return visible
-        lastChoice = choice
+        val current = indexed ?: window ?: return null
+        // A saved window uses the corrected archive clock. Incoming position
+        // samples have absolute timestamps, while the tower may still be
+        // anchored to a provisional heartbeat clock.
+        val start = window?.startUtcMs ?: current.startUtcMs
+        val utc = playhead.utcAt(start)
+        val windowMap = window?.tracks?.values?.any { it.hasPositionAt(utc) } == true
+        val windowTower = window != null && utc >= (window.firstTrackUtc ?: Long.MAX_VALUE) &&
+            utc <= (window.lastTrackUtc ?: Long.MIN_VALUE) && window.laps.values.any { it.hasRankAt(utc) }
+        val currentMap = indexed?.let {
+            it.positionsIndexed || it.tracks.values.any { track -> track.hasPositionAt(utc) }
+        } == true
+        val currentTower = indexed != null && indexed.startUtcMs == start &&
+            (indexed.towerIndexed || utc <= indexed.towerThroughUtc && indexed.laps.values.any { it.hasRankAt(utc) })
+        val map = if (currentMap) indexed else window.takeIf { windowMap }
+        val tower = if (currentTower) indexed else window.takeIf { windowTower }
         val tracks = map?.tracks.orEmpty()
         val laps = tower?.laps.orEmpty()
         val states = tower?.states.orEmpty()
         val geometry = shape ?: current.geometry
         val prev = visible
         if (prev != null && prev.tracks === tracks && prev.states === states && prev.laps === laps &&
-            prev.geometry === geometry && prev.drivers === current.drivers) return prev
+            prev.geometry === geometry && prev.drivers === current.drivers && prev.startUtcMs == start) return prev
         return SessionTiming(current.type, current.drivers, tracks, states, geometry.outline,
-            shapeHasLine, emptyList(), current.startUtcMs, circuitKey = current.circuitKey,
+            shapeHasLine, emptyList(), start, circuitKey = current.circuitKey,
             laps = laps, radioBase = current.radioBase, geometry = geometry).apply {
             archivePartial = true
             visible = this
@@ -88,6 +93,5 @@ internal class ReplayStartupPublication {
         visible = null
         shape = null
         shapeHasLine = false
-        lastChoice = -1
     }
 }

@@ -31,6 +31,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -214,16 +215,22 @@ private fun TimingTower(app: AppState, timing: SessionTiming) {
     var sample by remember(sessionOwner, timing.startUtcMs, timing.laps.isEmpty()) {
         mutableStateOf<TowerSample?>(null)
     }
-    LaunchedEffect(app, timing, nativeRequested) {
-        val sampler = OverlayTowerSampler(timing, OverlayPerformanceProbe("phone-tv-tower-sample"), nativeRequested)
+    val currentTiming by rememberUpdatedState(timing)
+    LaunchedEffect(app, sessionOwner, timing.laps, timing.tyres, timing.weather, nativeRequested) {
+        val probe = OverlayPerformanceProbe("phone-tv-tower-sample")
+        var sampler = OverlayTowerSampler(timing, probe, nativeRequested)
         while (true) {
             val now = app.mapTimeMs() ?: 0L
             // Capture mutable Compose state on main before entering the worker.
             // Newly loaded speed data must still appear at a paused playhead.
-            val speeds = timing.speeds
+            val source = currentTiming
+            val speeds = source.speeds
             val next = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
                 android.os.Trace.beginSection("PitwallTowerSampleBuild")
-                try { sampler.sample(now, speeds) }
+                try {
+                    if (!sampler.updateSource(source)) sampler = OverlayTowerSampler(source, probe, nativeRequested)
+                    sampler.sample(now, speeds)
+                }
                 finally { android.os.Trace.endSection() }
             }
             if (sample !== next) sample = next

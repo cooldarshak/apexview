@@ -1,5 +1,5 @@
 import unittest
-from analyze_pitwall_bufferqueues import analyze
+from analyze_pitwall_bufferqueues import analyze, at_ms
 
 
 class BufferQueueEvidenceTests(unittest.TestCase):
@@ -55,6 +55,23 @@ BUFFER_QUEUE_TIMEOUT repeats=11 last=11-24 10:02:59.500 E BufferQueueProducer: [
         r = analyze(log)
         self.assertEqual(1, r["blocking_or_unknown_timeouts"])
         self.assertEqual(0, r["nonblocking_timeouts"])
+
+    def test_steady_window_uses_exact_process_and_excludes_a_later_transition(self):
+        timeout = "dequeueBuffer: waitForFreeSlotThenRelock: timeout. mDequeueTimeout: 0"
+        log = f"""11-26 16:45:31.000 100 100 I Example: SCENE_CODEC_INPUT_ATTACH
+11-26 16:45:32.000 100 111 E BufferQueueProducer: [codec](id:a,api:3) {timeout}
+11-26 16:45:32.200 200 200 I Example: SCENE_CODEC_INPUT_RELEASE
+11-26 16:45:32.300 200 221 E BufferQueueProducer: [codec](id:b,api:3) {timeout}
+11-26 16:45:36.000 100 100 I Example: SCENE_CODEC_INPUT_DETACH
+11-26 16:45:36.200 100 111 E BufferQueueProducer: [codec](id:c,api:3) {timeout}
+"""
+        self.assertEqual(0, analyze(log)["queue_by_identity"]["codec#a"]["near_app_detach_or_release"])
+        steady = analyze(log, pid=100, start_ms=at_ms("11-26 16:45:31.000"),
+                         end_ms=at_ms("11-26 16:45:36.000"))
+        self.assertEqual(1, steady["nonblocking_timeouts"])
+        self.assertEqual(1, steady["app_attach_events"])
+        self.assertEqual(0, steady["app_detach_events"])
+        self.assertEqual(["codec#a"], list(steady["queue_by_identity"]))
 
 
 if __name__ == "__main__":

@@ -22,6 +22,24 @@ class DriverTimingTest {
     private val laps = DriverTimingParser.parse(stream, t0).getValue("16")
 
     @Test
+    fun replayStreamMergePreservesRowsAndFallsBackToTimestampOrder() {
+        val primary = stream.lines()
+        val supplement = sequenceOf(
+            """00:02:30.000{"Lines":{"16":{"Sectors":{"0":{"Segments":[{"Status":2049}]}}}}}"""
+        )
+        val expected = DriverTimingParser.parse(stream, t0, supplement.first()).getValue("16")
+        for (chronological in listOf(true, false)) {
+            val lines = if (chronological) primary else primary.reversed()
+            val actual = lines.joinToString("\r\n").reader().buffered().useLines {
+                DriverTimingParser.parseArchiveLines(it, supplement, t0, chronological, null, false)
+            }.getValue("16")
+            for (time in longArrayOf(0, 1_000L, 150_000L, 180_000L, 200_500L)) {
+                assertEquals(expected.at(t0 + time), actual.at(t0 + time))
+            }
+        }
+    }
+
+    @Test
     fun sectorsFillInWithTheirColours() {
         val s = laps.at(t0 + 185_000)!!
         assertEquals("30.123", s.sectors[0]!!.time)

@@ -9,7 +9,7 @@ import app.apexview.tiled.NativeHotPath
  * This is one-owner state, never shared between phone and Cast threads.
  */
 internal class OverlayTowerSampler(
-    private val timing: SessionTiming,
+    private var timing: SessionTiming,
     private val probe: OverlayPerformanceProbe? = null,
     nativeRequested: Boolean = false,
 ) {
@@ -32,6 +32,17 @@ internal class OverlayTowerSampler(
     private var last: TowerSample? = null
     private var lastMs = Long.MIN_VALUE
     private var lastSpeedSource: Map<String, SpeedLog>? = null
+
+    /** Position-only and circuit-only publications can keep the native indices and row cache. */
+    fun updateSource(next: SessionTiming): Boolean {
+        if (timing.laps !== next.laps || timing.tyres !== next.tyres || timing.weather !== next.weather)
+            return false
+        if (timing !== next) {
+            timing = next
+            lastMs = Long.MIN_VALUE
+        }
+        return true
+    }
 
     fun sample(now: Long, speedSource: Map<String, SpeedLog> = timing.speeds): TowerSample {
         // Speeds can finish loading while video is paused at the SAME time.

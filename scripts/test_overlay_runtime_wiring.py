@@ -12,7 +12,9 @@ def source(relative):
 class LiveOverlayWiringTest(unittest.TestCase):
     def test_live_tower_uses_cached_sampler_and_native_rows(self):
         laptop = source("Laptop.kt")
-        self.assertIn("val sampler = OverlayTowerSampler(timing", laptop)
+        self.assertIn("var sampler = OverlayTowerSampler(timing", laptop)
+        self.assertIn("rememberUpdatedState(timing)", laptop)
+        self.assertIn("if (!sampler.updateSource(source))", laptop)
         self.assertIn("sampler.sample(now, speeds)", laptop)
         self.assertRegex(laptop, r"TimingTowerContents\(timing, visible\.rows")
         self.assertIn("TvTowerRow(timing.drivers[number]", laptop)
@@ -99,6 +101,8 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("OverlayEdgeProjection(nativeRequested)", track)
         self.assertIn("NativeCircuitProjection(timing.geometry)", track)
         self.assertIn("app.settings.nativeRustStitching", sender)
+        self.assertIn("towerSampler?.updateSource(activeTowerTiming)", sender)
+        self.assertEqual(track.count("app.settings.mapDriverSelection || app.pitDriver != null"), 2)
 
     def test_gc_native_transport_sector_and_exact_forecast(self):
         self.assertIn("NativeHotPath.transport", source("cast/BakedCastTransportStream.kt"))

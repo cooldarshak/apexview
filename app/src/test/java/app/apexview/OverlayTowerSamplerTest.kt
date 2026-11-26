@@ -49,6 +49,21 @@ class OverlayTowerSamplerTest {
         assertSame(same, sampler.sample(1_200L))
     }
 
+    @Test fun geometryOnlyUpdateKeepsRowsAndRetainsTheNewTelemetrySource() {
+        val original = timing()
+        val sampler = OverlayTowerSampler(original)
+        val first = sampler.sample(1_100L)
+        val next = SessionTiming(original.type, original.drivers, original.tracks, original.states,
+            original.outline.copyOf(), original.hasStartFinish, original.corners, original.startUtcMs,
+            laps = original.laps, tyres = original.tyres, weather = original.weather)
+        next.speeds = mapOf("44" to SpeedLog(longArrayOf(1_000L), shortArrayOf(290), 1, shortArrayOf(8)))
+        assertTrue(sampler.updateSource(next))
+        val updated = sampler.sample(1_100L)
+        assertSame(first.rows, updated.rows)
+        assertEquals(290, updated.speeds.getValue("44").first)
+        assertFalse(sampler.updateSource(timing()))
+    }
+
     @Test fun speedGearLapTyreAndSectorChangesNeverGetSuppressed() {
         val sampler = OverlayTowerSampler(timing())
         val initial = sampler.sample(1_100L)

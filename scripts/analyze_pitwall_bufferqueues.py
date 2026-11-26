@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 STAMP = re.compile(r"(?<!\d)(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)\.(\d\d\d)")
+THREADTIME = re.compile(r"\s+(\d+)\s+\d+\s+[VDIWEFAS]\s+")
 QUEUE = re.compile(r"BufferQueueProducer:\s*\[([^\]]*)\](?:\(id:([^,)]*))?")
 CODEC_MAX_DELAY = re.compile(
     r"CCodecBufferChannel:\s*\[([^\]]+)\]\s*(?:start:|updating)\s*max output delay\s*(\d+)")
@@ -35,13 +36,22 @@ def at_ms(line):
         return None
 
 
-def analyze(text):
+def analyze(text, pid=None, start_ms=None, end_ms=None):
     owners = []
     events = []
     codec_delays = defaultdict(set)
     drm_unbind = 0
     for line in text.splitlines():
         moment = at_ms(line)
+        stamp = STAMP.search(line)
+        threadtime = THREADTIME.match(line, stamp.end()) if stamp else None
+        event_pid = int(threadtime.group(1)) if threadtime else None
+        if pid is not None and event_pid != pid:
+            continue
+        if start_ms is not None and (moment is None or moment < start_ms):
+            continue
+        if end_ms is not None and (moment is None or moment >= end_ms):
+            continue
         if "MediaDrm: Object Already unbinded" in line:
             drm_unbind += 1
         codec = CODEC_MAX_DELAY.search(line)
@@ -49,7 +59,7 @@ def analyze(text):
             codec_delays[codec.group(1).split("#", 1)[0]].add(int(codec.group(2)))
         for marker in OWNERSHIP:
             if marker in line:
-                owners.append((moment, marker, line))
+                owners.append((moment, event_pid, marker))
                 break
         if "BufferQueueProducer:" not in line or not any(issue in line for issue in ISSUES):
             continue
@@ -70,7 +80,7 @@ def analyze(text):
         nonblocking = "mDequeueTimeout: 0" in line
         dq = DEQUEUED.search(line)
         aq = ACQUIRED.search(line)
-        events.append((moment, name, identity or "unknown", issue, count, nonblocking,
+        events.append((moment, event_pid, name, identity or "unknown", issue, count, nonblocking,
                        int(dq.group(1)) if dq else None,
                        int(aq.group(1)) if aq else None))
     rows = defaultdict(lambda: {
@@ -81,9 +91,11 @@ def analyze(text):
         "observed_dequeued_counts": set(),
         "observed_acquired_counts": set(),
     })
-    release_stamps = [moment for moment, kind, _ in owners
-                      if moment is not None and kind != "SCENE_CODEC_INPUT_ATTACH"]
-    for moment, name, identity, issue, count, nonblocking, dequeued, acquired in events:
+    release_stamps = defaultdict(list)
+    for moment, event_pid, kind in owners:
+        if moment is not None and kind != "SCENE_CODEC_INPUT_ATTACH":
+            release_stamps[event_pid].append(moment)
+    for moment, event_pid, name, identity, issue, count, nonblocking, dequeued, acquired in events:
         # Name and queue id are essential. Never group unrelated 'SurfaceTexture'
         # producers into one assumed codec output.
         key = name + "#" + identity
@@ -94,7 +106,7 @@ def analyze(text):
         if issue == "dequeue_timeout":
             row["nonblocking_dequeue_timeout" if nonblocking
                 else "blocking_or_unknown_dequeue_timeout"] += count
-        if moment is not None and any(abs(moment - stamp) <= 3000 for stamp in release_stamps):
+        if moment is not None and any(abs(moment - stamp) <= 3000 for stamp in release_stamps[event_pid]):
             row["near_app_detach_or_release"] += count
     reported = {k: {name: sorted(value) if isinstance(value, set) else value
                     for name, value in row.items()} for k, row in sorted(rows.items())}
@@ -110,9 +122,9 @@ def analyze(text):
                             row["cancel_not_owned"] for row in rows.values()),
         "nonblocking_timeouts": sum(row["nonblocking_dequeue_timeout"] for row in rows.values()),
         "blocking_or_unknown_timeouts": sum(row["blocking_or_unknown_dequeue_timeout"] for row in rows.values()),
-        "app_attach_events": sum(kind == "SCENE_CODEC_INPUT_ATTACH" for _, kind, _ in owners),
-        "app_detach_events": sum(kind == "SCENE_CODEC_INPUT_DETACH" for _, kind, _ in owners),
-        "app_release_events": sum(kind == "SCENE_CODEC_INPUT_RELEASE" for _, kind, _ in owners),
+        "app_attach_events": sum(kind == "SCENE_CODEC_INPUT_ATTACH" for _, _, kind in owners),
+        "app_detach_events": sum(kind == "SCENE_CODEC_INPUT_DETACH" for _, _, kind in owners),
+        "app_release_events": sum(kind == "SCENE_CODEC_INPUT_RELEASE" for _, _, kind in owners),
         "queue_by_identity": reported,
         "codec_max_output_delay_by_name": codec_delay_values,
         "codec_output_delay_near_occupied_slots": possible_pool_match,
@@ -127,8 +139,17 @@ def analyze(text):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log", type=Path)
+    parser.add_argument("--pid", type=int, help="Select one logcat process")
+    parser.add_argument("--from", dest="start", help="First logcat timestamp, inclusive (MM-DD HH:MM:SS.mmm)")
+    parser.add_argument("--until", dest="end", help="Last logcat timestamp, exclusive (MM-DD HH:MM:SS.mmm)")
     args = parser.parse_args()
-    print(json.dumps(analyze(args.log.read_text(encoding="utf-8", errors="replace")),
+    start_ms = at_ms(args.start) if args.start else None
+    end_ms = at_ms(args.end) if args.end else None
+    if (args.start and start_ms is None) or (args.end and end_ms is None):
+        parser.error("Timestamps must use MM-DD HH:MM:SS.mmm")
+    if start_ms is not None and end_ms is not None and end_ms <= start_ms:
+        parser.error("--until needs to be later than --from")
+    print(json.dumps(analyze(args.log.read_text(encoding="utf-8", errors="replace"), args.pid, start_ms, end_ms),
                      indent=2, sort_keys=True))
 
 

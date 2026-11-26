@@ -633,16 +633,18 @@ private fun TrackDrawing(app: AppState, timing: SessionTiming, width: Float, hei
     val now = rememberMapRenderTime(app)
     // Hit targets and 60 Hz drawing use separate chronological cursors.
     // Alternating their clocks in one cursor caused unnecessary seek resets.
-    val hitSampler = remember(timing, app.settings.nativeRustStitching) {
-        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-track-position"), app.settings.nativeRustStitching)
-    }
     val drawSampler = remember(timing, app.settings.nativeRustStitching) {
         OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-track-draw-position"), app.settings.nativeRustStitching)
     }
-    val cars = remember(timing, now, hitSampler) {
-        android.os.Trace.beginSection("PitwallMapCars")
-        try { hitSampler.sample(now) } finally { android.os.Trace.endSection() }
-    }
+    val cars = if (app.settings.mapDriverSelection || app.pitDriver != null) {
+        val hitSampler = remember(timing, app.settings.nativeRustStitching) {
+            OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-track-position"), app.settings.nativeRustStitching)
+        }
+        remember(timing, now, hitSampler) {
+            android.os.Trace.beginSection("PitwallMapCars")
+            try { hitSampler.sample(now) } finally { android.os.Trace.endSection() }
+        }
+    } else emptyList()
     // The screen clock is read ONLY by the foreground Canvas draw lambda.
     // Its updates invalidate drawing without recomposing the map subtree.
     val drawClock = rememberOverlayDrawClock(timing, { app.mapTimeMs() ?: 0L },
@@ -1097,16 +1099,18 @@ internal class Ribbon(
 @Composable
 fun EdgeMap(app: AppState, timing: SessionTiming, width: Float, height: Float, inset: Float, screenCornerRadius: Float) {
     val now = rememberMapRenderTime(app)
-    val hitSampler = remember(timing, app.settings.nativeRustStitching) {
-        OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-edge-position"), app.settings.nativeRustStitching)
-    }
     val drawSampler = remember(timing, app.settings.nativeRustStitching) {
         OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-edge-draw-position"), app.settings.nativeRustStitching)
     }
-    val cars = remember(timing, now, hitSampler) {
-        android.os.Trace.beginSection("PitwallEdgeCars")
-        try { hitSampler.sample(now) } finally { android.os.Trace.endSection() }
-    }
+    val cars = if (app.settings.mapDriverSelection || app.pitDriver != null) {
+        val hitSampler = remember(timing, app.settings.nativeRustStitching) {
+            OverlayPositionSampler(timing, OverlayPerformanceProbe("phone-edge-position"), app.settings.nativeRustStitching)
+        }
+        remember(timing, now, hitSampler) {
+            android.os.Trace.beginSection("PitwallEdgeCars")
+            try { hitSampler.sample(now) } finally { android.os.Trace.endSection() }
+        }
+    } else emptyList()
     val drawClock = rememberOverlayDrawClock(timing, { app.mapTimeMs() ?: 0L },
         "phone-map-motion-clock")
     val motion = remember(timing, drawSampler, drawClock) {

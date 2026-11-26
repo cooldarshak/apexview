@@ -358,8 +358,8 @@ object DriverTimingParser {
      */
     private data class TimedLine(val time: Long, val source: Int, val line: String, val prefix: Int)
 
-    private fun timedLines(text: String, source: Int, streamStart: Long): Sequence<TimedLine> =
-        text.lineSequence().mapNotNull { line ->
+    private fun timedLines(lines: Sequence<String>, source: Int, streamStart: Long): Sequence<TimedLine> =
+        lines.mapNotNull { line ->
             val prefix = streamPrefixLength(line)
             if (line.length <= prefix) null
             else runCatching { TimedLine(streamStart + streamOffsetMs(line, prefix), source, line, prefix) }.getOrNull()
@@ -444,6 +444,25 @@ object DriverTimingParser {
         checkActive: () -> Unit = {},
         onProgress: ((Long, () -> Map<String, DriverLaps>) -> Unit)? = null,
     ): Map<String, DriverLaps> {
+        checkpoint?.invoke("checking timestamp order primaryChars=${stream.length} supplementChars=${timingF1.length}")
+        return parseArchiveLines(
+            stream.lineSequence(), timingF1.lineSequence(), streamStart,
+            timingStreamIsChronological(stream, checkActive) && timingStreamIsChronological(timingF1, checkActive),
+            stateHistory, nativeRequested, checkpoint, checkActive, onProgress,
+        )
+    }
+
+    internal fun parseArchiveLines(
+        primaryLines: Sequence<String>,
+        supplementLines: Sequence<String>,
+        streamStart: Long,
+        chronological: Boolean,
+        stateHistory: StateHistoryAccumulator?,
+        nativeRequested: Boolean,
+        checkpoint: ((String) -> Unit)? = null,
+        checkActive: () -> Unit = {},
+        onProgress: ((Long, () -> Map<String, DriverLaps>) -> Unit)? = null,
+    ): Map<String, DriverLaps> {
         val statusPolicy = RetirementStatusPolicy(nativeRequested)
         val drivers = mutableMapOf<String, Live>()
 
@@ -468,13 +487,12 @@ object DriverTimingParser {
             if (records % 1024 == 0) onProgress?.invoke(event.time) { materialize(drivers, copySnapshots = true) }
         }
 
-        checkpoint?.invoke("checking timestamp order primaryChars=${stream.length} supplementChars=${timingF1.length}")
-        if (timingStreamIsChronological(stream, checkActive) && timingStreamIsChronological(timingF1, checkActive)) {
+        if (chronological) {
             checkpoint?.invoke("merging chronological streams")
             // Merge the two sorted topics with one pending line per source. This avoids creating
             // and sorting a large in-memory Event list on Android TV for multi-megabyte archives.
-            val primary = timedLines(stream, 0, streamStart).iterator()
-            val supplement = timedLines(timingF1, 1, streamStart).iterator()
+            val primary = timedLines(primaryLines, 0, streamStart).iterator()
+            val supplement = timedLines(supplementLines, 1, streamStart).iterator()
             var a = if (primary.hasNext()) primary.next() else null
             var b = if (supplement.hasNext()) supplement.next() else null
             while (a != null || b != null) {
@@ -491,8 +509,8 @@ object DriverTimingParser {
         } else {
             checkpoint?.invoke("sorting out-of-order streams")
             // Preserve the previous defensive behaviour for malformed/out-of-order archives.
-            timedLines(stream, 0, streamStart)
-                .plus(timedLines(timingF1, 1, streamStart))
+            timedLines(primaryLines, 0, streamStart)
+                .plus(timedLines(supplementLines, 1, streamStart))
                 .sortedWith(compareBy<TimedLine> { it.time }.thenBy { it.source })
                 .forEach(::consume)
         }

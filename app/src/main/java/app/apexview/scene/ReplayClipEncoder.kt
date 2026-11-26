@@ -50,6 +50,10 @@ internal class ReplayClipEncoder(
     private val bufferInfo = MediaCodec.BufferInfo()
     private var texture = 0
     private var program = 0
+    private var overlayUniform = -1
+    private var positionAttribute = -1
+    private var uvAttribute = -1
+    private var closed = false
     private var firstNs = -1L
     private val quad = ByteBuffer.allocateDirect(16 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
         put(floatArrayOf(-1f,-1f,0f,1f, 1f,-1f,1f,1f, -1f,1f,0f,0f, 1f,1f,1f,0f))
@@ -97,6 +101,12 @@ internal class ReplayClipEncoder(
             val linked = IntArray(1)
             GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linked, 0)
             check(linked[0] != 0) { "Could not link replay overlay shader" }
+            overlayUniform = GLES20.glGetUniformLocation(program, "overlay")
+            positionAttribute = GLES20.glGetAttribLocation(program, "p")
+            uvAttribute = GLES20.glGetAttribLocation(program, "uv")
+            check(overlayUniform >= 0 && positionAttribute >= 0 && uvAttribute >= 0) {
+                "Replay encoder shader inputs are unavailable"
+            }
             val textures = IntArray(1)
             GLES20.glGenTextures(1, textures, 0)
             texture = textures[0]
@@ -111,26 +121,24 @@ internal class ReplayClipEncoder(
         GLES20.glViewport(0, 0, width, height)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
         if (textureAllocated) {
             GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, pixels)
         } else {
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
             GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, pixels, 0)
             textureAllocated = true
         }
         GLES20.glUseProgram(program)
-        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "overlay"), 0)
-        val p = GLES20.glGetAttribLocation(program, "p")
-        val uv = GLES20.glGetAttribLocation(program, "uv")
-        GLES20.glEnableVertexAttribArray(p)
-        GLES20.glEnableVertexAttribArray(uv)
+        GLES20.glUniform1i(overlayUniform, 0)
+        GLES20.glEnableVertexAttribArray(positionAttribute)
+        GLES20.glEnableVertexAttribArray(uvAttribute)
         quad.position(0)
-        GLES20.glVertexAttribPointer(p, 2, GLES20.GL_FLOAT, false, 16, quad)
+        GLES20.glVertexAttribPointer(positionAttribute, 2, GLES20.GL_FLOAT, false, 16, quad)
         quad.position(2)
-        GLES20.glVertexAttribPointer(uv, 2, GLES20.GL_FLOAT, false, 16, quad)
+        GLES20.glVertexAttribPointer(uvAttribute, 2, GLES20.GL_FLOAT, false, 16, quad)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
     }
 
@@ -211,6 +219,8 @@ internal class ReplayClipEncoder(
     }
 
     fun close() {
+        if (closed) return
+        closed = true
         if (egl != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, egl)
         if (program != 0) GLES20.glDeleteProgram(program)
         if (texture != 0) GLES20.glDeleteTextures(1, intArrayOf(texture), 0)

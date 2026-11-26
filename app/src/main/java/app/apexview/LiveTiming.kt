@@ -782,6 +782,16 @@ private data class TimingPreviewSnapshot(
     val positionsIndexed: Boolean,
 )
 
+private class ReplayPrimaryTimingTopic(
+    val characters: Long,
+    val chronological: Boolean,
+    private val spool: java.io.File?,
+    private val text: String?,
+) {
+    fun reader(): java.io.BufferedReader =
+        spool?.bufferedReader() ?: requireNotNull(text).reader().buffered()
+}
+
 class LiveTimingArchive(private val token: String, private val userAgent: String,
                         private val nativeRequested: () -> Boolean = { false }) {
 
@@ -1107,7 +1117,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     positionClock.complete(null)
                 }
             }
-            val historyTask = async(Dispatchers.IO) {
+            suspend fun kotlinx.coroutines.CoroutineScope.loadHistory(
+                spool: java.io.File?,
+            ): Triple<List<Pair<Long, Int>>, DriverTimingParse, Long> {
                 val primaryPreview = CompletableDeferred<Unit>()
                 val heartbeatStart = heartbeatTask.await()
                 val initialStart = withTimeoutOrNull(4_000L) { positionClock.await() }
@@ -1121,42 +1133,55 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     val job = coroutineContext
                     checkpoint("tower-download", "opening HTTP stream")
                     try {
-                        open(topic).bufferedReader().use { reader ->
-                            val start = initialStart
-                            val text = StringBuilder()
-                            val lines = reader.lineSequence().map { line ->
-                                job.ensureActive()
-                                text.appendLine(line)
-                                line
-                            }.iterator()
-                            fun previewTarget(): Long {
-                                val clock = playhead()
-                                // A resumed race can start far from the heartbeat estimate.
-                                if (clock != null && clock.positionMs >= 180_000L && clock.videoUtcMs == null &&
-                                    android.os.SystemClock.elapsedRealtime() - started < 3_000L
-                                ) return Long.MAX_VALUE
-                                return targetUtc(start)
-                            }
-                            for (preview in DriverTimingParser.previews(lines, start, ::previewTarget, nativeRequested(), { job.ensureActive() })) {
-                                val elapsed = android.os.SystemClock.elapsedRealtime() - started
-                                checkpoint("tower-preview", "drivers=${preview.history.laps.size} throughUtcMs=${preview.throughUtcMs} elapsedMs=$elapsed")
-                                withContext(Dispatchers.Main) {
-                                    partialClock = initialStart
-                                    towerThroughUtc = preview.throughUtcMs
-                                    partialHistory = preview.history
-                                    publishTopics()
+                        spool?.bufferedWriter().use { writer ->
+                            open(topic).bufferedReader().use { reader ->
+                                val start = initialStart
+                                val text = if (writer == null) StringBuilder() else null
+                                var characters = 0L
+                                var chronological = true
+                                var last = Long.MIN_VALUE
+                                val lines = reader.lineSequence().map { line ->
+                                    job.ensureActive()
+                                    characters += line.length + 1L
+                                    if (characters > MAX_REPLAY_TIMING_CHARS) throw IOException("Timing archive exceeds 64 MiB")
+                                    val prefix = streamPrefixLength(line)
+                                    if (prefix < line.length) {
+                                        val time = streamOffsetMs(line, prefix)
+                                        if (time < last) chronological = false
+                                        last = time
+                                    }
+                                    if (writer != null) writer.appendLine(line) else text?.appendLine(line)
+                                    line
+                                }.iterator()
+                                fun previewTarget(): Long {
+                                    val clock = playhead()
+                                    // A resumed race can start far from the heartbeat estimate.
+                                    if (clock != null && clock.positionMs >= 180_000L && clock.videoUtcMs == null &&
+                                        android.os.SystemClock.elapsedRealtime() - started < 3_000L
+                                    ) return Long.MAX_VALUE
+                                    return targetUtc(start)
+                                }
+                                for (preview in DriverTimingParser.previews(lines, start, ::previewTarget, nativeRequested(), { job.ensureActive() })) {
+                                    val elapsed = android.os.SystemClock.elapsedRealtime() - started
+                                    checkpoint("tower-preview", "drivers=${preview.history.laps.size} throughUtcMs=${preview.throughUtcMs} elapsedMs=$elapsed")
+                                    withContext(Dispatchers.Main) {
+                                        partialClock = initialStart
+                                        towerThroughUtc = preview.throughUtcMs
+                                        partialHistory = preview.history
+                                        publishTopics()
+                                    }
+                                    primaryPreview.complete(Unit)
+                                    val clock = playhead()
+                                    val videoClockReady = clock != null && clock.videoUtcMs != null && !clock.cachedVideoClock
+                                    if ((videoClockReady || elapsed >= 10_000L) &&
+                                        preview.throughUtcMs - targetUtc(start) >= TOWER_PREVIEW_LOOKAHEAD_MS
+                                    ) break
                                 }
                                 primaryPreview.complete(Unit)
-                                val clock = playhead()
-                                val videoClockReady = clock != null && clock.videoUtcMs != null && !clock.cachedVideoClock
-                                if ((videoClockReady || elapsed >= 10_000L) &&
-                                    preview.throughUtcMs - targetUtc(start) >= TOWER_PREVIEW_LOOKAHEAD_MS
-                                ) break
+                                while (lines.hasNext()) lines.next()
+                                progress("OK TimingData.jsonStream · $characters chars · ${android.os.SystemClock.elapsedRealtime() - started}ms")
+                                ReplayPrimaryTimingTopic(characters, chronological, spool, text?.toString())
                             }
-                            primaryPreview.complete(Unit)
-                            while (lines.hasNext()) lines.next()
-                            progress("OK TimingData.jsonStream · ${text.length} chars · ${android.os.SystemClock.elapsedRealtime() - started}ms")
-                            text.toString()
                         }
                     } catch (cancelled: kotlinx.coroutines.CancellationException) {
                         throw cancelled
@@ -1177,7 +1202,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     progress("TimingData unavailable; timing tower history could not be loaded")
                     DriverTimingParse(emptyMap(), StateParse(emptyMap(), emptyList()))
                 } else withContext(Dispatchers.Default) {
-                    progress("PARSING timing tower and lap history · ${timingStream.length} chars")
+                    progress("PARSING timing tower and lap history · ${timingStream.characters} chars")
                     val started = android.os.SystemClock.elapsedRealtime()
                     try {
                         val accumulator = StateHistoryAccumulator()
@@ -1188,20 +1213,24 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                             val priority = android.os.Process.getThreadPriority(threadId)
                             try {
                                 android.os.Process.setThreadPriority(threadId, android.os.Process.THREAD_PRIORITY_BACKGROUND)
-                                DriverTimingParser.parseWithEngine(timingStream, initialStart, timingF1Stream, accumulator, nativeRequested(), report,
-                                    checkActive = { job.ensureActive() }) { through, buildLaps ->
-                                    val target = targetUtc(initialStart)
-                                    if (through >= target && publishedTarget?.let { abs(target - it) < 30_000L } != true) {
-                                        val laps = buildLaps()
-                                        if (laps.values.any { it.at(target)?.position != null }) {
-                                            publishedTarget = target
-                                            val snapshot = DriverTimingParse(laps, accumulator.finish())
-                                            launch(Dispatchers.Main) {
-                                                partialClock = initialStart
-                                                if (towerIndexed || through < towerThroughUtc) return@launch
-                                                towerThroughUtc = through
-                                                partialHistory = snapshot
-                                                publishTopics()
+                                val ordered = timingStream.chronological &&
+                                    timingStreamIsChronological(timingF1Stream) { job.ensureActive() }
+                                timingStream.reader().useLines { lines ->
+                                    DriverTimingParser.parseArchiveLines(lines, timingF1Stream.lineSequence(), initialStart,
+                                        ordered, accumulator, nativeRequested(), report, checkActive = { job.ensureActive() }) { through, buildLaps ->
+                                        val target = targetUtc(initialStart)
+                                        if (through >= target && publishedTarget?.let { abs(target - it) < 30_000L } != true) {
+                                            val laps = buildLaps()
+                                            if (laps.values.any { it.hasRankAt(target) }) {
+                                                publishedTarget = target
+                                                val snapshot = DriverTimingParse(laps, accumulator.finish())
+                                                launch(Dispatchers.Main) {
+                                                    partialClock = initialStart
+                                                    if (towerIndexed || through < towerThroughUtc) return@launch
+                                                    towerThroughUtc = through
+                                                    partialHistory = snapshot
+                                                    publishTopics()
+                                                }
                                             }
                                         }
                                     }
@@ -1227,10 +1256,24 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     partialHistory = history
                     publishTopics()
                 }
-                val parts = if (type.contains("Qualifying", ignoreCase = true)) {
-                    traceStage("session-parts") { _ -> parseParts(timingStream.orEmpty(), initialStart) }
+                val parts = if (timingStream != null && type.contains("Qualifying", ignoreCase = true)) {
+                    traceStage("session-parts") { _ ->
+                        timingStream.reader().useLines { lines -> parseParts(lines, initialStart) }
+                    }
                 } else emptyList()
-                Triple(parts, history, initialStart)
+                return Triple(parts, history, initialStart)
+            }
+            val historyTask = async(Dispatchers.IO) {
+                // Persist the primary raw topic temporarily while its preview is
+                // streamed. The full ordered merge reads one line at a time.
+                val spool = positionScratchDir?.let { directory ->
+                    runCatching { java.io.File.createTempFile("replay-tower-", ".stream", directory) }.getOrNull()
+                }
+                try {
+                    coroutineScope { loadHistory(spool) }
+                } finally {
+                    spool?.delete()
+                }
             }
             val drivers = driverTask.await()
             val initialStart = heartbeatTask.await()
@@ -1628,7 +1671,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
 
     /** Which part of qualifying is running, as TimingData says when it changes. */
     internal fun parseParts(stream: String, streamStart: Long): List<Pair<Long, Int>> =
-        stream.lineSequence().mapNotNull { line ->
+        parseParts(stream.lineSequence(), streamStart)
+
+    private fun parseParts(lines: Sequence<String>, streamStart: Long): List<Pair<Long, Int>> =
+        lines.mapNotNull { line ->
             if (!line.contains("\"SessionPart\"") || line.length <= streamPrefixLength(line)) return@mapNotNull null
             val part = SESSION_PART.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: return@mapNotNull null
             streamStart + offsetMs(line) to part
@@ -2125,6 +2171,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         /** Lines read to find a stream's start. */
         private const val START_SAMPLES = 50
         private const val MAX_SEASON_INDEX_BYTES = 2L * 1024L * 1024L
+        private const val MAX_REPLAY_TIMING_CHARS = 64L * 1024L * 1024L
         private const val SEASON_INDEX_MAX_AGE_MS = 24L * 60L * 60_000L
         /** The heartbeat and the car positions may disagree by this much before the cars win. */
         private const val STREAM_START_SLACK_MS = 60_000L

@@ -75,8 +75,7 @@ internal class HevcArchiveVodSession(
     val nativeStitchingDecision: NativeStitchingSelection.Decision get() = nativeClear.decision
     val nativeStitchingCandidate: Boolean get() = nativeClear.candidate
 
-    /** Only the verified local clear multi-feed archive owner enables dispatch.
-     * The initial JVM probe has already validated the representation. */
+    /** The cold local clear probe uses its JVM result for the first native comparison. */
     internal fun enableColdProbe(context: android.content.Context) {
         if (inputs.size > 1) nativeClear.enable(context.applicationContext)
     }
@@ -238,6 +237,7 @@ internal class HevcArchiveVodSession(
 
     /** A fixed probe proves composition. It is never required to catch another player's clock. */
     fun prepare(positionMs: Long) {
+        val started = System.nanoTime()
         require(inputs.size in 1..app.apexview.AppState.MAX_SINGLE_DECODER_FEEDS)
         inputs.forEach { input ->
             val track = input.report.tracks.single { it.handler == "vide" }
@@ -245,14 +245,19 @@ internal class HevcArchiveVodSession(
             require(track.hevcConfiguration != null) { "Archive input is not HEVC CMAF" }
         }
         val probe = segmentAt(ArchiveTimelineSearch.msToUs(positionMs))
+        val coldNativeRequested = nativeClear.requested
         // Prepare and verify the manifest without borrowing a full extra CMAF copy.
         delivery.obtain(probe, copyForCaller = false)
+        val mediaReadyMs = (System.nanoTime() - started) / 1_000_000L
         // Validate the complete finite manifest with Media3 before any decoder is released.
         val parsed = androidx.media3.exoplayer.dash.manifest.DashManifestParser().parse(MANIFEST_URI,
             manifest().inputStream())
         require(!parsed.dynamic && parsed.periodCount == 1) { "Archive MPD must have one finite period" }
         android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_PREPARED feeds=${inputs.size} segments=$segmentCount " +
-            "sourceHeight=$selectedHeight output=${width}x$height probe=$probe fullFrames=true clock=ONE_PLAYER")
+            "sourceHeight=$selectedHeight output=${width}x$height probe=$probe fullFrames=true clock=ONE_PLAYER " +
+            "probeReadyMs=$mediaReadyMs preparedMs=${(System.nanoTime() - started) / 1_000_000L} " +
+            "coldRequestedRust=$coldNativeRequested coldActual=${nativeClear.decision.actual} " +
+            "coldReason=${nativeClear.decision.reason}")
         android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SOURCE_RENDITIONS " +
             inputs.joinToString(", ") { input ->
                 val actual = actualSourceDimensions.getValue(input.label)
