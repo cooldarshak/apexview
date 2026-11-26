@@ -1081,5 +1081,20 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("receiverTrackSelector = selector", receiver)
         self.assertIn("receiverTrackSelector = null", receiver)
 
+    def test_mandatory_instrumentation_footer_matches_each_junit_class(self):
+        runner = contents("scripts/run_rendernode_instrumentation.sh")
+        classes = re.findall(
+            r"^\s+(app\.apexview\.[\w.]+)\s+\\\s*\n\s+'OK \((\d+) (tests?)\)'",
+            runner, re.MULTILINE)
+        self.assertEqual(len(classes), 9)
+        self.assertEqual(len({name for name, _, _ in classes}), 9)
+        for name, count, noun in classes:
+            with self.subTest(class_name=name):
+                source = contents("app/src/androidTest/java/" + name.replace(".", "/") + ".kt")
+                test_count = len(re.findall(r"^\s*@(?:org\.junit\.)?Test\b", source, re.MULTILINE))
+                self.assertGreater(test_count, 0)
+                self.assertEqual(int(count), test_count)
+                self.assertEqual(noun, "test" if test_count == 1 else "tests")
+
 if __name__ == "__main__":
     unittest.main()
