@@ -1294,6 +1294,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                         val laps = traceStage("tower-history") { report ->
                             val job = kotlin.coroutines.coroutineContext
                             var publishedThrough: Long? = null
+                            var publishedFrom: Long? = null
+                            var previewRange = 0L..0L
                             val towerPreviewPending = java.util.concurrent.atomic.AtomicBoolean(false)
                             val threadId = android.os.Process.myTid()
                             val priority = android.os.Process.getThreadPriority(threadId)
@@ -1303,21 +1305,32 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                 timingStream.reader().useLines { lines ->
                                     (timingF1Stream?.reader() ?: "".reader().buffered()).useLines { supplement ->
                                     DriverTimingParser.parseArchiveLines(lines, supplement, initialStart,
-                                        ordered, accumulator, nativeRequested(), report, checkActive = { job.ensureActive() }) { through, buildLaps ->
+                                        ordered, accumulator, nativeRequested(), report, checkActive = { job.ensureActive() },
+                                        progressWindow = { previewRange }) { through, buildLaps ->
                                         val target = targetUtc(initialStart)
+                                        val from = (target - 90_000L).coerceAtLeast(0L)
+                                        val until = minOf(through, target + 120_000L)
+                                        val coversTarget = publishedFrom?.let { target >= it } == true &&
+                                            publishedThrough?.let { target <= it } == true
                                         if (!towerPreviewPending.get() && through >= target &&
-                                            publishedThrough?.let { target <= it && (through - it < 30_000L || target <= it - 10_000L) } != true) {
+                                            (!coversTarget || publishedThrough?.let { until - it >= 30_000L && target > it - 10_000L } == true)) {
+                                            previewRange = from..until
                                             val laps = buildLaps()
                                             if (laps.values.any { it.hasRankAt(target) }) {
                                                 if (towerPreviewPending.compareAndSet(false, true)) {
-                                                    publishedThrough = through
-                                                    val snapshot = DriverTimingParse(laps, accumulator.finish())
+                                                    publishedFrom = from
+                                                    publishedThrough = until
+                                                    val snapshot = DriverTimingParse(laps, accumulator.finishWindow(from, until))
                                                     launch(Dispatchers.Main) {
                                                         try {
-                                                            if (towerIndexed || through < towerThroughUtc) return@launch
+                                                            val current = targetUtc(initialStart)
+                                                            val currentCovered = current >= (towerFromUtc ?: Long.MIN_VALUE) &&
+                                                                current <= towerThroughUtc && partialHistory.laps.values.any { it.hasRankAt(current) }
+                                                            if (towerIndexed || current !in from..until ||
+                                                                (currentCovered && until < towerThroughUtc)) return@launch
                                                             partialClock = initialStart
-                                                            towerThroughUtc = through
-                                                            towerFromUtc = null
+                                                            towerThroughUtc = until
+                                                            towerFromUtc = from
                                                             partialHistory = snapshot
                                                             publishTopics()
                                                         } finally { towerPreviewPending.set(false) }
