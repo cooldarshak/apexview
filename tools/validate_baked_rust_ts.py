@@ -57,6 +57,31 @@ def fixture(directory):
         groups.append(group)
     return groups
 
+def inspect_table(pid, payload):
+    # Independently parse the advertised programme and elementary streams,
+    # including MPEG-2 CRC (not the reflected zlib/IEEE CRC).
+    pointer = payload[0]
+    assert pointer == 0
+    body = payload[1 + pointer:]
+    length = ((body[1] & 15) << 8) | body[2]
+    section = body[:3 + length]
+    assert len(section) == 3 + length
+    assert section[1] & 0xf0 == 0xb0
+    crc = 0xffffffff
+    for byte in section:
+        crc ^= byte << 24
+        for _ in range(8):
+            crc = ((crc << 1) ^ (0x04c11db7 if crc & 0x80000000 else 0)) & 0xffffffff
+    assert crc == 0
+    assert section[3:8] == bytes([0, 1, 0xc1, 0, 0])
+    if pid == 0:
+        assert section[0] == 0 and length == 13
+        assert section[8:-4] == bytes([0, 1, 0xf0, 0])
+    else:
+        assert section[0] == 2 and length == 23
+        assert section[8:12] == bytes([0xe1, 0, 0xf0, 0])
+        assert section[12:-4] == bytes([0x1b, 0xe1, 0, 0xf0, 0, 0x0f, 0xe1, 1, 0xf0, 0])
+
 def inspect(data, group, counters):
     assert len(data) % 188 == 0
     expected = {256: [],257: []}
@@ -92,6 +117,7 @@ def inspect(data, group, counters):
         payload = packet[at:]
         if pid in (0,4096):
             assert start and payload[0] == 0
+            inspect_table(pid, payload)
             tables.append(pid)
             continue
         if start:
