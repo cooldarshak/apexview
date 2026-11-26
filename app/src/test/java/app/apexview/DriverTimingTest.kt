@@ -303,4 +303,51 @@ class DriverTimingSnapshotOwnershipTest {
         org.junit.Assert.assertNull(first.sectors[1])
         org.junit.Assert.assertEquals("29.456", third.sectors[1]?.time)
     }
+
+    @Test
+    fun compactPrimaryPreviewFollowsForwardAndBackwardSeeksAndFinalIndexMatchesReference() {
+        var target = t0 + 150_000L
+        var complete: DriverTimingParse? = null
+        val previews = DriverTimingParser.previews(stream.lines().iterator(), t0, { target },
+            false, {}, onComplete = { complete = it() }, windowBackMs = 90_000L).iterator()
+        val first = previews.next()
+        assertEquals(t0 + 60_000L, first.fromUtcMs)
+        assertEquals(t0 + 150_000L, first.throughUtcMs)
+        assertEquals(laps.at(target), first.history.laps.getValue("16").at(target))
+        target = t0 + 200_000L
+        val second = previews.next()
+        assertEquals(t0 + 110_000L, second.fromUtcMs)
+        assertEquals(t0 + 200_000L, second.throughUtcMs)
+        assertEquals(laps.at(target), second.history.laps.getValue("16").at(target))
+        assertEquals(1, second.history.laps.getValue("16").at(target)?.positionChange)
+        target = t0 + 20_000L
+        val backward = previews.next()
+        assertTrue(target in requireNotNull(backward.fromUtcMs)..backward.throughUtcMs)
+        assertEquals(laps.at(target), backward.history.laps.getValue("16").at(target))
+        assertTrue(!previews.hasNext())
+        val final = requireNotNull(complete).laps.getValue("16")
+        for (time in 0L..201_000L step 1_000L) assertEquals(laps.at(t0 + time), final.at(t0 + time))
+        assertEquals(laps.at(t0 + 150_000L), first.history.laps.getValue("16").at(t0 + 150_000L))
+    }
+
+    @Test
+    fun primaryCompletionDoesNotClaimAnOrderedIndexFromDisorderedInput() {
+        var completed = false
+        DriverTimingParser.previews(stream.lines().reversed().iterator(), t0, { t0 },
+            false, {}, onComplete = { completed = true }).toList()
+        assertTrue(!completed)
+    }
+
+    @Test
+    fun compactHistoryKeepsPitEntryAndRejectsFutureOnlyDriver() {
+        val pit = DriverLaps.Snapshot(8, List(3) { null }, List(3) { null }, null, null, true, null, null)
+        val next = DriverLaps.Snapshot(6, pit.sectors, pit.lapSectors, null, null, true, null, null)
+        val full = DriverLaps(longArrayOf(1, 100_000, 200_000), listOf(pit, next, next),
+            longArrayOf(50_000L), longArrayOf(50_000L), intArrayOf(3))
+        val window = requireNotNull(full.previewWindow(150_000L, 250_000L))
+        assertEquals(full.inPitSince(200_000L), window.inPitSince(200_000L))
+        assertEquals(full.at(200_000L), window.at(200_000L))
+        assertEquals(full.lapAt(200_000L), window.lapAt(200_000L))
+        assertNull(full.previewWindow(-100_000L, 0L))
+    }
 }
