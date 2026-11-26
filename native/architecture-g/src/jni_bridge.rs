@@ -564,12 +564,11 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeSamplePositio
                 previous:cursors[3*i+1],seeks:cursors[3*i+2]};
             let sample=hot_path::position_at(count,now,&mut cursor,
                 |at|history_time(&env,&ts,at),
-                |at|{
-                    let mut xx=[0f32;1];let mut yy=[0f32;1];
-                    env.get_float_array_region(&x,at as i32,&mut xx).ok()?;
-                    env.get_float_array_region(&y,at as i32,&mut yy).ok()?;
-                    Some((xx[0],yy[0]))
-                })?;
+                hot_path::adjacent_points(count, |at,xx,yy|{
+                    env.get_float_array_region(&x,at as i32,xx).ok()?;
+                    env.get_float_array_region(&y,at as i32,yy).ok()?;
+                    Some(())
+                }))?;
             if let Some((xx,yy))=sample{
                 if !xx.is_finite()||!yy.is_finite(){return None;}
                 visible[i]=1;coords[2*i]=xx;coords[2*i+1]=yy;

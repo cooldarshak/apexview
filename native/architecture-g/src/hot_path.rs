@@ -46,6 +46,28 @@ pub fn floor_index_hint(n: usize, now: i64, hint: i32, mut time: impl FnMut(usiz
     floor_index(n, now, time)
 }
 
+/// Read at most two adjacent coordinates at once from an external history.
+/// The position kernel asks for lower then upper; a one-point stack cache avoids
+/// two additional JNI array-region calls on each interpolated driver.
+pub fn adjacent_points(
+    n: usize,
+    mut read: impl FnMut(usize, &mut [f32], &mut [f32]) -> Option<()>,
+) -> impl FnMut(usize) -> Option<(f32, f32)> {
+    let mut next = None;
+    move |at| {
+        if at >= n { return None; }
+        if let Some((index, point)) = next.take() {
+            if at == index { return Some(point); }
+        }
+        let len = (n - at).min(2);
+        let mut xs = [0.0; 2];
+        let mut ys = [0.0; 2];
+        read(at, &mut xs[..len], &mut ys[..len])?;
+        if len == 2 { next = Some((at + 1, (xs[1], ys[1]))); }
+        Some((xs[0], ys[0]))
+    }
+}
+
 /// Mirrors OverlayPositionCursor's leading, end-of-history, gap, duplicate
 /// and bounded chronological cursor rules. Outer None = invalid input;
 /// inner None = legitimate missing position. No allocations or raw pointers.
@@ -324,6 +346,31 @@ mod tests {
         let mut one=PositionCursor::default();
         assert_eq!(position_at(1,1,&mut one,|_|Some(1),|_|Some((2.,3.))),Some(Some((2.,3.))));
         assert_eq!(position_at(1,2,&mut one,|_|Some(1),|_|Some((2.,3.))),Some(None));
+    }
+    #[test]
+    fn adjacent_point_reads_are_bounded_and_preserve_cursor_samples() {
+        let points = [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)];
+        let reads = std::cell::Cell::new(0);
+        let mut point = adjacent_points(points.len(), |at, x, y| {
+            reads.set(reads.get() + 1);
+            for (i, p) in points.get(at..at + x.len())?.iter().enumerate() {
+                x[i] = p.0;
+                y[i] = p.1;
+            }
+            Some(())
+        });
+        assert_eq!(point(0), Some(points[0]));
+        assert_eq!(point(1), Some(points[1]));
+        assert_eq!(reads.get(), 1);
+        assert_eq!(point(2), Some(points[2]));
+        assert_eq!(point(3), None);
+        assert_eq!(point(1), Some(points[1]));
+        assert_eq!(point(0), Some(points[0]));
+        assert_eq!(reads.get(), 4);
+        let mut cursor = PositionCursor::default();
+        let times = [0, 100, 200];
+        assert_eq!(position_at(3, 150, &mut cursor, |i| times.get(i).copied(),
+            &mut point), Some(Some((4.0, 5.0))));
     }
     #[test]
     fn stable_order_and_audio_exact_bounds() {

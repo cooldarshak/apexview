@@ -157,6 +157,24 @@ class OverlayTowerSamplerTest {
         assertSame(restored, sampler.sample(1_100L))
     }
 
+    @Test fun scratchReuseNeverMutatesPublishedMapsOrKeepsRemovedDrivers() {
+        val session = timing()
+        val sampler = OverlayTowerSampler(session)
+        val initial = sampler.sample(1_100L)
+        val later = sampler.sample(3_100L, emptyMap())
+        assertTrue(later.speeds.isEmpty())
+        assertEquals(260, initial.speeds.getValue("44").first)
+        assertEquals("SOFT", initial.tyres.getValue("44")?.compound)
+        assertTrue(initial.normalizedSectors.containsKey("44"))
+        val beforeStart = sampler.sample(500L, emptyMap())
+        assertTrue(beforeStart.rows.isEmpty())
+        assertTrue(beforeStart.normalizedSectors.isEmpty())
+        assertTrue(initial.normalizedSectors.containsKey("44"))
+        val restored = sampler.sample(1_100L, session.speeds)
+        assertEquals(initial.speeds, restored.speeds)
+        assertEquals(initial.normalizedSectors, restored.normalizedSectors)
+    }
+
     @Test fun backwardSeekRestoresOldLapAndOldTyres() {
         val sampler = OverlayTowerSampler(timing())
         sampler.sample(3_100L)

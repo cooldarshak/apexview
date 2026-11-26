@@ -65,7 +65,7 @@ internal class OverlayTowerSampler(
         }
         nativeLookup?.report(nativeIndices && nativeOrder)
         val tyres = scratchTyres
-        tyres.clear()
+        // Fixed session keys: update existing nodes rather than recreate every poll.
         tyreEntries.forEachIndexed { slot, (number, log) ->
             val tyre = if (nativeIndices) log.atSnapshot(nativeLookup!!.tyreIndex(slot)) else log.at(now)
             val old = last?.tyres?.get(number)
@@ -73,7 +73,8 @@ internal class OverlayTowerSampler(
                 old.compound == tyre.compound && old.laps == tyre.laps) old else tyre
         }
         val speeds = scratchSpeeds
-        speeds.clear()
+        // Immutable source replacements can remove drivers. Keep matching scratch nodes.
+        if (lastSpeedSource !== speedSource) speeds.keys.retainAll(speedSource.keys)
         if (nativeIndices) {
             nativeLookup!!.speedEntries.forEachIndexed { slot, (number, log) ->
                 val speed = log.kmhAtSnapshot(nativeLookup.speedIndex(slot), now)
@@ -93,7 +94,8 @@ internal class OverlayTowerSampler(
         // Scratch storage never escapes. Publish only the components that
         // actually changed; reuse previous immutable maps and rows otherwise.
         val previousSample = last
-        scratchSectors.clear()
+        // Seeking before a driver's first snapshot must remove its old sector strips.
+        scratchSectors.keys.retainAll(rowCache.keys)
         for ((number, row) in rows) scratchSectors[number] = sectorNormalizer.sample(number, row)
         sectorNormalizer.retainOnly(scratchSectors.keys)
         val candidate = TowerSample(
