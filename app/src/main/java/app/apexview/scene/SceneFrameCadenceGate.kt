@@ -15,7 +15,7 @@ internal class SceneFrameCadenceGate {
 
     fun shouldDefer(frameTimeNs: Long, sourceFps: Double, displayHz: Float,
                     playbackSpeed: Float = 1f, thermalStatus: Int = Int.MAX_VALUE,
-                    pipelineHealthy: Boolean = true): Boolean {
+                    pipelineHealthy: Boolean = true, pendingAgeNs: Long = 0L): Boolean {
         // Match the submitted cadence, NOT the unthinned media clock.
         // The current FrameThinner keeps accelerated 50fps footage near 50 output
         // frames/s. Never defer decoder SurfaceTexture.updateTexImage().
@@ -33,6 +33,14 @@ internal class SceneFrameCadenceGate {
         // 120/50 needs two- and three-vsync gaps. Never gate 75fps as though it were 50.
         val shortestSlots = (displayHz / outputFps + 0.005f).toInt()
         if (shortestSlots < 2) {
+            consecutiveDeferrals = 0
+            return false
+        }
+        // Do not wait for another vsync if that would hold an already latched
+        // picture beyond one output period. This never delays texture acquisition.
+        val nextVsyncNs = (1_000_000_000.0 / displayHz).toLong()
+        val outputPeriodNs = (1_000_000_000.0 / outputFps).toLong()
+        if (pendingAgeNs > 0 && pendingAgeNs >= (outputPeriodNs - nextVsyncNs).coerceAtLeast(0L)) {
             consecutiveDeferrals = 0
             return false
         }

@@ -466,6 +466,10 @@ fun SettingsScreen(app: AppState) {
                     else "For multifeed phone playback, try one decoder and 1× first. At 1.5×, higher output cadence depends on the actual display refresh, temperature and rendering health.",
                     style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
+                SwitchRow("Temperature-based playback adjustments", s.thermalPlaybackAdaptation,
+                    app::setThermalPlaybackAdaptation)
+                Text("ON automatically adjusts playback when the device heats up. OFF disables only Pitwall's temperature-based adjustments, and may increase heat and power use. Android hardware thermal protection remains active.",
+                    style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                 SwitchRow("Software DRM", s.softwareDrm, s::updateSoftwareDrm)
                 SwitchRow(NativeStitchingSelection.LABEL,
                     s.nativeRustStitching, app::setNativeStitchingPreference)

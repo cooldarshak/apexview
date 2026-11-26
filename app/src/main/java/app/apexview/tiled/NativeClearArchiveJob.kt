@@ -24,8 +24,15 @@ internal object NativeClearArchiveJob {
     }
 
     data class WindowOutput(val initialization: ByteArray, val media: List<ByteArray>,
-                            val submitNs: Long = 0, val waitNs: Long = 0, val readNs: Long = 0) {
-        fun wipe() { initialization.fill(0); media.forEach { it.fill(0) } }
+                            val submitNs: Long = 0, val waitNs: Long = 0, val readNs: Long = 0,
+                            val nativeMedia: NativeFragmentLease? = null) {
+        val sizes: List<Int> get() = nativeMedia?.let { listOf(it.size) } ?: media.map { it.size }
+        fun matches(reference: List<ByteArray>): Boolean =
+            nativeMedia?.let { reference.size == 1 && it.matches(reference.single()) }
+                ?: (media.size == reference.size && media.zip(reference).all { (a, b) -> a.contentEquals(b) })
+        fun inspect(index: Int, init: CmafBoxInspector.Report): CmafBoxInspector.Report =
+            nativeMedia?.let { check(index == 0); it.inspect(init) } ?: CmafBoxInspector.inspect(media[index], init)
+        fun wipe() { initialization.fill(0); media.forEach { it.fill(0) }; nativeMedia?.close() }
     }
 
     fun size(geometry: Geometry, inits: List<ByteArray>, media: List<ByteArray>): Int =
@@ -102,8 +109,9 @@ internal object NativeClearArchiveJob {
         return Parts(parts.toTypedArray(), length)
     }
 
-    /** The entire lease is acquired once, then copied directly into its two
-     * final JVM-owned arrays. Never allocate another full concatenated result. */
+    /** Legacy heap result contract for explicit callers. Eligible archive
+     * window callers instead retain bounded native media backing; both paths
+     * acquire the engine lease once and never allocate a concatenated result. */
     fun execute(engine: NativeStitchingEngine, packet: ByteArray, foreground: Boolean,
                 timeoutMs: Long, checkCurrent: () -> Unit): Output {
         val out = executeWindow(engine, packet, 1, foreground, timeoutMs, checkCurrent)
@@ -118,8 +126,9 @@ internal object NativeClearArchiveJob {
     }
 
     fun executeWindow(engine: NativeStitchingEngine, packet: Parts, count: Int,
-                      foreground: Boolean, timeoutMs: Long, checkCurrent: () -> Unit): WindowOutput =
-        executeSubmitted(engine, count, timeoutMs, checkCurrent) {
+                      foreground: Boolean, timeoutMs: Long, nativeContext: android.content.Context? = null,
+                      checkCurrent: () -> Unit): WindowOutput =
+        executeSubmitted(engine, count, timeoutMs, checkCurrent, nativeContext) {
             if (engine.budget.compactAtlas)
                 engine.submitClearAtlasParts(engine.generation(), packet.arrays, packet.size, foreground, timeoutMs)
             else {
@@ -132,7 +141,8 @@ internal object NativeClearArchiveJob {
         }
 
     private fun executeSubmitted(engine: NativeStitchingEngine, count: Int, timeoutMs: Long,
-                                 checkCurrent: () -> Unit, submit: () -> Long): WindowOutput {
+                                 checkCurrent: () -> Unit, nativeContext: android.content.Context? = null,
+                                 submit: () -> Long): WindowOutput {
         require(count in 1..MAX_WINDOW)
         require(timeoutMs in 1..60_000)
         checkCurrent()
@@ -144,6 +154,7 @@ internal object NativeClearArchiveJob {
         var init: ByteArray? = null
         val media = ArrayList<ByteArray>(count)
         var transferred = false
+        var nativeMedia: NativeFragmentLease? = null
         try {
             var length: Long
             while (true) {
@@ -177,8 +188,15 @@ internal object NativeClearArchiveJob {
                     ByteBuffer.wrap(field).order(ByteOrder.BIG_ENDIAN).int
                 }
                 check(size > 0 && size <= end - cursor)
-                val bytes = ByteArray(size).also { media.add(it) }
-                check(engine.read(token, cursor, bytes, 0, size) == size.toLong())
+                if (count == 1 && nativeContext != null && engine.budget.compactAtlas) {
+                    nativeMedia = NativeFragmentLease.fromEngine(size, nativeContext, engine, token, cursor)
+                }
+                // Native capacity rejection is a storage decision, not a stitcher
+                // or video-quality failure. Preserve the existing heap path.
+                if (nativeMedia == null) {
+                    val bytes = ByteArray(size).also { media.add(it) }
+                    check(engine.read(token, cursor, bytes, 0, size) == size.toLong())
+                }
                 cursor += size
             }
             check(cursor == end)
@@ -188,10 +206,10 @@ internal object NativeClearArchiveJob {
             transferred = true
             return WindowOutput(initBytes, media,
                 (started - submittedAt).coerceAtLeast(0L), (readyAt - started).coerceAtLeast(0L),
-                (System.nanoTime() - readyAt).coerceAtLeast(0L))
+                (System.nanoTime() - readyAt).coerceAtLeast(0L), nativeMedia)
         } finally {
             if (!transferred) {
-                init?.fill(0); media.forEach { it.fill(0) }
+                init?.fill(0); media.forEach { it.fill(0) }; nativeMedia?.close()
                 // Failed jobs/ready leases can be released. A pending job must
                 // be generation-fenced, not released or overwritten.
                 if (terminal) engine.release(token) else engine.seek()

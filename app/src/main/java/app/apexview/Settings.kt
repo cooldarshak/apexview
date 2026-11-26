@@ -87,6 +87,17 @@ class Settings(context: Context) {
         prefs.edit().putBoolean("nativeRustStitching", value).apply()
     }
 
+    var thermalPlaybackAdaptation by mutableStateOf(prefs.getBoolean("thermalPlaybackAdaptation", true))
+        private set
+
+    fun updateThermalPlaybackAdaptation(value: Boolean) {
+        thermalPlaybackAdaptation = value
+        prefs.edit().putBoolean("thermalPlaybackAdaptation", value).apply()
+        VideoThermalBudget.setAdaptation(value)
+    }
+
+    init { VideoThermalBudget.setAdaptation(thermalPlaybackAdaptation) }
+
     /** Opt-in clear GLES SurfaceView A/B. Never changes Widevine or decoder selection. */
     var clearSceneSurfaceExperiment by mutableStateOf(prefs.getBoolean("clearSceneSurfaceExperiment", false))
         private set

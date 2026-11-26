@@ -7,12 +7,13 @@ package app.apexview.scene
 internal class SceneFrameDemand {
     private var callbackScheduled = false
     private var videoPending = false
+    private var pendingSinceNs = 0L
     // Multiple latched images can collapse into one display submission. This
     // measures coalescing, not codec drops or physical SurfaceFlinger loss.
     private var coalescedVideoArrivals = 0L
 
-    fun videoArrived(): Boolean {
-        if (videoPending) coalescedVideoArrivals++
+    fun videoArrived(nowNs: Long = 0L): Boolean {
+        if (videoPending) coalescedVideoArrivals++ else pendingSinceNs = nowNs
         videoPending = true
         return requestDraw()
     }
@@ -27,11 +28,14 @@ internal class SceneFrameDemand {
     /** Leave both flags unchanged when the vsync pacing gate postpones a draw. */
     fun hasPendingVideo(): Boolean = callbackScheduled && videoPending
 
+    fun pendingAgeNs(nowNs: Long): Long =
+        if (videoPending && pendingSinceNs > 0L && nowNs >= pendingSinceNs) nowNs - pendingSinceNs else 0L
+
     /** Consume the latest decoder image once, even when several notifications arrived. */
     fun beginFrame(): Boolean {
         check(callbackScheduled) { "Scene frame was not requested" }
         callbackScheduled = false
-        return videoPending.also { videoPending = false }
+        return videoPending.also { videoPending = false; pendingSinceNs = 0L }
     }
 
     /**
@@ -46,7 +50,7 @@ internal class SceneFrameDemand {
     }
 
     /** Old input pixels cannot satisfy a new atlas epoch; preserve the posted callback. */
-    fun discardPendingVideo() { videoPending = false }
+    fun discardPendingVideo() { videoPending = false; pendingSinceNs = 0L }
 
     fun takeCoalescedVideoArrivals(): Long = coalescedVideoArrivals.also { coalescedVideoArrivals = 0L }
 
@@ -54,5 +58,6 @@ internal class SceneFrameDemand {
         callbackScheduled = false
         videoPending = false
         coalescedVideoArrivals = 0L
+        pendingSinceNs = 0L
     }
 }

@@ -1,7 +1,8 @@
 //! Bounded generic fragment memory, separate from the HEVC/DRM validators.
 //! The JVM private owner serializes access to each view and retires the
-//! final view before release. No native code reads or modifies a live view.
-use std::collections::BTreeMap;
+//! final view before release. Direct native writes are allowed only before
+//! the first view is exposed; no native code modifies a published view.
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(target_os = "android")]
 use std::sync::{Mutex, OnceLock};
 
@@ -15,6 +16,7 @@ const MAX_FREE_BYTES: usize = 8 * 1024 * 1024;
 struct Arena {
     serial: i64,
     live: BTreeMap<i64, Vec<u8>>,
+    viewed: BTreeSet<i64>,
     free: Vec<Vec<u8>>,
     charged: usize,
     allocations: u64,
@@ -64,8 +66,20 @@ impl Arena {
         let ceiling=self.charged.saturating_add(incremental).min(MAX_BYTES);
         self.allocate_bounded(size,ceiling)
     }
+    fn write_unpublished(&mut self, id:i64, size:usize, write:impl FnOnce(&mut [u8])->i64)->Option<i64> {
+        if self.viewed.contains(&id) {return None;}
+        let dst=self.live.get_mut(&id)?;
+        if dst.len()!=size {return None;}
+        Some(write(dst))
+    }
+    fn mark_viewed(&mut self,id:i64)->bool {
+        if !self.live.contains_key(&id) {return false;}
+        self.viewed.insert(id);
+        true
+    }
     fn release(&mut self, id: i64) -> bool {
         let Some(mut bytes) = self.live.remove(&id) else { return false; };
+        self.viewed.remove(&id);
         // Final Java owner has retired every view before calling release.
         bytes.fill(0);
         // No idle native arena survives the final history/reader lease.
@@ -107,6 +121,10 @@ pub fn allocate_headroom(size:usize, incremental:usize)->Option<i64> {
     arena().lock().ok()?.allocate_headroom(size,incremental)
 }
 #[cfg(target_os = "android")]
+pub fn write_unpublished(id:i64, size:usize, write:impl FnOnce(&mut [u8])->i64)->Option<i64> {
+    arena().lock().ok()?.write_unpublished(id,size,write)
+}
+#[cfg(target_os = "android")]
 pub fn release(id: i64) -> bool { arena().lock().is_ok_and(|mut a| a.release(id)) }
 #[cfg(target_os = "android")]
 pub fn trim() { if let Ok(mut a) = arena().lock() { a.trim(); } }
@@ -119,6 +137,7 @@ pub fn snapshot() -> Option<[u64; 5]> { Some(arena().lock().ok()?.snapshot()) }
 #[cfg(target_os = "android")]
 pub fn view(id: i64) -> Option<(*mut u8, usize)> {
     let mut a = arena().lock().ok()?;
+    if !a.mark_viewed(id) {return None;}
     let bytes = a.live.get_mut(&id)?;
     Some((bytes.as_mut_ptr(), bytes.len()))
 }
@@ -139,6 +158,19 @@ mod tests {
         assert!(a.release(reused));
         assert!(a.release(keep));
         assert_eq!(a.snapshot()[0],0);
+    }
+    #[test]
+    fn native_transfer_cannot_modify_exposed_or_retired_backing() {
+        let mut a=Arena::default();
+        let id=a.allocate(4).unwrap();
+        assert_eq!(a.write_unpublished(id,3,|_|panic!("wrong size")),None);
+        assert_eq!(a.write_unpublished(id,4,|dst|{dst.copy_from_slice(b"test");4}),Some(4));
+        assert!(a.mark_viewed(id));
+        assert_eq!(a.write_unpublished(id,4,|_|panic!("published")),None);
+        assert_eq!(a.live.get(&id).unwrap().as_slice(),b"test");
+        assert!(a.release(id));
+        assert!(!a.mark_viewed(id));
+        assert_eq!(a.write_unpublished(id,4,|_|panic!("retired")),None);
     }
     #[test]
     fn shrinking_headroom_never_evicts_live_readers() {

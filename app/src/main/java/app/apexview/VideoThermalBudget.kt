@@ -5,6 +5,15 @@ import android.os.PowerManager
 /** Visible-tile quality policy applies ONLY to multiple-decoder playback.
  * Single-decoder atlas source quality is never modified by this budget. */
 internal object VideoThermalBudget {
+    @Volatile private var adaptationEnabled = true
+    fun setAdaptation(enabled: Boolean) { adaptationEnabled = enabled }
+    fun loadPreference(context: android.content.Context) {
+        setAdaptation(context.applicationContext.getSharedPreferences("f1mv", android.content.Context.MODE_PRIVATE)
+            .getBoolean("thermalPlaybackAdaptation", true))
+    }
+    fun effectiveStatus(status: Int, enabled: Boolean = adaptationEnabled): Int =
+        if (enabled) status else PowerManager.THERMAL_STATUS_NONE
+
     fun multipleDecoderScale(status: Int): Float = when {
         status >= PowerManager.THERMAL_STATUS_SEVERE -> 0.5f
         status >= PowerManager.THERMAL_STATUS_MODERATE -> 0.75f

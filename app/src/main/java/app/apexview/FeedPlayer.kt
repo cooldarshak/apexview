@@ -272,6 +272,17 @@ class FeedPlayer(
     private var firstFrameRendered = false
     private val diagnosticId = System.identityHashCode(this)
     private val playbackAllocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
+    private var parkedForArchive = false
+    private var activeAudioDecoders = 0
+    private fun updateMemoryOwner() {
+        val role = when {
+            parkedForArchive && player.mediaItemCount == 0 -> "ARCHIVE_PARKED"
+            archiveVodSession != null || protectedLiveDashSource != null -> "COMPOSED"
+            remotePlaybackSuspended -> "REMOTE"
+            else -> "SOURCE"
+        }
+        Media3MemoryOwners.update(playbackAllocator, role, activeVideoDecoderCount, activeAudioDecoders, player.mediaItemCount)
+    }
     private var loggedClock = false
     private var firstFrameLogged = false
     private var seekSequence = 0
@@ -286,6 +297,7 @@ class FeedPlayer(
     }
 
     internal fun logPlaybackSample() {
+        updateMemoryOwner()
         val counters = player.videoDecoderCounters
         counters?.ensureUpdated()
         val uptime = android.os.SystemClock.elapsedRealtime()
@@ -304,7 +316,8 @@ class FeedPlayer(
             "sampleIntervalMs=$sampleIntervalMs mediaPositionDeltaMs=$positionDeltaMs " +
             "mediaClockProgressionDifferenceMs=$clockDifferenceMs playbackSpeed=${player.playbackParameters.speed} " +
             "audioFormat=${player.audioFormat?.sampleMimeType ?: "none"} " +
-            "media3InUseBytes=${playbackAllocator.totalBytesAllocated} audioHardwareClock=NOT_MEASURED")
+            "media3InUseBytes=${playbackAllocator.totalBytesAllocated} parkedForArchive=$parkedForArchive mediaItems=${player.mediaItemCount} " +
+            "videoDecoders=$activeVideoDecoderCount audioDecoders=$activeAudioDecoders audioHardwareClock=NOT_MEASURED")
     }
     var activeVideoDecoderCount by mutableStateOf(0)
         private set
@@ -487,7 +500,7 @@ class FeedPlayer(
             .setTrackSelector(sourceTrackSelector)
             .setBandwidthMeter(androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(context))
             .build()
-        Media3MemoryOwners.register(playbackAllocator)
+        Media3MemoryOwners.register(playbackAllocator, "feed-$diagnosticId")
         val codecReleaseTiming = CodecReleaseTiming()
         var lastCodecReleaseLogNs = 0L
         player.setVideoFrameMetadataListener(object : VideoFrameMetadataListener {
@@ -587,6 +600,8 @@ class FeedPlayer(
                     else -> "Stopped"
                 }
                 buffering = playbackState == Player.STATE_BUFFERING
+                if (playbackState == Player.STATE_IDLE && parkedForArchive) playbackAllocator.trim()
+                updateMemoryOwner()
                 playbackEvent("state", "state=$playbackState positionMs=${player.currentPosition} bufferedMs=${player.bufferedPosition}")
                 if (playbackState == Player.STATE_READY && !started) {
                     started = true
@@ -680,6 +695,15 @@ class FeedPlayer(
                 if (!isVideo) return
                 captureVideoProfile(format, mediaLoadData.trackType, "downstream")
             }
+            override fun onAudioDecoderInitialized(eventTime: AnalyticsListener.EventTime, decoderName: String,
+                                                   initializedTimestampMs: Long, initializationDurationMs: Long) {
+                activeAudioDecoders++
+                updateMemoryOwner()
+            }
+            override fun onAudioDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
+                activeAudioDecoders = (activeAudioDecoders - 1).coerceAtLeast(0)
+                updateMemoryOwner()
+            }
             override fun onVideoDecoderInitialized(
                 eventTime: AnalyticsListener.EventTime,
                 decoderName: String,
@@ -690,6 +714,7 @@ class FeedPlayer(
                 decoder = decoderName
                 if (archiveVodSession != null) firstFrameRendered = false
                 activeVideoDecoderCount++
+                updateMemoryOwner()
                 if (stream.allowHevcProfileProbe) {
                     HevcFeedProfileCapture.updateVideoDecoder(
                         stream.profileGroup, stream.profileLabel, decoderName
@@ -702,6 +727,7 @@ class FeedPlayer(
                 sceneCodecCorrelation.reset()
                 activeVideoDecoderCount = (activeVideoDecoderCount - 1).coerceAtLeast(0)
                 if (activeVideoDecoderCount == 0) { decoder = ""; nativeSourceRendition = null }
+                updateMemoryOwner()
                 refresh()
             }
 
@@ -966,6 +992,8 @@ class FeedPlayer(
             player.playWhenReady = playWhenReady && !remotePlaybackSuspended
             player.prepare()
             handoffInstalled = true
+            parkedForArchive = false
+            updateMemoryOwner()
             // Retire only after the new Media3 source was successfully installed.
             previous?.release()
         } catch (error: Throwable) {
@@ -1028,7 +1056,7 @@ class FeedPlayer(
         archiveCaptionSelected = false
         availableCaptionTracks = emptyList()
         archiveSelectedAudioUri = audioUri
-        session.updateThermalStatus(archivePower?.currentThermalStatus ?: -1)
+        session.updateThermalStatus(VideoThermalBudget.effectiveStatus(archivePower?.currentThermalStatus ?: -1))
         outputCadence.composedSingle = true
         videoSuppressedByProtectedComposition = false
         videoOn = !remotePlaybackSuspended
@@ -1042,6 +1070,8 @@ class FeedPlayer(
             val children = audioSources + captionChildren
             // A sparse or shorter text rendition must leave the full video timeline seekable.
             player.setMediaSource(MergingMediaSource(true, video, *children.toTypedArray()), positionMs.coerceAtLeast(0))
+            parkedForArchive = false
+            updateMemoryOwner()
             archiveAudioChildren = audioChildren
             archiveCaptionChildren = captionIndexes
             player.playWhenReady = playWhenReady && !remotePlaybackSuspended
@@ -1152,8 +1182,12 @@ class FeedPlayer(
 
     /** Drop the original loaders/audio as well as video once all source decoders are released. */
     internal fun suspendForArchiveComposition() {
+        parkedForArchive = true
         player.stop()
         player.clearMediaItems()
+        playbackAllocator.trim()
+        updateMemoryOwner()
+        playbackEvent("archive-parked", "items=${player.mediaItemCount} allocatorBytes=${playbackAllocator.totalBytesAllocated}")
     }
 
     /** Validate total picture size/rate, not the number of source feeds, before handoff. */
@@ -1276,6 +1310,7 @@ class FeedPlayer(
         archiveCaptionSelected = false
         firstFrameRendered = false; error = null; problem = null
         videoSuppressedByProtectedComposition = false
+        parkedForArchive = false
         val restorePositionMs = positionMs?.coerceAtLeast(0L)
             ?: initialStartPositionMs.takeIf { it != C.TIME_UNSET }
         try {

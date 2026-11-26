@@ -5,6 +5,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VideoThermalBudgetTest {
+    @Test fun manualOverrideIgnoresOnlyAppThermalPolicy() {
+        val critical = PowerManager.THERMAL_STATUS_CRITICAL
+        val effective = VideoThermalBudget.effectiveStatus(critical, false)
+        assertEquals(PowerManager.THERMAL_STATUS_NONE, effective)
+        assertEquals(1f, VideoThermalBudget.multipleDecoderScale(effective), 0f)
+        assertFalse(VideoThermalBudget.mainVideoOnly(effective))
+        assertEquals(critical, VideoThermalBudget.effectiveStatus(critical, true))
+    }
     @Test fun preservesExistingMultidecoderThermalBounds() {
         assertEquals(1f, VideoThermalBudget.multipleDecoderScale(PowerManager.THERMAL_STATUS_LIGHT), 0f)
         assertEquals(0.75f, VideoThermalBudget.multipleDecoderScale(PowerManager.THERMAL_STATUS_MODERATE), 0f)

@@ -65,6 +65,14 @@ internal class NativeFragmentLease private constructor(private val shared: Share
         } finally { scratch.fill(0) }
     }
 
+    @Synchronized fun matches(bytes: ByteArray): Boolean {
+        check(!closed)
+        if (bytes.size != size) return false
+        return synchronized(shared) {
+            requireNotNull(shared.buffer).asReadOnlyBuffer().apply { position(0) } == ByteBuffer.wrap(bytes)
+        }
+    }
+
     fun copyBytes(): ByteArray = ByteArray(size).also { readTo(it, 0, 0, it.size) }
 
     @Synchronized override fun close() {
@@ -85,7 +93,18 @@ internal class NativeFragmentLease private constructor(private val shared: Share
         fun build(size: Int, writer: (ByteBuffer) -> Unit): NativeFragmentLease? =
             build(size, null, writer)
 
-        fun build(size: Int, context: android.content.Context?, writer: (ByteBuffer) -> Unit): NativeFragmentLease? {
+        fun build(size: Int, context: android.content.Context?, writer: (ByteBuffer) -> Unit): NativeFragmentLease? =
+            buildOwned(size, context) { _, buffer -> writer(buffer) }
+
+        fun fromEngine(size: Int, context: android.content.Context?, engine: NativeStitchingEngine,
+                       token: Long, offset: Int): NativeFragmentLease? =
+            buildOwned(size, context, beforeView = { id ->
+                check(engine.readToFragment(token, offset, id, size) == size.toLong())
+            }) { _, buffer -> buffer.position(size) }
+
+        private fun buildOwned(size: Int, context: android.content.Context?,
+                               beforeView: ((Long) -> Unit)? = null,
+                               writer: (Long, ByteBuffer) -> Unit): NativeFragmentLease? {
             if (size <= 0) return null
             if (size > 64 * 1024 * 1024) return null
             val id = try {
@@ -95,7 +114,7 @@ internal class NativeFragmentLease private constructor(private val shared: Share
                         val h = NativeStitchingDeviceBudget.sample(context)
                         if (h == null || h.lowMemory || h.available <= h.threshold) NativeStitchingEngine.BACKPRESSURE
                         else NativeStitchingEngine.allocateFragmentHeadroom(size,
-                            minOf(64L * 1024 * 1024, (h.available - h.threshold) / 8))
+                            (h.available - h.threshold) / 8)
                     }
                 }
             }
@@ -104,11 +123,12 @@ internal class NativeFragmentLease private constructor(private val shared: Share
             if (id <= 0) return null
             var transferred = false
             try {
+                beforeView?.invoke(id)
                 val buffer = NativeStitchingEngine.fragmentView(id) ?: return null
                 require(buffer.isDirect && !buffer.isReadOnly && buffer.capacity() == size)
                 buffer.clear()
                 buffer.order(ByteOrder.BIG_ENDIAN)
-                writer(buffer)
+                writer(id, buffer)
                 check(buffer.position() == size)
                 buffer.flip()
                 val lease = NativeFragmentLease(Shared(id, buffer.asReadOnlyBuffer(), size))
@@ -120,6 +140,7 @@ internal class NativeFragmentLease private constructor(private val shared: Share
         }
 
         fun trim() {
+            if (!NativeStitchingEngine.isLibraryReady()) return
             try {
                 val before = NativeStitchingEngine.engineMemorySnapshot()?.getOrNull(2) ?: -1L
                 val fragments = NativeStitchingEngine.fragmentMemorySnapshot()?.getOrNull(0) ?: -1L

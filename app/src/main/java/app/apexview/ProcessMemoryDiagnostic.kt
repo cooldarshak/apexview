@@ -29,8 +29,15 @@ internal object ProcessMemoryDiagnostic {
             "jvmUsedBytes=${runtime.totalMemory() - runtime.freeMemory()} jvmCommittedBytes=${runtime.totalMemory()} " +
             "nativeHeapAllocatedBytes=${Debug.getNativeHeapAllocatedSize()} nativeHeapSizeBytes=${Debug.getNativeHeapSize()} " +
             "platformGraphicsKiB=${memory.getMemoryStat("summary.graphics") ?: "unavailable"} externalCodecGpu=NOT_MEASURED defaultDisplayHz=${refresh ?: -1f} " +
+            "platformNativeHeapKiB=${memory.getMemoryStat("summary.native-heap") ?: "unavailable"} " +
+            "platformJavaHeapKiB=${memory.getMemoryStat("summary.java-heap") ?: "unavailable"} " +
+            "platformCodeKiB=${memory.getMemoryStat("summary.code") ?: "unavailable"} " +
+            "platformStackKiB=${memory.getMemoryStat("summary.stack") ?: "unavailable"} " +
+            "platformPrivateOtherKiB=${memory.getMemoryStat("summary.private-other") ?: "unavailable"} " +
+            "platformSystemKiB=${memory.getMemoryStat("summary.system") ?: "unavailable"} " +
+            "process64Bit=${android.os.Process.is64Bit()} nativeLibraryReady=${NativeStitchingEngine.isLibraryReady()} " +
             "osAvailableBytes=${headroom?.available ?: -1} osThresholdBytes=${headroom?.threshold ?: -1} " +
-            "lowRam=${headroom?.lowRam} lowMemory=${headroom?.lowMemory} thermal=${thermal ?: -1} " +
+            "lowRam=${headroom?.lowRam} lowMemory=${headroom?.lowMemory} thermal=${thermal ?: -1} effectivePlaybackThermal=${VideoThermalBudget.effectiveStatus(thermal ?: -1)} " +
             fragmentFields(fragments) + " " + engineFields(NativeStitchingEngine.engineMemorySnapshot()) +
             SpeculativeMemoryAdmission.process.snapshot().let { (reserved, peak) ->
                 " speculativeForecastBytes=$reserved speculativePeakForecastBytes=$peak"
@@ -38,7 +45,7 @@ internal object ProcessMemoryDiagnostic {
                 " foregroundForecastBytes=$current foregroundPeakForecastBytes=$peak"
             } + Media3MemoryOwners.snapshot().let { (owners, bytes) ->
                 " media3AllocatorOwners=$owners media3InUseBytes=$bytes"
-            } + MediaMemoryAccounting.process.snapshot().entries.joinToString("") { (kind, usage) ->
+            } + Media3MemoryOwners.ownerFields() + MediaMemoryAccounting.process.snapshot().entries.joinToString("") { (kind, usage) ->
                 " ${kind.name}OwnedBytes=${usage.owned} ${kind.name}PinnedBytes=${usage.pinned}"
             }
     }

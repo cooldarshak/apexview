@@ -96,6 +96,13 @@ public final class NativeStitchingEngine implements AutoCloseable {
         return Math.max(1,Math.min(60_000,(long)(media/speed)));
     }
 
+    private static volatile boolean libraryReady;
+    private static synchronized void ensureLibraryLoaded() {
+        if (libraryReady) return;
+        System.loadLibrary("pitwall_g0");
+        libraryReady = nativeAbi() == 2;
+    }
+    public static boolean isLibraryReady() { return libraryReady; }
     private static native int nativeAbi();
     private static native long nativeFragmentAllocate(int size);
     private static native long nativeFragmentAllocateBounded(int size,long limit);
@@ -106,36 +113,38 @@ public final class NativeStitchingEngine implements AutoCloseable {
     private static native long[] nativeFragmentMemorySnapshot();
     private static native long[] nativeEngineMemorySnapshot();
     public static long[] engineMemorySnapshot() {
+        if (!libraryReady) return null;
         try { return nativeEngineMemorySnapshot(); }
         catch (LinkageError unavailable) { return null; }
     }
     /** Never load the Rust library merely to sample Kotlin playback. */
     public static long[] fragmentMemorySnapshot() {
+        if (!libraryReady) return null;
         try { return nativeFragmentMemorySnapshot(); }
         catch (LinkageError unavailable) { return null; }
     }
     static long allocateFragment(int size) {
-        System.loadLibrary("pitwall_g0");
+        ensureLibraryLoaded();
         return nativeAbi() == 2 ? nativeFragmentAllocate(size) : INVALID;
     }
     static long allocateFragmentBounded(int size,long limit) {
-        System.loadLibrary("pitwall_g0");
+        ensureLibraryLoaded();
         return nativeAbi() == 2 ? nativeFragmentAllocateBounded(size,limit) : INVALID;
     }
     static long allocateFragmentHeadroom(int size,long incremental) {
-        System.loadLibrary("pitwall_g0");
+        ensureLibraryLoaded();
         return nativeAbi() == 2 ? nativeFragmentAllocateHeadroom(size,incremental) : INVALID;
     }
     static ByteBuffer fragmentView(long id) { return nativeFragmentView(id); }
     static long releaseFragment(long id) { return nativeFragmentRelease(id); }
-    static void trimFragments() { nativeFragmentTrim(); }
+    static void trimFragments() { if (libraryReady) nativeFragmentTrim(); }
 
     private static native byte[] nativeProtectedHeader(byte[] packet);
     private static native byte[] nativeProtectedPlan(byte[] packet, int kind);
     static byte[] protectedPlan(byte[] packet, int kind) {
         if (packet == null || packet.length == 0 || packet.length > 2 * MIB ||
             (kind < 1 || kind > 4)) return null;
-        System.loadLibrary("pitwall_g0");
+        ensureLibraryLoaded();
         if (nativeAbi() != 2) return null;
         return nativeProtectedPlan(packet, kind);
     }
@@ -144,7 +153,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
      * authorized DRM validation and compares exact output against JVM. */
     public static byte[] protectedHeader(byte[] packet) {
         if (packet == null || packet.length == 0 || packet.length > 2 * MIB) return null;
-        System.loadLibrary("pitwall_g0");
+        ensureLibraryLoaded();
         if (nativeAbi() != 2) return null;
         return nativeProtectedHeader(packet);
     }
@@ -153,6 +162,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
     private static native long nativeOpenAtlas(int slots,int input,int output,long ceiling);
     private static native long nativeSubmitAtlasParts(long handle,long generation,byte[][] parts,int length,
                                                        boolean foreground,long slackMs);
+    private static native long nativeReadAtlasFragment(long handle,long token,int sourceOffset,long id,int length);
     private static native long nativeReadAtlasArray(long handle,long token,int sourceOffset,byte[] target,
                                                      int targetOffset,int length);
     private static native long nativeSubmit(long handle,long generation,ByteBuffer input,int length,
@@ -198,7 +208,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
     /** Only call on a worker, after explicit engine admission. */
     public static NativeStitchingEngine open(Budget budget) {
         if(budget==null)throw new IllegalArgumentException("Native memory budget unavailable");
-        System.loadLibrary("pitwall_g0");
+        ensureLibraryLoaded();
         if(nativeAbi()!=2)throw new IllegalStateException("G-A ABI mismatch");
         long id=budget.compactAtlas?nativeOpenAtlas(budget.slots,budget.inputBytes,budget.outputBytes,budget.ceilingBytes)
             :nativeOpen(budget.slots,budget.inputBytes,budget.outputBytes,budget.ceilingBytes);
@@ -247,6 +257,14 @@ public final class NativeStitchingEngine implements AutoCloseable {
         return result;
     }
     public synchronized long acquire(long token){return handle==0?CLOSED:nativeAcquire(handle,token);}
+    synchronized long readToFragment(long token,int sourceOffset,long id,int length) {
+        if(handle==0)return CLOSED;
+        if(!budget.compactAtlas || id<=0 || sourceOffset<0 || length<=0 || length>budget.outputBytes)return INVALID;
+        long result=nativeReadAtlasFragment(handle,token,sourceOffset,id,length);
+        if(result==length)nativeOutputBytes=add(nativeOutputBytes,length);
+        return result;
+    }
+
     public synchronized long read(long token,int sourceOffset,byte[] target,int targetOffset,int length) {
         if(handle==0)return CLOSED;
         if(target==null || sourceOffset<0 || targetOffset<0 || length<=0 ||

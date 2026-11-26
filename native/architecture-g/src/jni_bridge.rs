@@ -300,6 +300,20 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeReadA
     })
 }
 #[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeReadAtlasFragment(
+    _env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong,token:jlong,offset:jint,id:jlong,length:jint)->jlong {
+    guarded(|| {
+        let (Ok(offset),Ok(n))=(usize::try_from(offset),usize::try_from(length)) else {return i64::from(INVALID);};
+        if n==0 || n>crate::bmff::MAX_ATLAS_BYTES {return i64::from(INVALID);}
+        engine_call(handle,|engine| {
+            // JVM owns the not-yet-published fragment exclusively. Registry,
+            // then arena, then engine slot: no inverse lock acquisition.
+            crate::fragment_storage::write_unpublished(id,n,|dst|engine.copy(token,offset,dst))
+                .unwrap_or(i64::from(INVALID))
+        })
+    })
+}
+#[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeRelease(
     _env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong,token:jlong)->jlong {
     guarded(||engine_call(handle,|e|e.release(token)))

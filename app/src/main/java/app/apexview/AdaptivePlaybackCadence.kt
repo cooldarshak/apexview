@@ -66,7 +66,7 @@ internal class AdaptivePlaybackCadenceObserver(
             lastReadDisplayId = requestedDisplay
         }
         return AdaptivePlaybackCadence.outputFps(
-            sourceFps, speed, displayHz, thermalStatus, composedSingle,
+            sourceFps, speed, displayHz, VideoThermalBudget.effectiveStatus(thermalStatus), composedSingle,
             pipelineHealthy = correlation?.allowsAcceleratedOutput(System.nanoTime()) == true)
     }
 }

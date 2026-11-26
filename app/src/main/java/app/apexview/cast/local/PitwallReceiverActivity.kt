@@ -202,6 +202,7 @@ class PitwallReceiverActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        app.apexview.VideoThermalBudget.loadPreference(this)
         captionSettings = Settings(this)
         captionsOn = captionSettings.subtitles
         captionLanguage = captionSettings.captionLanguage
@@ -565,7 +566,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             .setLoadControl(DefaultLoadControl.Builder().setAllocator(receiverAllocator).setBufferDurationsMs(5_000, 15_000, 1_000, 2_000).build())
             .build()
         activeReceiverAllocator = receiverAllocator
-        app.apexview.Media3MemoryOwners.register(receiverAllocator)
+        app.apexview.Media3MemoryOwners.register(receiverAllocator, "receiver")
         receiverCadence = cadence
         receiverDisplayOwner = null
         sceneCodecCorrelation = correlation
@@ -578,7 +579,24 @@ class PitwallReceiverActivity : ComponentActivity() {
             }
         })
         scene = nextScene; player = next; active = true; generation++; renderingReported = false; decoderCount = 0
+        var receiverAudioDecoders = 0
+        fun updateReceiverMemoryOwner() {
+            if (player !== next) return
+            app.apexview.Media3MemoryOwners.update(receiverAllocator, "RECEIVER", decoderCount,
+                receiverAudioDecoders, next.mediaItemCount)
+        }
         next.addAnalyticsListener(object : AnalyticsListener {
+            override fun onAudioDecoderInitialized(eventTime: AnalyticsListener.EventTime, decoderName: String,
+                initializedTimestampMs: Long, initializationDurationMs: Long) {
+                if (player !== next) return
+                receiverAudioDecoders++
+                updateReceiverMemoryOwner()
+            }
+            override fun onAudioDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
+                if (player !== next) return
+                receiverAudioDecoders = (receiverAudioDecoders - 1).coerceAtLeast(0)
+                updateReceiverMemoryOwner()
+            }
             override fun onVideoInputFormatChanged(
                 eventTime: AnalyticsListener.EventTime, format: androidx.media3.common.Format,
                 decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
@@ -593,6 +611,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                 if (player !== next) return
                 correlation.reset()
                 decoderCount++
+                updateReceiverMemoryOwner()
                 Log.i("PitwallReceiver", "VIDEO_DECODER_INIT name=$decoderName active=$decoderCount sources=${scene?.sources ?: 1}")
                 if (decoderCount > 1) fail("Receiver allocated more than one video decoder")
             }
@@ -600,6 +619,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                 if (player !== next) return
                 correlation.reset()
                 decoderCount = (decoderCount - 1).coerceAtLeast(0)
+                updateReceiverMemoryOwner()
                 Log.i("PitwallReceiver", "VIDEO_DECODER_RELEASE name=$decoderName active=$decoderCount")
             }
             override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long) {
@@ -642,6 +662,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             }
             override fun onPlaybackStateChanged(state: Int) {
                 if (player !== next) return
+                updateReceiverMemoryOwner()
                 Log.i("PitwallReceiver", "GC_RECEIVER_ALLOCATOR generation=$generation state=$state " +
                     "media3InUseBytes=${receiverAllocator.totalBytesAllocated}")
                 sendPlayback()

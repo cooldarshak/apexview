@@ -103,6 +103,34 @@ class ArchitectureGBAndroidTest {
                 assertArrayEquals(expected.copyOfRange(8 + initSize, expected.size), output.media.single())
                 assertTrue(output.submitNs >= 0 && output.waitNs >= 0 && output.readNs >= 0)
             } finally { output.wipe() }
+            val directToken = engine.submitClearAtlasParts(engine.generation(), parts, input.size, true, 5000)
+            assertTrue(directToken > 0)
+            assertEquals(expected.size.toLong(), await(engine, directToken))
+            val sizes = java.nio.ByteBuffer.wrap(expected)
+            val initSize = sizes.int
+            val mediaSize = sizes.int
+            val expectedMedia = expected.copyOfRange(8 + initSize, expected.size)
+            val before = engine.copyStats()
+            val native = requireNotNull(NativeFragmentLease.fromEngine(mediaSize, null, engine, directToken, 8 + initSize))
+            val cache = BoundedArchiveFragmentCache(maxEntries = 1)
+            try {
+                assertTrue(native.matches(expectedMedia))
+                assertEquals(before.javaOutputBytes, engine.copyStats().javaOutputBytes)
+                assertEquals(before.nativeOutputBytes + mediaSize, engine.copyStats().nativeOutputBytes)
+                assertEquals(1L, engine.release(directToken))
+                cache.putNative(1, native.retain())
+                requireNotNull(cache.readLease(1)).use { reader ->
+                    cache.put(2, byteArrayOf(7))
+                    engine.seek()
+                    cache.clear()
+                    val target = ByteArray(mediaSize)
+                    reader.readInto(target, 0, 0, mediaSize)
+                    assertArrayEquals(expectedMedia, target)
+                    val range = java.io.ByteArrayOutputStream()
+                    reader.writeTo(range, 0, minOf(32, mediaSize))
+                    assertArrayEquals(expectedMedia.copyOfRange(0, minOf(32, mediaSize)), range.toByteArray())
+                }
+            } finally { cache.clear(); native.close() }
         }
         Log.i("PitwallGC", "Compact direct slot transfer, exact parity and stale lease rejection PASS")
     }

@@ -1646,13 +1646,21 @@ class AppState(
     /** The phone's thermal status (PowerManager.THERMAL_STATUS_*). */
     var thermal by mutableIntStateOf(power?.currentThermalStatus ?: android.os.PowerManager.THERMAL_STATUS_NONE)
         private set
+    val playbackThermalStatus: Int get() = VideoThermalBudget.effectiveStatus(thermal, settings.thermalPlaybackAdaptation)
+
+    fun setThermalPlaybackAdaptation(enabled: Boolean) {
+        settings.updateThermalPlaybackAdaptation(enabled)
+        android.util.Log.i("PitwallThermal", "THERMAL_PLAYBACK_ADAPTATION enabled=$enabled actualStatus=$thermal effectiveStatus=$playbackThermalStatus")
+        applyVideoBudget()
+    }
+
     private val thermalListener = android.os.PowerManager.OnThermalStatusChangedListener { status ->
         val before = thermal
         thermal = status
-        VideoThermalBudget.transitionNotice(status, before)?.let { message = it }
+        if (settings.thermalPlaybackAdaptation) VideoThermalBudget.transitionNotice(status, before)?.let { message = it }
         android.util.Log.i("PitwallThermal", "THERMAL_STATUS_CHANGE from=$before to=$status " +
-            "multipleDecoderScale=${VideoThermalBudget.multipleDecoderScale(status)} " +
-            "criticalMainOnly=${VideoThermalBudget.mainVideoOnly(status)} " +
+            "multipleDecoderScale=${VideoThermalBudget.multipleDecoderScale(playbackThermalStatus)} " +
+            "criticalMainOnly=${VideoThermalBudget.mainVideoOnly(playbackThermalStatus)} adaptationEnabled=${settings.thermalPlaybackAdaptation} " +
             "singleDecoderAtlasQualityUnchanged=true")
         applyVideoBudget()
     }
@@ -1660,7 +1668,7 @@ class AppState(
     init {
         compositionBandwidthMeter.addEventListener(android.os.Handler(android.os.Looper.getMainLooper()), compositionBandwidthListener)
         power?.addThermalStatusListener(context.mainExecutor, thermalListener)
-        VideoThermalBudget.startupNotice(thermal)?.let { message = it }
+        if (settings.thermalPlaybackAdaptation) VideoThermalBudget.startupNotice(thermal)?.let { message = it }
         // Feeds come and go, move, hide behind each other and off screen; twice a second is soon enough.
         // Waits first: this runs while AppState is still being built, before the tiles exist.
         scope.launch {
@@ -1699,7 +1707,7 @@ class AppState(
         applyCaptionPreference()
         // The active finite archive owner also serves the local Cast relay.
         // Restrict only speculative work; never change its chosen rendition.
-        protectedCompositionHost?.feed?.updateArchiveThermalStatus(thermal)
+        protectedCompositionHost?.feed?.updateArchiveThermalStatus(playbackThermalStatus)
         if (castPlaybackHandedOff) {
             tiles.forEach { it.feed.suspendForRemotePlayback(true) }
             return
@@ -1726,7 +1734,7 @@ class AppState(
         }
         val shown = if (inPip) pipTile() else null
         val main = protectedCompositionHost ?: tiles.firstOrNull { it.id == bigTileId } ?: tiles.firstOrNull { it.audible } ?: tiles.maxByOrNull { it.w }
-        val scale = VideoThermalBudget.multipleDecoderScale(thermal)
+        val scale = VideoThermalBudget.multipleDecoderScale(playbackThermalStatus)
         val visibleTiles = tiles.filter { tile ->
             if (tile.protectedCompositionHidden) return@filter false
             when {
@@ -1752,7 +1760,7 @@ class AppState(
             // Laptop mode: the feed that was up top before the one there now keeps its picture
             // going out of sight, ready to return instantly. TV never takes this hidden slot.
             val warm = !visible && !browsing && !inPip && laptopActive && tile.id == previousTopId &&
-                thermal < android.os.PowerManager.THERMAL_STATUS_MODERATE && !speedHeld
+                playbackThermalStatus < android.os.PowerManager.THERMAL_STATUS_MODERATE && !speedHeld
             if (warm) {
                 tile.coolingOff = false
                 tile.heldForDecoder = false
@@ -1760,7 +1768,7 @@ class AppState(
                 return@forEach
             }
             val overDecoderBudget = isTv && visible && tile !in decoderEligible
-            val hot = VideoThermalBudget.mainVideoOnly(thermal) && tile !== main
+            val hot = VideoThermalBudget.mainVideoOnly(playbackThermalStatus) && tile !== main
             val held = speedHeld && !inPip && tile !== main
             tile.coolingOff = visible && hot
             tile.heldForSpeed = visible && held && !hot
@@ -5747,7 +5755,7 @@ class AppState(
             val allocator = androidx.media3.exoplayer.upstream.DefaultAllocator(true, androidx.media3.common.C.DEFAULT_BUFFER_SEGMENT_SIZE)
             androidx.media3.exoplayer.ExoPlayer.Builder(context)
                 .setLoadControl(androidx.media3.exoplayer.DefaultLoadControl.Builder().setAllocator(allocator).build())
-                .build().also { radioAllocator = allocator; Media3MemoryOwners.register(allocator) }
+                .build().also { radioAllocator = allocator; Media3MemoryOwners.register(allocator, "radio") }
         }.also { p ->
             radioPlayer = p
             p.setPlaybackSpeed(playbackSpeed)
@@ -6687,7 +6695,7 @@ class AppState(
             it.contentId == first.contentId && it.labels == labels
         }?.height
         val headroom = runCatching { app.apexview.tiled.NativeStitchingDeviceBudget.sample(context) }.getOrNull()
-        val constrained = thermal >= android.os.PowerManager.THERMAL_STATUS_SEVERE ||
+        val constrained = playbackThermalStatus >= android.os.PowerManager.THERMAL_STATUS_SEVERE ||
             headroom?.lowMemory == true
         val height = ComposedAutoQualityPolicy.preferredHeight(selected.map(::qualityFor),
             selected.map { tile -> minOf(tile.h, tile.w * 9f / 16f) }, baseline, previous, constrained)

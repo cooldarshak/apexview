@@ -185,7 +185,12 @@ impl Engine {
     /// OS headroom sample already reflects resident allocations; reserve only
     /// future commitments when another native owner requests new capacity.
     pub fn future_commitment(&self, bridge_bytes:usize)->usize {
-        self.budget.ceiling.saturating_sub(self.allocated_payload_bytes().saturating_add(bridge_bytes))
+        // The ceiling is a device admission limit, not a planned allocation.
+        // Count only actual slot/bridge/stack reservations and bounded scratch.
+        let workspace=atlas_job::workspace_reserve(self.budget.input,self.budget.output)
+            .unwrap_or(self.budget.ceiling);
+        self.reserved_bytes.saturating_add(workspace).min(self.budget.ceiling)
+            .saturating_sub(self.allocated_payload_bytes().saturating_add(bridge_bytes))
     }
     /// Counts payload-pair allocations and exact bytes passed across the slot
     /// boundary, not allocator-global or resident-page estimates.
@@ -411,6 +416,17 @@ mod tests {
             assert!(Instant::now()<until,"worker did not finish");
             thread::yield_now();
         }
+    }
+    #[test]
+    fn future_commitment_is_planned_capacity_not_device_ceiling() {
+        let b=Budget{slots:2,input:4*1024*1024,output:8*1024*1024,ceiling:192*1024*1024};
+        let mut engine=Engine::new_atlas(b).unwrap();
+        let planned=b.reserved_atlas().unwrap()+atlas_job::workspace_reserve(b.input,b.output).unwrap();
+        assert_eq!(engine.future_commitment(0),planned-engine.allocated_payload_bytes());
+        assert!(engine.future_commitment(0)<b.ceiling-engine.allocated_payload_bytes());
+        engine.trim_idle_payload();
+        assert_eq!(engine.future_commitment(0),planned);
+        assert!(engine.close());
     }
     #[test]
     fn direct_atlas_slot_transfer_is_bounded_and_atomic() {

@@ -127,23 +127,28 @@ internal class ArchiveWarmupCancelledException : IOException("Archive prefetch c
  * A cache eviction cannot erase a fragment until the last reader has closed.
  */
 internal class ArchiveFragmentLease(
-    private val bytes: ByteArray,
+    private val bytes: ByteArray?,
+    private val native: NativeFragmentLease?,
     private val release: () -> Unit,
 ) : AutoCloseable {
+    constructor(bytes: ByteArray, release: () -> Unit) : this(bytes, null, release)
+    init { require((bytes == null) != (native == null)) }
     private var closed = false
-    val size: Int = bytes.size
+    val size: Int = bytes?.size ?: requireNotNull(native).size
 
     @Synchronized fun readInto(target: ByteArray, targetOffset: Int, sourceOffset: Int, length: Int) {
         check(!closed) { "Archive fragment lease is closed" }
         require(length >= 0 && targetOffset >= 0 && sourceOffset >= 0 &&
             targetOffset <= target.size - length && sourceOffset <= size - length)
-        bytes.copyInto(target, targetOffset, sourceOffset, sourceOffset + length)
+        if (bytes != null) bytes.copyInto(target, targetOffset, sourceOffset, sourceOffset + length)
+        else requireNotNull(native).readTo(target, targetOffset, sourceOffset, length)
     }
 
     @Synchronized fun writeTo(output: java.io.OutputStream, sourceOffset: Int, length: Int) {
         check(!closed) { "Archive fragment lease is closed" }
         require(length >= 0 && sourceOffset >= 0 && sourceOffset <= size - length)
-        output.write(bytes, sourceOffset, length)
+        if (bytes != null) output.write(bytes, sourceOffset, length)
+        else requireNotNull(native).writeTo(output, sourceOffset, length)
     }
 
     @Synchronized override fun close() {
@@ -170,7 +175,12 @@ internal class BoundedArchiveFragmentCache(
     private val maxReaders: Int = 8,
 ) {
     init { require(maxEntries > 0 && maxBytes > 0 && maxReaders > 0) }
-    private class Entry(val bytes: ByteArray) {
+    private class Entry(val bytes: ByteArray?, val native: NativeFragmentLease?) {
+        init { require((bytes == null) != (native == null)) }
+        val size get() = bytes?.size ?: requireNotNull(native).size
+        val identity: Any get() = bytes ?: requireNotNull(native).storageIdentity
+        fun dispose() { bytes?.fill(0); native?.close() }
+        fun copyBytes() = bytes?.copyOf() ?: requireNotNull(native).copyBytes()
         var cached = true
         var readers = 0
     }
@@ -186,11 +196,13 @@ internal class BoundedArchiveFragmentCache(
         val unique: Long get() = Math.addExact(cached, retiredPinned)
     }
     @Synchronized fun memorySnapshot() = MemorySnapshot(bytesRetained, leasedBytes,
-        pinned.filterNot { it.cached }.sumOf { it.bytes.size.toLong() })
+        pinned.filterNot { it.cached }.sumOf { it.size.toLong() })
     private fun recordMemory() {
-        val s = memorySnapshot()
+        // Native fragment backing is already charged in the Rust arena.
+        val uniqueHeap = (entries.values + pinned.filterNot { it.cached }).filter { it.bytes != null }
         app.apexview.MediaMemoryAccounting.process.record(this,
-            app.apexview.MediaMemoryAccounting.Kind.ARCHIVE_CACHE, s.unique, s.pinned)
+            app.apexview.MediaMemoryAccounting.Kind.ARCHIVE_CACHE,
+            uniqueHeap.sumOf { it.size.toLong() }, uniqueHeap.filter { it.readers > 0 }.sumOf { it.size.toLong() })
     }
     /** Foreground keeps its original admission and retry contract. Do not
      * start speculative production while retired readers consume the cache
@@ -207,7 +219,7 @@ internal class BoundedArchiveFragmentCache(
         while (iterator.hasNext()) {
             val entry = iterator.next()
             if (entry.key >= number || entry.value.readers != 0) continue
-            freed += entry.value.bytes.size
+            freed += entry.value.size
             iterator.remove()
             retire(entry.value)
         }
@@ -215,22 +227,22 @@ internal class BoundedArchiveFragmentCache(
         return freed
     }
     @Synchronized fun contains(number: Int): Boolean = entries.containsKey(number)
-    @Synchronized fun readCopy(number: Int): ByteArray? = entries[number]?.bytes?.copyOf()
+    @Synchronized fun readCopy(number: Int): ByteArray? = entries[number]?.copyBytes()
 
     @Synchronized fun readLease(number: Int): ArchiveFragmentLease? {
         val entry = entries[number] ?: return null
         if (readers >= maxReaders || (entry.readers == 0 &&
-                entry.bytes.size.toLong() > maxBytes - leasedBytes)) {
+                entry.size.toLong() > maxBytes - leasedBytes)) {
             throw ArchiveVodMediaException("Archive read lease budget exhausted", retryable = true)
         }
         if (entry.readers == 0) {
             pinned.add(entry)
-            leasedBytes += entry.bytes.size
+            leasedBytes += entry.size
         }
         entry.readers++
         readers++
         recordMemory()
-        return ArchiveFragmentLease(entry.bytes) { release(entry) }
+        return ArchiveFragmentLease(entry.bytes, entry.native) { release(entry) }
     }
 
     @Synchronized private fun release(entry: Entry) {
@@ -239,28 +251,31 @@ internal class BoundedArchiveFragmentCache(
         readers--
         if (entry.readers == 0) {
             pinned.remove(entry)
-            leasedBytes -= entry.bytes.size
-            if (!entry.cached) entry.bytes.fill(0)
+            leasedBytes -= entry.size
+            if (!entry.cached) entry.dispose()
         }
         recordMemory()
     }
 
     private fun retire(entry: Entry) {
         entry.cached = false
-        bytesRetained -= entry.bytes.size
-        if (entry.readers == 0) entry.bytes.fill(0)
+        bytesRetained -= entry.size
+        if (entry.readers == 0) entry.dispose()
     }
 
     /** Transfers ownership only on success. Readers see stable bytes even after eviction. */
-    @Synchronized fun put(number: Int, owned: ByteArray) {
-        require(owned.isNotEmpty() && owned.size.toLong() <= maxBytes) {
+    @Synchronized fun put(number: Int, owned: ByteArray) = putEntry(number, Entry(owned, null))
+    @Synchronized fun putNative(number: Int, owned: NativeFragmentLease) = putEntry(number, Entry(null, owned))
+
+    private fun putEntry(number: Int, entry: Entry) {
+        require(entry.size > 0 && entry.size.toLong() <= maxBytes) {
             "Archive CMAF fragment exceeds the bounded cache budget"
         }
-        require(entries.values.none { it.bytes === owned } && pinned.none { it.bytes === owned }) {
+        require(entries.values.none { it.identity === entry.identity } && pinned.none { it.identity === entry.identity }) {
             "Archive fragment ownership already transferred"
         }
-        entries.put(number, Entry(owned))?.let(::retire)
-        bytesRetained += owned.size
+        entries.put(number, entry)?.let(::retire)
+        bytesRetained += entry.size
         while (entries.size > maxEntries || bytesRetained > maxBytes) {
             val eldest = entries.entries.iterator()
             val victim = eldest.next()

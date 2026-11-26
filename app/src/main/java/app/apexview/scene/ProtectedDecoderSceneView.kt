@@ -52,7 +52,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 .getOrNull() ?: Int.MAX_VALUE
             lastThermalReadMs = now
         }
-        return cachedThermal
+        return app.apexview.VideoThermalBudget.effectiveStatus(cachedThermal)
     }
     private val modeListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = Unit
@@ -80,7 +80,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }
         val active = SceneFrameRatePolicy.Mode(mode.modeId, mode.physicalWidth, mode.physicalHeight, mode.refreshRate)
         val actualOutputFps = SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed,
-            selectedDisplayHz, runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE,
+            selectedDisplayHz, app.apexview.VideoThermalBudget.effectiveStatus(runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE),
             pipelineHealthy())
         val seamlessMatches = SceneFrameRatePolicy.matchingSeamlessModes(
             active, modes.map { SceneFrameRatePolicy.Mode(it.modeId, it.physicalWidth, it.physicalHeight, it.refreshRate) },
@@ -91,7 +91,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             "sourceFps=$sourceFps speed=$playbackSpeed " +
             "effectiveFps=${SceneFrameRatePolicy.hint(sourceFps, playbackSpeed)} " +
             "outputHintFps=${SceneFrameRatePolicy.composedOutputHint(sourceFps, playbackSpeed,
-                selectedDisplayHz, runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE,
+                selectedDisplayHz, app.apexview.VideoThermalBudget.effectiveStatus(runCatching { outputPower?.currentThermalStatus }.getOrNull() ?: Int.MAX_VALUE),
                  pipelineHealthy())} " +
             "integerRefreshMultiple=${SceneFrameRatePolicy.isIntegerRefreshMultiple(mode.refreshRate, actualOutputFps.toDouble(), 1f)} " +
             "supportedModes=$available sameResolutionIntegralModes=$seamlessMatches " +
@@ -219,7 +219,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             val refreshHz = selectedDisplayHz
             if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
                 frameTimeNanos, scene?.sourceFrameRate ?: 0.0, refreshHz,
-                playbackSpeed, thermalForOutput(), pipelineHealthy())) {
+                playbackSpeed, thermalForOutput(), pipelineHealthy(),
+                pendingAgeNs = frameDemand.pendingAgeNs(callbackStartNs))) {
                 pacing.onPacingDeferred()
                 displayClock?.postFrameCallback(this)
                 return@guarded
@@ -237,7 +238,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }
     }
     private fun scheduleVideoFrame(newVideo: Boolean = false) {
-        val schedule = if (newVideo) frameDemand.videoArrived() else frameDemand.requestDraw()
+        val schedule = if (newVideo) frameDemand.videoArrived(System.nanoTime()) else frameDemand.requestDraw()
         if (schedule) {
             val clock = displayClock ?: Choreographer.getInstance().also { displayClock = it }
             clock.postFrameCallback(displayFrame)
@@ -612,6 +613,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 "plannedCodecReleaseToLatchP95UpperMs=${correlation?.releaseToLatch?.percentileUpperMs(95) ?: 0} " +
                 "codecCallbackToLatchP95UpperMs=${correlation?.callbackToLatch?.percentileUpperMs(95) ?: 0} " +
                 "latchToSwapP95UpperMs=${correlation?.latchToSwap?.percentileUpperMs(95) ?: 0} " +
+                "decoderInputSurfaceId=${input?.let { System.identityHashCode(it) } ?: 0} " +
+                "decoderAtlas=${scene?.atlasWidth ?: 0}x${scene?.atlasHeight ?: 0} " +
+                SceneBufferQueueEvidence.cadenceFields(metrics.latched, metrics.presented,
+                    if (lastLogNs > 0L) now - lastLogNs else 0L, selectedDisplayHz, expectedFps) + " " +
                 "bufferQueueStage=${SceneBufferQueueEvidence.stage(metrics.latched, metrics.presented, metrics.callbackGaps, metrics.slowSwaps, metrics.unavailableDraws)} " +
                 "bufferQueuePlatformDepth=NOT_MEASURED " +
                 "swapSubmissionsNotPhysicalPresentation=true physicalPresentation=NOT_MEASURED")

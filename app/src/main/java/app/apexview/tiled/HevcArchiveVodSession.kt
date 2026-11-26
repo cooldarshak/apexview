@@ -488,7 +488,7 @@ internal class HevcArchiveVodSession(
                             groups[number].durationUs / 1_000L, nativeDemand, android.os.SystemClock.elapsedRealtime())
                         nativeClear.compose(request, expectedInit,
                             foreground = Thread.currentThread().name != "ApexviewVodWarm",
-                            timeoutMs = timeout) {
+                            timeoutMs = timeout, retainNativeArchiveMedia = true) {
                             HevcClearCmafGridComposer.compose(request)
                         }
                     } finally { expectedInit.fill(0) }
@@ -496,6 +496,8 @@ internal class HevcArchiveVodSession(
             } finally { ownedInits.close() }
             val composed = produced.output
             var publishedFragment: ByteArray? = null
+            val nativeFragment = produced.nativeMedia
+            var publishedNative = false
             try {
                 checkOpen()
                 val compositionMs = (System.nanoTime() - compositionStarted) / 1_000_000L
@@ -504,13 +506,22 @@ internal class HevcArchiveVodSession(
                 val outputTrack = report.tracks.single()
                 // Container sync flags are insufficient proof of random access. The clear
                 // writer emits moof + mdat containing length-prefixed VCL NALs only.
-                val outputBytes = composed.mediaFragments.single()
-                val mdat = java.nio.ByteBuffer.wrap(outputBytes).int
-                val firstNal = mdat + 8 + config.nalLengthSize
-                require(inputs.size == 1 || ((outputBytes[firstNal].toInt() ushr 1) and 63) in 16..21) {
+                val outputBytes = composed.mediaFragments.singleOrNull()
+                val outputSize = nativeFragment?.size ?: requireNotNull(outputBytes).size
+                fun readHeader(offset: Int, count: Int): ByteArray {
+                    require(offset >= 0 && count >= 0 && offset <= outputSize - count)
+                    return ByteArray(count).also { bytes ->
+                        if (nativeFragment != null) nativeFragment.readTo(bytes, 0, offset, count)
+                        else requireNotNull(outputBytes).copyInto(bytes, 0, offset, offset + count)
+                    }
+                }
+                val mdat = java.nio.ByteBuffer.wrap(readHeader(0, 4)).int
+                val firstNal = Math.addExact(mdat, 8 + config.nalLengthSize)
+                require(inputs.size == 1 || ((readHeader(firstNal, 1)[0].toInt() ushr 1) and 63) in 16..21) {
                     "Archive sync sample does not begin with a real HEVC IRAP picture"
                 }
-                val last = CmafBoxInspector.inspect(composed.mediaFragments.last(), report).fragments.single()
+                val last = (nativeFragment?.inspect(report)
+                    ?: CmafBoxInspector.inspect(requireNotNull(outputBytes), report)).fragments.single()
                 val offset = requireNotNull(last.baseDecodeTimeTicks) - scaleUs(groups[number].startUs, trackScale)
                 checkOpen()
                 val verificationMs = (System.nanoTime() - verificationStarted) / 1_000_000L
@@ -555,10 +566,15 @@ internal class HevcArchiveVodSession(
                             "Archive decode timestamps differ from the VOD timeline"
                         }
                     }
-                    // The cache owns the fragment. DataSource readers get isolated copies.
-                    val output = composed.mediaFragments.last()
-                    cache.put(number, output)
-                    publishedFragment = output
+                    // Independent immutable read lease survives cache eviction/engine retirement.
+                    if (nativeFragment != null) {
+                        cache.putNative(number, nativeFragment)
+                        publishedNative = true
+                    } else {
+                        val output = requireNotNull(outputBytes)
+                        cache.put(number, output)
+                        publishedFragment = output
+                    }
                     cache.size to cache.bytesRetained
                     }
                 }
@@ -577,7 +593,7 @@ internal class HevcArchiveVodSession(
                 val sourceInputBytes=batches.sumOf { batch -> batch.sumOf { it.size.toLong() } }
                 // Reuse the exact verified fragment already in scope, not a
                 // second local with the same name or a new payload allocation.
-                if(nativeBudgetObservation.observe(sourceInputBytes,outputBytes.size.toLong())) {
+                if(nativeBudgetObservation.observe(sourceInputBytes,outputSize.toLong())) {
                     nativeBudgetContext?.let { nativeBudgetObservation.log(it) }
                 }
                 val producerMs = (System.nanoTime() - started) / 1_000_000L
@@ -594,7 +610,7 @@ internal class HevcArchiveVodSession(
                     "processGcDuringSegment=${gcDuringProduction ?: -1L} " +
                     "sourceInputBytes=$sourceInputBytes httpCoalescedBytesTotal=${httpCoalescedBytes.get()} " +
                     "media3DeliveredBytesTotal=${media3DeliveredBytes.get()} " +
-                    "outputBytes=${outputBytes.size} " +
+                    "outputBytes=$outputSize archiveStorage=${if (nativeFragment != null) "NATIVE_FRAGMENT" else "HEAP"} " +
                     "sourceAnnexBBytesAvoided=${composed.sourceAnnexBBytesAvoided} " +
                     "sourceNalCopyBytesAvoided=${composed.sourceNalCopyBytesAvoided} " +
                     "rewrittenTailStagingBytesAvoided=${composed.rewrittenTailStagingBytesAvoided} " +
@@ -607,6 +623,7 @@ internal class HevcArchiveVodSession(
             } finally {
                 composed.initializationSegment.fill(0)
                 composed.mediaFragments.forEach { if (it !== publishedFragment) it.fill(0) }
+                if (!publishedNative) nativeFragment?.close()
             }
         } catch (error: Exception) {
             val root = (error as? java.util.concurrent.ExecutionException)?.cause as? Exception ?: error

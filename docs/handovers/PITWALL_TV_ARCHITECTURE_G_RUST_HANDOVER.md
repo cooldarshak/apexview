@@ -6,6 +6,43 @@ When the user instructs completion of an agreed scope (including M1–M13), impl
 
 
 
+## 26 November 2026: Build 884 physical follow-up, consolidated implementation
+
+Baseline: Build 884, `8793e583fff8dacc44abd3ea057c298e1c0faa46`,
+all five CI jobs green. [Exact baseline run](https://github.com/cooldarshak/apexview/actions/runs/45668693169).
+User approved all six follow-up actions plus a persisted manual thermal playback override.
+No new architecture, allocator, decoder, DRM policy, selected quality, or stitching algorithm.
+
+### Evidence and decision ledger
+
+| Scope | Evidence from supplied captures | Implemented / investigated |
+|---|---|---|
+| Archive output ownership | 19 matching clear archive segments, median compose 304 ms Kotlin / 24 ms Rust; 134,657,697 cumulative Java output bytes. Cumulative bytes are NOT simultaneous memory. | Compact atlas output media copies directly from acquired Rust slot into a bounded unpublished Rust fragment; then validated immutable native lease transferred into archive cache. Media3 range reads and existing SceneCastRelay use the same lease; cache eviction, seek, engine retirement and concurrent readers preserve lifetime. Initial/reference metadata stays on JVM, byte parity and DRM gates unchanged. Native storage admission failure retains existing bounded heap output without forcing lower quality or changing the stitching engine. |
+| Three inactive players | Thirty samples per inactive Rust feed, 07:26:22–07:27:23, STATE_IDLE, zero allocator bytes, no decoder/audio; host owns approximately 58–61 MiB. | No inactive Media3 buffer leak established. Retain lightweight parked instances for switching; stop/clear and trim unused allocator blocks. Add per-player role, item count, active video/audio decoder counts, and allocator bytes, plus receiver owner metadata. Do not destroy players on an unsupported leak hypothesis. |
+| Native allocation / graphics attribution | Median process PSS 605.0 vs 623.3 MiB Kotlin/Rust; native heap allocated 40.4 vs 58.4 MiB; platform graphics 240.2 vs 249.1 MiB. Neither system trace contains uncompressed ProfilePacket (field 37) nor compressed packet (field 50): 170,208 and 169,227 packets respectively. Trace PID 21688 differs from log PID 26741. | Add bounded separate native heap + process/GPU/layer/frame-timeline config, trace coverage checker and phone-only capture/symbolization instructions. Expanded process PSS categories, actual owner identity and surface/atlas dimensions. Allocation-site stacks and external codec/GPU bytes remain UNKNOWN until matched physical evidence is supplied. No speculative allocator/surface redesign. |
+| BufferQueue/pacing | Both modes have immediate dequeue refusals (mDequeueTimeout=0), one input texture/one output view, 60 Hz display and 50 fps atlas, around 250 latches/5s, 242–250 submissions, zero reported codec drops. Fractional 60/50 cadence and latch coalescing are not proof of decoder starvation or duplicate buffers. | Keep immediate texture latching, original 60 Hz presentation, platform seamless-only display negotiation. Bound high-refresh deferral by age of oldest pending picture + next vsync vs one output period. Record measured latch/submission rates, cadence compatibility, surface identity and atlas; do not claim physical scanout. |
+| JNI diagnostics | Repeated unresolved native snapshot/trim calls before library load. | Explicit readiness set only after correct ABI loaded, diagnostic/trim paths do not load or invoke unresolved JNI. Preserve unknown vs measured zero. |
+| Native admission | Reserved 32,753,104 B, materialized payload 16,081,640 B, reported future commitment 185,244,952 B. Previous calculation used permitted ceiling rather than planned capacity; pre-clamping fragment headroom to 64 MiB then subtracting this commitment blocked native fragment allocations. | Reserve actual planned slot/bridge/stack + bounded workspace, minus materialized bytes, constrained by existing ceiling. Apply the OS incremental allowance before the arena's independent 64 MiB / 12-live-fragment hard caps; retain existing JVM and OS admission, no quality reduction. |
+| Thermal playback override | Device thermal status 3 during test; actual display 60 Hz despite advertised 120 Hz. | Advanced settings: Temperature-based playback adjustments, default ON, persisted per device. OFF bypasses ONLY Pitwall temperature policy in visible feed budgets, archive speculative warming, Auto preparation and accelerated cadence checks. Actual thermal status still logged; Android hardware thermal protection, pipeline health, memory limits, authorization and manual quality stay unchanged. Receiver uses its local setting. |
+
+Scope gate: unconditional coding changes and investigation of supplied evidence complete
+before the one functional commit. Separate physical proof remains required:
+matched fresh-process Kotlin/Rust PSS, peak RSS and GC, native heapprofd allocation
+call stacks with matching build-ID / ABI symbols, observed graphics/codec ownership,
+clear/protected, local/remote Cast and TV lifecycle/playback regressions. The agreed
+20% lower total PSS target has NOT passed. Moving cached output to native memory
+does not imply an equal reduction in PSS; one native-to-native copy and Media3's
+required bounded read copies remain. No native allocation callsite can be recovered
+from the supplied timing-only traces. M12/M13 redesign remains evidence-gated.
+See `docs/perfetto/pitwall-memory.cfg`, `docs/perfetto/ASHELL.md` and
+`scripts/check_pitwall_memory_trace.py` for the exact next capture.
+Pre-commit checks: full 42 production-wiring tests, 3 trace-coverage tests,
+7 coordinated-change contract tests; Rust/Android compile and instrumentation
+gates are CI-only in this workbench (no installed Rust/Android toolchain).
+The new tests cover native transfer and pinned eviction, unpublished/exposed
+storage safety, exact future reservation, inactive allocation, pending cadence
+age and thermal override. No CI gate was weakened or bypassed.
+
 ### Build 883 green baseline / M1–M13 consolidated completion
 
 Baseline: c06a6cc17eee4dccc857fff5553aa148e5390ad8, [run 45662092202](https://github.com/cooldarshak/apexview/actions/runs/45662092202), five successful jobs. This consolidated change supersedes the earlier partial memory-workstream ledger below. Implementation and pre-commit verification are separate from exact-source CI and measured device acceptance.

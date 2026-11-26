@@ -7,6 +7,43 @@ the device-shell permissions that previously allowed `perfetto` and `logcat`.
 If the device rejects a Perfetto data source, report the error; do not turn
 off Android security protections or downgrade the trace silently.
 
+## Native allocation-site capture (Build 884 follow-up)
+
+The two 26 November system traces contained no native heap profile packets.
+They establish timing, not allocation stacks. Use this separate 60-second
+configuration on the S22 Ultra; do not repeat a standard system trace for
+this question. Keep diagnostic logging on. Use the same four feeds (1080p +
+3 x 480p), same archive segment and speed, and temperature/refresh settings.
+Fully close and relaunch Pitwall before each engine selection measurement;
+record the actual thermal status and use matched conditions. Do not turn
+off Android thermal protections. The new app thermal setting may stay ON
+for the controlled comparison, or use the same setting in both runs.
+
+Download the configuration from the exact tested commit (replace COMMIT
+with its full SHA), then run while steady playback continues:
+
+```sh
+curl -fL -o /sdcard/Download/pitwall-memory.cfg https://raw.githubusercontent.com/cooldarshak/apexview/COMMIT/docs/perfetto/pitwall-memory.cfg
+cat /sdcard/Download/pitwall-memory.cfg | perfetto --txt -c - -o - > /sdcard/Download/pitwall-rust-memory.perfetto-trace
+```
+
+Use a separate filename for Kotlin. If curl cannot access the private
+repository, save the config directly from the repository using the browser.
+If a producer is unavailable or permission is denied, send the exact error.
+Export the matching in-app log and both traces. No root or security bypass.
+
+The analyst must first run
+`python scripts/check_pitwall_memory_trace.py TRACE --require-heap`.
+A ProfilePacket is necessary, not sufficient; verify the app PID,
+sampled allocation callstacks, and native symbols/build ID against the
+exact build's architecture-g0-apk-symbols CI artifact (device ABI).
+Use Perfetto native heap flamegraphs to attribute retained/allocated bytes
+to actual callsites. Correlate process stats, gpu_mem_total (if supported),
+SurfaceFlinger layers and frame timeline, decoderInputSurfaceId and
+decoderAtlas logs. GPU counters may not be supported on this device;
+do not infer vendor decoder/graphics allocation sizes from PSS categories.
+Do not add JVM/native/cache/graphics figures together as they overlap.
+
 ## Before the capture
 
 1. Install the newest green **signed** Debug APK over the current build.

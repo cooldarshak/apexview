@@ -35,7 +35,8 @@ internal class NativeClearArchiveBridge(
         val epoch: Long = 0, val requested: Boolean = false, val context: Context? = null,
         val published: Boolean = false, val reason: String? = null, val closed: Boolean = false,
     )
-    data class Produced(val output: HevcClearCmafGridComposer.Output, val nativeEpoch: Long? = null)
+    data class Produced(val output: HevcClearCmafGridComposer.Output, val nativeEpoch: Long? = null,
+                        val nativeMedia: NativeFragmentLease? = null)
 
     private val control = Any()
     @Volatile private var state = State()
@@ -119,7 +120,12 @@ internal class NativeClearArchiveBridge(
     }
 
     fun compose(request: HevcClearCmafGridComposer.Request, expectedInit: ByteArray,
-                foreground: Boolean, timeoutMs: Long, reference: () -> HevcClearCmafGridComposer.Output): Produced {
+                foreground: Boolean, timeoutMs: Long, reference: () -> HevcClearCmafGridComposer.Output): Produced =
+        compose(request, expectedInit, foreground, timeoutMs, false, reference)
+
+    fun compose(request: HevcClearCmafGridComposer.Request, expectedInit: ByteArray,
+                foreground: Boolean, timeoutMs: Long, retainNativeArchiveMedia: Boolean,
+                reference: () -> HevcClearCmafGridComposer.Output): Produced {
         val selected = state
         if (selected.context == null) return Produced(reference())
         work.lockInterruptibly()
@@ -242,7 +248,7 @@ internal class NativeClearArchiveBridge(
             val started = System.nanoTime()
             var active = requireNotNull(engine)
             val out = try {
-                NativeClearArchiveJob.executeWindow(active, encoded, count, foreground, timeoutMs) { checkCurrent(selected.epoch) }
+                NativeClearArchiveJob.executeWindow(active, encoded, count, foreground, timeoutMs, selected.context.takeIf { retainNativeArchiveMedia }) { checkCurrent(selected.epoch) }
             } catch (_: NativeClearArchiveJob.OutputCapacityException) {
                 // Only an explicitly undersized output lease can trigger a
                 // retry. Other invalid syntax/metadata stays a hard failure.
@@ -257,7 +263,7 @@ internal class NativeClearArchiveBridge(
                 val remaining = timeoutMs - (System.nanoTime() - started) / 1_000_000L
                 reason = "NATIVE_CLEAR_WORKER_REJECTED"
                 check(remaining > 0) { "Native clear resize deadline" }
-                NativeClearArchiveJob.executeWindow(active, encoded, count, foreground, remaining) { checkCurrent(selected.epoch) }
+                NativeClearArchiveJob.executeWindow(active, encoded, count, foreground, remaining, selected.context.takeIf { retainNativeArchiveMedia }) { checkCurrent(selected.epoch) }
             }
             nativeOutput = out
             val validationStarted = System.nanoTime()
@@ -265,15 +271,15 @@ internal class NativeClearArchiveBridge(
             require(out.initialization.contentEquals(expectedInit))
             baseline?.let {
                 require(out.initialization.contentEquals(it.initializationSegment) &&
-                    out.media.size == it.mediaFragments.size && out.media.zip(it.mediaFragments).all { (a, b) -> a.contentEquals(b) })
+                    out.matches(it.mediaFragments))
             }
             // Independently verify every output sample's timing and flags.
             // Sizes change by design when tiles are composed.
             reason = "NATIVE_CLEAR_OUTPUT_VALIDATION"
-            require(out.media.size == count)
+            require(out.sizes.size == count)
             var sampleCount = 0
-            out.media.forEachIndexed { index, bytes ->
-                val report = CmafBoxInspector.inspect(bytes, outputReport)
+            out.sizes.indices.forEach { index ->
+                val report = out.inspect(index, outputReport)
                 require(report.errors.isEmpty())
                 val fragment = report.fragments.single()
                 requireClear(fragment)
@@ -289,15 +295,15 @@ internal class NativeClearArchiveBridge(
                 sampleCount = Math.addExact(sampleCount, fragment.sampleCount)
             }
             checkCurrent(selected.epoch)
-            val actualOutput = 8L + out.initialization.size + out.media.sumOf { it.size.toLong() + if (count > 1) 4L else 0L }
+            val actualOutput = 8L + out.initialization.size + out.sizes.sumOf { it.toLong() + if (count > 1) 4L else 0L }
             smallerJobs = if (encoded.size <= active.budget.inputBytes / 2 && actualOutput <= active.budget.outputBytes / 2)
                 (smallerJobs + 1).coerceAtMost(8) else 0
             val stats = active.copyStats()
             Log.i("ApexviewSingleDecoder", "GB_CLEAR_NATIVE_FRAGMENT generation=${selected.epoch} " +
                 "referenceCompared=${baseline != null} sequence=${request.firstOutputSequenceNumber} deadlineMs=$timeoutMs wallMs=${(System.nanoTime() - started) / 1_000_000L} " +
-                "inputBytes=${encoded.size} outputBytes=${out.media.sumOf { it.size.toLong() }} fragments=$count javaInputBytes=${stats.javaInputBytes} " +
+                "inputBytes=${encoded.size} outputBytes=${out.sizes.sumOf { it.toLong() }} fragments=$count javaInputBytes=${stats.javaInputBytes} " +
                 "nativeInputBytes=${stats.nativeInputBytes} nativeOutputBytes=${stats.nativeOutputBytes} " +
-                "javaOutputBytes=${stats.javaOutputBytes} rejectedSubmits=${stats.rejectedSubmits} compactAtlas=${active.budget.compactAtlas} " +
+                "storage=${if (out.nativeMedia != null) "NATIVE_FRAGMENT" else "HEAP"} javaOutputBytes=${stats.javaOutputBytes} rejectedSubmits=${stats.rejectedSubmits} compactAtlas=${active.budget.compactAtlas} " +
                 "arenaReservedBytes=${active.budget.reservedBytes} arenaPayloadBytes=${active.allocatedPayloadBytes()} " +
                 "submitUs=${out.submitNs / 1000L} waitUs=${out.waitNs / 1000L} readUs=${out.readNs / 1000L} " +
                 "validateUs=${(System.nanoTime() - validationStarted) / 1000L}")
@@ -313,7 +319,7 @@ internal class NativeClearArchiveBridge(
             val result = HevcClearCmafGridComposer.Output(out.initialization, out.media,
                 sps.width, sps.height, sps.displayWidth, sps.displayHeight, sampleCount, count, emptyList())
             nativeOutput = null // transfer only exact, independently verified clear output
-            return Produced(result, selected.epoch)
+            return Produced(result, selected.epoch, out.nativeMedia)
         } catch (cancelled: InterruptedException) {
             clearProof()
             throw cancelled

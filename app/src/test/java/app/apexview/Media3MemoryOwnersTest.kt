@@ -4,6 +4,26 @@ import org.junit.Assert.*
 import org.junit.Test
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class Media3MemoryOwnersTest {
+    @Test fun parkedOwnerDoesNotConflateActiveBufferBytes() {
+        val parked = DefaultAllocator(true,1024)
+        val host = DefaultAllocator(true,1024)
+        Media3MemoryOwners.register(parked,"parked-test")
+        Media3MemoryOwners.register(host,"host-test")
+        val allocation = host.allocate()
+        try {
+            Media3MemoryOwners.update(parked,"ARCHIVE_PARKED",0,0,0)
+            Media3MemoryOwners.update(host,"COMPOSED",1,1,1)
+            val details=Media3MemoryOwners.ownerFields()
+            assertTrue(details.contains("parked-test:ARCHIVE_PARKED:0:0:0:0"))
+            assertTrue(details.contains("host-test:COMPOSED:1024:1:1:1"))
+            Media3MemoryOwners.trimUnused()
+            assertEquals(1024,host.totalBytesAllocated)
+        } finally {
+            host.release(allocation)
+            Media3MemoryOwners.unregister(parked)
+            Media3MemoryOwners.unregister(host)
+        }
+    }
     @Test fun trimKeepsOutstandingAllocationsAndUnregistersBothPlayers() {
         val initial = Media3MemoryOwners.snapshot()
         val a = DefaultAllocator(true,1024)

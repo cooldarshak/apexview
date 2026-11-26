@@ -4,6 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SceneFrameCadenceGateTest {
+    @Test fun oldPendingPictureIsNotDeferredBeyondOutputPeriod() {
+        val gate = SceneFrameCadenceGate()
+        val first = 1_000_000_000L
+        gate.onVideoDraw(first)
+        assertTrue(gate.shouldDefer(first + 8_333_333L, 50.0, 120f, pendingAgeNs = 2_000_000L))
+        assertFalse(gate.shouldDefer(first + 8_333_333L, 50.0, 120f, pendingAgeNs = 13_000_000L))
+        assertFalse(gate.shouldDefer(first + 8_333_333L, 50.0, 60f, pendingAgeNs = 13_000_000L))
+    }
     @Test fun preventsEightMillisecondBurstsAt120HzWithoutLosingPendingVideo() {
         val gate = SceneFrameCadenceGate()
         val demand = SceneFrameDemand()

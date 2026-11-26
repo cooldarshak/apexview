@@ -15,6 +15,31 @@ def contents(path):
 
 
 class ProductionWiringTests(unittest.TestCase):
+    def test_archive_native_publication_and_user_thermal_override(self):
+        base = "app/src/main/java/app/apexview/"
+        archive = contents(base + "tiled/HevcArchiveVodSession.kt")
+        job = contents(base + "tiled/NativeClearArchiveJob.kt")
+        lease = contents(base + "tiled/NativeFragmentLease.kt")
+        cache = contents(base + "tiled/ArchiveBufferPolicy.kt")
+        engine = contents(base + "tiled/NativeStitchingEngine.java")
+        self.assertIn("retainNativeArchiveMedia = true", archive)
+        self.assertIn("cache.putNative(", archive)
+        self.assertIn("NativeFragmentLease.fromEngine", job)
+        self.assertIn("engine.readToFragment", lease)
+        self.assertIn("native.readTo", cache.replace("requireNotNull(native).", "native."))
+        self.assertIn("if (!libraryReady) return null", engine)
+        self.assertIn("segmentLease(", contents(base + "cast/SceneCastRelay.kt"))
+        self.assertIn("ARCHIVE_PARKED", contents(base + "FeedPlayer.kt"))
+        self.assertIn('getBoolean("thermalPlaybackAdaptation", true)', contents(base + "Settings.kt"))
+        self.assertIn("setThermalPlaybackAdaptation", contents(base + "Sheets.kt"))
+        self.assertIn("playbackThermalStatus", contents(base + "AppState.kt"))
+        self.assertIn("effectiveStatus", contents(base + "AdaptivePlaybackCadence.kt"))
+        for name in ("SingleDecoderSceneView.kt", "ProtectedDecoderSceneView.kt"):
+            scene = contents(base + "scene/" + name)
+            self.assertIn("pendingAgeNs = frameDemand.pendingAgeNs", scene)
+            self.assertIn("SceneBufferQueueEvidence.cadenceFields", scene)
+        self.assertIn('name: "android.heapprofd"', contents("docs/perfetto/pitwall-memory.cfg"))
+
     def test_gc_shared_forecast_and_unique_owner_accounting(self):
         archive = contents("app/src/main/java/app/apexview/tiled/HevcArchiveVodSession.kt")
         relay = contents("app/src/main/java/app/apexview/cast/RelayResourceStore.kt")
@@ -329,7 +354,7 @@ class ProductionWiringTests(unittest.TestCase):
         state = contents(prefix + "AppState.kt")
         self.assertIn("singleDecoderScenePlayer?.isArchiveVodPlayback == true", state)
         self.assertIn("singleDecoderScenePlayer?.prioritizeArchiveSeek(targetMs)", state)
-        self.assertIn("protectedCompositionHost?.feed?.updateArchiveThermalStatus(thermal)", state)
+        self.assertIn("protectedCompositionHost?.feed?.updateArchiveThermalStatus(playbackThermalStatus)", state)
         session = contents(prefix + "tiled/HevcArchiveVodSession.kt")
         self.assertIn("ArchiveTimelineSearch.floorIndex(", session)
         # Preserve thermal gating and require memory gating before scheduling

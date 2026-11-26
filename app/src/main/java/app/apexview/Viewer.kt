@@ -2070,7 +2070,7 @@ private fun VideoQualitySheet(app: AppState) {
             VideoQualityAdvisory.atlasNotice(app.activeAtlasQualityEvidence())?.let { notice ->
                 Text(notice, style = Type.footnote, modifier = Modifier.padding(top = 12.dp))
             }
-            VideoQualityAdvisory.thermalNotice(app.thermal, app.settings.decoderMode,
+            VideoQualityAdvisory.thermalNotice(app.playbackThermalStatus, app.settings.decoderMode,
                 app.settings.videoQuality)?.let { notice ->
                 Text(notice, style = Type.footnote.copy(color = Ink.live),
                     modifier = Modifier.padding(top = 8.dp))

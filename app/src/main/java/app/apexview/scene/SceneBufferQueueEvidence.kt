@@ -10,6 +10,17 @@ internal object SceneBufferQueueEvidence {
     enum class Stage { NO_LATCH_OBSERVED, GL_OUTPUT_UNAVAILABLE, EGL_SWAP_DELAY_OBSERVED,
         CALLBACK_GAP_OBSERVED, GL_FLOW_OBSERVED }
 
+    fun cadenceFields(latched: Long, submitted: Long, windowNs: Long, refreshHz: Float,
+                      expectedFps: Float): String {
+        fun rate(count: Long): Long = if (windowNs > 0L && count >= 0L)
+            (count.toDouble() * 1_000_000_000_000.0 / windowNs).toLong() else -1L
+        val multiple = if (refreshHz > 0f && expectedFps > 0f)
+            SceneFrameRatePolicy.isIntegerRefreshMultiple(refreshHz, expectedFps.toDouble()).toString()
+        else "UNKNOWN"
+        return "cadenceWindowNs=$windowNs observedLatchMilliFps=${rate(latched)} " +
+            "observedSubmitMilliFps=${rate(submitted)} refreshMultiple=$multiple physicalPresentation=NOT_MEASURED"
+    }
+
     fun stage(latched: Long, submitted: Long, callbackGaps: Long, slowSwaps: Long,
               unavailableDraws: Long): Stage = when {
         unavailableDraws > 0L -> Stage.GL_OUTPUT_UNAVAILABLE

@@ -4,6 +4,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SceneFrameDemandTest {
+    @Test fun pendingAgeSurvivesCoalescingAndClearsOnConsumption() {
+        val demand = SceneFrameDemand()
+        assertTrue(demand.videoArrived(1_000L))
+        assertFalse(demand.videoArrived(2_000L))
+        assertEquals(2_000L, demand.pendingAgeNs(3_000L))
+        assertTrue(demand.beginFrame())
+        assertEquals(0L, demand.pendingAgeNs(4_000L))
+        demand.videoArrived(5_000L)
+        demand.discardPendingVideo()
+        assertEquals(0L, demand.pendingAgeNs(6_000L))
+    }
     @Test fun severalCodecCallbacksNeedOnlyOneDisplayFrame() {
         val frames = SceneFrameDemand()
         assertTrue(frames.videoArrived())
