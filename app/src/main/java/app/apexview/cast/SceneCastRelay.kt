@@ -11,7 +11,6 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.security.MessageDigest
 import java.security.SecureRandom
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -44,13 +43,15 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
     private fun recordFirst(kind: String, bytes: Int, startedNs: Long) {
         if (firstResponses.add(kind)) android.util.Log.i("PitwallCast", "CAST_RELAY_FIRST_RESPONSE id=$relayId route=ARCHIVE kind=$kind bytes=$bytes elapsedMs=${(System.nanoTime()-relayStartedNs)/1_000_000L} requestMs=${(System.nanoTime()-startedNs)/1_000_000L}")
     }
-    private val resources = ConcurrentHashMap<String, Uri>()
-    private val audioManifests = ConcurrentHashMap<String, ByteArray>()
-    private val activeSockets = ConcurrentHashMap.newKeySet<Socket>()
+    // Rewritten playlists contain local names only. Publish them once,
+    // retaining immutable bytes until the final socket reader exits.
+    private val playlists = RelayResourceStore(34L * 1024 * 1024, 17, 4)
+    @Volatile private var resources: Map<String, Uri> = emptyMap()
+    @Volatile private var metadataReady = false
+    private val activeSockets = java.util.concurrent.ConcurrentHashMap.newKeySet<Socket>()
     private val selectedAudio = session.audioUris[programmeLabel]
         ?: session.audioUri.takeIf { programmeLabel == session.clockLabel }
-    private data class CaptionTrack(val index: Int, val masterTag: String, val playlist: ByteArray,
-                                    val segments: List<Uri>)
+    private data class CaptionTrack(val index: Int, val masterTag: String, val segments: List<Uri>)
     @Volatile private var captions: List<CaptionTrack> = emptyList()
     init { accepting.execute {
         while (!stopped.get()) {
@@ -136,6 +137,17 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
             reply(404, "text/plain", ByteArray(0)); return
         }
         val name = path.removePrefix("/s/$token/")
+        if (!metadataReady) { reply(404, "text/plain", ByteArray(0)); return }
+        fun replyPlaylist(name: String) {
+            val body = playlists.acquire(name)
+            if (body == null) { reply(404, "text/plain", ByteArray(0)); return }
+            body.use {
+                val output = replyHeaders(200, HLS, it.size)
+                if (request[0] == "GET") it.writeTo(output, 0, it.size)
+                output.flush()
+                if (request[0] == "GET") recordFirst("PLAYLIST", it.size, requestStartedNs)
+            }
+        }
         try {
             when {
                 name == "master.m3u8" -> {
@@ -147,12 +159,12 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
                         (if (tracks.isEmpty()) "" else ",SUBTITLES=\"pitwall-cc\"") + "\nvideo.m3u8\n").toByteArray())
                 }
                 name == "video.m3u8" -> reply(200, HLS, session.hlsPlaylist().toByteArray())
-                name == "audio.m3u8" -> reply(200, HLS, audioManifest())
+                name == "audio.m3u8" -> replyPlaylist(name)
                 name.matches(Regex("cc-[0-9]+[.]m3u8")) -> {
                     val index = name.removePrefix("cc-").removeSuffix(".m3u8").toIntOrNull()
                     val track = captions.firstOrNull { it.index == index }
                     if (track == null) reply(404, "text/plain", ByteArray(0))
-                    else reply(200, HLS, track.playlist)
+                    else replyPlaylist(name)
                 }
                 name.matches(Regex("cc-[0-9]+-[0-9]+[.]vtt")) -> {
                     val ids = name.removePrefix("cc-").removeSuffix(".vtt").split('-')
@@ -169,7 +181,9 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
                 }
                 name == "init.mp4" -> replyVideo(app.apexview.tiled.ArchiveFragmentLease.owned(session.initialization()))
                 name.matches(Regex("s-\\d+\\.m4s")) -> replyVideo(session.segmentLease(name.removePrefix("s-").removeSuffix(".m4s").toInt()))
-                name.startsWith("a-") && resources[name] != null -> {
+                name.startsWith("a-") -> {
+                    val uri = resources[name]
+                    if (uri == null) { reply(404, "text/plain", ByteArray(0)); return }
                     val range = headers["range"]?.let { Regex("bytes=(\\d+)-(\\d+)").matchEntire(it) }
                     if (headers["range"] != null && range == null) { reply(400, "text/plain", ByteArray(0)); return }
                     val offset = if (range == null) 0L else requireNotNull(range.groupValues[1].toLongOrNull())
@@ -178,7 +192,7 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
                         require(last >= offset && last - offset < 8L * 1024 * 1024 && last < Long.MAX_VALUE)
                         last - offset + 1
                     }
-                    val bytes = reader.read(resources.getValue(name), 8 * 1024 * 1024, offset, length).bytes
+                    val bytes = reader.read(uri, 8 * 1024 * 1024, offset, length).bytes
                     try {
                         if (range != null) require(bytes.size.toLong() == length)
                         val extra = if (range == null) "" else "Content-Range: bytes $offset-${offset + bytes.size - 1}/*\r\n"
@@ -193,9 +207,31 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
     }
 
     /** Validate protection before exposing a link. No key URI or F1 credential is ever relayed. */
-    fun validateAudio() { audioManifest(); prepareCaptions() }
+    fun validateAudio() {
+        synchronized(publicationLock) {
+            check(!stopped.get())
+            if (metadataReady) return
+        }
+        val (audio, preparedResources) = prepareAudioManifest()
+        val prepared = linkedMapOf("audio.m3u8" to audio)
+        var transferred = false
+        try {
+            val verified = prepareCaptions(prepared)
+            synchronized(publicationLock) {
+                check(!stopped.get())
+                if (metadataReady) return
+                playlists.publish(prepared)
+                transferred = true
+                resources = preparedResources
+                captions = verified
+                metadataReady = true
+            }
+        } finally {
+            if (!transferred) prepared.values.forEach { it.fill(0) }
+        }
+    }
 
-    private fun prepareCaptions() {
+    private fun prepareCaptions(prepared: MutableMap<String, ByteArray>): List<CaptionTrack> {
         val offers = session.captionSources[programmeLabel]?.renditions.orEmpty().take(16)
         val verified = mutableListOf<CaptionTrack>()
         var remainingSegments = 32_768
@@ -218,8 +254,9 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
                     val sample = reader.read(segments.first(), MAX_CAPTION_BYTES).bytes
                     try { require(ClearCaptionPlaylist.isWebVtt(sample)) }
                     finally { sample.fill(0) }
-                    verified += CaptionTrack(index, ClearCaptionPlaylist.masterTag(index, offer.language, offer.label),
-                        playlist.text.toByteArray(Charsets.UTF_8), segments)
+                    val tag = ClearCaptionPlaylist.masterTag(index, offer.language, offer.label)
+                    prepared["cc-$index.m3u8"] = playlist.text.toByteArray(Charsets.UTF_8)
+                    verified += CaptionTrack(index, tag, segments)
                     remainingSegments -= segments.size
                 } finally { response.bytes.fill(0) }
             } catch (cancelled: java.io.InterruptedIOException) { throw cancelled }
@@ -228,16 +265,11 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
                 android.util.Log.w("PitwallCast", "CLEAR_CAPTION_RENDITION_UNAVAILABLE type=${error.javaClass.simpleName}")
             }
         }
-        synchronized(publicationLock) {
-            check(!stopped.get())
-            captions = verified.toList()
-        }
         android.util.Log.i("PitwallCast", "CLEAR_CAPTION_RELAY verified=${verified.size} declared=${offers.size}")
+        return verified.toList()
     }
-    private fun audioManifest(): ByteArray {
+    private fun prepareAudioManifest(): Pair<ByteArray, Map<String, Uri>> {
         val uri = requireNotNull(selectedAudio) { "No native audio rendition" }
-        val key = uri.toString()
-        audioManifests[key]?.let { return it }
         val preparedResources = linkedMapOf<String, Uri>()
         val prepared = run {
             val response = reader.read(uri, 2 * 1024 * 1024)
@@ -270,16 +302,7 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
                 }.toByteArray()
             } finally { response.bytes.fill(0) }
         }
-        synchronized(publicationLock) {
-            if (stopped.get()) {
-                prepared.fill(0)
-                throw IOException("Archive relay closed")
-            }
-            audioManifests[key]?.let { prepared.fill(0); return it }
-            resources.putAll(preparedResources)
-            audioManifests[key] = prepared
-            return prepared
-        }
+        return prepared to preparedResources.toMap()
     }
 
     override fun close() {
@@ -294,8 +317,10 @@ internal class SceneCastRelay(val session: HevcArchiveVodSession,
         steps.run("workers") { workers.shutdownNow() }
         steps.run("archive-lease") { lease.close() }
         synchronized(publicationLock) {
-            audioManifests.values.forEach { it.fill(0) }; audioManifests.clear(); resources.clear()
+            metadataReady = false
+            resources = emptyMap()
             captions = emptyList()
+            steps.run("playlist-leases") { playlists.close() }
         }
     }
     companion object {
