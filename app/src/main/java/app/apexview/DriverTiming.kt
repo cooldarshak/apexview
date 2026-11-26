@@ -410,7 +410,8 @@ object DriverTimingParser {
             }
             val target = targetUtc()
             val last = publishedThrough
-            val needsPreview = last == null || target > last + 5_000L ||
+            // Never knowingly leave the current playback clock outside the published prefix.
+            val needsPreview = last == null || target > last ||
                 last - target < TOWER_PREVIEW_LOOKAHEAD_MS && time - last >= TOWER_PREVIEW_LOOKAHEAD_MS
             if (time >= target && needsPreview && drivers.values.any { it.position != null }) {
                 publishedThrough = time
