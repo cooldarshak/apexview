@@ -17,4 +17,15 @@ class PitwallPairingCodeTest {
             PitwallPairingCode.fromCertificates(byteArrayOf(), tv)
         }
     }
+    @Test fun physicalTelevisionSelectionRejectsSpoofedAndChangedCertificates() {
+        val tv = byteArrayOf(4, 5, 6)
+        val expected = PitwallPairingCode.televisionIdentity(tv)
+        assertTrue(PitwallPairingCode.matchesTelevisionIdentity(expected, PitwallPairingCode.televisionIdentity(tv.copyOf())))
+        assertTrue(PitwallPairingCode.matchesTelevisionIdentity(expected.lowercase().replace(" ", "-"), expected))
+        assertFalse(PitwallPairingCode.matchesTelevisionIdentity(expected, PitwallPairingCode.televisionIdentity(byteArrayOf(4, 5, 7))))
+        assertFalse(PitwallPairingCode.matchesTelevisionIdentity(expected.take(5), expected))
+        assertFalse(PitwallPairingCode.matchesTelevisionIdentity("Z".repeat(24), expected))
+        assertFalse(PitwallPairingCode.matchesTelevisionIdentity(PitwallPairingCode.fromCertificates(byteArrayOf(1), tv), expected))
+        assertNull(PitwallPairingCode.normalizeTelevisionIdentity(""))
+    }
 }
