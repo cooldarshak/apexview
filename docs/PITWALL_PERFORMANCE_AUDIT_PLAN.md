@@ -6,6 +6,16 @@ When the user instructs completion of an agreed scope (including M1–M13), impl
 
 
 
+## Build 887 CI correction (26 November 2026)
+
+Build 887 (8f9d37798ac0bda63da54fe8d4a27f4beeae5811) failed at the first Android
+Rust ABI compilation, armeabi-v7a. The host kernel checks had already run.
+The new nativeAdoptAtlasFragment invalid-argument return used the JNI i32
+INVALID constant in an i64 result closure (E0308). Convert explicitly to i64,
+matching adjacent JNI entry points. No production behavior, ownership,
+quality, DRM, test gate or scope change. Android build and physical acceptance
+remain pending exact-source verification.
+
 ## Build 886 follow-up — owned-output publication and measured bottleneck investigation (26 November 2026)
 
 Baseline: Build 886 GREEN (dd4e2b45008b6c330fb8645fa0f66a39ef30ebcf).

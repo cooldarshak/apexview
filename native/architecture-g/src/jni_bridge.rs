@@ -300,7 +300,7 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeAdopt
     _env:JNIEnv<'_>,_class:JClass<'_>,handle:jlong,token:jlong,offset:jint,length:jint,incremental:jlong)->jlong {
     guarded(|| {
         let (Ok(offset),Ok(size),Ok(incremental))=(usize::try_from(offset),usize::try_from(length),usize::try_from(incremental))
-            else {return INVALID;};
+            else {return i64::from(INVALID);};
         session_call(handle,|s|{
             let Some((capacity,packet_len))=s.engine.owned_output_dimensions(token,offset,size)
                 else {return BACKPRESSURE;};
