@@ -1000,6 +1000,7 @@ class FeedPlayer(
         clearOutput: Boolean = false,
         startPositionMs: Long? = null,
         playWhenReady: Boolean = true,
+        validatePrepared: () -> Unit = {},
     ) {
         val nextSource = ProtectedHevcLiveDashSource(clearOutput)
         firstFrameRendered = false
@@ -1017,6 +1018,10 @@ class FeedPlayer(
                 publisherStarted = true
                 nextSource.publish(window, widevinePssh)
             }
+            // The expensive IO publication suspended the main coroutine.
+            // Revalidate the caller's exact selection before taking the
+            // Media3 host or replacing a source on the application looper.
+            validatePrepared()
             val mediaItem = MediaItem.Builder()
                 .setUri(Uri.parse(PROTECTED_COMPOSED_MANIFEST_URI))
                 .setMimeType(MimeTypes.APPLICATION_MPD)
