@@ -190,6 +190,8 @@ internal class HevcArchiveVodSession(
     private val baseReleased = java.util.concurrent.atomic.AtomicBoolean(false)
     // Guarded by cacheLock. Shared relay ownership and seeks invalidate local delivery proof.
     private var localDeliveryEpoch = 0L
+    // Separate production generation: relay lease changes do not invalidate valid media.
+    private var productionEpoch = 0L
     private fun captureLocalDeliveryEpoch(): Long? = synchronized(cacheLock) {
         if (!closed && owners.get() == 1 && !baseReleased.get()) localDeliveryEpoch else null
     }
@@ -303,7 +305,7 @@ internal class HevcArchiveVodSession(
         val target = segmentAt(ArchiveTimelineSearch.msToUs(positionMs))
         nativeDemand = null // never use the pre-seek clock for the new target
         synchronized(cacheLock) {
-            if (!closed) { localDeliveryEpoch++; nativeClear.invalidateForSeek() }
+            if (!closed) { localDeliveryEpoch++; productionEpoch++; nativeClear.invalidateForSeek() }
         }
         preemptUnrelatedWarmup(target, seek = true)
     }
@@ -449,7 +451,7 @@ internal class HevcArchiveVodSession(
     }
 
     private fun composeAndPublishAdmitted(number: Int, requestedAt: Long) {
-        checkOpen()
+        val epoch = synchronized(cacheLock) { checkOpen(); productionEpoch }
         val started = System.nanoTime()
         val cpuAtStart = android.os.Debug.threadCpuTimeNanos()
         // ART process-wide counters include concurrent player/UI allocation; this is a
@@ -592,6 +594,7 @@ internal class HevcArchiveVodSession(
                 // DataSource request behind a speculative producer's cacheLock.
                 val (cacheEntries, cachedByteCount) = synchronized(cacheLock) {
                     checkOpen()
+                    if (productionEpoch != epoch) throw ArchiveWarmupCancelledException()
                     nativeClear.publish(produced.nativeEpoch) {
                     if (initialization == null) {
                         initialization = composed.initializationSegment.copyOf()
@@ -689,6 +692,7 @@ internal class HevcArchiveVodSession(
             val root = (error as? java.util.concurrent.ExecutionException)?.cause as? Exception ?: error
             // A socket timeout is a network failure, not a seek cancellation:
             // SocketTimeoutException extends InterruptedIOException.
+            if (root is ArchiveWarmupCancelledException) throw root
             if (Thread.currentThread().isInterrupted ||
                 root is InterruptedException || root is java.util.concurrent.CancellationException ||
                 (root is java.io.InterruptedIOException && root !is java.net.SocketTimeoutException)) {
