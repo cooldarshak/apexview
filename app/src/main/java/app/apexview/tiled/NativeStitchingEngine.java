@@ -58,8 +58,9 @@ public final class NativeStitchingEngine implements AutoCloseable {
             observedInput>MAX_ATLAS_PACKET || observedOutput>MAX_ATLAS_PACKET) return null;
         // The arena lives outside the Java heap. Reserve Java packet/output
         // copies separately, and retain seven eighths of the OS surplus for
-        // codecs, GL, audio, the JVM and other apps. Do not grant capacity
-        // just because a device has a particular model or RAM class.
+        // codecs, GL, audio, the JVM and other apps in the normal tier.
+        // A bounded exact-reservation recovery tier below is restricted
+        // to non-low-RAM foreground atlas admission. No model exception.
         long surplus=availableBytes-osThresholdBytes;
         long ceiling=surplus/8;
         // The archive bridge serializes jobs; two logical slots preserve
@@ -73,7 +74,30 @@ public final class NativeStitchingEngine implements AutoCloseable {
             Budget grown=atlasBudget(ceiling,jvmHeadroom,grownInput,grownOutput);
             if (grown!=null) return grown;
         }
-        return atlasBudget(ceiling,jvmHeadroom,observedInput,observedOutput);
+        Budget exact=atlasBudget(ceiling,jvmHeadroom,observedInput,observedOutput);
+        if (exact!=null || lowRam) return exact;
+        // A bounded foreground recovery tier for normal-RAM devices. The
+        // previous 1/8 policy denied real 5–7 MB TV atlas packets even though
+        // OS lowMemory=false and sufficient Java/native headroom remained.
+        // Keep at least 3/4 of measured OS surplus plus the OS threshold
+        // outside this new engine/Java transient forecast. Never grant the
+        // whole larger allowance to the native worker: charge only its
+        // checked slot + workspace requirement, and retain the 192 MiB cap.
+        long recoveryCeiling=surplus/4;
+        int modestInput=(int)Math.min(MAX_ATLAS_PACKET,observedInput+(observedInput+7L)/8);
+        int modestOutput=(int)Math.min(MAX_ATLAS_PACKET,observedOutput+(observedOutput+7L)/8);
+        Budget modest=exactAtlasBudget(recoveryCeiling,jvmHeadroom,modestInput,modestOutput);
+        if (modest!=null) return modest;
+        return exactAtlasBudget(recoveryCeiling,jvmHeadroom,observedInput,observedOutput);
+    }
+    private static Budget exactAtlasBudget(long allowance,long jvmHeadroom,int input,int output) {
+        // Same full Java transient allowance as the original planner; no
+        // change to independent JVM headroom, native packet or worker bounds.
+        long javaTransient=input+2L*output+8*MIB;
+        long required=2L*(input+(long)output)+RESERVE+atlasWorkspaceBytes(input,output);
+        if (javaTransient>jvmHeadroom || javaTransient>=allowance ||
+            required>MAX_ATLAS_BUDGET || required>allowance-javaTransient) return null;
+        return new Budget(2,input,output,required,true);
     }
     public static long atlasWorkspaceBytes(int input,int output) {
         return 4L*input+output+8*MIB;

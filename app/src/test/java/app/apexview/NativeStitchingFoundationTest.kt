@@ -94,6 +94,36 @@ class NativeStitchingFoundationTest {
         assertTrue(maximum.ceilingBytes <= 192*mib)
         assertNull(NativeStitchingEngine.planClearAtlas(false,4096*mib,128*mib,256*mib,maxPacket+1,output))
     }
+    @Test fun build896TvForegroundAtlasAdmissionKeepsNativeAndJavaReserves() {
+        // Exact four rejected Build 896 TV observations. The admission test
+        // does not require JNI loading or a particular device model.
+        val samples = listOf(
+            longArrayOf(5474084,7002945,621977600,150994944,303428224),
+            longArrayOf(5226177,6258463,651563008,150994944,321931440),
+            longArrayOf(5591105,6324612,619515904,150994944,268680776),
+            longArrayOf(5221449,6295460,672854016,150994944,323391488)
+        )
+        val mib=1024L*1024L
+        samples.forEach { v ->
+            val input=v[0].toInt(); val output=v[1].toInt()
+            val surplus=v[2]-v[3]
+            val original=2L*(input.toLong()+output)+576*1024L+
+                NativeStitchingEngine.atlasWorkspaceBytes(input,output)+input+2L*output+8*mib
+            assertTrue(original>surplus/8)
+            val b=requireNotNull(NativeStitchingEngine.planClearAtlas(false,v[2],v[3],v[4],input,output))
+            assertTrue(b.compactAtlas)
+            assertEquals(2,b.slots)
+            assertTrue(b.inputBytes>=input && b.outputBytes>=output)
+            val required=b.reservedBytes+NativeStitchingEngine.atlasWorkspaceBytes(b.inputBytes,b.outputBytes)
+            assertEquals(required,b.ceilingBytes)
+            val transient=b.inputBytes+2L*b.outputBytes+8*mib
+            assertTrue(required+transient<=surplus/4)
+            assertTrue(required<=192*mib && transient<=v[4])
+            assertNull(NativeStitchingEngine.planClearAtlas(true,v[2],v[3],v[4],input,output))
+            assertNull(NativeStitchingEngine.planClearAtlas(false,v[3]+64*mib,v[3],v[4],input,output))
+            assertNull(NativeStitchingEngine.planClearAtlas(false,v[2],v[3],8*mib,input,output))
+        }
+    }
     @Test fun observedDeviceHeadroomAndHighWaterControlAdmission() {
         val mib=1024L*1024L
         val sizes=app.apexview.tiled.NativeStitchingBudgetObservation()

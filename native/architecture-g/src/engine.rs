@@ -61,6 +61,13 @@ impl Budget {
     /// worker stack reservation and conservative control overhead.
     pub fn reserved(self)->Option<usize> { self.reserved_with_bridge(true) }
     pub fn reserved_atlas(self)->Option<usize> { self.reserved_with_bridge(false) }
+    /// Full compact atlas admission, including worker scratch. Checked in
+    /// native code independently of the Android-side headroom forecast.
+    pub fn atlas_required(self)->Option<usize> {
+        let required=self.reserved_atlas()?.checked_add(
+            atlas_job::workspace_reserve(self.input,self.output)?)?;
+        (required<=self.ceiling).then_some(required)
+    }
     fn reserved_with_bridge(self, bridge:bool)->Option<usize> {
         if !(2..=8).contains(&self.slots) ||
             !(1..=MAX_BUFFER).contains(&self.input) ||
@@ -535,6 +542,24 @@ mod tests {
             if n!=0{return n;}
             assert!(Instant::now()<until,"worker did not finish");
             thread::yield_now();
+        }
+    }
+    #[test]
+    fn build896_tv_exact_native_budget_accepts_workspace_but_not_one_byte_less() {
+        for (input,output) in [(5474084,7002945),(5226177,6258463),
+                               (5591105,6324612),(5221449,6295460)] {
+            let proposed=Budget{slots:2,input,output,ceiling:MAX_BUDGET};
+            let required=proposed.atlas_required().unwrap();
+            let exact=Budget{ceiling:required,..proposed};
+            assert_eq!(exact.atlas_required(),Some(required));
+            assert_eq!(Budget{ceiling:required-1,..exact}.atlas_required(),None);
+            let mut engine=Engine::new_atlas(exact).unwrap();
+            assert_eq!(engine.allocated_payload_bytes(),0);
+            assert_eq!(engine.future_commitment(0),required);
+            // A rejected fill is not a media publication. It proves the
+            // full native workspace gate permits a bounded worker command.
+            assert_eq!(engine.submit_clear_atlas_with(1,4,true,5000,|_|false),INVALID);
+            assert!(engine.close());
         }
     }
     #[test]

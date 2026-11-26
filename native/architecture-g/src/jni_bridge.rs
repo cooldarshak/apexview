@@ -141,7 +141,7 @@ fn open_session(slots:jint,input:jint,output:jint,ceiling:jlong,compact:bool)->j
         let (Ok(slots),Ok(input),Ok(output),Ok(ceiling))=(usize::try_from(slots),usize::try_from(input),
             usize::try_from(output),usize::try_from(ceiling)) else {return i64::from(INVALID);};
         let budget=Budget{slots,input,output,ceiling};
-        let reserved=if compact {budget.reserved_atlas()} else {budget.reserved()};
+        let reserved=if compact {budget.atlas_required()} else {budget.reserved()};
         if reserved.is_none(){return i64::from(INVALID);}
         let mut r=registry().lock().expect("engine registry");
         if r.active.is_some(){return BACKPRESSURE;}

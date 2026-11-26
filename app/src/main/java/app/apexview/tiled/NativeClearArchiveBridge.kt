@@ -26,7 +26,9 @@ internal class NativeClearArchiveBridge(
             "lowRam=${h.lowRam} lowMemory=${h.lowMemory} admitted=${b != null} " +
             "inputCapacity=${b?.inputBytes ?: 0} outputCapacity=${b?.outputBytes ?: 0} " +
             "arenaBytes=${b?.reservedBytes ?: 0} workspaceBytes=${b?.let { NativeStitchingEngine.atlasWorkspaceBytes(it.inputBytes, it.outputBytes) } ?: 0} " +
-            "ceilingBytes=${b?.ceilingBytes ?: 0}")
+            "ceilingBytes=${b?.ceilingBytes ?: 0} " +
+            "osSurplusBytes=${(h.available-h.threshold).coerceAtLeast(0)} " +
+            "admissionReason=${if (h.lowMemory) "OS_LOW_MEMORY" else if (b == null) "FORECAST_REJECTED" else if (b.ceilingBytes + b.inputBytes + 2L*b.outputBytes + 8L*1024*1024 > (h.available-h.threshold)/8) "BOUNDED_FOREGROUND_RECOVERY" else "NORMAL"}")
         NativeStitchingEngine.open(b ?: throw IllegalStateException("Clear atlas memory admission rejected"))
       }
     },
