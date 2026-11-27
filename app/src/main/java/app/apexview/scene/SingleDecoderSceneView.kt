@@ -256,6 +256,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                         castVideoSurface = EGL14.eglCreateWindowSurface(display, selected, target.surface,
                             intArrayOf(EGL14.EGL_NONE), 0)
                         check(castVideoSurface != EGL14.EGL_NO_SURFACE)
+                        SceneColorOnlyEgl.discardAfterSwap(display, castVideoSurface, "clear-cast")
                     } catch (error: Exception) {
                         releaseBakedCastVideoSurface()
                         throw error
@@ -616,14 +617,12 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         val acquired = SceneEglDisplays.acquire()
         displayLease = acquired
         display = acquired.display
-        val configs = arrayOfNulls<EGLConfig>(1)
-        val count = IntArray(1)
         val attributes = intArrayOf(EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
             EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8)
-        fun choose(extra: IntArray) = EGL14.eglChooseConfig(display,
-            attributes + extra + EGL14.EGL_NONE, 0, configs, 0, 1, count, 0) && count[0] > 0
-        check(choose(intArrayOf(0x3142, 1)) || choose(intArrayOf())) { "No GLES2 configuration" }
-        val selected = checkNotNull(configs[0])
+        val selected = checkNotNull(
+            SceneColorOnlyEgl.choose(display, attributes + intArrayOf(0x3142, 1, EGL14.EGL_NONE), "clear-recordable")
+                ?: SceneColorOnlyEgl.choose(display, attributes + EGL14.EGL_NONE, "clear")
+        ) { "No GLES2 configuration" }
         config = selected
         contextGl = EGL14.eglCreateContext(display, selected, EGL14.EGL_NO_CONTEXT,
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
@@ -631,6 +630,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         outputSurface = displaySurface
         window = EGL14.eglCreateWindowSurface(display, selected, displaySurface, intArrayOf(EGL14.EGL_NONE), 0)
         check(EGL14.eglMakeCurrent(display, window, window, contextGl)) { "Unable to bind scene output" }
+        SceneColorOnlyEgl.discardAfterSwap(display, window, "clear-local")
         // Display callbacks already limit swaps to one per vsync. A second, blocking
         // EGL swap interval can hold this same GL thread while codec frames wait to be
         // latched. Let the platform reject interval zero if the driver requires one.

@@ -382,11 +382,12 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             ?.split(' ')?.contains("EGL_EXT_protected_content") == true) {
             "This device does not support protected GPU layout rendering at its active Widevine level"
         }
-        val configs = arrayOfNulls<EGLConfig>(1)
-        val count = IntArray(1)
-        check(EGL14.eglChooseConfig(display, intArrayOf(EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-            EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
-            EGL14.EGL_ALPHA_SIZE, 8, EGL14.EGL_NONE), 0, configs, 0, 1, count, 0) && count[0] > 0) { "No GLES2 configuration" }
+        val selected = checkNotNull(SceneColorOnlyEgl.choose(display,
+            intArrayOf(EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8, EGL14.EGL_NONE), "surface-protected=$protectedOutput")) {
+            "No GLES2 configuration"
+        }
         val eglContextAttributes = if (protectedOutput) intArrayOf(
             EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, 0x32C0, EGL14.EGL_TRUE,
             EGL14.EGL_NONE
@@ -394,13 +395,14 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val eglSurfaceAttributes = if (protectedOutput) intArrayOf(
             0x32C0, EGL14.EGL_TRUE, EGL14.EGL_NONE
         ) else intArrayOf(EGL14.EGL_NONE)
-        contextGl = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT,
+        contextGl = EGL14.eglCreateContext(display, selected, EGL14.EGL_NO_CONTEXT,
             eglContextAttributes, 0)
-        window = EGL14.eglCreateWindowSurface(display, configs[0], output,
+        window = EGL14.eglCreateWindowSurface(display, selected, output,
             eglSurfaceAttributes, 0)
         check(EGL14.eglMakeCurrent(display, window, window, contextGl)) {
             "Unable to bind scene output"
         }
+        SceneColorOnlyEgl.discardAfterSwap(display, window, "surface-protected=$protectedOutput")
         if (protectedOutput) check(GLES20.glGetString(GLES20.GL_EXTENSIONS)
             ?.split(' ')?.contains("GL_EXT_protected_textures") == true) {
             "Protected texture sampling is unavailable; no insecure output fallback is permitted"
