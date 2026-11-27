@@ -413,6 +413,37 @@ object DriverTimingParser {
 
     }
 
+    /** A native record is committed as a whole or passed untouched to the
+     * JSONObject reference parser. ASCII spans preserve empty vs absent gap
+     * fields and the original primary/supplement ordering. */
+    private class SimpleTowerDecoder(nativeRequested: Boolean) {
+        private val scratch = if (nativeRequested)
+            LongArray(app.apexview.tiled.NativeHotPath.REPLAY_TOWER_WORDS) else null
+        private val keys = if (scratch != null) arrayOfNulls<String>(1000) else null
+        var accepted = 0
+            private set
+        fun apply(json: String, time: Long, drivers: MutableMap<String, Live>): Boolean {
+            val out = scratch ?: return false
+            if (!app.apexview.tiled.NativeHotPath.replayTowerSimple(json, out)) return false
+            val numbers = requireNotNull(keys)
+            fun text(span: Long): String? =
+                json.substring((span ushr 32).toInt(), span.toInt()).ifEmpty { null }
+            for (i in 0 until out[0].toInt()) {
+                val at = 1 + 5 * i
+                val number = out[at].toInt()
+                val key = numbers[number] ?: number.toString().also { numbers[number] = it }
+                val live = drivers.getOrPut(key) { Live(true) }
+                if (out[at + 1] != Long.MIN_VALUE) live.position = out[at + 1].toInt()
+                if (out[at + 2] != -1L) live.gap = text(out[at + 2])
+                if (out[at + 3] != -1L) live.toLeader = text(out[at + 3])
+                if (out[at + 4] != -1L) live.ahead = text(out[at + 4])
+                live.snap(time)
+            }
+            accepted++
+            return true
+        }
+    }
+
     /**
      * Parses the normal TimingData stream and the optional TimingDataF1 supplement together.
      * F1 publishes micro-sector segment status on the latter. Events are ordered by UTC so a
@@ -482,6 +513,7 @@ object DriverTimingParser {
         val statusPolicy = RetirementStatusPolicy(nativeRequested)
         val drivers = mutableMapOf<String, Live>()
         val states = StateHistoryAccumulator()
+        val simpleDecoder = SimpleTowerDecoder(nativeRequested)
         var through = Long.MIN_VALUE
         var publishedThrough: Long? = null
         var publishedFrom = Long.MIN_VALUE
@@ -493,14 +525,16 @@ object DriverTimingParser {
             val time = streamStart + streamOffsetMs(line, prefix)
             if (time < through) return@sequence  // Use the full ordered merge for a disordered archive.
             through = time
-            val rows = runCatching { JSONObject(line.substring(prefix)).optJSONObject("Lines") }.getOrNull()
-                ?: continue
-            states.accept(rows, time)
-            rows.keys().forEach { number ->
-                val row = rows.optJSONObject(number) ?: return@forEach
-                val driver = drivers.getOrPut(number) { Live(nativeRequested) }
-                apply(driver, row, time, statusPolicy)
-                driver.snap(time)
+            val json = line.substring(prefix)
+            if (!simpleDecoder.apply(json, time, drivers)) {
+                val rows = runCatching { JSONObject(json).optJSONObject("Lines") }.getOrNull() ?: continue
+                states.accept(rows, time)
+                rows.keys().forEach { number ->
+                    val row = rows.optJSONObject(number) ?: return@forEach
+                    val driver = drivers.getOrPut(number) { Live(nativeRequested) }
+                    apply(driver, row, time, statusPolicy)
+                    driver.snap(time)
+                }
             }
             val target = targetUtc()
             val last = publishedThrough
@@ -579,6 +613,7 @@ object DriverTimingParser {
     ): Map<String, DriverLaps> {
         val statusPolicy = RetirementStatusPolicy(nativeRequested)
         val drivers = mutableMapOf<String, Live>()
+        val simpleDecoder = SimpleTowerDecoder(nativeRequested)
 
         var records = 0
         var invalidJson = 0
@@ -589,14 +624,17 @@ object DriverTimingParser {
             if (records == 1 || records % 1024 == 0) {
                 checkpoint?.invoke("merge records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size}")
             }
-            val json = runCatching { JSONObject(event.line.substring(event.prefix)) }.getOrNull() ?: run { invalidJson++; return }
-            val lines = json.optJSONObject("Lines") ?: run { missingLines++; return }
-            if (event.source == 0) stateHistory?.accept(lines, event.time)
-            lines.keys().forEach { number ->
-                val d = lines.optJSONObject(number) ?: return@forEach
-                val live = drivers.getOrPut(number) { Live(nativeRequested) }
-                apply(live, d, event.time, statusPolicy, event.source)
-                live.snap(event.time)
+            val payload = event.line.substring(event.prefix)
+            if (!simpleDecoder.apply(payload, event.time, drivers)) {
+                val json = runCatching { JSONObject(payload) }.getOrNull() ?: run { invalidJson++; return }
+                val lines = json.optJSONObject("Lines") ?: run { missingLines++; return }
+                if (event.source == 0) stateHistory?.accept(lines, event.time)
+                lines.keys().forEach { number ->
+                    val d = lines.optJSONObject(number) ?: return@forEach
+                    val live = drivers.getOrPut(number) { Live(nativeRequested) }
+                    apply(live, d, event.time, statusPolicy, event.source)
+                    live.snap(event.time)
+                }
             }
             if (records % 1024 == 0) onProgress?.invoke(event.time) {
                 val window = progressWindow?.invoke(event.time)
@@ -633,7 +671,7 @@ object DriverTimingParser {
                 .forEach(::consume)
         }
 
-        checkpoint?.invoke("building history records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size}")
+        checkpoint?.invoke("building history records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size} nativeSimpleRecords=${simpleDecoder.accepted}")
         return materialize(drivers, copySnapshots = false)
     }
 
