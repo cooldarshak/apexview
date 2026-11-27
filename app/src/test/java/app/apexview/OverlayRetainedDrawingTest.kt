@@ -70,6 +70,20 @@ class OverlayRetainedDrawingTest {
         }
     }
 
+    @Test fun sharedBadgeClockOnlyRunsWhenAVisibleOnboardConsumesIt() {
+        assertFalse(shouldShareOnboardBadgeClock(true, true, 4))
+        assertFalse(shouldShareOnboardBadgeClock(false, false, 4))
+        assertFalse(shouldShareOnboardBadgeClock(false, true, 0))
+        assertTrue(shouldShareOnboardBadgeClock(false, true, 1))
+        assertTrue(shouldShareOnboardBadgeClock(false, true, 6))
+        // Preserve the existing 10Hz sampling and backwards clock recovery;
+        // the independent draw-only 50/60Hz clock is deliberately unchanged.
+        assertTrue(isOverlaySampleDue(1000L, Long.MIN_VALUE))
+        assertFalse(isOverlaySampleDue(1099L, 1000L))
+        assertTrue(isOverlaySampleDue(1100L, 1000L))
+        assertTrue(isOverlaySampleDue(900L, 1000L))
+    }
+
     @Test fun drawRearmSkipsHighRefreshWakeupWithoutSleepingAfterLateWork() {
         val frame = 1_000_000_000L
         assertEquals(9L, overlayDrawRearmDelayMs(frame, frame))

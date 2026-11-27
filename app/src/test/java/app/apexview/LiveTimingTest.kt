@@ -255,6 +255,49 @@ class LiveTimingTest {
     }
 
     @Test
+    fun carDataStreamReusesDecoderAcrossMalformedRecordsAndIndependentChannels() {
+        fun record(offset: Long, channels: String): String {
+            val utc = Instant.ofEpochMilli(t0 + offset).toString()
+            val payload = """{"Entries":[{"Utc":"$utc","Cars":{"1":{"Channels":$channels}}}]}"""
+            return stamp(offset) + "\"" + deflate(payload) + "\""
+        }
+        val lines = sequenceOf(
+            "\uFEFF" + record(0L, """{"2":250,"3":7}"""),
+            stamp(500L) + "\"not-base64!\"",
+            record(1000L, """{"3":8}"""),
+            record(2000L, """{"2":300}"""),
+            record(1500L, """{"2":100,"3":4}"""),
+            record(3000L, """{"2":999,"3":99}""")
+        )
+        var checks = 0
+        val log = archive.parseCarDataRecords(lines) { checks++ }.getValue("1")
+        assertEquals(7, checks) // one check per record plus final driver publication
+        assertEquals(250, log.kmhAt(t0 + 1000L))
+        assertEquals(8, log.gearAt(t0 + 1000L))
+        assertEquals(300, log.kmhAt(t0 + 2000L))
+        // Independent gear series accepts a newer gear-only time even when
+        // the speed sample in that same record is older than the last speed.
+        assertEquals(4, log.gearAt(t0 + 2000L))
+        assertNull(log.kmhAt(t0 + 7001L))
+        assertNull(log.gearAt(t0 + 6501L))
+    }
+
+    @Test
+    fun carDataStreamCancellationStopsBeforePublishingPartialHistory() {
+        var checks = 0
+        var cancelled = false
+        try {
+            archive.parseCarDataRecords(sequenceOf("invalid", "invalid", "invalid")) {
+                if (++checks == 2) throw java.util.concurrent.CancellationException()
+            }
+        } catch (_: java.util.concurrent.CancellationException) {
+            cancelled = true
+        }
+        assertTrue(cancelled)
+        assertEquals(2, checks)
+    }
+
+    @Test
     fun archiveSpeedPublicationCompactsAndSharesExactTimestamps() {
         val pool = SpeedTimestampPool()
         val firstBuilder = SpeedBuilder()

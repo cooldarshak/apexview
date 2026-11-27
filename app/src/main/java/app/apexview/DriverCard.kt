@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -197,11 +198,12 @@ fun OnboardInfoBadge(
     modifier: Modifier = Modifier,
     compact: Boolean = false,
     availableWidthDp: Float = 250f,
+    badgeClock: State<Long>? = null,
 ) {
     // Speed was previously available independently of lap packets. Retain that
     // behaviour during partial timing loads, pits and session transitions.
     LaunchedEffect(timing) { app.loadSpeeds(timing) }
-    val now = rememberMapTime(app)
+    val now = badgeClock?.value ?: rememberMapTime(app)
     val state = timing.laps[number]?.at(now)
     val driver = timing.drivers[number]
     val team = driver?.color?.let { Color(it) } ?: Color.White

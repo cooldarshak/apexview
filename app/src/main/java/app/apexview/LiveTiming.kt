@@ -2120,17 +2120,32 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
      * once one is on screen rather than holding up the map.
      */
     suspend fun loadSpeeds(base: String): Map<String, SpeedLog> = withContext(Dispatchers.IO) {
-        val cars = mutableMapOf<String, SpeedBuilder>()
         open(base.removePrefix(BASE) + "CarData.z.jsonStream").bufferedReader().useLines { lines ->
+            parseCarDataRecords(lines) { ensureActive() }
+        }
+    }
+
+    /** Same native platform DEFLATE and CarData parser, one scratch owner for
+     * the whole stream. The former per-record inflater repeatedly created
+     * native zlib state, an 8 KiB scratch buffer and a growing output stream.
+     * reset() isolates both valid and malformed consecutive records. */
+    internal fun parseCarDataRecords(lines: Sequence<String>, checkActive: () -> Unit): Map<String, SpeedLog> {
+        val cars = mutableMapOf<String, SpeedBuilder>()
+        ArchiveInflater().use { inflater ->
             lines.forEach { line ->
-                ensureActive()
+                checkActive()
                 val text = line.removePrefix("\uFEFF")
-                if (text.length <= streamPrefixLength(text)) return@forEach
-                runCatching { JSONObject(inflate(text.substring(streamPrefixLength(text)))) }.getOrNull()?.let { addCarData(it, cars) }
+                val prefix = streamPrefixLength(text)
+                if (text.length <= prefix) return@forEach
+                runCatching { JSONObject(inflater.decode(text.substring(prefix))) }.getOrNull()
+                    ?.let { addCarData(it, cars) }
             }
         }
         val timestampPool = SpeedTimestampPool()
-        cars.mapValues { it.value.build(timestampPool) }
+        return cars.mapValues {
+            checkActive()
+            it.value.build(timestampPool)
+        }
     }
 
     /** One decoded CarData message: channel 2 is speed (km/h), channel 3 is gear. */

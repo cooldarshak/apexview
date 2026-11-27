@@ -20,6 +20,7 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.unit.IntSize
@@ -184,10 +185,18 @@ internal class Car(
 
 /** The video keeps its 50 fps clock. Text overlays need fewer Compose updates than the video. */
 @Composable
-internal fun rememberMapTime(app: AppState): Long {
-    if (app.isTv) return rememberTvMapTime { app.mapTimeMs() ?: 0L }
-    return rememberMapRenderTime(app)
-}
+internal fun rememberMapTime(app: AppState): Long = rememberMapTimeState(app).value
+
+/** The shared viewer badge clock is passed as State, not read by the parent.
+ * Multiple onboards publish one synchronized metadata tick instead of waking
+ * independent Compose text and accessibility updates across the next frame. */
+@Composable
+internal fun rememberMapTimeState(app: AppState): State<Long> =
+    if (app.isTv) rememberTvMapTimeState { app.mapTimeMs() ?: 0L }
+    else rememberMapRenderTimeState(app)
+
+internal fun shouldShareOnboardBadgeClock(inPip: Boolean, timingAvailable: Boolean,
+    visibleDriverCount: Int): Boolean = !inPip && timingAvailable && visibleDriverCount > 0
 
 /**
  * Map geometry and marker hit positions do not need to trigger a full Compose pass at 60/120 Hz.
@@ -212,15 +221,18 @@ internal fun isOverlaySampleDue(frameMs: Long, lastFrameMs: Long): Boolean =
 internal const val TV_MAP_FRAME_INTERVAL_NS = 100_000_000L
 
 @Composable
-internal fun rememberTvMapTime(read: () -> Long): Long {
+internal fun rememberTvMapTime(read: () -> Long): Long = rememberTvMapTimeState(read).value
+
+@Composable
+private fun rememberTvMapTimeState(read: () -> Long): State<Long> {
     val clock by rememberUpdatedState(read)
-    var now by remember { mutableLongStateOf(clock()) }
+    val now = remember { mutableLongStateOf(clock()) }
     LaunchedEffect(Unit) {
         // Static flags/targets need only 10Hz. Stop invoking TV's main
         // Choreographer at every 60/120Hz vsync just to discard most frames.
         // Driver markers keep their separate 60Hz Canvas draw-only clock.
         while (true) {
-            now = clock()
+            now.longValue = clock()
             delay(TV_MAP_FRAME_INTERVAL_NS / 1_000_000L)
         }
     }
@@ -228,8 +240,11 @@ internal fun rememberTvMapTime(read: () -> Long): Long {
 }
 
 @Composable
-internal fun rememberMapRenderTime(app: AppState): Long {
-    var now by remember(app) { mutableLongStateOf(app.mapTimeMs() ?: 0L) }
+internal fun rememberMapRenderTime(app: AppState): Long = rememberMapRenderTimeState(app).value
+
+@Composable
+private fun rememberMapRenderTimeState(app: AppState): State<Long> {
+    val now = remember(app) { mutableLongStateOf(app.mapTimeMs() ?: 0L) }
     LaunchedEffect(app) {
         var lastPublishedAtMs = Long.MIN_VALUE
         while (true) {
@@ -240,7 +255,7 @@ internal fun rememberMapRenderTime(app: AppState): Long {
             val sampledAtMs = System.nanoTime() / 1_000_000L
             if (isOverlaySampleDue(sampledAtMs, lastPublishedAtMs)) {
                 val sampledTime = app.mapTimeMs() ?: 0L
-                if (sampledTime != now) now = sampledTime
+                if (sampledTime != now.longValue) now.longValue = sampledTime
                 lastPublishedAtMs = sampledAtMs
             }
             val elapsedMs = System.nanoTime() / 1_000_000L

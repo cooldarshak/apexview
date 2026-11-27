@@ -102,6 +102,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -452,9 +453,14 @@ fun ViewerScreen(app: AppState) {
             // The pop-out is this same screen with one feed filling it: the feed keeps its video
             // surface, so its decoder carries on rather than restarting from the next keyframe.
             val popped = if (app.inPip) app.pipTile() else null
+            val badgeClock = if (shouldShareOnboardBadgeClock(app.inPip, app.timing != null,
+                    app.tiles.count { !it.protectedCompositionHidden && it.channel.racingNumber != null })) {
+                rememberMapTimeState(app)
+            } else null
             app.tiles.forEach { tile ->
                 if (!tile.protectedCompositionHidden && (popped == null || tile === popped)) {
-                    key(tile.id) { TileView(app, tile, controlsOnly = true, presetSlot = tvStartupSlot(app, width, height)) }
+                    key(tile.id) { TileView(app, tile, controlsOnly = true,
+                        presetSlot = tvStartupSlot(app, width, height), badgeClock = badgeClock) }
                 }
             }
             if (app.inPip) return@Box
@@ -1398,6 +1404,7 @@ private val overlayShadow = androidx.compose.ui.graphics.Shadow(Color.Black, blu
 private fun TileView(
     app: AppState, tile: Tile, videoOnly: Boolean = false, controlsOnly: Boolean = false,
     presetSlot: Slot? = null,
+    badgeClock: State<Long>? = null,
 ) {
     if (videoOnly && presetSlot == null && !tile.hasLayoutSlot && !app.inPip) return
     val density = LocalDensity.current
@@ -1521,6 +1528,7 @@ private fun TileView(
                     .offset(x = badgePosition.first.dp, y = badgePosition.second.dp)
                     .width(badgeWidth),
                 compact = narrow, availableWidthDp = badgeWidth.value,
+                badgeClock = badgeClock,
             )
         }
 
