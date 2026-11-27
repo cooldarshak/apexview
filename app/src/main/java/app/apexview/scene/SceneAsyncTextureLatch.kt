@@ -55,14 +55,19 @@ internal class SceneAsyncTextureLatch private constructor(
     private var maxWaitNs = 0L
     private var lastTimestampNs = 0L
     private var regressions = 0L
+    private var fenceWaits = 0L
+    private var maxFenceWaitNs = 0L
+    private var fenceWaitTotalNs = 0L
 
     data class Event(val notifications: Long, val firstNs: Long, val lastNs: Long,
                      val timestampNs: Long, val startedNs: Long, val latchedNs: Long)
     data class Stats(val notifications: Long, val latches: Long, val coalesced: Long,
-                     val maxWaitNs: Long, val regressions: Long)
+                     val maxWaitNs: Long, val regressions: Long, val fenceWaits: Long,
+                     val maxFenceWaitNs: Long, val fenceWaitTotalNs: Long)
     fun takeStats(): Stats = synchronized(lock) {
-        Stats(notifications, latches, coalesced, maxWaitNs, regressions).also {
+        Stats(notifications, latches, coalesced, maxWaitNs, regressions, fenceWaits, maxFenceWaitNs, fenceWaitTotalNs).also {
             notifications = 0L; latches = 0L; coalesced = 0L; maxWaitNs = 0L; regressions = 0L
+            fenceWaits = 0L; maxFenceWaitNs = 0L; fenceWaitTotalNs = 0L
         }
     }
     private var report: ((Event) -> Unit)? = null
@@ -107,7 +112,7 @@ internal class SceneAsyncTextureLatch private constructor(
                     when (EGL15.eglClientWaitSync(display, fence, 0, 0L)) {
                         EGL15.EGL_TIMEOUT_EXPIRED -> {
                             val now = System.nanoTime()
-                            if (retrySince == 0L) retrySince = now
+                            if (retrySince == 0L) { retrySince = now; fenceWaits++ }
                             check(now - retrySince < 1_000_000_000L) { "GPU sampling fence did not complete" }
                             retryPosted = worker.postDelayed(retry, 1L)
                             check(retryPosted)
@@ -120,9 +125,15 @@ internal class SceneAsyncTextureLatch private constructor(
                         else -> error("GPU sampling fence wait failed")
                     }
                 }
-                retrySince = 0L
                 val started = System.nanoTime()
-                frames.updateTexImage()
+                if (retrySince != 0L) {
+                    val waited = (started - retrySince).coerceAtLeast(0L)
+                    fenceWaitTotalNs += waited
+                    maxFenceWaitNs = maxOf(maxFenceWaitNs, waited)
+                    retrySince = 0L
+                }
+                android.os.Trace.beginSection("PitwallAsyncTextureLatch")
+                try { frames.updateTexImage() } finally { android.os.Trace.endSection() }
                 frames.getTransformMatrix(matrix)
                 val replacement = newFence()
                 val old = acquired

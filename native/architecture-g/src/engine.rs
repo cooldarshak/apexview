@@ -159,11 +159,24 @@ struct State {
     peak_pairs:usize,
     copied_input:u64,
     copied_output:u64,
+    last_admitted_input:usize,
 }
 impl State {
     fn payload_capacity(&self)->usize {
         self.slots.iter().map(|slot|slot.buffers.as_ref().map_or(slot.running_bytes,
             |b| b.input.capacity()+b.output.capacity())).sum()
+    }
+    // Choose the smallest backing that fits real admitted demand. Never
+    // replace a usable warm slot just because another slot appears first.
+    fn free_slot_for(&self, input:usize, output:usize)->Option<usize> {
+        self.slots.iter().enumerate().filter(|(_,slot)|slot.stage==Stage::Free)
+            .min_by_key(|(_,slot)| {
+                let (a,b)=slot.buffers.as_ref().map_or((0,0), |b|(b.input.capacity(),b.output.capacity()));
+                let fits=a>=input && b>=output;
+                // If none fits, reuse an existing slot rather than retaining
+                // two allocations; insufficient backing is retired before growth.
+                (!fits, if fits {a.saturating_add(b)} else {usize::MAX-a.saturating_add(b)})
+            }).map(|(index,_)|index)
     }
     fn owned_running(&self)->usize {
         self.slots.iter().filter(|slot|slot.stage==Stage::Running &&
@@ -211,7 +224,7 @@ impl Engine {
         }
         let initial_pairs=if compact_atlas {0} else {budget.slots};
         let shared=Arc::new((Mutex::new(State{slots,generation:1,closed:false,compact_atlas,trim_workspace:false,
-            known_workspace_capacity:Some(0),payload_allocations:initial_pairs as u64,peak_pairs:initial_pairs,copied_input:0,copied_output:0}),Condvar::new()));
+            known_workspace_capacity:Some(0),payload_allocations:initial_pairs as u64,peak_pairs:initial_pairs,copied_input:0,copied_output:0,last_admitted_input:0}),Condvar::new()));
         let cloned=Arc::clone(&shared);
         let worker=thread::Builder::new().name("pitwall-native-stitch".into())
             .stack_size(WORKER_STACK).spawn(move || run_worker(cloned,budget.output)).ok()?;
@@ -291,15 +304,22 @@ impl Engine {
     /// Keep one warm free pair; never touch a queued, running or leased slot.
     fn trim_free_spares(state:&mut State) {
         if !state.compact_atlas {return;}
-        let mut warm=false;
-        for slot in &mut state.slots {
-            if slot.stage!=Stage::Free {continue;}
-            let useful=slot.buffers.as_ref().is_some_and(|b|b.input.capacity()>0 || b.output.capacity()>0);
-            // A sustained small-job retirement can leave Some(empty buffers).
-            // Do not let an empty slot consume the one warm allowance and
-            // evict a reusable staging allocation in another slot.
-            if !useful || warm {slot.buffers=None;slot.small_owned_jobs=0;}
-            else {warm=true;}
+        let target=state.last_admitted_input;
+        let warm=state.slots.iter().enumerate().filter_map(|(i,slot)| {
+            if slot.stage!=Stage::Free{return None;}
+            let b=slot.buffers.as_ref()?;
+            let a=b.input.capacity();
+            let total=a.saturating_add(b.output.capacity());
+            if total==0{return None;}
+            // Prefer the smallest sufficient capacity for the most recent
+            // actual request; if none fits, keep the largest useful input.
+            let key=(a<target, if a>=target {total} else {usize::MAX-a},total);
+            Some((i,key))
+        }).min_by_key(|(_,key)|*key).map(|(i,_)|i);
+        for (i,slot) in state.slots.iter_mut().enumerate() {
+            if slot.stage==Stage::Free && Some(i)!=warm {
+                slot.buffers=None;slot.small_owned_jobs=0;
+            }
         }
     }
     /// Caller derives deadline from media buffer slack. Speculative work
@@ -355,8 +375,9 @@ impl Engine {
         if owned && !s.compact_atlas {return INVALID;}
         let free=s.slots.iter().filter(|slot|slot.stage==Stage::Free).count();
         if free==0 || (!foreground && free<2) {return BACKPRESSURE;}
-        let Some(index)=s.slots.iter().position(|slot|slot.stage==Stage::Free && slot.buffers.is_some())
-            .or_else(||s.slots.iter().position(|slot|slot.stage==Stage::Free)) else {return BACKPRESSURE;};
+        let required_input=if owned {len} else {self.budget.input};
+        let required_output=if owned {0} else {self.budget.output};
+        let Some(index)=s.free_slot_for(required_input,required_output) else {return BACKPRESSURE;};
         // Free/unallocated is distinct from Running/temporarily owned by the
         // worker. No active slot can be selected or evicted here.
         if s.slots[index].buffers.is_none() {
@@ -384,7 +405,6 @@ impl Engine {
         // the entire admission ceiling. Retain warm capacity for smaller jobs;
         // replace insufficient backing before allocation so two input buffers
         // never coexist. Fixed-output commands retain their existing contract.
-        let required_input=if owned {len} else {self.budget.input};
         if buffers.input.capacity()<required_input {
             buffers.input=Vec::new();
             let Some(input)=buffer(required_input) else {return BACKPRESSURE;};
@@ -401,6 +421,7 @@ impl Engine {
         if Instant::now()>=deadline { destination.fill(0); return DEADLINE; }
         slot.work=Some(Work{token,generation,len,command,foreground,deadline});
         slot.stage=Stage::Queued;
+        s.last_admitted_input=required_input;
         s.copied_input=s.copied_input.saturating_add(len as u64);
         self.shared.1.notify_one();
         token
@@ -801,6 +822,23 @@ mod tests {
         assert_eq!(slot.result,3);
     }
     #[test]
+    fn warm_slot_selection_fits_actual_demand_without_retaining_two() {
+        let b=Budget{slots:3,input:4096,output:8192,ceiling:12*1024*1024};
+        let engine=Engine::new_atlas(b).unwrap();
+        let mut state=engine.shared.0.lock().unwrap();
+        for (slot,cap) in state.slots.iter_mut().zip([256,1024,2048]) {
+            slot.buffers=Some(Buffers{input:buffer(cap).unwrap(),output:Vec::new()});
+        }
+        assert_eq!(state.free_slot_for(900,0),Some(1));
+        assert_eq!(state.free_slot_for(1400,0),Some(2));
+        state.last_admitted_input=900;
+        Engine::trim_free_spares(&mut state);
+        assert_eq!(state.payload_capacity(),1024);
+        assert_eq!(state.free_slot_for(900,0),Some(1));
+        assert!(state.slots[0].buffers.is_none() && state.slots[2].buffers.is_none());
+    }
+
+    #[test]
     fn empty_retired_staging_does_not_evict_a_warm_free_slot() {
         let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
         let engine=Engine::new_atlas(b).unwrap();
@@ -915,7 +953,7 @@ mod tests {
         let mk=|token,foreground,ms|Slot{buffers:None,stage:Stage::Queued,
             work:Some(Work{token,generation:1,len:3,command:Command::Convert{prefix:1,count:1},foreground,
                 deadline:now+Duration::from_millis(ms)}),result:0,running_bytes:0,small_owned_jobs:0,retire_on_recycle:false};
-        let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false,compact_atlas:false,trim_workspace:false,known_workspace_capacity:Some(0),payload_allocations:0,peak_pairs:0,copied_input:0,copied_output:0};
+        let mut s=State{slots:vec![mk(1,false,1),mk(2,true,40),mk(3,true,20),mk(4,true,20)],generation:1,closed:false,compact_atlas:false,trim_workspace:false,known_workspace_capacity:Some(0),payload_allocations:0,peak_pairs:0,copied_input:0,copied_output:0,last_admitted_input:0};
         assert_eq!(s.next(),Some(2));s.slots[2].stage=Stage::Running;
         assert_eq!(s.next(),Some(3));s.slots[3].stage=Stage::Running;
         assert_eq!(s.next(),Some(1));s.slots[1].stage=Stage::Running;

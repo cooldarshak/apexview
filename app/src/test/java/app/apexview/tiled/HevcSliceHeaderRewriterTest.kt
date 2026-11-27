@@ -91,7 +91,12 @@ class HevcSliceHeaderRewriterTest {
             val output = java.nio.ByteBuffer.allocate(parts.size)
             parts.writeTo(output)
             assertArrayEquals(rewritten.nal, output.array())
-            assertEquals(30, parts.verifyHeader(outputSps, outputPps).sliceSegmentAddress)
+            repeat(4) {
+                assertEquals(outputHeader, parts.verifyHeader(outputSps, outputPps))
+            }
+            // The borrowed input and all copied output bytes remain exactly
+            // unchanged when the same bounded scratch is reused.
+            assertArrayEquals(rewritten.nal, parts.materialize())
             val contiguous = HevcClearCmafFragmentWriter.writeNalSamples(1, 2, 90000,
                 listOf(HevcClearCmafFragmentWriter.NalSample(listOf(rewritten.nal), 3600, -120, 0x02000000L)),
                 4, false, false)

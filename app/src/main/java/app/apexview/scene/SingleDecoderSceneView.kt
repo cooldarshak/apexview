@@ -43,6 +43,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var ingressNotifications = 0L
     private var ingressCoalesced = 0L
     private var ingressMaxWaitNs = 0L
+    private var asyncFenceWaits = 0L
+    private var asyncFenceMaxNs = 0L
+    private var asyncFenceTotalNs = 0L
     private val main = Handler(Looper.getMainLooper())
     private val glProbePending = java.util.concurrent.atomic.AtomicBoolean(false)
     private val glQueueProbe = object : Runnable {
@@ -817,6 +820,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         ingressCoalesced += stats.coalesced
         ingressMaxWaitNs = maxOf(ingressMaxWaitNs, stats.maxWaitNs)
         rendered += stats.latches
+        asyncFenceWaits += stats.fenceWaits
+        asyncFenceMaxNs = maxOf(asyncFenceMaxNs, stats.maxFenceWaitNs)
+        asyncFenceTotalNs += stats.fenceWaitTotalNs
     }
 
     private data class DrawTiming(val glDrawNs: Long, val swapNs: Long, val newAsyncVideo: Boolean?)
@@ -866,6 +872,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
             drainAsyncStats()
+            if (asyncInput != null) Log.i("PitwallGraphics",
+                "SCENE_ASYNC_FENCE_WAIT owner=$graphicsOwnerId waits=$asyncFenceWaits " +
+                    "maxNs=$asyncFenceMaxNs totalNs=$asyncFenceTotalNs vendorBytes=NOT_MEASURED")
+            asyncFenceWaits = 0L; asyncFenceMaxNs = 0L; asyncFenceTotalNs = 0L
             val metrics = pacing.snapshotAndReset()
             Log.i("ApexviewSingleDecoder", "SCENE_DECODER_INGRESS notifications=$ingressNotifications coalesced=$ingressCoalesced maxGlWaitMs=${ingressMaxWaitNs / 1_000_000L}")
             ingressNotifications = 0; ingressCoalesced = 0; ingressMaxWaitNs = 0
@@ -1007,6 +1017,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         steps.run("decoder-ingress") { decoderIngress?.close(); decoderIngress = null }
         val independent = asyncInput.also { asyncInput = null }
         ingressNotifications = 0; ingressCoalesced = 0; ingressMaxWaitNs = 0
+        asyncFenceWaits = 0L; asyncFenceMaxNs = 0L; asyncFenceTotalNs = 0L
         input?.let { Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_RELEASE " +
             "renderer=TextureView surfaceId=${System.identityHashCode(it)} " +
             "outputEpoch=${surfaceLifetime.generation()} thread=GL") }

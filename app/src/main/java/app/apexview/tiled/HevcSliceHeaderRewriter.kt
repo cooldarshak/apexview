@@ -8,6 +8,8 @@ package app.apexview.tiled
  * unchanged. The caller must supply a verified clear prefix length from its CMAF subsample map.
  */
 internal object HevcSliceHeaderRewriter {
+    private const val VERIFY_PREFIX_BYTES = 8194
+    private val verificationScratch = ThreadLocal.withInitial { ByteArray(VERIFY_PREFIX_BYTES) }
     data class Result(
         val nal: ByteArray,
         val destinationAddress: Int,
@@ -47,11 +49,17 @@ internal object HevcSliceHeaderRewriter {
             check(!closed)
             require(limit in 1..size)
             val bytes = ByteArray(limit)
+            copyPrefixInto(bytes, limit)
+            return bytes
+        }
+
+        private fun copyPrefixInto(bytes: ByteArray, limit: Int) {
+            check(!closed)
+            require(limit in 1..size && limit <= bytes.size)
             val prefixCount = minOf(limit, prefix.size)
             prefix.copyInto(bytes, 0, 0, prefixCount)
             if (limit > prefixCount)
                 backing.copyInto(bytes, prefixCount, tailStart, tailStart + limit - prefixCount)
-            return bytes
         }
 
         /** Transfer an independently generated clear prefix only on exact
@@ -118,17 +126,18 @@ internal object HevcSliceHeaderRewriter {
         /** Preserve the original parser's 8194-byte fast path and full fallback. */
         fun verifyHeader(sps: HevcParameterSets.SpsMetadata,
                          pps: HevcParameterSets.PpsMetadata): HevcSliceHeaderParser.SliceHeader {
-            val length = minOf(size, 8194)
-            val prefixBytes = materialize(length)
+            val length = minOf(size, VERIFY_PREFIX_BYTES)
+            val prefixBytes = verificationScratch.get()!!
             try {
+                copyPrefixInto(prefixBytes, length)
                 return try {
-                    HevcSliceHeaderParser.parse(prefixBytes, sps, pps)
+                    HevcSliceHeaderParser.parseRange(prefixBytes, 0, length, sps, pps)
                 } catch (failure: IllegalArgumentException) {
                     if (length == size) throw failure
                     val all = materialize()
                     try { HevcSliceHeaderParser.parse(all, sps, pps) } finally { all.fill(0) }
                 }
-            } finally { prefixBytes.fill(0) }
+            } finally { prefixBytes.fill(0, 0, length) }
         }
 
         override fun close() {
