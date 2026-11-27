@@ -77,7 +77,14 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("size <= capacity && capacity <= size.saturating_add((size / 8).min(MAX_REUSE_SLACK))", arena)
         self.assertIn("const MAX_FREE_BYTES: usize = 8 * 1024 * 1024", arena)
         self.assertIn("const MAX_BYTES: usize = 64 * 1024 * 1024", arena)
-        self.assertIn("slot.stage==Stage::Free && slot.buffers.is_some()", engine)
+        # Check the new selection invariant, not the obsolete first-free search.
+        selector = engine.split("fn free_slot_for(", 1)[1].split("fn owned_running(", 1)[0]
+        self.assertIn("filter(|(_,slot)|slot.stage==Stage::Free)", selector)
+        self.assertIn("let fits=a>=input && b>=output", selector)
+        self.assertIn("(!fits, if fits {a.saturating_add(b)}", selector)
+        self.assertIn("s.free_slot_for(required_input,required_output)", engine)
+        self.assertIn("fn warm_slot_selection_fits_actual_demand_without_retaining_two()", engine)
+        self.assertIn("slot.stage==Stage::Free && Some(i)!=warm", engine)
         self.assertIn("slot.stage==Stage::Running", engine)
 
     def test_active_composition_generation_owns_diagnostics_and_remove_revokes_old_state(self):
@@ -725,7 +732,14 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("Self::new_reserved(budget, budget.reserved_atlas()?, true)", engine)
         self.assertIn("if compact_atlas {None} else", engine)
         self.assertIn("fn compact_owned_input_materializes_only_submitted_bytes_and_reuses_capacity()", engine)
-        self.assertIn("slot.stage==Stage::Free && slot.buffers.is_some()", engine)
+        # Check the new selection invariant, not the obsolete first-free search.
+        selector = engine.split("fn free_slot_for(", 1)[1].split("fn owned_running(", 1)[0]
+        self.assertIn("filter(|(_,slot)|slot.stage==Stage::Free)", selector)
+        self.assertIn("let fits=a>=input && b>=output", selector)
+        self.assertIn("(!fits, if fits {a.saturating_add(b)}", selector)
+        self.assertIn("s.free_slot_for(required_input,required_output)", engine)
+        self.assertIn("fn warm_slot_selection_fits_actual_demand_without_retaining_two()", engine)
+        self.assertIn("slot.stage==Stage::Free && Some(i)!=warm", engine)
         self.assertIn("Buffers::new(self.budget)", engine)
         self.assertIn("Command::ClearAtlasOwned", engine)
         self.assertIn("std::mem::take(output)", engine)
