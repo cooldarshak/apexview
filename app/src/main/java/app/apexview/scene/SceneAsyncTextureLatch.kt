@@ -244,7 +244,12 @@ internal class SceneAsyncTextureLatch private constructor(
                 EGL15.eglCreateSync(display, EGL15.EGL_SYNC_FENCE, longArrayOf(EGL14.EGL_NONE.toLong()), 0)
             }.getOrNull()
             if (probe == null || probe == EGL15.EGL_NO_SYNC) return null
-            EGL15.eglDestroySync(display, probe)
+            val renderFenceWorks = try {
+                GLES20.glFlush()
+                EGL15.eglClientWaitSync(display, probe, 0, 100_000_000L) == EGL15.EGL_CONDITION_SATISFIED &&
+                    EGL15.eglWaitSync(display, probe, 0)
+            } finally { EGL15.eglDestroySync(display, probe) }
+            if (!renderFenceWorks) return null
             val thread = HandlerThread("PitwallTextureLatch", Process.THREAD_PRIORITY_DISPLAY).apply { start() }
             val worker = Handler(thread.looper)
             val init = FutureTask<SceneAsyncTextureLatch?> {
@@ -267,7 +272,8 @@ internal class SceneAsyncTextureLatch private constructor(
                     if (sync == null || sync == EGL15.EGL_NO_SYNC) return@FutureTask null
                     val fenceWorks = try {
                         GLES20.glFlush()
-                        EGL15.eglClientWaitSync(display, sync, 0, 100_000_000L) == EGL15.EGL_CONDITION_SATISFIED
+                        EGL15.eglClientWaitSync(display, sync, 0, 100_000_000L) == EGL15.EGL_CONDITION_SATISFIED &&
+                            EGL15.eglWaitSync(display, sync, 0)
                     } finally { EGL15.eglDestroySync(display, sync) }
                     if (!fenceWorks) return@FutureTask null
                     val owner = SceneAsyncTextureLatch(display, ctx, SurfaceTexture(texture), thread, worker, render)
