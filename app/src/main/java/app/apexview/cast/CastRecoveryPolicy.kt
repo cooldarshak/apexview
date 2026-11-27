@@ -18,6 +18,12 @@ internal object CastRecoveryPolicy {
     fun controllerOnly(remoteHandedOff: Boolean, bakedProducer: Boolean, bakedReplacement: Boolean): Boolean =
         remoteHandedOff || bakedProducer || bakedReplacement
 
+    /** Loading and rolling HLS may legitimately report zero duration. Reject invalid
+     * status before committing its clock epoch or applying any media state. */
+    fun validPlaybackStatus(state: Int, time: Double, duration: Double, speed: Double): Boolean =
+        state in 0..2 && time.isFinite() && duration.isFinite() && speed.isFinite() &&
+            time in 0.0..604800.0 && duration in 0.0..604800.0 && speed in 0.25..4.0
+
     fun canRetry(remaining: Boolean, negotiated: Boolean, selected: Boolean, reason: String, pinned: Boolean): Boolean =
         remaining && negotiated && selected && pinned &&
             reason in setOf("PEER_EOF", "READ_SocketException", "WRITE_SocketException",

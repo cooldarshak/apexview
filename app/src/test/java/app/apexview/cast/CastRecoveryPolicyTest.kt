@@ -3,6 +3,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CastRecoveryPolicyTest {
+    @Test fun invalidStatusCannotAdvanceClockAndLoadingZeroDurationIsValid() {
+        assertTrue(CastRecoveryPolicy.validPlaybackStatus(1, 0.0, 0.0, 1.0))
+        assertTrue(CastRecoveryPolicy.validPlaybackStatus(2, 10.5, 12.0, 1.5))
+        assertTrue(CastRecoveryPolicy.validPlaybackStatus(0, 604800.0, 604800.0, 4.0))
+        assertFalse(CastRecoveryPolicy.validPlaybackStatus(-1, 0.0, 0.0, 1.0))
+        assertFalse(CastRecoveryPolicy.validPlaybackStatus(1, -1.0, 0.0, 1.0))
+        assertFalse(CastRecoveryPolicy.validPlaybackStatus(1, Double.NaN, 0.0, 1.0))
+        assertFalse(CastRecoveryPolicy.validPlaybackStatus(1, 0.0, Double.POSITIVE_INFINITY, 1.0))
+        assertFalse(CastRecoveryPolicy.validPlaybackStatus(1, 0.0, 0.0, 0.0))
+        val owner = CastSessionCoordinator()
+        owner.beginLoad("current")
+        if (CastRecoveryPolicy.validPlaybackStatus(1, -1.0, 0.0, 1.0)) owner.acceptClock("current", 50)
+        assertTrue(owner.acceptClock("current", 1))
+        assertEquals(1L, owner.clockEpoch)
+    }
+
     @Test fun confirmedGoogleHandoffUsesReceiverClockWithoutRequiringRelay() {
         assertEquals(12000L to 90000L, CastRecoveryPolicy.handoffClock(12000, 90000, 10000, 80000))
         assertEquals(12000L to 80000L, CastRecoveryPolicy.handoffClock(12000, -1, 10000, 80000))

@@ -728,14 +728,29 @@ class AppState(
                 }
                 protocol.PLAYBACK_UPDATE -> if (localReady && body != null) {
                     val packetId = if (body.has("playbackId")) body.optString("playbackId") else null
+                    if (packetId != null && !castCoordinator.accepts(packetId)) return
+                    val state = body.optInt("state", -1)
+                    val time = body.optDouble("time", Double.NaN)
+                    val duration = body.optDouble("duration", Double.NaN)
+                    val speed = body.optDouble("speed", playbackSpeed.toDouble())
+                    if (!app.apexview.cast.CastRecoveryPolicy.validPlaybackStatus(state, time, duration, speed)) {
+                        android.util.Log.w("PitwallCast", "CAST_STATUS_REJECTED opcode=${packet.opcode} load=$localLoadId reason=INVALID_CLOCK_OR_STATE")
+                        return
+                    }
+                    // Decode optional metadata before advancing the accepted epoch.
+                    val captionOffers = if (localCaptionsSupported) body.optJSONArray("captionTracks")?.let { offered ->
+                        try { app.apexview.cast.local.CaptionTrackProtocol.decode(offered) }
+                        catch (_: IllegalArgumentException) {
+                            android.util.Log.w("PitwallCast", "CAST_STATUS_METADATA_REJECTED load=$localLoadId kind=captionTracks")
+                            null
+                        } catch (_: org.json.JSONException) {
+                            android.util.Log.w("PitwallCast", "CAST_STATUS_METADATA_REJECTED load=$localLoadId kind=captionTracks")
+                            null
+                        }
+                    } else null
                     if (!castCoordinator.acceptClock(packetId, body.optLong("clockEpoch", 0L))) return
                     val wall = body.optLong("wallClockMs", 0)
-                    if (wall in 946684800000L..4102444800000L) remoteWallClockBaseMs = wall - (body.optDouble("time", 0.0) * 1000).toLong()
-                    val state = body.optInt("state")
-                    val time = body.optDouble("time", 0.0)
-                    val duration = body.optDouble("duration", 0.0)
-                    val speed = body.optDouble("speed", playbackSpeed.toDouble())
-                    require(time.isFinite() && duration.isFinite() && time in 0.0..604800.0 && duration in 0.0..604800.0 && speed.isFinite() && speed in 0.25..4.0)
+                    if (wall in 946684800000L..4102444800000L) remoteWallClockBaseMs = wall - (time * 1000).toLong()
                     if (directCast != null && localDirectQualitySupported && packetId == localLoadId) {
                         body.optJSONArray("directQualityOffers")?.let { offered ->
                             val sizes = app.apexview.cast.local.DirectQualityProtocol.decodeOffers(offered)
@@ -746,11 +761,7 @@ class AppState(
                             app.apexview.cast.local.DirectQualityProtocol.decodeOffers(org.json.JSONArray().put(it)).singleOrNull()
                         }
                     }
-                    if (localCaptionsSupported) {
-                        body.optJSONArray("captionTracks")?.let { offered ->
-                            remoteCaptionTracks = app.apexview.cast.local.CaptionTrackProtocol.decode(offered)
-                        }
-                    }
+                    if (captionOffers != null) remoteCaptionTracks = captionOffers
                     if (state == 0 && castPlaybackHandedOff) {
                         remoteCastClock.update((time * 1000).toLong(), false, speed.toFloat(), (duration * 1000).toLong())
                         if (body.optBoolean("finished")) playing = false
@@ -776,6 +787,8 @@ class AppState(
                 }
             }
         } catch (error: Exception) {
+            android.util.Log.w("PitwallCast", "CAST_CONTROL_HANDLER_FAILURE opcode=${packet.opcode} load=$localLoadId type=${error.javaClass.simpleName} reason=" +
+                DiagnosticRedaction.redact(error.message.orEmpty()).take(160))
             castStatus = DiagnosticRedaction.redact(error.message.orEmpty()).take(220); message = castStatus
             localConnection?.close()
         }
@@ -1181,6 +1194,8 @@ class AppState(
         castPreparationJob = scope.launch {
             var session: app.apexview.cast.BakedCastLiveSession? = null
             try {
+                // Both baked transports depend on the sender CPU and network.
+                if (!localChosen) app.apexview.cast.local.CastConnectionService.start(context)
                 val manager = context.getSystemService(android.net.ConnectivityManager::class.java)
                 val network = manager.allNetworks.firstOrNull { network -> manager.getNetworkCapabilities(network)?.let {
                     it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ||
@@ -1318,6 +1333,9 @@ class AppState(
     ) {
         val client = googleCastRemoteClient ?: return
         val url = relay.googleCastMediaUrl
+        // The phone still serves the authorized archive relay after handoff.
+        runCatching { app.apexview.cast.local.CastConnectionService.start(context) }
+            .onFailure { android.util.Log.w("PitwallCast", "CAST_BACKGROUND_SERVICE_FAILED route=GOOGLE_ARCHIVE type=${it.javaClass.simpleName}") }
         if (googleCastLoadedUrl == url && (googleLoading || currentGoogleMediaMatches(client))) {
             googleRemoteCallback.onStatusUpdated()
             return

@@ -15,7 +15,8 @@ import androidx.core.content.ContextCompat
 import app.apexview.MainActivity
 import app.apexview.R
 
-/** Keeps the explicitly connected LAN sender alive without phone video/audio decoding. */
+/** Keeps an explicitly selected Cast sender's CPU/network alive. Media ownership
+ * remains with the playback coordinator until an independent producer is installed. */
 class CastConnectionService : Service() {
     private var cpu: PowerManager.WakeLock? = null
     private var wifi: WifiManager.WifiLock? = null
@@ -37,6 +38,7 @@ class CastConnectionService : Service() {
         wifi = applicationContext.getSystemService(WifiManager::class.java)?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Pitwall:TVConnection")?.apply {
             setReferenceCounted(false); acquire()
         }
+        android.util.Log.i("PitwallCast", "CAST_BACKGROUND_SERVICE_STARTED cpuHeld=${cpu?.isHeld == true} wifiHeld=${wifi?.isHeld == true}")
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null || intent.action == STOP) {
@@ -50,6 +52,7 @@ class CastConnectionService : Service() {
         if (wifi?.isHeld == true) wifi?.release(); wifi = null
         if (cpu?.isHeld == true) cpu?.release(); cpu = null
         stopForeground(STOP_FOREGROUND_REMOVE)
+        android.util.Log.i("PitwallCast", "CAST_BACKGROUND_SERVICE_STOPPED")
         super.onDestroy()
     }
     companion object {
