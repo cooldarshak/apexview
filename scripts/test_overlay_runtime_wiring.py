@@ -160,9 +160,26 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("F1_SCENE_UI_BOUND", viewer)
         self.assertIn("AndroidView(factory = { context ->", viewer)
         self.assertIn("ProtectedDecoderSceneView(context, protectedOutput = secureRolling)", viewer)
+        # Both EGL renderers must bind the registered host, using the same
+        # source atlas translated into the actual output region when eligible.
+        # Keep the original protection against rendering an unbound raw atlas.
+        for renderer in ("ProtectedDecoderSceneView(context, protectedOutput = secureRolling)",
+                         "SingleDecoderSceneView(context)"):
+            block = viewer.split(renderer, 1)[1].split("onRelease = { it.release() }", 1)[0]
+            self.assertIn("it.bind(host.player, outputScene, app.playbackSpeed, host.sceneCodecCorrelation)", block)
         self.assertEqual(viewer.count(
-            "it.bind(host.player, scene, app.playbackSpeed, host.sceneCodecCorrelation)"
+            "it.bind(host.player, outputScene, app.playbackSpeed, host.sceneCodecCorrelation)"
         ), 2)
+        self.assertIn("val outputScene = remember(scene, bounds) { bounds?.let(scene::translatedTo) ?: scene }", viewer)
+        self.assertEqual(viewer.count("onRelease = { it.release() }, modifier = outputModifier)"), 2)
+        self.assertIn("!windowCaptureRequired && !app.arranging && !app.inPip)", viewer)
+        self.assertIn("if (bounds == null) Modifier.fillMaxSize()", viewer)
+        self.assertIn("Constraints.fixed(w, h)", viewer)
+        self.assertIn("child.place(bounds.left, bounds.top)", viewer)
+        output = source("scene/VideoScene.kt")
+        self.assertIn("copy(width = bounds.width.toFloat(), height = bounds.height.toFloat(),", output)
+        self.assertIn("windows = windows.map { it.copy(x = it.x - bounds.left, y = it.y - bounds.top) }", output)
+        self.assertIn("if (!allowed || windows.isEmpty()", output)
         host = source("FeedPlayer.kt")
         self.assertIn("sceneCodecCorrelation.onCodecFrame(", host)
         for renderer in ("scene/SingleDecoderSceneView.kt", "scene/ProtectedDecoderSceneView.kt"):
