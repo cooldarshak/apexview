@@ -254,5 +254,20 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("return 1", script)
         self.assertIn("test -s", script)
 
+    def test_independent_latch_fault_recovers_only_through_same_protection_renderer(self):
+        latch = source("scene/SceneAsyncTextureLatch.kt")
+        self.assertIn("throw Fault(error)", latch)
+        self.assertIn("failure?.invoke(Fault(error))", latch)
+        for name in ("SingleDecoderSceneView.kt", "ProtectedDecoderSceneView.kt"):
+            actual = source("scene/" + name)
+            self.assertIn("error is SceneAsyncTextureLatch.Fault && asyncInput != null && !asyncLatchDisabled", actual)
+            self.assertIn("if (retryLatch) asyncLatchDisabled = true", actual)
+            self.assertIn("val independent = if (asyncLatchDisabled) null", actual)
+            self.assertIn("SCENE_ASYNC_LATCH_RECOVERY sameProtection=true", actual)
+        protected = source("scene/ProtectedDecoderSceneView.kt")
+        self.assertIn("texture, protectedOutput, gl)", protected)
+        self.assertIn("surfaceCreated(holder)", protected)
+
+
 if __name__ == "__main__":
     unittest.main()

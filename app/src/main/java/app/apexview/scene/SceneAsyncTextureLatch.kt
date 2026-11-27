@@ -34,6 +34,9 @@ internal class SceneAsyncTextureLatch private constructor(
     private val worker: Handler,
     private val render: Handler,
 ) : AutoCloseable {
+    /** A fault of the optional independent path, not of the decoder or DRM. */
+    class Fault(cause: Exception) : IllegalStateException("Independent texture latch failed", cause)
+
     private val lock = Any()
     private var closed = false
     private var faulted = false
@@ -160,15 +163,20 @@ internal class SceneAsyncTextureLatch private constructor(
             }
         } catch (error: Exception) {
             synchronized(lock) { faulted = true }
-            render.post { failure?.invoke(error) }
+            render.post { failure?.invoke(Fault(error)) }
         }
     }
 
     /** Render context only; never include eglSwapBuffers in draw. */
     fun sample(transform: FloatArray, draw: () -> Unit): Long = synchronized(lock) {
-        check(!closed && !faulted) { "Independent decoder texture is unavailable" }
+        if (closed || faulted) throw Fault(IllegalStateException("Independent decoder texture is unavailable"))
         if (!image) return@synchronized 0L
-        acquired?.let { check(EGL15.eglWaitSync(display, it, 0)) { "GPU acquire wait failed" } }
+        try {
+            acquired?.let { check(EGL15.eglWaitSync(display, it, 0)) { "GPU acquire wait failed" } }
+        } catch (error: Exception) {
+            faulted = true
+            throw Fault(error)
+        }
         matrix.copyInto(transform)
         try { draw() } finally {
             try {
@@ -180,7 +188,7 @@ internal class SceneAsyncTextureLatch private constructor(
                 // Do not let the worker retire a sampled image without a fence.
                 faulted = true
                 GLES20.glFinish()
-                throw error
+                throw Fault(error)
             }
         }
         latchedAt

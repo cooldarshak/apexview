@@ -409,6 +409,10 @@ object DriverTimingParser {
         private val complexWords by lazy { LongArray(NativeReplayTimingFields.MAX_RECORD_WORDS) }
         var accepted = 0
             private set
+        var nativeComplexRows = 0
+            private set
+        var referenceComplexRows = 0
+            private set
         fun apply(json: String, time: Long, drivers: MutableMap<String, Live>,
                   stateHistory: StateHistoryAccumulator?, statusPolicy: RetirementStatusPolicy,
                   source: Int = 0): Boolean {
@@ -421,9 +425,9 @@ object DriverTimingParser {
             fun text(span: Long): String? =
                 json.substring((span ushr 32).toInt(), span.toInt()).ifEmpty { null }
             try {
-                // Do not commit even one simple row until Android's reference
-                // parser also accepts every complex row. A lexical Rust JSON
-                // success alone cannot prove org.json's numeric semantics.
+                // Validate every complex row before mutating any driver.
+                // Canonical typed rows have exact coercion and nested spans;
+                // all other forms must pass Android's reference parser.
                 var wordsUsed = 0
                 for (i in 0 until count) {
                     val span = out[1 + 6 * i + 5]
@@ -433,8 +437,10 @@ object DriverTimingParser {
                     if (tokens > 0) {
                         rows[i] = NativeReplayTimingFields(row, complexWords, wordsUsed)
                         wordsUsed += tokens * NativeReplayTimingFields.WORDS
+                        nativeComplexRows++
                     } else {
                         rows[i] = runCatching { replayFields(JSONObject(row)) }.getOrNull() ?: return false
+                        referenceComplexRows++
                     }
                 }
                 for (i in 0 until count) {
@@ -697,7 +703,7 @@ object DriverTimingParser {
                 .forEach(::consume)
         }
 
-        checkpoint?.invoke("building history records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size} nativeSimpleRecords=${simpleDecoder.accepted}")
+        checkpoint?.invoke("building history records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size} nativeEnvelopeRecords=${simpleDecoder.accepted} nativeComplexRows=${simpleDecoder.nativeComplexRows} referenceComplexRows=${simpleDecoder.referenceComplexRows}")
         return materialize(drivers, nativeRequested)
     }
 

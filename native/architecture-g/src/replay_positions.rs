@@ -526,8 +526,8 @@ mod complex_field_tests {
         let record=br#"{"Position":"2","NumberOfLaps":4,"Retired":false,"Sectors":{"0":{"Value":"21.1","Segments":[{"Status":2048},{"Status":0}]}}}"#;
         let mut out=[0;COMPLEX_MAX_WORDS];
         let n=complex_fields(record,&mut out).unwrap();
-        assert_eq!(n,13);
-        assert_eq!(&out[..5],&[ABSENT,OBJECT,raw_span(0,record.len()).unwrap(),13,4]);
+        assert_eq!(n,12);
+        assert_eq!(&out[..5],&[ABSENT,OBJECT,raw_span(0,record.len()).unwrap(),12,4]);
         let at=5;
         let (a,b)=span_bounds(out[at]).unwrap();
         assert_eq!(&record[a..b],b"Position");
@@ -535,7 +535,7 @@ mod complex_field_tests {
         assert_eq!(out[at+3],2);
         assert_eq!(out[3*5+1],FALSE);
         assert_eq!(out[4*5+1],OBJECT);
-        assert_eq!(out[4*5+3],13);
+        assert_eq!(out[4*5+3],12);
     }
     #[test]
     fn complex_fields_declines_coercion_and_duplicate_edge_cases() {

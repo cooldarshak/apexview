@@ -103,7 +103,7 @@ public final class NativeHotPath {
         // Keep direct parent owners reachable until native window retirement,
         // not merely until its Java referent is enqueued. Registry bytes thus
         // cannot stop accounting a backing while an alias still owns it.
-        final Object retained;
+        Object retained;
         CompactRef(Object value, long handle) { this(value, handle, null); }
         CompactRef(Object value, long handle, Object retained) {
             super(value, compactQueue); token = handle; this.retained = retained;
@@ -117,7 +117,7 @@ public final class NativeHotPath {
                     CompactRef ref = (CompactRef) compactQueue.remove();
                     try { nativeReleaseCompactTimes(ref.token); }
                     catch (LinkageError | RuntimeException unavailable) { /* process teardown */ }
-                    finally { compactRefs.remove(ref); ref.clear(); }
+                    finally { compactRefs.remove(ref); ref.retained = null; ref.clear(); }
                 } catch (InterruptedException ignored) { /* process lifetime owner */ }
             }
         }, "PitwallCompactTimingReaper");

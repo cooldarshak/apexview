@@ -25,8 +25,9 @@ internal class RollingTimingIndex(private val nativeRequested: Boolean,
     operator fun plusAssign(time: Long) {
         if (used == BLOCK) {
             val immutable = tail
-            sealed.add((if (nativeRequested) pack(immutable, BLOCK) else null)
-                ?: TimingTimestamps.jvm(immutable, BLOCK))
+            sealed.add((if (nativeRequested) {
+                frozenTail?.takeIf { frozenTailCount == BLOCK } ?: pack(immutable, BLOCK)
+            } else null) ?: TimingTimestamps.jvm(immutable, BLOCK))
             tail = LongArray(32)
             used = 0
             frozenTail = null

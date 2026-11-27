@@ -39,6 +39,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private val gl = Handler(thread.looper)
     private var decoderIngress: SceneDecoderIngress? = null
     private var asyncInput: SceneAsyncTextureLatch? = null
+    // A proven runtime fault retires the optional shared-context path once.
+    // Rebind through the existing renderer with the same DRM protection.
+    private var asyncLatchDisabled = false
     private var lastAsyncSubmitted = 0L
     private var ingressNotifications = 0L
     private var ingressCoalesced = 0L
@@ -295,6 +298,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 }
             } catch (error: Exception) {
                 if (!target.closed) target.fail(error)
+                if (error is SceneAsyncTextureLatch.Fault) guarded { throw error }
             } finally {
                 if (window != EGL14.EGL_NO_SURFACE) EGL14.eglMakeCurrent(display, window, window, contextGl)
             }
@@ -688,7 +692,15 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-        val independent = SceneAsyncTextureLatch.tryCreate(display, selected, contextGl, texture, false, gl)
+        val independent = if (asyncLatchDisabled) null else try {
+            SceneAsyncTextureLatch.tryCreate(display, selected, contextGl, texture, false, gl)
+        } catch (error: Exception) {
+            Log.w("PitwallGraphics", "Independent latch admission failed; retaining original renderer", error)
+            null
+        } catch (error: LinkageError) {
+            Log.w("PitwallGraphics", "Independent latch API unavailable; retaining original renderer", error)
+            null
+        }
         asyncInput = independent
         val frames = independent?.frames ?: SurfaceTexture(texture)
         decoderTexture = frames
@@ -986,11 +998,21 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             // replacement scene. Its queued teardown still owns its resources.
             if (released || !surfaceLifetime.matches(lifetime)) return
             recordGraphicsOwner()
+            val retryLatch = error is SceneAsyncTextureLatch.Fault && asyncInput != null && !asyncLatchDisabled
+            if (retryLatch) asyncLatchDisabled = true
+            val previousOutput = localOutputTexture
             failed = true
             val reason = "Single-decoder scene output: ${error.message ?: error.javaClass.simpleName}".take(200)
             Log.w("ApexviewSingleDecoder", reason)
             main.post {
                 if (released || !surfaceLifetime.matches(lifetime)) return@post
+                if (retryLatch && previousOutput != null && isAvailable && surfaceTexture === previousOutput) {
+                    Log.w("PitwallGraphics", "SCENE_ASYNC_LATCH_RECOVERY sameProtection=true decoderRebind=true")
+                    // The existing availability path invalidates output readiness,
+                    // detaches Media3 on its looper, then retires old GL resources.
+                    onSurfaceTextureAvailable(previousOutput, width, height)
+                    return@post
+                }
                 detachDecoderInput("output-failed")
                 gl.post { if (!released && surfaceLifetime.matches(lifetime) && failed) destroy() }
                 onFailure(reason)
