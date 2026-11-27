@@ -254,6 +254,77 @@ class LiveTimingTest {
         assertNull(LiveConnection.parse("broken"))
     }
 
+    @Test
+    fun archiveSpeedPublicationCompactsAndSharesExactTimestamps() {
+        val pool = SpeedTimestampPool()
+        val firstBuilder = SpeedBuilder()
+        val secondBuilder = SpeedBuilder()
+        repeat(4101) { i ->
+            val now = t0 + i * 250L
+            firstBuilder.add(now, 100 + i % 200, i % 9)
+            secondBuilder.add(now, 200 + i % 100, i % 9)
+        }
+        val first = firstBuilder.build(pool)
+        val second = secondBuilder.build(pool)
+        assertEquals(4101, first.speedTimes.size)
+        assertEquals(4101, first.gearTimeSeries.size)
+        assertTrue(first.speedTimes === first.gearTimeSeries)
+        assertTrue(first.speedTimes === second.speedTimes)
+        assertTrue(second.speedTimes === second.gearTimeSeries)
+        val last = t0 + 4100 * 250L
+        assertEquals(100, first.kmhAt(t0))
+        // Different drivers must keep their own value arrays.
+        assertEquals(200, second.kmhAt(t0))
+        assertEquals(100 + 4100 % 200, first.kmhAt(last))
+        assertEquals(200 + 4100 % 100, second.kmhAt(last))
+        assertEquals(4100 % 9, first.gearAt(last))
+        assertNull(first.kmhAt(last + 5_001L))
+        assertNull(first.gearAt(last + 5_001L))
+        firstBuilder.add(last + 250L, 350, 8)
+        assertEquals(4101, first.speedTimes.size)
+        assertEquals(4102, firstBuilder.build(pool).speedTimes.size)
+        assertEquals(100 + 4100 % 200, first.kmhAt(last + 250L))
+    }
+
+    @Test
+    fun archiveSpeedPublicationKeepsIndependentAndEmptySeries() {
+        val pool = SpeedTimestampPool()
+        val builder = SpeedBuilder()
+        builder.add(t0, 200)
+        builder.add(t0 + 1000, null, 5)
+        builder.add(t0 + 2000, 220, 6)
+        val log = builder.build(pool)
+        assertTrue(log.speedTimes !== log.gearTimeSeries)
+        assertEquals(listOf(t0, t0 + 2000), log.speedTimes.toList())
+        assertEquals(listOf(t0 + 1000, t0 + 2000), log.gearTimeSeries.toList())
+        assertNull(log.gearAt(t0))
+        assertEquals(200, log.kmhAt(t0 + 1000))
+        assertEquals(5, log.gearAt(t0 + 1000))
+        assertEquals(6, log.gearAt(t0 + 2000))
+        val gearOnly = SpeedBuilder().apply { add(t0, null, 0) }.build(pool)
+        assertEquals(0, gearOnly.speedTimes.size)
+        assertEquals(1, gearOnly.gearTimeSeries.size)
+        assertNull(gearOnly.kmhAt(t0))
+        assertEquals(0, gearOnly.gearAt(t0))
+        val empty = SpeedBuilder().build(pool)
+        assertNull(empty.kmhAt(t0))
+        assertNull(empty.gearAt(t0))
+    }
+
+    @Test
+    fun speedTimestampPoolDoesNotConfuseHashCollisionsOrUnusedCapacity() {
+        val pool = SpeedTimestampPool()
+        val a = longArrayOf(1000, 2000, 9999)
+        val b = longArrayOf(1001, 1969)
+        val first = pool.freeze(a, 2)
+        val collision = pool.freeze(b, 2)
+        assertTrue(first !== collision)
+        assertEquals(listOf(1000L, 2000L), first.toList())
+        assertEquals(listOf(1001L, 1969L), collision.toList())
+        assertTrue(first === pool.freeze(longArrayOf(1000, 2000), 2))
+        assertTrue(first !== SpeedTimestampPool().freeze(longArrayOf(1000, 2000), 2))
+    }
+
     private fun <T> assertNotNullAndGet(value: T?): T {
         assertNotNull(value)
         return value!!

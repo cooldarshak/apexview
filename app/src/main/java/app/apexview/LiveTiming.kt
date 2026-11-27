@@ -445,7 +445,50 @@ class SpeedBuilder {
         }
     }
 
-    fun build() = SpeedLog(t, v, size, gears, gearTimes, gearSize)
+    // Builder buffers remain append-only; publish only the valid prefix and share
+    // identical immutable timestamp series across speed, gear and archive drivers.
+    fun build(): SpeedLog = build(SpeedTimestampPool())
+
+    internal fun build(pool: SpeedTimestampPool): SpeedLog {
+        val speedTime = pool.freeze(t, size)
+        val gearTime = pool.freeze(gearTimes, gearSize)
+        return SpeedLog(speedTime, if (v.size == size) v else v.copyOf(size), size,
+            if (gears.size == gearSize) gears else gears.copyOf(gearSize),
+            if (gearTime === speedTime) null else gearTime, gearSize)
+    }
+}
+
+/** Scoped to one archive publication, not a process-wide cache. The hash is only
+ * a lookup hint: exact prefix equality is mandatory, including on collisions.
+ * A full builder backing is safe to transfer because the next append grows it;
+ * non-full backings must be frozen by copying only their valid prefix.
+ * Keep the existing LongArray JNI boundary for the Rust tower sampler. */
+internal class SpeedTimestampPool {
+    private val timelines = HashMap<Int, MutableList<LongArray>>()
+
+    fun freeze(source: LongArray, count: Int): LongArray {
+        require(count in 0..source.size)
+        var hash = 1
+        for (i in 0 until count) {
+            val value = source[i]
+            hash = 31 * hash + (value xor (value ushr 32)).toInt()
+        }
+        val candidates = timelines.getOrPut(hash) { ArrayList() }
+        for (candidate in candidates) {
+            if (candidate.size != count) continue
+            var equal = true
+            for (i in 0 until count) {
+                if (candidate[i] != source[i]) {
+                    equal = false
+                    break
+                }
+            }
+            if (equal) return candidate
+        }
+        val frozen = if (source.size == count) source else source.copyOf(count)
+        candidates.add(frozen)
+        return frozen
+    }
 }
 
 /** A speed in the unit chosen in Settings. */
@@ -2086,7 +2129,8 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 runCatching { JSONObject(inflate(text.substring(streamPrefixLength(text)))) }.getOrNull()?.let { addCarData(it, cars) }
             }
         }
-        cars.mapValues { it.value.build() }
+        val timestampPool = SpeedTimestampPool()
+        cars.mapValues { it.value.build(timestampPool) }
     }
 
     /** One decoded CarData message: channel 2 is speed (km/h), channel 3 is gear. */
