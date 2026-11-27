@@ -74,7 +74,7 @@ internal class ArchiveMeasuredLoadControl(
         if (generation != target.generation) { generation = target.generation; held = false }
         if (reportedTarget != target.highUs) {
             reportedTarget = target.highUs
-            android.util.Log.i("PitwallPlayback", "ARCHIVE_MEDIA3_BUFFER_POLICY targetUs=${target.highUs} lowUs=${target.lowUs} basis=MEASURED_VIDEO_AUDIO")
+            android.util.Log.i("PitwallPlayback", "ARCHIVE_MEDIA3_BUFFER_POLICY targetUs=${target.highUs} lowUs=${target.lowUs} basis=MEASURED_SELECTED_CHILDREN_AND_UPSTREAM")
         }
         if (parameters.bufferedDurationUs >= target.highUs) held = true
         if (parameters.bufferedDurationUs < target.lowUs) held = false

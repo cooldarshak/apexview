@@ -304,6 +304,8 @@ class FeedPlayer(
     private val playbackAllocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
     private val sourceAllocations = Media3SourceAllocationLedger()
     private val archiveForwardBuffers = ArchiveForwardBufferPolicy()
+    private var archiveBufferSourceToken: Any? = null
+
     private var parkedForArchive = false
     private var activeAudioDecoders = 0
     private val memoryLoads = Media3LoadLedger()
@@ -596,10 +598,6 @@ class FeedPlayer(
             "TCL_STABLE_RENDITION preferred=${videoQuality.name} cap=${qualityWidth(videoQuality)}x${qualityHeight(videoQuality)}")
         player.addListener(object : Player.Listener {
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
-                archiveForwardBuffers.reset(archiveVodSession != null && !remotePlaybackSuspended && !captionsSelected &&
-                    tracks.groups.any { it.type == C.TRACK_TYPE_VIDEO && it.isSelected } &&
-                    tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO && it.isSelected } &&
-                    tracks.groups.none { it.type == C.TRACK_TYPE_TEXT && it.isSelected })
                 archiveSelectedAudioUri?.let { applyArchiveAudioTrack(it, tracks) }
                 // Never replace the original feed ladder with composed atlas dimensions,
                 // or erase it just because its source player is parked.
@@ -619,6 +617,7 @@ class FeedPlayer(
                 refreshMissingQualityNotice()
                 if (archiveVodSession != null) {
                     applyArchiveCaptionTrack(tracks)
+                    updateArchiveBufferSelection(tracks)
                     return
                 }
                 val offered = buildList {
@@ -871,15 +870,6 @@ class FeedPlayer(
                 }
                 if (mediaLoadData.dataType == C.DATA_TYPE_MEDIA) {
                     memoryLoads.start(loadEventInfo.loadTaskId, mediaLoadData.trackType)
-                    if (archiveVodSession != null && eventTime.timeline == player.currentTimeline) {
-                        val mime = mediaLoadData.trackFormat?.sampleMimeType
-                        val lane = when {
-                            mediaLoadData.trackType == C.TRACK_TYPE_VIDEO || mime?.startsWith("video/") == true -> ArchiveForwardBufferPolicy.Lane.VIDEO
-                            mediaLoadData.trackType == C.TRACK_TYPE_AUDIO || mime?.startsWith("audio/") == true -> ArchiveForwardBufferPolicy.Lane.AUDIO
-                            else -> null
-                        }
-                        if (lane != null) archiveForwardBuffers.start(loadEventInfo.loadTaskId, lane)
-                    }
                 }
                 if (!DiagnosticLogs.recording) { observedLoads.clear(); return }
                 // Include steady playback, but keep the diagnostic map bounded.
@@ -912,7 +902,6 @@ class FeedPlayer(
             ) {
                 if (memoryOwnerRetired || parkedForArchive && player.mediaItemCount == 0) return
                 memoryLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
-                archiveForwardBuffers.cancel(loadEventInfo.loadTaskId)
                 val seek = observedLoads.remove(loadEventInfo.loadTaskId) ?: return
                 logLoad("load-cancel", loadEventInfo, mediaLoadData, seek)
             }
@@ -926,7 +915,6 @@ class FeedPlayer(
             ) {
                 if (memoryOwnerRetired || parkedForArchive && player.mediaItemCount == 0) return
                 if (wasCanceled) memoryLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
-                archiveForwardBuffers.reset()
                 val seek = observedLoads[loadEventInfo.loadTaskId] ?: return
                 // Media3's wrapper alone hid the distinction between a timeout and an HTTP
                 // rejection in device logs. Emit only exception types / status, never URLs.
@@ -947,12 +935,6 @@ class FeedPlayer(
             ) {
                 if (memoryOwnerRetired || parkedForArchive && player.mediaItemCount == 0) return
                 memoryLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
-                if (mediaLoadData.dataType == C.DATA_TYPE_MEDIA && archiveVodSession != null && eventTime.timeline == player.currentTimeline &&
-                    mediaLoadData.mediaStartTimeMs != C.TIME_UNSET && mediaLoadData.mediaEndTimeMs != C.TIME_UNSET &&
-                    loadEventInfo.bytesLoaded > 0) {
-                    archiveForwardBuffers.complete(loadEventInfo.loadTaskId, loadEventInfo.loadDurationMs,
-                        mediaLoadData.mediaEndTimeMs - mediaLoadData.mediaStartTimeMs, android.os.SystemClock.elapsedRealtime())
-                } else archiveForwardBuffers.cancel(loadEventInfo.loadTaskId)
                 observedLoads.remove(loadEventInfo.loadTaskId)?.let {
                     logLoad("load-end", loadEventInfo, mediaLoadData, it)
                 }
@@ -1138,6 +1120,60 @@ class FeedPlayer(
         }
     }
 
+    /** Actual child identity survives HLS default track types and merged analytics.
+     * Listeners live with their source; the token rejects late callbacks from
+     * an old source installation, even when the same session is reused. */
+    private fun observeArchiveChild(source: androidx.media3.exoplayer.source.MediaSource,
+                                    token: Any, child: Int) {
+        source.addEventListener(android.os.Handler(player.applicationLooper),
+            object : androidx.media3.exoplayer.source.MediaSourceEventListener {
+                private fun current() = archiveBufferSourceToken === token && archiveVodSession != null
+                override fun onLoadStarted(windowIndex: Int,
+                    mediaPeriodId: androidx.media3.exoplayer.source.MediaSource.MediaPeriodId?,
+                    loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData) {
+                    if (current() && mediaLoadData.dataType == C.DATA_TYPE_MEDIA)
+                        archiveForwardBuffers.startChild(loadEventInfo.loadTaskId, child)
+                }
+                override fun onLoadCompleted(windowIndex: Int,
+                    mediaPeriodId: androidx.media3.exoplayer.source.MediaSource.MediaPeriodId?,
+                    loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData) {
+                    if (!current()) return
+                    if (mediaLoadData.dataType == C.DATA_TYPE_MEDIA &&
+                        mediaLoadData.mediaStartTimeMs != C.TIME_UNSET &&
+                        mediaLoadData.mediaEndTimeMs != C.TIME_UNSET && loadEventInfo.bytesLoaded > 0)
+                        archiveForwardBuffers.complete(loadEventInfo.loadTaskId, loadEventInfo.loadDurationMs,
+                            mediaLoadData.mediaEndTimeMs - mediaLoadData.mediaStartTimeMs,
+                            android.os.SystemClock.elapsedRealtime())
+                    else archiveForwardBuffers.cancel(loadEventInfo.loadTaskId)
+                }
+                override fun onLoadCanceled(windowIndex: Int,
+                    mediaPeriodId: androidx.media3.exoplayer.source.MediaSource.MediaPeriodId?,
+                    loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData) {
+                    if (current()) archiveForwardBuffers.cancel(loadEventInfo.loadTaskId)
+                }
+                override fun onLoadError(windowIndex: Int,
+                    mediaPeriodId: androidx.media3.exoplayer.source.MediaSource.MediaPeriodId?,
+                    loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData,
+                    error: java.io.IOException, wasCanceled: Boolean) {
+                    if (current()) archiveForwardBuffers.failure(loadEventInfo.loadTaskId)
+                }
+            })
+    }
+
+    private fun updateArchiveBufferSelection(tracks: androidx.media3.common.Tracks) {
+        val selectedAudio = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO && it.isSelected }
+        val selectedText = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.isSelected }
+        val audio = selectedAudio.singleOrNull()?.let { ArchiveAudioSelectionPlan.childIndex(it.mediaTrackGroup.id) }
+        val text = selectedText.singleOrNull()?.let { ArchiveAudioSelectionPlan.childIndex(it.mediaTrackGroup.id) }
+        val expectedAudio = archiveAudioChildren.indexOf(archiveSelectedAudioUri) + 1
+        val expectedText = archiveCaptionChildren[archiveProgrammeLabel]
+        val enabled = archiveVodSession != null && !remotePlaybackSuspended &&
+            tracks.groups.any { it.type == C.TRACK_TYPE_VIDEO && it.isSelected } &&
+            audio != null && audio == expectedAudio &&
+            (if (captionsSelected) text != null && text == expectedText else selectedText.isEmpty())
+        archiveForwardBuffers.select(enabled, audio ?: -1, text ?: -1)
+    }
+
     /** One static composed video track plus native audio, on this same ExoPlayer and surface. */
     internal fun startArchiveVodPlayback(
         session: HevcArchiveVodSession, positionMs: Long, playWhenReady: Boolean,
@@ -1175,6 +1211,7 @@ class FeedPlayer(
         firstFrameRendered = false; error = null; problem = null
         archiveForwardBuffers.reset(false)
         val previousArchive = archiveVodSession
+        val previousBufferSourceToken = archiveBufferSourceToken
         val previousAudio = archiveSelectedAudioUri
         val previousAudioChildren = archiveAudioChildren
         val previousProgramme = archiveProgrammeLabel
@@ -1199,6 +1236,11 @@ class FeedPlayer(
         try {
             // Keep the audio child indexes stable for native TrackSelectionOverride.
             val children = audioSources + captionChildren
+            val token = Any()
+            archiveBufferSourceToken = token
+            archiveForwardBuffers.bindProduction(session.bufferProduction)
+            observeArchiveChild(video, token, 0)
+            children.forEachIndexed { index, child -> observeArchiveChild(child, token, index + 1) }
             // A sparse or shorter text rendition must leave the full video timeline seekable.
             player.setMediaSource(MergingMediaSource(true, video, *children.toTypedArray()), positionMs.coerceAtLeast(0))
             parkedForArchive = false
@@ -1211,6 +1253,8 @@ class FeedPlayer(
         } catch (failure: Throwable) {
             if (archiveVodSession === session) {
                 archiveVodSession = previousArchive
+                archiveBufferSourceToken = previousBufferSourceToken
+                previousArchive?.let { archiveForwardBuffers.bindProduction(it.bufferProduction) }
                 archiveSelectedAudioUri = previousAudio
                 archiveAudioChildren = previousAudioChildren
                 archiveCaptionChildren = previousCaptionChildren

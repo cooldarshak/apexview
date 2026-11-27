@@ -4,6 +4,36 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ArchiveForwardBufferPolicyTest {
+    private fun policy(producerMs: Long = 500): ArchiveForwardBufferPolicy =
+        ArchiveForwardBufferPolicy().apply {
+            val producer = ArchiveForwardBufferPolicy.ProductionWindow()
+            repeat(6) { producer.record(producerMs, 6000, 1000L + it) }
+            bindProduction(producer)
+        }
+    @Test fun selectedChildCaptionsAndUpstreamAreRequired() {
+        val policy = policy(2500)
+        policy.select(true, 1, 3)
+        fun child(index: Int, first: Long) {
+            repeat(6) {
+                val task = first + it
+                policy.startChild(task, index)
+                policy.complete(task, 500, 5760, 1000L + it)
+            }
+        }
+        child(0, 10); child(1, 20); child(2, 30)
+        assertNull(policy.target(2000, 1f))
+        child(3, 40)
+        assertEquals(25_000_000L, policy.target(2000, 1f)?.highUs)
+        assertEquals(27_780_000L, policy.target(2000, 1.5f)?.highUs)
+        policy.select(true, 2, 3)
+        assertNull(policy.target(2000, 1f))
+        val slow = policy(6000)
+        slow.reset(true)
+        observe(slow, ArchiveForwardBufferPolicy.Lane.VIDEO, 100)
+        observe(slow, ArchiveForwardBufferPolicy.Lane.AUDIO, 200)
+        assertNull(slow.target(2000, 1f))
+    }
+
     private fun observe(policy: ArchiveForwardBufferPolicy, lane: ArchiveForwardBufferPolicy.Lane,
                         first: Long, duration: Long = 500, segment: Long = 6000) {
         repeat(6) {
@@ -13,19 +43,19 @@ class ArchiveForwardBufferPolicyTest {
         }
     }
     @Test fun needsBothMeasuredMediaLanesAndPreservesConservativeSpeedMargin() {
-        val policy = ArchiveForwardBufferPolicy()
+        val policy = policy()
         policy.reset(true)
         observe(policy, ArchiveForwardBufferPolicy.Lane.VIDEO, 10)
         assertNull(policy.target(2000, 1f))
         observe(policy, ArchiveForwardBufferPolicy.Lane.AUDIO, 20)
-        assertEquals(20_000_000L, policy.target(2000, 1f)?.highUs)
-        assertEquals(14_000_000L, policy.target(2000, 1f)?.lowUs)
-        assertEquals(21_000_000L, policy.target(2000, 1.5f)?.highUs)
+        assertEquals(25_000_000L, policy.target(2000, 1f)?.highUs)
+        assertEquals(19_000_000L, policy.target(2000, 1f)?.lowUs)
+        assertEquals(25_000_000L, policy.target(2000, 1.5f)?.highUs)
         assertNull(policy.target(2000, 2f))
         assertNull(policy.target(130000, 1f))
     }
     @Test fun slowSourceAndGenerationChangesRestoreNormalPolicy() {
-        val policy = ArchiveForwardBufferPolicy()
+        val policy = policy()
         policy.reset(true)
         observe(policy, ArchiveForwardBufferPolicy.Lane.VIDEO, 1, 4500)
         observe(policy, ArchiveForwardBufferPolicy.Lane.AUDIO, 10)
@@ -42,7 +72,7 @@ class ArchiveForwardBufferPolicyTest {
         assertNull(policy.target(2000, 1f))
     }
     @Test fun cancelledAndInvalidLoadsCannotQualify() {
-        val policy = ArchiveForwardBufferPolicy()
+        val policy = policy()
         policy.reset(true)
         observe(policy, ArchiveForwardBufferPolicy.Lane.VIDEO, 1)
         observe(policy, ArchiveForwardBufferPolicy.Lane.AUDIO, 10)

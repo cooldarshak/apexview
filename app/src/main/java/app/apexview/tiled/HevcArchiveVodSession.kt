@@ -99,6 +99,7 @@ internal class HevcArchiveVodSession(
     private val sourceInitialization = ArchiveInitializationBacking(inputs.map { it.initialization })
     private val nativeClear = NativeClearArchiveBridge()
     private val nativeBudgetObservation = NativeStitchingBudgetObservation()
+    internal val bufferProduction = app.apexview.ArchiveForwardBufferPolicy.ProductionWindow()
     @Volatile private var nativeBudgetContext: android.content.Context? = null
     private val httpCoalescedBytes = java.util.concurrent.atomic.AtomicLong()
     private val media3DeliveredBytes = java.util.concurrent.atomic.AtomicLong()
@@ -340,6 +341,7 @@ internal class HevcArchiveVodSession(
     fun prioritizeSeek(positionMs: Long) {
         val target = segmentAt(ArchiveTimelineSearch.msToUs(positionMs))
         nativeDemand = null // never use the pre-seek clock for the new target
+        bufferProduction.reset()
         synchronized(cacheLock) {
             if (!closed) {
                 cache.invalidateLocalDelivery()
@@ -704,6 +706,7 @@ internal class HevcArchiveVodSession(
                 }
                 val producerMs = (System.nanoTime() - started) / 1_000_000L
                 val mediaMs = groups[number].durationUs / 1000L
+                bufferProduction.record(producerMs, mediaMs, android.os.SystemClock.elapsedRealtime())
                 val memory = cache.memorySnapshot()
                 android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs " +
                     "composeMs=$compositionMs verifyMs=$verificationMs totalMs=${(System.nanoTime() - started) / 1_000_000L} " +
@@ -733,6 +736,7 @@ internal class HevcArchiveVodSession(
                 if (!publishedNative) nativeFragment?.close()
             }
         } catch (error: Exception) {
+            bufferProduction.reset()
             val root = (error as? java.util.concurrent.ExecutionException)?.cause as? Exception ?: error
             // A socket timeout is a network failure, not a seek cancellation:
             // SocketTimeoutException extends InterruptedIOException.
