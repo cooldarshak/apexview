@@ -56,9 +56,11 @@ for abi in armeabi-v7a arm64-v8a x86 x86_64; do
     for symbol in nativeAbi nativeOpen nativeBridge nativeSubmit nativeSubmitClearAtlas nativeAcquire nativeCopy nativeRelease nativeSeek nativeClose nativeProtectedHeader nativeProtectedPlan nativeFragmentAllocate nativeFragmentView nativeFragmentRelease nativeFragmentTrim nativeOpenAtlas nativeSubmitAtlasParts nativeSubmitAtlasOwnedParts nativeAdoptAtlasFragment nativeReadAtlasArray nativeFragmentAllocateBounded; do
         grep -Eq "[[:space:]]Java_app_apexview_tiled_NativeStitchingEngine_$symbol$" "$report/$abi-symbols.txt"
     done
-    for symbol in nativeSamplePositions nativeFloorIndices nativeRowOrder nativeAdts nativeScaleUs nativePrepareGeometry nativeProjectGeometry nativeInterpolateMotion nativePointAt nativeFlags nativeAudioAdmit nativeAudioMetadata nativeTransport nativeNormalizeSectors nativeRetirementState; do
-        grep -Eq "[[:space:]]Java_app_apexview_tiled_NativeHotPath_$symbol$" "$report/$abi-symbols.txt"
-    done
+    # Verify every declared NativeHotPath JNI method, not a stale hand-written list.
+    "$ndk/llvm-nm" --defined-only --dynamic "$packed" > "$report/$abi-packaged-symbols.txt"
+    python3 scripts/verify_native_hot_path_symbols.py \
+        app/src/main/java/app/apexview/tiled/NativeHotPath.java \
+        "$report/$abi-symbols.txt" "$report/$abi-packaged-symbols.txt"
     address="$(awk '$3=="Java_app_apexview_tiled_ArchitectureG0Probe_nativeConvert"{print $1}' "$report/$abi-symbols.txt")"
     if [[ ! "$address" =~ ^[0-9a-fA-F]+$ ]]; then
         echo "G0 $abi: missing or ambiguous nativeConvert symbol" >&2

@@ -36,6 +36,18 @@ class ArchitectureG0PackagingContract(unittest.TestCase):
         self.assertIn("architecture_g0_build_id.py", verifier)
         self.assertIn("llvm-addr2line", verifier)
 
+    def test_hot_path_exports_follow_java_declarations_and_fail_loudly(self):
+        from verify_native_hot_path_symbols import required, verify
+        java = (ROOT/"app/src/main/java/app/apexview/tiled/NativeHotPath.java").read_text()
+        symbols = required(java)
+        self.assertIn("Java_app_apexview_tiled_NativeHotPath_nativeSamplePositionsPacked", symbols)
+        self.assertNotIn("Java_app_apexview_tiled_NativeHotPath_nativeSamplePositions", symbols)
+        self.assertIn("Java_app_apexview_tiled_NativeHotPath_nativeCreateCompactTelemetry", symbols)
+        verify(java, "\n".join("000000 T " + symbol for symbol in symbols))
+        with self.assertRaisesRegex(ValueError, "nativeSamplePositionsPacked"):
+            verify(java, "\n".join(symbol for symbol in symbols if not symbol.endswith("nativeSamplePositionsPacked")))
+        self.assertIn("verify_native_hot_path_symbols.py", (ROOT/"scripts/verify_architecture_g0_apk.sh").read_text())
+
     def test_missing_build_id_reproduces_build_844_failure(self):
         # Build 844 unstripped and packaged notes contained only Android ident.
         notes = "Displaying notes found in: .note.android.ident\n  Android  0x00000084  NT_ANDROID_TYPE_IDENT\n"
