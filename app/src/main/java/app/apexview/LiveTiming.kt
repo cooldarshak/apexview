@@ -727,9 +727,9 @@ class SessionClock(private val marks: List<Mark>, private val parts: List<Pair<L
 class StateParse(val states: Map<String, StateLog>, val crossings: List<Pair<String, Long>>)
 
 /** Keeps the tower and lap-state histories from one JSON parse of the large TimingData stream. */
-internal class StateHistoryAccumulator {
+internal class StateHistoryAccumulator(private val nativeRequested: Boolean = false) {
     private val crossings = mutableListOf<Pair<String, Long>>()
-    private val times = mutableMapOf<String, MutableList<Long>>()
+    private val times = mutableMapOf<String, RollingTimingIndex>()
     private val values = mutableMapOf<String, MutableList<LapState>>()
     private val current = mutableMapOf<String, LapState>()
     private val laps = mutableMapOf<String, Int>()
@@ -759,27 +759,34 @@ internal class StateHistoryAccumulator {
             if (driver.optBoolean("KnockedOut")) state = LapState.KNOCKED_OUT
             if (state != current[number]) {
                 current[number] = state
-                times.getOrPut(number) { mutableListOf() }.add(time)
+                val timeline = times.getOrPut(number) { RollingTimingIndex(nativeRequested) }
+                timeline += time
                 values.getOrPut(number) { mutableListOf() }.add(state)
             }
         }
     }
 
-    fun finish() = StateParse(
-        states = times.mapValues { (number, t) -> StateLog(t.toLongArray(), values.getValue(number).toTypedArray()) },
-        crossings = crossings.toList(),
-    )
+    fun finish(): StateParse {
+        val pool = SpeedTimestampPool(nativeRequested)
+        return StateParse(
+            states = times.mapValues { (number, t) -> StateLog(t.freeze(pool), values.getValue(number).toTypedArray()) },
+            crossings = crossings.toList(),
+        )
+    }
 
-    fun finishWindow(from: Long, until: Long) = StateParse(
-        states = times.mapNotNull { (number, t) ->
-            val range = historyWindowRange(t.size, from, until) { t[it] } ?: return@mapNotNull null
-            number to StateLog(LongArray(range.count()) { t[range.first + it] },
-                values.getValue(number).subList(range.first, range.last + 1).toTypedArray())
-        }.toMap(),
-        // The full accumulator retains every crossing for circuit/pace
-        // derivation; transient overlay windows need only the covered events.
-        crossings = crossings.filter { it.second in from..until },
-    )
+    fun finishWindow(from: Long, until: Long): StateParse {
+        val pool = SpeedTimestampPool(nativeRequested)
+        return StateParse(
+            states = times.mapNotNull { (number, t) ->
+                val range = t.window(from, until) ?: return@mapNotNull null
+                number to StateLog(t.freeze(pool, range.first, range.last + 1),
+                    values.getValue(number).subList(range.first, range.last + 1).toTypedArray())
+            }.toMap(),
+            // The full accumulator retains every crossing for circuit/pace
+            // derivation; transient overlay windows need only the covered events.
+            crossings = crossings.filter { it.second in from..until },
+        )
+    }
 }
 
 internal data class DriverTimingParse(val laps: Map<String, DriverLaps>, val states: StateParse)
@@ -1402,7 +1409,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     progress("PARSING timing tower and lap history · ${timingStream.characters} chars")
                     val started = android.os.SystemClock.elapsedRealtime()
                     try {
-                        val accumulator = StateHistoryAccumulator()
+                        val accumulator = StateHistoryAccumulator(nativeRequested())
                         val laps = traceStage("tower-history") { report ->
                             val job = kotlin.coroutines.coroutineContext
                             var publishedThrough: Long? = null
