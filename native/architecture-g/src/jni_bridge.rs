@@ -615,6 +615,19 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeCreateCompact
     match result { Ok(Some(buffer)) => buffer, _ => std::ptr::null_mut() }
 }
 #[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeCompactTimingSnapshot(
+    env: JNIEnv<'_>, _class: JClass<'_>, out: JLongArray<'_>,
+) -> jint {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Option<()> {
+        if env.get_array_length(&out).ok()? != 3 { return None; }
+        let registry = compact_registry().lock().ok()?;
+        let samples = registry.entries.values().try_fold(0i64, |total, packet| total.checked_add(packet.len() as i64))?;
+        env.set_long_array_region(&out, 0, &[registry.entries.len() as i64, registry.bytes as i64, samples]).ok()?;
+        Some(())
+    }));
+    match result { Ok(Some(())) => 1, Ok(None) => INVALID, Err(_) => PANIC }
+}
+#[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReleaseCompactTimes(
     _env: JNIEnv<'_>, _class: JClass<'_>, token: jlong,
 ) {

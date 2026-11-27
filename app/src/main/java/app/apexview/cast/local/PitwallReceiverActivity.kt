@@ -843,7 +843,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                 if (player !== next) return
                 updateReceiverMemoryOwner()
                 Log.i("PitwallReceiver", "GC_RECEIVER_ALLOCATOR generation=$generation state=$state " +
-                    "media3InUseBytes=${receiverAllocator.totalBytesAllocated}")
+                    "media3InUseBytes=${receiverAllocator.totalBytesAllocated} media3FreePoolBytes=${receiverAllocator.unusedBytesAllocated}")
                 sendPlayback()
                 if (state == Player.STATE_ENDED) stopPlayback()
             }
@@ -981,7 +981,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         retire("standard-view") { standard?.player = null }
         retire("player") { previous?.release() }
         retire("allocator-registration") { previousAllocator?.let { app.apexview.Media3MemoryOwners.unregister(it) } }
-        retire("allocator-trim") { previousAllocator?.trim() }
+        retire("allocator-trim") { previousAllocator?.let { app.apexview.Media3MemoryOwners.trimFreeBlocks(it, 0) } }
         retire("DRM") { previousAuthorization?.close() }
         secureOutput = false
         window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)

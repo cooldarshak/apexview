@@ -5,6 +5,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ProcessMemoryDiagnosticTest {
+    @Test fun compactTimingPayloadIsExactAndUnknownIsNotZero() {
+        assertEquals("nativeCompactTiming=UNAVAILABLE", ProcessMemoryDiagnostic.compactTimingFields(null))
+        assertEquals("nativeCompactTiming=UNAVAILABLE", ProcessMemoryDiagnostic.compactTimingFields(longArrayOf(2, 24, 3)))
+        assertTrue(ProcessMemoryDiagnostic.compactTimingFields(longArrayOf(2, 28, 3)).contains("nativeCompactTimingBytes=28"))
+        assertTrue(ProcessMemoryDiagnostic.compactTimingFields(longArrayOf(0, 0, 0)).contains("nativeCompactTimingOwners=0"))
+    }
     @Test fun unknownIsNotZeroAndInvalidAccountingIsRejected() {
         assertEquals("nativeFragmentArena=UNAVAILABLE", ProcessMemoryDiagnostic.fragmentFields(null))
         assertEquals("nativeFragmentArena=UNAVAILABLE", ProcessMemoryDiagnostic.fragmentFields(longArrayOf(10, 11, 3, 1, 1)))

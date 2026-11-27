@@ -46,7 +46,19 @@ internal object ProcessMemoryDiagnostic {
             } + Media3MemoryOwners.snapshot().let { (owners, bytes) ->
                 " media3AllocatorOwners=$owners media3InUseBytes=$bytes"
             } + Media3MemoryOwners.ownerFields() + app.apexview.scene.SceneGraphicsOwners.process.fields() +
-            MediaMemoryAccounting.process.diagnosticFields()
+            MediaMemoryAccounting.process.diagnosticFields() + " " +
+            compactTimingFields(app.apexview.tiled.NativeHotPath.compactTimingSnapshot())
+    }
+
+    /** Packed payload is already included in native heap/PSS. Do not add it
+     * again or report it as a measured total process saving. */
+    fun compactTimingFields(values: LongArray?): String {
+        if (values == null || values.size != 3 || values.any { it < 0 } ||
+            values[1] > 64L * 1024 * 1024 || values[0] > values[2] ||
+            values[0] > values[1] / 8 || values[2] > values[1] / 4 ||
+            values[0] * 8 + values[2] * 4 != values[1]) return "nativeCompactTiming=UNAVAILABLE"
+        return "nativeCompactTimingOwners=${values[0]} nativeCompactTimingBytes=${values[1]} " +
+            "nativeCompactTimingSamples=${values[2]} nativeCompactTimingScope=REGISTERED_PAYLOAD"
     }
 
     fun engineFields(values: LongArray?): String {

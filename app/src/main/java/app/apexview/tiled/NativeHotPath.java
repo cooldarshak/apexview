@@ -118,6 +118,13 @@ public final class NativeHotPath {
             }
         }
     }
+    public static long[] compactTimingSnapshot() {
+        if (!available()) return null;
+        long[] out = new long[3];
+        try { return nativeCompactTimingSnapshot(out) == 1 ? out : null; }
+        catch (LinkageError | RuntimeException unavailable) { return null; }
+    }
+    private static native int nativeCompactTimingSnapshot(long[] out);
     private static native ByteBuffer nativeCreateCompactTimes(long[] source,int count,long[] token);
     private static native void nativeReleaseCompactTimes(long token);
     public static boolean rowOrder(int[] positions, int count, int[] order) {

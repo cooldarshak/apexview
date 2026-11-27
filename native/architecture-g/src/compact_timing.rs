@@ -38,6 +38,7 @@ impl CompactTimes {
         Some(Self { bytes: bytes.into_boxed_slice(), count })
     }
     pub fn len(&self) -> usize { self.count }
+    pub fn is_empty(&self) -> bool { self.count == 0 }
     pub fn bytes(&self) -> &[u8] { &self.bytes }
     pub fn at(&self, index: usize) -> Option<i64> {
         if index >= self.count { return None; }
