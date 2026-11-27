@@ -9,6 +9,13 @@ internal class ReplayStartupPublication {
     private var visible: SessionTiming? = null
     private var shape: TrackGeometry? = null
     private var shapeHasLine = false
+    private data class MapPanel(val tracks: Map<String, DriverTrack>, val indexed: Boolean)
+    private data class TowerPanel(val laps: Map<String, DriverLaps>, val states: Map<String, StateLog>,
+                                  val start: Long, val from: Long?, val through: Long, val indexed: Boolean)
+    // Keep at most one previous covered panel per topic, not an entire old
+    // SessionTiming generation. A temporary seek gap must not destroy that data.
+    private var lastMap: MapPanel? = null
+    private var lastTower: TowerPanel? = null
 
     fun offer(next: SessionTiming, playhead: ReplayPlayhead): SessionTiming {
         val old = topics ?: saved
@@ -50,24 +57,28 @@ internal class ReplayStartupPublication {
         // Cold-cache topic publication can arrive in independent batches. Keep
         // the last visible, clock-covered panel only if the new panel is partial.
         // An indexed empty panel is authoritative, never a reason to borrow rows.
-        val prior = visible?.takeIf { it.startUtcMs == start }
-        val priorMap = prior?.tracks?.values?.any { it.hasPositionAt(utc) } == true
-        val priorTower = prior != null && utc >= (prior.previewTowerFromUtc ?: Long.MIN_VALUE) &&
-            utc <= prior.towerThroughUtc && prior.laps.values.any { it.hasRankAt(utc) }
-        val map = if (currentMap) indexed else if (windowMap) window else prior.takeIf { priorMap }
-        val tower = if (currentTower) indexed else if (windowTower) window else prior.takeIf { priorTower }
+        val priorMap = lastMap?.takeIf { it.tracks.values.any { track -> track.hasPositionAt(utc) } }
+        val priorTower = lastTower?.takeIf { it.start == start && utc >= (it.from ?: Long.MIN_VALUE) &&
+            utc <= it.through && it.laps.values.any { history -> history.hasRankAt(utc) } }
+        val mapSource = if (currentMap) indexed else if (windowMap) window else null
+        val towerSource = if (currentTower) indexed else if (windowTower) window else null
+        val map = mapSource?.let { MapPanel(it.tracks, it.positionsIndexed) } ?: priorMap
+        val tower = towerSource?.let {
+            TowerPanel(it.laps, it.states, start,
+                if (it === window) it.previewTowerFromUtc ?: it.firstTrackUtc else it.previewTowerFromUtc,
+                if (it === window && it.previewTowerFromUtc == null) it.lastTrackUtc ?: Long.MIN_VALUE else it.towerThroughUtc,
+                it.towerIndexed)
+        } ?: priorTower
+        if (map != null) lastMap = map
+        if (tower != null) lastTower = tower
         val tracks = map?.tracks.orEmpty()
         val laps = tower?.laps.orEmpty()
         val states = tower?.states.orEmpty()
         val geometry = shape ?: current.geometry
-        val towerFrom = if (tower === window) window?.previewTowerFromUtc ?: window?.firstTrackUtc else tower?.previewTowerFromUtc
-        val towerThrough = when {
-            tower == null -> Long.MIN_VALUE
-            tower === window && tower.previewTowerFromUtc == null -> tower.lastTrackUtc ?: Long.MIN_VALUE
-            else -> tower.towerThroughUtc
-        }
-        val towerComplete = tower?.towerIndexed == true
-        val positionsComplete = map?.positionsIndexed == true
+        val towerFrom = tower?.from
+        val towerThrough = tower?.through ?: Long.MIN_VALUE
+        val towerComplete = tower?.indexed == true
+        val positionsComplete = map?.indexed == true
         val prev = visible
         if (prev != null && prev.tracks === tracks && prev.states === states && prev.laps === laps &&
             prev.geometry === geometry && prev.drivers === current.drivers && prev.startUtcMs == start &&
@@ -97,19 +108,31 @@ internal class ReplayStartupPublication {
             logical += bytes
             if (arrays.put(array, true) == null) unique += bytes
         }
+        // Never materialize compact Rust arrays just to measure their JVM
+        // backing. Native payloads are already counted by the native registry.
+        fun times(t: TimingTimestamps) { t.array?.let { add(it, it.size * 8L) } }
+        fun tracks(values: Map<String, DriverTrack>) { values.values.forEach {
+            times(it.timeline)
+            it.coordinates.xArray?.let { a -> add(a, a.size * 4L) }
+            it.coordinates.yArray?.let { a -> add(a, a.size * 4L) }
+        } }
+        fun tower(laps: Map<String, DriverLaps>, states: Map<String, StateLog>) {
+            laps.values.forEach {
+                times(it.snapshotTimeline); times(it.crossingTimeline); times(it.lapTimeline)
+                add(it.lapCounts, it.lapCounts.size * 4L)
+            }
+            states.values.forEach { times(it.timeline) }
+        }
         for (owner in listOfNotNull(saved, topics, published)) {
             if (generations.put(owner, true) != null) continue
             add(owner.outline, owner.outline.size * 4L)
-            owner.tracks.values.forEach {
-                add(it.t, it.t.size * 8L); add(it.x, it.x.size * 4L); add(it.y, it.y.size * 4L)
-            }
-            owner.laps.values.forEach {
-                add(it.times, it.times.size * 8L); add(it.crossings, it.crossings.size * 8L)
-                add(it.lapTimes, it.lapTimes.size * 8L); add(it.lapCounts, it.lapCounts.size * 4L)
-            }
-            owner.states.values.forEach { add(it.t, it.t.size * 8L) }
+            tracks(owner.tracks)
+            tower(owner.laps, owner.states)
         }
-        return "publicationOwners=${generations.size} primitiveLogicalBytes=$logical primitiveUniqueBytes=$unique"
+        lastMap?.let { panel -> if (generations.keys.none { it.tracks === panel.tracks }) tracks(panel.tracks) }
+        lastTower?.let { panel -> if (generations.keys.none { it.laps === panel.laps && it.states === panel.states })
+            tower(panel.laps, panel.states) }
+        return "publicationOwners=${generations.size} primitiveLogicalBytes=$logical primitiveUniqueBytes=$unique primitiveScope=JVM_BACKING_ONLY"
     }
 
     private fun clear() {
@@ -118,5 +141,7 @@ internal class ReplayStartupPublication {
         visible = null
         shape = null
         shapeHasLine = false
+        lastMap = null
+        lastTower = null
     }
 }

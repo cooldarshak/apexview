@@ -116,6 +116,40 @@ class ReplayStartupPublicationTest {
         assertSame(rows, owner.at(video(8000L))!!.laps)
     }
 
+    @Test fun coldPanelCoverageSurvivesTemporarySeekGapWithoutInventingData() {
+        val owner = ReplayStartupPublication()
+        owner.offer(window(ReplayTimingStage.TOPICS, positions = emptyMap()), video(2000))
+        owner.offer(window(ReplayTimingStage.TOPICS, laps = emptyMap()), video(2000))
+        assertTrue(owner.at(video(9000))!!.tracks.isEmpty())
+        assertTrue(owner.at(video(9000))!!.laps.isEmpty())
+        assertSame(tracks, owner.at(video(2000))!!.tracks)
+        assertSame(rows, owner.at(video(2000))!!.laps)
+        val authoritative = window(ReplayTimingStage.TOPICS, emptyMap(), emptyMap()).apply {
+            positionsIndexed = true; towerIndexed = true
+        }
+        owner.offer(authoritative, video(2000))
+        assertTrue(owner.at(video(2000))!!.tracks.isEmpty())
+        assertTrue(owner.at(video(2000))!!.laps.isEmpty())
+    }
+
+    @Test fun rollingPositionWindowPreservesInterpolationAndRejectsRealGaps() {
+        val builder = TrackBuilder()
+        for (time in 0L..100_000L step 1_000L) builder.add(time, time.toFloat(), 2f * time)
+        builder.add(120_000L, 120_000f, 240_000f)
+        val full = builder.build()
+        val window = builder.previewWindow(30_500L, 90_500L, SpeedTimestampPool())!!
+        assertEquals(30_000L, window.startMs)
+        assertEquals(91_000L, window.endMs)
+        for (time in 30_500L..90_500L step 250L) {
+            assertEquals(full.at(time), window.at(time))
+            assertEquals(full.hasPositionAt(time), builder.hasPositionAt(time))
+        }
+        assertFalse(builder.hasPositionAt(110_000L))
+        assertNull(builder.previewWindow(130_000L, 150_000L, SpeedTimestampPool()))
+        builder.add(121_000L, 121_000f, 242_000f)
+        assertEquals(full.at(90_500L), window.at(90_500L))
+    }
+
     @Test fun compactArchivePreservesOldReadersAndEverySeekSample() {
         val builder = TrackBuilder()
         repeat(100) { builder.add(it.toLong(), it.toFloat(), 2f * it) }

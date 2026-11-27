@@ -1107,8 +1107,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                     return@withContext
                                 }
                                 val target = targetUtc(start)
-                                val covered = partialTracks.values.any { it.hasPositionAt(target) }
-                                if (!covered || snapshot.values.any { it.hasPositionAt(target) }) {
+                                // A seek may occur while a worker builds the preview.
+                                // Never replace any panel with a snapshot that misses the new playhead.
+                                if (snapshot.values.any { it.hasPositionAt(target) }) {
                                     partialTracks = snapshot
                                     partialOutline = outline
                                     publishTopics()
@@ -1122,7 +1123,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                             positionClock.complete(positionStart)
                             val initialStart = positionStart
                                 ?.takeIf { abs(it - heartbeatStart) > STREAM_START_SLACK_MS } ?: heartbeatStart
-                            fun parseFull(lines: Sequence<String>): PositionParseReport {
+                            fun parseFull(lines: Sequence<String>, allowBackgroundPriority: Boolean = true): PositionParseReport {
                                 var lastPreviewAt = -1_000L
                                 var previewOutline = FloatArray(0)
                                 var lastTraceAt = -1_000L
@@ -1130,17 +1131,31 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                 var lastPreview: Map<String, DriverTrack> = emptyMap()
                                 val thread = android.os.Process.myTid()
                                 val previousPriority = android.os.Process.getThreadPriority(thread)
+                                var background = false
                                 try {
                                     return parsePositionLines(lines, { job.ensureActive() }, report) { builders ->
                                         val now = android.os.SystemClock.elapsedRealtime()
                                         val target = targetUtc(initialStart)
-                                        if (positionPreviewPending.get() || now - lastPreviewAt < 400 || publishedThrough?.let {
+                                        val coveredAhead = publishedThrough?.let {
                                             target >= it - 120_000 && target <= it - 10_000 &&
                                                 lastPreview.values.any { track -> track.hasPositionAt(target) }
-                                        } == true) {
+                                        } == true
+                                        // An exhausted preview is foreground work again. Do not
+                                        // leave the only producer able to refill it at background priority.
+                                        if (allowBackgroundPriority && background != coveredAhead) {
+                                            android.os.Process.setThreadPriority(thread,
+                                                if (coveredAhead) android.os.Process.THREAD_PRIORITY_BACKGROUND else previousPriority)
+                                            background = coveredAhead
+                                        }
+                                        if (positionPreviewPending.get() || now - lastPreviewAt < 400 || coveredAhead) {
                                             return@parsePositionLines
                                         }
-                                        val snapshot = builders.mapValues { it.value.build() }
+                                        // Probe append-only builders without materializing every driver.
+                                        if (builders.values.none { it.hasPositionAt(target) }) return@parsePositionLines
+                                        val pool = SpeedTimestampPool(nativeRequested())
+                                        val snapshot = builders.mapNotNull { (number, builder) ->
+                                            builder.previewWindow(target - 90_000L, target + 120_000L, pool)?.let { number to it }
+                                        }.toMap()
                                         val covering = snapshot.values.filter { it.hasPositionAt(target) }
                                         if (covering.isEmpty()) return@parsePositionLines
                                         if (previewOutline.isEmpty()) {
@@ -1151,16 +1166,13 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                             }
                                         }
                                         if (previewOutline.size < 8) return@parsePositionLines
-                                        if (publishedThrough == null) {
-                                            android.os.Process.setThreadPriority(thread, android.os.Process.THREAD_PRIORITY_BACKGROUND)
-                                        }
-                                        lastPreviewAt = now
-                                        publishedThrough = covering.minOf { it.endMs }
-                                        lastPreview = snapshot
                                         val outline = previewOutline
-                                        report("position preview targetUtcMs=$target cars=${covering.size} throughUtcMs=$publishedThrough")
-                                        val previewEpoch = positionPreviewEpochs.next()
                                         if (positionPreviewPending.compareAndSet(false, true)) {
+                                            lastPreviewAt = now
+                                            publishedThrough = covering.minOf { it.endMs }
+                                            lastPreview = snapshot
+                                            report("position preview targetUtcMs=$target cars=${covering.size} throughUtcMs=$publishedThrough")
+                                            val previewEpoch = positionPreviewEpochs.next()
                                             launch {
                                                 try { publishTracks(snapshot, outline, initialStart, previewEpoch) }
                                                 finally { positionPreviewPending.set(false) }
@@ -1203,50 +1215,18 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                             if (wanted.retarget(targetUtc(initialStart) - initialStart)) {
                                                 report("retargeted position window offsetMs=$offset targetMs=${wanted.targetMs}")
                                             }
-                                            if (offset > wanted.lastMs) break
-                                            if (offset >= wanted.firstMs) yield(line)
+                                            // Keep retargeting while the raw stream is spooled.
+                                            // A slow TV must not stop decoding previews at the first
+                                            // window boundary and then spend minutes only copying bytes.
+                                            if (offset in wanted.firstMs..wanted.lastMs) yield(line)
                                         }
                                     }
-                                    var previewSent = false
-                                    var lastPreviewCheckMs = -1_000L
-                                    val initial = parsePositionLines(window, { job.ensureActive() }) { builders ->
-                                        val now = android.os.SystemClock.elapsedRealtime()
-                                        if (!previewSent && now - lastPreviewCheckMs >= 250) {
-                                            lastPreviewCheckMs = now
-                                            val currentUtc = targetUtc(initialStart)
-                                            val snapshot = builders.mapValues { it.value.build() }
-                                            val positioned = snapshot.values.count { it.hasPositionAt(currentUtc) }
-                                            if (positioned > 0) {
-                                                val remoteShape = availableCircuit.get()?.outline
-                                                val shape = remoteShape?.takeIf { it.size >= 8 }
-                                                    ?: traceOutline(builders.values.toList())
-                                                if (shape.size >= 8) {
-                                                    previewSent = true
-                                                    report("position window ready before lookahead targetUtcMs=$currentUtc cars=$positioned")
-                                                    val previewEpoch = positionPreviewEpochs.next()
-                                                    if (positionPreviewPending.compareAndSet(false, true)) {
-                                                        launch {
-                                                            try { publishTracks(snapshot, shape, initialStart, previewEpoch) }
-                                                            finally { positionPreviewPending.set(false) }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    val traced = traceOutline(initial.tracks.values.toList())
-                                    val outline = when {
-                                        traced.isNotEmpty() -> traced
-                                        circuitTask.isCompleted -> circuitTask.await()?.outline ?: traced
-                                        else -> traced
-                                    }
-                                    if (outline.size >= 8 && initial.tracks.isNotEmpty()) {
-                                        val previewEpoch = positionPreviewEpochs.next()
-                                        publishTracks(initial.tracks.mapValues { it.value.build() }, outline,
-                                            initialStart, previewEpoch)
-                                    }
-                                    report("position window available cars=${initial.tracks.size} outlinePoints=${outline.size / 2}")
-                                    while (records.hasNext()) records.next()
+                                    val initial = parseFull(window, allowBackgroundPriority = false)
+                                    report("position rolling preview pass complete cars=${initial.tracks.size}")
+                                    // Full history still comes from the complete spool, including
+                                    // skipped records and earlier seek targets. Retire preview-only
+                                    // builders before starting the full chronological pass.
+                                    initial.tracks.values.forEach { it.retireArchiveBacking() }
                                 }
                                 spool.bufferedReader().useLines { parseFull(it) }
                             } finally {
@@ -2474,6 +2454,29 @@ class TrackBuilder {
     }
 
     fun build() = DriverTrack(t, x, y, size)
+
+    internal fun hasPositionAt(utcMs: Long): Boolean {
+        if (size == 0 || utcMs < t[0] || utcMs > t[size - 1]) return false
+        var lo = 0
+        var hi = size - 1
+        while (hi - lo > 1) {
+            val mid = (lo + hi) ushr 1
+            if (t[mid] <= utcMs) lo = mid else hi = mid
+        }
+        return t[hi] - t[lo] <= 5_000L
+    }
+
+    /** Exact bounded immutable window: one predecessor and successor for
+     * interpolation. Only the selected extent is copied/packed, never the
+     * full growing parser backing. Rust compact storage falls back losslessly. */
+    internal fun previewWindow(from: Long, until: Long, pool: SpeedTimestampPool): DriverTrack? {
+        if (size == 0 || t[size - 1] < from) return null
+        val range = historyWindowRange(size, from, until) { t[it] } ?: return null
+        val end = (range.last + 2).coerceAtMost(size)
+        val count = end - range.first
+        return DriverTrack(pool.freezeTimeline(t.copyOfRange(range.first, end), count),
+            pool.freezeCoordinates(x.copyOfRange(range.first, end), y.copyOfRange(range.first, end), count), count)
+    }
 
     /** Called only after the archive producer has joined. Previously published
      * prefixes retain their own backing until their last reader releases it. */
