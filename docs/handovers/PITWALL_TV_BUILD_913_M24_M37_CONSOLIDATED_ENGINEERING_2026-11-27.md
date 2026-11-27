@@ -37,3 +37,31 @@ This is an **unfinished coding checkpoint**, not a release or physical acceptanc
 GitHub compare confirms five source commits, 19 unique files. Exact upstream 1.11.1 APIs inspected. Native allocation-size model was run as an isolated Python simulation; full native host Rust, Python production-wiring, Gradle Kotlin compilation, unit/instrumentation and APK publication have NOT run for these commits. Added regressions must pass, not just exist. No build yet; do not ask user to test a nonexistent APK. Complete all unconditional scope before a single consolidated CI trigger. Missing captures only gate attribution/physical acceptance and evidence-driven optimization, not the already identified unconditional architecture work.
 
 Final matched physical acceptance: both devices, clear/protected, selected per-feed resolution unchanged, captions including alternate commentary and overlay controls, local single/multi, both Cast routes with screen off and layout/seek changes, one decoder where requested, 2-hour endurance. Mobile PSS first <=550 then toward 450 MiB; active Media3 <=55 MiB, retained graphics <=20 MiB above idle at 120 s, reuse >=85% without enlarging budget, startup <5 s, median seek <1 s. Verify physical display/presentation, not just decoder drop counts. No new Kotlin-only physical exercise. 
+
+
+## M24–M37 continuation checkpoint (2026-11-27)
+
+Continuation parent: `0e619688a1cf5a603843a97c0af4e40a55cb4ca1`.
+Implementation head before this documentation: `d7e4ac002758f75f831482952eb4eebbcfe8920b`.
+Ten skip-CI source commits, 28 unique changed files in this continuation. Build 913 remains the last verified green baseline. No consolidated build has been triggered.
+
+### New implementation
+- M24: sparse UTF-8 byte index over the downloaded position spool, backward/forward seek windows, exact fallback for unordered input, and lookahead-gated repeated decode. Full position JSON decoding still uses the reference parser; native packing remains exact.
+- M25/M37: incremental 2,048-row snapshot blocks use existing Rust compact telemetry storage as soon as a subsequent timestamp seals the previous block. Same-timestamp replacements remain mutable until sealed. Frozen publications share immutable blocks and keep an exact fallback when native storage is unavailable. Native allocation cost and Java retention still need measurement.
+- M27/M28: application-context playback owner and coroutine scope with detached-controller cleanup, Google SDK session listener ownership, notification stop, private app-only non-mirroring virtual display and dedicated presentation using the same ViewerLayers, existing decoder player and direct EGL source-time encoder. Reject protected windows and fail closed on loss of the authorized clear archive. Added explicit retirement before replacement; private display buffers are an additional graphics cost, NOT an established saving.
+- M29: authenticated baked-only HLS extractor wrapper around Media3 1.11.1 TS/PES readers, explicit segment-boundary completion, no synthetic CEA-608 tracks on already-baked captions, fixture asserts exact 50 AVC and 94 AAC frames. Integration test not yet executed.
+- M30: optional direct quality metadata applied transactionally, invalid optional status does not close a valid connection, explicit CONTROL_REJECTED instead of generic LOCAL_CLOSE for rejected protocol.
+- M31: HTTP 503 with Retry-After for temporary reader admission, distinguish true retired/missing 404; receiver buffering removes optional capture backoff without changing 25 fps limit, concurrent request limit, or queue cap.
+- M32/M36: transfer the exact native output's independently validated BMFF report and fragment metadata to the archive session, retain all source/output validation, real IRAP check, generation fencing and JVM fallback. Avoid repeated inspection only for proven immutable native output; unique cold reference remains.
+- Regression sources added/updated for position spool, rolling history, Media3 TS extractor, relay admission, capture pacing, and protected private-display wiring.
+
+### Verification
+GitHub branch compare verified ten source commits and 28 files. An isolated Kotlin/JVM harness transcribing spool, rolling snapshot and pacing logic passed 14 checks. Android types/native registry were stubbed or absent in that harness; it is not the repository test suite or a native/Android test. Full Gradle, Rust host and Android instrumentation not run. No claim of successful compilation, physical screen-off Cast, or measured memory reduction for these changes.
+
+### Outstanding scope (do not mark 100% or trigger CI)
+- M24/M25/M37: native parser/index integration and actual retention/registry-pressure review. The new snapshot blocks use existing Rust storage; the JSON parser and sparse spool index remain JVM-side.
+- M26: previous independent publication implementation, source complete, physical continuity pending.
+- M27/M28/M29/M30/M31: source candidates committed; integration/behavioral review needed, in particular service lifecycle, decoder handoff, private presentation support/graphics costs, exact real Media3 segment finalization and actual paired sender/receiver recovery. Do not weaken secure media eligibility or suppress first-frame validation.
+- M32/M33/M36: cold unique-input validation remains and staging/arena retention need further evidence-guided optimization; reuse classes and exact proof transfer are not proof of target gains.
+- M34/M35: no independent input-latch/output-swap scheduling redesign or measured active GPU allocation reduction yet. Build 913 TCL logs demonstrate EGL swap and callback queue stalls (including 23–30ms swap P95 upper bins in affected windows) but no complete vendor allocation trace. Avoid speculative decoder/quality changes and preserve both secure and nonsecure renderers.
+- Full physical acceptance still requires same session/layout/quality/DRM conditions, both devices, single and multiple decoders, captions, both Cast routes including screen off, startup/seek, 1x/1.5x, 2-hour endurance, memory/graphics/reuse/presentation targets. No new APK or manual testing request until consolidated coding gate is met.
