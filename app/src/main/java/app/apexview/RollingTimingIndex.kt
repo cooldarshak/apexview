@@ -12,6 +12,8 @@ internal class RollingTimingIndex(private val nativeRequested: Boolean,
     private val sealed = ArrayList<TimingTimestamps>()
     private var tail = LongArray(32)
     private var used = 0
+    private var frozenTail: TimingTimestamps? = null
+    private var frozenTailCount = -1
     val size: Int get() = sealed.size * BLOCK + used
 
     fun lastOrNull(): Long? = if (size == 0) null else this[size - 1]
@@ -27,6 +29,8 @@ internal class RollingTimingIndex(private val nativeRequested: Boolean,
                 ?: TimingTimestamps.jvm(immutable, BLOCK))
             tail = LongArray(32)
             used = 0
+            frozenTail = null
+            frozenTailCount = -1
         }
         if (used == tail.size) tail = tail.copyOf(minOf(BLOCK, tail.size * 2))
         tail[used++] = time
@@ -61,6 +65,38 @@ internal class RollingTimingIndex(private val nativeRequested: Boolean,
         // Reuse it rather than allocating and packing an identical timeline.
         if (first % BLOCK == 0 && end - first == BLOCK && first / BLOCK < sealed.size)
             return sealed[first / BLOCK]
+        if (nativeRequested && end > first && first / BLOCK < sealed.size) {
+            val lastBlock = (end - 1) / BLOCK
+            val blocks = lastBlock - first / BLOCK + 1
+            if (blocks <= 1024) {
+                val owners = ArrayList<app.apexview.tiled.NativeHotPath.CompactTimes>(blocks)
+                val starts = IntArray(blocks)
+                val lengths = IntArray(blocks)
+                var at = first
+                while (at < end) {
+                    val block = at / BLOCK
+                    val local = at % BLOCK
+                    val count = minOf(BLOCK - local, end - at)
+                    val backing = if (block < sealed.size) sealed[block] else {
+                        // Pack the exact published mutable tail once per size.
+                        // Never pass a mutable array to a publication owner.
+                        if (frozenTailCount != used) {
+                            frozenTail = TimingTimestamps.packedBlock(tail, used)
+                            frozenTailCount = used
+                        }
+                        frozenTail
+                    }
+                    val owner = backing?.native ?: break
+                    val slot = owners.size
+                    owners.add(owner)
+                    starts[slot] = local
+                    lengths[slot] = count
+                    at += count
+                }
+                if (at == end) TimingTimestamps.packedWindow(owners.toTypedArray(), starts, lengths, end - first)
+                    ?.let { return it }
+            }
+        }
         val exact = copyRange(first, end)
         return pool.freezeTimeline(exact, exact.size)
     }

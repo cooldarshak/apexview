@@ -55,6 +55,18 @@ class SceneGraphicsOwnersTest {
         assertTrue(owners.snapshot().isEmpty())
     }
 
+    @Test fun independentLatchAccountsTwoContextsButOneDecoderTexture() {
+        val owners = SceneGraphicsOwners()
+        val id = owners.newId()
+        val scene = SceneGraphicsOwners.Owner("SecureSurfaceView", 1, 1, 2, 1, 1, 3840, 1088, 1920, 1080)
+        owners.record(id, scene)
+        assertTrue(owners.fields().contains("sceneEglContexts=2"))
+        assertTrue(owners.fields().contains("sceneDecoderTextures=1"))
+        owners.record(id, scene.copy(contexts = 0, windows = 0, decoderTextures = 0))
+        assertTrue(owners.snapshot().isEmpty())
+        assertTrue(owners.fields().contains("scenePeakEglContexts=2"))
+    }
+
     @Test fun replacedOwnerIsNotCountedTwiceAndRetiredOwnerIsRemoved() {
         val owners = SceneGraphicsOwners()
         val a = owners.newId()

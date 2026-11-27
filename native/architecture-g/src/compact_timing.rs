@@ -358,3 +358,86 @@ mod snapshot_delta_tests {
         assert!(CompactSnapshotDeltas::from_reader(64, |_, out| { out.fill(-1); Some(()) }).is_none());
     }
 }
+
+
+use std::sync::Arc;
+
+/// An immutable timestamp window shares existing Rust-owned blocks.
+/// Only the span index is newly allocated. No timestamp payload is copied.
+pub struct CompactTimeSpan {
+    owner: Arc<CompactTimes>,
+    first: usize,
+    end: usize,
+}
+pub struct CompactTimeWindow {
+    spans: Box<[CompactTimeSpan]>,
+    count: usize,
+}
+impl CompactTimeWindow {
+    pub const MAX_SPANS: usize = 1024;
+    pub fn from_spans(source: impl IntoIterator<Item = (Arc<CompactTimes>, usize, usize)>,
+                      count: usize) -> Option<Self> {
+        if count == 0 || count > Self::MAX_SPANS { return None; }
+        let mut spans = Vec::new();
+        spans.try_reserve_exact(count).ok()?;
+        let mut size = 0usize;
+        let mut previous = i64::MIN;
+        for (owner, first, length) in source {
+            if length == 0 || spans.len() >= count || first.checked_add(length)? > owner.len() {
+                return None;
+            }
+            let low = owner.at(first)?;
+            let high = owner.at(first + length - 1)?;
+            if low < previous { return None; }
+            previous = high;
+            size = size.checked_add(length)?;
+            if size > MAX_HISTORY { return None; }
+            spans.push(CompactTimeSpan { owner, first, end: size });
+        }
+        if spans.len() != count { return None; }
+        Some(Self { spans: spans.into_boxed_slice(), count: size })
+    }
+    pub fn len(&self) -> usize { self.count }
+    pub fn is_empty(&self) -> bool { self.count == 0 }
+    pub fn index_bytes(&self) -> usize { std::mem::size_of_val(self.spans.as_ref()) }
+    pub fn at(&self, index: usize) -> Option<i64> {
+        if index >= self.count { return None; }
+        let slot = self.spans.partition_point(|span| span.end <= index);
+        let span = self.spans.get(slot)?;
+        let start = if slot == 0 { 0 } else { self.spans[slot - 1].end };
+        span.owner.at(span.first + index - start)
+    }
+}
+
+#[cfg(test)]
+mod timestamp_window_tests {
+    use super::*;
+    fn packet(values: &[i64]) -> Arc<CompactTimes> {
+        Arc::new(CompactTimes::from_reader(values.len(), |at, out| {
+            out.copy_from_slice(&values[at..at + out.len()]); Some(())
+        }).unwrap())
+    }
+    #[test]
+    fn windows_share_payload_and_preserve_duplicate_timestamp_boundaries() {
+        let a = packet(&[1, 2, 3, 3]);
+        let b = packet(&[3, 3, 4, 5]);
+        let window = CompactTimeWindow::from_spans([(a.clone(), 1, 3), (b.clone(), 0, 3)], 2).unwrap();
+        assert_eq!(Arc::strong_count(&a), 2);
+        assert_eq!(Arc::strong_count(&b), 2);
+        assert_eq!(window.len(), 6);
+        let expected = [2, 3, 3, 3, 3, 4];
+        for (i, &value) in expected.iter().enumerate() { assert_eq!(window.at(i), Some(value)); }
+        assert_eq!(crate::hot_path::floor_index(window.len(), 3, |i| window.at(i)), Some(4));
+        assert_eq!(window.at(6), None);
+        drop(window);
+        assert_eq!(Arc::strong_count(&a), 1);
+        assert_eq!(Arc::strong_count(&b), 1);
+    }
+    #[test]
+    fn invalid_window_does_not_keep_parents() {
+        let a = packet(&[1, 2, 3]);
+        assert!(CompactTimeWindow::from_spans([(a.clone(), 2, 2)], 1).is_none());
+        assert!(CompactTimeWindow::from_spans([(a.clone(), 2, 1),(a.clone(), 0, 1)], 2).is_none());
+        assert_eq!(Arc::strong_count(&a), 1);
+    }
+}

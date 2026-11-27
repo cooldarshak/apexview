@@ -44,6 +44,11 @@ internal class TimingTimestamps private constructor(
         }
         fun packed(source: LongArray, count: Int): TimingTimestamps? =
             NativeHotPath.compactTimes(source, count)?.let { TimingTimestamps(null, it, count) }
+        fun packedBlock(source: LongArray, count: Int): TimingTimestamps? =
+            NativeHotPath.compactTimesBlock(source, count)?.let { TimingTimestamps(null, it, count) }
+        fun packedWindow(owners: Array<NativeHotPath.CompactTimes>, starts: IntArray,
+                         lengths: IntArray, count: Int): TimingTimestamps? =
+            NativeHotPath.compactTimeWindow(owners, starts, lengths)?.let { TimingTimestamps(null, it, count) }
     }
 }
 

@@ -30,7 +30,10 @@ internal class SceneGraphicsOwners(private val onChange: (Long, Owner?, Owner?) 
     private var peakDecoderTextures = 0
     fun newId(): Long = next.incrementAndGet()
     @Synchronized fun record(id: Long, owner: Owner) {
-        require(owner.contexts in 0..1 && owner.windows >= 0 && owner.decoderTextures in 0..1)
+        require(owner.contexts in 0..2 && owner.windows >= 0 && owner.decoderTextures in 0..1)
+        // Two contexts are the render + surfaceless latch pair; neither a
+        // second decoder texture nor a second decoder is implied.
+        require(owner.contexts < 2 || owner.decoderTextures == 1)
         require(owner.atlasWidth >= 0 && owner.atlasHeight >= 0 && owner.outputWidth >= 0 && owner.outputHeight >= 0)
         require(owner.encoderInputs in 0..1 && owner.captureTextures in 0..1 && owner.captureQueues in 0..1 &&
             owner.pbuffers in 0..1 && owner.captureWidth >= 0 && owner.captureHeight >= 0)

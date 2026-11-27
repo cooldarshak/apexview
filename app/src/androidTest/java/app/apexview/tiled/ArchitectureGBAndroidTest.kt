@@ -19,6 +19,25 @@ import org.junit.runner.RunWith
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class ArchitectureGBAndroidTest {
     @Test
+    fun nativeTimestampWindowSharesBlocksAndPreservesExactFloorLookup() {
+        val a = requireNotNull(NativeHotPath.compactTimes(LongArray(2048) { it / 3L }, 2048))
+        val b = requireNotNull(NativeHotPath.compactTimesBlock(LongArray(13) { 682L + it / 3L }, 13))
+        val before = NativeHotPath.compactTimingSnapshot()
+        val window = requireNotNull(NativeHotPath.compactTimeWindow(arrayOf(a, b), intArrayOf(2040, 0), intArrayOf(8, 13)))
+        val after = NativeHotPath.compactTimingSnapshot()
+        assertEquals(21, window.count())
+        for (i in 0 until 21) assertEquals(if (i < 8) (2040 + i) / 3L else 682L + (i - 8) / 3L, window.at(i))
+        assertTrue(after[1] - before[1] < 256L)
+        assertEquals(before[2], after[2])
+        val result = IntArray(1) { -1 }
+        assertTrue(NativeHotPath.floorIndicesWithCompactTimes(arrayOfNulls<LongArray>(1), intArrayOf(21),
+            longArrayOf(window.handle()), 682L, result))
+        assertEquals(10, result[0])
+        assertNull(NativeHotPath.compactTimeWindow(arrayOf(a), intArrayOf(2048), intArrayOf(1)))
+        java.lang.ref.Reference.reachabilityFence(window)
+    }
+
+    @Test
     fun nativeTowerDeltaStoragePreservesEveryFieldAndRejectsDensePackets() {
         val rows = 2051
         val source = ShortArray(rows * 9) { i ->

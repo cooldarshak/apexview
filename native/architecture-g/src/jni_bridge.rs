@@ -564,7 +564,7 @@ use crate::hot_path::{self,PositionCursor,MAX_DRIVERS,MAX_HISTORY};
 // Archive timestamp ownership is independent of media/DRM leases. A bounded
 // native registry owns immutable packets; a JVM reference-queue owner retires
 // the packet only after its last shared timing reader is unreachable.
-use crate::compact_timing::{CompactTimes, CompactCoordinates, CompactTelemetry, CompactSnapshotDeltas};
+use crate::compact_timing::{CompactTimes, CompactCoordinates, CompactTelemetry, CompactSnapshotDeltas, CompactTimeWindow};
 use std::collections::HashMap;
 use std::sync::Arc;
 const COMPACT_TIMING_LIMIT: usize = 64 * 1024 * 1024;
@@ -572,6 +572,7 @@ struct CompactTimingRegistry {
     serial: i64,
     bytes: usize,
     entries: HashMap<i64, Arc<CompactTimes>>,
+    windows: HashMap<i64, Arc<CompactTimeWindow>>,
     positions: HashMap<i64, Arc<CompactCoordinates>>,
     telemetry: HashMap<i64, Arc<CompactTelemetry>>,
     snapshot_deltas: HashMap<i64, Arc<CompactSnapshotDeltas>>,
@@ -579,11 +580,63 @@ struct CompactTimingRegistry {
 static COMPACT_TIMING: OnceLock<Mutex<CompactTimingRegistry>> = OnceLock::new();
 fn compact_registry() -> &'static Mutex<CompactTimingRegistry> {
     COMPACT_TIMING.get_or_init(|| Mutex::new(CompactTimingRegistry {
-        serial: 0, bytes: 0, entries: HashMap::new(), positions: HashMap::new(), telemetry: HashMap::new(), snapshot_deltas: HashMap::new(),
+        serial: 0, bytes: 0, entries: HashMap::new(), windows: HashMap::new(), positions: HashMap::new(), telemetry: HashMap::new(), snapshot_deltas: HashMap::new(),
     }))
 }
-fn compact_history(handle: i64) -> Option<Arc<CompactTimes>> {
-    compact_registry().lock().ok()?.entries.get(&handle).cloned()
+enum CompactHistory {
+    Direct(Arc<CompactTimes>),
+    Window(Arc<CompactTimeWindow>),
+}
+impl CompactHistory {
+    fn len(&self) -> usize {
+        match self { Self::Direct(p) => p.len(), Self::Window(p) => p.len() }
+    }
+    fn at(&self, index: usize) -> Option<i64> {
+        match self { Self::Direct(p) => p.at(index), Self::Window(p) => p.at(index) }
+    }
+}
+fn compact_history(handle: i64) -> Option<CompactHistory> {
+    let registry = compact_registry().lock().ok()?;
+    if let Some(packet) = registry.entries.get(&handle) {
+        Some(CompactHistory::Direct(packet.clone()))
+    } else {
+        Some(CompactHistory::Window(registry.windows.get(&handle)?.clone()))
+    }
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeCreateCompactTimeWindow(
+    env: JNIEnv<'_>, _class: JClass<'_>, parents: JLongArray<'_>,
+    starts: JIntArray<'_>, lengths: JIntArray<'_>,
+) -> jlong {
+    catch_unwind(AssertUnwindSafe(|| -> Option<jlong> {
+        let n = usize::try_from(env.get_array_length(&parents).ok()?).ok()?;
+        if n == 0 || n > CompactTimeWindow::MAX_SPANS ||
+            env.get_array_length(&starts).ok()? as usize != n ||
+            env.get_array_length(&lengths).ok()? as usize != n { return None; }
+        let mut handles = [0i64; CompactTimeWindow::MAX_SPANS];
+        let mut offsets = [0i32; CompactTimeWindow::MAX_SPANS];
+        let mut counts = [0i32; CompactTimeWindow::MAX_SPANS];
+        env.get_long_array_region(&parents, 0, &mut handles[..n]).ok()?;
+        env.get_int_array_region(&starts, 0, &mut offsets[..n]).ok()?;
+        env.get_int_array_region(&lengths, 0, &mut counts[..n]).ok()?;
+        let mut registry = compact_registry().lock().ok()?;
+        let mut spans = Vec::new();
+        spans.try_reserve_exact(n).ok()?;
+        for i in 0..n {
+            // Only direct parents. Prevent cycles and recursive alias lookup.
+            spans.push((registry.entries.get(&handles[i])?.clone(),
+                usize::try_from(offsets[i]).ok()?, usize::try_from(counts[i]).ok()?));
+        }
+        let window = Arc::new(CompactTimeWindow::from_spans(spans, n)?);
+        let total = registry.bytes.checked_add(window.index_bytes())?;
+        if total > COMPACT_TIMING_LIMIT { return None; }
+        let handle = registry.serial.checked_add(1)?;
+        registry.windows.try_reserve(1).ok()?;
+        registry.windows.insert(handle, window);
+        registry.serial = handle;
+        registry.bytes = total;
+        Some(handle)
+    })).ok().flatten().unwrap_or(0)
 }
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeCreateCompactTimes(
@@ -734,7 +787,7 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeCompactTiming
         let telemetry_samples = registry.telemetry.values().try_fold(0i64, |total, packet| total.checked_add(packet.len() as i64))?;
         let telemetry_samples = registry.snapshot_deltas.values().try_fold(telemetry_samples, |total, packet| total.checked_add((packet.len() * CompactSnapshotDeltas::FIELDS) as i64))?;
         let time_bytes = registry.bytes.checked_sub(position_bytes)?.checked_sub(telemetry_bytes)?;
-        env.set_long_array_region(&out, 0, &[registry.entries.len() as i64, time_bytes as i64, samples,
+        env.set_long_array_region(&out, 0, &[(registry.entries.len() + registry.windows.len()) as i64, time_bytes as i64, samples,
             registry.positions.len() as i64, position_bytes as i64, position_samples,
             (registry.telemetry.len() + registry.snapshot_deltas.len()) as i64, telemetry_bytes as i64, telemetry_samples]).ok()?;
         Some(())
@@ -749,6 +802,8 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReleaseCompac
         if let Ok(mut registry) = compact_registry().lock() {
             if let Some(packet) = registry.entries.remove(&token) {
                 registry.bytes = registry.bytes.saturating_sub(packet.bytes().len());
+            } else if let Some(window) = registry.windows.remove(&token) {
+                registry.bytes = registry.bytes.saturating_sub(window.index_bytes());
             } else if let Some(packet) = registry.positions.remove(&token) {
                 registry.bytes = registry.bytes.saturating_sub(packet.bytes().len());
             } else if let Some(packet) = registry.telemetry.remove(&token) {

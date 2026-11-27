@@ -66,17 +66,33 @@ public final class NativeHotPath {
         private final long handle;
         private final ByteBuffer data;
         private final int count;
+        private final CompactTimes[] parents;
+        private final int[] starts;
+        private final int[] ends;
         private CompactTimes(long handle, ByteBuffer data, int count) {
             this.handle = handle;
             this.data = data.asReadOnlyBuffer().order(ByteOrder.LITTLE_ENDIAN);
             this.count = count;
+            parents = null; starts = null; ends = null;
+        }
+        private CompactTimes(long handle, CompactTimes[] parents, int[] starts, int[] ends, int count) {
+            this.handle = handle; this.count = count; this.data = null;
+            this.parents = parents; this.starts = starts; this.ends = ends;
         }
         public long handle() { return handle; }
         public int count() { return count; }
         public long at(int index) {
             if (index < 0 || index >= count) throw new IndexOutOfBoundsException();
-            try { return data.getLong(0) + Integer.toUnsignedLong(data.getInt(8 + index * 4)); }
-            finally { Reference.reachabilityFence(this); }
+            try {
+                if (data != null) return data.getLong(0) + Integer.toUnsignedLong(data.getInt(8 + index * 4));
+                int low = 0, high = ends.length;
+                while (low < high) {
+                    int mid = (low + high) >>> 1;
+                    if (ends[mid] <= index) low = mid + 1; else high = mid;
+                }
+                int base = low == 0 ? 0 : ends[low - 1];
+                return parents[low].at(starts[low] + index - base);
+            } finally { Reference.reachabilityFence(this); }
         }
     }
     private static final ReferenceQueue<Object> compactQueue = new ReferenceQueue<>();
@@ -84,7 +100,14 @@ public final class NativeHotPath {
     private static boolean compactReaperStarted;
     private static final class CompactRef extends PhantomReference<Object> {
         final long token;
-        CompactRef(Object value, long handle) { super(value, compactQueue); token = handle; }
+        // Keep direct parent owners reachable until native window retirement,
+        // not merely until its Java referent is enqueued. Registry bytes thus
+        // cannot stop accounting a backing while an alias still owns it.
+        final Object retained;
+        CompactRef(Object value, long handle) { this(value, handle, null); }
+        CompactRef(Object value, long handle, Object retained) {
+            super(value, compactQueue); token = handle; this.retained = retained;
+        }
     }
     private static synchronized void ensureCompactReaper() {
         if (compactReaperStarted) return;
@@ -103,7 +126,11 @@ public final class NativeHotPath {
         compactReaperStarted = true;
     }
     public static CompactTimes compactTimes(long[] source, int count) {
-        if (count < 64 || count > source.length || !available()) return null;
+        return count < 64 ? null : compactTimesBlock(source, count);
+    }
+    /** Small immutable tail allowed only by rolling-history publication. */
+    public static CompactTimes compactTimesBlock(long[] source, int count) {
+        if (count <= 0 || count > source.length || !available()) return null;
         long[] token = new long[1];
         boolean registered = false;
         try {
@@ -122,6 +149,44 @@ public final class NativeHotPath {
             }
         }
     }
+    public static CompactTimes compactTimeWindow(CompactTimes[] source, int[] first, int[] lengths) {
+        int n = source.length;
+        if (n == 0 || n > 1024 || first.length != n || lengths.length != n || !available()) return null;
+        CompactTimes[] parents = source.clone();
+        int[] starts = first.clone();
+        int[] ends = new int[n];
+        long[] handles = new long[n];
+        int total = 0;
+        long handle = 0;
+        boolean registered = false;
+        try {
+            for (int i = 0; i < n; i++) {
+                CompactTimes parent = parents[i];
+                int length = lengths[i];
+                if (parent == null || parent.data == null || starts[i] < 0 ||
+                        length <= 0 || length > parent.count - starts[i]) return null;
+                total = Math.addExact(total, length);
+                ends[i] = total;
+                handles[i] = parent.handle;
+            }
+            handle = nativeCreateCompactTimeWindow(handles, starts, lengths);
+            if (handle <= 0) return null;
+            CompactTimes owner = new CompactTimes(handle, parents, starts, ends, total);
+            ensureCompactReaper();
+            compactRefs.add(new CompactRef(owner, handle, parents));
+            registered = true;
+            return owner;
+        } catch (LinkageError | RuntimeException unavailable) { return null; }
+        finally {
+            if (!registered && handle > 0) {
+                try { nativeReleaseCompactTimes(handle); }
+                catch (LinkageError | RuntimeException ignored) { }
+            }
+            Reference.reachabilityFence(parents);
+        }
+    }
+    private static native long nativeCreateCompactTimeWindow(long[] parents, int[] starts, int[] lengths);
+
     public static final class CompactCoordinates {
         private final long handle;
         private final ByteBuffer data;
