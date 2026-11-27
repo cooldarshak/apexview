@@ -97,6 +97,72 @@ class BoundedArchiveFragmentCacheTest {
         cache.clear()
     }
 
+    @Test fun olderDeliveredBackingRetiresImmediatelyAfterLastReaderWithoutAnotherDelivery() {
+        val cache = BoundedArchiveFragmentCache(maxEntries = 3, maxBytes = 64)
+        val old = ByteArray(8) { 3 }
+        val newer = ByteArray(8) { 4 }
+        val warm = ByteArray(8) { 5 }
+        cache.put(1, old); cache.put(2, newer); cache.put(3, warm)
+        val first = requireNotNull(cache.readLease(1))
+        val late = requireNotNull(cache.readLease(1))
+        assertEquals(0L, cache.completeLocalDelivery(1, first, 9L))
+        first.close()
+        val second = requireNotNull(cache.readLease(2))
+        assertEquals(0L, cache.completeLocalDelivery(2, second, 9L))
+        second.close()
+        assertTrue(cache.contains(1))
+        val read = ByteArray(8)
+        late.readInto(read, 0, 0, read.size)
+        assertArrayEquals(ByteArray(8) { 3 }, read)
+        late.close()
+        assertFalse(cache.contains(1))
+        assertArrayEquals(ByteArray(8), old)
+        assertEquals(16L, cache.bytesRetained)
+        assertArrayEquals(newer, cache.readCopy(2))
+        assertArrayEquals(warm, cache.readCopy(3))
+        cache.clear()
+    }
+
+    @Test fun outOfOrderDeliveryKeepsNewestAndSeekOrRelayInvalidationCancelsDeferredTrim() {
+        for (invalidate in listOf(false, true)) {
+            val cache = BoundedArchiveFragmentCache(maxEntries = 3, maxBytes = 64)
+            val old = ByteArray(8) { 7 }
+            val newer = ByteArray(8) { 8 }
+            cache.put(1, old); cache.put(2, newer)
+            val first = requireNotNull(cache.readLease(1))
+            val second = requireNotNull(cache.readLease(2))
+            assertEquals(0L, cache.completeLocalDelivery(2, second, 10L))
+            second.close()
+            // Late callback for the older segment must not evict segment 2.
+            assertEquals(0L, cache.completeLocalDelivery(1, first, 10L))
+            if (invalidate) cache.invalidateLocalDelivery()
+            first.close()
+            assertEquals(invalidate, cache.contains(1))
+            assertArrayEquals(ByteArray(8) { if (invalidate) 7 else 0 }, old)
+            assertArrayEquals(newer, cache.readCopy(2))
+            assertEquals(0L, cache.leasedBytes)
+            cache.clear()
+        }
+    }
+
+    @Test fun replacingDeferredEntryDoesNotRetireNewBackingAtSameNumber() {
+        val cache = BoundedArchiveFragmentCache(maxEntries = 3, maxBytes = 64)
+        val old = ByteArray(8) { 6 }
+        cache.put(1, old); cache.put(2, ByteArray(8) { 9 })
+        val first = requireNotNull(cache.readLease(1))
+        val second = requireNotNull(cache.readLease(2))
+        cache.completeLocalDelivery(1, first, 11L)
+        cache.completeLocalDelivery(2, second, 11L)
+        second.close()
+        val replacement = ByteArray(8) { 2 }
+        cache.put(1, replacement)
+        assertArrayEquals(ByteArray(8) { 6 }, old)
+        first.close()
+        assertArrayEquals(ByteArray(8), old)
+        assertArrayEquals(replacement, cache.readCopy(1))
+        cache.clear()
+    }
+
     @Test fun sharedInitializationSurvivesSessionRetirementWithoutCopy() {
         val bytes = byteArrayOf(1, 2, 3, 4, 5, 6)
         val published = HeapFragmentLease.take(bytes)

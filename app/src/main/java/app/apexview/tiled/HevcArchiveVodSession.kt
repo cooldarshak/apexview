@@ -235,7 +235,12 @@ internal class HevcArchiveVodSession(
             "GC_ARCHIVE_DELIVERED_TRIM number=$number retiredLogicalBytes=$freed foregroundUnchanged=true")
     }
     fun acquireLease(): AutoCloseable {
-        synchronized(cacheLock) { checkOpen(); owners.incrementAndGet(); localDeliveryEpoch++ }
+        synchronized(cacheLock) {
+            checkOpen()
+            cache.invalidateLocalDelivery()
+            owners.incrementAndGet()
+            localDeliveryEpoch++
+        }
         val released = java.util.concurrent.atomic.AtomicBoolean(false)
         return AutoCloseable { if (released.compareAndSet(false, true)) releaseOwner() }
     }
@@ -336,7 +341,12 @@ internal class HevcArchiveVodSession(
         val target = segmentAt(ArchiveTimelineSearch.msToUs(positionMs))
         nativeDemand = null // never use the pre-seek clock for the new target
         synchronized(cacheLock) {
-            if (!closed) { localDeliveryEpoch++; productionEpoch++; nativeClear.invalidateForSeek() }
+            if (!closed) {
+                cache.invalidateLocalDelivery()
+                localDeliveryEpoch++
+                productionEpoch++
+                nativeClear.invalidateForSeek()
+            }
         }
         preemptUnrelatedWarmup(target, seek = true)
     }

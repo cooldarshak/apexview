@@ -190,6 +190,7 @@ internal class BoundedArchiveFragmentCache(
         var cached = true
         var readers = 0
         var localDeliveryEpoch: Long? = null
+        var retireAfterLastReader = false
     }
     private val entries = LinkedHashMap<Int, Entry>(maxEntries + 1, 0.75f, true)
     private val pinned = mutableSetOf<Entry>()
@@ -240,18 +241,37 @@ internal class BoundedArchiveFragmentCache(
         recordMemory()
         return freed
     }
-    /** A complete downstream delivery is not playback completion. Keep the just-delivered
-     * resource for immediate retry; retire only older fully delivered, unpinned backing in
-     * this exact local ownership epoch. Never evict unread warm-ahead or active readers here. */
+    /** A seek or shared relay owner invalidates previous local delivery proof.
+     * Clear deferred decisions without changing the cache or touching active readers. */
+    @Synchronized fun invalidateLocalDelivery() {
+        for (entry in entries.values) {
+            entry.localDeliveryEpoch = null
+            entry.retireAfterLastReader = false
+        }
+    }
+
+    /** Downstream delivery is not playback completion. Preserve the newest fully
+     * delivered resource for retry, including out-of-order close callbacks.
+     * Older fully delivered readers retire only after their last lease closes.
+     * Never evict unread warm-ahead or an active reader here. */
     @Synchronized fun completeLocalDelivery(number: Int, lease: ArchiveFragmentLease, epoch: Long): Long {
         val current = entries[number] ?: return 0L
         if (current.identity !== lease.storageIdentity) return 0L
         current.localDeliveryEpoch = epoch
+        // An older reader may complete after a newer one. Retain the newest
+        // proven delivery, not whichever callback happened to arrive last.
+        val newest = entries.entries.asSequence()
+            .filter { it.value.localDeliveryEpoch == epoch }
+            .maxOf { it.key }
         var freed = 0L
         val iterator = entries.entries.iterator()
         while (iterator.hasNext()) {
             val entry = iterator.next()
-            if (entry.key >= number || entry.value.readers != 0 || entry.value.localDeliveryEpoch != epoch) continue
+            if (entry.key >= newest || entry.value.localDeliveryEpoch != epoch) continue
+            if (entry.value.readers != 0) {
+                entry.value.retireAfterLastReader = true
+                continue
+            }
             freed += entry.value.size
             iterator.remove()
             retire(entry.value)
@@ -286,6 +306,18 @@ internal class BoundedArchiveFragmentCache(
             pinned.remove(entry)
             leasedBytes -= entry.size
             if (!entry.cached) entry.dispose()
+            else if (entry.retireAfterLastReader) {
+                // No further delivery callback is needed to release a late
+                // reader. Identity prevents retiring a replacement segment.
+                val iterator = entries.entries.iterator()
+                while (iterator.hasNext()) {
+                    if (iterator.next().value === entry) {
+                        iterator.remove()
+                        retire(entry)
+                        break
+                    }
+                }
+            }
         }
         recordMemory()
     }

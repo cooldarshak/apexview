@@ -7,6 +7,40 @@ the device-shell permissions that previously allowed `perfetto` and `logcat`.
 If the device rejects a Perfetto data source, report the error; do not turn
 off Android security protections or downgrade the trace silently.
 
+## Native heap reliability follow-up after Build 901
+
+The v4 native-only capture disconnected with a client buffer overrun after one snapshot. Use
+[pitwall-heap-only-v5.cfg](pitwall-heap-only-v5.cfg) for the next isolated heap capture.
+It uses 128 KiB fixed sampling, 32 MiB producer shared memory, 90 seconds and
+10-second dumps. Do not block the playback client or combine this with GPU/ftrace.
+This is a diagnostic candidate, not a guarantee of capture success. The increased
+profiler buffer affects profiled memory; keep separate unprofiled PSS observations.
+
+Save the exact config to /sdcard/Download and install it in the previously working
+shell directory. Start before opening the replay, capture the actual PID, then
+copy the trace after 90 seconds. Use unique filenames for every run.
+
+```sh
+cp /sdcard/Download/pitwall-heap-only-v5.cfg /data/misc/perfetto-configs/
+pidof app.apexview_custom
+perfetto --background-wait --txt -c /data/misc/perfetto-configs/pitwall-heap-only-v5.cfg -o /data/misc/perfetto-traces/pitwall-v5-rust-on.perfetto-trace
+# Open the same replay immediately; after 90 seconds:
+cp /data/misc/perfetto-traces/pitwall-v5-rust-on.perfetto-trace /sdcard/Download/
+```
+
+On the analysis side, use the actual process PID, not the example:
+
+```sh
+python scripts/check_pitwall_memory_trace.py TRACE --strict-heap --pid 14022 --min-snapshots 8
+```
+
+Reject timeout/overrun/disconnected captures rather than interpreting missing
+samples as a memory improvement. Verify the native ELF build ID and stack
+coverage separately. Use an independent system graphics/FrameTimeline capture
+and package memory dump for graphics attribution; heap-only capture cannot
+measure vendor GPU/codec ownership. Never lower video quality or disable security
+to make the profiler pass. If config is rejected, report the precise error.
+
 ## Native allocation-site capture (Build 886 follow-up)
 
 The supplied traces have no native heap allocation stacks. Start this dedicated
