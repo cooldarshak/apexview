@@ -12,6 +12,36 @@ class ReplayCoreCacheTest {
     @get:Rule val temporary = TemporaryFolder()
 
     @Test
+    fun cacheRoundTripSharesIdenticalPositionTimesWithoutSharingCoordinates() {
+        val cache = ReplayCoreCache(temporary.root, 93)
+        val times = longArrayOf(1000, 2000, 3000)
+        val first = DriverTrack(times, floatArrayOf(0f, 10f, 20f), floatArrayOf(0f, 4f, 8f), 3)
+        val second = DriverTrack(times.copyOf(), floatArrayOf(10f, 20f, 30f), floatArrayOf(4f, 8f, 12f), 3)
+        val different = DriverTrack(longArrayOf(1000, 2000, 3001), first.x.copyOf(), first.y.copyOf(), 3)
+        val snapshot = DriverLaps.Snapshot(1, listOf(null, null, null), listOf(null, null, null),
+            null, null, false, null, null)
+        val laps = DriverLaps(longArrayOf(1000), listOf(snapshot), longArrayOf(), longArrayOf(), intArrayOf())
+        val source = ReplayCore("2026/Race/", "Race",
+            mapOf("1" to DriverInfo("1", "VER", 42), "2" to DriverInfo("2", "TWO", 43),
+                "3" to DriverInfo("3", "THR", 44)),
+            linkedMapOf("1" to first, "2" to second, "3" to different), emptyMap(),
+            floatArrayOf(0f, 0f, 0f, 5f, 5f, 5f, 5f, 0f), true, 1000,
+            mapOf("1" to laps), emptyList())
+        assertTrue(cache.write(source) {})
+        val tracks = requireNotNull(cache.read {}).tracks
+        val a = tracks.getValue("1")
+        val b = tracks.getValue("2")
+        val c = tracks.getValue("3")
+        assertTrue(a.t === b.t)
+        assertTrue(a.t !== c.t)
+        assertTrue(a.x !== b.x)
+        assertEquals(first.at(1500), a.at(1500))
+        assertEquals(second.at(1500), b.at(1500))
+        assertEquals(different.endMs, c.endMs)
+        assertTrue(a.t !== requireNotNull(cache.read {}).tracks.getValue("1").t)
+    }
+
+    @Test
     fun preservesIndexedReplayAndRejectsIncompleteFiles() {
         val cache = ReplayCoreCache(temporary.root, 17)
         val sector = SectorCell("28.002", Pace.GREEN, listOf(2049, 2051), "28.800")

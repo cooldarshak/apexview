@@ -85,6 +85,9 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                     DriverInfo(readUTF(), readUTF(), readInt(), readUTF(), readUTF(), readUTF())
                 }
                 val samples = ByteBuffer.allocate(TRACK_BLOCK_SAMPLES * TRACK_SAMPLE_BYTES)
+                // Per-read immutable owner only; do not change cache format or
+                // keep a process-wide reference to a retired session.
+                val timestamps = SpeedTimestampPool()
                 val tracks = input.readByDriver {
                     val n = count(MAX_SAMPLES, TRACK_SAMPLE_BYTES)
                     val t = LongArray(n)
@@ -101,7 +104,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                             y[i] = samples.float
                         }
                     }
-                    DriverTrack(t, x, y, n)
+                    DriverTrack(timestamps.freeze(t, n), x, y, n)
                 }
                 val states = input.readByDriver {
                     val times = readTimes()

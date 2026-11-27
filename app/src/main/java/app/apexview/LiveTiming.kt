@@ -445,10 +445,12 @@ class SpeedBuilder {
         }
     }
 
-    // Builder buffers remain append-only; publish only the valid prefix and share
-    // identical immutable timestamp series across speed, gear and archive drivers.
-    fun build(): SpeedLog = build(SpeedTimestampPool())
+    // Live publishes every two seconds while appending samples. Retain the
+    // original bounded prefix view instead of hashing/copying the growing
+    // histories at every refresh. Append never changes a published prefix.
+    fun build() = SpeedLog(t, v, size, gears, gearTimes, gearSize)
 
+    // Completed archive publication alone compacts and interns histories.
     internal fun build(pool: SpeedTimestampPool): SpeedLog {
         val speedTime = pool.freeze(t, size)
         val gearTime = pool.freeze(gearTimes, gearSize)
@@ -1451,7 +1453,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             val geometryStarted = android.os.SystemClock.elapsedRealtime()
             progress("Building the track map while timing tower finishes · cars=${tracks.size}")
             val built = withContext(Dispatchers.Default) {
-                traceStage("map-track-arrays") { _ -> tracks.mapValues { it.value.finishArchive() } }
+                traceStage("map-track-arrays") { _ ->
+                    val pool = SpeedTimestampPool()
+                    tracks.mapValues { it.value.finishArchive(pool) }
+                }
             }
             val traced = withContext(Dispatchers.Default) {
                 traceStage("map-outline") { _ -> traceOutline(tracks.values.toList()) }
@@ -2408,12 +2413,15 @@ class TrackBuilder {
 
     /** Called only after the archive producer has joined. Previously published
      * prefixes retain their own backing until their last reader releases it. */
-    internal fun finishArchive(): DriverTrack {
+    internal fun finishArchive(pool: SpeedTimestampPool = SpeedTimestampPool()): DriverTrack {
+        // Same exact timestamp series can occur for several drivers in one
+        // archive record. Never share on hash/length alone or with mutable
+        // live prefixes. The numeric Rust sampler keeps the same arrays/count.
         if (t.size - size >= maxOf(256, size / 8)) {
-            t = t.copyOf(size)
             x = x.copyOf(size)
             y = y.copyOf(size)
         }
+        t = pool.freeze(t, size)
         return build()
     }
 

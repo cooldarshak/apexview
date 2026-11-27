@@ -298,6 +298,61 @@ class LiveTimingTest {
     }
 
     @Test
+    fun liveSpeedPublicationDoesNotCopyGrowingHistoryAndOldCountsStayFrozen() {
+        val builder = SpeedBuilder()
+        builder.add(t0, 100, 1)
+        val first = builder.build()
+        repeat(100) { i -> builder.add(t0 + (i + 1) * 250L, 200, 2) }
+        val second = builder.build()
+        assertTrue(first.speedTimes === second.speedTimes)
+        assertTrue(first.gearTimeSeries === second.gearTimeSeries)
+        assertEquals(1, first.speedCount)
+        assertEquals(1, first.validGearCount)
+        assertEquals(101, second.speedCount)
+        assertEquals(100, first.kmhAt(t0 + 250L))
+        assertEquals(1, first.gearAt(t0 + 250L))
+        assertEquals(200, second.kmhAt(t0 + 250L))
+        assertEquals(2, second.gearAt(t0 + 250L))
+        repeat(4096) { i -> builder.add(t0 + (i + 101) * 250L, 300, 3) }
+        assertTrue(first.speedTimes !== builder.build().speedTimes)
+        assertEquals(1, first.speedCount)
+        assertEquals(100, first.kmhAt(t0))
+        val compact = builder.build(SpeedTimestampPool())
+        assertEquals(compact.speedCount, compact.speedTimes.size)
+    }
+
+    @Test
+    fun completedMapTracksShareOnlyIdenticalTimestampsAndRetainExactCoordinates() {
+        val pool = SpeedTimestampPool()
+        val a = TrackBuilder()
+        val b = TrackBuilder()
+        val different = TrackBuilder()
+        repeat(4101) { i ->
+            val now = t0 + i * 250L
+            a.add(now, i.toFloat(), i * 2f)
+            b.add(now, i * 3f, i * 4f)
+            different.add(now + if (i == 4100) 1L else 0L, i.toFloat(), i.toFloat())
+        }
+        val old = a.build()
+        val first = a.finishArchive(pool)
+        val second = b.finishArchive(pool)
+        val other = different.finishArchive(pool)
+        assertEquals(4101, first.t.size)
+        assertTrue(first.t === second.t)
+        assertTrue(first.t !== other.t)
+        assertTrue(first.x !== second.x)
+        assertTrue(first.y !== second.y)
+        assertEquals(old.at(t0 + 3125L), first.at(t0 + 3125L))
+        assertEquals(37.5f to 50f, second.at(t0 + 3125L))
+        // Even an unexpected append after finishing grows the full shared
+        // timestamp backing instead of modifying the other track's history.
+        a.add(t0 + 4101 * 250L, 1f, 2f)
+        assertEquals(4101, first.n)
+        assertEquals(t0 + 4100 * 250L, second.endMs)
+        assertEquals(4102, a.build().n)
+    }
+
+    @Test
     fun archiveSpeedPublicationCompactsAndSharesExactTimestamps() {
         val pool = SpeedTimestampPool()
         val firstBuilder = SpeedBuilder()
