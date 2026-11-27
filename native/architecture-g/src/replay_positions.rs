@@ -426,3 +426,128 @@ mod tower_tests {
         ] { assert_eq!(tower_simple(record,&mut out),None); }
     }
 }
+
+/** Canonical complex timing rows: one bounded, flat token index into the
+ * original ASCII record. No allocated JSON tree and no retained input bytes.
+ * Noncanonical scalars, duplicate keys, nulls and escapes use Android's exact
+ * reference parser rather than changing coercion or replacement semantics. */
+pub const COMPLEX_FIELDS: usize = 5;
+pub const COMPLEX_MAX_TOKENS: usize = 512;
+pub const COMPLEX_MAX_WORDS: usize = COMPLEX_FIELDS * COMPLEX_MAX_TOKENS;
+const OBJECT: i64 = 1;
+const ARRAY: i64 = 2;
+const STRING: i64 = 3;
+const INTEGER: i64 = 4;
+const TRUE: i64 = 5;
+const FALSE: i64 = 6;
+
+fn span_bounds(span: i64) -> Option<(usize,usize)> {
+    if span < 0 { return None; }
+    Some(((span >> 32) as usize, (span & 0xffffffff) as usize))
+}
+fn raw_span(begin: usize, end: usize) -> Option<i64> {
+    Some((i64::try_from(begin).ok()? << 32) | i64::try_from(end).ok()?)
+}
+fn indexed_value(p: &mut Parser<'_>, out: &mut [i64], used: &mut usize,
+                 key: i64, depth: usize) -> Option<()> {
+    if depth >= 32 || *used >= COMPLEX_MAX_TOKENS { return None; }
+    let node = *used;
+    let at = node * COMPLEX_FIELDS;
+    if at.checked_add(COMPLEX_FIELDS)? > out.len() { return None; }
+    *used += 1;
+    p.ws();
+    let begin = p.at;
+    let mut children = 0;
+    let (kind, value) = match *p.bytes.get(p.at)? {
+        b'{' => {
+            p.expect(b'{')?;
+            if !p.take(b'}') {
+                loop {
+                    let name = text_span(p)?;
+                    let (a,b) = span_bounds(name)?;
+                    let mut old = node + 1;
+                    while old < *used {
+                        let (x,y) = span_bounds(out[old * COMPLEX_FIELDS])?;
+                        if p.bytes.get(a..b)? == p.bytes.get(x..y)? { return None; }
+                        old = usize::try_from(out[old * COMPLEX_FIELDS + 3]).ok()?;
+                    }
+                    p.expect(b':')?;
+                    indexed_value(p,out,used,name,depth+1)?;
+                    children += 1;
+                    if p.take(b'}') { break; }
+                    p.expect(b',')?;
+                }
+            }
+            (OBJECT, raw_span(begin,p.at)?)
+        },
+        b'[' => {
+            p.expect(b'[')?;
+            if !p.take(b']') {
+                loop {
+                    indexed_value(p,out,used,ABSENT,depth+1)?;
+                    children += 1;
+                    if p.take(b']') { break; }
+                    p.expect(b',')?;
+                }
+            }
+            (ARRAY,raw_span(begin,p.at)?)
+        },
+        b'"' => (STRING,text_span(p)?),
+        b'-' | b'0'..=b'9' => {
+            p.integer()?;
+            (INTEGER,raw_span(begin,p.at)?)
+        },
+        b't' | b'f' => {
+            let (kind, word): (i64,&[u8]) = if p.bytes[p.at] == b't' {(TRUE,b"true")} else {(FALSE,b"false")};
+            let end=p.at.checked_add(word.len())?;
+            if p.bytes.get(p.at..end)? != word { return None; }
+            p.at=end;
+            (kind,raw_span(begin,end)?)
+        },
+        _ => return None,
+    };
+    out[at..at+COMPLEX_FIELDS].copy_from_slice(&[key,kind,value,*used as i64,children]);
+    Some(())
+}
+pub fn complex_fields(bytes: &[u8], out: &mut [i64]) -> Option<usize> {
+    if bytes.len()>MAX_RECORD || !bytes.is_ascii() { return None; }
+    let mut parser=Parser{bytes,at:0};
+    let mut used=0;
+    indexed_value(&mut parser,out,&mut used,ABSENT,0)?;
+    parser.ws();
+    if out[1]!=OBJECT || parser.at!=bytes.len() { return None; }
+    Some(used)
+}
+#[cfg(test)]
+mod complex_field_tests {
+    use super::*;
+    #[test]
+    fn canonical_complex_timing_index_preserves_order_and_nested_boundaries() {
+        let record=br#"{"Position":"2","NumberOfLaps":4,"Retired":false,"Sectors":{"0":{"Value":"21.1","Segments":[{"Status":2048},{"Status":0}]}}}"#;
+        let mut out=[0;COMPLEX_MAX_WORDS];
+        let n=complex_fields(record,&mut out).unwrap();
+        assert_eq!(n,13);
+        assert_eq!(&out[..5],&[ABSENT,OBJECT,raw_span(0,record.len()).unwrap(),13,4]);
+        let at=5;
+        let (a,b)=span_bounds(out[at]).unwrap();
+        assert_eq!(&record[a..b],b"Position");
+        assert_eq!(out[at+1],STRING);
+        assert_eq!(out[at+3],2);
+        assert_eq!(out[3*5+1],FALSE);
+        assert_eq!(out[4*5+1],OBJECT);
+        assert_eq!(out[4*5+3],13);
+    }
+    #[test]
+    fn complex_fields_declines_coercion_and_duplicate_edge_cases() {
+        let mut out=[0;COMPLEX_MAX_WORDS];
+        for record in [
+            br#"{"Sectors":{"0":{"Value":"1","Value":"2"}}}"#.as_slice(),
+            br#"{"NumberOfLaps":1.5}"#,
+            br#"{"Retired":null}"#,
+            br#"{"Position":"\u0031"}"#,
+            br#"{"Position":2147483648}"#,
+            br#"{"Sectors":[{"Segments":[{"Status":-0}]}]}"#,
+        ] { assert_eq!(complex_fields(record,&mut out),None); }
+        assert_eq!(complex_fields(br#"{"Position":"1"}"#,&mut out[..5]),None);
+    }
+}

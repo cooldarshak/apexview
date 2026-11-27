@@ -1405,3 +1405,25 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeLapStateTrans
     catch_unwind(AssertUnwindSafe(|| hot_path::lap_state_transition(state, raw, previous, flags)))
         .ok().flatten().unwrap_or(INVALID)
 }
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReplayComplexFields(
+    mut env: JNIEnv<'_>, _class: JClass<'_>, source: jni::objects::JString<'_>,
+    output: JLongArray<'_>, offset: jint,
+) -> jint {
+    let result=catch_unwind(AssertUnwindSafe(||->Option<jint>{
+        use crate::replay_positions::{complex_fields,COMPLEX_FIELDS,COMPLEX_MAX_WORDS};
+        let start=usize::try_from(offset).ok()?;
+        let capacity=env.get_array_length(&output).ok()? as usize;
+        if capacity>2048*COMPLEX_FIELDS || !start.is_multiple_of(COMPLEX_FIELDS) || start>=capacity {return None;}
+        let mut scratch=[0i64;COMPLEX_MAX_WORDS];
+        let text=env.get_string(&source).ok()?;
+        let count=complex_fields(text.to_bytes(),&mut scratch)?;
+        drop(text);
+        let words=count.checked_mul(COMPLEX_FIELDS)?;
+        if start.checked_add(words)?>capacity{return None;}
+        env.set_long_array_region(&output,offset,&scratch[..words]).ok()?;
+        jint::try_from(count).ok()
+    }));
+    result.ok().flatten().unwrap_or(0)
+}

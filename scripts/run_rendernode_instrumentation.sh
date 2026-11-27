@@ -111,7 +111,7 @@ run_g0_gate() {
   local gb_report="${RUNNER_TEMP:?}/pitwall-gb-api-$sdk-instrumentation.txt"
   if ! run_required_instrumentation \
     app.apexview.tiled.ArchitectureGBAndroidTest \
-    'OK (14 tests)' "$gb_report"; then
+    'OK (15 tests)' "$gb_report"; then
     adb logcat -d -s PitwallGB:I '*:S' >> "$gb_report" || true
     cat "$gb_report"
     return 1

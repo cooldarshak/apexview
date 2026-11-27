@@ -19,6 +19,32 @@ import org.junit.runner.RunWith
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class ArchitectureGBAndroidTest {
     @Test
+    fun nativeComplexTimingFieldIndexMatchesAndroidObjectSemantics() {
+        val row = """{"Position":"2","NumberOfLaps":4,"Retired":false,"InPit":"TRUE","Sectors":{"0":{"Value":"21.1","Segments":[{"Status":2048},{"Status":"0"}]}},"Stats":{"1":{"TimeDiffToFastest":"+1.2"}}}"""
+        val scratch = LongArray(app.apexview.NativeReplayTimingFields.MAX_RECORD_WORDS)
+        val count = NativeHotPath.replayComplexFields(row, scratch, 0)
+        assertTrue(count > 0)
+        val native = app.apexview.NativeReplayTimingFields(row,scratch,0)
+        val ref = requireNotNull(app.apexview.replayFields(org.json.JSONObject(row)))
+        for (name in listOf("Position","NumberOfLaps","Retired","InPit","Sectors","Stats","Missing")) {
+            assertEquals(ref.has(name),native.has(name))
+            assertEquals(ref.isNull(name),native.isNull(name))
+            assertEquals(ref.optString(name),native.optString(name))
+            assertEquals(ref.optInt(name,-1),native.optInt(name,-1))
+            assertEquals(ref.optBoolean(name),native.optBoolean(name))
+        }
+        val a = requireNotNull(native.optJSONObject("Sectors")?.optJSONObject("0")?.opt("Segments"))
+        val b = requireNotNull(ref.optJSONObject("Sectors")?.optJSONObject("0")?.opt("Segments"))
+        assertEquals(b.length(),a.length())
+        for(i in 0 until a.length()) assertEquals(b.optJSONObject(i)?.optInt("Status",-1),a.optJSONObject(i)?.optInt("Status",-1))
+        val saved = scratch.copyOf()
+        assertEquals(0,NativeHotPath.replayComplexFields("""{"Position":1.5}""",scratch,0))
+        assertArrayEquals(saved,scratch)
+        assertEquals(0,NativeHotPath.replayComplexFields("""{"Retired":null}""",scratch,0))
+        assertEquals(0,NativeHotPath.replayComplexFields("""{"Position":"2","Position":"3"}""",scratch,0))
+    }
+
+    @Test
     fun nativeComplexTimingPoliciesPreserveMiniSectorIdentityAndPrimaryPrecedence() {
         val previous = IntArray(64).apply { this[0] = 2048 }
         val updates = IntArray(64) { -1 }.apply { this[0] = 0; this[2] = 2051; this[5] = 0 }

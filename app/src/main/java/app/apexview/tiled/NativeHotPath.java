@@ -345,6 +345,12 @@ public final class NativeHotPath {
     private static native int nativeReplayIndexMark(long handle, long time, long offset);
     private static native long nativeReplayIndexOffset(long handle, long from);
     private static native void nativeReplayIndexClose(long handle);
+    public static int replayComplexFields(String row, long[] output, int offset) {
+        if (!available() || row.length() > 512 * 1024 || offset < 0 || offset >= output.length) return 0;
+        try { return nativeReplayComplexFields(row,output,offset); }
+        catch (LinkageError | RuntimeException failed) { return 0; }
+    }
+    private static native int nativeReplayComplexFields(String row,long[] output,int offset);
     public static final int REPLAY_TOWER_WORDS = 1 + 128 * 6;
     public static boolean replayTowerSimple(String json, long[] output) {
         if (output.length != REPLAY_TOWER_WORDS || json.length() > 512 * 1024 || !available()) return false;

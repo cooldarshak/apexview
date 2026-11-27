@@ -1,6 +1,5 @@
 package app.apexview
 
-import org.json.JSONArray
 import org.json.JSONObject
 
 /** How a sector or lap compares: the broadcast's yellow, green and purple. */
@@ -406,7 +405,8 @@ object DriverTimingParser {
         private val scratch = if (nativeRequested)
             LongArray(app.apexview.tiled.NativeHotPath.REPLAY_TOWER_WORDS) else null
         private val keys = if (scratch != null) arrayOfNulls<String>(1000) else null
-        private val complexRows = if (scratch != null) arrayOfNulls<JSONObject>(128) else null
+        private val complexRows = if (scratch != null) arrayOfNulls<ReplayTimingFields>(128) else null
+        private val complexWords by lazy { LongArray(NativeReplayTimingFields.MAX_RECORD_WORDS) }
         var accepted = 0
             private set
         fun apply(json: String, time: Long, drivers: MutableMap<String, Live>,
@@ -424,11 +424,18 @@ object DriverTimingParser {
                 // Do not commit even one simple row until Android's reference
                 // parser also accepts every complex row. A lexical Rust JSON
                 // success alone cannot prove org.json's numeric semantics.
+                var wordsUsed = 0
                 for (i in 0 until count) {
                     val span = out[1 + 6 * i + 5]
-                    if (span != -1L) rows[i] = runCatching {
-                        JSONObject(json.substring((span ushr 32).toInt(), span.toInt()))
-                    }.getOrNull() ?: return false
+                    if (span == -1L) continue
+                    val row = json.substring((span ushr 32).toInt(), span.toInt())
+                    val tokens = app.apexview.tiled.NativeHotPath.replayComplexFields(row, complexWords, wordsUsed)
+                    if (tokens > 0) {
+                        rows[i] = NativeReplayTimingFields(row, complexWords, wordsUsed)
+                        wordsUsed += tokens * NativeReplayTimingFields.WORDS
+                    } else {
+                        rows[i] = runCatching { replayFields(JSONObject(row)) }.getOrNull() ?: return false
+                    }
                 }
                 for (i in 0 until count) {
                     val at = 1 + 6 * i
@@ -551,7 +558,7 @@ object DriverTimingParser {
                 rows.keys().forEach { number ->
                     val row = rows.optJSONObject(number) ?: return@forEach
                     val driver = drivers.getOrPut(number) { Live(nativeRequested) }
-                    apply(driver, row, time, statusPolicy)
+                    apply(driver, requireNotNull(replayFields(row)), time, statusPolicy)
                     driver.snap(time)
                 }
             }
@@ -651,7 +658,7 @@ object DriverTimingParser {
                 lines.keys().forEach { number ->
                     val d = lines.optJSONObject(number) ?: return@forEach
                     val live = drivers.getOrPut(number) { Live(nativeRequested) }
-                    apply(live, d, event.time, statusPolicy, event.source)
+                    apply(live, requireNotNull(replayFields(d)), event.time, statusPolicy, event.source)
                     live.snap(event.time)
                 }
             }
@@ -694,7 +701,7 @@ object DriverTimingParser {
         return materialize(drivers, nativeRequested)
     }
 
-    private fun apply(l: Live, d: JSONObject, t: Long, statusPolicy: RetirementStatusPolicy, source: Int = 0) {
+    private fun apply(l: Live, d: ReplayTimingFields, t: Long, statusPolicy: RetirementStatusPolicy, source: Int = 0) {
         d.optString("Position").toIntOrNull()?.let { l.position = it }
         val rawCompleted = d.optInt("NumberOfLaps", -1).takeIf { it >= 0 }
         val previousLaps = l.laps
@@ -823,18 +830,16 @@ object DriverTimingParser {
         }
     }
 
-    private inline fun forEachSector(sectors: Any?, apply: (Int, JSONObject) -> Unit) {
-        when (sectors) {
-            is JSONArray -> for (i in 0 until minOf(3, sectors.length())) {
-                sectors.optJSONObject(i)?.let { apply(i, it) }
-            }
-            is JSONObject -> for (i in 0..2) {
-                sectors.optJSONObject(i.toString())?.let { apply(i, it) }
-            }
+    private inline fun forEachSector(sectors: ReplayTimingFields?, apply: (Int, ReplayTimingFields) -> Unit) {
+        if (sectors == null) return
+        if (sectors.isArray) for (i in 0 until minOf(3, sectors.length())) {
+            sectors.optJSONObject(i)?.let { apply(i, it) }
+        } else for (i in 0..2) {
+            sectors.optJSONObject(i.toString())?.let { apply(i, it) }
         }
     }
 
-    private fun applySector(l: Live, i: Int, o: JSONObject, t: Long) {
+    private fun applySector(l: Live, i: Int, o: ReplayTimingFields, t: Long) {
         // The last split can arrive after the crossing, even after the new S1 has started.
         val crossed = l.crossedAt
         if (i == 2 && crossed != null && t - crossed in 0..LATE_SECTOR_MS) {
@@ -883,10 +888,10 @@ object DriverTimingParser {
         val old = IntArray(MAX_MINI_SECTORS)
         val updates = IntArray(MAX_MINI_SECTORS)
         val output = IntArray(MAX_MINI_SECTORS)
-        fun apply(previous: List<Int>, raw: Any?, keepCleared: Boolean): Int {
+        fun apply(previous: List<Int>, raw: ReplayTimingFields?, keepCleared: Boolean): Int {
             if (previous.size > MAX_MINI_SECTORS) return -1
             updates.fill(-1)
-            fun add(index: Int, segment: JSONObject?): Boolean {
+            fun add(index: Int, segment: ReplayTimingFields?): Boolean {
                 if (index !in updates.indices) return true
                 val status = segment?.optInt("Status", -1) ?: return true
                 if (status !in 0..4096) return true
@@ -896,14 +901,12 @@ object DriverTimingParser {
                 updates[index] = status
                 return true
             }
-            when (raw) {
-                is JSONArray -> for (i in 0 until minOf(raw.length(), MAX_MINI_SECTORS))
-                    if (!add(i, raw.optJSONObject(i))) return -1
-                is JSONObject -> for (key in raw.keys()) {
-                    val i = key.toIntOrNull() ?: continue
-                    if (!add(i, raw.optJSONObject(key))) return -1
-                }
-                else -> return -1
+            if (raw == null) return -1
+            if (raw.isArray) for (i in 0 until minOf(raw.length(), MAX_MINI_SECTORS)) {
+                if (!add(i, raw.optJSONObject(i))) return -1
+            } else for (key in raw.keys()) {
+                val i = key.toIntOrNull() ?: continue
+                if (!add(i, raw.optJSONObject(key))) return -1
             }
             for (i in previous.indices) old[i] = previous[i]
             return app.apexview.tiled.NativeHotPath.miniSectorDelta(old, previous.size, updates, keepCleared, output)
@@ -916,7 +919,7 @@ object DriverTimingParser {
         override fun get(index: Int): Int = values[index]
     }
 
-    private fun hasFreshMiniProgress(previous: List<Int>, raw: Any?, nativeRequested: Boolean): Boolean {
+    private fun hasFreshMiniProgress(previous: List<Int>, raw: ReplayTimingFields?, nativeRequested: Boolean): Boolean {
         if (previous.isEmpty()) return false
         if (nativeRequested) {
             val result = miniScratch.get()!!.apply(previous, raw, true)
@@ -925,21 +928,19 @@ object DriverTimingParser {
         fun completed(status: Int) = status == 2048 || status == 2049 || status == 2051
         val last = previous.indexOfLast(::completed)
         if (last < 0) return false
-        fun fresh(index: Int, value: JSONObject?): Boolean =
+        fun fresh(index: Int, value: ReplayTimingFields?): Boolean =
             index in (last + 1) until previous.size && previous[index] == 0 &&
                 completed(value?.optInt("Status", -1) ?: -1)
-        return when (raw) {
-            is JSONArray -> (0 until minOf(raw.length(), MAX_MINI_SECTORS)).any { fresh(it, raw.optJSONObject(it)) }
-            is JSONObject -> raw.keys().asSequence().any { key ->
-                key.toIntOrNull()?.let { fresh(it, raw.optJSONObject(key)) } == true
-            }
-            else -> false
+        if (raw == null) return false
+        return if (raw.isArray) (0 until minOf(raw.length(), MAX_MINI_SECTORS)).any { fresh(it, raw.optJSONObject(it)) }
+        else raw.keys().asSequence().any { key ->
+            key.toIntOrNull()?.let { fresh(it, raw.optJSONObject(key)) } == true
         }
     }
 
-    private fun mergeSegments(previous: List<Int>, raw: Any?, keepCleared: Boolean = true,
+    private fun mergeSegments(previous: List<Int>, raw: ReplayTimingFields?, keepCleared: Boolean = true,
                               nativeRequested: Boolean = false): List<Int> {
-        if (raw !is JSONArray && raw !is JSONObject) return previous
+        if (raw == null) return previous
         if (nativeRequested) {
             val scratch = miniScratch.get()!!
             val result = scratch.apply(previous, raw, keepCleared)
@@ -949,7 +950,7 @@ object DriverTimingParser {
             }
         }
         var changed: MutableList<Int>? = null
-        fun set(index: Int, segment: JSONObject?) {
+        fun set(index: Int, segment: ReplayTimingFields?) {
             if (index !in 0 until MAX_MINI_SECTORS) return
             val status = segment?.optInt("Status", -1) ?: return
             if (status !in 0..4096 || status == 0 && !keepCleared) return
@@ -958,23 +959,21 @@ object DriverTimingParser {
             repeat((index + 1 - next.size).coerceAtLeast(0)) { next.add(0) }
             next[index] = status
         }
-        when (raw) {
-            is JSONArray -> for (i in 0 until minOf(raw.length(), MAX_MINI_SECTORS)) set(i, raw.optJSONObject(i))
-            is JSONObject -> raw.keys().forEach { key ->
-                key.toIntOrNull()?.let { set(it, raw.optJSONObject(key)) }
-            }
+        if (raw.isArray) for (i in 0 until minOf(raw.length(), MAX_MINI_SECTORS)) set(i, raw.optJSONObject(i))
+        else raw.keys().forEach { key ->
+            key.toIntOrNull()?.let { set(it, raw.optJSONObject(key)) }
         }
         return changed ?: previous
     }
 
     /** Latest qualifying-part entry in F1's keyed-object or array delta shapes. */
-    private fun latestObject(value: Any?): JSONObject? = when (value) {
-        is JSONArray -> (value.length() - 1 downTo 0).firstNotNullOfOrNull { value.optJSONObject(it) }
-        is JSONObject -> value.keys().asSequence()
+    private fun latestObject(value: ReplayTimingFields?): ReplayTimingFields? {
+        if (value == null) return null
+        return if (value.isArray) (value.length() - 1 downTo 0).firstNotNullOfOrNull { value.optJSONObject(it) }
+        else value.keys().asSequence()
             .mapNotNull { key -> key.toIntOrNull()?.let { it to value.optJSONObject(key) } }
             .filter { it.second != null }
             .maxByOrNull { it.first }?.second
-        else -> null
     }
 
     private fun pace(flags: BooleanArray) = when {

@@ -737,11 +737,11 @@ internal class StateHistoryAccumulator(private val nativeRequested: Boolean = fa
     fun accept(lines: JSONObject, time: Long) {
         lines.keys().forEach { number ->
             val driver = lines.optJSONObject(number) ?: return@forEach
-            acceptDriver(number, driver, time)
+            acceptDriver(number, requireNotNull(replayFields(driver)), time)
         }
     }
 
-    internal fun acceptDriver(number: String, driver: JSONObject, time: Long) {
+    internal fun acceptDriver(number: String, driver: ReplayTimingFields, time: Long) {
         if (!driver.has("InPit") && !driver.has("PitOut") && !driver.has("NumberOfLaps") && !driver.has("KnockedOut")) return
         var state = current[number] ?: LapState.UNKNOWN
         val rawCount = driver.optInt("NumberOfLaps", -1)
