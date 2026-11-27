@@ -6,6 +6,21 @@ import java.io.IOException
 import java.net.UnknownHostException
 
 class BakedAudioRecoveryTest {
+    @Test fun committedCursorSkipsLongArchivePrefixWithBoundedSearch() {
+        val starts = LongArray(10000) { it * 6_000_000L }
+        var reads = 0
+        val first = firstUnloadedAudioSegment(starts.size, starts[8999]) {
+            reads++
+            starts[it]
+        }
+        assertEquals(9000, first)
+        assertTrue(reads <= 15)
+        assertEquals(0, firstUnloadedAudioSegment(starts.size, Long.MIN_VALUE) { starts[it] })
+        assertEquals(starts.size, firstUnloadedAudioSegment(starts.size, starts.last()) { starts[it] })
+        assertEquals(0, firstUnloadedAudioSegment(0, 0L) { error("Empty playlist") })
+        assertEquals(2, firstUnloadedAudioSegment(4, 5L) { longArrayOf(0, 5, 10, 20)[it] })
+    }
+
     @Test fun wrappedTransientNetworkErrorRetriesBoundedlyButMediaAndAuthorizationDoNot() {
         val dns = IOException("wrapped", UnknownHostException("temporary"))
         assertEquals(500L, BakedAudioRecovery.retryDelayMs(dns, 0))

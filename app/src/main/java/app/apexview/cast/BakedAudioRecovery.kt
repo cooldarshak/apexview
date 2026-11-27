@@ -40,3 +40,17 @@ internal object BakedAudioRecovery {
         return null
     }
 }
+
+/** HLS segment start times are ordered. Search the committed cursor directly
+ * instead of scanning an entire completed archive on every audio wakeup.
+ * The caller still validates the selected segment and its time extent. */
+internal inline fun firstUnloadedAudioSegment(count: Int, committedStartUs: Long,
+                                             startAt: (Int) -> Long): Int {
+    var low = 0
+    var high = count
+    while (low < high) {
+        val mid = low + (high - low) / 2
+        if (startAt(mid) <= committedStartUs) low = mid + 1 else high = mid
+    }
+    return low
+}

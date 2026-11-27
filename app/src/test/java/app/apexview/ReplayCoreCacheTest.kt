@@ -134,6 +134,8 @@ class ReplayCoreCacheTest {
         }
 
         val file = temporary.root.resolve("replay-timing/17.bin")
+        java.io.RandomAccessFile(file, "rw").use { it.writeInt(3) }
+        assertNull(cache.read {})
         java.io.RandomAccessFile(file, "rw").use { it.writeInt(2) }
         val reasons = mutableListOf<String>()
         assertNull(ReplayCoreCache(temporary.root, 17) { reasons.add(it) }.read {})

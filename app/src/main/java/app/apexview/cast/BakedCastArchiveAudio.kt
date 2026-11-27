@@ -49,38 +49,43 @@ internal class BakedCastArchiveAudio(
         check(!closed)
         val media = completedPlaylist ?: readPlaylist(playlistUri).also { if (it.hasEndTag) completedPlaylist = it }
         return progress.transaction { output ->
-        for (segment in media.segments) {
-            val start = segment.relativeStartTimeUs
-            if (start <= progress.lastLoadedSegmentStartUs || start + segment.durationUs <= progress.nextAudioUs || start >= positionUs) continue
-            require(segment.fullSegmentEncryptionKeyUri == null && segment.drmInitData == null) {
-                "Protected F1 commentary cannot be encoded into a clear Cast stream"
+            val first = firstUnloadedAudioSegment(media.segments.size, progress.lastLoadedSegmentStartUs) {
+                media.segments[it].relativeStartTimeUs
             }
-            val map = requireNotNull(segment.initializationSegment) { "Commentary must use CMAF/AAC" }
-            val key = "${media.baseUri}|${map.url}|${map.byteRangeOffset}|${map.byteRangeLength}"
-            if (initKey != key) {
-                require(initKey.isEmpty()) { "Commentary codec changed; reconnect Cast" }
-                val bytes = reader.read(UriUtil.resolveToUri(media.baseUri, map.url), 2 * 1024 * 1024,
-                    map.byteRangeOffset, map.byteRangeLength).bytes
-                var transferred = false
+            for (index in first until media.segments.size) {
+                val segment = media.segments[index]
+                val start = segment.relativeStartTimeUs
+                if (start >= positionUs) break
+                if (start + segment.durationUs <= progress.nextAudioUs) continue
+                require(segment.fullSegmentEncryptionKeyUri == null && segment.drmInitData == null) {
+                    "Protected F1 commentary cannot be encoded into a clear Cast stream"
+                }
+                val map = requireNotNull(segment.initializationSegment) { "Commentary must use CMAF/AAC" }
+                val key = "${media.baseUri}|${map.url}|${map.byteRangeOffset}|${map.byteRangeLength}"
+                if (initKey != key) {
+                    require(initKey.isEmpty()) { "Commentary codec changed; reconnect Cast" }
+                    val bytes = reader.read(UriUtil.resolveToUri(media.baseUri, map.url), 2 * 1024 * 1024,
+                        map.byteRangeOffset, map.byteRangeLength).bytes
+                    var transferred = false
+                    try {
+                        val report = CmafBoxInspector.inspect(bytes)
+                        require(report.errors.isEmpty() && report.tracks.size == 1 &&
+                            report.tracks.single().handler == "soun" && !report.tracks.single().encrypted) {
+                            "Only unencrypted, single-track AAC commentary may be cast"
+                        }
+                        init = bytes; initKey = key; transferred = true
+                    } finally { if (!transferred) bytes.fill(0) }
+                }
+                val bytes = reader.read(UriUtil.resolveToUri(media.baseUri, segment.url), 8 * 1024 * 1024,
+                    segment.byteRangeOffset, segment.byteRangeLength).bytes
                 try {
-                    val report = CmafBoxInspector.inspect(bytes)
-                    require(report.errors.isEmpty() && report.tracks.size == 1 &&
-                        report.tracks.single().handler == "soun" && !report.tracks.single().encrypted) {
-                        "Only unencrypted, single-track AAC commentary may be cast"
-                    }
-                    init = bytes; initKey = key; transferred = true
-                } finally { if (!transferred) bytes.fill(0) }
+                    // Queue this whole CMAF fragment. Avoid downloading the same six-second
+                    // fragment every time the live encoder asks for another few frames.
+                    output += decodeSamples(init, bytes, start)
+                    progress.lastLoadedSegmentStartUs = start
+                }
+                finally { bytes.fill(0) }
             }
-            val bytes = reader.read(UriUtil.resolveToUri(media.baseUri, segment.url), 8 * 1024 * 1024,
-                segment.byteRangeOffset, segment.byteRangeLength).bytes
-            try {
-                // Queue this whole CMAF fragment. Avoid downloading the same six-second
-                // fragment every time the live encoder asks for another few frames.
-                output += decodeSamples(init, bytes, start)
-                progress.lastLoadedSegmentStartUs = start
-            }
-            finally { bytes.fill(0) }
-        }
         }
     }
 
