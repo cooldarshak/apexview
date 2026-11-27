@@ -4980,3 +4980,7 @@ Continue existing MEM-01–16 and all inherited G-TV/G-C/G/R/M/P0–P2/A–H/P0-
 ### Consolidated post-904 batch: Cast commentary ownership and bounded recovery
 - Reproduced sender commentary DNS failure in the supplied 903 phone log. A failed later fragment must not advance the committed commentary cursor or leak already decoded samples. BakedAudioReadProgress makes each read batch transactional, wipes rejected samples, and restores both progress fields on failure. BakedCastLiveSession retries only transient DNS/connect/socket timeout errors, with bounded 500/1000/2000 ms backoff; cancellation, invalid media and authorization failures remain terminal. Existing queue bounds and authorized source remain unchanged.
 - Regression tests cover failure after a partial batch, rollback, zeroization and retry classification. This is a source correction, not proof of Cast playback on the physical TV. Keep the consolidated build gate closed until the remaining source corrections are ready.
+
+
+### Post-904 Cast live-window startup and confirmation
+- Both baked Cast transports were explicitly selecting zero even though their HLS window advances. Use CAF's default live start and Media3's default media item position for baked live only; retain exact archive-origin seek behavior. Controller remains controller-only and says connecting until matching playback confirmation. Standard Google playback status is not proof of physical display. Added live versus archive position regression. Source correction; receiver physical acceptance remains mandatory.

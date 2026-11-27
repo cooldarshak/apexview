@@ -199,6 +199,7 @@ class AppState(
         get() = castResources.sceneJob
         set(value) { castResources.sceneJob = value }
     private var castSceneConfirmed by mutableStateOf(false)
+    internal val castPlaybackConfirmed get() = castSceneConfirmed
     private val usesLayoutCastReceiver get() = BuildConfig.CAST_RECEIVER_APP_ID.isNotEmpty()
     private var googleCastLoadedUrl: String? = null
     private var castPreparationJob: Job?
@@ -1289,14 +1290,18 @@ class AppState(
         val loadId = googleLoadId
         android.util.Log.i("PitwallCast", "CAST_RELAY_LOAD id=$loadId relay=${session.diagnosticRelayId} route=GOOGLE_BAKED")
         watchGoogleLoad(loadId, "BAKED")
-        runCatching { client.load(media, true, 0L).setResultCallback { result ->
+        // Rolling live HLS has a moving window; let CAF select its live start.
+        val request = com.google.android.gms.cast.MediaLoadRequestData.Builder()
+            .setMediaInfo(media).setAutoplay(true).build()
+        runCatching { client.load(request).setResultCallback { result ->
             if (bakedCastSession !== session || googleCastRemoteClient !== client || googleLoadId != loadId)
                 return@setResultCallback
             googleLoading = false
             if (result.status.isSuccess) {
                 // Only status for this load can retire the previous media.
                 googleRemoteCallback.onStatusUpdated()
-                castStatus = "Google Cast accepted the baked picture and commentary."
+                castStatus = if (castSceneConfirmed) "Google Cast reports playback."
+                    else "Google Cast accepted the stream; waiting for playback…"
                 message = castStatus
                 android.util.Log.i("PitwallCast", "BAKED_GOOGLE_CAST_LOADED picture=${session.width}x${session.height} feeds=${session.feeds}")
             } else failGoogleCastLoad("Google Cast rejected the live scene (${result.status.statusCode}).")

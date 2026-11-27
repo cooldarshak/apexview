@@ -2,6 +2,10 @@ package app.apexview.cast
 
 /** Pure retry and handoff predicates. Never authenticate from network identity. */
 internal object CastRecoveryPolicy {
+    /** null means use the player's default live-window start, not archive zero. */
+    fun receiverStartPosition(baked: Boolean, requestedMs: Long, originMs: Long): Long? =
+        if (baked) null else (requestedMs - originMs).coerceAtLeast(0L)
+
     fun controllerOnly(remoteHandedOff: Boolean, bakedProducer: Boolean, bakedReplacement: Boolean): Boolean =
         remoteHandedOff || bakedProducer || bakedReplacement
 

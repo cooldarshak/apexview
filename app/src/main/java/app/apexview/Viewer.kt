@@ -689,8 +689,10 @@ fun ViewerScreen(app: AppState) {
                 Box(Modifier.zIndex(2e9f)) { TopChrome(app, clearOf(cutouts, width, 0f, with(density) { 64.dp.toPx() })) }
                 if (!app.arranging) Column(Modifier.align(Alignment.Center).padding(horizontal = 24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("Playing on ${app.castDeviceName}", style = Type.title2)
-                    Text("This device is your playback controller.", style = Type.subhead)
+                    Text(if (app.castPlaybackConfirmed) "Playing on ${app.castDeviceName}"
+                        else "Connecting to ${app.castDeviceName}", style = Type.title2)
+                    Text(if (app.castPlaybackConfirmed) "This device is your playback controller."
+                        else "Waiting for TV playback confirmation…", style = Type.subhead)
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         app.tiles.filterNot { it.protectedCompositionHidden }.forEach { tile ->
                             Text(tile.channel.title, Modifier.pressable { app.openTileMenu(tile) }.padding(8.dp), style = Type.footnote)

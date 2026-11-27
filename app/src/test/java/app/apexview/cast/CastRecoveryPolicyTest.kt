@@ -3,6 +3,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CastRecoveryPolicyTest {
+    @Test fun bakedLiveUsesDefaultWindowPositionWhileArchiveRetainsExplicitSeek() {
+        assertNull(CastRecoveryPolicy.receiverStartPosition(true, 0L, 0L))
+        assertNull(CastRecoveryPolicy.receiverStartPosition(true, 60000L, 1000L))
+        assertEquals(59000L, CastRecoveryPolicy.receiverStartPosition(false, 60000L, 1000L))
+        assertEquals(0L, CastRecoveryPolicy.receiverStartPosition(false, 500L, 1000L))
+    }
+
     @Test fun controllerNeverShowsVideoDuringRemoteOwnershipOrBakedProduction() {
         for (remote in listOf(false, true)) for (baked in listOf(false, true))
             for (replacement in listOf(false, true)) {

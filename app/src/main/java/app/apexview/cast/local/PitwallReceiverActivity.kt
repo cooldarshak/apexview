@@ -858,8 +858,11 @@ class PitwallReceiverActivity : ComponentActivity() {
         val ownSource = if (direct) requireNotNull(widevine).source else null
         val mediaUri = ownSource?.url ?: body.getString("url")
         val mime = if (ownSource == null) body.getString("container") else if (ManifestProtocol.fromUrl(mediaUri) == ManifestProtocol.HLS || ownSource.streamType.contains("HLS", true)) "application/x-mpegURL" else "application/dash+xml"
-        next.setMediaItem(MediaItem.Builder().setUri(mediaUri).setMimeType(mime).build(),
-            ((body.optDouble("time", 0.0) * 1000).toLong() - originMs).coerceAtLeast(0))
+        val item = MediaItem.Builder().setUri(mediaUri).setMimeType(mime).build()
+        val start = app.apexview.cast.CastRecoveryPolicy.receiverStartPosition(
+            body.optJSONObject("metadata")?.optJSONObject("custom")?.optBoolean("pitwallBaked") == true,
+            (body.optDouble("time", 0.0) * 1000).toLong(), originMs)
+        if (start == null) next.setMediaItem(item) else next.setMediaItem(item, start)
         next.setPlaybackSpeed(desiredSpeed)
         next.volume = desiredVolume
         next.playWhenReady = desiredPlaying
