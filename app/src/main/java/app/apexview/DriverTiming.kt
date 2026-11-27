@@ -337,20 +337,6 @@ object DriverTimingParser {
     private const val LATE_SECTOR_MS = 3_000L
     private const val MAX_MINI_SECTORS = 64
 
-    /** Parser-owned primitive storage. Published histories receive exact-length snapshots. */
-    private class Timestamps {
-        private var values = LongArray(32)
-        private var size = 0
-        fun lastOrNull(): Long? = if (size == 0) null else values[size - 1]
-        operator fun plusAssign(time: Long) {
-            if (size == values.size) values = values.copyOf(size * 2)
-            values[size++] = time
-        }
-        fun toLongArray(): LongArray = values.copyOf(size)
-        fun window(from: Long, until: Long): IntRange? = historyWindowRange(size, from, until) { values[it] }
-        fun copyRange(first: Int, end: Int): LongArray = values.copyOfRange(first, end)
-    }
-
     private class Live(nativeRequested: Boolean) {
         var position: Int? = null
         val sector = arrayOfNulls<SectorCell>(3)
@@ -379,10 +365,10 @@ object DriverTimingParser {
         var primaryLapAt = Long.MIN_VALUE
         var stopped = false
         var laps: Int? = null
-        val times = Timestamps()
+        val times = RollingTimingIndex(nativeRequested)
         val snaps = RollingDriverSnapshots(nativeRequested)
-        val crossings = Timestamps()
-        val lapTimes = Timestamps()
+        val crossings = RollingTimingIndex(nativeRequested)
+        val lapTimes = RollingTimingIndex(nativeRequested)
         val lapCounts = ArrayList<Int>()
 
         private fun sameCell(a: SectorCell?, b: SectorCell?): Boolean =
@@ -458,28 +444,34 @@ object DriverTimingParser {
             else runCatching { TimedLine(streamStart + streamOffsetMs(line, prefix), source, line, prefix) }.getOrNull()
         }
 
-    private fun materialize(drivers: Map<String, Live>, copySnapshots: Boolean) =
-        drivers.mapValues { (_, driver) ->
-            DriverLaps(driver.times.toLongArray(), driver.snaps.snapshot(),
-                driver.crossings.toLongArray(), driver.lapTimes.toLongArray(), driver.lapCounts.toIntArray())
+    private fun materialize(drivers: Map<String, Live>, nativeRequested: Boolean): Map<String, DriverLaps> {
+        val pool = SpeedTimestampPool(nativeRequested)
+        return drivers.mapValues { (_, driver) ->
+            DriverLaps(driver.times.freeze(pool), driver.snaps.snapshot(),
+                driver.crossings.freeze(pool), driver.lapTimes.freeze(pool), driver.lapCounts.toIntArray())
         }
+    }
 
     /** Copy only the requested preview range, not the entire growing race prefix.
      * Mutable parser-owned storage never crosses the publication boundary. */
-    private fun materializePreview(drivers: Map<String, Live>, from: Long, until: Long): Map<String, DriverLaps> =
-        drivers.mapNotNull { (number, driver) ->
+    private fun materializePreview(drivers: Map<String, Live>, from: Long, until: Long,
+                                   nativeRequested: Boolean): Map<String, DriverLaps> {
+        val pool = SpeedTimestampPool(nativeRequested)
+        val empty = TimingTimestamps.jvm(LongArray(0), 0)
+        return drivers.mapNotNull { (number, driver) ->
             val range = driver.times.window(from, until) ?: return@mapNotNull null
             var first = range.first
             if (driver.snaps[first].inPit) while (first > 0 && driver.snaps[first - 1].inPit) first--
             val end = range.last + 1
             val crossings = driver.crossings.window(from, until)
             val laps = driver.lapTimes.window(from, until)
-            number to DriverLaps(driver.times.copyRange(first, end), driver.snaps.window(first, end),
-                crossings?.let { driver.crossings.copyRange((it.first - 8).coerceAtLeast(0), it.last + 1) } ?: LongArray(0),
-                laps?.let { driver.lapTimes.copyRange(it.first, it.last + 1) } ?: LongArray(0),
+            number to DriverLaps(driver.times.freeze(pool, first, end), driver.snaps.window(first, end),
+                crossings?.let { driver.crossings.freeze(pool, (it.first - 8).coerceAtLeast(0), it.last + 1) } ?: empty,
+                laps?.let { driver.lapTimes.freeze(pool, it.first, it.last + 1) } ?: empty,
                 laps?.let { driver.lapCounts.subList(it.first, it.last + 1).toIntArray() } ?: IntArray(0),
                 driver.snaps.firstOrNull()?.position)
         }.toMap()
+    }
 
     /** Publish the playhead's prefix, then keep following it while the archive is loading. */
     internal fun previews(
@@ -512,7 +504,7 @@ object DriverTimingParser {
         require(windowBackMs == null || windowBackMs in 1L..600_000L)
         val statusPolicy = RetirementStatusPolicy(nativeRequested)
         val drivers = mutableMapOf<String, Live>()
-        val states = StateHistoryAccumulator()
+        val states = StateHistoryAccumulator(nativeRequested)
         val simpleDecoder = SimpleTowerDecoder(nativeRequested)
         var through = Long.MIN_VALUE
         var publishedThrough: Long? = null
@@ -546,9 +538,9 @@ object DriverTimingParser {
                 val until = if (windowBackMs == null) time else minOf(time, target + 2 * TOWER_PREVIEW_LOOKAHEAD_MS)
                 publishedThrough = until
                 publishedFrom = from
-                val history = if (windowBackMs == null) DriverTimingParse(materialize(drivers, copySnapshots = true), states.finish())
+                val history = if (windowBackMs == null) DriverTimingParse(materialize(drivers, nativeRequested), states.finish())
                     else {
-                        val rows = materializePreview(drivers, from, until)
+                        val rows = materializePreview(drivers, from, until, nativeRequested)
                         val state = states.finishWindow(from, until)
                         // Pack completed, immutable preview windows on the
                         // parser thread as well as the eventual full archive.
@@ -563,7 +555,7 @@ object DriverTimingParser {
             }
         }
         checkActive()
-        onComplete { DriverTimingParse(materialize(drivers, copySnapshots = false), states.finish()) }
+        onComplete { DriverTimingParse(materialize(drivers, nativeRequested), states.finish()) }
     }
 
     fun parse(stream: String, streamStart: Long, timingF1: String = "",
@@ -636,10 +628,10 @@ object DriverTimingParser {
                     live.snap(event.time)
                 }
             }
-            if (records % 1024 == 0) onProgress?.invoke(event.time) {
+            if (records == 1 || records % 128 == 0) onProgress?.invoke(event.time) {
                 val window = progressWindow?.invoke(event.time)
-                if (window == null) materialize(drivers, copySnapshots = true)
-                else materializePreview(drivers, window.first, window.last)
+                if (window == null) materialize(drivers, nativeRequested)
+                else materializePreview(drivers, window.first, window.last, nativeRequested)
             }
         }
 
@@ -672,7 +664,7 @@ object DriverTimingParser {
         }
 
         checkpoint?.invoke("building history records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size} nativeSimpleRecords=${simpleDecoder.accepted}")
-        return materialize(drivers, copySnapshots = false)
+        return materialize(drivers, nativeRequested)
     }
 
     private fun apply(l: Live, d: JSONObject, t: Long, statusPolicy: RetirementStatusPolicy, source: Int = 0) {
