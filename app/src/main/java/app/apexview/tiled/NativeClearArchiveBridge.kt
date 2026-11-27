@@ -355,7 +355,7 @@ internal class NativeClearArchiveBridge(
             if (usedCertificate) {
                 val cached = requireNotNull(certificate)
                 val digests = out.nativeMedia?.let { listOf(it.sha256()) }
-                    ?: out.media.map(ClearCompositionCertificates::digest)
+                    ?: out.media.map { ClearCompositionCertificates.digest(it) }
                 require(cached.matchesInitialization(out.initialization) && digests == cached.mediaDigests)
                 Log.i("ApexviewSingleDecoder", "GB_CLEAR_EXACT_CERTIFICATE_MATCH generation=${selected.epoch} bytes=${out.sizes.sumOf { it.toLong() }}")
             }

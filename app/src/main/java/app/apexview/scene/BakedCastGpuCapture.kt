@@ -67,7 +67,11 @@ internal class BakedCastGpuCapture(
     fun requestFrame(complete: (BakedCastVideoPlacement) -> Unit, failed: (Exception) -> Unit) {
         check(!closed && pending == null)
         val request = Request(complete, failed)
-        request.timeout = Runnable { fail(request, IllegalStateException("Timed out drawing clear Cast layers")) }
+        request.timeout = Runnable {
+            val elapsedMs = (System.nanoTime() - request.startedNs) / 1_000_000L
+            android.util.Log.w("PitwallCast", "BAKED_GPU_TIMEOUT elapsedMs=$elapsedMs videoReady=${request.videoReady} overlayReady=${request.uiReady} placementReady=${request.placement != null}")
+            fail(request, IllegalStateException("Timed out drawing clear Cast layers"))
+        }
         pending = request
         gl.postDelayed(request.timeout, if (deliveredFrame) 750L else 2_000L)
         drawVideo(checkNotNull(videoTarget))

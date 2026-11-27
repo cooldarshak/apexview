@@ -22,7 +22,7 @@ internal class ClearCompositionCertificates {
         if (init.size !in 1..64*1024 || media.size !in 1..NativeClearArchiveJob.MAX_WINDOW) return
         val required = 8L + init.size + media.sumOf { it.size.toLong() + if (media.size > 1) 4L else 0L }
         if (required !in 1L..NativeClearArchiveJob.MAX_PACKET.toLong()) return
-        val value = Certificate(init, required.toInt(), media.map(::digest))
+        val value = Certificate(init, required.toInt(), media.map { digest(it) })
         entries.put(key, value)?.retire()
         while (entries.size > 4) {
             val oldest = entries.entries.iterator()

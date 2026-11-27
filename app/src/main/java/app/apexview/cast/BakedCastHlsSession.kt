@@ -69,7 +69,6 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
                 true
             }
         }.asReversed()
-        activeUs = duration
         val playlist = buildString {
             append("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:$targetDuration\n")
             append("#EXT-X-MEDIA-SEQUENCE:${active.first().sequence}\n#EXT-X-INDEPENDENT-SEGMENTS\n")
@@ -94,6 +93,7 @@ internal class BakedCastHlsSession(address: String, peer: InetAddress?,
             }
             relay.publishResources(mapOf("live.m3u8" to manifest), native = native, sharedHeap = heap)
             published = true
+            activeUs = duration
         } finally {
             if (!published) {
                 manifest.fill(0)

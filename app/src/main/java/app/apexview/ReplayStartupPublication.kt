@@ -62,12 +62,19 @@ internal class ReplayStartupPublication {
             utc <= it.through && it.laps.values.any { history -> history.hasRankAt(utc) } }
         val mapSource = if (currentMap) indexed else if (windowMap) window else null
         val towerSource = if (currentTower) indexed else if (windowTower) window else null
-        val map = mapSource?.let { MapPanel(it.tracks, it.positionsIndexed) } ?: priorMap
+        val map = mapSource?.let { source ->
+            lastMap?.takeIf { it.tracks === source.tracks && it.indexed == source.positionsIndexed }
+                ?: MapPanel(source.tracks, source.positionsIndexed)
+        } ?: priorMap
         val tower = towerSource?.let {
-            TowerPanel(it.laps, it.states, start,
-                if (it === window) it.previewTowerFromUtc ?: it.firstTrackUtc else it.previewTowerFromUtc,
-                if (it === window && it.previewTowerFromUtc == null) it.lastTrackUtc ?: Long.MIN_VALUE else it.towerThroughUtc,
-                it.towerIndexed)
+            val from = if (it === window) it.previewTowerFromUtc ?: it.firstTrackUtc else it.previewTowerFromUtc
+            val through = if (it === window && it.previewTowerFromUtc == null)
+                it.lastTrackUtc ?: Long.MIN_VALUE else it.towerThroughUtc
+            val source = it
+            lastTower?.takeIf { previous -> previous.laps === source.laps &&
+                previous.states === source.states && previous.start == start &&
+                previous.from == from && previous.through == through && previous.indexed == source.towerIndexed }
+                ?: TowerPanel(source.laps, source.states, start, from, through, source.towerIndexed)
         } ?: priorTower
         if (map != null) lastMap = map
         if (tower != null) lastTower = tower
