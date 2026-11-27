@@ -1209,3 +1209,47 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReplayPositio
     }));
     if matches!(result,Ok(Some(()))){1}else{0}
 }
+
+
+type ReplayIndexRegistry = (i64, std::collections::BTreeMap<i64,crate::replay_positions::SpoolIndex>);
+static REPLAY_INDICES: std::sync::OnceLock<std::sync::Mutex<ReplayIndexRegistry>>=std::sync::OnceLock::new();
+fn replay_indices()-> &'static std::sync::Mutex<ReplayIndexRegistry> {
+    REPLAY_INDICES.get_or_init(||std::sync::Mutex::new((0,std::collections::BTreeMap::new())))
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReplayIndexCreate(
+    _env:JNIEnv<'_>,_class:JClass<'_>,
+)->i64 {
+    catch_unwind(AssertUnwindSafe(||->Option<i64>{
+        let mut registry=replay_indices().lock().ok()?;
+        if registry.1.len()>=8{return None;}
+        let handle=registry.0.checked_add(1)?;
+        registry.0=handle;
+        registry.1.insert(handle,crate::replay_positions::SpoolIndex::default());
+        Some(handle)
+    })).ok().flatten().unwrap_or(0)
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReplayIndexMark(
+    _env:JNIEnv<'_>,_class:JClass<'_>,handle:i64,time:i64,offset:i64,
+)->jint {
+    if matches!(catch_unwind(AssertUnwindSafe(||->Option<()>{
+        replay_indices().lock().ok()?.1.get_mut(&handle)?.mark(time,offset)
+    })),Ok(Some(()))){1}else{0}
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReplayIndexOffset(
+    _env:JNIEnv<'_>,_class:JClass<'_>,handle:i64,from:i64,
+)->i64 {
+    catch_unwind(AssertUnwindSafe(||->Option<i64>{
+        Some(replay_indices().lock().ok()?.1.get(&handle)?.start_offset(from))
+    })).ok().flatten().unwrap_or(-1)
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReplayIndexClose(
+    _env:JNIEnv<'_>,_class:JClass<'_>,handle:i64,
+){
+    let _=catch_unwind(AssertUnwindSafe(||{
+        if let Ok(mut registry)=replay_indices().lock(){registry.1.remove(&handle);}
+    }));
+}
