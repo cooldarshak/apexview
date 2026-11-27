@@ -50,16 +50,50 @@ internal class BakedCastPresentationOwner(
         try {
             val drain = HandlerThread("PitwallPrivateCastSink").apply { start() }
             thread = drain
-            val sink = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-            reader = sink
-            sink.setOnImageAvailableListener({ available ->
-                runCatching { available.acquireLatestImage()?.close() }
-            }, Handler(drain.looper))
             val manager = context.getSystemService(DisplayManager::class.java)
-            val virtual = checkNotNull(manager.createVirtualDisplay("Pitwall private clear scene",
-                width, height, densityDpi, sink.surface,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION))
+            // The sink is discarded; the encoder consumes its own EGL surface at
+            // the original video size. Keep the logical display unchanged.
+            fun openSink(sinkWidth: Int, sinkHeight: Int): VirtualDisplay {
+                val sink = ImageReader.newInstance(sinkWidth, sinkHeight, PixelFormat.RGBA_8888, 2)
+                var virtual: VirtualDisplay? = null
+                try {
+                    var observedWidth = 0
+                    var observedHeight = 0
+                    sink.setOnImageAvailableListener({ available ->
+                        runCatching {
+                            available.acquireLatestImage()?.use { image ->
+                                if (image.width != observedWidth || image.height != observedHeight) {
+                                    observedWidth = image.width
+                                    observedHeight = image.height
+                                    android.util.Log.i("PitwallCast", "BAKED_DISCARD_SINK observed=${observedWidth}x${observedHeight} requested=${sinkWidth}x${sinkHeight} maxImages=2")
+                                }
+                            }
+                        }
+                    }, Handler(drain.looper))
+                    val created = checkNotNull(manager.createVirtualDisplay("Pitwall private clear scene",
+                        width, height, densityDpi, sink.surface,
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or
+                            DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION))
+                    virtual = created
+                    val mode = created.display.mode
+                    check(mode.physicalWidth == width && mode.physicalHeight == height) {
+                        "Private display dimensions changed"
+                    }
+                    reader = sink
+                    return created
+                } catch (failure: Exception) {
+                    runCatching { virtual?.release() }
+                    runCatching { sink.setOnImageAvailableListener(null, null) }
+                    runCatching { sink.close() }
+                    throw failure
+                }
+            }
+            val virtual = try {
+                openSink(minOf(width, 16), minOf(height, 16))
+            } catch (failure: Exception) {
+                android.util.Log.w("PitwallCast", "BAKED_DISCARD_SINK_FALLBACK", failure)
+                openSink(width, height)
+            }
             display = virtual
             val presentation = ProducerPresentation(context, virtual.display, app, width, height)
             window = presentation

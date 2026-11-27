@@ -54,7 +54,8 @@ internal object HevcTizenGridComposer {
         val pictures: List<ComposedPicture>,
         val sourcePictureIdentities: List<List<HevcPictureIdentityCompatibility.PictureIdentity>>,
         val annexB: ByteArray,
-        val outputLoopFilterAcrossTilesEnabled: Boolean
+        val outputLoopFilterAcrossTilesEnabled: Boolean,
+        val reusedSourceHeaders: Int = 0,
     )
 
     private data class ParsedFeed(
@@ -65,7 +66,8 @@ internal object HevcTizenGridComposer {
         val sps: HevcParameterSets.SpsMetadata,
         val pps: HevcParameterSets.PpsMetadata,
         val pictures: List<List<LocatedSlice>>,
-        val pictureIdentities: List<HevcPictureIdentityCompatibility.PictureIdentity>
+        val pictureIdentities: List<HevcPictureIdentityCompatibility.PictureIdentity>,
+        val reusedSourceHeaders: Int,
     )
 
     private data class SourceTile(
@@ -395,7 +397,8 @@ internal object HevcTizenGridComposer {
                 pictures = outputPictures,
                 sourcePictureIdentities = feeds.map { it.pictureIdentities },
                 annexB = annexB,
-                outputLoopFilterAcrossTilesEnabled = outputPps.loopFilterAcrossTiles == true
+                outputLoopFilterAcrossTilesEnabled = outputPps.loopFilterAcrossTiles == true,
+                reusedSourceHeaders = feeds.sumOf { it.reusedSourceHeaders }
             )
         } catch (failure: Throwable) {
             outputPictures.forEach { picture ->
@@ -444,12 +447,13 @@ internal object HevcTizenGridComposer {
         // Annex-B here cloned every large VCL NAL (and doubled peak young-generation pressure).
         val validatedHeaders = java.util.IdentityHashMap<HevcBitstream.NalSpan, HevcSliceHeaderParser.SliceHeader>()
         val reusable = verified?.takeIf { it.sps == sps && it.pps == pps }?.headers
+        var reusedSourceHeaders = 0
         val pictures = mutableListOf<MutableList<LocatedSlice>>()
         var current: MutableList<LocatedSlice>? = null
         nals.filter { it.type in 0..31 }.forEach { nal ->
             // Parse and validate every source tile just once. Keep the trusted header
             // beside its original immutable NAL bytes for all later composition stages.
-            val header = reusable?.get(nal)
+            val header = reusable?.get(nal)?.also { reusedSourceHeaders++ }
                 ?: HevcSliceHeaderParser.parseRange(nal.backing, nal.offset, nal.length, sps, pps)
             require(header.nalUnitType == nal.type && header.temporalIdPlus1 == nal.temporalIdPlus1 &&
                 header.ppsId == pps.ppsId)
@@ -495,7 +499,7 @@ internal object HevcTizenGridComposer {
         }
         return ParsedFeed(
             vpsUnits.first().parameterBytes(), spsUnits.first().parameterBytes(), ppsUnits.first().parameterBytes(),
-            vps, sps, pps, pictures, identities
+            vps, sps, pps, pictures, identities, reusedSourceHeaders
         )
     }
 

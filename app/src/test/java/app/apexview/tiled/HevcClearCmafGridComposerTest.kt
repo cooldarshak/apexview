@@ -73,7 +73,7 @@ class HevcClearCmafGridComposerTest {
                 ),
                 outputTrackId = 9,
                 frameRateNumerator = 25
-            )
+            ), reuseValidatedHeaders = false
         )
 
         assertEquals(1920, output.codedWidth)
@@ -125,6 +125,8 @@ class HevcClearCmafGridComposerTest {
                 frameRateNumerator = 25
             )
         )
+        assertEquals(0, output.reusedSourceHeaders)
+        assertTrue("fixture must exercise exact source-header reuse", cachedOutput.reusedSourceHeaders > 0)
         assertTrue(output.initializationSegment.contentEquals(cachedOutput.initializationSegment))
         output.mediaFragments.zip(cachedOutput.mediaFragments).forEach { (actual, cached) ->
             assertTrue(actual.contentEquals(cached))

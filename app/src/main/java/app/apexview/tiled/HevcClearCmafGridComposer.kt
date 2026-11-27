@@ -74,6 +74,7 @@ internal object HevcClearCmafGridComposer {
         /** Source NAL staging bytes avoided (all passthrough NALs, VCL only for stitching). */
         val sourceNalCopyBytesAvoided: Long = 0,
         val rewrittenTailStagingBytesAvoided: Long = 0,
+        val reusedSourceHeaders: Int = 0,
     )
 
     private data class SourceSample(
@@ -124,7 +125,7 @@ internal object HevcClearCmafGridComposer {
         }
     }
 
-    fun compose(request: Request): Output {
+    fun compose(request: Request, reuseValidatedHeaders: Boolean = true): Output {
         require(request.feeds.size >= 2) { "At least two clear CMAF feeds are required" }
         require(request.feeds.all { it.mediaFragments.isNotEmpty() }) {
             "Every source feed must contain at least one media fragment"
@@ -157,10 +158,10 @@ internal object HevcClearCmafGridComposer {
                 includeAnnexBOutput = false,
                 emitSampleData = false,
                 emitNalParts = true,
-                prevalidated = parsedFeeds.map { feed ->
+                prevalidated = if (reuseValidatedHeaders) parsedFeeds.map { feed ->
                     HevcTizenGridComposer.PrevalidatedSlices(feed.config.sps.single(),
                         feed.config.pps.single(), feed.verifiedSliceHeaders)
-                }
+                } else null
             )
         } finally {
             // The grid composer retains only owned headers and borrowed tail ranges.
@@ -250,6 +251,7 @@ internal object HevcClearCmafGridComposer {
                 nalInspectorMs = parsedFeeds.sumOf { it.nalInspectorNanos } / 1_000_000L,
                 sourceAnnexBBytesAvoided = parsedFeeds.sumOf { it.annexBEquivalentBytes.toLong() },
                 sourceNalCopyBytesAvoided = parsedFeeds.sumOf { it.borrowedVclBytes },
+                reusedSourceHeaders = composed.reusedSourceHeaders,
                 rewrittenTailStagingBytesAvoided = composed.pictures.sumOf { picture ->
                     picture.nalParts.sumOf { it.copiedTailBytes.toLong() }
                 },
