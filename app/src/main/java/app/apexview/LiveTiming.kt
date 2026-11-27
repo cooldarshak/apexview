@@ -1411,8 +1411,12 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                             val towerPreviewPending = java.util.concurrent.atomic.AtomicBoolean(false)
                             val threadId = android.os.Process.myTid()
                             val priority = android.os.Process.getThreadPriority(threadId)
+                            var background = false
                             try {
-                                android.os.Process.setThreadPriority(threadId, android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                                // The only producer of missing tower coverage must not
+                                // remain background-priority while the active clock
+                                // is waiting for rows. Yield to playback again as
+                                // soon as a healthy lookahead is published.
                                 val ordered = timingStream.chronological && (timingF1Stream?.chronological ?: true)
                                 timingStream.reader().useLines { lines ->
                                     (timingF1Stream?.reader() ?: "".reader().buffered()).useLines { supplement ->
@@ -1424,6 +1428,13 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                         val until = minOf(through, target + 120_000L)
                                         val coversTarget = publishedFrom?.let { target >= it } == true &&
                                             publishedThrough?.let { target <= it } == true
+                                        val coveredAhead = coversTarget &&
+                                            publishedThrough?.let { target <= it - 10_000L } == true
+                                        if (background != coveredAhead) {
+                                            android.os.Process.setThreadPriority(threadId,
+                                                if (coveredAhead) android.os.Process.THREAD_PRIORITY_BACKGROUND else priority)
+                                            background = coveredAhead
+                                        }
                                         if (!towerPreviewPending.get() && through >= target &&
                                             (!coversTarget || publishedThrough?.let { until - it >= 30_000L && target > it - 10_000L } == true)) {
                                             previewRange = from..until
