@@ -106,7 +106,7 @@ internal class NativePositionBatch(timing: SessionTiming) {
     fun state(index: Int): LapState =
         states[index]?.s?.getOrNull(metadataIndices[index]) ?: LapState.UNKNOWN
     fun retired(index: Int): Boolean =
-        laps[index]?.states?.getOrNull(metadataIndices[states.size + index])?.retired == true
+        laps[index]?.retiredAtSnapshot(metadataIndices[states.size + index]) == true
     private val timeOwners = tracks.map { it.timeline }.toTypedArray()
     private val times = timeOwners.map { it.array }.toTypedArray()
     private val compactHandles = LongArray(timeOwners.size) { timeOwners[it].handle }

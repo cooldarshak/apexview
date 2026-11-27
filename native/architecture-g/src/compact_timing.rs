@@ -128,7 +128,7 @@ pub struct CompactTelemetry {
 }
 impl CompactTelemetry {
     pub fn storage_len(count: usize, bits: usize) -> Option<usize> {
-        if count == 0 || count > MAX_HISTORY || !matches!(bits, 4 | 9) { return None; }
+        if count == 0 || count > MAX_HISTORY || !matches!(bits, 4 | 9 | 16) { return None; }
         Some(count.checked_mul(bits)?.div_ceil(8))
     }
     pub fn from_reader(count: usize, bits: usize, mut read: impl FnMut(usize, &mut [i16]) -> Option<()>) -> Option<Self> {
@@ -143,7 +143,7 @@ impl CompactTelemetry {
             for (i, &value) in block[..n].iter().enumerate() {
                 let code = match (bits, value) {
                     (4, -1) => 15u16,
-                    (4, 0..=8) | (9, 0..=500) => value as u16,
+                    (4, 0..=8) | (9, 0..=500) | (16, 0..=32767) => value as u16,
                     _ => return None,
                 };
                 let bit = (first + i) * bits;
@@ -166,7 +166,8 @@ impl CompactTelemetry {
         let shift = bit % 8;
         let mut word = u16::from(*self.bytes.get(at)?);
         if shift + self.bits > 8 { word |= u16::from(*self.bytes.get(at + 1)?) << 8; }
-        let value = ((word >> shift) & ((1u16 << self.bits) - 1)) as i16;
+        let mask = if self.bits == 16 { u16::MAX } else { (1u16 << self.bits) - 1 };
+        let value = ((word >> shift) & mask) as i16;
         Some(if self.bits == 4 && value == 15 { -1 } else { value })
     }
 }
@@ -174,6 +175,16 @@ impl CompactTelemetry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_dictionary_indices_use_native_sixteen_bit_rows() {
+        let values = [0i16, 1, 500, 32767, 256];
+        let rows = CompactTelemetry::from_reader(values.len(), 16, |first, out| {
+            out.copy_from_slice(&values[first..first+out.len()]); Some(())
+        }).unwrap();
+        for (i, value) in values.iter().enumerate() { assert_eq!(rows.at(i), Some(*value)); }
+        assert_eq!(rows.bytes().len(), values.len()*2);
+        assert!(CompactTelemetry::from_reader(1,16,|_,out| { out[0] = -1; Some(()) }).is_none());
+    }
     #[test]
     fn exact_coordinate_blocks_preserve_negative_and_large_origins() {
         let xs: Vec<f32> = (0..1027).map(|i| (-100_000 + i * 317) as f32).collect();

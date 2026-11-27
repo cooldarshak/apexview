@@ -148,7 +148,7 @@ class DriverLaps internal constructor(
     internal val crossings: LongArray get() = crossingTimeline.legacyArray()
     internal val lapTimes: LongArray get() = lapTimeline.legacyArray()
     internal fun compact(pool: SpeedTimestampPool): DriverLaps =
-        DriverLaps(snapshotTimeline.compact(pool), states, crossingTimeline.compact(pool),
+        DriverLaps(snapshotTimeline.compact(pool), pool.freezeDriverSnapshots(states), crossingTimeline.compact(pool),
             lapTimeline.compact(pool), lapCounts, initialPosition)
 
     internal fun shiftedBy(offsetMs: Long) = DriverLaps(
@@ -230,7 +230,9 @@ class DriverLaps internal constructor(
         states.getOrNull(snapshotTimeline.floorIndex(utcMs))?.position != null
 
     /** Whether the driver was out of the race at [utcMs]. */
-    fun retiredAt(utcMs: Long): Boolean = snapshotTimeline.floorIndex(utcMs).let { it >= 0 && states[it].retired }
+    fun retiredAt(utcMs: Long): Boolean = retiredAtSnapshot(snapshotTimeline.floorIndex(utcMs))
+    internal fun retiredAtSnapshot(index: Int): Boolean =
+        index in states.indices && ((states as? CompactDriverSnapshots)?.retiredAt(index) ?: states[index].retired)
 
     /** When the driver's current spell in the pit lane began, if they're in it at [utcMs]. */
     fun inPitSince(utcMs: Long): Long? {

@@ -489,6 +489,9 @@ class SpeedBuilder {
  * The completed archive may transfer each distinct timestamp series into
  * compact Rust ownership. The JVM/reference mode keeps exact shared arrays. */
 internal class SpeedTimestampPool(private val nativeStorage: Boolean = false) {
+    fun freezeDriverSnapshots(states: List<DriverLaps.Snapshot>): List<DriverLaps.Snapshot> =
+        if (nativeStorage) CompactDriverSnapshots.freeze(states) ?: states else states
+
     private val timelines = HashMap<Int, MutableList<LongArray>>()
     private val published = HashMap<Int, MutableList<TimingTimestamps>>()
 

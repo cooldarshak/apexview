@@ -152,6 +152,31 @@ class ArchitectureGBAndroidTest {
         val laps = app.apexview.DriverLaps(times, List(times.size) {
             app.apexview.DriverLaps.Snapshot(1, emptyList(), emptyList(), null, null, false, null, null)
         }, times, times, IntArray(times.size) { it }).compact(pool)
+        assertTrue(laps.states is app.apexview.CompactDriverSnapshots)
+        val varying = List(128) { i ->
+            app.apexview.DriverLaps.Snapshot(
+                if (i % 7 == 0) null else i, emptyList(), listOf(null), null,
+                if (i % 2 == 0) null else "+${i % 3}", i % 5 == 0,
+                "leader", if (i % 3 == 0) "ahead" else null, i % 11 == 0,
+                null, i % 13 == 0)
+        }
+        val packedRows = requireNotNull(app.apexview.CompactDriverSnapshots.freeze(varying))
+        for (i in varying.indices.reversed()) {
+            val expected = varying[i]
+            val actual = packedRows[i]
+            assertEquals(expected.position, actual.position)
+            assertEquals(expected.sectors, actual.sectors)
+            assertEquals(expected.lapSectors, actual.lapSectors)
+            assertEquals(expected.lastLap, actual.lastLap)
+            assertEquals(expected.gap, actual.gap)
+            assertEquals(expected.inPit, actual.inPit)
+            assertEquals(expected.toLeader, actual.toLeader)
+            assertEquals(expected.ahead, actual.ahead)
+            assertEquals(expected.retired, actual.retired)
+            assertEquals(expected.bestLap, actual.bestLap)
+            assertEquals(expected.stopped, actual.stopped)
+            assertEquals(expected.retired, packedRows.retiredAt(i))
+        }
         assertTrue(laps.snapshotTimeline === compact)
         assertTrue(laps.crossingTimeline === compact)
         assertTrue(laps.lapTimeline === compact)

@@ -185,7 +185,7 @@ public final class NativeHotPath {
         }
     }
     public static CompactTelemetry compactTelemetry(short[] source, int count, int bits) {
-        if (count < 64 || count > source.length || (bits != 4 && bits != 9) || !available()) return null;
+        if (count < 64 || count > source.length || (bits != 4 && bits != 9 && bits != 16) || !available()) return null;
         long[] token = new long[1];
         boolean registered = false;
         try {
