@@ -1191,7 +1191,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                             }
                             val spool = java.io.File.createTempFile("replay-positions-", ".stream", positionScratchDir)
                             try {
-                                ReplayPositionSpool(spool).use { index ->
+                                ReplayPositionSpool(spool, nativeRequested()).use { index ->
                                     var lastAttemptAt = -1_000L
                                     var lastAttemptOffset = Long.MIN_VALUE
                                     var lastAttemptThrough = Long.MIN_VALUE
