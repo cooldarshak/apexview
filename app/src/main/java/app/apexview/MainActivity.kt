@@ -248,13 +248,20 @@ private fun PipSetup(app: AppState) {
     }
 }
 
+/** Intercept Back only while the app owns a navigation action. At the signed-in
+ * home root without playback, the platform dispatcher must handle Back on both
+ * phone and TV. Dialogs/sheets retain their own higher-priority handlers. */
+internal fun handlesRootBack(stackDepth: Int, hasTiles: Boolean, hasPicker: Boolean,
+    hasTileMenu: Boolean, mapSheetOpen: Boolean): Boolean =
+    stackDepth > 1 || hasTiles || hasPicker || hasTileMenu || mapSheetOpen
+
 @Composable
 private fun Root(app: AppState) {
     val reducedMotion = LocalReduceMotion.current
     PipSetup(app)
     val watching = app.tiles.isNotEmpty() && !app.browsing
-    val handlesBack = !app.isTv || app.backStack.size > 1 || app.tiles.isNotEmpty() ||
-        app.picker != null || app.tileMenu != null || app.mapSheetOpen
+    val handlesBack = handlesRootBack(app.backStack.size, app.tiles.isNotEmpty(),
+        app.picker != null, app.tileMenu != null, app.mapSheetOpen)
     BackHandler(enabled = app.auth == AuthState.SIGNED_IN && handlesBack) {
         when {
             app.tileMenu != null -> app.closeTileMenu()
