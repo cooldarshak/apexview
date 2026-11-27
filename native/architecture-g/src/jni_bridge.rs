@@ -561,10 +561,77 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragm
 use jni::objects::{JFloatArray,JIntArray,JLongArray,JObjectArray,JByteArray};
 use crate::hot_path::{self,PositionCursor,MAX_DRIVERS,MAX_HISTORY};
 
+// Archive timestamp ownership is independent of media/DRM leases. A bounded
+// native registry owns immutable packets; a JVM reference-queue owner retires
+// the packet only after its last shared timing reader is unreachable.
+use crate::compact_timing::CompactTimes;
+use std::collections::HashMap;
+use std::sync::Arc;
+const COMPACT_TIMING_LIMIT: usize = 64 * 1024 * 1024;
+struct CompactTimingRegistry {
+    serial: i64,
+    bytes: usize,
+    entries: HashMap<i64, Arc<CompactTimes>>,
+}
+static COMPACT_TIMING: OnceLock<Mutex<CompactTimingRegistry>> = OnceLock::new();
+fn compact_registry() -> &'static Mutex<CompactTimingRegistry> {
+    COMPACT_TIMING.get_or_init(|| Mutex::new(CompactTimingRegistry {
+        serial: 0, bytes: 0, entries: HashMap::new(),
+    }))
+}
+fn compact_history(handle: i64) -> Option<Arc<CompactTimes>> {
+    compact_registry().lock().ok()?.entries.get(&handle).cloned()
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeCreateCompactTimes(
+    mut env: JNIEnv<'_>, _class: JClass<'_>, source: JLongArray<'_>,
+    count: jint, token: JLongArray<'_>,
+) -> jobject {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Option<jobject> {
+        let n = usize::try_from(count).ok()?;
+        let len = CompactTimes::storage_len(n)?;
+        if (env.get_array_length(&source).ok()? as usize) < n ||
+            env.get_array_length(&token).ok()? != 1 { return None; }
+        let mut registry = compact_registry().lock().ok()?;
+        let total = registry.bytes.checked_add(len)?;
+        if total > COMPACT_TIMING_LIMIT { return None; }
+        let handle = registry.serial.checked_add(1)?;
+        registry.entries.try_reserve(1).ok()?;
+        let packet = Arc::new(CompactTimes::from_reader(n, |start, out| {
+            env.get_long_array_region(&source, start as i32, out).ok()
+        })?);
+        // SAFETY: this allocation remains in the registry until the JVM
+        // CompactTimes holder is unreachable. The Java boundary immediately
+        // converts this private buffer into a read-only view, never exposes
+        // the mutable buffer, and fences the holder through each scalar read.
+        // Native queries use Arc clones rather than dereferencing JNI pointers.
+        let buffer = unsafe { env.new_direct_byte_buffer(packet.bytes().as_ptr() as *mut u8, len).ok()? };
+        env.set_long_array_region(&token, 0, &[handle]).ok()?;
+        registry.serial = handle;
+        registry.bytes = total;
+        registry.entries.insert(handle, packet);
+        Some(buffer.into_raw())
+    }));
+    match result { Ok(Some(buffer)) => buffer, _ => std::ptr::null_mut() }
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReleaseCompactTimes(
+    _env: JNIEnv<'_>, _class: JClass<'_>, token: jlong,
+) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if let Ok(mut registry) = compact_registry().lock() {
+            if let Some(packet) = registry.entries.remove(&token) {
+                registry.bytes = registry.bytes.saturating_sub(packet.bytes().len());
+            }
+        }
+    }));
+}
+
+
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeSamplePositions(
     mut env:JNIEnv<'_>,_class:JClass<'_>,times:JObjectArray<'_>,
-    xs:JObjectArray<'_>,ys:JObjectArray<'_>,counts:JIntArray<'_>,
+    xs:JObjectArray<'_>,ys:JObjectArray<'_>,counts:JIntArray<'_>,compact:JLongArray<'_>,
     now:jlong,state:JLongArray<'_>,xy:JFloatArray<'_>,active:JIntArray<'_>,
 )->jint{
     let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
@@ -575,6 +642,11 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeSamplePositio
             env.get_array_length(&xy).ok()? as usize!=2*n ||
             env.get_array_length(&active).ok()? as usize!=n{return None;}
         let mut sizes=[0i32;MAX_DRIVERS];
+        let mut handles=[0i64;MAX_DRIVERS];
+        if !compact.is_null() {
+            if env.get_array_length(&compact).ok()? as usize != n { return None; }
+            env.get_long_array_region(&compact,0,&mut handles[..n]).ok()?;
+        }
         let mut cursors=[0i64;3*MAX_DRIVERS];
         let mut coords=[0f32;2*MAX_DRIVERS];
         let mut visible=[0i32;MAX_DRIVERS];
@@ -586,15 +658,21 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeSamplePositio
             let ts=JLongArray::from(env.get_object_array_element(&times,i as i32).ok()?);
             let x=JFloatArray::from(env.get_object_array_element(&xs,i as i32).ok()?);
             let y=JFloatArray::from(env.get_object_array_element(&ys,i as i32).ok()?);
-            if ts.is_null() || x.is_null() || y.is_null() ||
-                (env.get_array_length(&ts).ok()? as usize)<count ||
+            let packed = if handles[i] == 0 { None } else { Some(compact_history(handles[i])?) };
+            if let Some(ref packet) = packed {
+                if packet.len() != count { return None; }
+            } else if ts.is_null() || (env.get_array_length(&ts).ok()? as usize)<count { return None; }
+            if x.is_null() || y.is_null() ||
                 (env.get_array_length(&x).ok()? as usize)<count ||
                 (env.get_array_length(&y).ok()? as usize)<count{return None;}
             let mut cursor=PositionCursor{lower:i32::try_from(cursors[3*i]).ok()?,
                 previous:cursors[3*i+1],seeks:cursors[3*i+2]};
             let sample=hot_path::position_at(count,now,&mut cursor,
                 hot_path::adjacent_times(count, |start, out| {
-                    env.get_long_array_region(&ts, start as i32, out).ok()
+                    if let Some(ref packet) = packed {
+                        for (i, value) in out.iter_mut().enumerate() { *value = packet.at(start + i)?; }
+                        Some(())
+                    } else { env.get_long_array_region(&ts, start as i32, out).ok() }
                 }),
                 hot_path::adjacent_points(count, |at,xx,yy|{
                     env.get_float_array_region(&x,at as i32,xx).ok()?;
@@ -621,7 +699,7 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeSamplePositio
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeFloorIndices(
     mut env:JNIEnv<'_>,_class:JClass<'_>,times:JObjectArray<'_>,
-    counts:JIntArray<'_>,now:jlong,indices:JIntArray<'_>,
+    counts:JIntArray<'_>,compact:JLongArray<'_>,now:jlong,indices:JIntArray<'_>,
 )->jint{
     // Each driver can contribute lap state, tyre, lap count, speed and gear.
     const MAX_FLOOR_HISTORIES: usize = 5 * MAX_DRIVERS + 1;
@@ -630,6 +708,11 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeFloorIndices(
         if n>MAX_FLOOR_HISTORIES||env.get_array_length(&times).ok()? as usize!=n||
             env.get_array_length(&indices).ok()? as usize!=n{return None;}
         let mut sizes=[0i32;MAX_FLOOR_HISTORIES];let mut out=[-1i32;MAX_FLOOR_HISTORIES];
+        let mut handles=[0i64;MAX_FLOOR_HISTORIES];
+        if !compact.is_null() {
+            if env.get_array_length(&compact).ok()? as usize != n { return None; }
+            env.get_long_array_region(&compact,0,&mut handles[..n]).ok()?;
+        }
         env.get_int_array_region(&counts,0,&mut sizes[..n]).ok()?;
         // Output is an existing per-owner scratch array. Previous contents are
         // untrusted hints; the Rust kernel verifies them against this history.
@@ -637,9 +720,15 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeFloorIndices(
         for i in 0..n{
             let count=usize::try_from(sizes[i]).ok()?;
             let ts=JLongArray::from(env.get_object_array_element(&times,i as i32).ok()?);
-            if ts.is_null()||(env.get_array_length(&ts).ok()? as usize)<count{return None;}
+            let packed = if handles[i] == 0 { None } else { Some(compact_history(handles[i])?) };
+            if let Some(ref packet) = packed {
+                if packet.len() != count { return None; }
+            } else if ts.is_null() || (env.get_array_length(&ts).ok()? as usize)<count { return None; }
             out[i]=hot_path::floor_index_hint(count,now,out[i],hot_path::adjacent_times(count, |start, out| {
-                    env.get_long_array_region(&ts, start as i32, out).ok()
+                    if let Some(ref packet) = packed {
+                        for (i, value) in out.iter_mut().enumerate() { *value = packet.at(start + i)?; }
+                        Some(())
+                    } else { env.get_long_array_region(&ts, start as i32, out).ok() }
                 }))?;
             env.delete_local_ref(ts).ok()?;
         }
