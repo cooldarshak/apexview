@@ -690,6 +690,9 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeCreateCompact
         let fields = n.checked_mul(CompactSnapshotDeltas::FIELDS)?;
         if fields > MAX_HISTORY || fields != env.get_array_length(&source).ok()? as usize { return None; }
         let mut registry = compact_registry().lock().ok()?;
+        // Admit worst-case encoder scratch against the existing cap before
+        // allocating, rather than checking only the smaller finished packet.
+        if registry.bytes.checked_add(fields.checked_mul(2)?)? > COMPACT_TIMING_LIMIT { return None; }
         let packet = Arc::new(CompactSnapshotDeltas::from_reader(n, |first, out| {
             env.get_short_array_region(&source, first as i32, out).ok()
         })?);
