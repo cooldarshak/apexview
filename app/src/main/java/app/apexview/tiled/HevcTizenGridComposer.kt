@@ -127,6 +127,14 @@ internal object HevcTizenGridComposer {
     )
 
     /** Borrow clear input ranges only until all rewritten output NALs are independently owned. */
+    /** Headers already parsed by the independent clear CMAF access-unit
+     * inspector, bound to exact span identity and exact active parameter sets. */
+    internal class PrevalidatedSlices(
+        val sps: HevcParameterSets.SpsMetadata,
+        val pps: HevcParameterSets.PpsMetadata,
+        val headers: java.util.IdentityHashMap<HevcBitstream.NalSpan, HevcSliceHeaderParser.SliceHeader>,
+    )
+
     internal fun composeNalSpans(
         feedNals: List<List<HevcBitstream.NalSpan>>,
         grid: HevcOutputGridDimensions,
@@ -136,14 +144,16 @@ internal object HevcTizenGridComposer {
         outputNalLengthSize: Int = 4,
         includeAnnexBOutput: Boolean = true,
         emitSampleData: Boolean = true,
-        emitNalParts: Boolean = false
+        emitNalParts: Boolean = false,
+        prevalidated: List<PrevalidatedSlices>? = null,
     ): Result {
         require(!emitNalParts || (!includeAnnexBOutput && !emitSampleData)) {
             "Borrowed NAL parts require the synchronous clear CMAF writer"
         }
         require(feedNals.size >= 2) { "At least two independent source feeds are required" }
         require(outputNalLengthSize in 1..4) { "Output NAL length size must be between 1 and 4" }
-        val feeds = feedNals.mapIndexed { index, nals -> parseFeed(index, nals) }
+        require(prevalidated == null || prevalidated.size == feedNals.size)
+        val feeds = feedNals.mapIndexed { index, nals -> parseFeed(index, nals, prevalidated?.get(index)) }
         val first = feeds.first()
         require(feeds.all { it.pictures.size == first.pictures.size }) {
             "Source feeds contain different coded-picture counts"
@@ -397,7 +407,7 @@ internal object HevcTizenGridComposer {
         }
     }
 
-    private fun parseFeed(index: Int, nals: List<HevcBitstream.NalSpan>): ParsedFeed {
+    private fun parseFeed(index: Int, nals: List<HevcBitstream.NalSpan>, verified: PrevalidatedSlices?): ParsedFeed {
         require(nals.all { it.layerId == 0 }) {
             "Source feed $index contains a non-zero HEVC layer ID"
         }
@@ -433,12 +443,16 @@ internal object HevcTizenGridComposer {
         // The analyzer and tile locator inspect the same immutable NAL payloads. Re-splitting
         // Annex-B here cloned every large VCL NAL (and doubled peak young-generation pressure).
         val validatedHeaders = java.util.IdentityHashMap<HevcBitstream.NalSpan, HevcSliceHeaderParser.SliceHeader>()
+        val reusable = verified?.takeIf { it.sps == sps && it.pps == pps }?.headers
         val pictures = mutableListOf<MutableList<LocatedSlice>>()
         var current: MutableList<LocatedSlice>? = null
         nals.filter { it.type in 0..31 }.forEach { nal ->
             // Parse and validate every source tile just once. Keep the trusted header
             // beside its original immutable NAL bytes for all later composition stages.
-            val header = HevcSliceHeaderParser.parseRange(nal.backing, nal.offset, nal.length, sps, pps)
+            val header = reusable?.get(nal)
+                ?: HevcSliceHeaderParser.parseRange(nal.backing, nal.offset, nal.length, sps, pps)
+            require(header.nalUnitType == nal.type && header.temporalIdPlus1 == nal.temporalIdPlus1 &&
+                header.ppsId == pps.ppsId)
             validatedHeaders[nal] = header
             if (header.firstSliceSegmentInPicture) {
                 current?.let { pictures += it }

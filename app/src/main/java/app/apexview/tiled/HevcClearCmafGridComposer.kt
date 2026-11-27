@@ -97,6 +97,7 @@ internal object HevcClearCmafGridComposer {
         val fragments: List<SourceFragment>,
         val inspectorFragments: List<CmafBoxInspector.FragmentMetadata>,
         val nalUnits: MutableList<HevcBitstream.NalSpan>,
+        val verifiedSliceHeaders: java.util.IdentityHashMap<HevcBitstream.NalSpan, HevcSliceHeaderParser.SliceHeader>,
         val firstVclType: Int?,
         val validatedNalBytes: Long,
         val borrowedVclBytes: Long,
@@ -155,7 +156,11 @@ internal object HevcClearCmafGridComposer {
                 outputNalLengthSize = first.config.nalLengthSize,
                 includeAnnexBOutput = false,
                 emitSampleData = false,
-                emitNalParts = true
+                emitNalParts = true,
+                prevalidated = parsedFeeds.map { feed ->
+                    HevcTizenGridComposer.PrevalidatedSlices(feed.config.sps.single(),
+                        feed.config.pps.single(), feed.verifiedSliceHeaders)
+                }
             )
         } finally {
             // The grid composer retains only owned headers and borrowed tail ranges.
@@ -271,6 +276,7 @@ internal object HevcClearCmafGridComposer {
 
     private fun releaseNalSpans(feed: ParsedFeed) {
         feed.nalUnits.clear() // Borrowed source bytes must never be zeroed here.
+        feed.verifiedSliceHeaders.clear()
     }
 
     private fun sequence(
@@ -356,12 +362,14 @@ internal object HevcClearCmafGridComposer {
         val nalInspectStarted = System.nanoTime()
         val annexBEquivalentBytes = exactAnnexBSize(rawParameterSets, fragments, config.nalLengthSize)
         val nalUnits = ArrayList<HevcBitstream.NalSpan>()
+        val verifiedSliceHeaders = java.util.IdentityHashMap<HevcBitstream.NalSpan, HevcSliceHeaderParser.SliceHeader>()
         var firstVclType: Int? = null
         var validatedNalBytes = 0L
         var borrowedVclBytes = 0L
         var validatedAnnexBBytes = 0L
         try {
-            fun addNal(bytes: ByteArray, offset: Int, length: Int) {
+            fun addNal(bytes: ByteArray, offset: Int, length: Int,
+                       verifiedSlice: HevcSliceHeaderParser.SliceHeader? = null) {
                 require(offset >= 0 && length >= 2 && offset <= bytes.size &&
                     length <= bytes.size - offset) { "Invalid HEVC NAL range" }
                 // Match the legacy Annex-B splitter's terminal-zero handling.
@@ -376,9 +384,16 @@ internal object HevcClearCmafGridComposer {
                 validatedNalBytes = Math.addExact(validatedNalBytes, nalLength.toLong())
                 validatedAnnexBBytes = Math.addExact(validatedAnnexBBytes, nalLength.toLong() + 4L)
                 if (retainSpans) {
-                    nalUnits += HevcBitstream.NalSpan(bytes, offset, nalLength)
-                    if (header.type in 0..31)
+                    val span = HevcBitstream.NalSpan(bytes, offset, nalLength)
+                    nalUnits += span
+                    if (header.type in 0..31) {
                         borrowedVclBytes = Math.addExact(borrowedVclBytes, nalLength.toLong())
+                        // A header belongs to the exact validated byte extent.
+                        // The Annex-B reference may trim terminal zero bytes;
+                        // retain its independent parse for changed extents.
+                        if (verifiedSlice != null && nalLength == length)
+                            verifiedSliceHeaders[span] = verifiedSlice
+                    }
                 }
             }
             rawParameterSets.forEach { addNal(it, 0, it.size) }
@@ -397,7 +412,13 @@ internal object HevcClearCmafGridComposer {
                         sampleLength = sample.length,
                         retainNalUnits = false
                     )
-                    accessUnit.nalUnitRanges.forEach { nal -> addNal(sample.bytes, nal.offset, nal.length) }
+                    var slice = 0
+                    accessUnit.nalUnitRanges.forEachIndexed { nalIndex, nal ->
+                        val verified = accessUnit.slices.getOrNull(slice)?.takeIf { it.nalIndex == nalIndex }
+                        if (verified != null) slice++
+                        addNal(sample.bytes, nal.offset, nal.length, verified?.header)
+                    }
+                    require(slice == accessUnit.slices.size)
                 }
             }
             require(validatedAnnexBBytes <= annexBEquivalentBytes.toLong()) {
@@ -408,7 +429,7 @@ internal object HevcClearCmafGridComposer {
                 "Feed ${feed.label} CMAF fragment sample counts are inconsistent"
             }
             return ParsedFeed(track, config, rawParameterSets, fragments, metadata,
-                nalUnits, firstVclType, validatedNalBytes, borrowedVclBytes, annexBEquivalentBytes,
+                nalUnits, verifiedSliceHeaders, firstVclType, validatedNalBytes, borrowedVclBytes, annexBEquivalentBytes,
                 cmafInspectorNanos = cmafInspectorNanos.coerceAtLeast(0L),
                 nalInspectorNanos = (System.nanoTime() - nalInspectStarted).coerceAtLeast(0L))
         } catch (error: Throwable) {
