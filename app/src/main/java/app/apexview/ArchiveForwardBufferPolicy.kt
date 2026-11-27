@@ -61,13 +61,17 @@ internal class ArchiveForwardBufferPolicy {
         video.clear(); audio.clear(); caption.clear()
         if (!enabled) { audioChild = -1; captionChild = -1 }
     }
-    @Synchronized fun startChild(taskId: Long, child: Int) {
+    @Synchronized fun startChild(taskId: Long, child: Int, retryCount: Int = 0) {
         val lane = when {
             child == 0 -> Lane.VIDEO
             child > 0 && child == audioChild -> Lane.AUDIO
             child > 0 && child == captionChild -> Lane.CAPTION
             else -> return
         }
+        if (!eligible) return
+        // Media3 1.11.1 reports every retry start. A successful retry is
+        // not a clean delivery observation; require fresh selected loads.
+        if (retryCount != 0) { reset(); return }
         start(taskId, lane)
     }
     @Synchronized fun start(taskId: Long, lane: Lane) {

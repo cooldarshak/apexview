@@ -1130,9 +1130,9 @@ class FeedPlayer(
                 private fun current() = archiveBufferSourceToken === token && archiveVodSession != null
                 override fun onLoadStarted(windowIndex: Int,
                     mediaPeriodId: androidx.media3.exoplayer.source.MediaSource.MediaPeriodId?,
-                    loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData) {
+                    loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData, retryCount: Int) {
                     if (current() && mediaLoadData.dataType == C.DATA_TYPE_MEDIA)
-                        archiveForwardBuffers.startChild(loadEventInfo.loadTaskId, child)
+                        archiveForwardBuffers.startChild(loadEventInfo.loadTaskId, child, retryCount)
                 }
                 override fun onLoadCompleted(windowIndex: Int,
                     mediaPeriodId: androidx.media3.exoplayer.source.MediaSource.MediaPeriodId?,

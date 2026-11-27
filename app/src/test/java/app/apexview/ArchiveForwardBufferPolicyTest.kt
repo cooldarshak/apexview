@@ -34,6 +34,37 @@ class ArchiveForwardBufferPolicyTest {
         assertNull(slow.target(2000, 1f))
     }
 
+    @Test fun selectedRetriesRestoreDefaultAndCannotCountAsCleanDelivery() {
+        val policy = policy(2500)
+        policy.select(true, 1, 3)
+        fun child(index: Int, first: Long, count: Int = 6, retry: Int = 0) {
+            repeat(count) {
+                val task = first + it
+                policy.startChild(task, index, retry)
+                policy.complete(task, 500, 5760, 1000L + it)
+            }
+        }
+        child(0, 10); child(1, 20); child(3, 30)
+        assertNotNull(policy.target(2000, 1f))
+        child(2, 40, 1, 1) // Unselected alternate source.
+        assertNotNull(policy.target(2000, 1f))
+        child(3, 50, 1, 1)
+        assertNull(policy.target(2000, 1f))
+        child(0, 60); child(1, 70); child(3, 80, 5)
+        assertNull(policy.target(2000, 1f))
+        child(3, 90, 1)
+        assertNotNull(policy.target(2000, 1f))
+        policy.startChild(100, 0)
+        policy.failure(100)
+        assertNull(policy.target(2000, 1f))
+        policy.startChild(100, 0, 1)
+        policy.complete(100, 1, 5760, 2000)
+        child(1, 110); child(3, 120); child(0, 130, 5)
+        assertNull(policy.target(2000, 1f))
+        child(0, 140, 1)
+        assertNotNull(policy.target(2000, 1f))
+    }
+
     private fun observe(policy: ArchiveForwardBufferPolicy, lane: ArchiveForwardBufferPolicy.Lane,
                         first: Long, duration: Long = 500, segment: Long = 6000) {
         repeat(6) {
