@@ -3290,9 +3290,18 @@ class AppState(
         }
         val probePositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
         selected.forEach { android.util.Log.i("ApexviewPlaybackOffer", it.feed.sourceStream.offerDiagnostic) }
-        // While network preflight runs, keep exactly one native source playable. The
-        // single composed decoder takes ownership only after the output is validated.
-        if (!replacingActiveScene) resumeNativeFallback() else applyVideoBudget()
+        // A cold TV source that has never rendered is not a useful fallback.
+        // Do not compete with the first Rust proof for its decoder/CPU/buffers.
+        // A working picture and an existing composed scene are still preserved.
+        val deferredColdFallback = app.apexview.tiled.deferColdTvFallback(
+            isTv, settings.nativeRustStitching, replacingActiveScene,
+            castingActive || castPlaybackHandedOff, host.feed.hasRenderedFirstFrame)
+        if (deferredColdFallback) {
+            singleDecoderFallbackTileId = null
+            selected.forEach { it.feed.player.playWhenReady = false }
+            applyVideoBudget()
+            android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_COLD_TV_PROOF sourceVideoDeferred=true")
+        } else if (!replacingActiveScene) resumeNativeFallback() else applyVideoBudget()
         archiveCompositionStarting = true
         message = SINGLE_DECODER_ACTIVATING
         diagnostic()
@@ -3465,7 +3474,7 @@ class AppState(
                     "requested=${PerFeedQualityPolicy.description(selected.map { it.feed.sourceStream.profileLabel }, selected.map(::qualityFor))} " +
                     "sourceDecodersTouched=${startup.sourceDecodersTouched}")
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                if (startup.sourceDecodersTouched) restore()
+                if (startup.sourceDecodersTouched || deferredColdFallback) restore()
                 phase = "CANCELLED"
                 diagnostic()
                 throw cancelled
@@ -3504,6 +3513,8 @@ class AppState(
                 if (compositionHandoffOwner === capture) compositionHandoffOwner = null
                 if (playbackWork.capture === capture) {
                     archiveCompositionStarting = false
+                    // Protected/rolling fallback must get its normal source ownership.
+                    if (deferredColdFallback && !transferred && useExistingBackend) resumeNativeFallback()
                     if (!transferred && !useExistingBackend && settings.decoderMode == DecoderMode.MULTIPLE)
                         selected.filter { it in tiles }.forEach { it.feed.player.playWhenReady = playing }
                 }
