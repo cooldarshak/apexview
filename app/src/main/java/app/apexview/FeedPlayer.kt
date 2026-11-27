@@ -300,6 +300,7 @@ class FeedPlayer(
     private var firstFrameRendered by mutableStateOf(false)
     private val diagnosticId = System.identityHashCode(this)
     private val playbackAllocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
+    private val sourceAllocations = Media3SourceAllocationLedger()
     private var parkedForArchive = false
     private var activeAudioDecoders = 0
     private val memoryLoads = Media3LoadLedger()
@@ -530,7 +531,8 @@ class FeedPlayer(
         } else {
             http
         }
-        val sources = DefaultMediaSourceFactory(mediaDataSourceFactory).setDrmSessionManagerProvider { drmManager }
+        val sources = sourceAllocations.factory(DefaultMediaSourceFactory(mediaDataSourceFactory).setDrmSessionManagerProvider { drmManager },
+            Media3SourceAllocationLedger.Kind.SOURCE_MIXED)
         archiveAudioSources = DefaultMediaSourceFactory(http).setDrmSessionManagerProvider { drmManager }
 
         // Starts once a second of picture is in rather than the default 2.5 (2 rather than 5 after
@@ -546,7 +548,7 @@ class FeedPlayer(
             .setTrackSelector(sourceTrackSelector)
             .setBandwidthMeter(androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(context))
             .build()
-        Media3MemoryOwners.register(playbackAllocator, "feed-$diagnosticId")
+        Media3MemoryOwners.register(playbackAllocator, "feed-$diagnosticId", sourceAllocations)
         val codecReleaseTiming = CodecReleaseTiming()
         var lastCodecReleaseLogNs = 0L
         player.setVideoFrameMetadataListener(object : VideoFrameMetadataListener {
@@ -1069,9 +1071,9 @@ class FeedPlayer(
                 .setUri(Uri.parse(PROTECTED_COMPOSED_MANIFEST_URI))
                 .setMimeType(MimeTypes.APPLICATION_MPD)
                 .build()
-            val mediaSource = DashMediaSource.Factory(nextSource.dataSourceFactory())
+            val mediaSource = sourceAllocations.source(DashMediaSource.Factory(nextSource.dataSourceFactory())
                 .setDrmSessionManagerProvider { drmManager }
-                .createMediaSource(mediaItem)
+                .createMediaSource(mediaItem), Media3SourceAllocationLedger.Kind.PROTECTED_COMPOSED)
 
             protectedLiveDashSource = nextSource
             outputCadence.composedSingle = true
@@ -1114,16 +1116,18 @@ class FeedPlayer(
         val audioUri = requireNotNull(session.audioUris[programme] ?: session.audioUri.takeIf { programme == session.clockLabel }) {
             "Archive native audio was not validated"
         }
-        val video = DashMediaSource.Factory(session.dataSourceFactory()).setDrmSessionManagerProvider { drmManager }
+        val video = sourceAllocations.source(DashMediaSource.Factory(session.dataSourceFactory()).setDrmSessionManagerProvider { drmManager }
             .setLoadErrorHandlingPolicy(app.apexview.tiled.ArchiveVodLoadErrorPolicy())
-            .createMediaSource(MediaItem.Builder().setUri(HevcArchiveVodSession.MANIFEST_URI).setMimeType(MimeTypes.APPLICATION_MPD).build())
+            .createMediaSource(MediaItem.Builder().setUri(HevcArchiveVodSession.MANIFEST_URI).setMimeType(MimeTypes.APPLICATION_MPD).build()),
+            Media3SourceAllocationLedger.Kind.ARCHIVE_VIDEO)
         // Keep native audio AND F1-provided text renditions while replacing only video
         // with the composed HEVC atlas. This does not add any video decoder.
         val offers = session.trackOffersSnapshot()
         val audioChildren = ArchiveAudioSelectionPlan.children(audioUri, offers.stableAudioUris)
         val audioSources = audioChildren.map { uri ->
-            FilteringMediaSource(archiveAudioSources.createMediaSource(MediaItem.Builder().setUri(uri)
-                .setMimeType(MimeTypes.APPLICATION_M3U8).build()), setOf(C.TRACK_TYPE_AUDIO))
+            sourceAllocations.source(FilteringMediaSource(archiveAudioSources.createMediaSource(MediaItem.Builder().setUri(uri)
+                .setMimeType(MimeTypes.APPLICATION_M3U8).build()), setOf(C.TRACK_TYPE_AUDIO)),
+                Media3SourceAllocationLedger.Kind.PROGRAMME_AUDIO_SOURCE)
         }
         val captionSources = offers.captions.filterKeys { label ->
             label == programme || session.audioUris[label] in audioChildren
@@ -1133,9 +1137,10 @@ class FeedPlayer(
         }
         val captionChildren = captionSources.values.map {
             // Every text child belongs to its own verified programme. None exposes video or audio.
-            FilteringMediaSource(archiveAudioSources.createMediaSource(MediaItem.Builder()
+            sourceAllocations.source(FilteringMediaSource(archiveAudioSources.createMediaSource(MediaItem.Builder()
                 .setUri(it.masterUri).setMimeType(MimeTypes.APPLICATION_M3U8)
-                .setStreamKeys(it.streamKeys).build()), setOf(C.TRACK_TYPE_TEXT))
+                .setStreamKeys(it.streamKeys).build()), setOf(C.TRACK_TYPE_TEXT)),
+                Media3SourceAllocationLedger.Kind.CAPTION_SOURCE)
         }
         firstFrameRendered = false; error = null; problem = null
         val previousArchive = archiveVodSession

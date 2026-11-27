@@ -11,16 +11,17 @@ internal object Media3MemoryOwners {
     data class Owner(val id: String, val role: String = "UNCLASSIFIED",
                      val videoDecoders: Int = 0, val audioDecoders: Int = 0, val items: Int = 0,
                      val forwardMs: Long = -1, val backMs: Long = -1,
-                     val loads: Media3LoadLedger.Snapshot? = null)
+                     val loads: Media3LoadLedger.Snapshot? = null,
+                     val sourceAllocations: Media3SourceAllocationLedger? = null)
     private val owners = java.util.WeakHashMap<DefaultAllocator, Owner>()
     private const val ACTIVE_RESERVE_BYTES = 2 * 1024 * 1024
-    @Synchronized fun register(allocator: DefaultAllocator, id: String = "other") {
-        owners.putIfAbsent(allocator, Owner(id))
+    @Synchronized fun register(allocator: DefaultAllocator, id: String = "other", sourceAllocations: Media3SourceAllocationLedger? = null) {
+        owners.putIfAbsent(allocator, Owner(id, sourceAllocations = sourceAllocations))
     }
     @Synchronized fun update(allocator: DefaultAllocator, role: String, video: Int, audio: Int, items: Int,
                              forwardMs: Long = -1, backMs: Long = -1, loads: Media3LoadLedger.Snapshot? = null) {
         val prior = owners[allocator] ?: return
-        owners[allocator] = Owner(prior.id, role, video, audio, items, forwardMs, backMs, loads)
+        owners[allocator] = Owner(prior.id, role, video, audio, items, forwardMs, backMs, loads, prior.sourceAllocations)
     }
     @Synchronized private fun ownerSnapshot() = owners.entries.map { it.key to it.value }
     fun ownerFields(): String {
@@ -33,6 +34,10 @@ internal object Media3MemoryOwners {
             " media3FreePoolBytes=${entries.sumOf { it.first.unusedBytesAllocated.toLong() }} " +
             "media3FreePoolDetail=" + entries.joinToString(",") { (allocator, owner) -> "${owner.id}:${allocator.unusedBytesAllocated}" }.ifEmpty { "NONE" } +
             " media3BackBufferMs=NOT_EXPOSED media3SampleQueueTrackBytes=NOT_EXPOSED" +
+            " media3SourceAllocationScope=SOURCE_BLOCK_CAPACITY" +
+            " media3SourceAllocatedDetail=" + entries.joinToString(",") { (_, owner) ->
+                "${owner.id}:${owner.sourceAllocations?.fields() ?: "UNAVAILABLE"}"
+            }.ifEmpty { "NONE" } +
             " media3BufferDetail=" + entries.joinToString(",") { (_, owner) ->
                 val load = owner.loads
                 "${owner.id}:${owner.forwardMs}:${owner.backMs}:${load?.pending ?: -1}:" +

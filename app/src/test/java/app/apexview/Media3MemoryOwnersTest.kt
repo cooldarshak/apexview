@@ -4,6 +4,34 @@ import org.junit.Assert.*
 import org.junit.Test
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class Media3MemoryOwnersTest {
+    @Test fun realSourceBlocksRemainAttributedUntilReturnedToTheSameAllocator() {
+        val backing = DefaultAllocator(true, 1024)
+        val ledger = Media3SourceAllocationLedger()
+        val video = ledger.allocator(backing, Media3SourceAllocationLedger.Kind.ARCHIVE_VIDEO)
+        val audio = ledger.allocator(backing, Media3SourceAllocationLedger.Kind.PROGRAMME_AUDIO_SOURCE)
+        val a = video.allocate()
+        val b = video.allocate()
+        val c = audio.allocate()
+        assertEquals(3072, backing.totalBytesAllocated)
+        assertTrue(ledger.fields().contains("ARCHIVE_VIDEO:2048"))
+        assertTrue(ledger.fields().contains("PROGRAMME_AUDIO_SOURCE:1024"))
+        val last = object : androidx.media3.exoplayer.upstream.Allocator.AllocationNode {
+            override fun getAllocation() = b
+            override fun next(): androidx.media3.exoplayer.upstream.Allocator.AllocationNode? = null
+        }
+        val first = object : androidx.media3.exoplayer.upstream.Allocator.AllocationNode {
+            override fun getAllocation() = a
+            override fun next() = last
+        }
+        video.release(first)
+        assertEquals(1024, backing.totalBytesAllocated)
+        assertTrue(ledger.fields().contains("ARCHIVE_VIDEO:0"))
+        assertTrue(ledger.fields().contains("PROGRAMME_AUDIO_SOURCE:1024"))
+        audio.release(c)
+        assertEquals(0, backing.totalBytesAllocated)
+        assertTrue(ledger.fields().contains("PROGRAMME_AUDIO_SOURCE:0"))
+    }
+
     @Test fun boundedLoadLedgerSeparatesDownloadedBytesFromPendingOwners() {
         val loads=Media3LoadLedger(2)
         val c=androidx.media3.common.C.TRACK_TYPE_VIDEO

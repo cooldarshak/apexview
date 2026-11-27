@@ -706,12 +706,14 @@ class PitwallReceiverActivity : ComponentActivity() {
                 }
             }.build()
         val receiverAllocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
+        val sourceAllocations = app.apexview.Media3SourceAllocationLedger()
         val next = ExoPlayer.Builder(this, renderers).setTrackSelector(selector)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(data).apply { widevine?.sessions?.let { key -> setDrmSessionManagerProvider { key } } })
+            .setMediaSourceFactory(sourceAllocations.factory(DefaultMediaSourceFactory(data).apply { widevine?.sessions?.let { key -> setDrmSessionManagerProvider { key } } },
+                app.apexview.Media3SourceAllocationLedger.Kind.RECEIVER_MIXED))
             .setLoadControl(DefaultLoadControl.Builder().setAllocator(receiverAllocator).setBufferDurationsMs(5_000, 15_000, 1_000, 2_000).build())
             .build()
         activeReceiverAllocator = receiverAllocator
-        app.apexview.Media3MemoryOwners.register(receiverAllocator, "receiver")
+        app.apexview.Media3MemoryOwners.register(receiverAllocator, "receiver", sourceAllocations)
         receiverCadence = cadence
         receiverDisplayOwner = null
         sceneCodecCorrelation = correlation
