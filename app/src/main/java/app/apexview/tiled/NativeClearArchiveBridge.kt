@@ -73,6 +73,8 @@ internal class NativeClearArchiveBridge(
     private var verifiedGeometry: NativeClearArchiveJob.Geometry? = null
     private var verifiedRate: Pair<Int, Int>? = null
     private var verifiedTrack: Long = 0L
+    // All accesses are fenced by the existing producer work lock.
+    private val certificates = ClearCompositionCertificates()
 
     private fun clearProof() {
         verifiedEpoch = -1
@@ -252,9 +254,14 @@ internal class NativeClearArchiveBridge(
                 }
                 media to fragments
             }
-            // On the cold local route the mandatory JVM probe is also the exact
-            // same-input differential reference for the first native fragment.
-            val expectedInit = priorInitialization ?: referenceOutput().initializationSegment
+            // Only a previously byte-matched exact request can reuse the
+            // initialization/size certificate. New source bytes still require
+            // the independent JVM composer, even at identical quality/layout.
+            val proofKey by lazy { ClearCompositionCertificates.key(request) }
+            val certificate by lazy { certificates.find(proofKey) }
+            val expectedInit = priorInitialization ?: certificate?.initialization()
+                ?: referenceOutput().initializationSegment
+            var usedCertificate = false
             val outputReport = CmafBoxInspector.inspect(expectedInit)
             require(outputReport.errors.isEmpty())
             val track = outputReport.tracks.single()
@@ -284,6 +291,12 @@ internal class NativeClearArchiveBridge(
             var needReference = engine == null || !proofMatches ||
                 inputSize > requireNotNull(engine).budget.inputBytes
             fun referenceSize(): Int {
+                val cached = certificate?.takeIf { it.matchesInitialization(expectedInit) }
+                if (baseline == null && cached != null) {
+                    checkCurrent(selected.epoch)
+                    usedCertificate = true
+                    return cached.requiredBytes
+                }
                 val ref = referenceOutput()
                 checkCurrent(selected.epoch)
                 require(ref.initializationSegment.contentEquals(expectedInit))
@@ -339,6 +352,13 @@ internal class NativeClearArchiveBridge(
             val validationStarted = System.nanoTime()
             reason = "NATIVE_CLEAR_PARITY_MISMATCH"
             require(out.initialization.contentEquals(expectedInit))
+            if (usedCertificate) {
+                val cached = requireNotNull(certificate)
+                val digests = out.nativeMedia?.let { listOf(it.sha256()) }
+                    ?: out.media.map(ClearCompositionCertificates::digest)
+                require(cached.matchesInitialization(out.initialization) && digests == cached.mediaDigests)
+                Log.i("ApexviewSingleDecoder", "GB_CLEAR_EXACT_CERTIFICATE_MATCH generation=${selected.epoch} bytes=${out.sizes.sumOf { it.toLong() }}")
+            }
             baseline?.let {
                 val proofStarted = System.nanoTime()
                 require(out.initialization.contentEquals(it.initializationSegment) &&
@@ -373,13 +393,16 @@ internal class NativeClearArchiveBridge(
                 (smallerJobs + 1).coerceAtMost(8) else 0
             val stats = active.copyStats()
             Log.i("ApexviewSingleDecoder", "GB_CLEAR_NATIVE_FRAGMENT generation=${selected.epoch} " +
-                "referenceCompared=${baseline != null} sequence=${request.firstOutputSequenceNumber} deadlineMs=$timeoutMs wallMs=${(System.nanoTime() - started) / 1_000_000L} " +
+                "referenceCompared=${baseline != null} exactCertificate=$usedCertificate sequence=${request.firstOutputSequenceNumber} deadlineMs=$timeoutMs wallMs=${(System.nanoTime() - started) / 1_000_000L} " +
                 "inputBytes=${encoded.size} outputBytes=${out.sizes.sumOf { it.toLong() }} fragments=$count javaInputBytes=${stats.javaInputBytes} " +
                 "nativeInputBytes=${stats.nativeInputBytes} nativeOutputBytes=${stats.nativeOutputBytes} " +
                 "storage=${if (out.nativeMedia != null) "NATIVE_FRAGMENT" else "HEAP"} javaOutputBytes=${stats.javaOutputBytes} rejectedSubmits=${stats.rejectedSubmits} compactAtlas=${active.budget.compactAtlas} " +
                 "arenaReservedBytes=${active.budget.reservedBytes} arenaPayloadBytes=${active.allocatedPayloadBytes()} " +
                 "submitUs=${out.submitNs / 1000L} waitUs=${out.waitNs / 1000L} readUs=${out.readNs / 1000L} " +
                 "validateUs=${(System.nanoTime() - validationStarted) / 1000L}")
+            // Record only AFTER byte parity and independent clear/timing
+            // validation; never certify a rejected or speculative result.
+            baseline?.let { certificates.remember(proofKey, it.initializationSegment, it.mediaFragments) }
             if (needReference) {
                 clearProof()
                 verifiedInits = inits.map { it.copyOf() }
@@ -486,6 +509,7 @@ internal class NativeClearArchiveBridge(
                 engineEpoch = -1
                 smallerJobs = 0
                 clearProof()
+                certificates.clear()
             }
         } finally { work.unlock() }
         old?.let { retiring ->

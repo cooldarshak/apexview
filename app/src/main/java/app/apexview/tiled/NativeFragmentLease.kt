@@ -73,6 +73,14 @@ internal class NativeFragmentLease private constructor(private val shared: Share
         }
     }
 
+    /** Hash the private immutable native view without copying the fragment. */
+    @Synchronized fun sha256(): String {
+        check(!closed)
+        return synchronized(shared) {
+            ClearCompositionCertificates.digest(requireNotNull(shared.buffer))
+        }
+    }
+
     fun copyBytes(): ByteArray = ByteArray(size).also { readTo(it, 0, 0, it.size) }
 
     @Synchronized override fun close() {
