@@ -4,6 +4,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import app.apexview.tiled.NativeHotPath
 
 /** Single IO owner for the incoming raw position topic. Sparse offsets are
  * byte offsets (not String character counts), never retained JSON or tracks.
@@ -11,8 +12,10 @@ import java.io.IOException
  * Unordered sources deliberately fall back to the complete reference pass. */
 internal class ReplayPositionSpool(private val file: File) : AutoCloseable {
     private val writer = FileOutputStream(file).buffered()
-    private var offsets = LongArray(64)
-    private var times = LongArray(64)
+    private var nativeIndex = NativeHotPath.replayIndexCreate()
+    private var indexLost = false
+    private var offsets = LongArray(if (nativeIndex == 0L) 64 else 0)
+    private var times = LongArray(offsets.size)
     private var marks = 0
     private var records = 0L
     var bytesWritten = 0L
@@ -33,12 +36,20 @@ internal class ReplayPositionSpool(private val file: File) : AutoCloseable {
             val time = streamOffsetMs(line, prefix)
             if (time < throughMs) chronological = false
             if (chronological && records % STRIDE == 0L) {
-                if (marks == offsets.size) {
-                    offsets = offsets.copyOf(offsets.size * 2)
-                    times = times.copyOf(times.size * 2)
+                if (nativeIndex != 0L) {
+                    if (!NativeHotPath.replayIndexMark(nativeIndex, time, bytesWritten)) {
+                        NativeHotPath.replayIndexClose(nativeIndex)
+                        nativeIndex = 0L
+                        indexLost = true
+                    }
+                } else if (!indexLost) {
+                    if (marks == offsets.size) {
+                        offsets = offsets.copyOf(offsets.size * 2)
+                        times = times.copyOf(times.size * 2)
+                    }
+                    offsets[marks] = bytesWritten
+                    times[marks++] = time
                 }
-                offsets[marks] = bytesWritten
-                times[marks++] = time
             }
             throughMs = maxOf(throughMs, time)
             records++
@@ -51,6 +62,8 @@ internal class ReplayPositionSpool(private val file: File) : AutoCloseable {
     /** Include the preceding sparse block so equal timestamps at a block
      * boundary never lose a record. Exact filtering follows the indexed seek. */
     private fun startOffset(fromMs: Long): Long {
+        if (nativeIndex != 0L) return NativeHotPath.replayIndexOffset(nativeIndex, fromMs).coerceAtLeast(0L)
+        if (indexLost) return 0L // Exact sequential fallback, never use an incomplete index.
         var lo = 0
         var hi = marks
         while (lo < hi) {
@@ -83,7 +96,10 @@ internal class ReplayPositionSpool(private val file: File) : AutoCloseable {
     override fun close() {
         if (closed) return
         closed = true
-        writer.close()
+        try { writer.close() } finally {
+            NativeHotPath.replayIndexClose(nativeIndex)
+            nativeIndex = 0L
+        }
     }
 
     companion object {
