@@ -37,6 +37,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     // UI thread do any GL work or introducing a second decoder/context.
     private val thread = HandlerThread("ApexviewSingleScene", Process.THREAD_PRIORITY_DISPLAY).apply { start() }
     private val gl = Handler(thread.looper)
+    private var decoderIngress: SceneDecoderIngress? = null
+    private var ingressNotifications = 0L
+    private var ingressCoalesced = 0L
+    private var ingressMaxWaitNs = 0L
     private val main = Handler(Looper.getMainLooper())
     private val glProbePending = java.util.concurrent.atomic.AtomicBoolean(false)
     private val glQueueProbe = object : Runnable {
@@ -683,10 +687,13 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             graphicsAtlasWidth = it.atlasWidth
             graphicsAtlasHeight = it.atlasHeight
         }
-        frames.setOnFrameAvailableListener({
+        val ingress = SceneDecoderIngress(gl) { count, firstNs, lastNs ->
             guarded(lifetime) {
                 if (decoderTexture === frames && !released) {
                     val callbackStarted = System.nanoTime()
+                    ingressNotifications += count
+                    ingressCoalesced += count - 1L
+                    ingressMaxWaitNs = maxOf(ingressMaxWaitNs, (callbackStarted - firstNs).coerceAtLeast(0L))
                     Trace.beginSection("PitwallDecoderFrameCallback")
                     try {
                     // A decoder can exhaust its output BufferQueue while the EGL display
@@ -705,7 +712,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                     val latchedAt = System.nanoTime()
                     val sourceTimestampNs = frames.timestamp
                     pacing.onTextureLatched(latchedAt, latchedAt - latchStarted, sourceTimestampNs,
-                        eglBindNs, callbackArrivalNs = callbackStarted)
+                        eglBindNs, callbackArrivalNs = lastNs)
                     codecCorrelation?.onTextureLatched(input, sourceTimestampNs, latchedAt)
                     // Keep latching for the TV producer. Submit a black local
                     // frame once, not a periodic moving video preview.
@@ -719,7 +726,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                     } finally { Trace.endSection() }
                 }
             }
-        }, gl)
+        }
+        decoderIngress = ingress
+        frames.setOnFrameAvailableListener({ ingress.offer() }, ingress.handler)
         val surface = Surface(frames); input = surface
         // Never relabel an input created for an obsolete Android surface
         // with the newer UI epoch, even if EGL initialization was slow.
@@ -815,6 +824,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
             val metrics = pacing.snapshotAndReset()
+            Log.i("ApexviewSingleDecoder", "SCENE_DECODER_INGRESS notifications=$ingressNotifications coalesced=$ingressCoalesced maxGlWaitMs=${ingressMaxWaitNs / 1_000_000L}")
+            ingressNotifications = 0; ingressCoalesced = 0; ingressMaxWaitNs = 0
             val expectedFps = SceneFrameRatePolicy.composedOutputHint(
                 scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz,
                 thermalForOutput(), pipelineHealthy())
@@ -944,6 +955,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         steps.run("recording") { saveClip() }
         config = null
         steps.run("decoder-listener") { decoderTexture?.setOnFrameAvailableListener(null) }
+        steps.run("decoder-ingress") { decoderIngress?.close(); decoderIngress = null }
+        ingressNotifications = 0; ingressCoalesced = 0; ingressMaxWaitNs = 0
         input?.let { Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_RELEASE " +
             "renderer=TextureView surfaceId=${System.identityHashCode(it)} " +
             "outputEpoch=${surfaceLifetime.generation()} thread=GL") }

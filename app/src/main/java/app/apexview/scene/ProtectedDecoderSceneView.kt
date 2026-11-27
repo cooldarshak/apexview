@@ -35,6 +35,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         android.os.Process.THREAD_PRIORITY_DISPLAY
     ).apply { start() }
     private val gl = Handler(thread.looper)
+    private var decoderIngress: SceneDecoderIngress? = null
+    private var ingressNotifications = 0L
+    private var ingressCoalesced = 0L
+    private var ingressMaxWaitNs = 0L
     private val displayHandler = Handler(Looper.getMainLooper())
     private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private var previousModeSignature: String? = null
@@ -457,10 +461,13 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             graphicsAtlasWidth = it.atlasWidth
             graphicsAtlasHeight = it.atlasHeight
         }
-        frames.setOnFrameAvailableListener({
+        val ingress = SceneDecoderIngress(gl) { count, firstNs, lastNs ->
             guarded(lifetime) {
                 if (decoderTexture === frames && !released) {
                     val callbackStartedNs = System.nanoTime()
+                    ingressNotifications += count
+                    ingressCoalesced += count - 1L
+                    ingressMaxWaitNs = maxOf(ingressMaxWaitNs, (callbackStartedNs - firstNs).coerceAtLeast(0L))
                     // Texture latching and drawing use the SAME protected EGL context.
                     // EGL may be unbound after surface/encoder handoffs; never assume
                     // that the previous draw left it current on this GL looper.
@@ -476,7 +483,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                     val latchedAtNs = System.nanoTime()
                     val timestamp = frames.timestamp
                     pacing.onTextureLatched(latchedAtNs, latchedAtNs - latchStartNs,
-                        timestamp, eglBindNs = bindNs, callbackArrivalNs = callbackStartedNs)
+                        timestamp, eglBindNs = bindNs, callbackArrivalNs = lastNs)
                     codecCorrelation?.onTextureLatched(input, timestamp, latchedAtNs)
                     if (lastSourceTimestampNs > 0L && timestamp > 0L &&
                         timestamp < lastSourceTimestampNs) {
@@ -489,7 +496,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                     scheduleVideoFrame(newVideo = true)
                 }
             }
-        }, gl)
+        }
+        decoderIngress = ingress
+        frames.setOnFrameAvailableListener({ ingress.offer() }, ingress.handler)
         val surface = Surface(frames); input = surface
         // Never relabel an input created for an obsolete Android surface
         // with the newer UI epoch, even if EGL initialization was slow.
@@ -582,6 +591,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
             val metrics = pacing.snapshotAndReset()
+            Log.i("ApexviewSingleDecoder", "SCENE_DECODER_INGRESS notifications=$ingressNotifications coalesced=$ingressCoalesced maxGlWaitMs=${ingressMaxWaitNs / 1_000_000L}")
+            ingressNotifications = 0; ingressCoalesced = 0; ingressMaxWaitNs = 0
             val expectedFps = SceneFrameRatePolicy.composedOutputHint(
                 scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz,
                 thermalForOutput(), pipelineHealthy())
@@ -701,6 +712,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         lastLogNs = 0L
         nextGlProbeExpectedNs = 0L
         steps.run("decoder-listener") { decoderTexture?.setOnFrameAvailableListener(null) }
+        steps.run("decoder-ingress") { decoderIngress?.close(); decoderIngress = null }
+        ingressNotifications = 0; ingressCoalesced = 0; ingressMaxWaitNs = 0
         input?.let { Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_RELEASE " +
             "renderer=SurfaceView protected=$protectedOutput " +
             "surfaceId=${System.identityHashCode(it)} " +
