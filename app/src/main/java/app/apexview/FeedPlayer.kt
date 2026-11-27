@@ -216,6 +216,7 @@ class FeedPlayer(
         if (captionsSelected == enabled && selectedCaptionLanguage == normalized &&
             (archiveVodSession != null || (C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes) == disabled)) return
         captionsSelected = enabled
+        archiveForwardBuffers.reset(false)
         selectedCaptionLanguage = normalized
         remoteTextWasDisabled = !enabled
         if (archiveVodSession != null) {
@@ -243,6 +244,7 @@ class FeedPlayer(
             return
         }
         remotePlaybackSuspended = suspended
+        archiveForwardBuffers.reset(false)
         if (suspended) {
             remoteTextWasDisabled = C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes
             player.playWhenReady = false
@@ -301,6 +303,7 @@ class FeedPlayer(
     private val diagnosticId = System.identityHashCode(this)
     private val playbackAllocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
     private val sourceAllocations = Media3SourceAllocationLedger()
+    private val archiveForwardBuffers = ArchiveForwardBufferPolicy()
     private var parkedForArchive = false
     private var activeAudioDecoders = 0
     private val memoryLoads = Media3LoadLedger()
@@ -544,7 +547,7 @@ class FeedPlayer(
             .build()
         player = ExoPlayer.Builder(context, ThinningRenderersFactory(context, outputCadence))
             .setMediaSourceFactory(sources)
-            .setLoadControl(loadControl)
+            .setLoadControl(ArchiveMeasuredLoadControl(loadControl, archiveForwardBuffers))
             .setTrackSelector(sourceTrackSelector)
             .setBandwidthMeter(androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(context))
             .build()
@@ -593,6 +596,10 @@ class FeedPlayer(
             "TCL_STABLE_RENDITION preferred=${videoQuality.name} cap=${qualityWidth(videoQuality)}x${qualityHeight(videoQuality)}")
         player.addListener(object : Player.Listener {
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                archiveForwardBuffers.reset(archiveVodSession != null && !remotePlaybackSuspended && !captionsSelected &&
+                    tracks.groups.any { it.type == C.TRACK_TYPE_VIDEO && it.isSelected } &&
+                    tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO && it.isSelected } &&
+                    tracks.groups.none { it.type == C.TRACK_TYPE_TEXT && it.isSelected })
                 archiveSelectedAudioUri?.let { applyArchiveAudioTrack(it, tracks) }
                 // Never replace the original feed ladder with composed atlas dimensions,
                 // or erase it just because its source player is parked.
@@ -641,6 +648,8 @@ class FeedPlayer(
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 val now = android.os.SystemClock.elapsedRealtime()
+                if (playbackState == Player.STATE_BUFFERING || playbackState == Player.STATE_IDLE || playbackState == Player.STATE_ENDED)
+                    archiveForwardBuffers.reset()
                 bufferEpisodes.onState(now, playbackState == Player.STATE_BUFFERING,
                     playbackState == Player.STATE_READY, player.playWhenReady)?.let { episode ->
                     playbackEvent("buffer-episode", "phase=${episode.phase} durationMs=${episode.durationMs} " +
@@ -683,7 +692,10 @@ class FeedPlayer(
 
             override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
                 if (reason == Player.DISCONTINUITY_REASON_SEEK ||
-                    reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) sceneCodecCorrelation.reset()
+                    reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
+                    sceneCodecCorrelation.reset()
+                    archiveForwardBuffers.reset()
+                }
                 if (reason == Player.DISCONTINUITY_REASON_SEEK) {
                     bufferEpisodes.onSeek(android.os.SystemClock.elapsedRealtime())
                     trimAfterSeek = true
@@ -857,8 +869,18 @@ class FeedPlayer(
                     observedLoads.clear()
                     return
                 }
-                if (mediaLoadData.dataType == C.DATA_TYPE_MEDIA)
+                if (mediaLoadData.dataType == C.DATA_TYPE_MEDIA) {
                     memoryLoads.start(loadEventInfo.loadTaskId, mediaLoadData.trackType)
+                    if (archiveVodSession != null && eventTime.timeline == player.currentTimeline) {
+                        val mime = mediaLoadData.trackFormat?.sampleMimeType
+                        val lane = when {
+                            mediaLoadData.trackType == C.TRACK_TYPE_VIDEO || mime?.startsWith("video/") == true -> ArchiveForwardBufferPolicy.Lane.VIDEO
+                            mediaLoadData.trackType == C.TRACK_TYPE_AUDIO || mime?.startsWith("audio/") == true -> ArchiveForwardBufferPolicy.Lane.AUDIO
+                            else -> null
+                        }
+                        if (lane != null) archiveForwardBuffers.start(loadEventInfo.loadTaskId, lane)
+                    }
+                }
                 if (!DiagnosticLogs.recording) { observedLoads.clear(); return }
                 // Include steady playback, but keep the diagnostic map bounded.
                 if (observedLoads.size >= 128) {
@@ -890,6 +912,7 @@ class FeedPlayer(
             ) {
                 if (memoryOwnerRetired || parkedForArchive && player.mediaItemCount == 0) return
                 memoryLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
+                archiveForwardBuffers.cancel(loadEventInfo.loadTaskId)
                 val seek = observedLoads.remove(loadEventInfo.loadTaskId) ?: return
                 logLoad("load-cancel", loadEventInfo, mediaLoadData, seek)
             }
@@ -903,6 +926,7 @@ class FeedPlayer(
             ) {
                 if (memoryOwnerRetired || parkedForArchive && player.mediaItemCount == 0) return
                 if (wasCanceled) memoryLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
+                archiveForwardBuffers.reset()
                 val seek = observedLoads[loadEventInfo.loadTaskId] ?: return
                 // Media3's wrapper alone hid the distinction between a timeout and an HTTP
                 // rejection in device logs. Emit only exception types / status, never URLs.
@@ -923,6 +947,12 @@ class FeedPlayer(
             ) {
                 if (memoryOwnerRetired || parkedForArchive && player.mediaItemCount == 0) return
                 memoryLoads.finish(loadEventInfo.loadTaskId, loadEventInfo.bytesLoaded)
+                if (mediaLoadData.dataType == C.DATA_TYPE_MEDIA && archiveVodSession != null && eventTime.timeline == player.currentTimeline &&
+                    mediaLoadData.mediaStartTimeMs != C.TIME_UNSET && mediaLoadData.mediaEndTimeMs != C.TIME_UNSET &&
+                    loadEventInfo.bytesLoaded > 0) {
+                    archiveForwardBuffers.complete(loadEventInfo.loadTaskId, loadEventInfo.loadDurationMs,
+                        mediaLoadData.mediaEndTimeMs - mediaLoadData.mediaStartTimeMs, android.os.SystemClock.elapsedRealtime())
+                } else archiveForwardBuffers.cancel(loadEventInfo.loadTaskId)
                 observedLoads.remove(loadEventInfo.loadTaskId)?.let {
                     logLoad("load-end", loadEventInfo, mediaLoadData, it)
                 }
@@ -1143,6 +1173,7 @@ class FeedPlayer(
                 Media3SourceAllocationLedger.Kind.CAPTION_SOURCE)
         }
         firstFrameRendered = false; error = null; problem = null
+        archiveForwardBuffers.reset(false)
         val previousArchive = archiveVodSession
         val previousAudio = archiveSelectedAudioUri
         val previousAudioChildren = archiveAudioChildren
@@ -1270,6 +1301,7 @@ class FeedPlayer(
     }
 
     internal fun releaseArchiveOwnership() {
+        archiveForwardBuffers.reset(false)
         archiveVodSession?.close(); archiveVodSession = null
         archiveSelectedAudioUri = null
         archiveAudioChildren = emptyList()
@@ -1284,6 +1316,7 @@ class FeedPlayer(
 
     /** Drop the original loaders/audio as well as video once all source decoders are released. */
     internal fun suspendForArchiveComposition() {
+        archiveForwardBuffers.reset(false)
         parkedForArchive = true
         player.stop()
         player.clearMediaItems()
@@ -1401,6 +1434,7 @@ class FeedPlayer(
 
     /** Restores this player's original feed and releases its bounded composed-media window. */
     fun stopProtectedComposedPlayback(positionMs: Long? = null, playWhenReady: Boolean = true, enableVideo: Boolean = initialVideoEnabled) {
+        archiveForwardBuffers.reset(false)
         outputCadence.composedSingle = false
         val priorProtected = protectedLiveDashSource
         val priorArchive = archiveVodSession

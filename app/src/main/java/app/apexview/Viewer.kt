@@ -1329,7 +1329,7 @@ internal fun PlaybackVideoCanvas(
                 delay(80)
             }
         }
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
+        Box(Modifier.fillMaxSize().then(if (bounds != null) Modifier.background(Color.Black) else Modifier)) {
         if (app.protectedRollingSceneActive || independentClearSurface) {
             // Reuse the tested protected scene's *nonsecure* GLES path for clear
             // A/B. Still one decoder input, one atlas, one independent output.
