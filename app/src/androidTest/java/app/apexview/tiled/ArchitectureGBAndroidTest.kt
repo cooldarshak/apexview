@@ -31,7 +31,13 @@ class ArchitectureGBAndroidTest {
         assertNull(compact.array)
         assertTrue(compact === pool.freezeTimeline(times.copyOf(), times.size))
         assertEquals(times.last(), compact[times.lastIndex])
-        val track = app.apexview.DriverTrack(compact, xs, ys, times.size)
+        val packedPoints = pool.freezeCoordinates(xs, ys, times.size)
+        assertTrue(packedPoints.handle > 0)
+        assertNull(packedPoints.xArray)
+        assertNull(packedPoints.yArray)
+        assertEquals(xs[256], packedPoints.xAt(256), 0f)
+        assertEquals(ys.last(), packedPoints.yAt(times.lastIndex), 0f)
+        val track = app.apexview.DriverTrack(compact, packedPoints, times.size)
         val reference = app.apexview.OverlayPositionCursor(app.apexview.DriverTrack(times, xs, ys, times.size))
         val packedReference = app.apexview.OverlayPositionCursor(track)
         val arrays = arrayOfNulls<LongArray>(1)
@@ -43,8 +49,8 @@ class ArchitectureGBAndroidTest {
             times.last(), times.last() + 1, times[10])) {
             val expected = reference.sample(now)
             assertEquals(expected, packedReference.sample(now))
-            assertTrue(NativeHotPath.samplePositionsWithCompactTimes(arrays, arrayOf(xs), arrayOf(ys),
-                counts, handles, now, cursor, xy, active))
+            assertTrue(NativeHotPath.samplePositionsPacked(arrays, arrayOfNulls<FloatArray>(1), arrayOfNulls<FloatArray>(1),
+                counts, handles, longArrayOf(packedPoints.handle), now, cursor, xy, active))
             assertEquals(expected, active[0] == 1)
             if (expected) {
                 assertEquals(reference.x, xy[0], 0.00001f)
@@ -66,6 +72,7 @@ class ArchitectureGBAndroidTest {
         assertEquals(4100 % 9, speeds.gearAt(times.last()))
         assertNull(speeds.kmhAt(times.last() + 5001))
         java.lang.ref.Reference.reachabilityFence(compact)
+        java.lang.ref.Reference.reachabilityFence(packedPoints)
     }
 
     @Test

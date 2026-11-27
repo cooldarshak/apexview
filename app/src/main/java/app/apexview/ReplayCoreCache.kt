@@ -103,7 +103,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                             y[i] = samples.float
                         }
                     }
-                    DriverTrack(timestamps.freezeTimeline(t, n), x, y, n)
+                    DriverTrack(timestamps.freezeTimeline(t, n), timestamps.freezeCoordinates(x, y, n), n)
                 }
                 val states = input.readByDriver {
                     val times = readTimes()
@@ -197,8 +197,9 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
             val range = historyWindowRange(track.n, from, until) { track.timeline[it] } ?: return@mapNotNull null
             // Interpolation at the upper boundary requires the following sample.
             val end = (range.last + 2).coerceAtMost(track.n)
-            number to DriverTrack(LongArray(end - range.first) { track.timeline[range.first + it] }, track.x.copyOfRange(range.first, end),
-                track.y.copyOfRange(range.first, end), end - range.first)
+            number to DriverTrack(LongArray(end - range.first) { track.timeline[range.first + it] },
+                FloatArray(end - range.first) { track.xAt(range.first + it) },
+                FloatArray(end - range.first) { track.yAt(range.first + it) }, end - range.first)
         }.toMap()
         val states = if (!hasTower) emptyMap() else session.states.mapNotNull { (number, state) ->
             val range = historyWindowRange(state.t.size, towerFrom, towerThrough) { state.t[it] } ?: return@mapNotNull null
@@ -267,8 +268,8 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                         samples.clear()
                         for (i in first until minOf(first + TRACK_BLOCK_SAMPLES, track.n)) {
                             samples.putLong(track.timeline[i])
-                            samples.putFloat(track.x[i])
-                            samples.putFloat(track.y[i])
+                            samples.putFloat(track.xAt(i))
+                            samples.putFloat(track.yAt(i))
                         }
                         write(samples.array(), 0, samples.position())
                     }

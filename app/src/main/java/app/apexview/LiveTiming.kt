@@ -325,13 +325,18 @@ class TrackGeometry(val outline: FloatArray) {
 /** One car's positions over the session, in archive coordinates (1/10 m). */
 class DriverTrack internal constructor(
     internal val timeline: TimingTimestamps,
-    internal val x: FloatArray,
-    internal val y: FloatArray,
+    internal val coordinates: TimingCoordinates,
     internal val n: Int,
 ) {
+    internal constructor(timeline: TimingTimestamps, x: FloatArray, y: FloatArray, n: Int) :
+        this(timeline, TimingCoordinates.jvm(x, y, n), n)
     constructor(t: LongArray, x: FloatArray, y: FloatArray, n: Int) :
-        this(TimingTimestamps.jvm(t, n), x, y, n)
+        this(TimingTimestamps.jvm(t, n), TimingCoordinates.jvm(x, y, n), n)
     internal val t: LongArray get() = timeline.legacyArray()
+    internal val x: FloatArray get() = coordinates.legacyX()
+    internal val y: FloatArray get() = coordinates.legacyY()
+    internal fun xAt(index: Int) = coordinates.xAt(index)
+    internal fun yAt(index: Int) = coordinates.yAt(index)
     val startMs get() = if (n > 0) timeline[0] else 0L
     val endMs get() = if (n > 0) timeline[n - 1] else 0L
 
@@ -357,12 +362,12 @@ class DriverTrack internal constructor(
         val hi = if (lo + 1 < n) lo + 1 else lo
         val span = timeline[hi] - timeline[lo]
         val f = if (span == 0L) 0f else (utcMs - timeline[lo]).toFloat() / span
-        return Pair(x[lo] + (x[hi] - x[lo]) * f, y[lo] + (y[hi] - y[lo]) * f)
+        return Pair(xAt(lo) + (xAt(hi) - xAt(lo)) * f, yAt(lo) + (yAt(hi) - yAt(lo)) * f)
     }
 
     /** As [at], but a car not heard from yet waits where it was first seen. For showing on the map. */
     fun atOrFirst(utcMs: Long): Pair<Float, Float>? =
-        if (n > 0 && utcMs < timeline[0]) Pair(x[0], y[0]) else at(utcMs)
+        if (n > 0 && utcMs < timeline[0]) Pair(xAt(0), yAt(0)) else at(utcMs)
 
     companion object {
         private const val MAX_GAP_MS = 5_000L
@@ -476,6 +481,9 @@ class SpeedBuilder {
 internal class SpeedTimestampPool(private val nativeStorage: Boolean = false) {
     private val timelines = HashMap<Int, MutableList<LongArray>>()
     private val published = HashMap<Int, MutableList<TimingTimestamps>>()
+
+    fun freezeCoordinates(x: FloatArray, y: FloatArray, count: Int): TimingCoordinates =
+        (if (nativeStorage) TimingCoordinates.packed(x, y, count) else null) ?: TimingCoordinates.jvm(x, y, count)
 
     fun freezeTimeline(source: LongArray, count: Int): TimingTimestamps {
         require(count in 0..source.size)
@@ -1483,14 +1491,17 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
 
             val geometryStarted = android.os.SystemClock.elapsedRealtime()
             progress("Building the track map while timing tower finishes · cars=${tracks.size}")
+            val traced = withContext(Dispatchers.Default) {
+                traceStage("map-outline") { _ -> traceOutline(tracks.values.toList()) }
+            }
+            val totalPositionSamples = tracks.values.sumOf { it.size }
             val built = withContext(Dispatchers.Default) {
                 traceStage("map-track-arrays") { _ ->
                     val pool = SpeedTimestampPool(nativeRequested())
-                    tracks.mapValues { it.value.finishArchive(pool) }
+                    tracks.mapValues { (_, builder) ->
+                        builder.finishArchive(pool).also { builder.retireArchiveBacking() }
+                    }
                 }
-            }
-            val traced = withContext(Dispatchers.Default) {
-                traceStage("map-outline") { _ -> traceOutline(tracks.values.toList()) }
             }
             withContext(Dispatchers.Main) {
                 positionsIndexed = positionReport.decodedRecords > 0
@@ -1519,7 +1530,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             }
 
             progress(
-                "TRACK GEOMETRY · samples=${tracks.values.sumOf { it.size }}, outlinePoints=${traced.size / 2} · " +
+                "TRACK GEOMETRY · samples=$totalPositionSamples, outlinePoints=${traced.size / 2} · " +
                     "${android.os.SystemClock.elapsedRealtime() - geometryStarted}ms"
             )
             val line = traceStage("start-finish") { _ -> findStartFinish(traced, history.states.crossings, built) }
@@ -2447,8 +2458,8 @@ class TrackBuilder {
     internal fun finishArchive(pool: SpeedTimestampPool = SpeedTimestampPool()): DriverTrack {
         // Same exact timestamp series can occur for several drivers in one
         // archive record. Never share on hash/length alone or with mutable
-        // live prefixes. Only the timestamp backing changes; coordinates
-        // remain exact floats, without quantization or a second native copy.
+        // live prefixes. Native coordinates are packed only when exact; all
+        // unsupported inputs retain their original immutable float backing.
         if (t.size - size >= maxOf(256, size / 8)) {
             x = x.copyOf(size)
             y = y.copyOf(size)
@@ -2457,7 +2468,13 @@ class TrackBuilder {
         // A JVM shared exact backing is full, so any later append grows it.
         // Native storage is independent of this temporary parser builder.
         timeline.array?.let { t = it }
-        return DriverTrack(timeline, x, y, size)
+        return DriverTrack(timeline, pool.freezeCoordinates(x, y, size), size)
+    }
+
+    /** Completed archive parser only, after outline extraction. Old previews
+     * retain their immutable arrays; resetting references does not mutate them. */
+    internal fun retireArchiveBacking() {
+        t = LongArray(0); x = FloatArray(0); y = FloatArray(0); size = 0
     }
 
     /** As [build], with [earlier]'s samples from before these in front: the archive's part of a live session. */

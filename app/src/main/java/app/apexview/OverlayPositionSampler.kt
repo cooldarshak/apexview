@@ -10,8 +10,7 @@ import app.apexview.tiled.NativeHotPath
  */
 internal class OverlayPositionCursor(private val track: DriverTrack) {
     private val times = track.timeline
-    private val xs = track.x
-    private val ys = track.y
+    private val points = track.coordinates
     private val count = track.n
     private var lower = -1
     private var previousTime = Long.MIN_VALUE
@@ -26,7 +25,7 @@ internal class OverlayPositionCursor(private val track: DriverTrack) {
     fun sample(atMs: Long): Boolean {
         if (count == 0) return false
         if (atMs < times[0]) {
-            x = xs[0]; y = ys[0]; previousTime = atMs; lower = 0
+            x = points.xAt(0); y = points.yAt(0); previousTime = atMs; lower = 0
             return true
         }
         if (atMs > times[count - 1]) {
@@ -35,7 +34,7 @@ internal class OverlayPositionCursor(private val track: DriverTrack) {
             return false
         }
         if (count == 1) {
-            x = xs[0]; y = ys[0]; previousTime = atMs; lower = 0
+            x = points.xAt(0); y = points.yAt(0); previousTime = atMs; lower = 0
             return true
         }
         if (lower < 0) {
@@ -58,8 +57,8 @@ internal class OverlayPositionCursor(private val track: DriverTrack) {
         val span = times[hi] - times[lower]
         if (span > 5_000L) return false
         val f = if (span == 0L) 0f else (atMs - times[lower]).toFloat() / span
-        x = xs[lower] + (xs[hi] - xs[lower]) * f
-        y = ys[lower] + (ys[hi] - ys[lower]) * f
+        x = points.xAt(lower) + (points.xAt(hi) - points.xAt(lower)) * f
+        y = points.yAt(lower) + (points.yAt(hi) - points.yAt(lower)) * f
         return true
     }
 
@@ -109,8 +108,10 @@ internal class NativePositionBatch(timing: SessionTiming) {
     private val timeOwners = tracks.map { it.timeline }.toTypedArray()
     private val times = timeOwners.map { it.array }.toTypedArray()
     private val compactHandles = LongArray(timeOwners.size) { timeOwners[it].handle }
-    private val xs = tracks.map { it.x }.toTypedArray()
-    private val ys = tracks.map { it.y }.toTypedArray()
+    private val pointOwners = tracks.map { it.coordinates }.toTypedArray()
+    private val xs = pointOwners.map { it.xArray }.toTypedArray()
+    private val ys = pointOwners.map { it.yArray }.toTypedArray()
+    private val positionHandles = LongArray(pointOwners.size) { pointOwners[it].handle }
     private val counts = tracks.map { it.n }.toIntArray()
     private val cursors = LongArray(counts.size * 3) { when (it % 3) {
         0 -> -1L
@@ -124,8 +125,11 @@ internal class NativePositionBatch(timing: SessionTiming) {
     fun sample(now: Long, includeMetadata: Boolean = true): Boolean {
         if (failed) return false
         val positionOk = try {
-            NativeHotPath.samplePositionsWithCompactTimes(times, xs, ys, counts, compactHandles, now, cursors, xy, active)
-        } finally { java.lang.ref.Reference.reachabilityFence(timeOwners) }
+            NativeHotPath.samplePositionsPacked(times, xs, ys, counts, compactHandles, positionHandles, now, cursors, xy, active)
+        } finally {
+            java.lang.ref.Reference.reachabilityFence(timeOwners)
+            java.lang.ref.Reference.reachabilityFence(pointOwners)
+        }
         if (!positionOk || includeMetadata && !NativeHotPath.floorIndices(metadataTimes, metadataCounts, now, metadataIndices)) {
             failed = true
             android.util.Log.i("PitwallNativeHotPath", "MAP_ENGINE requested=RUST actual=JVM reason=NATIVE_BATCH_UNAVAILABLE")

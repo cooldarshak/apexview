@@ -41,8 +41,12 @@ public final class NativeHotPath {
     }
     public static boolean samplePositionsWithCompactTimes(long[][] times, float[][] x, float[][] y,
             int[] counts, long[] handles, long now, long[] state, float[] xy, int[] active) {
+        return samplePositionsPacked(times,x,y,counts,handles,null,now,state,xy,active);
+    }
+    public static boolean samplePositionsPacked(long[][] times, float[][] x, float[][] y,
+            int[] counts, long[] timeHandles, long[] positionHandles, long now, long[] state, float[] xy, int[] active) {
         if (!available()) return false;
-        try { return nativeSamplePositions(times,x,y,counts,handles,now,state,xy,active)==1; }
+        try { return nativeSamplePositionsPacked(times,x,y,counts,timeHandles,positionHandles,now,state,xy,active)==1; }
         catch (LinkageError | RuntimeException failed) { return false; }
     }
     public static boolean floorIndices(long[][] times, int[] counts, long now, int[] indices) {
@@ -75,12 +79,12 @@ public final class NativeHotPath {
             finally { Reference.reachabilityFence(this); }
         }
     }
-    private static final ReferenceQueue<CompactTimes> compactQueue = new ReferenceQueue<>();
+    private static final ReferenceQueue<Object> compactQueue = new ReferenceQueue<>();
     private static final Set<CompactRef> compactRefs = ConcurrentHashMap.newKeySet();
     private static boolean compactReaperStarted;
-    private static final class CompactRef extends PhantomReference<CompactTimes> {
+    private static final class CompactRef extends PhantomReference<Object> {
         final long token;
-        CompactRef(CompactTimes value) { super(value, compactQueue); token = value.handle; }
+        CompactRef(Object value, long handle) { super(value, compactQueue); token = handle; }
     }
     private static synchronized void ensureCompactReaper() {
         if (compactReaperStarted) return;
@@ -107,7 +111,7 @@ public final class NativeHotPath {
             if (raw == null || token[0] <= 0 || raw.capacity() != 8L + count * 4L) return null;
             CompactTimes owner = new CompactTimes(token[0],raw,count);
             ensureCompactReaper();
-            compactRefs.add(new CompactRef(owner));
+            compactRefs.add(new CompactRef(owner, token[0]));
             registered = true;
             return owner;
         } catch (LinkageError | RuntimeException unavailable) { return null; }
@@ -118,9 +122,53 @@ public final class NativeHotPath {
             }
         }
     }
+    public static final class CompactCoordinates {
+        private final long handle;
+        private final ByteBuffer data;
+        private final int count;
+        private CompactCoordinates(long handle, ByteBuffer raw, int count) {
+            this.handle = handle;
+            this.data = raw.asReadOnlyBuffer().order(ByteOrder.LITTLE_ENDIAN);
+            this.count = count;
+        }
+        public long handle() { return handle; }
+        public int count() { return count; }
+        private float at(int index, int axis) {
+            if (index < 0 || index >= count) throw new IndexOutOfBoundsException();
+            int start = (index / 256) * (8 + 256 * 4);
+            int offset = start + 8 + (index % 256) * 4 + axis * 2;
+            try { return (float) (data.getInt(start + axis * 4) + Short.toUnsignedInt(data.getShort(offset))); }
+            finally { Reference.reachabilityFence(this); }
+        }
+        public float xAt(int index) { return at(index, 0); }
+        public float yAt(int index) { return at(index, 1); }
+    }
+    public static CompactCoordinates compactCoordinates(float[] xs, float[] ys, int count) {
+        if (count < 64 || count > xs.length || count > ys.length || !available()) return null;
+        long[] token = new long[1];
+        boolean registered = false;
+        try {
+            ByteBuffer raw = nativeCreateCompactCoordinates(xs,ys,count,token);
+            long expected = count * 4L + ((count + 255L) / 256L) * 8L;
+            if (raw == null || token[0] <= 0 || raw.capacity() != expected) return null;
+            CompactCoordinates owner = new CompactCoordinates(token[0],raw,count);
+            ensureCompactReaper();
+            compactRefs.add(new CompactRef(owner,token[0]));
+            registered = true;
+            return owner;
+        } catch (LinkageError | RuntimeException unavailable) { return null; }
+        finally {
+            if (!registered && token[0] > 0) {
+                try { nativeReleaseCompactTimes(token[0]); }
+                catch (LinkageError | RuntimeException ignored) { }
+            }
+        }
+    }
+    private static native ByteBuffer nativeCreateCompactCoordinates(float[] xs,float[] ys,int count,long[] token);
+
     public static long[] compactTimingSnapshot() {
         if (!available()) return null;
-        long[] out = new long[3];
+        long[] out = new long[6];
         try { return nativeCompactTimingSnapshot(out) == 1 ? out : null; }
         catch (LinkageError | RuntimeException unavailable) { return null; }
     }
@@ -209,8 +257,8 @@ public final class NativeHotPath {
     private static native int nativePrepareGeometry(float[] outline,ByteBuffer packet);
     private static native int nativeProjectGeometry(ByteBuffer packet,float[] xy,int count,float[] fractions,int[] order);
     private static native int nativeInterpolateMotion(float[] points,int[] counts,float steps,float[] xy);
-    private static native int nativeSamplePositions(long[][] times,float[][] x,float[][] y,int[] counts,
-                                                    long[] handles,long now,long[] state,float[] xy,int[] active);
+    private static native int nativeSamplePositionsPacked(long[][] times,float[][] x,float[][] y,int[] counts,
+                                                    long[] handles,long[] positionHandles,long now,long[] state,float[] xy,int[] active);
     private static native int nativeFloorIndices(long[][] times,int[] counts,long[] handles,long now,int[] indices);
     private static native int nativeRowOrder(int[] positions,int count,int[] order);
     private static native int nativeAdts(ByteBuffer input,int size,int rate,int channels,byte[] output);

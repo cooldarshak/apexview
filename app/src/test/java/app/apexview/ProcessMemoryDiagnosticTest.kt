@@ -5,6 +5,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ProcessMemoryDiagnosticTest {
+    @Test fun packedCoordinatesAreSeparateFromTimestampAndProcessTotals() {
+        val fields = ProcessMemoryDiagnostic.compactTimingFields(longArrayOf(1, 264, 64, 1, 264, 64))
+        assertTrue(fields.contains("nativeCompactTimingBytes=264"))
+        assertTrue(fields.contains("nativeCompactCoordinateBytes=264"))
+        assertEquals("nativeCompactTiming=UNAVAILABLE", ProcessMemoryDiagnostic.compactTimingFields(longArrayOf(1, 264, 64, 1, 263, 64)))
+    }
     @Test fun compactTimingPayloadIsExactAndUnknownIsNotZero() {
         assertEquals("nativeCompactTiming=UNAVAILABLE", ProcessMemoryDiagnostic.compactTimingFields(null))
         assertEquals("nativeCompactTiming=UNAVAILABLE", ProcessMemoryDiagnostic.compactTimingFields(longArrayOf(2, 24, 3)))

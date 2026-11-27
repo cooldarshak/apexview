@@ -27,3 +27,26 @@ internal class TimingTimestamps private constructor(
             NativeHotPath.compactTimes(source, count)?.let { TimingTimestamps(null, it, count) }
     }
 }
+
+/** Exact coordinates. Completed archives may use a single native packed owner;
+ * live prefixes and any non-representable archive remain JVM float arrays. */
+internal class TimingCoordinates private constructor(
+    val xArray: FloatArray?,
+    val yArray: FloatArray?,
+    val native: NativeHotPath.CompactCoordinates?,
+    val count: Int,
+) {
+    val handle: Long get() = native?.handle() ?: 0L
+    fun xAt(index: Int): Float = native?.xAt(index) ?: requireNotNull(xArray)[index]
+    fun yAt(index: Int): Float = native?.yAt(index) ?: requireNotNull(yArray)[index]
+    fun legacyX(): FloatArray = xArray ?: FloatArray(count) { xAt(it) }
+    fun legacyY(): FloatArray = yArray ?: FloatArray(count) { yAt(it) }
+    companion object {
+        fun jvm(x: FloatArray, y: FloatArray, count: Int): TimingCoordinates {
+            require(count in 0..minOf(x.size, y.size))
+            return TimingCoordinates(x, y, null, count)
+        }
+        fun packed(x: FloatArray, y: FloatArray, count: Int): TimingCoordinates? =
+            NativeHotPath.compactCoordinates(x, y, count)?.let { TimingCoordinates(null, null, it, count) }
+    }
+}
