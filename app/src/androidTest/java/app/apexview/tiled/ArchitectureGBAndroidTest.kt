@@ -19,6 +19,31 @@ import org.junit.runner.RunWith
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class ArchitectureGBAndroidTest {
     @Test
+    fun nativeComplexTimingPoliciesPreserveMiniSectorIdentityAndPrimaryPrecedence() {
+        val previous = IntArray(64).apply { this[0] = 2048 }
+        val updates = IntArray(64) { -1 }.apply { this[0] = 0; this[2] = 2051; this[5] = 0 }
+        val out = IntArray(64)
+        assertEquals(3 or 256 or 512, NativeHotPath.miniSectorDelta(previous, 3, updates, false, out))
+        assertArrayEquals(intArrayOf(2048, 0, 2051), out.copyOf(3))
+        assertEquals(6 or 256 or 512, NativeHotPath.miniSectorDelta(previous, 3, updates, true, out))
+        assertArrayEquals(intArrayOf(0, 0, 2051, 0, 0, 0), out.copyOf(6))
+        for (raw in -1..4) for (prev in -1..4) for (flags in 0..31) {
+            val primary = flags and 1 != 0
+            val stale = raw >= 0 && prev >= 0 && raw < prev
+            val lap = primary || flags and 2 == 0
+            val expected = (if (stale) 1 else 0) or (if (lap) 2 else 0) or
+                (if (!stale && (primary || flags and 4 == 0)) 4 else 0) or
+                (if (!stale && (primary || flags and 8 == 0)) 8 else 0) or
+                (if (!stale && (primary || flags and 16 == 0)) 16 else 0) or
+                (if (lap && raw >= 0 && prev >= 0 && raw > prev) 32 else 0)
+            assertEquals(expected, NativeHotPath.towerLifecycle(raw, prev, flags))
+        }
+        assertEquals(2, NativeHotPath.lapStateTransition(1, -1, 2, 1))
+        assertEquals(3, NativeHotPath.lapStateTransition(2, 3, 2, 0))
+        assertEquals(5, NativeHotPath.lapStateTransition(3, 4, 3, 8))
+    }
+
+    @Test
     fun nativeTimestampWindowSharesBlocksAndPreservesExactFloorLookup() {
         val a = requireNotNull(NativeHotPath.compactTimes(LongArray(2048) { it / 3L }, 2048))
         val b = requireNotNull(NativeHotPath.compactTimesBlock(LongArray(13) { 682L + it / 3L }, 13))
@@ -28,7 +53,7 @@ class ArchitectureGBAndroidTest {
         assertEquals(21, window.count())
         for (i in 0 until 21) assertEquals(if (i < 8) (2040 + i) / 3L else 682L + (i - 8) / 3L, window.at(i))
         assertTrue(after[1] - before[1] < 256L)
-        assertEquals(before[2], after[2])
+        assertTrue(after[2] <= before[2]) // Other unreachable histories may retire concurrently.
         val result = IntArray(1) { -1 }
         assertTrue(NativeHotPath.floorIndicesWithCompactTimes(arrayOfNulls<LongArray>(1), intArrayOf(21),
             longArrayOf(window.handle()), 682L, result))

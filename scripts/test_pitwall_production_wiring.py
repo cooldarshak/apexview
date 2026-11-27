@@ -1157,8 +1157,9 @@ class ProductionWiringTests(unittest.TestCase):
         classes = re.findall(
             r"^\s+(app\.apexview\.[\w.]+)\s+\\\s*\n\s+'OK \((\d+) (tests?)\)'",
             runner, re.MULTILINE)
-        self.assertEqual(len(classes), 9)
-        self.assertEqual(len({name for name, _, _ in classes}), 9)
+        self.assertEqual(len(classes), 10)
+        self.assertEqual(len({name for name, _, _ in classes}), 10)
+        self.assertIn("app.apexview.scene.SceneAsyncTextureLatchAndroidTest", {name for name, _, _ in classes})
         for name, count, noun in classes:
             with self.subTest(class_name=name):
                 source = contents("app/src/androidTest/java/" + name.replace(".", "/") + ".kt")

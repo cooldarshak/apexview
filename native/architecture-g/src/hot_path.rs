@@ -474,3 +474,106 @@ mod avc_access_unit_tests {
         }
     }
 }
+
+
+pub const MINI_SECTORS: usize = 64;
+/// Exact sparse delta, with -1 meaning absent. Keep explicit zero handling
+/// distinct from absence, and detect genuine new progress from old state.
+pub fn mini_sector_delta(previous: &[i32], updates: &[i32], keep_cleared: bool,
+                         out: &mut [i32]) -> Option<i32> {
+    if previous.len() > MINI_SECTORS || updates.len() != MINI_SECTORS ||
+        out.len() != MINI_SECTORS || previous.iter().any(|&v| !(0..=4096).contains(&v)) ||
+        updates.iter().any(|&v| !(-1..=4096).contains(&v)) { return None; }
+    fn completed(v: i32) -> bool { matches!(v, 2048 | 2049 | 2051) }
+    let last = previous.iter().rposition(|&v| completed(v));
+    let fresh = last.is_some_and(|last| previous.iter().enumerate().skip(last + 1)
+        .any(|(i, &v)| v == 0 && completed(updates[i])));
+    out.fill(0);
+    out[..previous.len()].copy_from_slice(previous);
+    let mut size = previous.len();
+    let mut changed = false;
+    for (i, &status) in updates.iter().enumerate() {
+        if status < 0 || status == 0 && !keep_cleared { continue; }
+        if i >= size || out[i] != status {
+            out[i] = status;
+            size = size.max(i + 1);
+            changed = true;
+        }
+    }
+    Some(size as i32 | (i32::from(changed) << 8) | (i32::from(fresh) << 9))
+}
+
+/// Primary-topic precedence and stale-lap gate. Timestamp equality is
+/// normalized by Android, but all policy decisions run here in Rust.
+/// Input bits: primary, same primary lap, pit, stopped, retired.
+/// Output bits: stale, lap accepted, pit allowed, stopped allowed,
+/// retired allowed, crossing.
+pub fn tower_lifecycle(raw: i32, previous: i32, flags: i32) -> Option<i32> {
+    if raw < -1 || previous < -1 || !(0..=31).contains(&flags) { return None; }
+    let primary = flags & 1 != 0;
+    let stale = raw >= 0 && previous >= 0 && raw < previous;
+    let lap = primary || flags & 2 == 0;
+    let pit = !stale && (primary || flags & 4 == 0);
+    let stopped = !stale && (primary || flags & 8 == 0);
+    let retired = !stale && (primary || flags & 16 == 0);
+    let crossing = lap && raw >= 0 && previous >= 0 && raw > previous;
+    Some(i32::from(stale) | (i32::from(lap) << 1) | (i32::from(pit) << 2) |
+        (i32::from(stopped) << 3) | (i32::from(retired) << 4) | (i32::from(crossing) << 5))
+}
+
+/// Lap-state history domain: UNKNOWN=0,PIT=1,OUT_LAP=2,PUSH=3,
+/// COOL_DOWN=4,KNOCKED_OUT=5. Input flags describe explicit lifecycle
+/// evidence: InPit present, InPit true, PitOut, KnockedOut.
+pub fn lap_state_transition(state: i32, raw: i32, previous: i32, flags: i32) -> Option<i32> {
+    if !(0..=5).contains(&state) || previous < -1 || !(0..=15).contains(&flags) { return None; }
+    let mut next = state;
+    if flags & 2 != 0 { next = 1; }
+    if flags & 4 != 0 || (flags & 1 != 0 && flags & 2 == 0 && next == 1) { next = 2; }
+    if previous >= 0 && raw > previous {
+        next = match next { 2 | 4 => 3, 3 => 4, _ => next };
+    }
+    if flags & 8 != 0 { next = 5; }
+    Some(next)
+}
+#[cfg(test)]
+mod timing_delta_tests {
+    use super::*;
+    #[test]
+    fn sparse_mini_sector_merge_preserves_late_s3_and_retirement_evidence() {
+        let prior = [2048, 0, 0];
+        let mut updates = [-1; MINI_SECTORS];
+        let mut out = [0; MINI_SECTORS];
+        updates[0] = 0;
+        updates[2] = 2051;
+        updates[5] = 0;
+        assert_eq!(mini_sector_delta(&prior, &updates, false, &mut out), Some(3 | 256 | 512));
+        assert_eq!(&out[..3], &[2048, 0, 2051]);
+        assert_eq!(mini_sector_delta(&prior, &updates, true, &mut out), Some(6 | 256 | 512));
+        assert_eq!(&out[..6], &[0, 0, 2051, 0, 0, 0]);
+        updates.fill(-1);
+        updates[0] = 2049;
+        assert_eq!(mini_sector_delta(&prior, &updates, true, &mut out), Some(3 | 256));
+        updates[0] = 2048;
+        assert_eq!(mini_sector_delta(&prior, &updates, true, &mut out), Some(3));
+        updates[1] = 4097;
+        assert_eq!(mini_sector_delta(&prior, &updates, true, &mut out), None);
+    }
+    #[test]
+    fn lifecycle_gate_matches_primary_and_supplement_precedence() {
+        for raw in -1..5 { for prev in -1..5 { for flags in 0..32 {
+            let primary = flags & 1 != 0;
+            let stale = raw != -1 && prev != -1 && raw < prev;
+            let lap = primary || flags & 2 == 0;
+            let expected = [stale, lap, !stale && (primary || flags & 4 == 0),
+                !stale && (primary || flags & 8 == 0), !stale && (primary || flags & 16 == 0),
+                lap && raw != -1 && prev != -1 && raw > prev];
+            let bits = expected.into_iter().enumerate().fold(0, |acc, (i, v)| acc | (i32::from(v) << i));
+            assert_eq!(tower_lifecycle(raw, prev, flags), Some(bits));
+        }}}
+        assert_eq!(lap_state_transition(1, -1, 2, 1), Some(2));
+        assert_eq!(lap_state_transition(2, 3, 2, 0), Some(3));
+        assert_eq!(lap_state_transition(3, 4, 3, 8), Some(5));
+        assert_eq!(lap_state_transition(3, 4, 3, 0), Some(4));
+        assert_eq!(lap_state_transition(4, 2, 3, 0), Some(4));
+    }
+}

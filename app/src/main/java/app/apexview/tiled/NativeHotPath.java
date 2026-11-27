@@ -425,6 +425,25 @@ public final class NativeHotPath {
     }
     private static native int nativeTransport(byte[][] parts,long[] metadata,int[] continuity,ByteBuffer output);
     /** Low two bits are reconciled status; negative means unavailable/invalid. */
+    public static int miniSectorDelta(int[] previous, int count, int[] updates, boolean keepCleared, int[] output) {
+        if (!available()) return -1;
+        try { return nativeMiniSectorDelta(previous,count,updates,keepCleared,output); }
+        catch (LinkageError | RuntimeException failed) { return -1; }
+    }
+    public static int towerLifecycle(int raw, int previous, int flags) {
+        if (!available()) return -1;
+        try { return nativeTowerLifecycle(raw,previous,flags); }
+        catch (LinkageError | RuntimeException failed) { return -1; }
+    }
+    public static int lapStateTransition(int state, int raw, int previous, int flags) {
+        if (!available()) return -1;
+        try { return nativeLapStateTransition(state,raw,previous,flags); }
+        catch (LinkageError | RuntimeException failed) { return -1; }
+    }
+    private static native int nativeMiniSectorDelta(int[] previous,int count,int[] updates,boolean keepCleared,int[] output);
+    private static native int nativeTowerLifecycle(int raw,int previous,int flags);
+    private static native int nativeLapStateTransition(int state,int raw,int previous,int flags);
+
     public static int retirementState(int flags) {
         if (!available()) return -1;
         try { return nativeRetirementState(flags); }

@@ -337,7 +337,7 @@ object DriverTimingParser {
     private const val LATE_SECTOR_MS = 3_000L
     private const val MAX_MINI_SECTORS = 64
 
-    private class Live(nativeRequested: Boolean) {
+    private class Live(val nativeRequested: Boolean) {
         var position: Int? = null
         val sector = arrayOfNulls<SectorCell>(3)
         val sectorFlags = Array(3) { BooleanArray(2) }   // personal, overall
@@ -698,14 +698,20 @@ object DriverTimingParser {
         d.optString("Position").toIntOrNull()?.let { l.position = it }
         val rawCompleted = d.optInt("NumberOfLaps", -1).takeIf { it >= 0 }
         val previousLaps = l.laps
-        val staleLap = rawCompleted != null && previousLaps != null && rawCompleted < previousLaps
         val primary = source == 0
-        val lapAllowed = primary || l.primaryLapAt != t
+        val flags = (if (primary) 1 else 0) or (if (l.primaryLapAt == t) 2 else 0) or
+            (if (l.primaryPitAt == t) 4 else 0) or (if (l.primaryStoppedAt == t) 8 else 0) or
+            (if (l.primaryRetiredAt == t) 16 else 0)
+        val nativeGate = if (l.nativeRequested)
+            app.apexview.tiled.NativeHotPath.towerLifecycle(rawCompleted ?: -1, previousLaps ?: -1, flags) else -1
+        val staleLap = if (nativeGate >= 0) nativeGate and 1 != 0
+            else rawCompleted != null && previousLaps != null && rawCompleted < previousLaps
+        val lapAllowed = if (nativeGate >= 0) nativeGate and 2 != 0 else primary || l.primaryLapAt != t
         if (primary && rawCompleted != null) l.primaryLapAt = t
         val completed = rawCompleted.takeIf { lapAllowed }
-        val pitAllowed = !staleLap && (primary || l.primaryPitAt != t)
-        val stoppedAllowed = !staleLap && (primary || l.primaryStoppedAt != t)
-        val retiredAllowed = !staleLap && (primary || l.primaryRetiredAt != t)
+        val pitAllowed = if (nativeGate >= 0) nativeGate and 4 != 0 else !staleLap && (primary || l.primaryPitAt != t)
+        val stoppedAllowed = if (nativeGate >= 0) nativeGate and 8 != 0 else !staleLap && (primary || l.primaryStoppedAt != t)
+        val retiredAllowed = if (nativeGate >= 0) nativeGate and 16 != 0 else !staleLap && (primary || l.primaryRetiredAt != t)
         if (primary && (d.has("InPit") || d.has("PitOut"))) l.primaryPitAt = t
         if (primary && d.has("Stopped")) l.primaryStoppedAt = t
         if (primary && d.has("Retired")) l.primaryRetiredAt = t
@@ -730,7 +736,8 @@ object DriverTimingParser {
         d.optJSONObject("IntervalToPositionAhead")?.let { o -> if (o.has("Value")) l.ahead = o.optString("Value").ifEmpty { null } }
         if (d.has("TimeDiffToPositionAhead")) l.ahead = d.optString("TimeDiffToPositionAhead").ifEmpty { null }
 
-        val crossing = completed != null && previousLaps != null && completed > previousLaps
+        val crossing = if (nativeGate >= 0) nativeGate and 32 != 0
+            else completed != null && previousLaps != null && completed > previousLaps
         if ((crossing || pitExit) && !d.optBoolean("Stopped") &&
             (primary || l.primaryStoppedAt != t)) l.stopped = false
         val sectors = d.opt("Sectors")
@@ -747,7 +754,7 @@ object DriverTimingParser {
                     val seconds = sector.optString("Value").toDoubleOrNull()
                     if (i < 2 && l.sectorValue[i].isEmpty() &&
                         ((seconds != null && seconds.isFinite() && seconds > 0) ||
-                            hasFreshMiniProgress(l.sectorSegments[i], sector.opt("Segments"))))
+                            hasFreshMiniProgress(l.sectorSegments[i], sector.opt("Segments"), l.nativeRequested)))
                         sectorProgress = true
                 }
             }
@@ -834,7 +841,7 @@ object DriverTimingParser {
             val previous = l.lapSectors[i]
             val reported = o.optString("Value")
             val existing = previous?.segments.orEmpty()
-            val segments = mergeSegments(existing, o.opt("Segments"), keepCleared = false)
+            val segments = mergeSegments(existing, o.opt("Segments"), keepCleared = false, nativeRequested = l.nativeRequested)
             if (reported.isNotEmpty() || segments !== existing) {
                 val pace = when {
                     o.optBoolean("OverallFastest") -> Pace.PURPLE
@@ -862,7 +869,7 @@ object DriverTimingParser {
         if (o.has("PreviousValue")) l.sectorPrevious[i] = o.optString("PreviousValue")
         if (o.has("PersonalFastest")) l.sectorFlags[i][0] = o.optBoolean("PersonalFastest")
         if (o.has("OverallFastest")) l.sectorFlags[i][1] = o.optBoolean("OverallFastest")
-        val segments = mergeSegments(l.sectorSegments[i], o.opt("Segments"))
+        val segments = mergeSegments(l.sectorSegments[i], o.opt("Segments"), nativeRequested = l.nativeRequested)
         l.sectorSegments[i] = segments
         l.sector[i] = if (l.sectorValue[i].isNotEmpty() || segments.isNotEmpty()) {
             SectorCell(l.sectorValue[i], if (l.sectorValue[i].isEmpty()) Pace.NONE else pace(l.sectorFlags[i]), segments, l.sectorPrevious[i])
@@ -872,8 +879,49 @@ object DriverTimingParser {
     /** Only an explicit previously uncompleted slot becoming a measured
      * green/yellow/purple mini-sector beyond the last completed slot counts.
      * Unknown, pit, empty, recoloured or duplicate values are not proof. */
-    private fun hasFreshMiniProgress(previous: List<Int>, raw: Any?): Boolean {
+    private class MiniScratch {
+        val old = IntArray(MAX_MINI_SECTORS)
+        val updates = IntArray(MAX_MINI_SECTORS)
+        val output = IntArray(MAX_MINI_SECTORS)
+        fun apply(previous: List<Int>, raw: Any?, keepCleared: Boolean): Int {
+            if (previous.size > MAX_MINI_SECTORS) return -1
+            updates.fill(-1)
+            fun add(index: Int, segment: JSONObject?): Boolean {
+                if (index !in updates.indices) return true
+                val status = segment?.optInt("Status", -1) ?: return true
+                if (status !in 0..4096) return true
+                // Noncanonical numeric aliases preserve the exact ordered
+                // JVM path rather than flattening two conflicting updates.
+                if (updates[index] != -1) return false
+                updates[index] = status
+                return true
+            }
+            when (raw) {
+                is JSONArray -> for (i in 0 until minOf(raw.length(), MAX_MINI_SECTORS))
+                    if (!add(i, raw.optJSONObject(i))) return -1
+                is JSONObject -> for (key in raw.keys()) {
+                    val i = key.toIntOrNull() ?: continue
+                    if (!add(i, raw.optJSONObject(key))) return -1
+                }
+                else -> return -1
+            }
+            for (i in previous.indices) old[i] = previous[i]
+            return app.apexview.tiled.NativeHotPath.miniSectorDelta(old, previous.size, updates, keepCleared, output)
+        }
+    }
+    private val miniScratch = ThreadLocal.withInitial { MiniScratch() }
+    /** Retain one exact primitive array, not up to 64 separately boxed status values. */
+    private class MiniValues(private val values: IntArray) : AbstractList<Int>(), java.util.RandomAccess {
+        override val size: Int get() = values.size
+        override fun get(index: Int): Int = values[index]
+    }
+
+    private fun hasFreshMiniProgress(previous: List<Int>, raw: Any?, nativeRequested: Boolean): Boolean {
         if (previous.isEmpty()) return false
+        if (nativeRequested) {
+            val result = miniScratch.get()!!.apply(previous, raw, true)
+            if (result >= 0) return result and 512 != 0
+        }
         fun completed(status: Int) = status == 2048 || status == 2049 || status == 2051
         val last = previous.indexOfLast(::completed)
         if (last < 0) return false
@@ -889,7 +937,17 @@ object DriverTimingParser {
         }
     }
 
-    private fun mergeSegments(previous: List<Int>, raw: Any?, keepCleared: Boolean = true): List<Int> {
+    private fun mergeSegments(previous: List<Int>, raw: Any?, keepCleared: Boolean = true,
+                              nativeRequested: Boolean = false): List<Int> {
+        if (raw !is JSONArray && raw !is JSONObject) return previous
+        if (nativeRequested) {
+            val scratch = miniScratch.get()!!
+            val result = scratch.apply(previous, raw, keepCleared)
+            if (result >= 0) {
+                if (result and 256 == 0) return previous
+                return MiniValues(scratch.output.copyOf(result and 127))
+            }
+        }
         var changed: MutableList<Int>? = null
         fun set(index: Int, segment: JSONObject?) {
             if (index !in 0 until MAX_MINI_SECTORS) return

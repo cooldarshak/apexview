@@ -1368,3 +1368,40 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReplayTowerSi
     }));
     if matches!(result,Ok(Some(()))){1}else{0}
 }
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeMiniSectorDelta(
+    env: JNIEnv<'_>, _class: JClass<'_>, previous: JIntArray<'_>, count: jint,
+    updates: JIntArray<'_>, keep_cleared: jboolean, output: JIntArray<'_>,
+) -> jint {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Option<i32> {
+        let n = usize::try_from(count).ok()?;
+        let limit = hot_path::MINI_SECTORS;
+        if n > limit || env.get_array_length(&previous).ok()? as usize != limit ||
+            env.get_array_length(&updates).ok()? as usize != limit ||
+            env.get_array_length(&output).ok()? as usize != limit { return None; }
+        let mut old = [0; hot_path::MINI_SECTORS];
+        let mut delta = [-1; hot_path::MINI_SECTORS];
+        let mut out = [0; hot_path::MINI_SECTORS];
+        env.get_int_array_region(&previous, 0, &mut old[..n]).ok()?;
+        env.get_int_array_region(&updates, 0, &mut delta).ok()?;
+        let flags = hot_path::mini_sector_delta(&old[..n], &delta, keep_cleared != 0, &mut out)?;
+        env.set_int_array_region(&output, 0, &out).ok()?;
+        Some(flags)
+    }));
+    match result { Ok(Some(v)) => v, Ok(None) => INVALID, Err(_) => PANIC }
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeTowerLifecycle(
+    _env: JNIEnv<'_>, _class: JClass<'_>, raw: jint, previous: jint, flags: jint,
+) -> jint {
+    catch_unwind(AssertUnwindSafe(|| hot_path::tower_lifecycle(raw, previous, flags)))
+        .ok().flatten().unwrap_or(INVALID)
+}
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeLapStateTransition(
+    _env: JNIEnv<'_>, _class: JClass<'_>, state: jint, raw: jint, previous: jint, flags: jint,
+) -> jint {
+    catch_unwind(AssertUnwindSafe(|| hot_path::lap_state_transition(state, raw, previous, flags)))
+        .ok().flatten().unwrap_or(INVALID)
+}
