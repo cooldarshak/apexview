@@ -1006,9 +1006,6 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         steps.run("decoder-listener") { decoderTexture?.setOnFrameAvailableListener(null) }
         steps.run("decoder-ingress") { decoderIngress?.close(); decoderIngress = null }
         val independent = asyncInput.also { asyncInput = null }
-        steps.run("decoder-async-latch") { independent?.close() }
-        lastAsyncSubmitted = 0L
-        pacing.reset()
         ingressNotifications = 0; ingressCoalesced = 0; ingressMaxWaitNs = 0
         input?.let { Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_RELEASE " +
             "renderer=TextureView surfaceId=${System.identityHashCode(it)} " +
@@ -1018,6 +1015,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         val oldTexture = decoderTexture
         input = null; decoderTexture = null; hasFrame = false
         steps.run("decoder-surface") { oldInput?.release() }
+        steps.run("decoder-async-latch") { independent?.close() }
+        lastAsyncSubmitted = 0L
+        pacing.reset()
         steps.run("decoder-texture") { if (independent == null) oldTexture?.release() }
         firstFrameReported = false
         renderEpoch = -1L
