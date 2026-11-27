@@ -1190,43 +1190,61 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                             }
                             val spool = java.io.File.createTempFile("replay-positions-", ".stream", positionScratchDir)
                             try {
-                                spool.bufferedWriter().use { writer ->
-                                    var chars = 0L
-                                    fun copy(line: String): String {
+                                ReplayPositionSpool(spool).use { index ->
+                                    var lastAttemptAt = -1_000L
+                                    var lastAttemptOffset = Long.MIN_VALUE
+                                    var lastAttemptThrough = Long.MIN_VALUE
+                                    var previewOutline = FloatArray(0)
+                                    var preview: Map<String, DriverTrack> = emptyMap()
+                                    var coveredThrough = Long.MIN_VALUE
+                                    val incoming = firstLines.asSequence() + reader.lineSequence()
+                                    for (line in incoming) {
                                         job.ensureActive()
-                                        chars += line.length + 1L
-                                        if (chars > 64L * 1024 * 1024) throw IOException("Position archive exceeds 64 MiB")
-                                        writer.write(line)
-                                        writer.newLine()
-                                        return line
-                                    }
-                                    val wanted = ReplayPositionWindow(targetUtc(initialStart) - initialStart)
-                                    // Bound startup work to a few minutes of positions near the replay clock.
-                                    // Copy the remaining data through to disk for seeks and full history.
-                                    report("streaming position window targetMs=${wanted.targetMs}")
-                                    val incoming = (firstLines.asSequence() + reader.lineSequence()).map(::copy)
-                                    val records = incoming.iterator()
-                                    val window = sequence {
-                                        while (records.hasNext()) {
-                                            val line = records.next()
-                                            val prefix = streamPrefixLength(line)
-                                            if (prefix >= line.length) continue
-                                            val offset = streamOffsetMs(line, prefix)
-                                            if (wanted.retarget(targetUtc(initialStart) - initialStart)) {
-                                                report("retargeted position window offsetMs=$offset targetMs=${wanted.targetMs}")
+                                        index.append(line)
+                                        val target = targetUtc(initialStart)
+                                        val offset = (target - initialStart).coerceAtLeast(0L)
+                                        val now = android.os.SystemClock.elapsedRealtime()
+                                        val covered = preview.values.any { it.hasPositionAt(target) }
+                                        // Revisit bytes already spooled, not only future records.
+                                        // This handles backward seeks during a slow HTTP download.
+                                        if (!index.chronological || index.throughMs < offset ||
+                                            (covered && target <= coveredThrough - 10_000L) ||
+                                            now - lastAttemptAt < 400L ||
+                                            (lastAttemptThrough == index.throughMs &&
+                                                lastAttemptOffset == offset)) continue
+                                        lastAttemptAt = now
+                                        lastAttemptOffset = offset
+                                        lastAttemptThrough = index.throughMs
+                                        val from = (offset - 90_000L).coerceAtLeast(0L)
+                                        val until = offset + 120_000L
+                                        val parsed = index.readWindow(from, until) { lines ->
+                                            parsePositionLines(lines, { job.ensureActive() })
+                                        }
+                                        try {
+                                            if (parsed.tracks.values.none { it.hasPositionAt(target) }) continue
+                                            if (previewOutline.size < 8) {
+                                                previewOutline = availableCircuit.get()?.outline
+                                                    ?.takeIf { it.size >= 8 }
+                                                    ?: traceOutline(parsed.tracks.values.toList())
                                             }
-                                            // Keep retargeting while the raw stream is spooled.
-                                            // A slow TV must not stop decoding previews at the first
-                                            // window boundary and then spend minutes only copying bytes.
-                                            if (offset in wanted.firstMs..wanted.lastMs) yield(line)
+                                            if (previewOutline.size < 8) continue
+                                            val pool = SpeedTimestampPool(nativeRequested())
+                                            val snapshot = parsed.tracks.mapNotNull { (number, builder) ->
+                                                builder.previewWindow(target - 90_000L, target + 120_000L, pool)
+                                                    ?.let { number to it }
+                                            }.toMap()
+                                            val current = targetUtc(initialStart)
+                                            val covering = snapshot.values.filter { it.hasPositionAt(current) }
+                                            if (covering.isEmpty()) continue
+                                            preview = snapshot
+                                            coveredThrough = covering.minOf { it.endMs }
+                                            report("indexed position preview targetUtcMs=$current cars=${covering.size} throughUtcMs=$coveredThrough spoolThroughMs=${index.throughMs}")
+                                            publishTracks(snapshot, previewOutline, initialStart, positionPreviewEpochs.next())
+                                        } finally {
+                                            parsed.tracks.values.forEach { it.retireArchiveBacking() }
                                         }
                                     }
-                                    val initial = parseFull(window, allowBackgroundPriority = false)
-                                    report("position rolling preview pass complete cars=${initial.tracks.size}")
-                                    // Full history still comes from the complete spool, including
-                                    // skipped records and earlier seek targets. Retire preview-only
-                                    // builders before starting the full chronological pass.
-                                    initial.tracks.values.forEach { it.retireArchiveBacking() }
+                                    report("position spool complete bytes=${index.bytesWritten} indexed=${index.chronological}")
                                 }
                                 spool.bufferedReader().useLines { parseFull(it) }
                             } finally {
