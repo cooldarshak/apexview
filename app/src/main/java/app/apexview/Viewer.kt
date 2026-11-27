@@ -279,7 +279,7 @@ fun ViewerScreen(app: AppState) {
     }
     LaunchedEffect(Unit) {
         while (true) {
-            app.syncTick()
+            if (app.bakedCastSession == null) app.syncTick()
             delay(500)
         }
     }
@@ -391,7 +391,7 @@ fun ViewerScreen(app: AppState) {
         // so its size also counts by itself. Taken for the screen, it left the feeds laid out small.
         val popOutSized = isPopOutSized(view, width, height)
         LaunchedEffect(width, height, app.layoutRequest, app.inPip, popOutSized) {
-            if (!app.inPip && !popOutSized) {
+            if (!app.inPip && !popOutSized && app.bakedCastSession == null) {
                 app.onCanvasResized(width, height)
                 app.layoutIfRequested(width, height)
             }
@@ -416,30 +416,106 @@ fun ViewerScreen(app: AppState) {
                 translationY = (1f - side) * size.height * 0.5f +
                     side * ((1f - liftScale) * size.height - sheetShift)
             }
-        val bakedSession = app.bakedCastSession
-        val placement by rememberUpdatedState {
-            if (fixedVideoGeometry) BakedCastVideoPlacement.viewer(1f, 1f, 0f)
-            else BakedCastVideoPlacement.viewer(1f - sheetSide * AppState.VOTE_SHEET_WIDTH,
-                if (app.inPip) 1f else 1f - lift * band / height, sheetShift / height)
-        }
         val controllerOnly = app.castControllerOnly
-        val captureOverlay = remember(bakedSession) {
-            bakedSession?.let { BakedCastOverlay({ placement() }, Ink.background.toArgb()) }
-        }
-        val captureCaptions = captureOverlay != null && app.singleDecoderScenePlayer?.archiveSceneSession != null
         Box(Modifier.fillMaxSize().then(videoTransform)) {
-            if (app.castPlaybackHandedOff || app.externalDisplayActive) {
+            if (app.castPlaybackHandedOff || app.externalDisplayActive || app.bakedCastSession != null) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("Playing on ${if (app.externalDisplayActive) app.externalDisplayName else app.castDeviceName}", style = Type.title2)
                         Text("Use this phone to control playback and arrange the TV video windows.", style = Type.subhead)
                     }
                 }
-            } else PlaybackVideoCanvas(app, width, height, window, viewerBounds, captureOverlay, captureCaptions)
+            } else PlaybackVideoCanvas(app, width, height, window, viewerBounds)
 
         }
 
-        if (!controllerOnly || captureOverlay != null) Box(Modifier.fillMaxSize().recordBakedCastOverlay(captureOverlay, showOnSender = !controllerOnly)) {
+        if (!controllerOnly) ViewerLayers(app, width, height, videoTransform, lift, band, edgeInset,
+            cornerRadius, screenMotionMs, chromeMotionMs, cutouts, compactWidth, false, null, false)
+        // Sibling of the retained Cast overlay; never recorded into TV output.
+        if (controllerOnly) {
+            Box(Modifier.fillMaxSize().zIndex(CHROME_Z + 10).background(Ink.background)
+                .pointerInput(Unit) { detectTapGestures(onTap = { app.showChrome() }) }) {
+                if (app.arranging) {
+                    // Static geometry editor: no decoder output or moving timing data on the sender.
+                    app.tiles.filterNot { it.protectedCompositionHidden }.forEach { tile ->
+                        key(tile.id) {
+                            Box(Modifier.offset { IntOffset(tile.x.roundToInt(), tile.y.roundToInt()) }
+                                .requiredSize(with(density) { tile.w.toDp() }, with(density) { tile.h.toDp() })
+                                .zIndex(tile.z).background(Ink.secondary.copy(alpha = 0.18f))
+                                .arrangeGestures(app, tile), contentAlignment = Alignment.Center) {
+                                Text(tile.channel.title, style = Type.footnote, maxLines = 1)
+                            }
+                        }
+                    }
+                    if (app.towerOpen && app.towerSpot.w > 0f && app.towerSpot.h > 0f) {
+                        val spot = app.towerSpot
+                        Box(Modifier.offset { IntOffset(spot.x.roundToInt(), spot.y.roundToInt()) }
+                            .requiredSize(with(density) { spot.w.toDp() }, with(density) { spot.h.toDp() })
+                            .zIndex(1e9f).background(Ink.secondary.copy(alpha = 0.25f))
+                            .pointerInput(app.towerLocked, app.tvLandscapeLayout) {
+                                detectTransformGestures { _, pan, zoom, _ ->
+                                    if (!app.towerLocked) {
+                                        if (app.tvLandscapeLayout) app.updateTowerWidth(spot.w * zoom - pan.x)
+                                        else app.applyTowerEdit(Area(spot.x + pan.x, spot.y + pan.y, spot.w * zoom, spot.h * zoom))
+                                    }
+                                }
+                            }, contentAlignment = Alignment.Center) { Text("Timing tower", style = Type.footnote) }
+                    }
+                    val map = app.activeMapPanel
+                    if (app.mapMode != MapMode.OFF && map.placed && map.w > 0f && map.h > 0f) {
+                        Box(Modifier.offset { IntOffset(map.x.roundToInt(), map.y.roundToInt()) }
+                            .requiredSize(with(density) { map.w.toDp() }, with(density) { map.h.toDp() })
+                            .zIndex(1e9f + 1).background(Ink.secondary.copy(alpha = 0.25f))
+                            .pointerInput(app.mapLocked) {
+                                detectTransformGestures { _, pan, zoom, rotation -> app.arrangeMap(pan, zoom, rotation) }
+                            }, contentAlignment = Alignment.Center) { Text("Track map", style = Type.footnote) }
+                    }
+                }
+                Box(Modifier.zIndex(2e9f)) { TopChrome(app, clearOf(cutouts, width, 0f, with(density) { 64.dp.toPx() })) }
+                if (!app.arranging) Column(Modifier.align(Alignment.Center).padding(horizontal = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(if (app.castPlaybackConfirmed) "Playing on ${app.castDeviceName}"
+                        else "Connecting to ${app.castDeviceName}", style = Type.title2)
+                    Text(if (app.castPlaybackConfirmed) "This device is your playback controller."
+                        else "Waiting for TV playback confirmation…", style = Type.subhead)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        app.tiles.filterNot { it.protectedCompositionHidden }.forEach { tile ->
+                            Text(tile.channel.title, Modifier.pressable { app.openTileMenu(tile) }.padding(8.dp), style = Type.footnote)
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    FilledTonalButton(onClick = app::stopFullSceneCast) { Text("Disconnect TV") }
+                }
+                if (!app.arranging) Box(Modifier.align(Alignment.BottomCenter)) {
+                    BottomChrome(app, clearOf(cutouts, width, height - with(density) { 150.dp.toPx() }, height))
+                }
+                Messages(app, Modifier.align(Alignment.Center))
+            }
+        }
+    }
+
+    app.tileMenu?.let { TileMenuSheet(app, it) }
+    if (app.mapSheetOpen) MapSheet(app)
+    if (app.layoutSheetOpen) LayoutSheet(app)
+    if (app.speedSheetOpen) SpeedSheet(app)
+    if (app.qualitySheetOpen) VideoQualitySheet(app)
+    if (app.captionsSheetOpen) ClosedCaptionsSheet(app)
+    LaptopPrompt(app)
+}
+
+
+// Shared layer tree: the private Cast presentation records the identical map,
+// tower, badges and caption appearance, not a second approximate renderer.
+@Composable
+private fun ViewerLayers(
+    app: AppState, width: Float, height: Float, videoTransform: Modifier,
+    lift: Float, band: Float, edgeInset: Float, cornerRadius: Float,
+    screenMotionMs: Int, chromeMotionMs: Int, cutouts: List<Rect>,
+    compactWidth: Boolean, controllerOnly: Boolean, captureOverlay: BakedCastOverlay?,
+    captureCaptions: Boolean,
+) {
+    val density = LocalDensity.current
+        Box(Modifier.fillMaxSize().recordBakedCastOverlay(captureOverlay, showOnSender = !controllerOnly)) {
         if (captureCaptions && !app.castPlaybackHandedOff && !app.externalDisplayActive) {
             Box(Modifier.fillMaxSize().then(videoTransform)) { ViewerComposedCaptions(app) }
         }
@@ -641,83 +717,31 @@ fun ViewerScreen(app: AppState) {
             HelpOverlay(app, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height, compact = with(density) { minOf(width, height).toDp() } < 600.dp)
         }
         LaunchedEffect(Unit) {
-            if (!app.helpSeen && !app.isTv) {
+            if (!controllerOnly && !app.helpSeen && !app.isTv) {
                 delay(HELP_FIRST_DELAY_MS)
                 if (app.tiles.isNotEmpty()) app.showHelp()
             }
         }
         }
         }
-        // Sibling of the retained Cast overlay; never recorded into TV output.
-        if (controllerOnly) {
-            Box(Modifier.fillMaxSize().zIndex(CHROME_Z + 10).background(Ink.background)
-                .pointerInput(Unit) { detectTapGestures(onTap = { app.showChrome() }) }) {
-                if (app.arranging) {
-                    // Static geometry editor: no decoder output or moving timing data on the sender.
-                    app.tiles.filterNot { it.protectedCompositionHidden }.forEach { tile ->
-                        key(tile.id) {
-                            Box(Modifier.offset { IntOffset(tile.x.roundToInt(), tile.y.roundToInt()) }
-                                .requiredSize(with(density) { tile.w.toDp() }, with(density) { tile.h.toDp() })
-                                .zIndex(tile.z).background(Ink.secondary.copy(alpha = 0.18f))
-                                .arrangeGestures(app, tile), contentAlignment = Alignment.Center) {
-                                Text(tile.channel.title, style = Type.footnote, maxLines = 1)
-                            }
-                        }
-                    }
-                    if (app.towerOpen && app.towerSpot.w > 0f && app.towerSpot.h > 0f) {
-                        val spot = app.towerSpot
-                        Box(Modifier.offset { IntOffset(spot.x.roundToInt(), spot.y.roundToInt()) }
-                            .requiredSize(with(density) { spot.w.toDp() }, with(density) { spot.h.toDp() })
-                            .zIndex(1e9f).background(Ink.secondary.copy(alpha = 0.25f))
-                            .pointerInput(app.towerLocked, app.tvLandscapeLayout) {
-                                detectTransformGestures { _, pan, zoom, _ ->
-                                    if (!app.towerLocked) {
-                                        if (app.tvLandscapeLayout) app.updateTowerWidth(spot.w * zoom - pan.x)
-                                        else app.applyTowerEdit(Area(spot.x + pan.x, spot.y + pan.y, spot.w * zoom, spot.h * zoom))
-                                    }
-                                }
-                            }, contentAlignment = Alignment.Center) { Text("Timing tower", style = Type.footnote) }
-                    }
-                    val map = app.activeMapPanel
-                    if (app.mapMode != MapMode.OFF && map.placed && map.w > 0f && map.h > 0f) {
-                        Box(Modifier.offset { IntOffset(map.x.roundToInt(), map.y.roundToInt()) }
-                            .requiredSize(with(density) { map.w.toDp() }, with(density) { map.h.toDp() })
-                            .zIndex(1e9f + 1).background(Ink.secondary.copy(alpha = 0.25f))
-                            .pointerInput(app.mapLocked) {
-                                detectTransformGestures { _, pan, zoom, rotation -> app.arrangeMap(pan, zoom, rotation) }
-                            }, contentAlignment = Alignment.Center) { Text("Track map", style = Type.footnote) }
-                    }
-                }
-                Box(Modifier.zIndex(2e9f)) { TopChrome(app, clearOf(cutouts, width, 0f, with(density) { 64.dp.toPx() })) }
-                if (!app.arranging) Column(Modifier.align(Alignment.Center).padding(horizontal = 24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(if (app.castPlaybackConfirmed) "Playing on ${app.castDeviceName}"
-                        else "Connecting to ${app.castDeviceName}", style = Type.title2)
-                    Text(if (app.castPlaybackConfirmed) "This device is your playback controller."
-                        else "Waiting for TV playback confirmation…", style = Type.subhead)
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        app.tiles.filterNot { it.protectedCompositionHidden }.forEach { tile ->
-                            Text(tile.channel.title, Modifier.pressable { app.openTileMenu(tile) }.padding(8.dp), style = Type.footnote)
-                        }
-                    }
-                    Spacer(Modifier.height(12.dp))
-                    FilledTonalButton(onClick = app::stopFullSceneCast) { Text("Disconnect TV") }
-                }
-                if (!app.arranging) Box(Modifier.align(Alignment.BottomCenter)) {
-                    BottomChrome(app, clearOf(cutouts, width, height - with(density) { 150.dp.toPx() }, height))
-                }
-                Messages(app, Modifier.align(Alignment.Center))
-            }
-        }
-    }
 
-    app.tileMenu?.let { TileMenuSheet(app, it) }
-    if (app.mapSheetOpen) MapSheet(app)
-    if (app.layoutSheetOpen) LayoutSheet(app)
-    if (app.speedSheetOpen) SpeedSheet(app)
-    if (app.qualitySheetOpen) VideoQualitySheet(app)
-    if (app.captionsSheetOpen) ClosedCaptionsSheet(app)
-    LaptopPrompt(app)
+}
+
+@Composable
+internal fun BakedPresentationCanvas(app: AppState, window: android.view.Window, sourceWidth: Int, sourceHeight: Int) {
+    val session = app.bakedCastSession ?: return
+    val width = sourceWidth.toFloat()
+    val height = sourceHeight.toFloat()
+    val density = LocalDensity.current
+    val overlay = remember(session) { BakedCastOverlay({ BakedCastVideoPlacement.viewer(1f, 1f, 0f) }, Ink.background.toArgb()) }
+    val reducedMotion = LocalReduceMotion.current
+    val motion = if (reducedMotion) 0 else Motion.SCREEN_MS
+    Box(Modifier.fillMaxSize().background(Ink.background)) {
+        PlaybackVideoCanvas(app, width, height, window, Rect(0, 0, sourceWidth, sourceHeight), overlay, true)
+        ViewerLayers(app, width, height, Modifier, 0f, 0f, with(density) { 30.dp.toPx() },
+            rememberScreenCornerRadius(), motion, 0, emptyList(), with(density) { width.toDp() } < 600.dp,
+            true, overlay, true)
+    }
 }
 
 /**

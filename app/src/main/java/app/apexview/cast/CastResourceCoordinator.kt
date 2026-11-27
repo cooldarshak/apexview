@@ -14,6 +14,16 @@ internal data class DirectCastRoute(val tileId: Int, val contentId: Long, val ch
 internal class CastResourceCoordinator {
     var archive by mutableStateOf<SceneCastRelay?>(null)
     var baked by mutableStateOf<BakedCastLiveSession?>(null)
+    private var bakedProducer: AutoCloseable? = null
+    fun installBakedProducer(session: BakedCastLiveSession, producer: AutoCloseable) {
+        check(baked === session && bakedProducer == null)
+        bakedProducer = producer
+    }
+    fun stopBakedProducer() {
+        val previous = bakedProducer
+        bakedProducer = null
+        closeOwner(previous)
+    }
     var native by mutableStateOf<NativeComposedCastSession?>(null)
     var direct by mutableStateOf<DirectCastRoute?>(null)
     var preparingNative: NativeComposedCastSession? = null
@@ -40,6 +50,7 @@ internal class CastResourceCoordinator {
     }
 
     fun retireBaked() {
+        stopBakedProducer()
         baked?.let { retiredBaked += it }; baked = null
     }
 
@@ -73,6 +84,7 @@ internal class CastResourceCoordinator {
         preparationJob?.cancel(); preparationJob = null
         sceneJob?.cancel(); sceneJob = null
         nativePump?.cancel(); nativePump = null
+        stopBakedProducer()
         val oldBaked = baked; baked = null
         val oldNative = native; native = null
         val oldArchive = archive; archive = null

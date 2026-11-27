@@ -192,7 +192,10 @@ class AppState(
     /** A live, baked picture + commentary stream. Remains on the phone until Cast stops. */
     internal var bakedCastSession: app.apexview.cast.BakedCastLiveSession?
         get() = castResources.baked
-        private set(value) { castResources.baked = value }
+        private set(value) {
+            if (castResources.baked !== value) castResources.stopBakedProducer()
+            castResources.baked = value
+        }
     private var googleCastRemoteClient: com.google.android.gms.cast.framework.media.RemoteMediaClient? = null
     private var googleCastSession: com.google.android.gms.cast.framework.CastSession? = null
     private var castSceneJob: Job?
@@ -1171,6 +1174,12 @@ class AppState(
         }
         val host = singleDecoderScenePlayer ?: return
         val archive = host.archiveSceneSession ?: return
+        val sourceWindow = (context as? android.app.Activity)?.window
+        if (sourceWindow == null || sourceWindow.attributes.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE != 0 ||
+            protectedRollingSceneActive || canvasSize.first <= 0f || canvasSize.second <= 0f) {
+            message = "A clear, authorized video scene is required to start baked Cast."
+            return
+        }
         if (replayClipRunning || replayClipRequested) {
             message = "Stop replay recording before starting a continuous Cast stream."
             return
@@ -1232,7 +1241,15 @@ class AppState(
                 session = next
                 host.player.volume = 0f // AAC is supplied independently to the receiver.
                 radioPlayer?.pause()
-                bakedCastSession = next // Independent producer, separate sender controls.
+                bakedCastSession = next
+                // The visible viewer removes its decoder output before the
+                // private presentation binds the same player. Surface clears
+                // are identity guarded by the renderer, not a second decoder.
+                val producer = app.apexview.cast.local.BakedCastPresentationOwner(
+                    context.applicationContext, this@AppState, next, canvasSize.first.toInt(),
+                    canvasSize.second.toInt(), context.resources.displayMetrics.densityDpi, scope)
+                castResources.installBakedProducer(next, producer)
+                producer.start()
                 android.util.Log.i("PitwallCast", "CAST_SENDER_MODE mode=BAKED_PRODUCER visibleVideoRequested=false audibleAudioRequested=false sourceDecoderRequired=true")
                 kotlinx.coroutines.withTimeout(25_000) { next.awaitPlayable() }
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
