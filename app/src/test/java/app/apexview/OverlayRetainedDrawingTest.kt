@@ -70,6 +70,15 @@ class OverlayRetainedDrawingTest {
         }
     }
 
+    @Test fun drawRearmSkipsHighRefreshWakeupWithoutSleepingAfterLateWork() {
+        val frame = 1_000_000_000L
+        assertEquals(9L, overlayDrawRearmDelayMs(frame, frame))
+        assertEquals(5L, overlayDrawRearmDelayMs(frame, frame + 4_000_000L))
+        assertEquals(0L, overlayDrawRearmDelayMs(frame, frame + 9_000_000L))
+        assertEquals(0L, overlayDrawRearmDelayMs(frame, frame - 1L))
+        assertTrue(isOverlayDrawFrameDue(frame + 16_666_666L, frame))
+    }
+
     @Test fun drawClockSchedulesDrawOnlyRefreshForSixtyAndOneTwentyHertz() {
         for (hz in listOf(50, 60, 120)) {
             val interval = 1_000_000_000L / hz

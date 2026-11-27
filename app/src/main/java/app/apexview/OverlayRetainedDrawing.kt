@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.delay
 
 /**
  * Pure cache invalidation contract used by both retained map display lists and
@@ -100,6 +101,14 @@ internal fun isOverlayDrawFrameDue(frameNanos: Long, previousNanos: Long): Boole
 
 private const val OVERLAY_DRAW_INTERVAL_NS = 15_000_000L // 60 Hz cap on 120 Hz panels
 
+/** Skip an immediately discarded 120Hz callback, subtracting time already
+ * spent in the current frame. Keep the 15ms gate and the video clock intact. */
+internal fun overlayDrawRearmDelayMs(frameNanos: Long, nowNanos: Long): Long {
+    if (nowNanos < frameNanos) return 0L
+    val elapsed = nowNanos - frameNanos
+    return ((9_000_000L - elapsed).coerceAtLeast(0L) + 999_999L) / 1_000_000L
+}
+
 /**
  * The caller MUST pass the State itself to Canvas; only the Canvas draw lambda
  * reads .value. This schedules draw invalidation rather than recomposition.
@@ -115,7 +124,7 @@ internal fun rememberOverlayDrawClock(
     LaunchedEffect(owner) {
         var previousFrame = Long.MIN_VALUE
         while (true) {
-            withFrameNanos { frame ->
+            val rearm = withFrameNanos { frame ->
                 if (isOverlayDrawFrameDue(frame, previousFrame)) {
                     val started = System.nanoTime()
                     val videoPosition = clock()
@@ -123,8 +132,10 @@ internal fun rememberOverlayDrawClock(
                     position.longValue = videoPosition
                     previousFrame = frame
                     probe.record(System.nanoTime() - started, 1, changed)
-                }
+                    overlayDrawRearmDelayMs(frame, System.nanoTime())
+                } else 0L
             }
+            if (rearm > 0L) delay(rearm)
         }
     }
     return position
@@ -171,13 +182,15 @@ internal fun rememberOverlayFlagPulse(active: Boolean): State<Float> {
         var beginning = Long.MIN_VALUE
         var previous = Long.MIN_VALUE
         while (true) {
-            withFrameNanos { frame ->
+            val rearm = withFrameNanos { frame ->
                 if (isOverlayDrawFrameDue(frame, previous)) {
                     if (beginning == Long.MIN_VALUE) beginning = frame
                     pulse.floatValue = overlayFlagPulseAlpha(frame - beginning)
                     previous = frame
-                }
+                    overlayDrawRearmDelayMs(frame, System.nanoTime())
+                } else 0L
             }
+            if (rearm > 0L) delay(rearm)
         }
     }
     return pulse

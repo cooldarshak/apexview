@@ -62,11 +62,67 @@ def inspect(stream):
                 counts["compressed_packets"] += 1
     return counts
 
+def inspect_heap_quality(stream, expected_pid):
+    """Inspect uncompressed heapprofd snapshots, not symbol or stack quality."""
+    counts = collections.Counter()
+    snapshots = set()
+    for number, wire, packet in fields(stream):
+        if number != 1 or wire != 2:
+            continue
+        for field, kind, value in fields(io.BytesIO(packet)):
+            if kind != 2:
+                continue
+            if field == 50 and value:
+                counts["compressed_packets"] += 1
+            if field != 37:
+                continue
+            for tag, typ, dump in fields(io.BytesIO(value)):
+                if tag != 5 or typ != 2:
+                    continue
+                scalar = {}
+                samples = 0
+                for key, wire_type, val in fields(io.BytesIO(dump)):
+                    if wire_type == 0:
+                        scalar[key] = val
+                    elif key == 2 and wire_type == 2:
+                        samples += 1
+                pid = scalar.get(1, 0)
+                if pid != expected_pid:
+                    continue
+                counts["dumps"] += 1
+                counts["samples"] += samples
+                if samples and scalar.get(9, 0):
+                    snapshots.add((pid, scalar[9]))
+                for key, name in ((4, "rejected_concurrent"), (6, "disconnected"),
+                                  (7, "buffer_overrun"), (8, "buffer_corrupted"),
+                                  (10, "guardrail"), (14, "client_error")):
+                    if scalar.get(key, 0):
+                        counts[name] += 1
+    counts["snapshots"] = len(snapshots)
+    return counts
+
+
+def heap_quality_ok(counts, minimum_snapshots):
+    return (counts["snapshots"] >= minimum_snapshots and counts["samples"] > 0
+            and not any(counts[k] for k in ("compressed_packets",
+                "rejected_concurrent", "disconnected", "buffer_overrun",
+                "buffer_corrupted", "guardrail", "client_error")))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("trace", type=pathlib.Path)
     parser.add_argument("--require-heap", action="store_true")
+    parser.add_argument("--strict-heap", action="store_true",
+                        help="Reject interrupted or insufficient native heap captures")
+    parser.add_argument("--pid", type=int)
+    parser.add_argument("--min-snapshots", type=int, default=2)
     args = parser.parse_args()
+    if args.min_snapshots < 1 or (args.pid is not None and args.pid <= 0):
+        parser.error("positive PID and snapshot minimum required")
+    if args.strict_heap and args.pid is None:
+        parser.error("--strict-heap requires --pid")
+    quality = collections.Counter()
     if zipfile.is_zipfile(args.trace):
         with zipfile.ZipFile(args.trace) as archive:
             traces = [n for n in archive.namelist() if n.endswith((".perfetto-trace", ".trace", ".pftrace"))]
@@ -74,9 +130,15 @@ def main():
                 parser.error("ZIP must contain exactly one Perfetto trace")
             with archive.open(traces[0]) as stream:
                 counts = inspect(stream)
+            if args.strict_heap:
+                with archive.open(traces[0]) as stream:
+                    quality = inspect_heap_quality(stream, args.pid)
     else:
         with args.trace.open("rb") as stream:
             counts = inspect(stream)
+        if args.strict_heap:
+            with args.trace.open("rb") as stream:
+                quality = inspect_heap_quality(stream, args.pid)
     print("packets=%d profile_packets=%d compressed_packets=%d" %
           tuple(counts[k] for k in ("packets", "profile_packets", "compressed_packets")))
     if counts["compressed_packets"]:
@@ -85,6 +147,11 @@ def main():
         print("No uncompressed native heap profile packets observed; allocation-site attribution is not established.")
     else:
         print("Profile packets exist; verify process, sampled stacks and exact-build symbols in Perfetto.")
+    if args.strict_heap:
+        print("heap_quality=" + " ".join(f"{k}={v}" for k, v in sorted(quality.items())))
+        if not heap_quality_ok(quality, args.min_snapshots):
+            print("Heap capture is incomplete or unverified; do not compare allocation sites.")
+            return 1
     return int(args.require_heap and not counts["profile_packets"])
 
 if __name__ == "__main__":

@@ -22,6 +22,10 @@ internal class SceneGraphicsOwners {
     }
     private val next = AtomicLong()
     private val owners = linkedMapOf<Long, Owner>()
+    private var peakOwners = 0
+    private var peakContexts = 0
+    private var peakWindows = 0
+    private var peakDecoderTextures = 0
     fun newId(): Long = next.incrementAndGet()
     @Synchronized fun record(id: Long, owner: Owner) {
         require(owner.contexts in 0..1 && owner.windows >= 0 && owner.decoderTextures in 0..1)
@@ -30,11 +34,17 @@ internal class SceneGraphicsOwners {
             owner.pbuffers in 0..1 && owner.captureWidth >= 0 && owner.captureHeight >= 0)
         if (!owner.active) owners.remove(id)
         else owners[id] = owner
+        peakOwners = maxOf(peakOwners, owners.size)
+        peakContexts = maxOf(peakContexts, owners.values.sumOf { it.contexts })
+        peakWindows = maxOf(peakWindows, owners.values.sumOf { it.windows })
+        peakDecoderTextures = maxOf(peakDecoderTextures, owners.values.sumOf { it.decoderTextures })
     }
     @Synchronized fun remove(id: Long) { owners.remove(id) }
     @Synchronized fun snapshot(): Map<Long, Owner> = LinkedHashMap(owners)
+    @Synchronized private fun diagnosticSnapshot() = LinkedHashMap(owners) to
+        " scenePeakOwners=$peakOwners scenePeakEglContexts=$peakContexts scenePeakEglWindows=$peakWindows scenePeakDecoderTextures=$peakDecoderTextures scenePeakScope=PROCESS_LIFETIME"
     fun fields(): String {
-        val live = snapshot()
+        val (live, peaks) = diagnosticSnapshot()
         return " sceneGraphicsOwners=${live.size} sceneEglContexts=${live.values.sumOf { it.contexts }}" +
             " sceneEglWindows=${live.values.sumOf { it.windows }}" +
             " sceneDecoderTextures=${live.values.sumOf { it.decoderTextures }}" +
@@ -55,7 +65,7 @@ internal class SceneGraphicsOwners {
             }.joinToString(",") { (id, owner) ->
                 "${id}:${owner.backend}:${owner.encoderInputs}:${owner.captureTextures}:" +
                     "${owner.captureQueues}:${owner.pbuffers}:${owner.captureWidth}x${owner.captureHeight}"
-            }.ifEmpty { "NONE" } + " sceneGraphicsBytes=NOT_MEASURED"
+            }.ifEmpty { "NONE" } + " sceneGraphicsBytes=NOT_MEASURED" + peaks
     }
     companion object { val process = SceneGraphicsOwners() }
 }

@@ -734,6 +734,44 @@ mod tests {
     }
 
     #[test]
+    fn build_901_output_sizes_keep_pinned_readers_immutable_and_capacity_bounded() {
+        // Sanitized size-only fixture from observed clear native fragments.
+        let sizes=[9094863usize,8479970,8383367,8415481,8753698,8868748,8562506,
+            8405957,8461691,8375390,8480302,8322116,9089322,9280169,8694034,
+            9500298,8036384,8075126,8562678,8686738,8919003];
+        let mut a=Arena::default();
+        let ceiling=16*1024*1024;
+        a.set_atlas_idle_limit(ceiling);
+        let mut held=std::collections::VecDeque::new();
+        for (i,size) in sizes.into_iter().enumerate() {
+            let len=size+1024;
+            let mut b=a.take_output(len,ceiling).unwrap();
+            assert!(b.iter().all(|&v|v==0));
+            let pattern=(i+1) as u8;
+            b[1024]=pattern;
+            let cap=b.capacity();
+            assert!(a.charged+cap<=MAX_BYTES);
+            let id=a.adopt(cap,len,1024,size,MAX_BYTES,||Some(b)).unwrap();
+            assert!(a.mark_viewed(id));
+            held.push_back((id,pattern));
+            if held.len()>2 {
+                let (old,value)=held.pop_front().unwrap();
+                assert_eq!(a.live[&old][1024],value);
+                assert!(a.release(old));
+            }
+            for &(reader,value) in &held {assert_eq!(a.live[&reader][1024],value);}
+        }
+        assert_eq!(a.adopted,21);
+        assert_eq!(a.owned_allocations+a.owned_reuses,21);
+        assert!(a.owned_reuses>0);
+        assert_eq!(a.owned_eligible,a.owned_reuses);
+        assert!(a.peak_charged<=40*1024*1024);
+        for (id,_) in held {assert!(a.release(id));}
+        a.trim_pressure();
+        assert_eq!(a.charged,0);
+    }
+
+    #[test]
     fn build_886_fragment_sizes_replay_with_bounded_capacity() {
         let sizes=[7895615,6988629,6861401,6582662,6434449,6215677,6932098,6932098,
             6577768,7313173,6215467,7076904,7895615,6988629,6861401,6582662,6434449,

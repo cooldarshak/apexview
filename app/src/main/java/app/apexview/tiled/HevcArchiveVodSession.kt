@@ -744,6 +744,9 @@ internal class HevcArchiveVodSession(
         val retained = mutableListOf<ByteArray>()
         val aborted = java.util.concurrent.atomic.AtomicBoolean(false)
         val futures = mutableListOf<Future<ByteArray>>()
+        val queueMs = LongArray(inputs.size)
+        val readMs = LongArray(inputs.size)
+        val readBytes = IntArray(inputs.size)
         try {
         checkOpen()
         if (ArchiveFetchDeadline.remainingNs(fetchStartedNs, System.nanoTime()) == 0L)
@@ -762,7 +765,10 @@ internal class HevcArchiveVodSession(
         require(inputs.indices.all { i ->
             abs(inputs[i].playlist.segments[groups[number].indexes[i]].durationUs - groups[number].durationUs) <= 1_000L
         }) { "Archive segment $number has incompatible source durations" }
-        inputs.forEachIndexed { i, input -> futures += lane.submit<ByteArray> {
+        inputs.forEachIndexed { i, input ->
+            val enqueuedNs = System.nanoTime()
+            futures += lane.submit<ByteArray> {
+            queueMs[i] = (System.nanoTime() - enqueuedNs) / 1_000_000L
             checkOpen()
             val segment = input.playlist.segments[groups[number].indexes[i]]
             require(!segment.hasGapTag && segment.fullSegmentEncryptionKeyUri == null) { "Unsupported HLS gap or full-segment encryption" }
@@ -788,8 +794,11 @@ internal class HevcArchiveVodSession(
                     } finally { alternate.fill(0) }
                 }
             }
+            val readStarted = System.nanoTime()
             val response = reader.read(UriUtil.resolveToUri(input.playlist.baseUri, segment.url), 8 * 1024 * 1024,
                 segment.byteRangeOffset, segment.byteRangeLength)
+            readMs[i] = (System.nanoTime() - readStarted) / 1_000_000L
+            readBytes[i] = response.bytes.size
             httpCoalescedBytes.addAndGet(response.coalescedCopyBytes)
             val bytes = response.bytes
             synchronized(retained) {
@@ -818,6 +827,12 @@ internal class HevcArchiveVodSession(
                 }
             }
             checkOpen()
+            // Future.get publishes each worker's scalar timings. No URLs or headers.
+            if (app.apexview.DiagnosticLogs.recording) android.util.Log.i("ApexviewSingleDecoder",
+                "ARCHIVE_VOD_FETCH_DETAIL segment=$number worker=${if (lane === prefetchFetchers) "PREFETCH" else "PLAYBACK"} " +
+                    "feedQueueMs=${queueMs.joinToString(",")} feedReadMs=${readMs.joinToString(",")} " +
+                    "feedBytes=${readBytes.joinToString(",")} feedOrder=SOURCE_INDEX " +
+                    "groupElapsedMs=${(System.nanoTime() - fetchStartedNs) / 1_000_000L}")
             return result
         } catch (error: Exception) {
             // Future.get clears the interrupt flag before throwing InterruptedException.

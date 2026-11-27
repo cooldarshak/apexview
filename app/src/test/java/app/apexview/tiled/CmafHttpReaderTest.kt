@@ -164,6 +164,22 @@ class CmafHttpReaderTest {
         borrowed.forEach { assertArrayEquals(ByteArray(it.size), it) }
     }
 
+    @Test fun explicitRangeWithUnknownOpenLengthAvoidsFullCoalescingAndChecksEof() {
+        val original = ByteArray(130_099) { (it * 13).toByte() }
+        val result = reader(original, C.LENGTH_UNSET.toLong()).read(uri, original.size,
+            offset = 16, length = original.size.toLong() - 16)
+        assertArrayEquals(original.copyOfRange(16, original.size), result.bytes)
+        assertEquals(0L, result.coalescedCopyBytes)
+        assertThrows(PermanentCaptureException::class.java) {
+            reader(original, C.LENGTH_UNSET.toLong()).read(uri, original.size + 1,
+                length = original.size.toLong() + 1)
+        }
+        assertThrows(PermanentCaptureException::class.java) {
+            reader(original, C.LENGTH_UNSET.toLong()).read(uri, original.size,
+                length = original.size.toLong() - 1)
+        }
+    }
+
     @Test fun explicitRangeMustMatchReturnedBytesInBothTransferModes() {
         val bytes = byteArrayOf(1, 2, 3, 4, 5, 6)
         assertThrows(PermanentCaptureException::class.java) {

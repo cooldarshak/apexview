@@ -40,5 +40,9 @@ class SceneGraphicsOwnersTest {
         owners.record(b, scene.copy(contexts = 0, windows = 0, decoderTextures = 0))
         assertTrue(owners.snapshot().isEmpty())
         assertTrue(owners.fields().contains("sceneGraphicsDetail=NONE"))
+        assertTrue(owners.fields().contains("scenePeakOwners=2"))
+        assertTrue(owners.fields().contains("scenePeakEglContexts=2"))
+        assertTrue(owners.fields().contains("scenePeakDecoderTextures=2"))
+        assertTrue(owners.fields().contains("scenePeakScope=PROCESS_LIFETIME"))
     }
 }

@@ -33,8 +33,11 @@ internal class CmafHttpReader(private val factory: DataSource.Factory) {
             // ByteArrayOutputStream growth + toByteArray full copy for every
             // large clear or CBCS CMAF segment. This buffer owns the response
             // until it passes to the authorized composition/cast consumer.
-            if (size >= 0L) {
-                val exact = ByteArray(size.toInt())
+            // A bounded DataSpec range remains exact even if open reports
+            // unknown size. Verify EOF as before, without coalescing chunks.
+            val expectedSize = if (size >= 0L) size else length
+            if (expectedSize >= 0L) {
+                val exact = ByteArray(expectedSize.toInt())
                 try {
                     var readAt = 0
                     while (readAt < exact.size) {
@@ -52,7 +55,7 @@ internal class CmafHttpReader(private val factory: DataSource.Factory) {
                     if (length != C.LENGTH_UNSET.toLong() && exact.size.toLong() != length) {
                         throw PermanentCaptureException("HLS byte-range response was truncated")
                     }
-                    if (verifyEnd) {
+                    if (verifyEnd || size < 0L) {
                         val probe = ByteArray(1)
                         try {
                             if (Thread.currentThread().isInterrupted)
