@@ -90,14 +90,27 @@ internal class BakedCastLiveSession(
 
     private val audioJob: Job = scope.launch(Dispatchers.IO) {
         try {
+            var consecutiveFailures = 0
             while (true) {
+                ensureActive()
                 val request = synchronized(this@BakedCastLiveSession) {
                     if (stopped) return@launch
                     audio?.let { it to (sourceStartMs * 1000 + pending.latestVideoUs.coerceAtLeast(0) + 5_000_000) }
                 }
                 if (request == null) { delay(50); continue }
                 // Fetch a short distance ahead of the captured picture, not the entire replay.
-                val samples = request.first.readUntil(request.second)
+                val samples = try {
+                    request.first.readUntil(request.second).also { consecutiveFailures = 0 }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    val backoff = BakedAudioRecovery.retryDelayMs(failure, consecutiveFailures)
+                        ?: throw failure
+                    consecutiveFailures++
+                    Log.w("PitwallCast", "BAKED_AUDIO_RETRY attempt=$consecutiveFailures delayMs=$backoff")
+                    delay(backoff)
+                    continue
+                }
                 synchronized(this@BakedCastLiveSession) {
                     if (stopped) {
                         samples.forEach { it.bytes.fill(0) }

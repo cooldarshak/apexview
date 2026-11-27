@@ -22,8 +22,7 @@ internal class BakedCastArchiveAudio(
 ) : AutoCloseable {
     private var init = ByteArray(0)
     private var initKey = ""
-    private var nextAudioUs = startPositionUs
-    private var lastLoadedSegmentStartUs = Long.MIN_VALUE
+    private val progress = BakedAudioReadProgress(startPositionUs)
     private var closed = false
     private var completedPlaylist: HlsMediaPlaylist? = null
     private var sampleBuffer: ByteBuffer? = null
@@ -49,10 +48,10 @@ internal class BakedCastArchiveAudio(
     fun readUntil(positionUs: Long): List<BakedCastTransportStream.Sample> {
         check(!closed)
         val media = completedPlaylist ?: readPlaylist(playlistUri).also { if (it.hasEndTag) completedPlaylist = it }
-        val output = mutableListOf<BakedCastTransportStream.Sample>()
+        return progress.transaction { output ->
         for (segment in media.segments) {
             val start = segment.relativeStartTimeUs
-            if (start <= lastLoadedSegmentStartUs || start + segment.durationUs <= nextAudioUs || start >= positionUs) continue
+            if (start <= progress.lastLoadedSegmentStartUs || start + segment.durationUs <= progress.nextAudioUs || start >= positionUs) continue
             require(segment.fullSegmentEncryptionKeyUri == null && segment.drmInitData == null) {
                 "Protected F1 commentary cannot be encoded into a clear Cast stream"
             }
@@ -78,11 +77,11 @@ internal class BakedCastArchiveAudio(
                 // Queue this whole CMAF fragment. Avoid downloading the same six-second
                 // fragment every time the live encoder asks for another few frames.
                 output += decodeSamples(init, bytes, start)
-                lastLoadedSegmentStartUs = start
+                progress.lastLoadedSegmentStartUs = start
             }
             finally { bytes.fill(0) }
         }
-        return output
+        }
     }
 
     private fun readPlaylist(uri: Uri): HlsMediaPlaylist {
@@ -128,7 +127,7 @@ internal class BakedCastArchiveAudio(
                 val timestamp = extractor.sampleTime
                 if (firstSampleTimeUs < 0L) firstSampleTimeUs = timestamp
                 val absoluteUs = segmentStartUs + (timestamp - firstSampleTimeUs)
-                if (absoluteUs >= nextAudioUs && absoluteUs >= startPositionUs) {
+                if (absoluteUs >= progress.nextAudioUs && absoluteUs >= startPositionUs) {
                     val packet = BakedAacAdts.wrap(buffer, size, rate, channels, requested && actualNative != false) { native ->
                         if (actualNative != native) {
                             actualNative = native
@@ -140,7 +139,10 @@ internal class BakedCastArchiveAudio(
                 }
                 if (!extractor.advance()) break
             }
-            samples.lastOrNull()?.let { nextAudioUs = it.ptsUs + startPositionUs + 1 }
+            samples.lastOrNull()?.let { progress.nextAudioUs = it.ptsUs + startPositionUs + 1 }
+        } catch (failure: Throwable) {
+            samples.forEach { it.bytes.fill(0) }
+            throw failure
         } finally { extractor.release() }
         return samples
     }
