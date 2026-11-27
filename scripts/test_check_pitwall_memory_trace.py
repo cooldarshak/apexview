@@ -17,9 +17,10 @@ def scalar(n, value):
     return encode(n << 3) + encode(value)
 
 
-def snapshot(pid, timestamp, error=b""):
+def snapshot(pid, timestamp, error=b"", index=0, continued=False, sequence=1):
     dump = scalar(1, pid) + scalar(9, timestamp) + field(2, scalar(1, 7)) + error
-    return field(1, field(37, field(5, dump)))
+    profile = field(5, dump) + scalar(7, index) + scalar(6, int(continued))
+    return field(1, scalar(10, sequence) + field(37, profile))
 
 
 class MemoryTraceTests(unittest.TestCase):
@@ -31,12 +32,30 @@ class MemoryTraceTests(unittest.TestCase):
         self.assertFalse(heap_quality_ok(inspect_heap_quality(io.BytesIO(bad), 42), 1))
 
     def test_strict_heap_counts_distinct_snapshots_not_packet_continuations(self):
-        first = snapshot(123, 100)
-        second = snapshot(123, 200)
-        quality = inspect_heap_quality(io.BytesIO(first + first + second), 123)
+        first = snapshot(123, 100, index=0, continued=True)
+        continuation = snapshot(123, 100, index=1)
+        second = snapshot(123, 200, index=2)
+        quality = inspect_heap_quality(io.BytesIO(first + continuation + second), 123)
         self.assertEqual(quality["snapshots"], 2)
         self.assertTrue(heap_quality_ok(quality, 2))
         self.assertFalse(heap_quality_ok(quality, 3))
+
+    def test_strict_heap_rejects_missing_profile_packet_and_unfinished_continuation(self):
+        first = snapshot(123, 100, index=0, continued=True)
+        skipped = snapshot(123, 200, index=2)
+        quality = inspect_heap_quality(io.BytesIO(first + skipped), 123)
+        self.assertEqual(quality["profile_index_gaps"], 1)
+        self.assertFalse(heap_quality_ok(quality, 2))
+        unfinished = inspect_heap_quality(io.BytesIO(first), 123)
+        self.assertEqual(unfinished["unfinished_profile_sequences"], 1)
+        self.assertFalse(heap_quality_ok(unfinished, 1))
+        unknown = inspect_heap_quality(io.BytesIO(snapshot(123, 100, sequence=0)), 123)
+        self.assertFalse(heap_quality_ok(unknown, 1))
+
+    def test_independent_profile_sequences_can_have_independent_indexes(self):
+        a = snapshot(123, 100, index=0, sequence=1)
+        b = snapshot(123, 200, index=0, sequence=2)
+        self.assertTrue(heap_quality_ok(inspect_heap_quality(io.BytesIO(a + b), 123), 2))
 
     def test_system_only_is_not_heap_evidence(self):
         counts = inspect(io.BytesIO(field(1, field(2, b"system"))))

@@ -200,11 +200,15 @@ internal class BoundedArchiveFragmentCache(
     @get:Synchronized var leasedBytes: Long = 0L
         private set
     val size: Int @Synchronized get() = entries.size
-    data class MemorySnapshot(val cached: Long, val pinned: Long, val retiredPinned: Long) {
+    private var deferredRetiredBytes = 0L
+    private var deferredRetiredEntries = 0L
+    data class MemorySnapshot(val cached: Long, val pinned: Long, val retiredPinned: Long,
+        val deferredRetiredBytes: Long = 0L, val deferredRetiredEntries: Long = 0L) {
         val unique: Long get() = Math.addExact(cached, retiredPinned)
     }
     @Synchronized fun memorySnapshot() = MemorySnapshot(bytesRetained, leasedBytes,
-        pinned.filterNot { it.cached }.sumOf { it.size.toLong() })
+        pinned.filterNot { it.cached }.sumOf { it.size.toLong() },
+        deferredRetiredBytes, deferredRetiredEntries)
     private fun recordMemory() {
         // Native fragment backing is already charged in the Rust arena.
         var owned = 0L
@@ -313,7 +317,10 @@ internal class BoundedArchiveFragmentCache(
                 while (iterator.hasNext()) {
                     if (iterator.next().value === entry) {
                         iterator.remove()
+                        val retiredBytes = entry.size.toLong()
                         retire(entry)
+                        deferredRetiredBytes += retiredBytes
+                        deferredRetiredEntries++
                         break
                     }
                 }

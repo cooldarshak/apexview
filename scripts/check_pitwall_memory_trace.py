@@ -66,17 +66,35 @@ def inspect_heap_quality(stream, expected_pid):
     """Inspect uncompressed heapprofd snapshots, not symbol or stack quality."""
     counts = collections.Counter()
     snapshots = set()
+    profile_indexes = {}
+    continued = {}
     for number, wire, packet in fields(stream):
         if number != 1 or wire != 2:
             continue
-        for field, kind, value in fields(io.BytesIO(packet)):
+        packet_fields = list(fields(io.BytesIO(packet)))
+        sequence = next((val for tag, typ, val in packet_fields
+                         if tag == 10 and typ == 0), 0)
+        for field, kind, value in packet_fields:
             if kind != 2:
                 continue
             if field == 50 and value:
                 counts["compressed_packets"] += 1
             if field != 37:
                 continue
-            for tag, typ, dump in fields(io.BytesIO(value)):
+            profile_fields = list(fields(io.BytesIO(value)))
+            # ProfilePacket index is per trusted_packet_sequence_id. A gap
+            # means allocation-site samples or their metadata may be lost.
+            index = next((val for tag, typ, val in profile_fields
+                          if tag == 7 and typ == 0), 0)
+            more = next((val for tag, typ, val in profile_fields
+                         if tag == 6 and typ == 0), 0)
+            if not sequence:
+                counts["missing_profile_sequence"] += 1
+            elif sequence in profile_indexes and index != profile_indexes[sequence] + 1:
+                counts["profile_index_gaps"] += 1
+            profile_indexes[sequence] = index
+            continued[sequence] = bool(more)
+            for tag, typ, dump in profile_fields:
                 if tag != 5 or typ != 2:
                     continue
                 scalar = {}
@@ -99,6 +117,7 @@ def inspect_heap_quality(stream, expected_pid):
                     if scalar.get(key, 0):
                         counts[name] += 1
     counts["snapshots"] = len(snapshots)
+    counts["unfinished_profile_sequences"] = sum(continued.values())
     return counts
 
 
@@ -106,7 +125,9 @@ def heap_quality_ok(counts, minimum_snapshots):
     return (counts["snapshots"] >= minimum_snapshots and counts["samples"] > 0
             and not any(counts[k] for k in ("compressed_packets",
                 "rejected_concurrent", "disconnected", "buffer_overrun",
-                "buffer_corrupted", "guardrail", "client_error")))
+                "buffer_corrupted", "guardrail", "client_error",
+                "missing_profile_sequence", "profile_index_gaps",
+                "unfinished_profile_sequences")))
 
 
 def main():

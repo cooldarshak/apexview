@@ -725,7 +725,8 @@ internal class HevcArchiveVodSession(
                     "worker=$worker actualStitcher=${if (produced.nativeEpoch != null) "RUST" else "JVM"} " +
                     "requestedRust=${nativeClear.requested} stitcherReason=${nativeClear.decision.reason} " +
                     "clock=PLAYER_REQUEST cache=$cacheEntries cachedBytes=$cachedByteCount " +
-                    "cacheUniqueBytes=${memory.unique} cachePinnedBytes=${memory.pinned} cacheRetiredPinnedBytes=${memory.retiredPinned}")
+                    "cacheUniqueBytes=${memory.unique} cachePinnedBytes=${memory.pinned} cacheRetiredPinnedBytes=${memory.retiredPinned} " +
+                    "cacheDeferredRetiredBytesTotal=${memory.deferredRetiredBytes} cacheDeferredRetiredEntriesTotal=${memory.deferredRetiredEntries}")
             } finally {
                 if (!publishedInitialization) composed.initializationSegment.fill(0)
                 composed.mediaFragments.forEach { if (it !== publishedFragment) it.fill(0) }
