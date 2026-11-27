@@ -58,6 +58,23 @@ class ProcessMemoryDiagnosticTest {
         v[27]=-1
         assertEquals("nativeFragmentArena=UNAVAILABLE",ProcessMemoryDiagnostic.fragmentFields(v))
     }
+    @Test fun nativeGrowthOutcomesAndBypassesMustReconcileWithObservedMisses() {
+        val v=longArrayOf(100,80,70,2,0,6,4,7,400,32,20,1,8,3,0,4,2,1,3,2,120,8,1,4,0,4,0,3)
+        assertTrue(ProcessMemoryDiagnostic.fragmentFields(v).contains("nativeAtlasResizeBypassed=3"))
+        v[27]=5
+        assertEquals("nativeFragmentArena=UNAVAILABLE",ProcessMemoryDiagnostic.fragmentFields(v))
+        v[27]=3
+        v[25]=5
+        assertEquals("nativeFragmentArena=UNAVAILABLE",ProcessMemoryDiagnostic.fragmentFields(v))
+        v[25]=3
+        assertEquals("nativeFragmentArena=UNAVAILABLE",ProcessMemoryDiagnostic.fragmentFields(v))
+        v[26]=1
+        assertTrue(ProcessMemoryDiagnostic.fragmentFields(v).contains("nativeAtlasResizeFailed=1"))
+        val previous=v.copyOf(27)
+        assertTrue(ProcessMemoryDiagnostic.fragmentFields(previous).contains("nativeAtlasResizeMoved=3"))
+        previous[23]=Long.MAX_VALUE
+        assertEquals("nativeFragmentArena=UNAVAILABLE",ProcessMemoryDiagnostic.fragmentFields(previous))
+    }
     @Test fun partialWorkspaceIsNotConfusedWithReservationOrUnobservedZero() {
         val boundary = longArrayOf(1, 100, 40, 0, 2, 60, 15, 25, 90, 0, 17, 1)
         val measured = ProcessMemoryDiagnostic.engineFields(boundary)

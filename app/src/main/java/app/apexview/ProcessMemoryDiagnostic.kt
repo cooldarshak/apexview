@@ -69,7 +69,14 @@ internal object ProcessMemoryDiagnostic {
         if (values == null || (values.size !in setOf(5,9,15,21,27,28)) || values.any { it < 0L } ||
             values[2] > values[1] || values[1] > values[0] ||
             (values.size >= 15 && (values[10] > values[9] || values[10] > values[0] - values[1])) ||
-            (values.size >= 21 && (values[15] < values[6] || values[20] < values[0]))) return "nativeFragmentArena=UNAVAILABLE"
+            (values.size >= 21 && (values[15] < values[6] || values[20] < values[0])) ||
+            // One outcome per attempt and one distinct bypass per too-small
+            // observation; validate using subtraction to avoid Long overflow.
+            (values.size >= 27 && (values[23] > values[21] || values[24] > values[23] ||
+                values[25] > values[23] - values[24] ||
+                values[26] != values[23] - values[24] - values[25])) ||
+            (values.size == 28 && values[27] > values[21] - values[23]))
+            return "nativeFragmentArena=UNAVAILABLE"
         return "nativeFragmentCapacityBytes=${values[0]} nativeFragmentLiveCapacityBytes=${values[1]} " +
             "nativeFragmentLivePayloadBytes=${values[2]} nativeFragmentFreeCapacityBytes=${values[0] - values[1]} " +
             "nativeFragmentBackings=${values[3]} nativeFragmentAllocations=${values[4]}" +
