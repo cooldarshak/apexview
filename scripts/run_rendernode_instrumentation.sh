@@ -10,6 +10,16 @@ test -s "$apk"
 test -s "$tests"
 adb wait-for-device
 
+# Collect independent test failures, but keep installation/boot prerequisites fatal.
+# Every gate is mandatory; no failed assertion is converted to a passing build.
+failed_gates=()
+finish_gates() {
+  if (( ${#failed_gates[@]} > 0 )); then
+    printf 'Mandatory instrumentation failed: %s\n' "${failed_gates[@]}" >&2
+    return 1
+  fi
+}
+
 # sys.boot_completed can become 1 before system_server's activity/package
 # binders have stabilized. The Build 686 runner hit DeadObjectException
 # immediately after an otherwise successful emulator boot. Require
@@ -76,8 +86,7 @@ run_tls_gate() {
     app.apexview.cast.local.PitwallTlsAndroidTest \
     'OK (2 tests)' "$tls_report"; then
     adb logcat -d -s PitwallTls:I '*:S' >> "$tls_report" || true
-    cat "$tls_report" >> "$report"
-    return 1
+    failed_gates+=("PitwallTlsAndroidTest")
   fi
   cat "$tls_report" >> "$report"
 }
@@ -91,8 +100,7 @@ run_g0_gate() {
     app.apexview.tiled.ArchitectureG0AndroidTest \
     'OK (4 tests)' "$g0_report"; then
     adb logcat -d -s PitwallG0:I '*:S' >> "$g0_report" || true
-    cat "$g0_report"
-    return 1
+    failed_gates+=("ArchitectureG0AndroidTest")
   fi
   adb logcat -d -s PitwallG0:I '*:S' >> "$g0_report"
   cat "$g0_report"
@@ -102,8 +110,7 @@ run_g0_gate() {
     app.apexview.tiled.ArchitectureGAAndroidTest \
     'OK (2 tests)' "$ga_report"; then
     adb logcat -d -s PitwallGA:I '*:S' >> "$ga_report" || true
-    cat "$ga_report"
-    return 1
+    failed_gates+=("ArchitectureGAAndroidTest")
   fi
   adb logcat -d -s PitwallGA:I '*:S' >> "$ga_report"
   cat "$ga_report" >> "$report"
@@ -113,8 +120,7 @@ run_g0_gate() {
     app.apexview.tiled.ArchitectureGBAndroidTest \
     'OK (15 tests)' "$gb_report"; then
     adb logcat -d -s PitwallGB:I '*:S' >> "$gb_report" || true
-    cat "$gb_report"
-    return 1
+    failed_gates+=("ArchitectureGBAndroidTest")
   fi
   adb logcat -d -s PitwallGB:I '*:S' >> "$gb_report"
   cat "$gb_report" >> "$report"
@@ -138,17 +144,18 @@ fi
 
 if [[ "${1:-}" == "tls-only" ]]; then
   run_tls_gate
+  finish_gates
   exit 0
 fi
 
 run_required_instrumentation \
   app.apexview.OverlayRetainedRenderNodeAndroidTest \
-  'OK (2 tests)' "$report"
+  'OK (2 tests)' "$report" || failed_gates+=("OverlayRetainedRenderNodeAndroidTest")
 
 surface_report="${RUNNER_TEMP:?}/pitwall-surface-scene-instrumentation.txt"
 run_required_instrumentation \
   app.apexview.scene.SurfaceDecoderSceneInstrumentationTest \
-  'OK (1 test)' "$surface_report"
+  'OK (1 test)' "$surface_report" || failed_gates+=("SurfaceDecoderSceneInstrumentationTest")
 cat "$surface_report" >> "$report"
 
 # The clear TextureView is the production default and must be tested with the
@@ -157,7 +164,7 @@ cat "$surface_report" >> "$report"
 texture_report="${RUNNER_TEMP:?}/pitwall-texture-scene-instrumentation.txt"
 run_required_instrumentation \
   app.apexview.scene.SingleDecoderSceneInstrumentationTest \
-  'OK (1 test)' "$texture_report"
+  'OK (1 test)' "$texture_report" || failed_gates+=("SingleDecoderSceneInstrumentationTest")
 cat "$texture_report" >> "$report"
 
 # Real clear shared-texture pixel check. An assumption skip on unsupported
@@ -165,13 +172,13 @@ cat "$texture_report" >> "$report"
 async_report="${RUNNER_TEMP:?}/pitwall-async-latch-instrumentation.txt"
 run_required_instrumentation \
   app.apexview.scene.SceneAsyncTextureLatchAndroidTest \
-  'OK (1 test)' "$async_report"
+  'OK (1 test)' "$async_report" || failed_gates+=("SceneAsyncTextureLatchAndroidTest")
 cat "$async_report" >> "$report"
 
 cast_report="${RUNNER_TEMP:?}/pitwall-baked-cast-instrumentation.txt"
 run_required_instrumentation \
   app.apexview.scene.BakedCastCaptureAndroidTest \
-  'OK (1 test)' "$cast_report"
+  'OK (1 test)' "$cast_report" || failed_gates+=("BakedCastCaptureAndroidTest")
 cat "$cast_report" >> "$report"
 
 # Independent Android-runtime coverage for archive delivery and memory ownership.
@@ -179,7 +186,8 @@ cat "$cast_report" >> "$report"
 delivery_report="${RUNNER_TEMP:?}/pitwall-archive-delivery-instrumentation.txt"
 run_required_instrumentation \
   app.apexview.tiled.ArchiveSegmentDeliveryAndroidTest \
-  'OK (2 tests)' "$delivery_report"
+  'OK (2 tests)' "$delivery_report" || failed_gates+=("ArchiveSegmentDeliveryAndroidTest")
 cat "$delivery_report" >> "$report"
 
 run_tls_gate
+finish_gates

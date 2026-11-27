@@ -9,6 +9,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotEquals
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.io.InterruptedIOException
