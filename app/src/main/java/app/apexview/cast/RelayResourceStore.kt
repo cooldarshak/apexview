@@ -143,14 +143,24 @@ internal class RelayResourceStore(
         releaseStep("accounting") { recordMemory() }
     }
 
-    @Synchronized fun acquire(name: String): Lease? {
-        val entry = current[name] ?: return null
+    sealed interface Acquisition {
+        data object Missing : Acquisition
+        data object Busy : Acquisition
+        class Available(val lease: Lease) : Acquisition
+    }
+
+    fun acquire(name: String): Lease? = (tryAcquire(name) as? Acquisition.Available)?.lease
+
+    /** Distinguish a retired/missing segment from temporary reader admission.
+     * The HTTP caller must not present capacity pressure as permanent absence. */
+    @Synchronized fun tryAcquire(name: String): Acquisition {
+        val entry = current[name] ?: return Acquisition.Missing
         if (readers >= maxReaders || (entry.readers == 0 && entry.size.toLong() > maxBytes - pinnedBytes))
-            return null
+            return Acquisition.Busy
         if (entry.readers++ == 0) { pinned.add(entry); pinnedBytes += entry.size }
         readers++
         recordMemory()
-        return Lease(entry.heap, {
+        return Acquisition.Available(Lease(entry.heap, {
             synchronized(this) {
                 check(entry.readers > 0 && readers > 0)
                 readers--
@@ -161,7 +171,7 @@ internal class RelayResourceStore(
                 }
                 recordMemory()
             }
-        }, entry.native)
+        }, entry.native))
     }
 
     private fun releaseStep(owner: String, action: () -> Unit) {

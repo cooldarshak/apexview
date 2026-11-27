@@ -87,13 +87,26 @@ internal class ComposedCmafRelay(address: String, private val peer: InetAddress?
             output.write("HTTP/1.1 204 No Content\r\n${cors}Content-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
             return
         }
-        val body = if (request[0] in setOf("GET", "HEAD") && name.matches(Regex("[a-zA-Z0-9.-]{1,80}")))
-            resources.acquire(name) else null
-        if (body == null) { output.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray()); return }
+        val acquisition = if (request[0] in setOf("GET", "HEAD") && name.matches(Regex("[a-zA-Z0-9.-]{1,80}")))
+            resources.tryAcquire(name) else RelayResourceStore.Acquisition.Missing
+        val body = when (acquisition) {
+            is RelayResourceStore.Acquisition.Available -> acquisition.lease
+            RelayResourceStore.Acquisition.Busy -> {
+                android.util.Log.w("PitwallCast", "CAST_RELAY_BUSY id=$relayId route=${if (liveHls) "BAKED" else "COMPOSED"}")
+                output.write("HTTP/1.1 503 Service Unavailable\r\n${cors}Retry-After: 1\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
+                return
+            }
+            RelayResourceStore.Acquisition.Missing -> {
+                if (liveHls && name.matches(Regex("view-[0-9]+\\.ts")))
+                    android.util.Log.w("PitwallCast", "CAST_RELAY_SEGMENT_MISSING id=$relayId sequence=${name.removePrefix("view-").removeSuffix(".ts")}")
+                output.write("HTTP/1.1 404 Not Found\r\n${cors}Cache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
+                return
+            }
+        }
         try {
             val selected = RelayHttpRange.parse(range, body.size)
             if (selected == null) {
-                output.write("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */${body.size}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
+                output.write("HTTP/1.1 416 Range Not Satisfiable\r\n${cors}Cache-Control: no-store\r\nContent-Range: bytes */${body.size}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
                 return
             }
             val start = selected.start

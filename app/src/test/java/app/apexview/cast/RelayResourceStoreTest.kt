@@ -46,6 +46,19 @@ class RelayResourceStoreTest {
         assertArrayEquals(ByteArray(8), old)
         assertEquals(0L, store.snapshot().pinnedBytes)
     }
+    @Test fun temporaryAdmissionIsNotAFalseMissingSegment() {
+        RelayResourceStore(8, 2, 1).use { store ->
+            store.publish(mapOf("a" to byteArrayOf(1), "b" to byteArrayOf(2)))
+            val a = store.tryAcquire("a") as RelayResourceStore.Acquisition.Available
+            assertSame(RelayResourceStore.Acquisition.Busy, store.tryAcquire("b"))
+            assertSame(RelayResourceStore.Acquisition.Missing, store.tryAcquire("missing"))
+            a.lease.close()
+            val b = store.tryAcquire("b") as RelayResourceStore.Acquisition.Available
+            b.lease.close()
+            store.publish(mapOf("c" to byteArrayOf(3)))
+            assertSame(RelayResourceStore.Acquisition.Missing, store.tryAcquire("b"))
+        }
+    }
     @Test fun malformedAndOverflowingRangesFailClosed() {
         assertEquals(RelayHttpRange(0, 99), RelayHttpRange.parse(null, 100))
         assertEquals(RelayHttpRange(5, 99), RelayHttpRange.parse("bytes=5-", 100))
