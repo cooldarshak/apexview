@@ -3,7 +3,6 @@ package app.apexview.scene
 import android.content.Context
 import android.graphics.Rect
 import android.opengl.EGL14
-import android.opengl.EGLConfig
 import android.opengl.EGLContext
 import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
@@ -85,8 +84,6 @@ internal class BakedCastCaptureWorker(
         val acquired = SceneEglDisplays.acquire()
         displayLease = acquired
         display = acquired.display
-        val configs = arrayOfNulls<EGLConfig>(1)
-        val count = IntArray(1)
         val attrs = intArrayOf(
             EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
             EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
@@ -97,9 +94,9 @@ internal class BakedCastCaptureWorker(
             0x3142, 1, // EGL_RECORDABLE_ANDROID for the MediaCodec input Surface.
             EGL14.EGL_NONE,
         )
-        check(EGL14.eglChooseConfig(display, attrs, 0, configs, 0, 1, count, 0)
-            && count[0] > 0) { "No encoder-compatible EGL config" }
-        val config = checkNotNull(configs[0])
+        val config = checkNotNull(SceneColorOnlyEgl.choose(display, attrs, "baked-encoder")) {
+            "No encoder-compatible EGL config"
+        }
         contextGl = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT,
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
         check(contextGl != EGL14.EGL_NO_CONTEXT) { "Cannot create Cast EGL context" }

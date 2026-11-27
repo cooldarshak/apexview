@@ -180,6 +180,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var contextGl: EGLContext = EGL14.EGL_NO_CONTEXT
     private var window: EGLSurface = EGL14.EGL_NO_SURFACE
     private var outputSurface: Surface? = null
+    private var localOutputTexture: SurfaceTexture? = null
+    private var localBufferRequest: LocalPreviewBufferPolicy.Size? = null
+    private var localBufferObserved: LocalPreviewBufferPolicy.Size? = null
+    private var localBufferQueries = 0
     private var hintedFrameRate = -1f
     private var config: EGLConfig? = null
     @Volatile private var clip: ReplayClipEncoder? = null
@@ -571,7 +575,11 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
         outputWidth = width; outputHeight = height
         onOutputSize(width, height)
-        gl.post { guarded { recordGraphicsOwner(); scheduleDisplayFrame() } }
+        gl.post { guarded {
+            localBufferRequest = null; localBufferObserved = null
+            senderBlankSubmitted = false
+            recordGraphicsOwner(); scheduleDisplayFrame()
+        } }
     }
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
@@ -626,6 +634,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         config = selected
         contextGl = EGL14.eglCreateContext(display, selected, EGL14.EGL_NO_CONTEXT,
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
+        localOutputTexture = output
         val displaySurface = Surface(output)
         outputSurface = displaySurface
         window = EGL14.eglCreateWindowSurface(display, selected, displaySurface, intArrayOf(EGL14.EGL_NONE), 0)
@@ -719,6 +728,42 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         post { attachDecoderInput(surface, lifetime) }
     }
 
+    // The opaque controller surface is already black during baked Cast.
+    // Change only its default allocation size, not the decoder or encoder.
+    private fun requestLocalBuffer(producerOnly: Boolean) {
+        val target = LocalPreviewBufferPolicy.size(outputWidth, outputHeight, producerOnly) ?: return
+        if (localBufferRequest == target) return
+        val owner = localOutputTexture ?: return
+        try {
+            owner.setDefaultBufferSize(target.width, target.height)
+            localBufferRequest = target
+            localBufferObserved = null
+            localBufferQueries = 4
+        } catch (error: RuntimeException) {
+            Log.w("ApexviewSingleDecoder", "LOCAL_PREVIEW_BUFFER_REQUEST_FAILED producerOnly=$producerOnly", error)
+            // Do not turn an optional graphics optimization into a playback failure.
+            localBufferQueries = 0
+        }
+    }
+
+    private fun observeLocalBuffer() {
+        if (localBufferQueries <= 0) return
+        localBufferQueries--
+        val value = IntArray(1)
+        if (!EGL14.eglQuerySurface(display, window, EGL14.EGL_WIDTH, value, 0)) { EGL14.eglGetError(); return }
+        val width = value[0]
+        if (!EGL14.eglQuerySurface(display, window, EGL14.EGL_HEIGHT, value, 0)) { EGL14.eglGetError(); return }
+        val height = value[0]
+        if (width <= 0 || height <= 0) return
+        val observed = LocalPreviewBufferPolicy.Size(width, height)
+        if (observed != localBufferObserved) {
+            localBufferObserved = observed
+            Log.i("ApexviewSingleDecoder", "LOCAL_PREVIEW_BUFFER owner=$graphicsOwnerId requested=$localBufferRequest observed=$observed producerOnly=${suppressLocalPreview()} vendorBytes=NOT_MEASURED")
+            recordGraphicsOwner()
+        }
+        if (observed == localBufferRequest) localBufferQueries = 0
+    }
+
     private data class DrawTiming(val glDrawNs: Long, val swapNs: Long)
 
     private fun draw(): DrawTiming? {
@@ -726,17 +771,19 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         if (!outputReadiness.matches(surfaceEpoch)) return null
         val model = scene ?: return null
         if (window == EGL14.EGL_NO_SURFACE || !EGL14.eglMakeCurrent(display, window, window, contextGl)) return null
+        val producerOnly = suppressLocalPreview()
+        requestLocalBuffer(producerOnly)
         val drawStarted = System.nanoTime()
         Trace.beginSection("PitwallGlDraw")
         GLES20.glViewport(0, 0, outputWidth, outputHeight)
         GLES20.glClearColor(0f, 0f, 0f, 1f); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        val producerOnly = suppressLocalPreview()
         try { if (hasFrame && !producerOnly) drawVideo(model) } finally { Trace.endSection() }
         val swapStarted = System.nanoTime()
         Trace.beginSection("PitwallEglSwap")
         try { check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" } }
         finally { Trace.endSection() }
         val swapCompleted = System.nanoTime()
+        observeLocalBuffer()
         if (producerOnly) {
             if (!senderBlankSubmitted) Log.i("PitwallCast", "CAST_LOCAL_PREVIEW_BLANKED owner=$graphicsOwnerId localVideoSubmitted=false")
             senderBlankSubmitted = true
@@ -848,7 +895,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             if (contextGl != EGL14.EGL_NO_CONTEXT) 1 else 0,
             (if (window != EGL14.EGL_NO_SURFACE) 1 else 0) + (if (castVideoSurface != EGL14.EGL_NO_SURFACE) 1 else 0),
             if (decoderTexture != null) 1 else 0,
-            graphicsAtlasWidth, graphicsAtlasHeight, outputWidth.coerceAtLeast(0), outputHeight.coerceAtLeast(0)))
+            graphicsAtlasWidth, graphicsAtlasHeight, outputWidth.coerceAtLeast(0), outputHeight.coerceAtLeast(0),
+            localBufferWidth = localBufferObserved?.width ?: 0, localBufferHeight = localBufferObserved?.height ?: 0))
     }
 
     private fun guarded(lifetime: Long = surfaceLifetime.generation(), action: () -> Unit) {
@@ -934,6 +982,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
         val oldOutput = outputSurface
         outputSurface = null
+        localOutputTexture = null; localBufferRequest = null; localBufferObserved = null; localBufferQueries = 0
         steps.run("output-surface") { oldOutput?.release() }
         hintedFrameRate = -1f
         display = EGL14.EGL_NO_DISPLAY; contextGl = EGL14.EGL_NO_CONTEXT; window = EGL14.EGL_NO_SURFACE

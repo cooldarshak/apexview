@@ -388,7 +388,7 @@ class AppState(
                     remote.isPlaying || remote.isPaused, usesLayoutCastReceiver, castSceneConfirmed) && !googleHasPlayed) {
                 googleHasPlayed = true
                 googleLoadWatchdog?.cancel(); googleLoadWatchdog = null
-                handOffCastPlayback()
+                handOffCastPlayback(remote.approximateStreamPosition, remote.streamDuration)
                 if (!usesLayoutCastReceiver) castSceneConfirmed = true
             }
             if (!castPlaybackHandedOff) return
@@ -799,13 +799,17 @@ class AppState(
         castStatus = "Waiting for the TV's first rendered frame…"; message = castStatus
         startCastSceneUpdates(relay)
     }
-    private fun handOffCastPlayback() {
+    private fun handOffCastPlayback(googlePositionMs: Long? = null, googleDurationMs: Long? = null) {
         if (!castPlaybackHandedOff) castSourceWallClockBaseMs = leaderTile()?.feed?.let { feed ->
             feed.wallClockMs()?.minus(feed.player.currentPosition)
         }
         castResources.confirmRendering()
         if (castPlaybackHandedOff || !castingActive) return
-        if (!localChosen) remoteCastClock.update(castFramePositionMs, playing, playbackSpeed, castRelay!!.session.durationUs / 1000)
+        if (!localChosen) {
+            val clock = app.apexview.cast.CastRecoveryPolicy.handoffClock(googlePositionMs, googleDurationMs,
+                castFramePositionMs, castRelay?.session?.durationUs?.div(1000) ?: durationMs)
+            remoteCastClock.update(clock.first, playing, playbackSpeed, clock.second)
+        }
         cancelQualityRestart()
         castPlaybackHandedOff = true
         ProtectedHevcLiveComposition.updateLocalNativeHeaderPreference(false)
@@ -827,6 +831,7 @@ class AppState(
             it.feed.suspendForRemotePlayback(false)
             val localTarget = app.apexview.cast.local.ReceiverTimeline.restorePosition(remoteWallClockBaseMs, target, it.feed.windowStartMs())
             it.feed.player.seekTo(localTarget)
+            it.feed.prepareAfterRemoteHandback()
             it.feed.player.playWhenReady = playing && (!singleDecoderSceneActive || it === protectedCompositionHost)
         }
         applyVideoBudget()

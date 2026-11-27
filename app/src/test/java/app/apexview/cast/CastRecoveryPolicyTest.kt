@@ -3,6 +3,21 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CastRecoveryPolicyTest {
+    @Test fun confirmedGoogleHandoffUsesReceiverClockWithoutRequiringRelay() {
+        assertEquals(12000L to 90000L, CastRecoveryPolicy.handoffClock(12000, 90000, 10000, 80000))
+        assertEquals(12000L to 80000L, CastRecoveryPolicy.handoffClock(12000, -1, 10000, 80000))
+        assertEquals(10000L to 80000L, CastRecoveryPolicy.handoffClock(null, null, 10000, 80000))
+    }
+    @Test fun onlyConfirmedSeekableReplaySenderMayRetireMediaPeriods() {
+        assertTrue(CastRecoveryPolicy.retireReplayQueues(true, false, 1, false, false, false, true))
+        assertFalse(CastRecoveryPolicy.retireReplayQueues(false, false, 1, false, false, false, true))
+        assertFalse(CastRecoveryPolicy.retireReplayQueues(true, true, 1, false, false, false, true))
+        assertFalse(CastRecoveryPolicy.retireReplayQueues(true, false, 1, true, false, false, true))
+        assertFalse(CastRecoveryPolicy.retireReplayQueues(true, false, 1, false, true, false, true))
+        assertFalse(CastRecoveryPolicy.retireReplayQueues(true, false, 1, false, false, true, true))
+        assertFalse(CastRecoveryPolicy.retireReplayQueues(true, false, 1, false, false, false, false))
+    }
+
     @Test fun bakedLiveUsesDefaultWindowPositionWhileArchiveRetainsExplicitSeek() {
         assertNull(CastRecoveryPolicy.receiverStartPosition(true, 0L, 0L))
         assertNull(CastRecoveryPolicy.receiverStartPosition(true, 60000L, 1000L))

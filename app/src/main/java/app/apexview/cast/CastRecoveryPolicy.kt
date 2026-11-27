@@ -2,6 +2,15 @@ package app.apexview.cast
 
 /** Pure retry and handoff predicates. Never authenticate from network identity. */
 internal object CastRecoveryPolicy {
+    /** Use the confirmed receiver clock, without a route-specific assertion. */
+    fun handoffClock(positionMs: Long?, durationMs: Long?, fallbackPositionMs: Long, fallbackDurationMs: Long): Pair<Long, Long> =
+        (positionMs?.takeIf { it >= 0 } ?: fallbackPositionMs.coerceAtLeast(0)) to
+            (durationMs?.takeIf { it > 0 } ?: fallbackDurationMs)
+
+    fun retireReplayQueues(remote: Boolean, parked: Boolean, items: Int, idle: Boolean,
+                           emptyTimeline: Boolean, live: Boolean, seekable: Boolean): Boolean =
+        remote && !parked && items > 0 && !idle && !emptyTimeline && !live && seekable
+
     /** null means use the player's default live-window start, not archive zero. */
     fun receiverStartPosition(baked: Boolean, requestedMs: Long, originMs: Long): Long? =
         if (baked) null else (requestedMs - originMs).coerceAtLeast(0L)

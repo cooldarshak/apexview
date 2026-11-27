@@ -200,6 +200,7 @@ class FeedPlayer(
     internal var composedSurfaceHeight: Int = 0
         private set
     private var remotePlaybackSuspended = false
+    private var remoteReplayStopped = false
     // Constructor language must survive subsequent in-player CC toggles.
     private val captionCommentaryLanguage = commentary
     private var captionsSelected = subtitles
@@ -235,7 +236,10 @@ class FeedPlayer(
     /** A remote renderer owns playback. Disable tracks as well as pausing to release codec slots. */
     internal fun suspendForRemotePlayback(suspended: Boolean) {
         if (remotePlaybackSuspended == suspended) {
-            if (suspended) player.playWhenReady = false
+            if (suspended) {
+                player.playWhenReady = false
+                retireRemoteReplayQueues()
+            }
             return
         }
         remotePlaybackSuspended = suspended
@@ -249,6 +253,7 @@ class FeedPlayer(
                 .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
             player.volume = 0f
+            retireRemoteReplayQueues()
         } else {
             videoOn = false // The visibility budget must explicitly re-enable the actual video track.
             if (archiveVodSession != null) applyArchiveCaptionTrack(player.currentTracks)
@@ -256,6 +261,27 @@ class FeedPlayer(
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, remoteTextWasDisabled).build()
         }
         // AppState restores visibility/audio under the existing single/multiple decoder budget.
+    }
+    /** Confirmed independent receiver owns playback. Release only seekable
+     * replay periods; retain source/playlist and restore position before
+     * preparation. Live windows must remain available for clock mapping. */
+    private fun retireRemoteReplayQueues() {
+        if (!app.apexview.cast.CastRecoveryPolicy.retireReplayQueues(remotePlaybackSuspended,
+                parkedForArchive, player.mediaItemCount, player.playbackState == Player.STATE_IDLE,
+                player.currentTimeline.isEmpty, player.isCurrentMediaItemLive, player.isCurrentMediaItemSeekable)) return
+        remoteReplayStopped = true
+        player.stop()
+        memoryLoads.clearPending()
+        Media3MemoryOwners.trimFreeBlocks(playbackAllocator, 0)
+        updateMemoryOwner()
+        playbackEvent("remote-replay-period-retired", "allocatorBytes=${playbackAllocator.totalBytesAllocated}")
+    }
+
+    internal fun prepareAfterRemoteHandback() {
+        if (!remoteReplayStopped) return
+        remoteReplayStopped = false
+        if (!remotePlaybackSuspended && !parkedForArchive && player.mediaItemCount > 0 &&
+            player.playbackState == Player.STATE_IDLE) player.prepare()
     }
     private var videoSuppressedByProtectedComposition = false
 

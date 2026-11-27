@@ -4,6 +4,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SceneGraphicsOwnersTest {
+    @Test fun controllerBufferDoesNotChangeAtlasOrVisibleOutputGeometry() {
+        assertEquals(LocalPreviewBufferPolicy.Size(16, 16), LocalPreviewBufferPolicy.size(2316, 1080, true))
+        assertEquals(LocalPreviewBufferPolicy.Size(2316, 1080), LocalPreviewBufferPolicy.size(2316, 1080, false))
+        assertNull(LocalPreviewBufferPolicy.size(0, 1080, false))
+        val owners = SceneGraphicsOwners()
+        val id = owners.newId()
+        val state = SceneGraphicsOwners.Owner("TextureView", 1, 1, 1, 1, 1, 3840, 1088, 2316, 1080,
+            localBufferWidth = 16, localBufferHeight = 16)
+        owners.record(id, state)
+        assertTrue(owners.fields().contains("sceneObservedLocalBufferPixels=256"))
+        assertTrue(owners.fields().contains("sceneOutputPixels=2501280"))
+        assertTrue(owners.fields().contains("sceneGraphicsBytes=NOT_MEASURED"))
+        owners.record(id, state.copy(localBufferWidth = 2316, localBufferHeight = 1080))
+        assertTrue(owners.fields().contains("sceneObservedLocalBufferPixels=2501280"))
+    }
+
     @Test fun lifetimeEventsReportOnlyTransitionsAndReleaseExactlyOnce() {
         val events = mutableListOf<Triple<Long, SceneGraphicsOwners.Owner?, SceneGraphicsOwners.Owner?>>()
         val owners = SceneGraphicsOwners { id, before, after -> events.add(Triple(id, before, after)) }

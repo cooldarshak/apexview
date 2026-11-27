@@ -112,6 +112,7 @@ internal class ReplayClipEncoder(
             }
             egl = EGL14.eglCreateWindowSurface(display, config, input, intArrayOf(EGL14.EGL_NONE), 0)
             check(egl != EGL14.EGL_NO_SURFACE) { "Could not create the encoder surface" }
+            SceneColorOnlyEgl.discardAfterSwap(display, egl, "encoder-output")
             recordGraphicsOwner()
         } catch (error: Exception) {
             close()
