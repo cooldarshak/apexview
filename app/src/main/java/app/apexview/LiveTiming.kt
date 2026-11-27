@@ -1404,7 +1404,12 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                                 if (towerPreviewPending.compareAndSet(false, true)) {
                                                     publishedFrom = from
                                                     publishedThrough = until
-                                                    val snapshot = DriverTimingParse(laps, accumulator.finishWindow(from, until))
+                                                    val state = accumulator.finishWindow(from, until)
+                                                    val snapshot = if (nativeRequested()) {
+                                                        val pool = SpeedTimestampPool(true)
+                                                        DriverTimingParse(laps.mapValues { it.value.compact(pool) },
+                                                            StateParse(state.states.mapValues { it.value.compact(pool) }, state.crossings))
+                                                    } else DriverTimingParse(laps, state)
                                                     launch(Dispatchers.Main) {
                                                         try {
                                                             val current = targetUtc(initialStart)

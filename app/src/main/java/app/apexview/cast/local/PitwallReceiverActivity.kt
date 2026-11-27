@@ -707,8 +707,18 @@ class PitwallReceiverActivity : ComponentActivity() {
             }.build()
         val receiverAllocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
         val sourceAllocations = app.apexview.Media3SourceAllocationLedger()
+        val baked = !direct && custom?.optBoolean("pitwallBaked") == true
+        val mediaFactory: androidx.media3.exoplayer.source.MediaSource.Factory = if (baked) {
+            // MediaCodec AVC is not guaranteed to carry AUD NALs. The Media3
+            // default HLS extractor does not detect access-unit boundaries.
+            // Scope the change to authenticated clear baked AVC/AAC only.
+            Log.i("PitwallReceiver", "BAKED_HLS_EXTRACTOR detectAccessUnits=true")
+            androidx.media3.exoplayer.hls.HlsMediaSource.Factory(data).setExtractorFactory(
+                androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory(
+                    androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS, true))
+        } else DefaultMediaSourceFactory(data).apply { widevine?.sessions?.let { key -> setDrmSessionManagerProvider { key } } }
         val next = ExoPlayer.Builder(this, renderers).setTrackSelector(selector)
-            .setMediaSourceFactory(sourceAllocations.factory(DefaultMediaSourceFactory(data).apply { widevine?.sessions?.let { key -> setDrmSessionManagerProvider { key } } },
+            .setMediaSourceFactory(sourceAllocations.factory(mediaFactory,
                 app.apexview.Media3SourceAllocationLedger.Kind.RECEIVER_MIXED))
             .setLoadControl(DefaultLoadControl.Builder().setAllocator(receiverAllocator).setBufferDurationsMs(5_000, 15_000, 1_000, 2_000).build())
             .build()

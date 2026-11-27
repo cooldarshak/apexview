@@ -506,7 +506,18 @@ object DriverTimingParser {
                 publishedThrough = until
                 publishedFrom = from
                 val history = if (windowBackMs == null) DriverTimingParse(materialize(drivers, copySnapshots = true), states.finish())
-                    else DriverTimingParse(materializePreview(drivers, from, until), states.finishWindow(from, until))
+                    else {
+                        val rows = materializePreview(drivers, from, until)
+                        val state = states.finishWindow(from, until)
+                        // Pack completed, immutable preview windows on the
+                        // parser thread as well as the eventual full archive.
+                        // Live parser histories and exact unsupported values are unchanged.
+                        if (nativeRequested) {
+                            val pool = SpeedTimestampPool(true)
+                            DriverTimingParse(rows.mapValues { it.value.compact(pool) },
+                                StateParse(state.states.mapValues { it.value.compact(pool) }, state.crossings))
+                        } else DriverTimingParse(rows, state)
+                    }
                 yield(DriverTimingPreview(until, history, from.takeIf { windowBackMs != null }))
             }
         }

@@ -164,6 +164,35 @@ def main():
     assert frames["h264"] == 50
     assert frames["aac"] == sum(1 for group in groups for _,f,_ in group if not f&1)
     print("Rust TS: independent PES, continuity, PCR, source-byte and FFmpeg decode checks passed",frames)
+    # Android MediaCodec AVC is not required to emit AUD NALs. Exercise the
+    # production Rust writer with the same valid access units minus AUD, then
+    # let the real Media3 HLS extractor test consume these exact segments.
+    no_aud = directory / "no-aud"
+    no_aud.mkdir(exist_ok=True)
+    def without_aud(data):
+        starts = list(re.finditer(rb"\x00\x00\x00\x01|\x00\x00\x01", data))
+        return b"".join(data[m.start():end] for m,end in zip(starts, [m.start() for m in starts[1:]]+[len(data)])
+                        if data[m.end()] & 31 != 9)
+    stripped = [[(pts, flags, without_aud(data) if flags&1 else data)
+                 for pts,flags,data in group] for group in groups]
+    for n,group in enumerate(stripped):
+        (no_aud/f"segment-{n}.samples").write_bytes(b"".join(
+            struct.pack(">qIB", pts, len(data), flags)+data for pts,flags,data in group))
+    run(args.writer.resolve(),no_aud)
+    counters = {}
+    streams = []
+    for n,group in enumerate(stripped):
+        data = (no_aud/f"segment-{n}.ts").read_bytes()
+        inspect(data,group,counters)
+        streams.append(data)
+    output = no_aud/"baked.ts"
+    output.write_bytes(b"".join(streams))
+    run("ffmpeg","-hide_banner","-loglevel","error","-xerror","-i",output,
+        "-map","0:v:0","-map","0:a:0","-f","null","-")
+    result = json.loads(subprocess.check_output(["ffprobe","-v","error","-count_frames",
+        "-show_entries","stream=codec_name,nb_read_frames","-of","json",str(output)]))
+    assert {s["codec_name"]:int(s["nb_read_frames"]) for s in result["streams"]} == frames
+    print("Rust TS: AUD-free Android-compatible fixture preserved every encoded frame")
 
 if __name__ == "__main__":
     main()

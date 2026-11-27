@@ -32,7 +32,11 @@ pub(crate) fn reusable_capacity(size:usize, capacity:usize)->bool {
 // slack, worker ceiling and idle permit. No new pool or larger cap.
 #[cfg(any(target_os = "android", test))]
 fn atlas_reservation(size: usize, ceiling: usize, idle_limit: usize) -> usize {
-    const CLASS: usize = 512 * 1024;
+    // Build 913 logged 42 mobile and 53 TV fragment extents. In a
+    // single immediately retired backing replay, 256 KiB classes cover
+    // more of both sequences than 512 KiB, with no larger peak capacity.
+    // Physical reader pinning and device admission still decide real reuse.
+    const CLASS: usize = 256 * 1024;
     if size < 4 * 1024 * 1024 { return size; }
     let rounded = size.saturating_add(CLASS - 1) / CLASS * CLASS;
     if rounded <= ceiling && rounded <= idle_limit && reusable_capacity(size, rounded) {
@@ -633,7 +637,7 @@ mod tests {
         let size=8*mib+64*1024;
         let b=a.take_output(size,ceiling).unwrap();
         let cap=b.capacity(); let ptr=b.as_ptr();
-        assert_eq!(cap,8*mib+512*1024);
+        assert_eq!(cap,8*mib+256*1024);
         let id=a.adopt(cap,size,0,size,ceiling,||Some(b)).unwrap();
         assert!(a.release(id));
         let next=a.take_output(size+128*1024,ceiling).unwrap();
@@ -642,6 +646,35 @@ mod tests {
         assert_eq!(atlas_reservation(size,size,size),size);
         assert_eq!(atlas_reservation(size,ceiling,size),size);
         a.trim_pressure();
+    }
+
+    #[test]
+    fn build_913_size_sequences_use_bounded_capacity_classes() {
+        // Media payload extents from the two physical logs, plus a bounded
+        // representative 763-byte composed init/header overhead. This is an
+        // idealized immediately reusable backing model, not physical reuse.
+        let mobile=[8907076,9610544,9525020,8704287,8218860,8524525,8192365,8891400,8540151,9272516,8183245,9048802,9850798,8940916,8833622,8552024,8397563,8850898,8602898,8395293,8007984,8568742,8600141,8920288,8801335,8314942,8345977,8410018,8722577,8698173,9205769,9033608,8473795,8547992,8668901,8553005,9085198,8148920,8196931,9129247,9116190,8373865];
+        let tv=[5515810,6140579,5230344,6178932,5541729,5603392,5821578,5974975,5557633,6075089,5837537,5801761,5695673,5839243,5817517,5511581,5938293,5111652,6256978,5790792,5751351,5537912,5819481,5111652,6256978,5790792,5751351,5537912,5819481,5505276,5909319,5769282,5674431,5233999,5675232,5797234,5742409,6001587,5732398,5496408,5966354,5613915,5645184,5676542,5825970,5845317,5569088,5984561,5523808,5905016,5844267,5372377,6299637];
+        let ceiling=10*1024*1024;
+        for sizes in [&mobile[..],&tv[..]] {
+            let mut current=0; let mut old=0;
+            let mut current_hits=0; let mut old_hits=0;
+            let mut current_peak=0; let mut old_peak=0;
+            for &media in sizes {
+                let size=media+763;
+                if reusable_capacity(size,current) {current_hits+=1;}
+                else {current=atlas_reservation(size,ceiling,ceiling);}
+                if reusable_capacity(size,old) {old_hits+=1;}
+                else {
+                    let rounded=size.div_ceil(512*1024)*512*1024;
+                    old=if rounded<=ceiling && reusable_capacity(size,rounded) {rounded} else {size};
+                }
+                assert!(reusable_capacity(size,current)&&current<=ceiling);
+                current_peak=current_peak.max(current);old_peak=old_peak.max(old);
+            }
+            assert!(current_hits>=old_hits);
+            assert!(current_peak<=old_peak);
+        }
     }
 
     #[test]
