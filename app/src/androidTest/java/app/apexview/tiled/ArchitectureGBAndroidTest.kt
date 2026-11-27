@@ -19,6 +19,56 @@ import org.junit.runner.RunWith
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class ArchitectureGBAndroidTest {
     @Test
+    fun compactArchiveTimestampsRetainExactMapAndTowerSeekSemantics() {
+        assertTrue(NativeHotPath.available())
+        val base = 1_800_000_000_123L
+        val times = LongArray(4101) { base + it * 137L + if (it >= 2048) 6000L else 0L }
+        val xs = FloatArray(times.size) { it.toFloat() }
+        val ys = FloatArray(times.size) { it * 2f }
+        val pool = app.apexview.SpeedTimestampPool(true)
+        val compact = pool.freezeTimeline(times, times.size)
+        assertTrue(compact.handle > 0L)
+        assertNull(compact.array)
+        assertTrue(compact === pool.freezeTimeline(times.copyOf(), times.size))
+        assertEquals(times.last(), compact[times.lastIndex])
+        val track = app.apexview.DriverTrack(compact, xs, ys, times.size)
+        val reference = app.apexview.OverlayPositionCursor(app.apexview.DriverTrack(times, xs, ys, times.size))
+        val packedReference = app.apexview.OverlayPositionCursor(track)
+        val arrays = arrayOfNulls<LongArray>(1)
+        val handles = longArrayOf(compact.handle)
+        val counts = intArrayOf(times.size)
+        val cursor = longArrayOf(-1L, Long.MIN_VALUE, 0L)
+        val xy = FloatArray(2); val active = IntArray(1); val indices = intArrayOf(-1)
+        for (now in listOf(base - 10, base, base + 400, times[2047] + 100, times[2048],
+            times.last(), times.last() + 1, times[10])) {
+            val expected = reference.sample(now)
+            assertEquals(expected, packedReference.sample(now))
+            assertTrue(NativeHotPath.samplePositionsWithCompactTimes(arrays, arrayOf(xs), arrayOf(ys),
+                counts, handles, now, cursor, xy, active))
+            assertEquals(expected, active[0] == 1)
+            if (expected) {
+                assertEquals(reference.x, xy[0], 0.00001f)
+                assertEquals(reference.y, xy[1], 0.00001f)
+                assertEquals(reference.x, packedReference.x, 0.00001f)
+                assertEquals(reference.y, packedReference.y, 0.00001f)
+            }
+            assertTrue(NativeHotPath.floorIndicesWithCompactTimes(arrays, counts, handles, now, indices))
+            assertEquals(times.indexOfLast { it <= now }, indices[0])
+        }
+        val wide = LongArray(64) { base + it * 100_000_000L }
+        assertNull(NativeHotPath.compactTimes(wide, wide.size))
+        val speeds = app.apexview.SpeedBuilder().apply {
+            times.forEachIndexed { i, time -> add(time, 200 + i % 80, i % 9) }
+        }.build(pool)
+        assertTrue(speeds.speedTimeline === compact)
+        assertTrue(speeds.gearTimeline === compact)
+        assertEquals(200 + 4100 % 80, speeds.kmhAt(times.last()))
+        assertEquals(4100 % 9, speeds.gearAt(times.last()))
+        assertNull(speeds.kmhAt(times.last() + 5001))
+        java.lang.ref.Reference.reachabilityFence(compact)
+    }
+
+    @Test
     fun nativeRetirementStatusMatchesReferenceAndHistoricalParser() {
         assertTrue(NativeHotPath.available())
         for (flags in 0..127) {

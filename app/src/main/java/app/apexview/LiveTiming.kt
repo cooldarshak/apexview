@@ -323,25 +323,28 @@ class TrackGeometry(val outline: FloatArray) {
 }
 
 /** One car's positions over the session, in archive coordinates (1/10 m). */
-class DriverTrack(
-    internal val t: LongArray,
+class DriverTrack internal constructor(
+    internal val timeline: TimingTimestamps,
     internal val x: FloatArray,
     internal val y: FloatArray,
     internal val n: Int,
 ) {
-    val startMs get() = if (n > 0) t[0] else 0L
-    val endMs get() = if (n > 0) t[n - 1] else 0L
+    constructor(t: LongArray, x: FloatArray, y: FloatArray, n: Int) :
+        this(TimingTimestamps.jvm(t, n), x, y, n)
+    internal val t: LongArray get() = timeline.legacyArray()
+    val startMs get() = if (n > 0) timeline[0] else 0L
+    val endMs get() = if (n > 0) timeline[n - 1] else 0L
 
     /** Shared exact interval lookup; readiness checks never allocate marker coordinates. */
     private fun validBracketStart(utcMs: Long): Int {
-        if (n == 0 || utcMs < t[0] || utcMs > t[n - 1]) return -1
+        if (n == 0 || utcMs < timeline[0] || utcMs > timeline[n - 1]) return -1
         var lo = 0
         var hi = n - 1
         while (hi - lo > 1) {
             val mid = (lo + hi) ushr 1
-            if (t[mid] <= utcMs) lo = mid else hi = mid
+            if (timeline[mid] <= utcMs) lo = mid else hi = mid
         }
-        return if (t[hi] - t[lo] > MAX_GAP_MS) -1 else lo
+        return if (timeline[hi] - timeline[lo] > MAX_GAP_MS) -1 else lo
     }
 
     /** True exactly when at(time) can render a marker, without allocating a Pair. */
@@ -352,14 +355,14 @@ class DriverTrack(
         val lo = validBracketStart(utcMs)
         if (lo < 0) return null
         val hi = if (lo + 1 < n) lo + 1 else lo
-        val span = t[hi] - t[lo]
-        val f = if (span == 0L) 0f else (utcMs - t[lo]).toFloat() / span
+        val span = timeline[hi] - timeline[lo]
+        val f = if (span == 0L) 0f else (utcMs - timeline[lo]).toFloat() / span
         return Pair(x[lo] + (x[hi] - x[lo]) * f, y[lo] + (y[hi] - y[lo]) * f)
     }
 
     /** As [at], but a car not heard from yet waits where it was first seen. For showing on the map. */
     fun atOrFirst(utcMs: Long): Pair<Float, Float>? =
-        if (n > 0 && utcMs < t[0]) Pair(x[0], y[0]) else at(utcMs)
+        if (n > 0 && utcMs < timeline[0]) Pair(x[0], y[0]) else at(utcMs)
 
     companion object {
         private const val MAX_GAP_MS = 5_000L
@@ -373,15 +376,21 @@ class StateLog(internal val t: LongArray, internal val s: Array<LapState>) {
 }
 
 /** A car's speed and gear through a session, from F1 CarData (speed in km/h). */
-class SpeedLog(
-    private val t: LongArray,
+class SpeedLog internal constructor(
+    internal val speedTimeline: TimingTimestamps,
     private val v: ShortArray,
     private val n: Int,
     private val gears: ShortArray = ShortArray(0),
-    private val gearTimes: LongArray? = null,
+    private val separateGearTimeline: TimingTimestamps? = null,
     private val gearCount: Int = gears.size,
 ) {
-    private fun indexAt(utcMs: Long, times: LongArray, count: Int): Int {
+    constructor(t: LongArray, v: ShortArray, n: Int, gears: ShortArray = ShortArray(0),
+                gearTimes: LongArray? = null, gearCount: Int = gears.size) :
+        this(TimingTimestamps.jvm(t, n), v, n, gears,
+            gearTimes?.let { TimingTimestamps.jvm(it, gearCount) }, gearCount)
+
+    internal val gearTimeline: TimingTimestamps get() = separateGearTimeline ?: speedTimeline
+    private fun indexAt(utcMs: Long, times: TimingTimestamps, count: Int): Int {
         if (count == 0 || utcMs < times[0]) return -1
         var lo = 0
         var hi = count
@@ -392,24 +401,22 @@ class SpeedLog(
         return if (utcMs - times[lo] > STALE_MS) -1 else lo
     }
 
-    internal val speedTimes: LongArray get() = t
+    internal val speedTimes: LongArray get() = speedTimeline.legacyArray()
     internal val speedCount: Int get() = n
-    internal val gearTimeSeries: LongArray get() = gearTimes ?: t
-    internal val validGearCount: Int get() = if (gearTimes == null) minOf(n, gears.size) else gearCount
+    internal val gearTimeSeries: LongArray get() = gearTimeline.legacyArray()
+    internal val validGearCount: Int get() = if (separateGearTimeline == null) minOf(n, gears.size) else gearCount
     internal fun kmhAtSnapshot(index: Int, now: Long): Int? =
-        if (index !in 0 until n || now - t[index] > STALE_MS) null else v[index].toInt()
+        if (index !in 0 until n || now - speedTimeline[index] > STALE_MS) null else v[index].toInt()
     internal fun gearAtSnapshot(index: Int, now: Long): Int? =
-        if (index !in 0 until validGearCount || now - gearTimeSeries[index] > STALE_MS ||
+        if (index !in 0 until validGearCount || now - gearTimeline[index] > STALE_MS ||
             gears[index].toInt() < 0) null else gears[index].toInt()
 
     /** The latest speed at [utcMs], null before the first reading or when it goes stale. */
-    fun kmhAt(utcMs: Long): Int? = kmhAtSnapshot(indexAt(utcMs, t, n), utcMs)
+    fun kmhAt(utcMs: Long): Int? = kmhAtSnapshot(indexAt(utcMs, speedTimeline, n), utcMs)
 
     /** F1 car-data channel 3: 0 is neutral, 1–8 are gears. */
     fun gearAt(utcMs: Long): Int? {
-        val times = gearTimes ?: t
-        val count = if (gearTimes == null) minOf(n, gears.size) else gearCount
-        val index = indexAt(utcMs, times, count)
+        val index = indexAt(utcMs, gearTimeline, validGearCount)
         return if (index < 0 || gears[index].toInt() < 0) null else gears[index].toInt()
     }
 
@@ -452,8 +459,8 @@ class SpeedBuilder {
 
     // Completed archive publication alone compacts and interns histories.
     internal fun build(pool: SpeedTimestampPool): SpeedLog {
-        val speedTime = pool.freeze(t, size)
-        val gearTime = pool.freeze(gearTimes, gearSize)
+        val speedTime = pool.freezeTimeline(t, size)
+        val gearTime = pool.freezeTimeline(gearTimes, gearSize)
         return SpeedLog(speedTime, if (v.size == size) v else v.copyOf(size), size,
             if (gears.size == gearSize) gears else gears.copyOf(gearSize),
             if (gearTime === speedTime) null else gearTime, gearSize)
@@ -464,9 +471,33 @@ class SpeedBuilder {
  * a lookup hint: exact prefix equality is mandatory, including on collisions.
  * A full builder backing is safe to transfer because the next append grows it;
  * non-full backings must be frozen by copying only their valid prefix.
- * Keep the existing LongArray JNI boundary for the Rust tower sampler. */
-internal class SpeedTimestampPool {
+ * The completed archive may transfer each distinct timestamp series into
+ * compact Rust ownership. The JVM/reference mode keeps exact shared arrays. */
+internal class SpeedTimestampPool(private val nativeStorage: Boolean = false) {
     private val timelines = HashMap<Int, MutableList<LongArray>>()
+    private val published = HashMap<Int, MutableList<TimingTimestamps>>()
+
+    fun freezeTimeline(source: LongArray, count: Int): TimingTimestamps {
+        require(count in 0..source.size)
+        var hash = 1
+        for (i in 0 until count) {
+            val value = source[i]
+            hash = 31 * hash + (value xor (value ushr 32)).toInt()
+        }
+        val candidates = published.getOrPut(hash) { ArrayList() }
+        for (candidate in candidates) {
+            if (candidate.count != count) continue
+            var equal = true
+            for (i in 0 until count) {
+                if (candidate[i] != source[i]) { equal = false; break }
+            }
+            if (equal) return candidate
+        }
+        val frozen = (if (nativeStorage) TimingTimestamps.packed(source, count) else null)
+            ?: TimingTimestamps.jvm(if (source.size == count) source else source.copyOf(count), count)
+        candidates.add(frozen)
+        return frozen
+    }
 
     fun freeze(source: LongArray, count: Int): LongArray {
         require(count in 0..source.size)
@@ -1454,7 +1485,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             progress("Building the track map while timing tower finishes · cars=${tracks.size}")
             val built = withContext(Dispatchers.Default) {
                 traceStage("map-track-arrays") { _ ->
-                    val pool = SpeedTimestampPool()
+                    val pool = SpeedTimestampPool(nativeRequested())
                     tracks.mapValues { it.value.finishArchive(pool) }
                 }
             }
@@ -1512,7 +1543,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             circuitKey = ref.circuitKey, laps = laps, radioBase = BASE + path, geometry = geometry,
         ).apply { archivePartial = true }
         val previewStarted = android.os.SystemClock.elapsedRealtime()
-        replayCache?.readPreview(replayPositionMs) { loadJob.ensureActive() }?.let { preview ->
+        replayCache?.readPreview(replayPositionMs, nativeRequested()) { loadJob.ensureActive() }?.let { preview ->
             publish(preview.partial().apply {
                 publicationStage = ReplayTimingStage.SAVED_WINDOW
                 previewTowerFromUtc = preview.previewTowerFromUtc ?: firstTrackUtc
@@ -1521,7 +1552,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             progress("Replay startup snapshot hit · ${android.os.SystemClock.elapsedRealtime() - previewStarted}ms")
         }
         val cacheStarted = android.os.SystemClock.elapsedRealtime()
-        val cached = replayCache?.read { loadJob.ensureActive() }
+        val cached = replayCache?.read(nativeRequested()) { loadJob.ensureActive() }
         progress(
             "Replay index ${if (cached == null) "miss" else "hit"} · " +
                 "${android.os.SystemClock.elapsedRealtime() - cacheStarted}ms"
@@ -2146,7 +2177,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                     ?.let { addCarData(it, cars) }
             }
         }
-        val timestampPool = SpeedTimestampPool()
+        val timestampPool = SpeedTimestampPool(nativeRequested())
         return cars.mapValues {
             checkActive()
             it.value.build(timestampPool)
@@ -2398,7 +2429,7 @@ class TrackBuilder {
     fun add(time: Long, px: Float, py: Float) {
         // Samples can repeat or arrive slightly out of order; keep time increasing.
         if (size > 0 && time <= t[size - 1]) return
-        if (size == t.size) {
+        if (size == t.size || size == x.size || size == y.size) {
             t = t.copyOf(size * 2)
             x = x.copyOf(size * 2)
             y = y.copyOf(size * 2)
@@ -2416,13 +2447,17 @@ class TrackBuilder {
     internal fun finishArchive(pool: SpeedTimestampPool = SpeedTimestampPool()): DriverTrack {
         // Same exact timestamp series can occur for several drivers in one
         // archive record. Never share on hash/length alone or with mutable
-        // live prefixes. The numeric Rust sampler keeps the same arrays/count.
+        // live prefixes. Only the timestamp backing changes; coordinates
+        // remain exact floats, without quantization or a second native copy.
         if (t.size - size >= maxOf(256, size / 8)) {
             x = x.copyOf(size)
             y = y.copyOf(size)
         }
-        t = pool.freeze(t, size)
-        return build()
+        val timeline = pool.freezeTimeline(t, size)
+        // A JVM shared exact backing is full, so any later append grows it.
+        // Native storage is independent of this temporary parser builder.
+        timeline.array?.let { t = it }
+        return DriverTrack(timeline, x, y, size)
     }
 
     /** As [build], with [earlier]'s samples from before these in front: the archive's part of a live session. */

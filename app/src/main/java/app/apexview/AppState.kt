@@ -4694,7 +4694,7 @@ class AppState(
         val token = api.ascendon ?: return
         timingWork.loadSpeeds(
             scope, session.radioBase,
-            fetch = { LiveTimingArchive(token, userAgent).loadSpeeds(session.radioBase) },
+            fetch = { LiveTimingArchive(token, userAgent) { settings.nativeRustStitching }.loadSpeeds(session.radioBase) },
             publish = { loaded ->
                 timing?.takeIf { !it.live && it.radioBase == session.radioBase }?.speeds = loaded
             },

@@ -9,7 +9,7 @@ import app.apexview.tiled.NativeHotPath
  * clock sample; no mutable coordinate arrays escape to the UI/receiver.
  */
 internal class OverlayPositionCursor(private val track: DriverTrack) {
-    private val times = track.t
+    private val times = track.timeline
     private val xs = track.x
     private val ys = track.y
     private val count = track.n
@@ -89,9 +89,9 @@ internal class OverlayDrawCar(override val number: String) : OverlayMotionCar {
         internal set
 }
 
-/** One owner and bounded batched JNI calls per position sample. JVM retains the
- * existing immutable source arrays; native reads only the required samples.
- * The reusable cursor/result storage is never published to another thread.
+/** One owner and bounded batched JNI calls per position sample. A completed
+ * native archive retains compact Rust timestamp owners, while coordinates and
+ * live prefixes remain immutable JVM arrays. Result scratch is thread-local.
  */
 internal class NativePositionBatch(timing: SessionTiming) {
     private val tracks = timing.tracks.values
@@ -106,7 +106,9 @@ internal class NativePositionBatch(timing: SessionTiming) {
         states[index]?.s?.getOrNull(metadataIndices[index]) ?: LapState.UNKNOWN
     fun retired(index: Int): Boolean =
         laps[index]?.states?.getOrNull(metadataIndices[states.size + index])?.retired == true
-    private val times = tracks.map { it.t }.toTypedArray()
+    private val timeOwners = tracks.map { it.timeline }.toTypedArray()
+    private val times = timeOwners.map { it.array }.toTypedArray()
+    private val compactHandles = LongArray(timeOwners.size) { timeOwners[it].handle }
     private val xs = tracks.map { it.x }.toTypedArray()
     private val ys = tracks.map { it.y }.toTypedArray()
     private val counts = tracks.map { it.n }.toIntArray()
@@ -121,8 +123,10 @@ internal class NativePositionBatch(timing: SessionTiming) {
     private var reported = false
     fun sample(now: Long, includeMetadata: Boolean = true): Boolean {
         if (failed) return false
-        if (!NativeHotPath.samplePositions(times, xs, ys, counts, now, cursors, xy, active) ||
-            includeMetadata && !NativeHotPath.floorIndices(metadataTimes, metadataCounts, now, metadataIndices)) {
+        val positionOk = try {
+            NativeHotPath.samplePositionsWithCompactTimes(times, xs, ys, counts, compactHandles, now, cursors, xy, active)
+        } finally { java.lang.ref.Reference.reachabilityFence(timeOwners) }
+        if (!positionOk || includeMetadata && !NativeHotPath.floorIndices(metadataTimes, metadataCounts, now, metadataIndices)) {
             failed = true
             android.util.Log.i("PitwallNativeHotPath", "MAP_ENGINE requested=RUST actual=JVM reason=NATIVE_BATCH_UNAVAILABLE")
             return false

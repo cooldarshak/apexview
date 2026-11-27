@@ -44,16 +44,16 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
     private val file = File(folder, "$contentId.bin")
     private val preview = File(File(directory, "replay-previews"), "$contentId.bin")
 
-    fun read(checkActive: () -> Unit): ReplayCore? = readFile(file, null, checkActive)
+    fun read(nativeStorage: Boolean = false, checkActive: () -> Unit): ReplayCore? = readFile(file, null, nativeStorage, checkActive)
 
     fun deletePreview() {
         preview.delete()
     }
 
-    fun readPreview(positionMs: Long, checkActive: () -> Unit): ReplayCore? =
-        readFile(preview, positionMs, checkActive)
+    fun readPreview(positionMs: Long, nativeStorage: Boolean = false, checkActive: () -> Unit): ReplayCore? =
+        readFile(preview, positionMs, nativeStorage, checkActive)
 
-    private fun readFile(file: File, previewPositionMs: Long?, checkActive: () -> Unit): ReplayCore? {
+    private fun readFile(file: File, previewPositionMs: Long?, nativeStorage: Boolean, checkActive: () -> Unit): ReplayCore? {
         val kind = if (previewPositionMs == null) "core" else "preview"
         fun miss(reason: String): ReplayCore? {
             diagnostic("Replay $kind cache content=$contentId result=$reason")
@@ -86,7 +86,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                 val samples = ByteBuffer.allocate(TRACK_BLOCK_SAMPLES * TRACK_SAMPLE_BYTES)
                 // Per-read immutable owner only; do not change cache format or
                 // keep a process-wide reference to a retired session.
-                val timestamps = SpeedTimestampPool()
+                val timestamps = SpeedTimestampPool(nativeStorage)
                 val tracks = input.readByDriver {
                     val n = count(MAX_SAMPLES, TRACK_SAMPLE_BYTES)
                     val t = LongArray(n)
@@ -103,7 +103,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                             y[i] = samples.float
                         }
                     }
-                    DriverTrack(timestamps.freeze(t, n), x, y, n)
+                    DriverTrack(timestamps.freezeTimeline(t, n), x, y, n)
                 }
                 val states = input.readByDriver {
                     val times = readTimes()
@@ -194,10 +194,10 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
         val tracks = if (!hasMap) emptyMap() else session.tracks.mapNotNull { (number, track) ->
             checkActive()
             if (track.n == 0 || track.endMs < from) return@mapNotNull null
-            val range = historyWindowRange(track.n, from, until) { track.t[it] } ?: return@mapNotNull null
+            val range = historyWindowRange(track.n, from, until) { track.timeline[it] } ?: return@mapNotNull null
             // Interpolation at the upper boundary requires the following sample.
             val end = (range.last + 2).coerceAtMost(track.n)
-            number to DriverTrack(track.t.copyOfRange(range.first, end), track.x.copyOfRange(range.first, end),
+            number to DriverTrack(LongArray(end - range.first) { track.timeline[range.first + it] }, track.x.copyOfRange(range.first, end),
                 track.y.copyOfRange(range.first, end), end - range.first)
         }.toMap()
         val states = if (!hasTower) emptyMap() else session.states.mapNotNull { (number, state) ->
@@ -266,7 +266,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                         checkActive()
                         samples.clear()
                         for (i in first until minOf(first + TRACK_BLOCK_SAMPLES, track.n)) {
-                            samples.putLong(track.t[i])
+                            samples.putLong(track.timeline[i])
                             samples.putFloat(track.x[i])
                             samples.putFloat(track.y[i])
                         }

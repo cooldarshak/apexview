@@ -153,7 +153,9 @@ private class NativeTowerLookup(private val laps: List<DriverLaps>, tyres: List<
         laps.map { it.lapTimes } + listOf(weatherLog.times)).toTypedArray()
     private val baseCounts = IntArray(baseTimes.size) { baseTimes[it].size }
     private val speedOffset = baseTimes.size
-    private var times = baseTimes
+    private var times: Array<LongArray?> = Array(baseTimes.size) { baseTimes[it] }
+    private var timeOwners: Array<TimingTimestamps?> = arrayOfNulls(baseTimes.size)
+    private var compactHandles = LongArray(baseTimes.size)
     private var counts = baseCounts
     private var indices = IntArray(baseTimes.size) { -1 }
     private val positions = IntArray(lapCount)
@@ -181,13 +183,17 @@ private class NativeTowerLookup(private val laps: List<DriverLaps>, tyres: List<
             speedEntries = source.entries.toList()
             val total = speedOffset + speedEntries.size * 2
             val prior = indices
-            times = Array(total) { index ->
-                if (index < speedOffset) baseTimes[index] else {
+            timeOwners = Array(total) { index ->
+                if (index < speedOffset) null else {
                     val slot = index - speedOffset
                     val log = speedEntries[slot / 2].value
-                    if (slot % 2 == 0) log.speedTimes else log.gearTimeSeries
+                    if (slot % 2 == 0) log.speedTimeline else log.gearTimeline
                 }
             }
+            times = Array(total) { index ->
+                if (index < speedOffset) baseTimes[index] else timeOwners[index]?.array
+            }
+            compactHandles = LongArray(total) { timeOwners[it]?.handle ?: 0L }
             counts = IntArray(total) { index ->
                 if (index < speedOffset) baseCounts[index] else {
                     val slot = index - speedOffset
@@ -198,7 +204,10 @@ private class NativeTowerLookup(private val laps: List<DriverLaps>, tyres: List<
             // Only unchanged histories keep their prior search hints.
             indices = IntArray(total) { if (it < speedOffset) prior[it] else -1 }
         }
-        if (!NativeHotPath.floorIndices(times, counts, now, indices)) {
+        val found = try {
+            NativeHotPath.floorIndicesWithCompactTimes(times, counts, compactHandles, now, indices)
+        } finally { java.lang.ref.Reference.reachabilityFence(timeOwners) }
+        if (!found) {
             failed = true
             return false
         }
