@@ -2,6 +2,9 @@ package app.apexview.cast
 
 /** Pure retry and handoff predicates. Never authenticate from network identity. */
 internal object CastRecoveryPolicy {
+    fun controllerOnly(remoteHandedOff: Boolean, bakedProducer: Boolean, bakedReplacement: Boolean): Boolean =
+        remoteHandedOff || bakedProducer || bakedReplacement
+
     fun canRetry(remaining: Boolean, negotiated: Boolean, selected: Boolean, reason: String, pinned: Boolean): Boolean =
         remaining && negotiated && selected && pinned &&
             reason in setOf("PEER_EOF", "READ_SocketException", "WRITE_SocketException",

@@ -107,7 +107,7 @@ class BakedCastCaptureAndroidTest {
             instrumentation.runOnMainSync {
                 val view = ComposeView(activity).apply {
                     setContent {
-                        Canvas(Modifier.fillMaxSize().recordBakedCastOverlay(overlay)) {
+                        Canvas(Modifier.fillMaxSize().recordBakedCastOverlay(overlay, showOnSender = !moved.value)) {
                             val isMoved = moved.value
                             drawRect(androidx.compose.ui.graphics.Color.Green.copy(alpha = 0.5f),
                                 topLeft = Offset(size.width * if (isMoved) 0.5f else 0.25f,

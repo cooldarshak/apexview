@@ -3,6 +3,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CastRecoveryPolicyTest {
+    @Test fun controllerNeverShowsVideoDuringRemoteOwnershipOrBakedProduction() {
+        for (remote in listOf(false, true)) for (baked in listOf(false, true))
+            for (replacement in listOf(false, true)) {
+                assertEquals(remote || baked || replacement,
+                    CastRecoveryPolicy.controllerOnly(remote, baked, replacement))
+            }
+    }
+
     @Test fun retryIsBoundedAndRequiresAnAuthenticatedNegotiatedPeer() {
         assertTrue(CastRecoveryPolicy.canRetry(true,true,true,"PEER_EOF",true))
         assertFalse(CastRecoveryPolicy.canRetry(false,true,true,"PEER_EOF",true))

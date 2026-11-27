@@ -303,3 +303,19 @@ seek/recovery, secure output and Cast parity. Never infer displayed 50/75 fps
 from codec drops=0, GLES submissions or late app-window frames alone.
 Keep the surface experiment OFF by default until a physical A/B proves an
 advantage without feature regressions.
+
+
+### Root-cause bundle (Build 901 follow-up)
+Copy capture-root-cause.sh from this directory to Download. Start on the browse screen with diagnostic logging off, then run each phase using the same fresh label:
+
+    sh /sdcard/Download/capture-root-cause.sh start rust902
+    # enable diagnostics, open same replay, play 95s
+    sh /sdcard/Download/capture-root-cause.sh graphics rust902
+    # return to playback, wait 65s
+    sh /sdcard/Download/capture-root-cause.sh java rust902
+    # return to playback, wait 30s
+    sh /sdcard/Download/capture-root-cause.sh collect rust902
+    # stop playback, wait 20s, disable diagnostics to flush
+    sh /sdcard/Download/capture-root-cause.sh idle rust902
+
+Upload the generated Pitwall-evidence-rust902.tar.gz. Use a new run label each time. Keep feed, quality, speed, refresh, renderer and engine settings constant, record these in the report. Do not run two profilers simultaneously. Trace files contain device/process metadata; review before sharing. No raw Java object field data or video content is requested. Unsupported producer, missing log segment, wrong PID, truncated trace or GPU counters missing is incomplete evidence, never zero. Native check: python scripts/check_pitwall_memory_trace.py <native trace> --strict-heap --pid <pid> --min-snapshots 3 (see --help for exact CLI). Use Perfetto Java heap graph dominators/retaining references and FrameTimeline, including trace stats, for attribution. Build 901 v4 heap capture cannot establish native callsite totals. Use unprofiled paired runs for actual acceptance metrics.

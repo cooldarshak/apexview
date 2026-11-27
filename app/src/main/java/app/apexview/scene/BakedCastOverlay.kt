@@ -32,14 +32,14 @@ internal class BakedCastOverlay(
 ) {
     private val content = RenderNode("PitwallCastViewerLayers")
 
-    fun record(scope: ContentDrawScope) {
+    fun record(scope: ContentDrawScope, showOnSender: Boolean = true) {
         val context = scope.drawContext
         val display = context.canvas
         val width = scope.size.width.roundToInt()
         val height = scope.size.height.roundToInt()
         if (width <= 0 || height <= 0 || !display.nativeCanvas.isHardwareAccelerated) {
             clear()
-            scope.drawContent()
+            if (showOnSender) scope.drawContent()
             return
         }
         content.setPosition(0, 0, width, height)
@@ -51,7 +51,7 @@ internal class BakedCastOverlay(
             context.canvas = display
             content.endRecording()
         }
-        display.nativeCanvas.drawRenderNode(content)
+        if (showOnSender) display.nativeCanvas.drawRenderNode(content)
     }
 
     /** Main thread only. Clear the entire buffer, then post one transparent overlay. */
@@ -72,8 +72,8 @@ internal class BakedCastOverlay(
 }
 
 @Composable
-internal fun Modifier.recordBakedCastOverlay(overlay: BakedCastOverlay?): Modifier {
+internal fun Modifier.recordBakedCastOverlay(overlay: BakedCastOverlay?, showOnSender: Boolean = true): Modifier {
     if (overlay == null) return this
     DisposableEffect(overlay) { onDispose { overlay.clear() } }
-    return drawWithContent { overlay.record(this) }
+    return drawWithContent { overlay.record(this, showOnSender) }
 }

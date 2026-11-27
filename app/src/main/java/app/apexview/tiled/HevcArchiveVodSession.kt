@@ -500,9 +500,10 @@ internal class HevcArchiveVodSession(
         val allocatedAtStart = android.os.Debug.getRuntimeStat("art.gc.bytes-allocated")?.toLongOrNull()
         val gcAtStart = android.os.Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull()
         val batches = mutableListOf<List<ByteArray>>()
+        val sourceOwner = Any()
         try {
             val anchor = number
-            batches += fetch(number, requestedAt)
+            batches += fetch(number, requestedAt, sourceOwner)
             // A finite DASH index may seek directly to any advertised chunk. A continuation
             // fragment cannot be advertised as an independent seek point merely because an
             // earlier GOP was inspected. Never feed a decoder a missing-reference picture.
@@ -599,6 +600,7 @@ internal class HevcArchiveVodSession(
                     if (composed.mediaFragments.none { it === source }) source.fill(0)
                 } }
                 batches.clear()
+                app.apexview.MediaMemoryAccounting.process.record(sourceOwner, app.apexview.MediaMemoryAccounting.Kind.CLEAR_SOURCE, 0L)
                 checkOpen()
                 val compositionMs = (System.nanoTime() - compositionStarted) / 1_000_000L
                 val verificationStarted = System.nanoTime()
@@ -746,10 +748,13 @@ internal class HevcArchiveVodSession(
                 else CaptureFailure.from(root).reason
             val retryable = root !is IllegalArgumentException && root !is IllegalStateException && CaptureFailure.from(root).retryable
             throw ArchiveVodMediaException("Archive segment $number: $message", retryable)
-        } finally { batches.forEach { batch -> batch.forEach { it.fill(0) } } }
+        } finally {
+            batches.forEach { batch -> batch.forEach { it.fill(0) } }
+            app.apexview.MediaMemoryAccounting.process.record(sourceOwner, app.apexview.MediaMemoryAccounting.Kind.CLEAR_SOURCE, 0L)
+        }
     }
 
-    private fun fetch(number: Int, fetchStartedNs: Long): List<ByteArray> {
+    private fun fetch(number: Int, fetchStartedNs: Long, sourceOwner: Any): List<ByteArray> {
         val lane = if (Thread.currentThread().name == "ApexviewVodWarm") prefetchFetchers else fetchers
         val retained = mutableListOf<ByteArray>()
         val aborted = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -816,6 +821,11 @@ internal class HevcArchiveVodSession(
                     bytes.fill(0); throw IOException("Archive session closed")
                 }
                 retained += bytes
+                // Charge actual fetched arrays, including simultaneous foreground
+                // and prefetch groups, until compose consumes or transfers them.
+                app.apexview.MediaMemoryAccounting.process.record(sourceOwner,
+                    app.apexview.MediaMemoryAccounting.Kind.CLEAR_SOURCE,
+                    retained.sumOf { it.size.toLong() })
             }
             bytes
         } }
@@ -851,7 +861,12 @@ internal class HevcArchiveVodSession(
             aborted.set(true)
             futures.forEach { it.cancel(true) }
             lane.purge()
-            synchronized(retained) { retained.forEach { it.fill(0) } }
+            synchronized(retained) {
+                retained.forEach { it.fill(0) }
+                retained.clear()
+                app.apexview.MediaMemoryAccounting.process.record(sourceOwner,
+                    app.apexview.MediaMemoryAccounting.Kind.CLEAR_SOURCE, 0L)
+            }
             throw error
         }
     }

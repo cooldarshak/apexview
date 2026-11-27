@@ -45,6 +45,19 @@ class ReplayStartupPublicationTest {
         assertNull(owner.at(video(3500)))
     }
 
+    @Test fun coldTopicsDoNotBlinkBetweenIndependentCoveredPanels() {
+        val owner = ReplayStartupPublication()
+        owner.offer(window(ReplayTimingStage.TOPICS, positions = emptyMap()), video(1200))
+        val both = owner.offer(window(ReplayTimingStage.TOPICS, laps = emptyMap()), video(2000))
+        assertSame(rows, both.laps)
+        assertSame(tracks, both.tracks)
+        val empty = window(ReplayTimingStage.TOPICS, emptyMap(), emptyMap()).apply {
+            positionsIndexed = true; towerIndexed = true
+        }
+        assertTrue(owner.offer(empty, video(2000)).laps.isEmpty())
+        assertTrue(owner.at(video(2000))!!.tracks.isEmpty())
+    }
+
     @Test fun seekGapSessionSwitchAndAuthoritativeEmptyNeverBorrowOldRows() {
         val owner = ReplayStartupPublication()
         owner.offer(window(ReplayTimingStage.SAVED_WINDOW), video(2000))

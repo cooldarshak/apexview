@@ -47,8 +47,15 @@ internal class ReplayStartupPublication {
         val currentTower = indexed != null && indexed.startUtcMs == start &&
             (indexed.towerIndexed || utc >= (indexed.previewTowerFromUtc ?: Long.MIN_VALUE) &&
                 utc <= indexed.towerThroughUtc && indexed.laps.values.any { it.hasRankAt(utc) })
-        val map = if (currentMap) indexed else window.takeIf { windowMap }
-        val tower = if (currentTower) indexed else window.takeIf { windowTower }
+        // Cold-cache topic publication can arrive in independent batches. Keep
+        // the last visible, clock-covered panel only if the new panel is partial.
+        // An indexed empty panel is authoritative, never a reason to borrow rows.
+        val prior = visible?.takeIf { it.startUtcMs == start }
+        val priorMap = prior?.tracks?.values?.any { it.hasPositionAt(utc) } == true
+        val priorTower = prior != null && utc >= (prior.previewTowerFromUtc ?: Long.MIN_VALUE) &&
+            utc <= prior.towerThroughUtc && prior.laps.values.any { it.hasRankAt(utc) }
+        val map = if (currentMap) indexed else if (windowMap) window else prior.takeIf { priorMap }
+        val tower = if (currentTower) indexed else if (windowTower) window else prior.takeIf { priorTower }
         val tracks = map?.tracks.orEmpty()
         val laps = tower?.laps.orEmpty()
         val states = tower?.states.orEmpty()
@@ -59,8 +66,8 @@ internal class ReplayStartupPublication {
             tower === window && tower.previewTowerFromUtc == null -> tower.lastTrackUtc ?: Long.MIN_VALUE
             else -> tower.towerThroughUtc
         }
-        val towerComplete = tower === indexed && indexed?.towerIndexed == true
-        val positionsComplete = map === indexed && indexed?.positionsIndexed == true
+        val towerComplete = tower?.towerIndexed == true
+        val positionsComplete = map?.positionsIndexed == true
         val prev = visible
         if (prev != null && prev.tracks === tracks && prev.states === states && prev.laps === laps &&
             prev.geometry === geometry && prev.drivers === current.drivers && prev.startUtcMs == start &&

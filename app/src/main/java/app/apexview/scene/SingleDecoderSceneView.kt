@@ -215,6 +215,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 )
                 castWorker = worker
                 castSession = session
+                senderBlankSubmitted = false
+                scheduleDisplayFrame()
                 worker.start()
             } catch (error: Exception) {
                 session.captureFailed(error.message ?: error.javaClass.simpleName)
@@ -223,11 +225,16 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     }
 
     fun stopBakedCast(session: BakedCastLiveSession? = null) {
-        gl.post { if (session == null || castSession === session) stopBakedCastOnGl() }
+        gl.post {
+            if (session == null || castSession === session) {
+                stopBakedCastOnGl()
+                if (!released && window != EGL14.EGL_NO_SURFACE) scheduleDisplayFrame()
+            }
+        }
     }
 
     private fun stopBakedCastOnGl() {
-        lastPreviewRequestNs = 0L
+        senderBlankSubmitted = false
         val worker = castWorker
         castWorker = null; castSession = null
         try { worker?.stop() } finally { releaseBakedCastVideoSurface() }
@@ -265,6 +272,12 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                 drawVideo(model)
                 check(EGL14.eglSwapBuffers(display, output)) { "Clear Cast video output swap failed" }
+                castVideoSubmissions++
+                val now = System.nanoTime()
+                if (now - lastCastReportNs >= 5_000_000_000L) {
+                    Log.i("PitwallCast", "CAST_PRODUCER_OUTPUT owner=$graphicsOwnerId localVideoSubmissions=$localVideoSubmissions castVideoSubmissions=$castVideoSubmissions decoderFrames=$rendered localBlank=$senderBlankSubmitted physicalPresentation=NOT_MEASURED")
+                    lastCastReportNs = now
+                }
             } catch (error: Exception) {
                 if (!target.closed) target.fail(error)
             } finally {
@@ -277,8 +290,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         if (!gl.post {
             if (castVideoTarget === target) {
                 releaseBakedCastVideoSurface()
-                lastPreviewRequestNs = 0L
-                scheduleDisplayFrame()
+                if (!suppressLocalPreview()) scheduleDisplayFrame()
             }
         }) Log.w("ApexviewSingleDecoder", "BAKED_VIDEO_DETACH_QUEUE_CLOSED owner=$graphicsOwnerId")
     }
@@ -396,16 +408,17 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private val frameDemand = SceneFrameDemand()
     private val pacing = SceneFramePacing()
     private val cadenceGate = SceneFrameCadenceGate()
-    private var lastPreviewRequestNs = 0L
+    private var senderBlankSubmitted = false
+    private var localVideoSubmissions = 0L
+    private var castVideoSubmissions = 0L
+    private var lastCastReportNs = 0L
     private var reducedPreviewInWindow = false
-    private fun reduceLocalPreview(): Boolean =
-        castSession?.let { it.receiverRendering && it.previewSuppressionRequested } == true &&
-            castWorker?.directFrameReady == true
+    private fun suppressLocalPreview(): Boolean = castSession != null
     private var displayClock: Choreographer? = null
     private val displayFrame: Choreographer.FrameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNs: Long) = guarded {
             val callbackStarted = System.nanoTime()
-            if (frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
+            if (!suppressLocalPreview() && frameDemand.hasPendingVideo() && cadenceGate.shouldDefer(
                     frameTimeNs, scene?.sourceFrameRate ?: 0.0, selectedDisplayHz,
                     playbackSpeed, thermalForOutput(), pipelineHealthy(),
                 pendingAgeNs = frameDemand.pendingAgeNs(callbackStarted),
@@ -418,8 +431,9 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             val newVideo = frameDemand.beginFrame()
             val timing = draw()
             if (timing != null) {
-                if (newVideo) cadenceGate.onVideoDraw(frameTimeNs)
-                pacing.onDisplayFrame(frameTimeNs, timing.swapNs, newVideo, timing.glDrawNs, callbackStarted)
+                val videoPresented = newVideo && !suppressLocalPreview()
+                if (videoPresented) cadenceGate.onVideoDraw(frameTimeNs)
+                pacing.onDisplayFrame(frameTimeNs, timing.swapNs, videoPresented, timing.glDrawNs, callbackStarted)
             } else {
                 // Keep the last codec picture pending until a later surface/bind event.
                 // Never spin Choreographer while EGL output is unavailable.
@@ -684,15 +698,13 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                     pacing.onTextureLatched(latchedAt, latchedAt - latchStarted, sourceTimestampNs,
                         eglBindNs, callbackArrivalNs = callbackStarted)
                     codecCorrelation?.onTextureLatched(input, sourceTimestampNs, latchedAt)
-                    // Always latch the codec buffer. Reduce only the local preview draws.
-                    if (reduceLocalPreview()) {
+                    // Keep latching for the TV producer. Submit a black local
+                    // frame once, not a periodic moving video preview.
+                    if (suppressLocalPreview()) {
                         reducedPreviewInWindow = true
-                        if (lastPreviewRequestNs == 0L || latchedAt - lastPreviewRequestNs >= 100_000_000L) {
-                            lastPreviewRequestNs = latchedAt
-                            scheduleDisplayFrame(videoArrived = true)
-                        }
+                        if (!senderBlankSubmitted) scheduleDisplayFrame()
                     } else {
-                        lastPreviewRequestNs = 0L
+                        senderBlankSubmitted = false
                         scheduleDisplayFrame(videoArrived = true)
                     }
                     } finally { Trace.endSection() }
@@ -718,14 +730,22 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         Trace.beginSection("PitwallGlDraw")
         GLES20.glViewport(0, 0, outputWidth, outputHeight)
         GLES20.glClearColor(0f, 0f, 0f, 1f); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        try { if (hasFrame) drawVideo(model) } finally { Trace.endSection() }
+        val producerOnly = suppressLocalPreview()
+        try { if (hasFrame && !producerOnly) drawVideo(model) } finally { Trace.endSection() }
         val swapStarted = System.nanoTime()
         Trace.beginSection("PitwallEglSwap")
         try { check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" } }
         finally { Trace.endSection() }
         val swapCompleted = System.nanoTime()
-        if (hasFrame) codecCorrelation?.onSwapSubmitted(input, swapCompleted)
-        if (hasFrame && !firstFrameReported) {
+        if (producerOnly) {
+            if (!senderBlankSubmitted) Log.i("PitwallCast", "CAST_LOCAL_PREVIEW_BLANKED owner=$graphicsOwnerId localVideoSubmitted=false")
+            senderBlankSubmitted = true
+            reducedPreviewInWindow = true
+        } else if (hasFrame) {
+            localVideoSubmissions++
+            codecCorrelation?.onSwapSubmitted(input, swapCompleted)
+        }
+        if (!producerOnly && hasFrame && !firstFrameReported) {
             firstFrameReported = true
             post {
                 if (!released && outputReadiness.acknowledgeSubmittedFrame(surfaceEpoch)) {
@@ -743,7 +763,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz,
                 thermalForOutput(), pipelineHealthy())
             if (!reducedPreviewInWindow) codecCorrelation?.recordPipelineWindow(input, now, now - lastLogNs, expectedFps, metrics)
-            else Log.i("ApexviewSingleDecoder", "SCENE_LOCAL_PREVIEW_REDUCED receiver=BAKED_CAST localTargetFps=10")
+            else Log.i("ApexviewSingleDecoder", "SCENE_LOCAL_PREVIEW_SUPPRESSED receiver=BAKED_CAST localVideoFps=0")
             reducedPreviewInWindow = false
             val correlation = codecCorrelation?.snapshotAndReset(input)
             // Five-second trace samples of GL stages, not video scanout.

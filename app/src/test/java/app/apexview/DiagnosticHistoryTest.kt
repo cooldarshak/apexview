@@ -38,6 +38,16 @@ class DiagnosticHistoryTest {
     }
 
     @Test
+    fun carriesGraphicsLifetimeAndCastRoleAcrossRotation() {
+        val history = DiagnosticHistory()
+        val graphics = "I PitwallGraphics: GRAPHICS_OWNER_EVENT owner=7 event=CREATE"
+        val cast = "I PitwallCast: CAST_SENDER_MODE mode=BAKED_PRODUCER"
+        history.retain(graphics)
+        history.retain(cast)
+        assertEquals(listOf(graphics, cast), history.context())
+    }
+
+    @Test
     fun carriesTheReplayStartAcrossLogRotation() {
         val history = DiagnosticHistory()
         val start = "I ApexviewTiming: Starting timing load for content=42 trace=100"

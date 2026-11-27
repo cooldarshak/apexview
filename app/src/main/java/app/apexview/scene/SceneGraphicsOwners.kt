@@ -5,7 +5,7 @@ import java.util.concurrent.atomic.AtomicLong
 /** App-owned EGL objects, not driver allocations or SurfaceFlinger buffers.
  * Store scalar evidence only; never retain a View, Surface, texture or player.
  */
-internal class SceneGraphicsOwners {
+internal class SceneGraphicsOwners(private val onChange: (Long, Owner?, Owner?) -> Unit = { _, _, _ -> }) {
     data class Owner(
         val backend: String, val surfaceEpoch: Long, val readinessEpoch: Long,
         val contexts: Int, val windows: Int, val decoderTextures: Int,
@@ -32,14 +32,17 @@ internal class SceneGraphicsOwners {
         require(owner.atlasWidth >= 0 && owner.atlasHeight >= 0 && owner.outputWidth >= 0 && owner.outputHeight >= 0)
         require(owner.encoderInputs in 0..1 && owner.captureTextures in 0..1 && owner.captureQueues in 0..1 &&
             owner.pbuffers in 0..1 && owner.captureWidth >= 0 && owner.captureHeight >= 0)
-        if (!owner.active) owners.remove(id)
-        else owners[id] = owner
+        val previous = owners[id]
+        val current = owner.takeIf { it.active }
+        if (current == null) owners.remove(id)
+        else owners[id] = current
+        if (previous != current) onChange(id, previous, current)
         peakOwners = maxOf(peakOwners, owners.size)
         peakContexts = maxOf(peakContexts, owners.values.sumOf { it.contexts })
         peakWindows = maxOf(peakWindows, owners.values.sumOf { it.windows })
         peakDecoderTextures = maxOf(peakDecoderTextures, owners.values.sumOf { it.decoderTextures })
     }
-    @Synchronized fun remove(id: Long) { owners.remove(id) }
+    @Synchronized fun remove(id: Long) { owners.remove(id)?.let { onChange(id, it, null) } }
     @Synchronized fun snapshot(): Map<Long, Owner> = LinkedHashMap(owners)
     @Synchronized private fun diagnosticSnapshot() = LinkedHashMap(owners) to
         " scenePeakOwners=$peakOwners scenePeakEglContexts=$peakContexts scenePeakEglWindows=$peakWindows scenePeakDecoderTextures=$peakDecoderTextures scenePeakScope=PROCESS_LIFETIME"
@@ -67,5 +70,18 @@ internal class SceneGraphicsOwners {
                     "${owner.captureQueues}:${owner.pbuffers}:${owner.captureWidth}x${owner.captureHeight}"
             }.ifEmpty { "NONE" } + " sceneGraphicsBytes=NOT_MEASURED" + peaks
     }
-    companion object { val process = SceneGraphicsOwners() }
+    companion object {
+        val process = SceneGraphicsOwners { id, previous, current ->
+            if (app.apexview.DiagnosticLogs.recording) {
+                val owner = current ?: previous!!
+                android.util.Log.i("PitwallGraphics", "GRAPHICS_OWNER_EVENT uptimeMs=${android.os.SystemClock.elapsedRealtime()} " +
+                    "owner=$id backend=${owner.backend} surfaceEpoch=${owner.surfaceEpoch} readinessEpoch=${owner.readinessEpoch} " +
+                    "event=${if (current == null) "RELEASE" else if (previous == null) "CREATE" else "CHANGE"} " +
+                    "contexts=${current?.contexts ?: 0} windows=${current?.windows ?: 0} decoderTextures=${current?.decoderTextures ?: 0} " +
+                    "atlas=${owner.atlasWidth}x${owner.atlasHeight} output=${owner.outputWidth}x${owner.outputHeight} " +
+                    "encoderInputs=${current?.encoderInputs ?: 0} captureTextures=${current?.captureTextures ?: 0} " +
+                    "captureQueues=${current?.captureQueues ?: 0} pbuffers=${current?.pbuffers ?: 0} vendorBytes=NOT_MEASURED")
+            }
+        }
+    }
 }

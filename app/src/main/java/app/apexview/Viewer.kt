@@ -265,9 +265,9 @@ fun ViewerScreen(app: AppState) {
     // The controls step back a few seconds after the last touch, unless paused.
     // helpOpen is a key so opening the overlay cancels a hide already counting down; it used
     // to fire anyway and take the top bar away from under its labels.
-    LaunchedEffect(app.chromeTouch, app.chromeVisible, app.playing, app.helpOpen, app.controlsFocused) {
+    LaunchedEffect(app.chromeTouch, app.chromeVisible, app.playing, app.helpOpen, app.controlsFocused, app.castControllerOnly) {
         // Stays up while arranging, or while a TV remote is operating an overlay control.
-        if (app.chromeVisible && app.playing && !app.arranging && !app.helpOpen &&
+        if (!app.castControllerOnly && app.chromeVisible && app.playing && !app.arranging && !app.helpOpen &&
             !(app.isTv && app.controlsFocused)
         ) {
             delay(CHROME_HIDE_MS)
@@ -346,7 +346,7 @@ fun ViewerScreen(app: AppState) {
     // controls animate can desynchronise its surface from Compose. TV chrome overlays in place.
     val fixedVideoGeometry = app.isTv || app.layoutMode == LayoutMode.TV
     val lift by animateFloatAsState(
-        if (!fixedVideoGeometry && app.chromeVisible && !app.arranging && !app.laptopActive) 1f else 0f,
+        if (!fixedVideoGeometry && app.chromeVisible && !app.castControllerOnly && !app.arranging && !app.laptopActive) 1f else 0f,
         motion,
         label = "lift",
     )
@@ -419,10 +419,7 @@ fun ViewerScreen(app: AppState) {
             else BakedCastVideoPlacement.viewer(1f - sheetSide * AppState.VOTE_SHEET_WIDTH,
                 if (app.inPip) 1f else 1f - lift * band / height, sheetShift / height)
         }
-        LaunchedEffect(bakedSession, app.chromeVisible, app.arranging, app.inPip, app.playing) {
-            bakedSession?.previewSuppressionRequested =
-                !app.chromeVisible && !app.arranging && !app.inPip && app.playing
-        }
+        val controllerOnly = app.castControllerOnly
         val captureOverlay = remember(bakedSession) {
             bakedSession?.let { BakedCastOverlay({ placement() }, Ink.background.toArgb()) }
         }
@@ -439,7 +436,7 @@ fun ViewerScreen(app: AppState) {
 
         }
 
-        Box(Modifier.fillMaxSize().recordBakedCastOverlay(captureOverlay)) {
+        if (!controllerOnly || captureOverlay != null) Box(Modifier.fillMaxSize().recordBakedCastOverlay(captureOverlay, showOnSender = !controllerOnly)) {
         if (captureCaptions && !app.castPlaybackHandedOff && !app.externalDisplayActive) {
             Box(Modifier.fillMaxSize().then(videoTransform)) { ViewerComposedCaptions(app) }
         }
@@ -575,7 +572,7 @@ fun ViewerScreen(app: AppState) {
         if (app.inPip) return@uiLayer
 
         // Over the feeds and the map, under the controls; it doesn't shrink with the feeds.
-        if (app.radioOpen) app.timing?.let { timing ->
+        if (app.radioOpen && !controllerOnly) app.timing?.let { timing ->
             Box(Modifier.zIndex(CHROME_Z - 1)) { RadioPanel(app, timing, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height) }
         }
         // Laptop mode has the tower below the hinge already.
@@ -611,26 +608,28 @@ fun ViewerScreen(app: AppState) {
         val topBand = with(density) { 64.dp.toPx() }
         val bottomBand = with(density) { 150.dp.toPx() }
         AnimatedVisibility(
-            app.chromeVisible,
+            app.chromeVisible && !controllerOnly,
             Modifier.zIndex(CHROME_Z).align(Alignment.TopCenter),
             enter = fadeIn(fade), exit = fadeOut(fade),
         ) { TopChrome(app, clearOf(cutouts, width, 0f, topBand)) }
         // The playback controls step aside while arranging, so the bottom feeds can be seen.
         AnimatedVisibility(
-            app.chromeVisible && !app.arranging,
+            app.chromeVisible && !app.arranging && !controllerOnly,
             Modifier.zIndex(CHROME_Z).align(Alignment.BottomCenter),
             enter = fadeIn(fade), exit = fadeOut(fade),
         ) { BottomChrome(app, clearOf(cutouts, width, height - bottomBand, height)) }
 
-        if (!app.replayClipRunning) Messages(app, Modifier.zIndex(CHROME_Z + 1).align(Alignment.Center))
-        else Box(Modifier.fillMaxSize().zIndex(CHROME_Z + 3)
+        if (!app.replayClipRunning && !controllerOnly) Messages(app, Modifier.zIndex(CHROME_Z + 1).align(Alignment.Center))
+        else if (app.replayClipRunning && !controllerOnly) Box(Modifier.fillMaxSize().zIndex(CHROME_Z + 3)
             .pointerInput(Unit) { detectTapGestures(onTap = { app.replayClipStopRequested = true }) })
         // In the corner, or centred where the screen is too narrow for a corner to mean much.
-        VotePrompt(app, Modifier.zIndex(CHROME_Z + 1).align(if (compactWidth) Alignment.BottomCenter else Alignment.BottomEnd))
-        NextLivePrompt(app, Modifier.zIndex(CHROME_Z + 1).align(if (compactWidth) Alignment.BottomCenter else Alignment.BottomEnd))
+        if (!controllerOnly) {
+            VotePrompt(app, Modifier.zIndex(CHROME_Z + 1).align(if (compactWidth) Alignment.BottomCenter else Alignment.BottomEnd))
+            NextLivePrompt(app, Modifier.zIndex(CHROME_Z + 1).align(if (compactWidth) Alignment.BottomCenter else Alignment.BottomEnd))
+        }
 
         // The explanation overlay, above everything. Shown once by itself, the first time.
-        Box(Modifier.fillMaxSize().zIndex(CHROME_Z + 2)) {
+        if (!controllerOnly) Box(Modifier.fillMaxSize().zIndex(CHROME_Z + 2)) {
             HelpOverlay(app, width, height, feedScale = if (app.isTv) 1f else 1f - lift * band / height, compact = with(density) { minOf(width, height).toDp() } < 600.dp)
         }
         LaunchedEffect(Unit) {
@@ -640,6 +639,65 @@ fun ViewerScreen(app: AppState) {
             }
         }
         }
+        }
+        // Sibling of the retained Cast overlay; never recorded into TV output.
+        if (controllerOnly) {
+            Box(Modifier.fillMaxSize().zIndex(CHROME_Z + 10).background(Ink.background)
+                .pointerInput(Unit) { detectTapGestures(onTap = { app.showChrome() }) }) {
+                if (app.arranging) {
+                    // Static geometry editor: no decoder output or moving timing data on the sender.
+                    app.tiles.filterNot { it.protectedCompositionHidden }.forEach { tile ->
+                        key(tile.id) {
+                            Box(Modifier.offset { IntOffset(tile.x.roundToInt(), tile.y.roundToInt()) }
+                                .requiredSize(with(density) { tile.w.toDp() }, with(density) { tile.h.toDp() })
+                                .zIndex(tile.z).background(Ink.secondary.copy(alpha = 0.18f))
+                                .arrangeGestures(app, tile), contentAlignment = Alignment.Center) {
+                                Text(tile.channel.title, style = Type.footnote, maxLines = 1)
+                            }
+                        }
+                    }
+                    if (app.towerOpen && app.towerSpot.w > 0f && app.towerSpot.h > 0f) {
+                        val spot = app.towerSpot
+                        Box(Modifier.offset { IntOffset(spot.x.roundToInt(), spot.y.roundToInt()) }
+                            .requiredSize(with(density) { spot.w.toDp() }, with(density) { spot.h.toDp() })
+                            .zIndex(1e9f).background(Ink.secondary.copy(alpha = 0.25f))
+                            .pointerInput(app.towerLocked, app.tvLandscapeLayout) {
+                                detectTransformGestures { _, pan, zoom, _ ->
+                                    if (!app.towerLocked) {
+                                        if (app.tvLandscapeLayout) app.updateTowerWidth(spot.w * zoom - pan.x)
+                                        else app.applyTowerEdit(Area(spot.x + pan.x, spot.y + pan.y, spot.w * zoom, spot.h * zoom))
+                                    }
+                                }
+                            }, contentAlignment = Alignment.Center) { Text("Timing tower", style = Type.footnote) }
+                    }
+                    val map = app.activeMapPanel
+                    if (app.mapMode != MapMode.OFF && map.placed && map.w > 0f && map.h > 0f) {
+                        Box(Modifier.offset { IntOffset(map.x.roundToInt(), map.y.roundToInt()) }
+                            .requiredSize(with(density) { map.w.toDp() }, with(density) { map.h.toDp() })
+                            .zIndex(1e9f + 1).background(Ink.secondary.copy(alpha = 0.25f))
+                            .pointerInput(app.mapLocked) {
+                                detectTransformGestures { _, pan, zoom, rotation -> app.arrangeMap(pan, zoom, rotation) }
+                            }, contentAlignment = Alignment.Center) { Text("Track map", style = Type.footnote) }
+                    }
+                }
+                Box(Modifier.zIndex(2e9f)) { TopChrome(app, clearOf(cutouts, width, 0f, with(density) { 64.dp.toPx() })) }
+                if (!app.arranging) Column(Modifier.align(Alignment.Center).padding(horizontal = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Playing on ${app.castDeviceName}", style = Type.title2)
+                    Text("This device is your playback controller.", style = Type.subhead)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        app.tiles.filterNot { it.protectedCompositionHidden }.forEach { tile ->
+                            Text(tile.channel.title, Modifier.pressable { app.openTileMenu(tile) }.padding(8.dp), style = Type.footnote)
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    FilledTonalButton(onClick = app::stopFullSceneCast) { Text("Disconnect TV") }
+                }
+                if (!app.arranging) Box(Modifier.align(Alignment.BottomCenter)) {
+                    BottomChrome(app, clearOf(cutouts, width, height - with(density) { 150.dp.toPx() }, height))
+                }
+                Messages(app, Modifier.align(Alignment.Center))
+            }
         }
     }
 
@@ -1710,7 +1768,7 @@ private fun TileHeader(app: AppState, tile: Tile) {
             .width(with(density) { tile.w.toDp() })
             .zIndex(tile.z)
     ) {
-        AnimatedVisibility(app.chromeVisible, Modifier.fillMaxWidth(), enter = fadeIn(fade), exit = fadeOut(fade)) {
+        AnimatedVisibility(app.chromeVisible && !app.castControllerOnly, Modifier.fillMaxWidth(), enter = fadeIn(fade), exit = fadeOut(fade)) {
             Row(
                 Modifier
                     .fillMaxWidth()

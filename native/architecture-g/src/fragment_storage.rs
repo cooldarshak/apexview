@@ -42,6 +42,12 @@ struct Arena {
     atlas_idle_limit: usize,
     owned_miss_empty: u64,
     owned_miss_fit: u64,
+    atlas_fit_small: u64,
+    atlas_fit_large: u64,
+    resize_attempts: u64,
+    resize_same_address: u64,
+    resize_moved: u64,
+    resize_failed: u64,
     owned_miss_ceiling: u64,
     owned_alloc_failures: u64,
     owned_eligible: u64,
@@ -108,12 +114,19 @@ impl Arena {
         }
         let mut miss_ceiling=false;
         let mut miss_fit=false;
+        let mut grow=None;
         if let Some(mut b)=self.atlas_idle.take() {
             self.charged-=b.capacity();
             if b.capacity()>ceiling {
                 miss_ceiling=true;
             } else if !reusable_capacity(size,b.capacity()) {
                 miss_fit=true;
+                if b.capacity()<size {
+                    self.atlas_fit_small=self.atlas_fit_small.saturating_add(1);
+                    if size-b.capacity() <= (size/8).min(MAX_REUSE_SLACK) {grow=Some(b);}
+                } else {
+                    self.atlas_fit_large=self.atlas_fit_large.saturating_add(1);
+                }
             } else {
                 b.resize(size,0);
                 self.owned_reuses=self.owned_reuses.saturating_add(1);
@@ -143,6 +156,22 @@ impl Arena {
                 self.owned_miss_empty=self.owned_miss_empty.saturating_add(1);
             }
             self.trim();
+            // Only the wiped, unleased atlas backing can be resized. No extra
+            // reserved slack; the worker ceiling and arena caps stay unchanged.
+            // A moved realloc is not counted as a reuse or physical memory saving.
+            if let Some(mut b)=grow {
+                self.resize_attempts=self.resize_attempts.saturating_add(1);
+                let old=b.as_ptr() as usize;
+                b.clear();
+                if b.try_reserve_exact(size).is_ok() && b.capacity()<=ceiling && reusable_capacity(size,b.capacity()) {
+                    if b.as_ptr() as usize==old {self.resize_same_address=self.resize_same_address.saturating_add(1);}
+                    else {self.resize_moved=self.resize_moved.saturating_add(1);}
+                    b.resize(size,0);
+                    self.owned_allocations=self.owned_allocations.saturating_add(1);
+                    return Some(b);
+                }
+                self.resize_failed=self.resize_failed.saturating_add(1);
+            }
             let mut b=Vec::new();
             if b.try_reserve_exact(size).is_err() || b.capacity()>ceiling {
                 self.owned_alloc_failures=self.owned_alloc_failures.saturating_add(1);
@@ -312,14 +341,15 @@ pub fn release(id: i64) -> bool { arena().lock().is_ok_and(|mut a| a.release(id)
 #[cfg(target_os = "android")]
 pub fn trim() { if let Ok(mut a) = arena().lock() { a.trim_pressure(); } }
 #[cfg(target_os = "android")]
-pub fn snapshot() -> Option<[u64; 21]> {
+pub fn snapshot() -> Option<[u64; 27]> {
     let a=arena().lock().ok()?;
     let [capacity,live,payload,count,allocations]=a.snapshot();
     Some([capacity,live,payload,count,allocations,a.owned_allocations,a.owned_reuses,a.adopted,a.adopted_bytes,
           a.atlas_idle_limit as u64,a.atlas_idle.as_ref().map_or(0,|b|b.capacity()) as u64,
           a.owned_miss_empty,a.owned_miss_fit,a.owned_miss_ceiling,a.owned_alloc_failures,
           a.owned_eligible,a.owned_miss_pinned,a.owned_miss_disabled,a.adopt_rejected,
-          a.stale_releases,a.peak_charged as u64])
+          a.stale_releases,a.peak_charged as u64,a.atlas_fit_small,a.atlas_fit_large,
+          a.resize_attempts,a.resize_same_address,a.resize_moved,a.resize_failed])
 }
 #[cfg(target_os = "android")]
 pub(crate) fn adopt(capacity:usize,packet_len:usize,offset:usize,size:usize,
@@ -585,6 +615,26 @@ mod tests {
         assert_eq!(a.owned_allocations,1);
         assert_eq!(a.owned_reuses,1);
     }
+    #[test]
+    fn small_atlas_growth_is_bounded_wiped_and_attributed() {
+        let mut a=Arena::default();
+        let ceiling=10*1024*1024;
+        a.set_atlas_idle_limit(ceiling);
+        let mut b=a.take_output(8*1024*1024,ceiling).unwrap();
+        b.fill(0x5a);
+        let cap=b.capacity(); let len=b.len();
+        let id=a.adopt(cap,len,0,len,ceiling,||Some(b)).unwrap();
+        assert!(a.release(id));
+        let next=a.take_output(cap+64*1024,ceiling).unwrap();
+        assert!(next.iter().all(|&x|x==0));
+        assert!(next.capacity()<=ceiling);
+        assert_eq!(a.atlas_fit_small,1);
+        assert_eq!(a.resize_attempts,1);
+        assert_eq!(a.resize_same_address+a.resize_moved+a.resize_failed,1);
+        assert_eq!(a.owned_allocations,2);
+        assert_eq!(a.snapshot()[0],0);
+    }
+
     #[test]
     fn reuse_miss_counters_classify_generic_fit_and_worker_ceiling_once() {
         for (requested,ceiling,expected_fit,expected_ceiling) in [

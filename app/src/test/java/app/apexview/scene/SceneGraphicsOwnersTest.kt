@@ -4,6 +4,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SceneGraphicsOwnersTest {
+    @Test fun lifetimeEventsReportOnlyTransitionsAndReleaseExactlyOnce() {
+        val events = mutableListOf<Triple<Long, SceneGraphicsOwners.Owner?, SceneGraphicsOwners.Owner?>>()
+        val owners = SceneGraphicsOwners { id, before, after -> events.add(Triple(id, before, after)) }
+        val id = owners.newId()
+        val state = SceneGraphicsOwners.Owner("TextureView", 1, 1, 1, 1, 1, 1920, 2176, 2316, 1080)
+        owners.record(id, state)
+        owners.record(id, state)
+        owners.record(id, state.copy(readinessEpoch = 2))
+        owners.remove(id)
+        owners.remove(id)
+        assertEquals(3, events.size)
+        assertNull(events.first().second)
+        assertEquals(2L, events[1].third!!.readinessEpoch)
+        assertNull(events.last().third)
+    }
+
     @Test fun queueSurvivesTextureRetirementAndEncoderIsDistinct() {
         val owners = SceneGraphicsOwners()
         val queue = owners.newId()

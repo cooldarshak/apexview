@@ -212,6 +212,9 @@ class AppState(
     private var bakedQualityRestartPending by mutableStateOf(false)
     internal val bakedQualityTransitionActive get() = bakedQualityRestartPending
     val castingActive: Boolean get() = castResources.active
+    /** Baked production is not local presentation. */
+    internal val castControllerOnly: Boolean get() =
+        app.apexview.cast.CastRecoveryPolicy.controllerOnly(castPlaybackHandedOff, bakedCastSession != null, bakedQualityRestartPending)
     var tvCastingMenuOpen by mutableStateOf(false)
     var castPickerOpen by mutableStateOf(false)
     internal var castVideoOnlyOffer by mutableStateOf(false)
@@ -356,6 +359,7 @@ class AppState(
                     googleHasPlayed = true
                     castSceneConfirmed = true
                     castResources.confirmRendering()
+                    android.util.Log.i("PitwallCast", "CAST_SENDER_MODE transport=GoogleCast mode=BAKED_PRODUCER receiverConfirmed=true visibleVideoRequested=false")
                 }
                 if (castRemoteBuffering != remote.isBuffering) {
                     castRemoteBuffering = remote.isBuffering
@@ -711,7 +715,7 @@ class AppState(
                         handOffCastPlayback()
                         if (alreadyHandedOff) sendCaptionPreferenceToReceiver()
                     }
-                    else { bakedCastSession?.receiverRendering = true; singleDecoderScenePlayer?.player?.volume = 0f; sendCaptionPreferenceToReceiver(); android.util.Log.i("PitwallCast", "BAKED_CAST_RECEIVER_CONFIRMED feeds=${bakedCastSession?.feeds} picture=${bakedCastSession?.width}x${bakedCastSession?.height} phonePlayback=ACTIVE") }
+                    else { bakedCastSession?.receiverRendering = true; singleDecoderScenePlayer?.player?.volume = 0f; sendCaptionPreferenceToReceiver(); android.util.Log.i("PitwallCast", "BAKED_CAST_RECEIVER_CONFIRMED feeds=${bakedCastSession?.feeds} picture=${bakedCastSession?.width}x${bakedCastSession?.height} senderMode=BAKED_PRODUCER visibleVideoRequested=false") }
                     val height = nativeComposedCast?.geometry?.displayHeight ?: castRelay?.session?.sourceDisplayHeight
                     castStatus = if (bakedCastSession != null) "Streaming the baked phone picture, tower, map and commentary to $castDeviceName."
                         else "Playing on $castDeviceName in the phone video layout." + (height?.let { " ${it}p sources." } ?: "")
@@ -811,7 +815,7 @@ class AppState(
             tiles.forEach { it.feed.suspendForRemotePlayback(true) }
         }
         radioPlayer?.pause()
-        android.util.Log.i("PitwallCast", "LOCAL_PLAYBACK_STOPPED transport=${if (localChosen) "FCast" else "GoogleCast"} feeds=${tiles.size}")
+        android.util.Log.i("PitwallCast", "LOCAL_PLAYBACK_STOPPED transport=${if (localChosen) "FCast" else "GoogleCast"} feeds=${tiles.size} senderMode=REMOTE_CONTROLLER visibleVideoRequested=false audibleAudioRequested=false")
     }
     private fun returnCastPlayback() {
         if (!castPlaybackHandedOff) return
@@ -1197,7 +1201,10 @@ class AppState(
                     }
                 }
                 session = next
-                bakedCastSession = next // PlaybackVideoCanvas binds the clear renderer and live viewer overlays.
+                host.player.volume = 0f // AAC is supplied independently to the receiver.
+                radioPlayer?.pause()
+                bakedCastSession = next // Independent producer, separate sender controls.
+                android.util.Log.i("PitwallCast", "CAST_SENDER_MODE mode=BAKED_PRODUCER visibleVideoRequested=false audibleAudioRequested=false sourceDecoderRequired=true")
                 kotlinx.coroutines.withTimeout(25_000) { next.awaitPlayable() }
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                 check(generation == castPreparationGeneration && bakedCastSession === next &&
@@ -1209,7 +1216,7 @@ class AppState(
                     else googleCastRemoteClient === originalGoogleReceiver) { "TV disconnected during preparation" }
                 android.util.Log.i("PitwallCast", "BAKED_CAST_READY feeds=${castTiles.size} " +
                     "picture=${next.width}x${next.height} sourceDecoder=${host.activeVideoDecoderName} " +
-                    "audio=AAC liveHls=true phonePlayback=ACTIVE")
+                    "audio=AAC liveHls=true senderMode=BAKED_PRODUCER visibleVideoRequested=false")
                 castResources.retireArchive()
                 castResources.retireNative()
                 directCast = null
@@ -6163,6 +6170,10 @@ class AppState(
      * playing stops it. No audio focus: taking it would pause the feeds.
      */
     fun playRadio(clip: RadioClip) {
+        if (castControllerOnly) {
+            message = "Radio playback on this device is disabled while casting."
+            return
+        }
         if (radioPlaying?.path == clip.path) {
             stopRadio()
             return
@@ -6507,7 +6518,7 @@ class AppState(
             }
             if (byUser) mutedAll = false
             tiles.forEach { it.audible = it === tile; it.feed.setAudible(false) }
-            if (bakedCastSession != null) owner.player.volume = if (mutedAll || bakedCastSession?.receiverRendering == true) 0f else 1f
+            if (bakedCastSession != null) owner.player.volume = 0f
             else owner.setAudible(!mutedAll && !castingActive)
             applyCaptionPreference()
             if (restartBaked) playbackWork.scheduleCastRestart(scope) {
@@ -6564,7 +6575,7 @@ class AppState(
             else ownedGoogleRemoteClient()?.setStreamMute(mutedAll)
         }
         if (bakedCastSession != null) singleDecoderScenePlayer?.player?.volume =
-            if (mutedAll || bakedCastSession?.receiverRendering == true) 0f else 1f
+            0f
         else if (nativeArchiveTiles.isNotEmpty()) protectedCompositionHost?.feed?.setAudible(!mutedAll && !castingActive)
         else tiles.forEach { it.feed.setAudible(it.audible && !mutedAll && !castingActive) }
         showChrome()
@@ -6817,7 +6828,7 @@ class AppState(
         private set
 
     /** Pop out only from the viewer itself, not from browsing or an open sheet. */
-    val canPip get() = !castPlaybackHandedOff && !externalDisplayRequested && tiles.isNotEmpty() && !browsing && picker == null
+    val canPip get() = !castControllerOnly && !externalDisplayRequested && tiles.isNotEmpty() && !browsing && picker == null
 
     /** The feed the pop-out shows: the big tile in main + strip, else the top-left one. */
     fun pipTile(): Tile? =
@@ -6840,7 +6851,7 @@ class AppState(
 
     /** Leaving the app without a pop-out (or closing the pop-out) pauses everything. */
     fun pauseForBackground() {
-        if (castPlaybackHandedOff || localChosen && localConnection != null || externalDisplayActive || externalDisplayRequested && android.os.SystemClock.elapsedRealtime() < externalRequestDeadline) { saveWatch(); return }
+        if (castControllerOnly || localChosen && localConnection != null || externalDisplayActive || externalDisplayRequested && android.os.SystemClock.elapsedRealtime() < externalRequestDeadline) { saveWatch(); return }
         playbackWork.cancelOffer()
         saveWatch()
         if (tiles.isNotEmpty() && playing) togglePlay()
@@ -6970,6 +6981,7 @@ class AppState(
     }
 
     fun toggleChrome() {
+        if (castControllerOnly) { showChrome(); return }
         if (chromeVisible) chromeVisible = false else showChrome()
     }
 
@@ -7550,7 +7562,18 @@ class AppState(
      * when both streams carry one, else by position. Far off: jump. Slightly off: play a little
      * faster or slower until caught up, the way eXViewer does.
      */
+    private var lastCastSenderDiagnosticMs = 0L
+
     fun syncTick() {
+        if (castControllerOnly) {
+            if (bakedCastSession != null) singleDecoderScenePlayer?.player?.volume = 0f
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (DiagnosticLogs.recording && now - lastCastSenderDiagnosticMs >= 5_000L) {
+                lastCastSenderDiagnosticMs = now
+                android.util.Log.i("PitwallCast", "CAST_SENDER_OWNERS uptimeMs=$now handedOff=$castPlaybackHandedOff baked=${bakedCastSession != null} feeds=${tiles.size} " +
+                    tiles.joinToString(";") { "tile=${it.id},${it.feed.castSenderFields()}" })
+            }
+        }
         if (castPlaybackHandedOff) {
             positionMs = remoteCastClock.positionMs()
             tiles.forEach { it.feed.suspendForRemotePlayback(true) }

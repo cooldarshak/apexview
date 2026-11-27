@@ -81,7 +81,7 @@ object DiagnosticLogs {
                 segment = 0
                 captureId = "${Process.myPid()}-${SystemClock.elapsedRealtime()}"
                 history.clear()
-                openFile(context)
+                openFile(context, rotate = true)
                 flushLocked()
                 appendQueue.start(token)
                 recording = true

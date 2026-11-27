@@ -230,6 +230,8 @@ class FeedPlayer(
         playbackEvent("captions", "enabled=$enabled language=$normalized offered=${availableCaptionTracks.size}")
     }
 
+    internal fun castSenderFields(): String = "playing=${player.isPlaying},playWhenReady=${player.playWhenReady},volume=${player.volume},videoDecoders=$activeVideoDecoderCount,audioDecoders=$activeAudioDecoders,selectedVideo=$selectedVideoTrackCount,allocatorBytes=${playbackAllocator.totalBytesAllocated},remoteSuspended=$remotePlaybackSuspended"
+
     /** A remote renderer owns playback. Disable tracks as well as pausing to release codec slots. */
     internal fun suspendForRemotePlayback(suspended: Boolean) {
         if (remotePlaybackSuspended == suspended) {
