@@ -99,15 +99,6 @@ internal object HevcSliceHeaderParser {
         require(clearNalBytes in 3..length) { "Clear HEVC slice prefix is outside the NAL unit" }
         // CABAC slice data can be megabytes long; the syntactic header is normally tiny.
         // Retry with the entire clear prefix when a legitimate unusually long header needs it.
-        // Avoid converting 8 KiB of CABAC payload for every ordinary short
-        // header. Preserve the previous 8 KiB and full-clear-prefix paths
-        // verbatim on any failure; the independent syntax proof still runs.
-        val shortPrefix = minOf(clearNalBytes, 258)
-        if (shortPrefix == clearNalBytes)
-            return parseWithin(nal, offset, length, sps, pps, clearNalBytes, shortPrefix)
-        try {
-            return parseWithin(nal, offset, length, sps, pps, clearNalBytes, shortPrefix)
-        } catch (_: IllegalArgumentException) { /* retry the established proof */ }
         val prefix = minOf(clearNalBytes, 8194)
         if (prefix == clearNalBytes) return parseWithin(nal, offset, length, sps, pps, clearNalBytes, prefix)
         return try {
