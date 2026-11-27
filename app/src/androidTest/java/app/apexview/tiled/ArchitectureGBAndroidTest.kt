@@ -19,6 +19,60 @@ import org.junit.runner.RunWith
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class ArchitectureGBAndroidTest {
     @Test
+    fun nativeTowerDeltaStoragePreservesEveryFieldAndRejectsDensePackets() {
+        val rows = 2051
+        val source = ShortArray(rows * 9) { i ->
+            when (i % 9) {
+                0 -> ((i / 9) % 24).toShort()
+                4 -> (i / 99).toShort()
+                5 -> ((i / 819) % 8).toShort()
+                8 -> Short.MAX_VALUE
+                else -> (i % 9).toShort()
+            }
+        }
+        val owner = requireNotNull(NativeHotPath.compactSnapshotDeltas(source, rows))
+        val out = IntArray(9)
+        for (i in rows - 1 downTo 0) {
+            owner.read(i, out)
+            assertArrayEquals(IntArray(9) { source[i * 9 + it].toInt() }, out)
+        }
+        val dense = ShortArray(64 * 9) { it.toShort() }
+        assertNull(NativeHotPath.compactSnapshotDeltas(dense, 64))
+    }
+
+    @Test
+    fun rustTowerParserMatchesReferenceAcrossPrimaryAndSupplementDeltas() {
+        val primary = """
+            00:00:00.000{"Lines":{"44":{"Position":"1","GapToLeader":{"Value":"0"},"InPit":false,"NumberOfLaps":0},"1":{"Position":"2"}}}
+            00:00:01.000{"Lines":{"44":{"Position":"2","TimeDiffToFastest":"+1.5","IntervalToPositionAhead":{"Value":""}},"1":{"Position":1}}}
+            00:00:02.000{"Lines":{"44":{"Retired":true}}}
+            00:00:03.000{"Lines":{"44":{"GapToLeader":{"Value":"+3.0"},"TimeDiffToPositionAhead":"+0.4"}}}
+        """.trimIndent()
+        val supplement = """
+            00:00:01.000{"Lines":{"44":{"GapToLeader":{"Value":"+1.8"}}}}
+            00:00:02.000{"Lines":{"44":{"Retired":false,"Sectors":{"0":{"Value":"20.0"}}}}}
+        """.trimIndent()
+        val a = app.apexview.DriverTimingParser.parse(primary, 0L, supplement, false)
+        val b = app.apexview.DriverTimingParser.parse(primary, 0L, supplement, true)
+        assertEquals(a.keys, b.keys)
+        for (number in a.keys) {
+            val x = a.getValue(number)
+            val y = b.getValue(number)
+            for (time in 0L..4000L step 100L) {
+                assertEquals(x.retiredAt(time), y.retiredAt(time))
+                assertEquals(x.lapAt(time), y.lapAt(time))
+                assertEquals(x.at(time, false)?.toString(), y.at(time, false)?.toString())
+            }
+        }
+        val json = """{"Lines":{"44":{"Position":"2","TimeDiffToFastest":"+1.0"}}}"""
+        val scratch = LongArray(NativeHotPath.REPLAY_TOWER_WORDS)
+        assertTrue(NativeHotPath.replayTowerSimple(json, scratch))
+        val before = scratch.copyOf()
+        assertFalse(NativeHotPath.replayTowerSimple(json.replace(""""+1.0"""", "null"), scratch))
+        assertArrayEquals(before, scratch)
+    }
+
+    @Test
     fun rustReplayIndexHandlesAreIsolatedAndRetired() {
         val a = NativeHotPath.replayIndexCreate()
         val b = NativeHotPath.replayIndexCreate()
