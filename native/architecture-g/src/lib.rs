@@ -25,6 +25,7 @@ pub mod clear_slice;
 pub mod engine;
 pub mod hot_path;
 pub mod compact_timing;
+pub mod replay_positions;
 pub mod audio_metadata;
 pub mod ts_mux;
 pub mod overlay_geometry;

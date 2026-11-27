@@ -1193,3 +1193,19 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeNormalizeSect
     }));
     match result{Ok(Some(()))=>1,Ok(None)=>INVALID,Err(_)=>PANIC}
 }
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReplayPositions(
+    mut env:JNIEnv<'_>,_class:JClass<'_>,source:jni::objects::JString<'_>,out:JLongArray<'_>,
+)->jint{
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        if env.get_array_length(&out).ok()? as usize != crate::replay_positions::WORDS{return None;}
+        let mut scratch=[0i64;crate::replay_positions::WORDS];
+        let text=env.get_string(&source).ok()?;
+        let used=crate::replay_positions::parse(text.to_bytes(),&mut scratch)?;
+        drop(text);
+        env.set_long_array_region(&out,0,&scratch[..used]).ok()?;
+        Some(())
+    }));
+    if matches!(result,Ok(Some(()))){1}else{0}
+}

@@ -216,6 +216,13 @@ public final class NativeHotPath {
     private static native int nativeCompactTimingSnapshot(long[] out);
     private static native ByteBuffer nativeCreateCompactTimes(long[] source,int count,long[] token);
     private static native void nativeReleaseCompactTimes(long token);
+    public static final int REPLAY_POSITION_WORDS = 3 + 512 * 4;
+    public static boolean replayPositions(String json, long[] output) {
+        if (output.length != REPLAY_POSITION_WORDS || json.length() > 512 * 1024 || !available()) return false;
+        try { return nativeReplayPositions(json, output) == 1; }
+        catch (LinkageError | RuntimeException failed) { return false; }
+    }
+    private static native int nativeReplayPositions(String json, long[] output);
     public static boolean rowOrder(int[] positions, int count, int[] order) {
         if (!available()) return false;
         try { return nativeRowOrder(positions,count,order)==1; }

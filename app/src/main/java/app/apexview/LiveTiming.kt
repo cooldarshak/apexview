@@ -2164,6 +2164,9 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         var decodedRecords = 0
         var malformedRecords = 0
         var positionSamples = 0
+        var nativeRecords = 0
+        val nativeScratch = if (nativeRequested()) LongArray(app.apexview.tiled.NativeHotPath.REPLAY_POSITION_WORDS) else null
+        val driverKeys = if (nativeScratch != null) arrayOfNulls<String>(1000) else null
         ArchiveInflater().use { inflater ->
             lines.forEach { raw ->
                 checkActive()
@@ -2174,8 +2177,35 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 if (inputRecords == 1 || inputRecords % 1024 == 0) {
                     checkpoint?.invoke("records=$inputRecords decoded=$decodedRecords malformed=$malformedRecords samples=$positionSamples cars=${tracks.size}")
                 }
+                val decoded = try {
+                    inflater.decode(line.substring(prefix))
+                } catch (_: Exception) {
+                    malformedRecords++
+                    return@forEach
+                }
+                if (nativeScratch != null && app.apexview.tiled.NativeHotPath.replayPositions(decoded, nativeScratch)) {
+                    val sampleCount = nativeScratch[0].toInt()
+                    val rowCount = nativeScratch[1].toInt()
+                    val latest = nativeScratch[2]
+                    if (starts.size < START_SAMPLES && latest != Long.MIN_VALUE) {
+                        runCatching { latest - offsetMs(line) }.getOrNull()?.let(starts::add)
+                    }
+                    nativeRecords++
+                    decodedRecords++
+                    positionSamples += sampleCount
+                    val keys = requireNotNull(driverKeys)
+                    for (row in 0 until rowCount) {
+                        val at = 3 + row * 4
+                        val n = nativeScratch[at + 1].toInt()
+                        val key = keys[n] ?: n.toString().also { keys[n] = it }
+                        tracks.getOrPut(key) { TrackBuilder() }.add(nativeScratch[at],
+                            Float.fromBits(nativeScratch[at + 2].toInt()), Float.fromBits(nativeScratch[at + 3].toInt()))
+                    }
+                    if (decodedRecords == 1 || decodedRecords % 32 == 0) onProgress?.invoke(tracks)
+                    return@forEach
+                }
                 val json = try {
-                    JSONObject(inflater.decode(line.substring(prefix)))
+                    JSONObject(decoded)
                 } catch (_: Exception) {
                     malformedRecords++
                     return@forEach
@@ -2192,6 +2222,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 if (decodedRecords == 1 || decodedRecords % 32 == 0) onProgress?.invoke(tracks)
             }
         }
+        if (nativeScratch != null) checkpoint?.invoke("position decoder nativeRecords=$nativeRecords referenceRecords=${decodedRecords-nativeRecords}")
         return PositionParseReport(tracks, inputRecords, decodedRecords, malformedRecords, positionSamples,
             starts.sorted().let { it.getOrNull(it.size / 2) })
     }
