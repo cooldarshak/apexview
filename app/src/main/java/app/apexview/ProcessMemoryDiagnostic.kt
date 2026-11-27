@@ -66,7 +66,7 @@ internal object ProcessMemoryDiagnostic {
     // A null snapshot means the library was not loaded or the query failed;
     // zero is reserved for a successfully measured empty native arena.
     fun fragmentFields(values: LongArray?): String {
-        if (values == null || (values.size !in setOf(5,9,15,21,27)) || values.any { it < 0L } ||
+        if (values == null || (values.size !in setOf(5,9,15,21,27,28)) || values.any { it < 0L } ||
             values[2] > values[1] || values[1] > values[0] ||
             (values.size >= 15 && (values[10] > values[9] || values[10] > values[0] - values[1])) ||
             (values.size >= 21 && (values[15] < values[6] || values[20] < values[0]))) return "nativeFragmentArena=UNAVAILABLE"
@@ -81,8 +81,9 @@ internal object ProcessMemoryDiagnostic {
             (if (values.size >= 21) " nativeOwnedEligible=${values[15]} nativeOwnedMissPinned=${values[16]}" +
                 " nativeOwnedMissDisabled=${values[17]} nativeAdoptRejected=${values[18]}" +
                 " nativeStaleReleases=${values[19]} nativeFragmentPeakCapacityBytes=${values[20]}" else "") +
-            (if (values.size == 27) " nativeAtlasFitTooSmall=${values[21]} nativeAtlasFitTooLarge=${values[22]}" +
+            (if (values.size >= 27) " nativeAtlasFitTooSmall=${values[21]} nativeAtlasFitTooLarge=${values[22]}" +
                 " nativeAtlasResizeAttempts=${values[23]} nativeAtlasResizeSameAddress=${values[24]}" +
-                " nativeAtlasResizeMoved=${values[25]} nativeAtlasResizeFailed=${values[26]}" else "")
+                " nativeAtlasResizeMoved=${values[25]} nativeAtlasResizeFailed=${values[26]}" else "") +
+            (if (values.size == 28) " nativeAtlasResizeBypassed=${values[27]}" else "")
     }
 }

@@ -18,6 +18,11 @@ const MAX_FREE: usize = 2;
 #[cfg(any(target_os = "android", test))]
 const MAX_FREE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REUSE_SLACK: usize = 1024 * 1024;
+// A moved realloc copies the wiped old fragment into a new allocation, which
+// has no value to an overwrite-only writer. Learn from this process allocator;
+// do not penalize platforms that actually grow their buffers in place.
+#[cfg(any(target_os = "android", test))]
+const MAX_UNHELPFUL_ATLAS_GROWTHS: u8 = 4;
 pub(crate) fn reusable_capacity(size:usize, capacity:usize)->bool {
     size <= capacity && capacity <= size.saturating_add((size / 8).min(MAX_REUSE_SLACK))
 }
@@ -48,6 +53,8 @@ struct Arena {
     resize_same_address: u64,
     resize_moved: u64,
     resize_failed: u64,
+    resize_bypassed: u64,
+    resize_unhelpful_streak: u8,
     owned_miss_ceiling: u64,
     owned_alloc_failures: u64,
     owned_eligible: u64,
@@ -104,6 +111,11 @@ impl Arena {
         self.free.iter().enumerate().filter(|(_,b)|reusable_capacity(size,b.capacity()))
             .min_by_key(|(_,b)|b.capacity()).map(|(i,_)|i)
     }
+    fn note_atlas_growth(&mut self, in_place: bool) {
+        self.resize_unhelpful_streak = if in_place { 0 } else {
+            self.resize_unhelpful_streak.saturating_add(1)
+        };
+    }
     // The worker already has a bounded slot commitment. Move free backing
     // OUT of this arena before writing, so it is charged only to the worker.
     fn take_output(&mut self,size:usize,ceiling:usize)->Option<Vec<u8>> {
@@ -159,18 +171,29 @@ impl Arena {
             // Only the wiped, unleased atlas backing can be resized. No extra
             // reserved slack; the worker ceiling and arena caps stay unchanged.
             // A moved realloc is not counted as a reuse or physical memory saving.
+            // A compatible generic backing has already won above. Only count
+            // a bypass when we would otherwise attempt near-size atlas growth.
+            // Drop the old allocation BEFORE reserving fresh backing so there
+            // is no needless overlap/copy of two multi-MiB wiped buffers.
+            if grow.is_some() && self.resize_unhelpful_streak >= MAX_UNHELPFUL_ATLAS_GROWTHS {
+                self.resize_bypassed=self.resize_bypassed.saturating_add(1);
+                drop(grow.take());
+            }
             if let Some(mut b)=grow {
                 self.resize_attempts=self.resize_attempts.saturating_add(1);
                 let old=b.as_ptr() as usize;
                 b.clear();
                 if b.try_reserve_exact(size).is_ok() && b.capacity()<=ceiling && reusable_capacity(size,b.capacity()) {
-                    if b.as_ptr() as usize==old {self.resize_same_address=self.resize_same_address.saturating_add(1);}
+                    let in_place=b.as_ptr() as usize==old;
+                    if in_place {self.resize_same_address=self.resize_same_address.saturating_add(1);}
                     else {self.resize_moved=self.resize_moved.saturating_add(1);}
+                    self.note_atlas_growth(in_place);
                     b.resize(size,0);
                     self.owned_allocations=self.owned_allocations.saturating_add(1);
                     return Some(b);
                 }
                 self.resize_failed=self.resize_failed.saturating_add(1);
+                self.note_atlas_growth(false);
             }
             let mut b=Vec::new();
             if b.try_reserve_exact(size).is_err() || b.capacity()>ceiling {
@@ -341,7 +364,7 @@ pub fn release(id: i64) -> bool { arena().lock().is_ok_and(|mut a| a.release(id)
 #[cfg(target_os = "android")]
 pub fn trim() { if let Ok(mut a) = arena().lock() { a.trim_pressure(); } }
 #[cfg(target_os = "android")]
-pub fn snapshot() -> Option<[u64; 27]> {
+pub fn snapshot() -> Option<[u64; 28]> {
     let a=arena().lock().ok()?;
     let [capacity,live,payload,count,allocations]=a.snapshot();
     Some([capacity,live,payload,count,allocations,a.owned_allocations,a.owned_reuses,a.adopted,a.adopted_bytes,
@@ -349,7 +372,7 @@ pub fn snapshot() -> Option<[u64; 27]> {
           a.owned_miss_empty,a.owned_miss_fit,a.owned_miss_ceiling,a.owned_alloc_failures,
           a.owned_eligible,a.owned_miss_pinned,a.owned_miss_disabled,a.adopt_rejected,
           a.stale_releases,a.peak_charged as u64,a.atlas_fit_small,a.atlas_fit_large,
-          a.resize_attempts,a.resize_same_address,a.resize_moved,a.resize_failed])
+          a.resize_attempts,a.resize_same_address,a.resize_moved,a.resize_failed,a.resize_bypassed])
 }
 #[cfg(target_os = "android")]
 pub(crate) fn adopt(capacity:usize,packet_len:usize,offset:usize,size:usize,
@@ -632,6 +655,49 @@ mod tests {
         assert_eq!(a.resize_attempts,1);
         assert_eq!(a.resize_same_address+a.resize_moved+a.resize_failed,1);
         assert_eq!(a.owned_allocations,2);
+        assert_eq!(a.snapshot()[0],0);
+    }
+
+    #[test]
+    fn repeated_moved_growth_bypasses_copy_but_keeps_exact_fit_and_reader_safety() {
+        let mut a=Arena::default();
+        let ceiling=10*1024*1024;
+        a.set_atlas_idle_limit(ceiling);
+        // Deterministic observations, independent of the host allocator.
+        for _ in 0..MAX_UNHELPFUL_ATLAS_GROWTHS-1 {a.note_atlas_growth(false);}
+        a.note_atlas_growth(true);
+        assert_eq!(a.resize_unhelpful_streak,0);
+        for _ in 0..MAX_UNHELPFUL_ATLAS_GROWTHS {a.note_atlas_growth(false);}
+        let len=8*1024*1024;
+        let mut pinned=a.take_output(len,ceiling).unwrap();
+        pinned.fill(0x61);
+        let cap=pinned.capacity();
+        let held=a.adopt(cap,len,16,len-16,MAX_BYTES,||Some(pinned)).unwrap();
+        assert!(a.mark_viewed(held));
+        let mut idle=a.take_output(len,ceiling).unwrap();
+        idle.fill(0x5a);
+        let cap=idle.capacity();
+        let id=a.adopt(cap,len,16,len-16,MAX_BYTES,||Some(idle)).unwrap();
+        assert!(a.release(id));
+        let requested=cap+64*1024;
+        let fresh=a.take_output(requested,ceiling).unwrap();
+        assert_eq!(fresh.len(),requested);
+        assert!(fresh.iter().all(|&v|v==0));
+        assert!(fresh.capacity()<=ceiling);
+        assert_eq!(a.resize_attempts,0);
+        assert_eq!(a.resize_bypassed,1);
+        assert_eq!(a.snapshot()[0],a.live[&held].capacity() as u64);
+        assert_eq!(a.live[&held][16],0x61);
+        let cap=fresh.capacity();
+        let id=a.adopt(cap,requested,16,requested-16,MAX_BYTES,||Some(fresh)).unwrap();
+        assert!(a.release(id));
+        let ptr=a.atlas_idle.as_ref().unwrap().as_ptr();
+        let again=a.take_output(requested,ceiling).unwrap();
+        assert_eq!(ptr,again.as_ptr());
+        assert_eq!(a.owned_reuses,1);
+        assert_eq!(a.resize_bypassed,1);
+        assert!(a.release(held));
+        a.trim_pressure();
         assert_eq!(a.snapshot()[0],0);
     }
 
