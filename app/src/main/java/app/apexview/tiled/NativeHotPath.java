@@ -216,6 +216,29 @@ public final class NativeHotPath {
     private static native int nativeCompactTimingSnapshot(long[] out);
     private static native ByteBuffer nativeCreateCompactTimes(long[] source,int count,long[] token);
     private static native void nativeReleaseCompactTimes(long token);
+    /** Owner must close this handle; native registry retains no Java references. */
+    public static long replayIndexCreate() {
+        if (!available()) return 0;
+        try { return nativeReplayIndexCreate(); }
+        catch (LinkageError | RuntimeException unavailable) { return 0; }
+    }
+    public static boolean replayIndexMark(long handle, long time, long offset) {
+        try { return nativeReplayIndexMark(handle, time, offset) == 1; }
+        catch (LinkageError | RuntimeException unavailable) { return false; }
+    }
+    public static long replayIndexOffset(long handle, long from) {
+        try { return nativeReplayIndexOffset(handle, from); }
+        catch (LinkageError | RuntimeException unavailable) { return -1; }
+    }
+    public static void replayIndexClose(long handle) {
+        if (handle == 0) return;
+        try { nativeReplayIndexClose(handle); }
+        catch (LinkageError | RuntimeException unavailable) { }
+    }
+    private static native long nativeReplayIndexCreate();
+    private static native int nativeReplayIndexMark(long handle, long time, long offset);
+    private static native long nativeReplayIndexOffset(long handle, long from);
+    private static native void nativeReplayIndexClose(long handle);
     public static final int REPLAY_POSITION_WORDS = 3 + 512 * 4;
     public static boolean replayPositions(String json, long[] output) {
         if (output.length != REPLAY_POSITION_WORDS || json.length() > 512 * 1024 || !available()) return false;
