@@ -10,9 +10,9 @@ import app.apexview.tiled.NativeHotPath
  * byte offsets (not String character counts), never retained JSON or tracks.
  * Only one bounded decode window is read at a time. The caller owns deletion.
  * Unordered sources deliberately fall back to the complete reference pass. */
-internal class ReplayPositionSpool(private val file: File) : AutoCloseable {
+internal class ReplayPositionSpool(private val file: File, nativeRequested: Boolean = false) : AutoCloseable {
     private val writer = FileOutputStream(file).buffered()
-    private var nativeIndex = NativeHotPath.replayIndexCreate()
+    private var nativeIndex = if (nativeRequested) NativeHotPath.replayIndexCreate() else 0L
     private var indexLost = false
     private var offsets = LongArray(if (nativeIndex == 0L) 64 else 0)
     private var times = LongArray(offsets.size)
