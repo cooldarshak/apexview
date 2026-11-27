@@ -89,8 +89,8 @@ internal class OverlayDrawCar(override val number: String) : OverlayMotionCar {
 }
 
 /** One owner and bounded batched JNI calls per position sample. A completed
- * native archive retains compact Rust timestamp owners, while coordinates and
- * live prefixes remain immutable JVM arrays. Result scratch is thread-local.
+ * native archive retains compact Rust timestamp and exact coordinate owners;
+ * unsupported values and live prefixes remain JVM arrays. Scratch is private.
  */
 internal class NativePositionBatch(timing: SessionTiming) {
     private val tracks = timing.tracks.values

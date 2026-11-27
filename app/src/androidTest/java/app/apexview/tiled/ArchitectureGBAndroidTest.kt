@@ -68,6 +68,14 @@ class ArchitectureGBAndroidTest {
         }.build(pool)
         assertTrue(speeds.speedTimeline === compact)
         assertTrue(speeds.gearTimeline === compact)
+        assertNull(speeds.speedValues.array)
+        assertNull(speeds.gearValues.array)
+        assertTrue(speeds.speedValues.native != null && speeds.gearValues.native != null)
+        for (i in listOf(0, 1, 7, 8, 1023, 1024, times.lastIndex)) {
+            assertEquals(200 + i % 80, speeds.kmhAt(times[i]))
+            assertEquals(i % 9, speeds.gearAt(times[i]))
+        }
+        assertNull(NativeHotPath.compactTelemetry(ShortArray(64) { 501 }, 64, 9))
         assertEquals(200 + 4100 % 80, speeds.kmhAt(times.last()))
         assertEquals(4100 % 9, speeds.gearAt(times.last()))
         assertNull(speeds.kmhAt(times.last() + 5001))

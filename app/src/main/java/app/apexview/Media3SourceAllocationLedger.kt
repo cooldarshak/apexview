@@ -26,21 +26,21 @@ internal class Media3SourceAllocationLedger {
     fun allocator(delegate: Allocator, kind: Kind): Allocator = object : Allocator {
         override fun allocate(): Allocation {
             val result = delegate.allocate()
-            bytes.addAndGet(kind.ordinal, individualAllocationLength.toLong())
+            bytes.addAndGet(kind.ordinal, delegate.individualAllocationLength.toLong())
             return result
         }
         override fun release(allocation: Allocation) {
             delegate.release(allocation)
-            bytes.addAndGet(kind.ordinal, -individualAllocationLength.toLong())
+            bytes.addAndGet(kind.ordinal, -delegate.individualAllocationLength.toLong())
         }
-        override fun release(allocationNode: Allocator.AllocationNode?) {
+        override fun release(allocationNode: Allocator.AllocationNode) {
             // No temporary list or allocations on the release path. Count
             // before returning ownership to Media3, which may mutate nodes.
-            var node = allocationNode
+            var node: Allocator.AllocationNode? = allocationNode
             var count = 0L
             while (node != null) { count++; node = node.next() }
-            if (allocationNode != null) delegate.release(allocationNode)
-            bytes.addAndGet(kind.ordinal, -count * individualAllocationLength.toLong())
+            delegate.release(allocationNode)
+            bytes.addAndGet(kind.ordinal, -count * delegate.individualAllocationLength.toLong())
         }
         override fun trim() = delegate.trim()
         override fun getTotalBytesAllocated(): Int = delegate.totalBytesAllocated

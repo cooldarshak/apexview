@@ -166,9 +166,50 @@ public final class NativeHotPath {
     }
     private static native ByteBuffer nativeCreateCompactCoordinates(float[] xs,float[] ys,int count,long[] token);
 
+    public static final class CompactTelemetry {
+        private final ByteBuffer data;
+        private final int count, bits;
+        private CompactTelemetry(ByteBuffer raw, int count, int bits) {
+            this.data = raw.asReadOnlyBuffer();
+            this.count = count; this.bits = bits;
+        }
+        public int at(int index) {
+            if (index < 0 || index >= count) throw new IndexOutOfBoundsException();
+            int bit = index * bits, offset = bit / 8, shift = bit % 8;
+            try {
+                int word = Byte.toUnsignedInt(data.get(offset));
+                if (shift + bits > 8) word |= Byte.toUnsignedInt(data.get(offset + 1)) << 8;
+                int value = (word >>> shift) & ((1 << bits) - 1);
+                return bits == 4 && value == 15 ? -1 : value;
+            } finally { Reference.reachabilityFence(this); }
+        }
+    }
+    public static CompactTelemetry compactTelemetry(short[] source, int count, int bits) {
+        if (count < 64 || count > source.length || (bits != 4 && bits != 9) || !available()) return null;
+        long[] token = new long[1];
+        boolean registered = false;
+        try {
+            ByteBuffer raw = nativeCreateCompactTelemetry(source,count,bits,token);
+            long expected = (count * (long)bits + 7L) / 8L;
+            if (raw == null || token[0] <= 0 || raw.capacity() != expected) return null;
+            CompactTelemetry owner = new CompactTelemetry(raw,count,bits);
+            ensureCompactReaper();
+            compactRefs.add(new CompactRef(owner,token[0]));
+            registered = true;
+            return owner;
+        } catch (LinkageError | RuntimeException unavailable) { return null; }
+        finally {
+            if (!registered && token[0] > 0) {
+                try { nativeReleaseCompactTimes(token[0]); }
+                catch (LinkageError | RuntimeException ignored) { }
+            }
+        }
+    }
+    private static native ByteBuffer nativeCreateCompactTelemetry(short[] source,int count,int bits,long[] token);
+
     public static long[] compactTimingSnapshot() {
         if (!available()) return null;
-        long[] out = new long[6];
+        long[] out = new long[9];
         try { return nativeCompactTimingSnapshot(out) == 1 ? out : null; }
         catch (LinkageError | RuntimeException unavailable) { return null; }
     }

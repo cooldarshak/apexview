@@ -5,6 +5,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ProcessMemoryDiagnosticTest {
+    @Test fun packedTelemetryIsNotDoubleCountedWithCoordinatesOrTimestamps() {
+        val valid = longArrayOf(1, 264, 64, 1, 264, 64, 2, 104, 128)
+        assertTrue(ProcessMemoryDiagnostic.compactTimingFields(valid).contains("nativeCompactTelemetryBytes=104"))
+        valid[7] = 1
+        assertEquals("nativeCompactTiming=UNAVAILABLE", ProcessMemoryDiagnostic.compactTimingFields(valid))
+    }
     @Test fun packedCoordinatesAreSeparateFromTimestampAndProcessTotals() {
         val fields = ProcessMemoryDiagnostic.compactTimingFields(longArrayOf(1, 264, 64, 1, 264, 64))
         assertTrue(fields.contains("nativeCompactTimingBytes=264"))

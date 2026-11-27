@@ -558,13 +558,13 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragm
 // G-C audio and telemetry. JNI references are scoped to one call; the
 // bounded primitive arrays carry cursor state and results without mirroring
 // the complete session histories. A failure never publishes partial data.
-use jni::objects::{JFloatArray,JIntArray,JLongArray,JObjectArray,JByteArray};
+use jni::objects::{JFloatArray,JIntArray,JLongArray,JObjectArray,JByteArray,JShortArray};
 use crate::hot_path::{self,PositionCursor,MAX_DRIVERS,MAX_HISTORY};
 
 // Archive timestamp ownership is independent of media/DRM leases. A bounded
 // native registry owns immutable packets; a JVM reference-queue owner retires
 // the packet only after its last shared timing reader is unreachable.
-use crate::compact_timing::{CompactTimes, CompactCoordinates};
+use crate::compact_timing::{CompactTimes, CompactCoordinates, CompactTelemetry};
 use std::collections::HashMap;
 use std::sync::Arc;
 const COMPACT_TIMING_LIMIT: usize = 64 * 1024 * 1024;
@@ -573,11 +573,12 @@ struct CompactTimingRegistry {
     bytes: usize,
     entries: HashMap<i64, Arc<CompactTimes>>,
     positions: HashMap<i64, Arc<CompactCoordinates>>,
+    telemetry: HashMap<i64, Arc<CompactTelemetry>>,
 }
 static COMPACT_TIMING: OnceLock<Mutex<CompactTimingRegistry>> = OnceLock::new();
 fn compact_registry() -> &'static Mutex<CompactTimingRegistry> {
     COMPACT_TIMING.get_or_init(|| Mutex::new(CompactTimingRegistry {
-        serial: 0, bytes: 0, entries: HashMap::new(), positions: HashMap::new(),
+        serial: 0, bytes: 0, entries: HashMap::new(), positions: HashMap::new(), telemetry: HashMap::new(),
     }))
 }
 fn compact_history(handle: i64) -> Option<Arc<CompactTimes>> {
@@ -650,18 +651,51 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeCreateCompact
     match result { Ok(Some(buffer)) => buffer, _ => std::ptr::null_mut() }
 }
 #[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeCreateCompactTelemetry(
+    mut env: JNIEnv<'_>, _class: JClass<'_>, source: JShortArray<'_>,
+    count: jint, bits: jint, token: JLongArray<'_>,
+) -> jobject {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Option<jobject> {
+        let n = usize::try_from(count).ok()?;
+        let width = usize::try_from(bits).ok()?;
+        let len = CompactTelemetry::storage_len(n, width)?;
+        if (env.get_array_length(&source).ok()? as usize) < n ||
+            env.get_array_length(&token).ok()? != 1 { return None; }
+        let mut registry = compact_registry().lock().ok()?;
+        let total = registry.bytes.checked_add(len)?;
+        if total > COMPACT_TIMING_LIMIT { return None; }
+        let handle = registry.serial.checked_add(1)?;
+        registry.telemetry.try_reserve(1).ok()?;
+        let packet = Arc::new(CompactTelemetry::from_reader(n, width, |start, out| {
+            env.get_short_array_region(&source, start as i32, out).ok()
+        })?);
+        // SAFETY: immutable native backing, shared reference-queue retirement,
+        // private Java read-only view and reachability fence for each read.
+        let buffer = unsafe { env.new_direct_byte_buffer(packet.bytes().as_ptr() as *mut u8, len).ok()? };
+        env.set_long_array_region(&token, 0, &[handle]).ok()?;
+        registry.serial = handle;
+        registry.bytes = total;
+        registry.telemetry.insert(handle, packet);
+        Some(buffer.into_raw())
+    }));
+    match result { Ok(Some(buffer)) => buffer, _ => std::ptr::null_mut() }
+}
+#[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeCompactTimingSnapshot(
     env: JNIEnv<'_>, _class: JClass<'_>, out: JLongArray<'_>,
 ) -> jint {
     let result = catch_unwind(AssertUnwindSafe(|| -> Option<()> {
-        if env.get_array_length(&out).ok()? != 6 { return None; }
+        if env.get_array_length(&out).ok()? != 9 { return None; }
         let registry = compact_registry().lock().ok()?;
         let samples = registry.entries.values().try_fold(0i64, |total, packet| total.checked_add(packet.len() as i64))?;
         let position_bytes = registry.positions.values().try_fold(0usize, |total, packet| total.checked_add(packet.bytes().len()))?;
         let position_samples = registry.positions.values().try_fold(0i64, |total, packet| total.checked_add(packet.len() as i64))?;
-        let time_bytes = registry.bytes.checked_sub(position_bytes)?;
+        let telemetry_bytes = registry.telemetry.values().try_fold(0usize, |total, packet| total.checked_add(packet.bytes().len()))?;
+        let telemetry_samples = registry.telemetry.values().try_fold(0i64, |total, packet| total.checked_add(packet.len() as i64))?;
+        let time_bytes = registry.bytes.checked_sub(position_bytes)?.checked_sub(telemetry_bytes)?;
         env.set_long_array_region(&out, 0, &[registry.entries.len() as i64, time_bytes as i64, samples,
-            registry.positions.len() as i64, position_bytes as i64, position_samples]).ok()?;
+            registry.positions.len() as i64, position_bytes as i64, position_samples,
+            registry.telemetry.len() as i64, telemetry_bytes as i64, telemetry_samples]).ok()?;
         Some(())
     }));
     match result { Ok(Some(())) => 1, Ok(None) => INVALID, Err(_) => PANIC }
@@ -675,6 +709,8 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReleaseCompac
             if let Some(packet) = registry.entries.remove(&token) {
                 registry.bytes = registry.bytes.saturating_sub(packet.bytes().len());
             } else if let Some(packet) = registry.positions.remove(&token) {
+                registry.bytes = registry.bytes.saturating_sub(packet.bytes().len());
+            } else if let Some(packet) = registry.telemetry.remove(&token) {
                 registry.bytes = registry.bytes.saturating_sub(packet.bytes().len());
             }
         }

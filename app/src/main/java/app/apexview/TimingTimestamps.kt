@@ -50,3 +50,24 @@ internal class TimingCoordinates private constructor(
             NativeHotPath.compactCoordinates(x, y, count)?.let { TimingCoordinates(null, null, it, count) }
     }
 }
+
+/** Exact CarData values; keep live prefixes and unsupported archive inputs
+ * in the original shorts, never keep both arrays and a native owner. */
+internal class TimingTelemetry private constructor(
+    val array: ShortArray?,
+    val native: NativeHotPath.CompactTelemetry?,
+    val count: Int,
+) {
+    operator fun get(index: Int): Int {
+        require(index in 0 until count)
+        return native?.at(index) ?: requireNotNull(array)[index].toInt()
+    }
+    companion object {
+        fun jvm(source: ShortArray, count: Int): TimingTelemetry {
+            require(count in 0..source.size)
+            return TimingTelemetry(source, null, count)
+        }
+        fun packed(source: ShortArray, count: Int, bits: Int): TimingTelemetry? =
+            NativeHotPath.compactTelemetry(source, count, bits)?.let { TimingTelemetry(null, it, count) }
+    }
+}

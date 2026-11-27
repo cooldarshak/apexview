@@ -117,6 +117,60 @@ impl CompactCoordinates {
     }
 }
 
+
+/// Exact telemetry values. Speed is 0..500 km/h (9 bits); gear is 0..8
+/// plus the original -1 unknown sentinel (4 bits). Unsupported values
+/// are rejected rather than clamped or rounded.
+pub struct CompactTelemetry {
+    bytes: Box<[u8]>,
+    count: usize,
+    bits: usize,
+}
+impl CompactTelemetry {
+    pub fn storage_len(count: usize, bits: usize) -> Option<usize> {
+        if count == 0 || count > MAX_HISTORY || !matches!(bits, 4 | 9) { return None; }
+        Some(count.checked_mul(bits)?.div_ceil(8))
+    }
+    pub fn from_reader(count: usize, bits: usize, mut read: impl FnMut(usize, &mut [i16]) -> Option<()>) -> Option<Self> {
+        let len = Self::storage_len(count, bits)?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(len).ok()?;
+        bytes.resize(len, 0);
+        let mut block = [0i16; 1024];
+        for first in (0..count).step_by(block.len()) {
+            let n = (count - first).min(block.len());
+            read(first, &mut block[..n])?;
+            for (i, &value) in block[..n].iter().enumerate() {
+                let code = match (bits, value) {
+                    (4, -1) => 15u16,
+                    (4, 0..=8) | (9, 0..=500) => value as u16,
+                    _ => return None,
+                };
+                let bit = (first + i) * bits;
+                let at = bit / 8;
+                let shift = bit % 8;
+                let word = code << shift;
+                bytes[at] |= word as u8;
+                if shift + bits > 8 { bytes[at + 1] |= (word >> 8) as u8; }
+            }
+        }
+        Some(Self { bytes: bytes.into_boxed_slice(), count, bits })
+    }
+    pub fn len(&self) -> usize { self.count }
+    pub fn is_empty(&self) -> bool { self.count == 0 }
+    pub fn bytes(&self) -> &[u8] { &self.bytes }
+    pub fn at(&self, index: usize) -> Option<i16> {
+        if index >= self.count { return None; }
+        let bit = index * self.bits;
+        let at = bit / 8;
+        let shift = bit % 8;
+        let mut word = u16::from(*self.bytes.get(at)?);
+        if shift + self.bits > 8 { word |= u16::from(*self.bytes.get(at + 1)?) << 8; }
+        let value = ((word >> shift) & ((1u16 << self.bits) - 1)) as i16;
+        Some(if self.bits == 4 && value == 15 { -1 } else { value })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +197,21 @@ mod tests {
                 x.copy_from_slice(&[0.0, value]); y.fill(0.0); Some(())
             }).is_none());
         }
+    }
+
+    #[test]
+    fn telemetry_bit_packing_is_exact_across_bytes_and_reader_blocks() {
+        for bits in [4, 9] {
+            let values: Vec<i16> = (0..4101).map(|i| if bits == 4 { (i % 10) as i16 - 1 } else { (i % 501) as i16 }).collect();
+            let compact = CompactTelemetry::from_reader(values.len(), bits, |first, out| {
+                out.copy_from_slice(&values[first..first + out.len()]); Some(())
+            }).unwrap();
+            assert_eq!(compact.bytes().len(), (values.len() * bits).div_ceil(8));
+            for (i, value) in values.iter().enumerate() { assert_eq!(compact.at(i), Some(*value)); }
+            assert_eq!(compact.at(values.len()), None);
+        }
+        assert!(CompactTelemetry::from_reader(1, 4, |_, out| { out[0] = 9; Some(()) }).is_none());
+        assert!(CompactTelemetry::from_reader(1, 9, |_, out| { out[0] = 501; Some(()) }).is_none());
     }
 
     fn pack(values: &[i64]) -> Option<CompactTimes> {

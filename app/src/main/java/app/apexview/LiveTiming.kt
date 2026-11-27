@@ -383,15 +383,16 @@ class StateLog(internal val t: LongArray, internal val s: Array<LapState>) {
 /** A car's speed and gear through a session, from F1 CarData (speed in km/h). */
 class SpeedLog internal constructor(
     internal val speedTimeline: TimingTimestamps,
-    private val v: ShortArray,
+    internal val speedValues: TimingTelemetry,
     private val n: Int,
-    private val gears: ShortArray = ShortArray(0),
+    internal val gearValues: TimingTelemetry,
     private val separateGearTimeline: TimingTimestamps? = null,
-    private val gearCount: Int = gears.size,
+    private val gearCount: Int = gearValues.count,
 ) {
     constructor(t: LongArray, v: ShortArray, n: Int, gears: ShortArray = ShortArray(0),
                 gearTimes: LongArray? = null, gearCount: Int = gears.size) :
-        this(TimingTimestamps.jvm(t, n), v, n, gears,
+        this(TimingTimestamps.jvm(t, n), TimingTelemetry.jvm(v, n), n,
+            TimingTelemetry.jvm(gears, gears.size),
             gearTimes?.let { TimingTimestamps.jvm(it, gearCount) }, gearCount)
 
     internal val gearTimeline: TimingTimestamps get() = separateGearTimeline ?: speedTimeline
@@ -409,12 +410,12 @@ class SpeedLog internal constructor(
     internal val speedTimes: LongArray get() = speedTimeline.legacyArray()
     internal val speedCount: Int get() = n
     internal val gearTimeSeries: LongArray get() = gearTimeline.legacyArray()
-    internal val validGearCount: Int get() = if (separateGearTimeline == null) minOf(n, gears.size) else gearCount
+    internal val validGearCount: Int get() = if (separateGearTimeline == null) minOf(n, gearValues.count) else gearCount
     internal fun kmhAtSnapshot(index: Int, now: Long): Int? =
-        if (index !in 0 until n || now - speedTimeline[index] > STALE_MS) null else v[index].toInt()
+        if (index !in 0 until n || now - speedTimeline[index] > STALE_MS) null else speedValues[index]
     internal fun gearAtSnapshot(index: Int, now: Long): Int? =
         if (index !in 0 until validGearCount || now - gearTimeline[index] > STALE_MS ||
-            gears[index].toInt() < 0) null else gears[index].toInt()
+            gearValues[index] < 0) null else gearValues[index]
 
     /** The latest speed at [utcMs], null before the first reading or when it goes stale. */
     fun kmhAt(utcMs: Long): Int? = kmhAtSnapshot(indexAt(utcMs, speedTimeline, n), utcMs)
@@ -422,7 +423,7 @@ class SpeedLog internal constructor(
     /** F1 car-data channel 3: 0 is neutral, 1–8 are gears. */
     fun gearAt(utcMs: Long): Int? {
         val index = indexAt(utcMs, gearTimeline, validGearCount)
-        return if (index < 0 || gears[index].toInt() < 0) null else gears[index].toInt()
+        return if (index < 0 || gearValues[index] < 0) null else gearValues[index]
     }
 
     private companion object {
@@ -466,9 +467,15 @@ class SpeedBuilder {
     internal fun build(pool: SpeedTimestampPool): SpeedLog {
         val speedTime = pool.freezeTimeline(t, size)
         val gearTime = pool.freezeTimeline(gearTimes, gearSize)
-        return SpeedLog(speedTime, if (v.size == size) v else v.copyOf(size), size,
-            if (gears.size == gearSize) gears else gears.copyOf(gearSize),
+        return SpeedLog(speedTime, pool.freezeTelemetry(v, size, 9), size,
+            pool.freezeTelemetry(gears, gearSize, 4),
             if (gearTime === speedTime) null else gearTime, gearSize)
+    }
+
+    internal fun retireArchiveBacking() {
+        t = LongArray(0); v = ShortArray(0)
+        gearTimes = LongArray(0); gears = ShortArray(0)
+        size = 0; gearSize = 0
     }
 }
 
@@ -481,6 +488,10 @@ class SpeedBuilder {
 internal class SpeedTimestampPool(private val nativeStorage: Boolean = false) {
     private val timelines = HashMap<Int, MutableList<LongArray>>()
     private val published = HashMap<Int, MutableList<TimingTimestamps>>()
+
+    fun freezeTelemetry(source: ShortArray, count: Int, bits: Int): TimingTelemetry =
+        (if (nativeStorage) TimingTelemetry.packed(source, count, bits) else null)
+            ?: TimingTelemetry.jvm(if (source.size == count) source else source.copyOf(count), count)
 
     fun freezeCoordinates(x: FloatArray, y: FloatArray, count: Int): TimingCoordinates =
         (if (nativeStorage) TimingCoordinates.packed(x, y, count) else null) ?: TimingCoordinates.jvm(x, y, count)
@@ -2191,7 +2202,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         val timestampPool = SpeedTimestampPool(nativeRequested())
         return cars.mapValues {
             checkActive()
-            it.value.build(timestampPool)
+            it.value.build(timestampPool).also { _ -> it.value.retireArchiveBacking() }
         }
     }
 

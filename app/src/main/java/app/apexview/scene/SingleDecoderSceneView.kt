@@ -731,8 +731,12 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     // The opaque controller surface is already black during baked Cast.
     // Change only its default allocation size, not the decoder or encoder.
     private fun requestLocalBuffer(producerOnly: Boolean) {
+        // Avoid constructing a Size on every 50/60Hz frame.
+        if (outputWidth <= 0 || outputHeight <= 0) return
+        val width = if (producerOnly) 16 else outputWidth
+        val height = if (producerOnly) 16 else outputHeight
+        if (localBufferRequest?.width == width && localBufferRequest?.height == height) return
         val target = LocalPreviewBufferPolicy.size(outputWidth, outputHeight, producerOnly) ?: return
-        if (localBufferRequest == target) return
         val owner = localOutputTexture ?: return
         try {
             owner.setDefaultBufferSize(target.width, target.height)
@@ -743,6 +747,11 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             Log.w("ApexviewSingleDecoder", "LOCAL_PREVIEW_BUFFER_REQUEST_FAILED producerOnly=$producerOnly", error)
             // Do not turn an optional graphics optimization into a playback failure.
             localBufferQueries = 0
+            // Record the attempted size to avoid a failing request on every frame.
+            // Restore a previously reduced buffer before visible playback; failure
+            // there is a real output error, not an optional optimization failure.
+            if (!producerOnly && localBufferRequest?.width == 16 && localBufferRequest?.height == 16) throw error
+            localBufferRequest = target
         }
     }
 

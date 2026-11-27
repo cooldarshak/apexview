@@ -53,19 +53,25 @@ internal object ProcessMemoryDiagnostic {
     /** Packed payload is already included in native heap/PSS. Do not add it
      * again or report it as a measured total process saving. */
     fun compactTimingFields(values: LongArray?): String {
-        if (values == null || values.size !in setOf(3, 6) || values.any { it < 0 } ||
+        if (values == null || values.size !in setOf(3, 6, 9) || values.any { it < 0 } ||
             values[1] > 64L * 1024 * 1024 || values[0] > values[2] ||
             values[0] > values[1] / 8 || values[2] > values[1] / 4 ||
             values[0] * 8 + values[2] * 4 != values[1]) return "nativeCompactTiming=UNAVAILABLE"
-        val positions = if (values.size == 6) {
+        val positions = if (values.size >= 6) {
             if (values[4] > 64L * 1024 * 1024 - values[1] || values[3] > values[5] ||
                 values[5] > values[4] / 4 || values[3] > values[4] / 8 ||
                 values[4] - values[5] * 4 < values[3] * 8 ||
                 (values[4] - values[5] * 4) % 8 != 0L) return "nativeCompactTiming=UNAVAILABLE"
             " nativeCompactCoordinateOwners=${values[3]} nativeCompactCoordinateBytes=${values[4]} nativeCompactCoordinateSamples=${values[5]}"
         } else " nativeCompactCoordinateBytes=UNAVAILABLE"
+        val telemetry = if (values.size == 9) {
+            if (values[7] > 64L * 1024 * 1024 - values[1] - values[4] ||
+                values[6] > values[8] || values[8] > values[7] * 2 ||
+                values[7] > (values[8] * 9 + values[6] * 7) / 8) return "nativeCompactTiming=UNAVAILABLE"
+            " nativeCompactTelemetryOwners=${values[6]} nativeCompactTelemetryBytes=${values[7]} nativeCompactTelemetrySamples=${values[8]}"
+        } else " nativeCompactTelemetryBytes=UNAVAILABLE"
         return "nativeCompactTimingOwners=${values[0]} nativeCompactTimingBytes=${values[1]} " +
-            "nativeCompactTimingSamples=${values[2]} nativeCompactTimingScope=REGISTERED_PAYLOAD" + positions
+            "nativeCompactTimingSamples=${values[2]} nativeCompactTimingScope=REGISTERED_PAYLOAD" + positions + telemetry
     }
 
     fun engineFields(values: LongArray?): String {
