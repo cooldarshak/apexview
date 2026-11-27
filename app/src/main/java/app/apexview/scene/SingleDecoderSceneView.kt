@@ -38,6 +38,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private val thread = HandlerThread("ApexviewSingleScene", Process.THREAD_PRIORITY_DISPLAY).apply { start() }
     private val gl = Handler(thread.looper)
     private var decoderIngress: SceneDecoderIngress? = null
+    private var asyncInput: SceneAsyncTextureLatch? = null
+    private var lastAsyncSubmitted = 0L
     private var ingressNotifications = 0L
     private var ingressCoalesced = 0L
     private var ingressMaxWaitNs = 0L
@@ -279,7 +281,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 GLES20.glViewport(0, 0, target.width, target.height)
                 GLES20.glClearColor(0f, 0f, 0f, 1f)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                drawVideo(model)
+                val sampledAt = drawVideo(model)
+                check(asyncInput == null || sampledAt > 0L) { "Clear Cast source epoch has no current frame" }
                 check(EGL14.eglSwapBuffers(display, output)) { "Clear Cast video output swap failed" }
                 castVideoSubmissions++
                 val now = System.nanoTime()
@@ -440,7 +443,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             val newVideo = frameDemand.beginFrame()
             val timing = draw()
             if (timing != null) {
-                val videoPresented = newVideo && !suppressLocalPreview()
+                val videoPresented = timing.newAsyncVideo ?: (newVideo && !suppressLocalPreview())
                 if (videoPresented) cadenceGate.onVideoDraw(frameTimeNs)
                 pacing.onDisplayFrame(frameTimeNs, timing.swapNs, videoPresented, timing.glDrawNs, callbackStarted)
             } else {
@@ -543,6 +546,8 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 if (invalidatedEpoch != null) {
                     renderEpoch = invalidatedEpoch
                     hasFrame = false
+                    asyncInput?.discard()
+                    lastAsyncSubmitted = 0L
                     frameDemand.discardPendingVideo()
                     firstFrameReported = false
                     cadenceGate.reset()
@@ -680,13 +685,36 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-        val frames = SurfaceTexture(texture)
+        val independent = SceneAsyncTextureLatch.tryCreate(display, selected, contextGl, texture, false, gl)
+        asyncInput = independent
+        val frames = independent?.frames ?: SurfaceTexture(texture)
         decoderTexture = frames
         scene?.let {
             frames.setDefaultBufferSize(it.atlasWidth, it.atlasHeight)
             graphicsAtlasWidth = it.atlasWidth
             graphicsAtlasHeight = it.atlasHeight
         }
+        if (independent != null) {
+            independent.start(report = { event ->
+                if (!released && surfaceLifetime.matches(lifetime)) {
+                    pacing.onTextureLatched(event.latchedNs, event.latchedNs - event.startedNs,
+                        event.timestampNs, callbackArrivalNs = event.lastNs)
+                    codecCorrelation?.onTextureLatched(input, event.timestampNs, event.latchedNs)
+                }
+            }, signal = { guarded(lifetime) {
+                if (asyncInput === independent && decoderTexture === frames) {
+                    drainAsyncStats()
+                    hasFrame = true
+                    if (suppressLocalPreview()) {
+                        reducedPreviewInWindow = true
+                        if (!senderBlankSubmitted) scheduleDisplayFrame()
+                    } else {
+                        senderBlankSubmitted = false
+                        scheduleDisplayFrame(videoArrived = true)
+                    }
+                }
+            } }, failure = { error -> guarded(lifetime) { throw error } })
+        } else {
         val ingress = SceneDecoderIngress(gl) { count, firstNs, lastNs ->
             guarded(lifetime) {
                 if (decoderTexture === frames && !released) {
@@ -729,6 +757,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
         decoderIngress = ingress
         frames.setOnFrameAvailableListener({ ingress.offer() }, ingress.handler)
+        }
         val surface = Surface(frames); input = surface
         // Never relabel an input created for an obsolete Android surface
         // with the newer UI epoch, even if EGL initialization was slow.
@@ -782,7 +811,15 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         if (observed == localBufferRequest) localBufferQueries = 0
     }
 
-    private data class DrawTiming(val glDrawNs: Long, val swapNs: Long)
+    private fun drainAsyncStats() {
+        val stats = asyncInput?.takeStats() ?: return
+        ingressNotifications += stats.notifications
+        ingressCoalesced += stats.coalesced
+        ingressMaxWaitNs = maxOf(ingressMaxWaitNs, stats.maxWaitNs)
+        rendered += stats.latches
+    }
+
+    private data class DrawTiming(val glDrawNs: Long, val swapNs: Long, val newAsyncVideo: Boolean?)
 
     private fun draw(): DrawTiming? {
         val surfaceEpoch = renderEpoch
@@ -795,22 +832,27 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         Trace.beginSection("PitwallGlDraw")
         GLES20.glViewport(0, 0, outputWidth, outputHeight)
         GLES20.glClearColor(0f, 0f, 0f, 1f); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        try { if (hasFrame && !producerOnly) drawVideo(model) } finally { Trace.endSection() }
+        val sampledAt = try { if (hasFrame && !producerOnly) drawVideo(model) else 0L } finally { Trace.endSection() }
         val swapStarted = System.nanoTime()
         Trace.beginSection("PitwallEglSwap")
         try { check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" } }
         finally { Trace.endSection() }
         val swapCompleted = System.nanoTime()
         observeLocalBuffer()
+        val independent = asyncInput != null
+        val submittedVideo = !producerOnly && hasFrame && (!independent || sampledAt > 0L)
+        val newAsyncVideo = if (independent) submittedVideo && sampledAt > lastAsyncSubmitted else null
+        if (newAsyncVideo == true) lastAsyncSubmitted = sampledAt
         if (producerOnly) {
             if (!senderBlankSubmitted) Log.i("PitwallCast", "CAST_LOCAL_PREVIEW_BLANKED owner=$graphicsOwnerId localVideoSubmitted=false")
             senderBlankSubmitted = true
             reducedPreviewInWindow = true
-        } else if (hasFrame) {
+        } else if (submittedVideo) {
             localVideoSubmissions++
-            codecCorrelation?.onSwapSubmitted(input, swapCompleted)
+            if (independent) codecCorrelation?.onSampledSwapSubmitted(input, swapCompleted, sampledAt)
+            else codecCorrelation?.onSwapSubmitted(input, swapCompleted)
         }
-        if (!producerOnly && hasFrame && !firstFrameReported) {
+        if (submittedVideo && !firstFrameReported) {
             firstFrameReported = true
             post {
                 if (!released && outputReadiness.acknowledgeSubmittedFrame(surfaceEpoch)) {
@@ -823,6 +865,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         }
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
+            drainAsyncStats()
             val metrics = pacing.snapshotAndReset()
             Log.i("ApexviewSingleDecoder", "SCENE_DECODER_INGRESS notifications=$ingressNotifications coalesced=$ingressCoalesced maxGlWaitMs=${ingressMaxWaitNs / 1_000_000L}")
             ingressNotifications = 0; ingressCoalesced = 0; ingressMaxWaitNs = 0
@@ -889,10 +932,17 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 "gpuSubmitNotGpuCompletion=true physicalPresentation=NOT_MEASURED")
             lastLogNs = now
         }
-        return DrawTiming(swapStarted - drawStarted, swapCompleted - swapStarted)
+        return DrawTiming(swapStarted - drawStarted, swapCompleted - swapStarted, newAsyncVideo)
     }
 
-    private fun drawVideo(model: VideoScene) {
+    private fun drawVideo(model: VideoScene): Long {
+        val independent = asyncInput
+        if (independent != null) return independent.sample(transform) { drawVideoGl(model) }
+        drawVideoGl(model)
+        return 0L // Same-context path uses existing frame-demand accounting.
+    }
+
+    private fun drawVideoGl(model: VideoScene) {
         GLES20.glUseProgram(program)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
         GLES20.glUniform1i(imageUniform, 0)
@@ -912,7 +962,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private fun recordGraphicsOwner() {
         SceneGraphicsOwners.process.record(graphicsOwnerId, SceneGraphicsOwners.Owner(
             "TextureView", graphicsLifetime, renderEpoch,
-            if (contextGl != EGL14.EGL_NO_CONTEXT) 1 else 0,
+            (if (contextGl != EGL14.EGL_NO_CONTEXT) 1 else 0) + (if (asyncInput != null) 1 else 0),
             (if (window != EGL14.EGL_NO_SURFACE) 1 else 0) + (if (castVideoSurface != EGL14.EGL_NO_SURFACE) 1 else 0),
             if (decoderTexture != null) 1 else 0,
             graphicsAtlasWidth, graphicsAtlasHeight, outputWidth.coerceAtLeast(0), outputHeight.coerceAtLeast(0),
@@ -947,7 +997,6 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         displayClock = null
         frameDemand.reset()
         cadenceGate.reset()
-        pacing.reset()
         lastLogNs = 0L
         val endedCapture = castSession
         steps.run("baked-cast") { stopBakedCastOnGl() }
@@ -956,6 +1005,10 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         config = null
         steps.run("decoder-listener") { decoderTexture?.setOnFrameAvailableListener(null) }
         steps.run("decoder-ingress") { decoderIngress?.close(); decoderIngress = null }
+        val independent = asyncInput.also { asyncInput = null }
+        steps.run("decoder-async-latch") { independent?.close() }
+        lastAsyncSubmitted = 0L
+        pacing.reset()
         ingressNotifications = 0; ingressCoalesced = 0; ingressMaxWaitNs = 0
         input?.let { Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_RELEASE " +
             "renderer=TextureView surfaceId=${System.identityHashCode(it)} " +
@@ -965,7 +1018,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         val oldTexture = decoderTexture
         input = null; decoderTexture = null; hasFrame = false
         steps.run("decoder-surface") { oldInput?.release() }
-        steps.run("decoder-texture") { oldTexture?.release() }
+        steps.run("decoder-texture") { if (independent == null) oldTexture?.release() }
         firstFrameReported = false
         renderEpoch = -1L
         if (display != EGL14.EGL_NO_DISPLAY) {
