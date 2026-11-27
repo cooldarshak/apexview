@@ -293,9 +293,13 @@ impl Engine {
         if !state.compact_atlas {return;}
         let mut warm=false;
         for slot in &mut state.slots {
-            if slot.stage==Stage::Free && slot.buffers.is_some() {
-                if warm {slot.buffers=None;slot.small_owned_jobs=0;} else {warm=true;}
-            }
+            if slot.stage!=Stage::Free {continue;}
+            let useful=slot.buffers.as_ref().is_some_and(|b|b.input.capacity()>0 || b.output.capacity()>0);
+            // A sustained small-job retirement can leave Some(empty buffers).
+            // Do not let an empty slot consume the one warm allowance and
+            // evict a reusable staging allocation in another slot.
+            if !useful || warm {slot.buffers=None;slot.small_owned_jobs=0;}
+            else {warm=true;}
         }
     }
     /// Caller derives deadline from media buffer slack. Speculative work
@@ -795,6 +799,18 @@ mod tests {
         assert_eq!(b.output,[7,8,9]);
         assert_eq!(slot.stage,Stage::Ready);
         assert_eq!(slot.result,3);
+    }
+    #[test]
+    fn empty_retired_staging_does_not_evict_a_warm_free_slot() {
+        let b=Budget{slots:2,input:4096,output:8192,ceiling:12*1024*1024};
+        let engine=Engine::new_atlas(b).unwrap();
+        let mut state=engine.shared.0.lock().unwrap();
+        state.slots[0].buffers=Some(Buffers{input:Vec::new(),output:Vec::new()});
+        state.slots[1].buffers=Some(Buffers{input:buffer(512).unwrap(),output:Vec::new()});
+        Engine::trim_free_spares(&mut state);
+        assert!(state.slots[0].buffers.is_none());
+        assert_eq!(state.slots[1].buffers.as_ref().unwrap().input.capacity(),512);
+        assert_eq!(state.payload_capacity(),512);
     }
     #[test]
     fn compact_seek_trims_free_spares_but_not_active_slots() {
