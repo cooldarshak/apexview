@@ -49,9 +49,22 @@ internal class SceneAsyncTextureLatch private constructor(
     private var last = 0L
     private var retryPosted = false
     private var retrySince = 0L
+    private var notifications = 0L
+    private var latches = 0L
+    private var coalesced = 0L
+    private var maxWaitNs = 0L
+    private var lastTimestampNs = 0L
+    private var regressions = 0L
 
     data class Event(val notifications: Long, val firstNs: Long, val lastNs: Long,
                      val timestampNs: Long, val startedNs: Long, val latchedNs: Long)
+    data class Stats(val notifications: Long, val latches: Long, val coalesced: Long,
+                     val maxWaitNs: Long, val regressions: Long)
+    fun takeStats(): Stats = synchronized(lock) {
+        Stats(notifications, latches, coalesced, maxWaitNs, regressions).also {
+            notifications = 0L; latches = 0L; coalesced = 0L; maxWaitNs = 0L; regressions = 0L
+        }
+    }
     private var report: ((Event) -> Unit)? = null
     private var signal: (() -> Unit)? = null
     private var failure: ((Exception) -> Unit)? = null
@@ -117,7 +130,16 @@ internal class SceneAsyncTextureLatch private constructor(
                 old?.let { check(EGL15.eglDestroySync(display, it)) }
                 latchedAt = System.nanoTime()
                 image = true
-                Event(pending, first, last, frames.timestamp, started, latchedAt).also { pending = 0L }
+                val timestamp = frames.timestamp
+                notifications += pending
+                latches++
+                coalesced += pending - 1L
+                maxWaitNs = maxOf(maxWaitNs, (started - first).coerceAtLeast(0L))
+                if (timestamp > 0L) {
+                    if (lastTimestampNs > 0L && timestamp < lastTimestampNs) regressions++
+                    lastTimestampNs = timestamp
+                }
+                Event(pending, first, last, timestamp, started, latchedAt).also { pending = 0L }
             }
             report?.invoke(event)
             synchronized(lock) {
@@ -160,8 +182,9 @@ internal class SceneAsyncTextureLatch private constructor(
     }
 
     override fun close() {
-        frames.setOnFrameAvailableListener(null)
-        ingress?.close()
+        // A listener retirement error cannot strand the EGL owner.
+        runCatching { frames.setOnFrameAvailableListener(null) }
+        runCatching { ingress?.close() }
         ingress = null
         synchronized(lock) {
             if (closed) return
