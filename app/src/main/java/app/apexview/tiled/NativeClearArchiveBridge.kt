@@ -58,7 +58,9 @@ internal class NativeClearArchiveBridge(
         val retryAdmission: RetryAdmission? = null,
     )
     data class Produced(val output: HevcClearCmafGridComposer.Output, val nativeEpoch: Long? = null,
-                        val nativeMedia: NativeFragmentLease? = null)
+                        val nativeMedia: NativeFragmentLease? = null,
+                        val verifiedInitialization: CmafBoxInspector.Report? = null,
+                        val verifiedFragments: List<CmafBoxInspector.FragmentMetadata>? = null)
 
     private val control = Any()
     @Volatile private var state = State()
@@ -371,6 +373,7 @@ internal class NativeClearArchiveBridge(
             reason = "NATIVE_CLEAR_OUTPUT_VALIDATION"
             require(out.sizes.size == count)
             var sampleCount = 0
+            val verifiedFragments = ArrayList<CmafBoxInspector.FragmentMetadata>(count)
             out.sizes.indices.forEach { index ->
                 val report = out.inspect(index, outputReport)
                 require(report.errors.isEmpty())
@@ -386,6 +389,7 @@ internal class NativeClearArchiveBridge(
                             a.sampleFlags == b.sampleFlags && (a.sampleSizeBytes ?: 0) > 0
                     })
                 sampleCount = Math.addExact(sampleCount, fragment.sampleCount)
+                verifiedFragments.add(fragment)
             }
             checkCurrent(selected.epoch)
             val actualOutput = 8L + out.initialization.size + out.sizes.sumOf { it.toLong() + if (count > 1) 4L else 0L }
@@ -415,7 +419,7 @@ internal class NativeClearArchiveBridge(
             val result = HevcClearCmafGridComposer.Output(out.initialization, out.media,
                 sps.width, sps.height, sps.displayWidth, sps.displayHeight, sampleCount, count, emptyList())
             nativeOutput = null // transfer only exact, independently verified clear output
-            return Produced(result, selected.epoch, out.nativeMedia)
+            return Produced(result, selected.epoch, out.nativeMedia, outputReport, verifiedFragments)
         } catch (cancelled: InterruptedException) {
             clearProof()
             throw cancelled

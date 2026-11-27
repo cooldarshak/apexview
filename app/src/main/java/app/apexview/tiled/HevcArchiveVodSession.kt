@@ -614,7 +614,10 @@ internal class HevcArchiveVodSession(
                 checkOpen()
                 val compositionMs = (System.nanoTime() - compositionStarted) / 1_000_000L
                 val verificationStarted = System.nanoTime()
-                val report = CmafBoxInspector.inspect(composed.initializationSegment)
+                // Native bridge already independently inspected these exact
+                // transferred immutable bytes and checked all sample timing.
+                // JVM/reference routes have no such proof and inspect as before.
+                val report = produced.verifiedInitialization ?: CmafBoxInspector.inspect(composed.initializationSegment)
                 val outputTrack = report.tracks.single()
                 // Container sync flags are insufficient proof of random access. The clear
                 // writer emits moof + mdat containing length-prefixed VCL NALs only.
@@ -635,7 +638,7 @@ internal class HevcArchiveVodSession(
                 require(inputs.size == 1 || ((readHeader(firstNal, 1)[0].toInt() ushr 1) and 63) in 16..21) {
                     "Archive sync sample does not begin with a real HEVC IRAP picture"
                 }
-                val last = (nativeFragment?.inspect(report)
+                val last = produced.verifiedFragments?.single() ?: (nativeFragment?.inspect(report)
                     ?: CmafBoxInspector.inspect(requireNotNull(outputBytes), report)).fragments.single()
                 val offset = requireNotNull(last.baseDecodeTimeTicks) - scaleUs(groups[number].startUs, trackScale)
                 checkOpen()
