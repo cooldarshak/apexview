@@ -752,13 +752,21 @@ class AppState(
                     val wall = body.optLong("wallClockMs", 0)
                     if (wall in 946684800000L..4102444800000L) remoteWallClockBaseMs = wall - (time * 1000).toLong()
                     if (directCast != null && localDirectQualitySupported && packetId == localLoadId) {
-                        body.optJSONArray("directQualityOffers")?.let { offered ->
-                            val sizes = app.apexview.cast.local.DirectQualityProtocol.decodeOffers(offered)
-                            if (remoteDirectQualityOffers != sizes) remoteDirectQualityOffers = sizes
-                        }
-                        remoteDirectRequested = body.optInt("directQualityRequested", -1).takeIf { it >= 0 }
-                        remoteDirectActual = body.optJSONArray("directQualityActual")?.let {
-                            app.apexview.cast.local.DirectQualityProtocol.decodeOffers(org.json.JSONArray().put(it)).singleOrNull()
+                        val metadata = runCatching {
+                            val offers = body.optJSONArray("directQualityOffers")?.let {
+                                app.apexview.cast.local.DirectQualityProtocol.decodeOffers(it)
+                            }
+                            val actual = body.optJSONArray("directQualityActual")?.let {
+                                app.apexview.cast.local.DirectQualityProtocol.decodeOffers(org.json.JSONArray().put(it)).single()
+                            }
+                            Triple(offers, body.optInt("directQualityRequested", -1).takeIf { it >= 0 }, actual)
+                        }.onFailure {
+                            android.util.Log.w("PitwallCast", "CAST_STATUS_METADATA_REJECTED load=$localLoadId kind=directQuality")
+                        }.getOrNull()
+                        if (metadata != null) {
+                            metadata.first?.let { if (remoteDirectQualityOffers != it) remoteDirectQualityOffers = it }
+                            remoteDirectRequested = metadata.second
+                            remoteDirectActual = metadata.third
                         }
                     }
                     if (captionOffers != null) remoteCaptionTracks = captionOffers
@@ -790,7 +798,7 @@ class AppState(
             android.util.Log.w("PitwallCast", "CAST_CONTROL_HANDLER_FAILURE opcode=${packet.opcode} load=$localLoadId type=${error.javaClass.simpleName} reason=" +
                 DiagnosticRedaction.redact(error.message.orEmpty()).take(160))
             castStatus = DiagnosticRedaction.redact(error.message.orEmpty()).take(220); message = castStatus
-            localConnection?.close()
+            localConnection?.rejectControl()
         }
     }
     private fun loadLocalCastMedia(

@@ -136,5 +136,6 @@ internal class FcastConnection(
         reader?.cancel(); writer?.cancel()
         scope.launch { onClosed(reason) }
     }
+    fun rejectControl() = finish("CONTROL_REJECTED")
     override fun close() = finish("LOCAL_CLOSE")
 }
