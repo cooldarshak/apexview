@@ -19,6 +19,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -227,12 +230,52 @@ fun OnboardInfoBadge(
     val widthFactor = (availableWidthDp / 190f).coerceIn(0.55f, 1f)
     val scale = if (compact) minOf(app.speedReadoutScale, 0.78f * widthFactor)
         else app.speedReadoutScale
+    OnboardBadgeContent(
+        number = number, shownName = shownName, position = state?.position,
+        lapClock = lapClock, gapText = state?.gap, speedText = speedText,
+        sectorData = if (completed) state?.lapSectors else state?.sectors,
+        team = team, scale = scale, compact = compact, opacity = app.onboardBadgeOpacity,
+        modifier = modifier,
+    )
+}
+
+/** The badge contains display-only fields, not independent actions. Keep the
+ * complete current values readable in a single accessibility node rather than
+ * a separate changing text node for each position/name/lap/gap/speed field. */
+internal fun onboardBadgeDescription(number: String, name: String, position: Int?,
+    lapClock: String?, gap: String?, speed: String, sectors: List<SectorCell?>?): String = buildString {
+    append("Driver $number, $name.")
+    position?.let { append(" Position $it.") }
+    lapClock?.let { if (it == "PIT") append(" In pit.") else append(" Lap time $it.") }
+    gap?.let { append(" Gap $it.") }
+    append(if (speed == "--") " Speed unavailable." else " Speed $speed.")
+    sectors?.take(3)?.forEachIndexed { index, sector ->
+        val pace = when (sector?.pace) {
+            Pace.PURPLE -> "session best"
+            Pace.GREEN -> "personal best"
+            Pace.YELLOW -> "completed"
+            Pace.NONE, null -> null
+        }
+        if (pace != null) append(" Sector ${index + 1}, $pace.")
+    }
+}
+
+@Composable
+internal fun OnboardBadgeContent(
+    number: String, shownName: String, position: Int?, lapClock: Pair<String, Color>?,
+    gapText: String?, speedText: String, sectorData: List<SectorCell?>?,
+    team: Color, scale: Float, compact: Boolean, opacity: Float, modifier: Modifier = Modifier,
+) {
+    val summary = remember(number, shownName, position, lapClock?.first, gapText, speedText, sectorData) {
+        onboardBadgeDescription(number, shownName, position, lapClock?.first, gapText, speedText, sectorData)
+    }
     val font = (if (compact) 10f else 13f) * scale / SpeedReadoutScale.DEFAULT
     val miniFont = font * (if (compact) 0.82f else 0.88f)
     val gap = if (compact) 2.dp else 5.dp
     Column(
-        modifier.clip(RoundedCornerShape(5.dp * scale))
-            .background(Color.Black.copy(alpha = app.onboardBadgeOpacity))
+        modifier.clearAndSetSemantics { contentDescription = summary }
+            .clip(RoundedCornerShape(5.dp * scale))
+            .background(Color.Black.copy(alpha = opacity))
             .padding(horizontal = (if (compact) 3f else 6f).dp * scale,
                 vertical = (if (compact) 2f else 4f).dp * scale)
     ) {
@@ -240,7 +283,7 @@ fun OnboardInfoBadge(
             Box(Modifier.width(3.dp * scale).height((font + 3f).dp)
                 .background(team))
             Spacer(Modifier.width(gap))
-            state?.position?.let { pos ->
+            position?.let { pos ->
                 Text("$pos", style = digits.copy(color = Color.Black,
                     fontSize = miniFont.sp, fontWeight = FontWeight.Bold),
                     maxLines = 1, modifier = Modifier.clip(RoundedCornerShape(2.dp))
@@ -259,7 +302,7 @@ fun OnboardInfoBadge(
                     maxLines = 1)
                 Spacer(Modifier.width(gap))
             }
-            state?.gap?.let { value ->
+            gapText?.let { value ->
                 Text(value, style = digits.copy(
                     fontSize = (if (compact) miniFont * 0.78f else miniFont).sp,
                     color = Color.White.copy(alpha = 0.8f)), maxLines = 1)
@@ -272,7 +315,6 @@ fun OnboardInfoBadge(
         // purple. No invented sector values or animation on missing timing data.
         Row(Modifier.fillMaxWidth().padding(top = 3.dp * scale),
             horizontalArrangement = Arrangement.spacedBy(3.dp * scale)) {
-            val sectorData = if (completed) state?.lapSectors else state?.sectors
             repeat(3) { index ->
                 val sector = sectorData?.getOrNull(index)
                 Box(Modifier.weight(1f).height((if (compact) 2.5f else 4f).dp * scale)

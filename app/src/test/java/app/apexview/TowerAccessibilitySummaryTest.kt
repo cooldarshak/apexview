@@ -31,6 +31,34 @@ class TowerAccessibilitySummaryTest {
         bestLap = SectorCell("1:32.429", Pace.PURPLE)
     )
 
+    @Test fun onboardBadgeKeepsAllDynamicValuesInOneAccessibleNode() {
+        var speed by mutableIntStateOf(250)
+        val sectors = listOf(SectorCell("27.0", Pace.GREEN), SectorCell("28.0", Pace.PURPLE), null)
+        fun description(kmh: Int) = onboardBadgeDescription("1", "VER", 2,
+            "1:23.4", "+0.310", "${kmh}km/h", sectors)
+        rule.setContent {
+            OnboardBadgeContent(number = "1", shownName = "VER", position = 2,
+                lapClock = "1:23.4" to androidx.compose.ui.graphics.Color.White,
+                gapText = "+0.310", speedText = "${speed}km/h", sectorData = sectors,
+                team = androidx.compose.ui.graphics.Color.Blue, scale = 1f, compact = true,
+                opacity = .7f)
+        }
+        rule.onNodeWithContentDescription(description(250)).assertExists()
+        rule.onAllNodesWithText("250km/h", useUnmergedTree = false).assertCountEquals(0)
+        rule.runOnIdle { speed = 301 }
+        rule.waitForIdle()
+        rule.onNodeWithContentDescription(description(301)).assertExists()
+        rule.onNodeWithContentDescription(description(250)).assertDoesNotExist()
+        val summary = description(301)
+        listOf("Driver 1, VER", "Position 2", "Lap time 1:23.4", "Gap +0.310",
+            "Speed 301km/h", "Sector 1, personal best", "Sector 2, session best")
+            .forEach { assertTrue(summary.contains(it)) }
+        val missing = onboardBadgeDescription("44", "HAM", null, "PIT", null, "--", null)
+        assertTrue(missing.contains("In pit"))
+        assertTrue(missing.contains("Speed unavailable"))
+        assertTrue(!missing.contains("Position"))
+    }
+
     @Test fun summaryKeepsMeaningfulTimingAndDoesNotDependOnGearOrMicroSectors() {
         val original = TowerAccessibilitySummary.prepare("HAM", state, Tyre("SOFT", 6))
         val changedStrip = state.copy(sectors = listOf(SectorCell("27.000", Pace.GREEN, listOf(3, 2, 1))))
