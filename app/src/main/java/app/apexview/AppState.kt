@@ -424,7 +424,7 @@ class AppState(
     internal fun stopLocalDiscovery() { localDiscovery?.close(); localDiscovery = null }
     fun openTvReceiver() {
         stopAll()
-        context.startActivity(Intent(context, app.apexview.cast.local.PitwallReceiverActivity::class.java))
+        context.startActivity(Intent(context, app.apexview.cast.local.PitwallReceiverActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
     internal var externalDisplayRequested by mutableStateOf(false)
         private set
@@ -1176,9 +1176,8 @@ class AppState(
         }
         val host = singleDecoderScenePlayer ?: return
         val archive = host.archiveSceneSession ?: return
-        val sourceWindow = (context as? android.app.Activity)?.window
-        if (sourceWindow == null || sourceWindow.attributes.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE != 0 ||
-            protectedRollingSceneActive || canvasSize.first <= 0f || canvasSize.second <= 0f) {
+        val secureWindow = controllerSecureWindow?.invoke() ?: lastControllerSecure
+        if (secureWindow || protectedRollingSceneActive || canvasSize.first <= 0f || canvasSize.second <= 0f) {
             message = "A clear, authorized video scene is required to start baked Cast."
             return
         }
@@ -2481,6 +2480,21 @@ class AppState(
         if (token == null) auth = AuthState.SIGNED_OUT else signIn(token)
         loadHome()
     }
+
+    // Only a controller which has supplied a real window may authorize
+    // private clear presentation. Retain that decision when it detaches;
+    // actual clear archive/decoder eligibility is rechecked at every start.
+    private var controllerSecureWindow: (() -> Boolean)? = null
+    private var lastControllerSecure = true
+    internal fun attachControllerSecurity(secure: () -> Boolean) {
+        controllerSecureWindow = secure
+        lastControllerSecure = secure()
+    }
+    internal fun detachControllerSecurity() {
+        lastControllerSecure = controllerSecureWindow?.invoke() ?: lastControllerSecure
+        controllerSecureWindow = null
+    }
+    internal fun retainForCast(): Boolean = castingActive || castControllerOnly || castBusy
 
     fun startLogin() = openLogin()
 

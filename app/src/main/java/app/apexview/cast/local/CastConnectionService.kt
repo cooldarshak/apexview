@@ -42,7 +42,8 @@ class CastConnectionService : Service() {
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null || intent.action == STOP) {
-            if (intent?.action == STOP) sendBroadcast(Intent(STOP_CONNECTION).setPackage(packageName))
+            if (intent?.action == STOP && !app.apexview.PlaybackLifetime.stopFromService())
+                sendBroadcast(Intent(STOP_CONNECTION).setPackage(packageName))
             stopSelf()
         }
         return START_NOT_STICKY
@@ -53,6 +54,7 @@ class CastConnectionService : Service() {
         if (cpu?.isHeld == true) cpu?.release(); cpu = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         android.util.Log.i("PitwallCast", "CAST_BACKGROUND_SERVICE_STOPPED")
+        app.apexview.PlaybackLifetime.serviceRetired()
         super.onDestroy()
     }
     companion object {

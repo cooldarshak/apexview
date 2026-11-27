@@ -56,24 +56,9 @@ import kotlinx.coroutines.launch
 
 class MainActivity : FragmentActivity() {
     private lateinit var app: AppState
-    private var castContext: CastContext? = null
+    private lateinit var playbackOwner: PlaybackLifetime.Owner
     private var externalDisplay: ExternalDisplayController? = null
     private var frameDiagnostics: WindowFrameDiagnostics? = null
-    private val castSessionListener = object : SessionManagerListener<CastSession> {
-        override fun onSessionStarting(session: CastSession) = Unit
-        override fun onSessionStarted(session: CastSession, sessionId: String) =
-            app.onGoogleCastSessionAvailable(session)
-        override fun onSessionStartFailed(session: CastSession, error: Int) =
-            app.onGoogleCastStartFailed("Google Cast could not start (error $error). Check the receiver connection and try again.")
-        override fun onSessionEnding(session: CastSession) = Unit
-        override fun onSessionEnded(session: CastSession, error: Int) = app.onGoogleCastSessionEnded(session)
-        override fun onSessionResuming(session: CastSession, sessionId: String) = Unit
-        override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) =
-            app.onGoogleCastSessionAvailable(session)
-        override fun onSessionResumeFailed(session: CastSession, error: Int) =
-            app.onGoogleCastStartFailed("Google Cast could not reconnect (error $error). Choose the device again.")
-        override fun onSessionSuspended(session: CastSession, reason: Int) = Unit
-    }
     private val login = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         app.onLoginFinished()
     }
@@ -85,14 +70,12 @@ class MainActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         val userAgent = WebSettings.getDefaultUserAgent(this).replace("; wv", "")
         val chromeMajor = WebView.getCurrentWebViewPackage()?.versionName?.substringBefore('.') ?: "140"
-        app = AppState(this, lifecycleScope, userAgent, chromeMajor) {
-            login.launch(Intent(this, LoginActivity::class.java))
-        }
+        playbackOwner = PlaybackLifetime.attach(applicationContext, userAgent, chromeMajor, this,
+            login = { login.launch(Intent(this, LoginActivity::class.java)) },
+            secure = { window.attributes.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE != 0 })
+        app = playbackOwner.app
         externalDisplay = ExternalDisplayController(this, app)
-        bindGoogleCast()
         setContent { AppTheme { Root(app) } }
-        app.restore()
-        app.updater.checkOnLaunch()
         // The fold's posture: half-open with the hinge running across the screen is laptop mode.
         lifecycleScope.launch {
             repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
@@ -179,26 +162,16 @@ class MainActivity : FragmentActivity() {
         super.onResume()
         app.onResumed()
         externalDisplay?.update()
-        castContext?.sessionManager?.currentCastSession?.let(app::onGoogleCastSessionAvailable)
+        playbackOwner.refreshCastSession()
     }
 
     override fun onDestroy() {
         frameDiagnostics?.close()
         frameDiagnostics = null
         externalDisplay?.close(); externalDisplay = null
-        castContext?.sessionManager?.removeSessionManagerListener(castSessionListener, CastSession::class.java)
-        castContext = null
         unregisterReceiver(pipControls)
-        app.stopAll()
-        app.close()
+        PlaybackLifetime.detach(playbackOwner, this)
         super.onDestroy()
-    }
-
-    private fun bindGoogleCast() {
-        val instance = runCatching { CastContext.getSharedInstance(applicationContext) }.getOrNull()
-        castContext = instance
-        app.updateGoogleCastAvailability(instance != null)
-        instance?.sessionManager?.addSessionManagerListener(castSessionListener, CastSession::class.java)
     }
 }
 
