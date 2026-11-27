@@ -55,6 +55,15 @@ internal class SceneCodecTimestampCorrelation {
     @Synchronized fun onSwapSubmitted(owner: Any?, nowNs: Long) {
         if (owner != null && surfaceOwner === owner) onSwapSubmitted(nowNs)
     }
+    /** The independent input may latch a newer image while the sampled image is swapping. */
+    @Synchronized fun onSampledSwapSubmitted(owner: Any?, nowNs: Long, sampledLatchNs: Long) {
+        if (owner == null || surfaceOwner !== owner || !active || sampledLatchNs <= 0L ||
+            sampledLatchNs <= lastSubmittedLatchNs || nowNs < sampledLatchNs) return
+        latchToSwap.record(nowNs - sampledLatchNs)
+        submitted++
+        lastSubmittedLatchNs = sampledLatchNs
+        if (pendingLatch == sampledLatchNs) pendingLatch = 0L
+    }
     @Synchronized fun snapshotAndReset(owner: Any?): Snapshot? =
         if (owner != null && surfaceOwner === owner && active) snapshotAndReset() else null
     private val pts = LongArray(CAPACITY) { Long.MIN_VALUE }
@@ -62,6 +71,7 @@ internal class SceneCodecTimestampCorrelation {
     private val callbacks = LongArray(CAPACITY)
     private var next = 0
     private var pendingLatch = 0L
+    private var lastSubmittedLatchNs = 0L
     // Media3 frame metadata and the SurfaceTexture listener run on different
     // loopers. An OEM may deliver the texture before its matching metadata.
     // Retain bounded unmatched PTS and reconcile the later callback exactly.
@@ -213,6 +223,7 @@ internal class SceneCodecTimestampCorrelation {
         callbacks.fill(0)
         next = 0
         pendingLatch = 0
+        lastSubmittedLatchNs = 0L
         lastMatchedTimestamp = Long.MIN_VALUE
         lastObservedLatchNs = Long.MIN_VALUE
         earlyLatchPts.fill(Long.MIN_VALUE)
