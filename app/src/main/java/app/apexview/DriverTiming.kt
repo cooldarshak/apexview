@@ -303,7 +303,8 @@ internal class RetirementStatusPolicy(private val nativeRequested: Boolean) {
             val pending = (flags and PENDING) != 0
             if ((flags and FRESH) == 0) return if (pending) RETIRED or PENDING else RETIRED
             val corrected = pending || (flags and CORRECT) != 0
-            if ((flags and LAP_OR_PIT) != 0 || corrected && (flags and SECTOR) != 0) return 0
+            // A late final lap or pit marker is not an explicit retirement correction.
+            if (corrected && (flags and (LAP_OR_PIT or SECTOR)) != 0) return 0
             return if (corrected) RETIRED or PENDING else RETIRED
         }
     }

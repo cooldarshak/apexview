@@ -66,11 +66,10 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
         return try {
             DataInputStream(file.inputStream().buffered(BUFFER_SIZE)).use { input ->
                 val version = input.readInt()
-                // Version 2 omitted the stopped bit and cannot represent the original history.
-                // V4 adds independent tower coverage; V5 preserves the
-                // original rank baseline in compact preview histories.
-                // Full V3 indices (including Stopped) are unchanged.
-                if (version != VERSION && !(previewPositionMs != null && version in COVERAGE_PREVIEW_VERSION..PREVIEW_VERSION))
+                // V6/V7 retain the binary layout of V3/V5 but use corrected
+                // retirement semantics. Old derived histories lack the raw
+                // evidence needed to repair a false resurrection; reindex them.
+                if (version != (if (previewPositionMs == null) VERSION else PREVIEW_VERSION))
                     return miss("rebuild-version-$version")
                 if (input.readLong() != contentId) return miss("wrong-content")
                 if (previewPositionMs != null &&
@@ -147,8 +146,8 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                     DriverLaps(times, snapshots, crossings, lapTimes, lapCounts)
                 }
                 val parts = List(input.count(MAX_SAMPLES, 12)) { input.readLong() to input.readInt() }
-                val towerFrom = if (version >= COVERAGE_PREVIEW_VERSION) input.readLong() else null
-                val towerThrough = if (version >= COVERAGE_PREVIEW_VERSION) input.readLong() else null
+                val towerFrom = if (previewPositionMs != null) input.readLong() else null
+                val towerThrough = if (previewPositionMs != null) input.readLong() else null
                 val withRankBaseline = if (version == PREVIEW_VERSION) {
                     val originalRanks = input.readByDriver {
                         val rank = readInt()
@@ -411,9 +410,8 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
     private companion object {
         val commitLock = Any()
         const val MAX_PREVIEW_BYTES = 16L * 1024 * 1024
-        const val VERSION = 3
-        const val COVERAGE_PREVIEW_VERSION = 4
-        const val PREVIEW_VERSION = 5
+        const val VERSION = 6
+        const val PREVIEW_VERSION = 7
         const val PREVIEW_REUSE_MS = 45_000L
         const val TRACK_BLOCK_SAMPLES = 4096
         const val TRACK_SAMPLE_BYTES = Long.SIZE_BYTES + 2 * Int.SIZE_BYTES

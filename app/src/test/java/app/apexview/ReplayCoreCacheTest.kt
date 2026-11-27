@@ -124,16 +124,14 @@ class ReplayCoreCacheTest {
         assertEquals(laps.lastCrossing(targetUtc),preview.laps.getValue("16").lastCrossing(targetUtc))
         assertNull(cache.readPreview(targetPosition + 46_000L) {})
         assertEquals(track.n, cache.read {}?.tracks?.get("16")?.n)
-        // Full V3 cache remains readable; V2 is still rejected below.
+        // V6 full history is unchanged structurally; older retirement
+        // semantics must not be republished from V3-V5 derived caches.
         assertNull(cache.read {}?.previewTowerThroughUtc)
-        // V4 has the same independent coverage but no original rank field.
-        // One rank entry: count(4), modified-UTF length(2), "16"(2), rank(4).
         val previewFile = temporary.root.resolve("replay-previews/17.bin")
-        java.io.RandomAccessFile(previewFile, "rw").use { it.writeInt(4); it.setLength(it.length() - 12L) }
-        assertEquals(targetUtc + 30_000L, requireNotNull(cache.readPreview(targetPosition) {}).previewTowerThroughUtc)
-        // Old V3 previews remain readable and use conservative legacy coverage.
-        java.io.RandomAccessFile(previewFile, "rw").use { it.writeInt(3); it.setLength(it.length() - 16L) }
-        assertNull(requireNotNull(cache.readPreview(targetPosition) {}).previewTowerThroughUtc)
+        for (legacy in 3..5) {
+            java.io.RandomAccessFile(previewFile, "rw").use { it.writeInt(legacy) }
+            assertNull(cache.readPreview(targetPosition) {})
+        }
 
         val file = temporary.root.resolve("replay-timing/17.bin")
         java.io.RandomAccessFile(file, "rw").use { it.writeInt(2) }

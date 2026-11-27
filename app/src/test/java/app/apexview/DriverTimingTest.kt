@@ -117,6 +117,25 @@ class DriverTimingTest {
     }
 
     @Test
+    fun lateLapAndPitDeltasCannotResurrectRetiredDriverWithoutCorrection() {
+        val stream = listOf(
+            """00:00:01.000{"Lines":{"4":{"Position":"12","NumberOfLaps":3}}}""",
+            """00:00:02.000{"Lines":{"4":{"Retired":true}}}""",
+            """00:00:03.000{"Lines":{"4":{"NumberOfLaps":4}}}""",
+            """00:00:04.000{"Lines":{"4":{"PitOut":true}}}""",
+            """00:00:05.000{"Lines":{"4":{"Retired":false}}}""",
+            """00:00:06.000{"Lines":{"4":{"NumberOfLaps":5}}}"""
+        ).joinToString("\n")
+        val history = DriverTimingParser.parse(stream, t0).getValue("4")
+        assertTrue(!history.retiredAt(t0 + 1500))
+        assertTrue(history.retiredAt(t0 + 3500))
+        assertTrue(history.retiredAt(t0 + 4500))
+        assertTrue(history.retiredAt(t0 + 5500))
+        assertTrue(!history.retiredAt(t0 + 6500))
+        assertTrue(history.retiredAt(t0 + 2500))
+    }
+
+    @Test
     fun stopIsTemporaryAndRetirementClearsOnNewLap() {
         val stream = listOf(
             """00:00:01.000{"Lines":{"4":{"Position":"12","NumberOfLaps":3,"Stopped":true}}}""",

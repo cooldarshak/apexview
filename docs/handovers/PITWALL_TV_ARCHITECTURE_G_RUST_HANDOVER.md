@@ -1933,3 +1933,8 @@ Continue existing MEM-01–16 and all inherited G-TV/G-C/G/R/M/P0–P2/A–H/P0-
 
 ### Post-904 Cast live-window startup and confirmation
 - Both baked Cast transports were explicitly selecting zero even though their HLS window advances. Use CAF's default live start and Media3's default media item position for baked live only; retain exact archive-origin seek behavior. Controller remains controller-only and says connecting until matching playback confirmation. Standard Google playback status is not proof of physical display. Added live versus archive position regression. Source correction; receiver physical acceptance remains mandatory.
+
+
+### Post-904 retired-driver state and derived cache correction
+- Rust and independent Kotlin retirement policies now require a fresh explicit retirement correction plus corroborating lap/pit/sector progress before a retired car is restored. Late lap or pit records alone cannot resurrect it. Existing temporary-stop handling, same-time primary precedence and chronological replay remain intact. Added Rust and parser regressions. The exact Lindblad timing packets are not present in the logs, so the reported case still requires physical replay verification.
+- Bump disposable replay core/preview semantic versions to 6/7, retaining the binary layouts of 3/5 but requiring one-time reindex of old derived histories which cannot reconstruct raw correction evidence. This deliberately trades a one-time cold rebuild for correct retirement state; no account, layout or user data is removed. Cache tests assert rejection of old preview versions. All previously valid source inputs and normal warm cache behavior after rebuild remain supported.

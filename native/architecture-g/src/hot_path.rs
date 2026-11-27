@@ -284,7 +284,8 @@ pub fn retirement_state(flags:i32)->Option<i32> {
     let pending=flags&2!=0;
     if flags&16==0 {return Some(if pending {3} else {1});}
     let corrected=pending || flags&8!=0;
-    if flags&32!=0 || corrected && flags&64!=0 {return Some(0);}
+    // Late lap/pit records alone must never resurrect a retired driver.
+    if corrected && flags&(32|64)!=0 {return Some(0);}
     Some(if corrected {3} else {1})
 }
 
@@ -329,7 +330,9 @@ mod tests {
         assert_eq!(retirement_state(3|64),Some(3));
         assert_eq!(retirement_state(1|16|64),Some(1));
         assert_eq!(retirement_state(3|16|64),Some(0));
-        assert_eq!(retirement_state(1|16|32),Some(0));
+        assert_eq!(retirement_state(1|16|32),Some(1));
+        assert_eq!(retirement_state(1|8|16|32),Some(0));
+        assert_eq!(retirement_state(3|16|32),Some(0));
         assert_eq!(retirement_state(3|4|16|64),Some(1));
         assert_eq!(retirement_state(0),Some(0));
         assert_eq!(retirement_state(-1),None);
