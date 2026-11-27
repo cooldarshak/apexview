@@ -111,7 +111,7 @@ run_g0_gate() {
   local gb_report="${RUNNER_TEMP:?}/pitwall-gb-api-$sdk-instrumentation.txt"
   if ! run_required_instrumentation \
     app.apexview.tiled.ArchitectureGBAndroidTest \
-    'OK (8 tests)' "$gb_report"; then
+    'OK (12 tests)' "$gb_report"; then
     adb logcat -d -s PitwallGB:I '*:S' >> "$gb_report" || true
     cat "$gb_report"
     return 1
@@ -159,6 +159,14 @@ run_required_instrumentation \
   app.apexview.scene.SingleDecoderSceneInstrumentationTest \
   'OK (1 test)' "$texture_report"
 cat "$texture_report" >> "$report"
+
+# Real clear shared-texture pixel check. An assumption skip on unsupported
+# emulator EGL is capability evidence only, never a physical GPU pass.
+async_report="${RUNNER_TEMP:?}/pitwall-async-latch-instrumentation.txt"
+run_required_instrumentation \
+  app.apexview.scene.SceneAsyncTextureLatchAndroidTest \
+  'OK (1 test)' "$async_report"
+cat "$async_report" >> "$report"
 
 cast_report="${RUNNER_TEMP:?}/pitwall-baked-cast-instrumentation.txt"
 run_required_instrumentation \

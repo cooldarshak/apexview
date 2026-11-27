@@ -280,7 +280,7 @@ public final class NativeHotPath {
     private static native int nativeReplayIndexMark(long handle, long time, long offset);
     private static native long nativeReplayIndexOffset(long handle, long from);
     private static native void nativeReplayIndexClose(long handle);
-    public static final int REPLAY_TOWER_WORDS = 1 + 128 * 5;
+    public static final int REPLAY_TOWER_WORDS = 1 + 128 * 6;
     public static boolean replayTowerSimple(String json, long[] output) {
         if (output.length != REPLAY_TOWER_WORDS || json.length() > 512 * 1024 || !available()) return false;
         try { return nativeReplayTowerSimple(json, output) == 1; }

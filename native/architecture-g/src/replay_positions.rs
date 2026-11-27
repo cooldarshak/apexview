@@ -247,7 +247,7 @@ mod spool_tests {
 
 
 pub const TOWER_ROWS: usize = 128;
-pub const TOWER_FIELDS: usize = 5;
+pub const TOWER_FIELDS: usize = 6;
 pub const TOWER_WORDS: usize = 1 + TOWER_ROWS * TOWER_FIELDS;
 const ABSENT: i64 = -1;
 const NO_POSITION: i64 = i64::MIN;
@@ -280,6 +280,70 @@ fn position_value(p: &mut Parser<'_>) -> Option<i64> {
     } else { p.integer()? };
     Some(i64::from(position))
 }
+// Validate a canonical nested value without allocating a JSON tree. Escaped
+// strings, non-ASCII and excessive nesting use the exact reference path.
+// Complex driver rows are dispatched individually after the whole envelope
+// passes validation; simple rows never allocate a JSONObject.
+fn skip_value(p: &mut Parser<'_>, depth: usize) -> Option<()> {
+    if depth >= 32 { return None; }
+    p.ws();
+    match *p.bytes.get(p.at)? {
+        b'{' => p.object(|p, _| skip_value(p, depth + 1)),
+        b'[' => p.array(|p| skip_value(p, depth + 1)),
+        b'"' => { p.string()?; Some(()) },
+        b't' | b'f' | b'n' => {
+            let word: &[u8] = match p.bytes[p.at] { b't' => b"true", b'f' => b"false", _ => b"null" };
+            let end = p.at.checked_add(word.len())?;
+            if p.bytes.get(p.at..end)? != word { return None; }
+            p.at = end;
+            Some(())
+        },
+        b'-' | b'0'..=b'9' => {
+            if p.bytes[p.at] == b'-' { p.at += 1; }
+            let first = *p.bytes.get(p.at)?;
+            if !first.is_ascii_digit() { return None; }
+            p.at += 1;
+            if first != b'0' { while p.bytes.get(p.at).is_some_and(u8::is_ascii_digit) { p.at += 1; } }
+            if p.bytes.get(p.at) == Some(&b'.') {
+                p.at += 1;
+                let start = p.at;
+                while p.bytes.get(p.at).is_some_and(u8::is_ascii_digit) { p.at += 1; }
+                if start == p.at { return None; }
+            }
+            if p.bytes.get(p.at).is_some_and(|v| matches!(*v, b'e' | b'E')) {
+                p.at += 1;
+                if p.bytes.get(p.at).is_some_and(|v| matches!(*v, b'+' | b'-')) { p.at += 1; }
+                let start = p.at;
+                while p.bytes.get(p.at).is_some_and(u8::is_ascii_digit) { p.at += 1; }
+                if start == p.at { return None; }
+            }
+            Some(())
+        },
+        _ => None,
+    }
+}
+fn simple_fields(p: &mut Parser<'_>) -> Option<[i64; 4]> {
+    let mut fields = 0;
+    let mut position = NO_POSITION;
+    let mut fastest = ABSENT;
+    let mut interval = ABSENT;
+    let mut leader = ABSENT;
+    let mut ahead = ABSENT;
+    p.object(|p,key| {
+        match key {
+            b"Position" => { unique(&mut fields, 1)?; position = position_value(p)?; },
+            b"TimeDiffToFastest" => { unique(&mut fields, 2)?; fastest = text_span(p)?; },
+            b"IntervalToPositionAhead" => { unique(&mut fields, 4)?; interval = value_span(p)?; },
+            b"GapToLeader" => { unique(&mut fields, 8)?; leader = value_span(p)?; },
+            b"TimeDiffToPositionAhead" => { unique(&mut fields, 16)?; ahead = text_span(p)?; },
+            _ => return None,
+        }
+        Some(())
+    })?;
+    Some([position, if interval != ABSENT {interval} else {fastest},
+        if fastest != ABSENT {fastest} else {leader},
+        if ahead != ABSENT {ahead} else {interval}])
+}
 pub fn tower_simple(bytes: &[u8], out: &mut [i64]) -> Option<usize> {
     if bytes.len() > MAX_RECORD || out.len() < TOWER_WORDS || !bytes.is_ascii() { return None; }
     let mut p = Parser { bytes, at: 0 };
@@ -293,28 +357,24 @@ pub fn tower_simple(bytes: &[u8], out: &mut [i64]) -> Option<usize> {
             let number = driver(key)?;
             if rows >= TOWER_ROWS || *seen.get(number)? { return None; }
             seen[number] = true;
-            let mut fields = 0;
-            let mut position = NO_POSITION;
-            let mut fastest = ABSENT;
-            let mut interval = ABSENT;
-            let mut leader = ABSENT;
-            let mut ahead = ABSENT;
-            p.object(|p,key| {
-                match key {
-                    b"Position" => { unique(&mut fields, 1)?; position = position_value(p)?; },
-                    b"TimeDiffToFastest" => { unique(&mut fields, 2)?; fastest = text_span(p)?; },
-                    b"IntervalToPositionAhead" => { unique(&mut fields, 4)?; interval = value_span(p)?; },
-                    b"GapToLeader" => { unique(&mut fields, 8)?; leader = value_span(p)?; },
-                    b"TimeDiffToPositionAhead" => { unique(&mut fields, 16)?; ahead = text_span(p)?; },
-                    _ => return None,
+            p.ws();
+            let begin = p.at;
+            // Simple fields are all exact, or the complete driver row is
+            // validated and handed to the established lifecycle/sector engine.
+            let (values, complex) = match simple_fields(p) {
+                Some(values) => (values, ABSENT),
+                None => {
+                    p.at = begin;
+                    if p.bytes.get(begin) != Some(&b'{') { return None; }
+                    skip_value(p, 0)?;
+                    ([NO_POSITION, ABSENT, ABSENT, ABSENT],
+                        (i64::try_from(begin).ok()? << 32) | i64::try_from(p.at).ok()?)
                 }
-                Some(())
-            })?;
+            };
             let at = 1 + rows * TOWER_FIELDS;
-            out[at..at+TOWER_FIELDS].copy_from_slice(&[number as i64, position,
-                if interval != ABSENT {interval} else {fastest},
-                if fastest != ABSENT {fastest} else {leader},
-                if ahead != ABSENT {ahead} else {interval}]);
+            out[at] = number as i64;
+            out[at+1..at+5].copy_from_slice(&values);
+            out[at+5] = complex;
             rows += 1;
             Some(())
         })
@@ -335,24 +395,34 @@ mod tower_tests {
     fn tower_gap_precedence_and_explicit_empty_values() {
         let record = br#"{"Lines":{"44":{"Position":"2","TimeDiffToFastest":"+1.2","GapToLeader":{"Value":"3"},"IntervalToPositionAhead":{"Value":""},"TimeDiffToPositionAhead":"0.4"},"1":{"GapToLeader":{"Value":"+0.5"}}}}"#;
         let mut out = [0;TOWER_WORDS];
-        assert_eq!(tower_simple(record,&mut out),Some(11));
+        assert_eq!(tower_simple(record,&mut out),Some(13));
         assert_eq!(&out[..3], &[2,44,2]);
         assert_eq!(read_span(record,out[3]),Some(b"".as_slice()));
         assert_eq!(read_span(record,out[4]),Some(b"+1.2".as_slice()));
         assert_eq!(read_span(record,out[5]),Some(b"0.4".as_slice()));
-        assert_eq!(&out[6..9], &[1,NO_POSITION,ABSENT]);
-        assert_eq!(read_span(record,out[9]),Some(b"+0.5".as_slice()));
-        assert_eq!(out[10],ABSENT);
+        assert_eq!(out[6], ABSENT);
+        assert_eq!(&out[7..10], &[1,NO_POSITION,ABSENT]);
+        assert_eq!(read_span(record,out[10]),Some(b"+0.5".as_slice()));
+        assert_eq!(&out[11..13], &[ABSENT,ABSENT]);
     }
     #[test]
-    fn mixed_lifecycle_sector_and_unknown_records_decline_transactionally() {
+    fn mixed_records_preserve_complex_row_spans_and_simple_rows() {
+        let record=br#"{"Lines":{"44":{"Position":"2"},"1":{"Retired":true,"Sectors":{"0":{"Value":"21.2","Segments":[{"Status":2048}]}}}}}"#;
+        let mut out=[0;TOWER_WORDS];
+        assert_eq!(tower_simple(record,&mut out),Some(13));
+        assert_eq!(&out[..3], &[2,44,2]);
+        assert_eq!(out[6],ABSENT);
+        assert_eq!(out[7],1);
+        assert_eq!(read_span(record,out[12]),Some(br#"{"Retired":true,"Sectors":{"0":{"Value":"21.2","Segments":[{"Status":2048}]}}}"#.as_slice()));
+    }
+    #[test]
+    fn malformed_or_unsupported_envelopes_decline_transactionally() {
         let mut out=[0;TOWER_WORDS];
         for record in [
-            br#"{"Lines":{"44":{"Position":"2"},"1":{"Retired":true}}}"#.as_slice(),
-            br#"{"Lines":{"44":{"Sectors":[]}}}"#,
-            br#"{"Lines":{"44":{"Position":"2","Position":"3"}}}"#,
-            br#"{"Lines":{"44":{"IntervalToPositionAhead":{"Value":null}}}}"#,
+            br#"{"Lines":{"44":{"Position":"2"},"1":{"Retired":true,}}}"#.as_slice(),
+            br#"{"Lines":{"44":{"Sectors":[1e]}}}"#,
             br#"{"Lines":{"44":{"GapToLeader":{"Value":"\u0031"}}}}"#,
+            br#"{"Lines":{"44":{"Position":"2"},"44":{"Position":"3"}}}"#,
         ] { assert_eq!(tower_simple(record,&mut out),None); }
     }
 }

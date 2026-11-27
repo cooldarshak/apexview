@@ -737,7 +737,12 @@ internal class StateHistoryAccumulator(private val nativeRequested: Boolean = fa
     fun accept(lines: JSONObject, time: Long) {
         lines.keys().forEach { number ->
             val driver = lines.optJSONObject(number) ?: return@forEach
-            if (!driver.has("InPit") && !driver.has("PitOut") && !driver.has("NumberOfLaps") && !driver.has("KnockedOut")) return@forEach
+            acceptDriver(number, driver, time)
+        }
+    }
+
+    internal fun acceptDriver(number: String, driver: JSONObject, time: Long) {
+            if (!driver.has("InPit") && !driver.has("PitOut") && !driver.has("NumberOfLaps") && !driver.has("KnockedOut")) return
             var state = current[number] ?: LapState.UNKNOWN
             if (driver.optBoolean("InPit")) state = LapState.PIT
             if (driver.optBoolean("PitOut") || (driver.has("InPit") && !driver.optBoolean("InPit") && state == LapState.PIT)) {
@@ -763,7 +768,6 @@ internal class StateHistoryAccumulator(private val nativeRequested: Boolean = fa
                 timeline += time
                 values.getOrPut(number) { mutableListOf() }.add(state)
             }
-        }
     }
 
     fun finish(): StateParse {

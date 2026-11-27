@@ -312,6 +312,7 @@ impl CompactSnapshotDeltas {
     }
     pub fn bytes(&self) -> &[u8] { &self.bytes }
     pub fn len(&self) -> usize { self.rows }
+    pub fn is_empty(&self) -> bool { self.rows == 0 }
     pub fn row(&self, index: usize) -> Option<[i32; Self::FIELDS]> {
         if index >= self.rows { return None; }
         let entry = (index / Self::BLOCK) * 4;

@@ -68,8 +68,15 @@ class ArchitectureGBAndroidTest {
         val scratch = LongArray(NativeHotPath.REPLAY_TOWER_WORDS)
         assertTrue(NativeHotPath.replayTowerSimple(json, scratch))
         val before = scratch.copyOf()
-        assertFalse(NativeHotPath.replayTowerSimple(json.replace(""""+1.0"""", "null"), scratch))
+        assertFalse(NativeHotPath.replayTowerSimple("""{"Lines":{"44":{"Position":"2",}}}""", scratch))
         assertArrayEquals(before, scratch)
+        val mixed = """{"Lines":{"44":{"Position":"2"},"1":{"Retired":true,"NumberOfLaps":3}}}"""
+        assertTrue(NativeHotPath.replayTowerSimple(mixed, scratch))
+        assertEquals(2L, scratch[0])
+        assertEquals(-1L, scratch[6])
+        val span = scratch[12]
+        assertEquals("""{"Retired":true,"NumberOfLaps":3}""",
+            mixed.substring((span ushr 32).toInt(), span.toInt()))
     }
 
     @Test

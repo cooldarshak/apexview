@@ -408,17 +408,27 @@ object DriverTimingParser {
         private val keys = if (scratch != null) arrayOfNulls<String>(1000) else null
         var accepted = 0
             private set
-        fun apply(json: String, time: Long, drivers: MutableMap<String, Live>): Boolean {
+        fun apply(json: String, time: Long, drivers: MutableMap<String, Live>,
+                  stateHistory: StateHistoryAccumulator?, statusPolicy: RetirementStatusPolicy,
+                  source: Int = 0): Boolean {
             val out = scratch ?: return false
             if (!app.apexview.tiled.NativeHotPath.replayTowerSimple(json, out)) return false
             val numbers = requireNotNull(keys)
             fun text(span: Long): String? =
                 json.substring((span ushr 32).toInt(), span.toInt()).ifEmpty { null }
             for (i in 0 until out[0].toInt()) {
-                val at = 1 + 5 * i
+                val at = 1 + 6 * i
                 val number = out[at].toInt()
                 val key = numbers[number] ?: number.toString().also { numbers[number] = it }
                 val live = drivers.getOrPut(key) { Live(true) }
+                val complex = out[at + 5]
+                if (complex != -1L) {
+                    val row = JSONObject(json.substring((complex ushr 32).toInt(), complex.toInt()))
+                    if (source == 0) stateHistory?.acceptDriver(key, row, time)
+                    DriverTimingParser.apply(live, row, time, statusPolicy, source)
+                    live.snap(time)
+                    continue
+                }
                 if (out[at + 1] != Long.MIN_VALUE) live.position = out[at + 1].toInt()
                 if (out[at + 2] != -1L) live.gap = text(out[at + 2])
                 if (out[at + 3] != -1L) live.toLeader = text(out[at + 3])
@@ -518,7 +528,7 @@ object DriverTimingParser {
             if (time < through) return@sequence  // Use the full ordered merge for a disordered archive.
             through = time
             val json = line.substring(prefix)
-            if (!simpleDecoder.apply(json, time, drivers)) {
+            if (!simpleDecoder.apply(json, time, drivers, states, statusPolicy)) {
                 val rows = runCatching { JSONObject(json).optJSONObject("Lines") }.getOrNull() ?: continue
                 states.accept(rows, time)
                 rows.keys().forEach { number ->
@@ -617,7 +627,7 @@ object DriverTimingParser {
                 checkpoint?.invoke("merge records=$records invalidJson=$invalidJson missingLines=$missingLines drivers=${drivers.size}")
             }
             val payload = event.line.substring(event.prefix)
-            if (!simpleDecoder.apply(payload, event.time, drivers)) {
+            if (!simpleDecoder.apply(payload, event.time, drivers, stateHistory, statusPolicy, event.source)) {
                 val json = runCatching { JSONObject(payload) }.getOrNull() ?: run { invalidJson++; return }
                 val lines = json.optJSONObject("Lines") ?: run { missingLines++; return }
                 if (event.source == 0) stateHistory?.accept(lines, event.time)

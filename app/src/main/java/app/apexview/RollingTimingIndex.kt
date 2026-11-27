@@ -56,6 +56,11 @@ internal class RollingTimingIndex(private val nativeRequested: Boolean,
         return out
     }
     fun freeze(pool: SpeedTimestampPool, first: Int = 0, end: Int = size): TimingTimestamps {
+        require(first in 0..end && end <= size)
+        // A complete immutable block is already an exact native/JVM owner.
+        // Reuse it rather than allocating and packing an identical timeline.
+        if (first % BLOCK == 0 && end - first == BLOCK && first / BLOCK < sealed.size)
+            return sealed[first / BLOCK]
         val exact = copyRange(first, end)
         return pool.freezeTimeline(exact, exact.size)
     }
