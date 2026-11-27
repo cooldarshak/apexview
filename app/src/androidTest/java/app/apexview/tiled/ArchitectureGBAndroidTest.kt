@@ -19,6 +19,29 @@ import org.junit.runner.RunWith
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class ArchitectureGBAndroidTest {
     @Test
+    fun rustReplayIndexHandlesAreIsolatedAndRetired() {
+        val a = NativeHotPath.replayIndexCreate()
+        val b = NativeHotPath.replayIndexCreate()
+        assertTrue(a > 0L && b > a)
+        try {
+            assertTrue(NativeHotPath.replayIndexMark(a, 0L, 0L))
+            assertTrue(NativeHotPath.replayIndexMark(a, 10L, 100L))
+            assertTrue(NativeHotPath.replayIndexMark(a, 20L, 200L))
+            assertTrue(NativeHotPath.replayIndexMark(a, 20L, 300L))
+            assertEquals(100L, NativeHotPath.replayIndexOffset(a, 20L))
+            assertEquals(300L, NativeHotPath.replayIndexOffset(a, 21L))
+            assertEquals(0L, NativeHotPath.replayIndexOffset(b, 21L))
+            assertFalse(NativeHotPath.replayIndexMark(a, 19L, 400L))
+            assertEquals(300L, NativeHotPath.replayIndexOffset(a, 21L))
+        } finally {
+            NativeHotPath.replayIndexClose(a)
+            NativeHotPath.replayIndexClose(b)
+        }
+        assertEquals(-1L, NativeHotPath.replayIndexOffset(a, 21L))
+        assertFalse(NativeHotPath.replayIndexMark(b, 0L, 0L))
+    }
+
+    @Test
     fun rustReplayPositionDecoderMatchesReferenceCoordinatesAndUtc() {
         val json = """{"Position":[{"Timestamp":"2026-10-24T20:00:00.1234567Z","Entries":{"44":{"Status":"OnTrack","X":100,"Y":-12,"Z":0},"1":{"Status":"OffTrack","X":5,"Y":6,"Z":0}}},{"Entries":{"4":{"X":16777217,"Y":-2147483648}},"Timestamp":"2026-10-24T20:00:00.3456789Z"}]}"""
         val out = LongArray(NativeHotPath.REPLAY_POSITION_WORDS)
