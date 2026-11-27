@@ -262,3 +262,98 @@ mod tests {
         assert_eq!(crate::hot_path::floor_index_hint(compact.len(), values[11], 4000, |i| compact.at(i)), Some(11));
     }
 }
+
+
+/** Exact nine-column driver snapshot deltas. Every 32nd row is a complete
+ * checkpoint. A seek decodes at most 32 masks, never an entire race.
+ * Only retain this format when its complete indexed packet is smaller than
+ * the dense 16-bit alternative. Values and dictionary IDs are unchanged. */
+pub struct CompactSnapshotDeltas {
+    bytes: Box<[u8]>,
+    rows: usize,
+}
+impl CompactSnapshotDeltas {
+    pub const FIELDS: usize = 9;
+    const BLOCK: usize = 32;
+    const FULL: u16 = (1 << Self::FIELDS) - 1;
+    pub fn from_reader(rows: usize, mut read: impl FnMut(usize, &mut [i16]) -> Option<()>) -> Option<Self> {
+        let dense = rows.checked_mul(Self::FIELDS)?.checked_mul(2)?;
+        if rows == 0 || rows.checked_mul(Self::FIELDS)? > MAX_HISTORY { return None; }
+        let index_bytes = rows.div_ceil(Self::BLOCK).checked_mul(4)?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(dense).ok()?;
+        bytes.resize(index_bytes, 0);
+        let mut previous = [0i16; Self::FIELDS];
+        let mut scratch = [0i16; Self::BLOCK * Self::FIELDS];
+        for first in (0..rows).step_by(Self::BLOCK) {
+            let count = (rows - first).min(Self::BLOCK);
+            read(first * Self::FIELDS, &mut scratch[..count * Self::FIELDS])?;
+            let offset = u32::try_from(bytes.len()).ok()?;
+            let index = (first / Self::BLOCK) * 4;
+            bytes[index..index + 4].copy_from_slice(&offset.to_le_bytes());
+            for (i, row) in scratch[..count * Self::FIELDS].chunks_exact(Self::FIELDS).enumerate() {
+                if row.iter().any(|v| *v < 0) { return None; }
+                let mut mask = 0u16;
+                for (field, &value) in row.iter().enumerate() {
+                    if i == 0 || value != previous[field] { mask |= 1 << field; }
+                }
+                let required = 2 + mask.count_ones() as usize * 2;
+                if bytes.len().checked_add(required)? >= dense { return None; }
+                bytes.extend_from_slice(&mask.to_le_bytes());
+                for (field, &value) in row.iter().enumerate() {
+                    if mask & (1 << field) != 0 {
+                        bytes.extend_from_slice(&value.to_le_bytes());
+                        previous[field] = value;
+                    }
+                }
+            }
+        }
+        Some(Self { bytes: bytes.into_boxed_slice(), rows })
+    }
+    pub fn bytes(&self) -> &[u8] { &self.bytes }
+    pub fn len(&self) -> usize { self.rows }
+    pub fn row(&self, index: usize) -> Option<[i32; Self::FIELDS]> {
+        if index >= self.rows { return None; }
+        let entry = (index / Self::BLOCK) * 4;
+        let mut at = u32::from_le_bytes(self.bytes.get(entry..entry + 4)?.try_into().ok()?) as usize;
+        let mut result = [0i32; Self::FIELDS];
+        for i in 0..=index % Self::BLOCK {
+            let mask = u16::from_le_bytes(self.bytes.get(at..at + 2)?.try_into().ok()?);
+            at += 2;
+            if mask & !Self::FULL != 0 || (i == 0 && mask != Self::FULL) { return None; }
+            for (field, value) in result.iter_mut().enumerate() {
+                if mask & (1 << field) != 0 {
+                    *value = i32::from(u16::from_le_bytes(self.bytes.get(at..at + 2)?.try_into().ok()?));
+                    at += 2;
+                }
+            }
+        }
+        Some(result)
+    }
+}
+#[cfg(test)]
+mod snapshot_delta_tests {
+    use super::*;
+    #[test]
+    fn indexed_deltas_preserve_all_fields_at_every_seek_boundary() {
+        let rows = 2051;
+        let source: Vec<i16> = (0..rows).flat_map(|i| {
+            [i as i16 % 24, 100, 32767, 3, (i / 11) as i16, (i / 91 % 8) as i16, 6, 7, 8]
+        }).collect();
+        let packet = CompactSnapshotDeltas::from_reader(rows, |first, out| {
+            out.copy_from_slice(&source[first..first + out.len()]); Some(())
+        }).unwrap();
+        assert!(packet.bytes().len() < source.len() * 2);
+        for i in (0..rows).rev() {
+            assert_eq!(packet.row(i).unwrap().as_slice(), &source[i * 9..i * 9 + 9].iter().map(|v| i32::from(*v)).collect::<Vec<_>>());
+        }
+        assert_eq!(packet.row(rows), None);
+    }
+    #[test]
+    fn dense_or_invalid_data_keeps_reference_fallback() {
+        assert!(CompactSnapshotDeltas::from_reader(64, |first, out| {
+            for (i, v) in out.iter_mut().enumerate() { *v = (first + i) as i16; } Some(())
+        }).is_none());
+        assert!(CompactSnapshotDeltas::from_reader(64, |_, out| { out.fill(-1); Some(()) }).is_none());
+    }
+}
