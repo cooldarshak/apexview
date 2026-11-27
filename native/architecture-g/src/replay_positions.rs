@@ -199,3 +199,48 @@ mod tests{
         ]{assert_eq!(parse(bad,&mut out),None);}
     }
 }
+
+
+/** Bounded sparse index for the disk spool. No JSON or media payload is retained.
+ * The single spool owner supplies byte offsets only after validating chronology. */
+#[derive(Default)]
+pub struct SpoolIndex { marks: Vec<(i64,i64)> }
+impl SpoolIndex {
+    pub fn mark(&mut self, time:i64, offset:i64)->Option<()> {
+        if time<0 || !(0..64*1024*1024).contains(&offset) ||
+            self.marks.len()>=65536 ||
+            self.marks.last().is_some_and(|&(t,o)| time<t || offset<=o) { return None; }
+        self.marks.try_reserve(1).ok()?;
+        self.marks.push((time,offset));
+        Some(())
+    }
+    pub fn start_offset(&self, from:i64)->i64 {
+        let at=self.marks.partition_point(|&(time,_)| time<from);
+        if at<=1 {0} else {self.marks[at-1].1}
+    }
+}
+#[cfg(test)]
+mod spool_tests {
+    use super::*;
+    #[test]
+    fn seek_and_equal_time_boundaries() {
+        let mut index=SpoolIndex::default();
+        for (t,o) in [(0,0),(10,100),(20,200),(20,300),(30,400)] {
+            assert_eq!(index.mark(t,o),Some(()));
+        }
+        assert_eq!(index.start_offset(20),100);
+        assert_eq!(index.start_offset(21),300);
+        assert_eq!(index.start_offset(5),0);
+        assert_eq!(index.start_offset(100),400);
+        assert_eq!(index.mark(29,500),None);
+        assert_eq!(index.mark(31,400),None);
+        assert_eq!(index.start_offset(100),400);
+    }
+    #[test]
+    fn cap_is_enforced_without_mutating_index() {
+        let mut index=SpoolIndex::default();
+        for i in 0..65536 { assert_eq!(index.mark(i,i),Some(())); }
+        assert_eq!(index.mark(65536,65536),None);
+        assert_eq!(index.start_offset(100000),65535);
+    }
+}
