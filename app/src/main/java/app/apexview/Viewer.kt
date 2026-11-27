@@ -140,6 +140,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
@@ -1202,6 +1204,26 @@ internal fun PlaybackVideoCanvas(
     )
     val independentClearSurface = clearOutputMode == ClearSceneOutputMode.SURFACE_VIEW
     if (scene != null && host != null) {
+        // Fixed TV layouts need no full-screen black video buffer under the
+        // separate tower/map. Preserve the original full-canvas capture path,
+        // and keep free arrangement and PiP on the existing renderer.
+        val bounds = scene.boundedOutput((app.isTv || app.layoutMode == LayoutMode.TV) &&
+            !windowCaptureRequired && !app.arranging && !app.inPip)
+        val outputScene = remember(scene, bounds) { bounds?.let(scene::translatedTo) ?: scene }
+        val outputModifier = if (bounds == null) Modifier.fillMaxSize() else Modifier.fillMaxSize()
+            .layout { measurable, constraints ->
+                val w = bounds.width.coerceAtMost(constraints.maxWidth)
+                val h = bounds.height.coerceAtMost(constraints.maxHeight)
+                val child = measurable.measure(Constraints.fixed(w, h))
+                layout(constraints.maxWidth, constraints.maxHeight) {
+                    child.place(bounds.left, bounds.top)
+                }
+            }
+        LaunchedEffect(bounds, scene.width, scene.height) {
+            android.util.Log.i("PitwallGraphics", "SCENE_OUTPUT_REGION canvas=${scene.width.toInt()}x${scene.height.toInt()} " +
+                "region=${bounds?.let { "${it.left},${it.top},${it.width}x${it.height}" } ?: "FULL"} " +
+                "sourceAtlasUnchanged=true vendorBytes=NOT_MEASURED")
+        }
         // The renderer's callbacks capture this composition's readiness state.
         // Recreate the whole owner on host/backend changes, not just the Boolean.
         key(host, app.protectedRollingSceneActive, secureRolling, independentClearSurface) {
@@ -1307,7 +1329,7 @@ internal fun PlaybackVideoCanvas(
                 delay(80)
             }
         }
-        Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (app.protectedRollingSceneActive || independentClearSurface) {
             // Reuse the tested protected scene's *nonsecure* GLES path for clear
             // A/B. Still one decoder input, one atlas, one independent output.
@@ -1334,8 +1356,8 @@ internal fun PlaybackVideoCanvas(
                         onOutputLost = { composedGlReady = false }
                         onFirstFrame = { composedGlReady = true }
                     }
-                }, update = { it.bind(host.player, scene, app.playbackSpeed, host.sceneCodecCorrelation) },
-                    onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
+                }, update = { it.bind(host.player, outputScene, app.playbackSpeed, host.sceneCodecCorrelation) },
+                    onRelease = { it.release() }, modifier = outputModifier)
             }
         } else {
             // Capture-compatible TextureView, also the controlled A/B baseline.
@@ -1346,8 +1368,8 @@ internal fun PlaybackVideoCanvas(
                 onOutputLost = { composedGlReady = false }
                 onFirstFrame = { composedGlReady = true }
                 view = this
-            } }, update = { it.bind(host.player, scene, app.playbackSpeed, host.sceneCodecCorrelation) },
-                onRelease = { it.release() }, modifier = Modifier.fillMaxSize())
+            } }, update = { it.bind(host.player, outputScene, app.playbackSpeed, host.sceneCodecCorrelation) },
+                onRelease = { it.release() }, modifier = outputModifier)
         }
             // Custom clear HEVC and Widevine HEVC scenes do not host PlayerView.
             // Display only actual Media3 cues above the single decoded surface.

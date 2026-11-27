@@ -28,6 +28,34 @@ data class VideoScene(val width: Float, val height: Float, val atlasWidth: Int,
             sourceDisplayHeight == other.sourceDisplayHeight &&
             sourceRects == other.sourceRects
 
+    data class OutputBounds(val left: Int, val top: Int, val width: Int, val height: Int) {
+        val pixels: Long get() = width.toLong() * height
+    }
+
+    /** A one-to-one pixel translation, never a scale or atlas crop. Full
+     * canvas remains mandatory for capture and unconstrained layout motion.
+     * Outward rounding preserves partially covered edge pixels. */
+    internal fun boundedOutput(allowed: Boolean): OutputBounds? {
+        if (!allowed || windows.isEmpty() || !width.isFinite() || !height.isFinite() ||
+            width < 1f || height < 1f || width > 16384f || height > 16384f) return null
+        if (windows.any { !it.x.isFinite() || !it.y.isFinite() || !it.width.isFinite() ||
+                !it.height.isFinite() || it.width <= 0f || it.height <= 0f }) return null
+        val w = kotlin.math.ceil(width).toInt()
+        val h = kotlin.math.ceil(height).toInt()
+        val left = kotlin.math.floor(windows.minOf { it.x }).toInt().coerceIn(0, w)
+        val top = kotlin.math.floor(windows.minOf { it.y }).toInt().coerceIn(0, h)
+        val right = kotlin.math.ceil(windows.maxOf { it.x + it.width }).toInt().coerceIn(0, w)
+        val bottom = kotlin.math.ceil(windows.maxOf { it.y + it.height }).toInt().coerceIn(0, h)
+        if (right <= left || bottom <= top) return null
+        val bounds = OutputBounds(left, top, right - left, bottom - top)
+        // Avoid tiny gains causing extra surface resizes at the layout edge.
+        return bounds.takeIf { it.pixels * 10 <= w.toLong() * h * 9 }
+    }
+
+    internal fun translatedTo(bounds: OutputBounds): VideoScene =
+        copy(width = bounds.width.toFloat(), height = bounds.height.toFloat(),
+            windows = windows.map { it.copy(x = it.x - bounds.left, y = it.y - bounds.top) })
+
     data class Quad(val id: Int, val positions: FloatArray, val texture: FloatArray)
 
     /** Same geometry is used by native GLES and the cast receiver. Overlap follows tile z order. */

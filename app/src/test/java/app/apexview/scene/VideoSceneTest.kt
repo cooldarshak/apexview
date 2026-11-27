@@ -7,6 +7,37 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VideoSceneTest {
+    @Test fun dockedOutputAllocatesOnlyVideoPixelsAndPreservesOriginalQuadPlacement() {
+        val scene = VideoScene(1920f, 1080f, 1920, 1080, 1,
+            listOf(VideoWindow(1, 0, 12.25f, 20.5f, 1270f, 720f, 0f)))
+        val bounds = requireNotNull(scene.boundedOutput(true))
+        assertEquals(VideoScene.OutputBounds(12, 20, 1271, 721), bounds)
+        val local = scene.translatedTo(bounds)
+        assertTrue(scene.sameEncodedAtlasAs(local))
+        val original = scene.quads().single()
+        val cropped = local.quads().single()
+        assertArrayEquals(original.texture, cropped.texture, 0f)
+        for (i in original.positions.indices step 2) {
+            assertEquals((original.positions[i] + 1) * scene.width / 2,
+                (cropped.positions[i] + 1) * local.width / 2 + bounds.left, 0.001f)
+            assertEquals((1 - original.positions[i + 1]) * scene.height / 2,
+                (1 - cropped.positions[i + 1]) * local.height / 2 + bounds.top, 0.001f)
+        }
+        assertNull(scene.boundedOutput(false))
+        assertNull(scene.copy(windows = listOf(VideoWindow(1, 0, 0f, 0f, 1920f, 1080f, 0f))).boundedOutput(true))
+    }
+
+    @Test fun offscreenWindowsKeepCropAndOrderAndNeverRequestInvalidSurface() {
+        val scene = VideoScene(1920f, 1080f, 1920, 1080, 2,
+            listOf(VideoWindow(1, 0, -100f, -5f, 800f, 600f, 2f),
+                VideoWindow(2, 1, 500f, 10f, 600f, 400f, 1f)))
+        val region = requireNotNull(scene.boundedOutput(true))
+        assertEquals(VideoScene.OutputBounds(0, 0, 1100, 595), region)
+        assertEquals(scene.quads().map { it.id }, scene.translatedTo(region).quads().map { it.id })
+        assertNull(scene.copy(windows = emptyList()).boundedOutput(true))
+        assertNull(scene.copy(windows = listOf(VideoWindow(1, 0, 2000f, 0f, 100f, 100f, 0f))).boundedOutput(true))
+    }
+
     @Test fun mainGridAndTvReuseTheExistingLayoutGeometryWithoutChangingSourceOrder() {
         for (mode in listOf(LayoutMode.FEATURED, LayoutMode.GRID, LayoutMode.TV)) {
             val slots = if (mode == LayoutMode.TV) Layouts.withCombinedOverlays(mode, 3, 1920f, 1080f,
