@@ -2,7 +2,7 @@ package app.apexview.scene
 
 import app.apexview.TimingBuckets
 
-/** GL-thread-only presentation counters. Media3's decoder-drop count alone misses jitter. */
+/** Serialized counters shared by the independent latch and presentation GL owners. */
 internal class SceneFramePacing {
     data class Snapshot(
         val latched: Long,
@@ -67,9 +67,9 @@ internal class SceneFramePacing {
     private val glQueueDelays = TimingBuckets()
 
     /** Measures handler enqueue-to-run delay, not SurfaceFlinger presentation latency. */
-    fun onGlQueueProbe(delayNs: Long) { glQueueDelays.record(delayNs) }
+    @Synchronized fun onGlQueueProbe(delayNs: Long) { glQueueDelays.record(delayNs) }
 
-    fun onTextureLatched(nowNs: Long, latchDurationNs: Long = 0L, surfaceTimestampNs: Long = 0L,
+    @Synchronized fun onTextureLatched(nowNs: Long, latchDurationNs: Long = 0L, surfaceTimestampNs: Long = 0L,
                          eglBindNs: Long = 0L, callbackArrivalNs: Long = nowNs) {
         if (lastCallbackNs > 0 && callbackArrivalNs > lastCallbackNs) {
             callbackIntervals.record(callbackArrivalNs - lastCallbackNs)
@@ -93,7 +93,7 @@ internal class SceneFramePacing {
         if (surfaceTimestampNs > 0L) lastSurfaceTimestampNs = surfaceTimestampNs
     }
 
-    fun onDisplayFrame(frameTimeNs: Long, swapNs: Long, newVideo: Boolean,
+    @Synchronized fun onDisplayFrame(frameTimeNs: Long, swapNs: Long, newVideo: Boolean,
                        drawNs: Long = 0L, callbackStartNs: Long = frameTimeNs) {
         if (lastVsyncNs > 0 && frameTimeNs > lastVsyncNs) allVsyncIntervals.record(frameTimeNs - lastVsyncNs)
         lastVsyncNs = frameTimeNs
@@ -121,12 +121,12 @@ internal class SceneFramePacing {
         presented++
     }
 
-    fun onPacingDeferred() { pacingDeferrals++ }
+    @Synchronized fun onPacingDeferred() { pacingDeferrals++ }
 
     /** Output lifecycle rejection; not a decoded or SurfaceFlinger dropped picture. */
-    fun onDrawUnavailable() { unavailableDraws++ }
+    @Synchronized fun onDrawUnavailable() { unavailableDraws++ }
 
-    fun snapshotAndReset(): Snapshot {
+    @Synchronized fun snapshotAndReset(): Snapshot {
         val result = Snapshot(latched, presented, callbackGaps, displayGaps, slowSwaps,
             slowDraws, slowLatches, maxCallbackGapMs, maxDisplayGapMs, maxSwapMs,
             maxDrawMs, maxLatchMs, maxVsyncCallbackDelayMs, surfaceTimestampRegressions,
@@ -147,7 +147,7 @@ internal class SceneFramePacing {
         return result
     }
 
-    fun reset() {
+    @Synchronized fun reset() {
         lastCallbackNs = 0; lastPresentNs = 0; lastSurfaceTimestampNs = 0; lastVsyncNs = 0
         snapshotAndReset()
     }
