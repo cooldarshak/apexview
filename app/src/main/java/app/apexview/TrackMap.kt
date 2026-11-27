@@ -853,13 +853,17 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
             val movingCars = motion?.let { it.carsAt(it.positionMs.value) }
             if (movingCars != null) {
                 val radius = dotSizeDp.dp.toPx()
-                movingCars.forEach { car ->
+                val labelGap = minOf(3.dp.toPx(), radius)
+                val stopRadius = radius + 4.dp.toPx()
+                val stopStroke = Stroke(2.dp.toPx())
+                for (index in movingCars.indices) {
+                    val car = movingCars[index]
                     val p = fit.map(car.x, car.y)
                     val alpha = drawCar(timing, car.number, car.state, p, radius)
-                    if (car.number == stop?.number) drawCircle(Color.White, radius + 4.dp.toPx(),
-                        p, style = Stroke(2.dp.toPx()))
+                    if (car.number == stop?.number) drawCircle(Color.White, stopRadius,
+                        p, style = stopStroke)
                     names[car.number]?.let {
-                        drawText(it, topLeft = Offset(p.x + radius + minOf(3.dp.toPx(), radius),
+                        drawText(it, topLeft = Offset(p.x + radius + labelGap,
                             p.y - it.size.height / 2f), alpha = alpha)
                     }
                 }
@@ -871,13 +875,16 @@ internal fun TrackDrawingContent(timing: SessionTiming, width: Float, height: Fl
                     }
                 }
             } else {
-                cars.forEach { (car, p) ->
-                    val r = dotSizeDp.dp.toPx()
+                val r = dotSizeDp.dp.toPx()
+                val labelGap = minOf(3.dp.toPx(), r)
+                val stopStroke = Stroke(2.dp.toPx())
+                for (index in cars.indices) {
+                    val (car, p) = cars[index]
                     val alpha = drawCar(timing, car, p, r)
                     if (car.number == stop?.number) drawCircle(Color.White, r + 4.dp.toPx(), p,
-                        style = Stroke(2.dp.toPx()))
+                        style = stopStroke)
                     names[car.number]?.let {
-                        drawText(it, topLeft = Offset(p.x + r + minOf(3.dp.toPx(), r),
+                        drawText(it, topLeft = Offset(p.x + r + labelGap,
                             p.y - it.size.height / 2f), alpha = alpha)
                     }
                 }
@@ -1324,6 +1331,10 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
             val motionCount = if (movingCars == null) 0
                 else movingProjection.updateForDraw(movingCars, timing.geometry)
             val count = if (movingCars == null) cars.size else motionCount
+            val radius = dotSizeDp.dp.toPx()
+            val labelGap = 6.dp.toPx()
+            val markGap = 4.dp.toPx()
+            val stopStroke = Stroke(2.dp.toPx())
             for (index in 0 until count) {
                 val number = if (movingCars == null) cars[index].first.number
                     else movingProjection.drawCar(index).number
@@ -1332,19 +1343,18 @@ internal fun EdgeDrawingContent(timing: SessionTiming, width: Float, height: Flo
                 val f = if (movingCars == null) cars[index].second
                     else movingProjection.fraction(index)
                 val p = ribbon.point(f)
-                val radius = dotSizeDp.dp.toPx()
                 val alpha = drawCar(timing, number, state, p, radius)
                 if (number == stop?.number) drawCircle(Color.White,
-                    radius + 4.dp.toPx(), p, style = Stroke(2.dp.toPx()))
+                    radius + markGap, p, style = stopStroke)
                 val label = names[number] ?: continue
                 val along = f * ribbon.perimeter
-                val gap = label.size.width + 6.dp.toPx()
+                val gap = label.size.width + labelGap
                 var nearMark = false
                 for (i in taken.indices) {
                     val mark = taken[i]
                     val distance = abs(along - mark.first)
                     if (minOf(distance, ribbon.perimeter - distance) <
-                        (mark.second + label.size.width) / 2 + 4.dp.toPx()) {
+                        (mark.second + label.size.width) / 2 + markGap) {
                         nearMark = true
                         break
                     }

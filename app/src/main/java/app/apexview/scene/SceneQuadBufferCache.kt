@@ -23,6 +23,11 @@ internal class SceneQuadBufferCache {
             .order(ByteOrder.nativeOrder()).asFloatBuffer()
     }
 
+    fun clear() {
+        active.clear()
+        pairs.clear()
+    }
+
     fun update(model: VideoScene): List<Pair<FloatBuffer, FloatBuffer>> {
         val quads = model.quads()
         val retainedCount = minOf(quads.size, MAX_RETAINED_WINDOWS)

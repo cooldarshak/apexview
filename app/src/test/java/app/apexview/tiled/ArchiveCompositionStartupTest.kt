@@ -8,13 +8,12 @@ import org.junit.Test
 import java.io.IOException
 
 class ArchiveCompositionStartupTest {
-    @Test fun coldNativeTvProofDoesNotCompeteWithAnUnrenderedFallback() {
-        assertTrue(deferColdTvFallback(true, true, false, false, false))
-        assertFalse(deferColdTvFallback(false, true, false, false, false))
-        assertFalse(deferColdTvFallback(true, false, false, false, false))
-        assertFalse(deferColdTvFallback(true, true, true, false, false))
-        assertFalse(deferColdTvFallback(true, true, false, true, false))
-        assertFalse(deferColdTvFallback(true, true, false, false, true))
+    @Test fun coldNativeProofDoesNotCompeteWithAnUnrenderedFallbackOnAnyDevice() {
+        assertTrue(deferColdArchiveFallback(true, false, false, false))
+        assertFalse(deferColdArchiveFallback(false, false, false, false))
+        assertFalse(deferColdArchiveFallback(true, true, false, false))
+        assertFalse(deferColdArchiveFallback(true, false, true, false))
+        assertFalse(deferColdArchiveFallback(true, false, false, true))
     }
 
     @Test fun supersededSelectionCannotReleaseOrReplaceDecoder() = runBlocking {

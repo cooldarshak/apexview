@@ -1165,7 +1165,7 @@ class FeedPlayer(
         val selectedText = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.isSelected }
         val audio = selectedAudio.singleOrNull()?.let { ArchiveAudioSelectionPlan.childIndex(it.mediaTrackGroup.id) }
         val text = selectedText.singleOrNull()?.let { ArchiveAudioSelectionPlan.childIndex(it.mediaTrackGroup.id) }
-        val expectedAudio = archiveAudioChildren.indexOf(archiveSelectedAudioUri) + 1
+        val expectedAudio = archiveSelectedAudioUri?.let { archiveAudioChildren.indexOf(it) + 1 } ?: 0
         val expectedText = archiveCaptionChildren[archiveProgrammeLabel]
         val enabled = archiveVodSession != null && !remotePlaybackSuspended &&
             tracks.groups.any { it.type == C.TRACK_TYPE_VIDEO && it.isSelected } &&
@@ -1346,6 +1346,7 @@ class FeedPlayer(
 
     internal fun releaseArchiveOwnership() {
         archiveForwardBuffers.reset(false)
+        archiveBufferSourceToken = null
         archiveVodSession?.close(); archiveVodSession = null
         archiveSelectedAudioUri = null
         archiveAudioChildren = emptyList()

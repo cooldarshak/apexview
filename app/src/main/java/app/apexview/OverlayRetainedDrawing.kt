@@ -40,6 +40,7 @@ internal class OverlayRecordingValidity {
         recordings++
     }
     fun markReplayed() { replays++ }
+    fun clear() { owner = null; width = -1; height = -1 }
 }
 
 /**
@@ -91,6 +92,7 @@ internal class RetainedTowerRenderNode {
     }
     fun discard() {
         node.discardDisplayList()
+        validity.clear()
     }
 }
 

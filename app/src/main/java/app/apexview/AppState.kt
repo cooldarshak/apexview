@@ -3295,17 +3295,18 @@ class AppState(
         }
         val probePositionMs = host.feed.player.currentPosition.coerceAtLeast(0)
         selected.forEach { android.util.Log.i("ApexviewPlaybackOffer", it.feed.sourceStream.offerDiagnostic) }
-        // A cold TV source that has never rendered is not a useful fallback.
-        // Do not compete with the first Rust proof for its decoder/CPU/buffers.
-        // A working picture and an existing composed scene are still preserved.
-        val deferredColdFallback = app.apexview.tiled.deferColdTvFallback(
-            isTv, settings.nativeRustStitching, replacingActiveScene,
+        // Build 910: 136 provisional decoder timeouts before the first
+        // composed input attached on the phone. Cold proof on either form
+        // factor must not compete with an unrendered fallback. A visible
+        // picture, Cast route and active composition remain untouched.
+        val deferredColdFallback = app.apexview.tiled.deferColdArchiveFallback(
+            settings.nativeRustStitching, replacingActiveScene,
             castingActive || castPlaybackHandedOff, host.feed.hasRenderedFirstFrame)
         if (deferredColdFallback) {
             singleDecoderFallbackTileId = null
             selected.forEach { it.feed.player.playWhenReady = false }
             applyVideoBudget()
-            android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_COLD_TV_PROOF sourceVideoDeferred=true")
+            android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_COLD_PROOF sourceVideoDeferred=true tv=$isTv")
         } else if (!replacingActiveScene) resumeNativeFallback() else applyVideoBudget()
         archiveCompositionStarting = true
         message = SINGLE_DECODER_ACTIVATING

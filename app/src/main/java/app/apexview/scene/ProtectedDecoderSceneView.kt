@@ -750,6 +750,13 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 }
         }
         display = EGL14.EGL_NO_DISPLAY; contextGl = EGL14.EGL_NO_CONTEXT; window = EGL14.EGL_NO_SURFACE
+        // Dedicated scene GL looper: retire EGL thread-local driver state
+        // after unbinding/destroying this context, not while another owner
+        // is current. The shared display registry still owns eglTerminate.
+        steps.run("egl-thread") { check(EGL14.eglReleaseThread()) }
+        cachedModel = null
+        cachedQuads = emptyList()
+        quadBuffers.clear()
         texture = 0; program = 0
         appliedFrameRateHint = Float.NaN
         frameRateOutput = null

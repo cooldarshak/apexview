@@ -1,10 +1,10 @@
 package app.apexview.tiled
 
-/** Preserve an already visible picture; avoid starting an unrendered TV source
- * decoder alongside the cold Rust proof, where both compete for CPU and memory. */
-internal fun deferColdTvFallback(isTv: Boolean, nativeRequested: Boolean,
-                                 replacing: Boolean, casting: Boolean, rendered: Boolean): Boolean =
-    isTv && nativeRequested && !replacing && !casting && !rendered
+/** Preserve an already visible picture. Build 910 proved that a cold,
+ * unrendered phone fallback also competes with Rust proof/decoder ownership. */
+internal fun deferColdArchiveFallback(nativeRequested: Boolean,
+                                      replacing: Boolean, casting: Boolean, rendered: Boolean): Boolean =
+    nativeRequested && !replacing && !casting && !rendered
 
 /** Keeps validation outside decoder ownership. Also covers cancellation during the handoff. */
 internal class ArchiveCompositionStartup(
